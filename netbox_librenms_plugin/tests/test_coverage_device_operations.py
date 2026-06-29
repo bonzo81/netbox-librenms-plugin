@@ -2237,6 +2237,7 @@ class TestOOBDetection:
         result = self._validate(libre_device)
 
         assert result["serial_action"] == "hostname_differs"
+        assert result["existing_match_type"] == "serial"
         assert result["serial_role_choice_available"] is False
         assert result["oob_candidate"] is None
         assert result.get("promote_to_host") is None

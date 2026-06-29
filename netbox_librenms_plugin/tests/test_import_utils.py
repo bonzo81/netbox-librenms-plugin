@@ -1841,38 +1841,10 @@ class TestSerialNumberMatching:
         assert result["existing_match_type"] == "serial"
         assert "not linked to LibreNMS" in result["warnings"][0]
 
-    def test_serial_match_diff_hostname_no_oob_signal_is_reinstall(self):
-        """Serial matches but hostname differs with no OOB signal and no link is a reinstall (hostname_differs), not an OOB candidate."""
-        existing = MagicMock()
-        existing.name = "old-hostname"
-        existing.serial = "ABC123"
-        existing.pk = 7
-        existing.custom_field_data = {}
-
-        self.mock_vm.objects.filter.return_value.first.return_value = None
-
-        def device_filter(*args, **kwargs):
-            result = _matchable_filter_result()
-            if "serial" in kwargs:
-                result.first.return_value = existing
-            else:
-                result.first.return_value = None
-            return result
-
-        self.mock_device.objects.filter.side_effect = device_filter
-
-        from netbox_librenms_plugin.import_utils import validate_device_for_import
-
-        device_data = {"device_id": 1, "hostname": "new-hostname", "serial": "ABC123"}
-        result = validate_device_for_import(device_data, include_vc_detection=False)
-
-        # Neither side is OOB-flavoured and there is no existing link, so a bare hostname mismatch
-        # on a shared chassis serial is a reinstall — NOT a host/OOB chassis pair.
-        assert result["serial_action"] == "hostname_differs"
-        assert result["existing_match_type"] == "serial"
-        assert result.get("oob_candidate") is None
-        assert "promote_to_host" not in result
-        assert result.get("serial_role_choice_available") is False
+    # The serial-match-reinstall case (differing hostname, no OOB signal, no link → hostname_differs)
+    # is covered end-to-end against real Device rows by
+    # TestOOBDetection.test_serial_match_reinstall_no_oob_signal_yields_hostname_differs in
+    # test_coverage_device_operations.py — the mock-ORM duplicate here was removed.
 
     def test_hostname_match_diff_serial_offers_update(self):
         """Hostname matches but serial differs offers update_serial action."""
