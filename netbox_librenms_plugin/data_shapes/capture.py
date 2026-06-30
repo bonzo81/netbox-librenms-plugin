@@ -177,7 +177,9 @@ def capture_device_recording(api, device_id, *, name=None, description="", meta=
     #    only when the device actually has serial sensors (most don't), so the instance-wide route is
     #    never added to unrelated recordings.
     if hasattr(api, "get_serial_port_sensors"):
-        ss_ok, device_serial_sensors = api.get_serial_port_sensors(device_id)
+        # Bypass the per-server sensor cache: a capture records the CURRENT LibreNMS shape, so a
+        # subset cached by an earlier refresh would embed stale sensors into the recording.
+        ss_ok, device_serial_sensors = api.get_serial_port_sensors(device_id, use_cache=False)
         if ss_ok and device_serial_sensors:
             responses["GET /api/v0/resources/sensors"] = {"status": "ok", "sensors": device_serial_sensors}
 
