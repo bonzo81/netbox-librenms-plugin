@@ -226,28 +226,14 @@ class BaseLibreNMSSyncView(LibreNMSPermissionMixin, LibreNMSAPIMixin, generic.Ob
                         host_id = coerce_librenms_id(oob.get("id"))
                         is_oob_only = host_id is not None
                 did = host_id
-            # Validate device ID consistently with the int()-based coercion used everywhere
-            # else for librenms_id: int() strips surrounding whitespace, so a value written as
-            # " 42 " (hand-edited, or from a path that doesn't normalize) resolves fine in the
-            # rest of the app but str.isdigit() wrongly rejected it here, hiding a valid link
-            # from the per-server mappings UI (issue #99). Reject bool/None/non-numeric and
-            # non-positive ids.
-            if isinstance(did, bool) or did is None:
-                continue
-            # Only str/int are valid stored shapes; coercing a float here would silently
-            # truncate (1.9 → 1) and surface a link to the wrong device. This mirrors
-            # get_librenms_device_id() in utils.py, which rejects non-str/int before int() (#99).
-            if isinstance(did, str):
-                try:
-                    did = int(did)
-                except (TypeError, ValueError):
-                    continue
-            elif not isinstance(did, int):
-                continue
-            # LibreNMS device IDs are strictly positive (matches coerce_librenms_id); a
-            # 0/negative here is a malformed CF entry, not a real mapping — don't surface
-            # it as ID 0 with a dead /device/device=0/ link.
-            if did <= 0:
+            # Coerce via the single source of truth instead of reimplementing the same
+            # int/digit-string/bool/zero/negative validation inline. The dict branch above already
+            # calls coerce_librenms_id(), and the hand-rolled copy had drifted from it — str.isdigit()
+            # wrongly rejected a whitespace-padded " 42 " (int() strips it, so it resolves fine
+            # everywhere else; cf. the same #99 fix elsewhere). A None result means
+            # bool/None/blank/zero/negative/non-numeric → skip; LibreNMS ids are strictly positive.
+            did = coerce_librenms_id(did)
+            if did is None:
                 continue
             srv_cfg = servers_config.get(sk)
             # Legacy single-server config: "default" key with no matching servers entry —

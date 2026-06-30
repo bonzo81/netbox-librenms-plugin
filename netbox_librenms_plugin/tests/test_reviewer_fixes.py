@@ -176,6 +176,16 @@ class TestAllServerMappingsDidValidation:
         ids = {e["device_id"] for e in result}
         assert ids == {5, 10}
 
+    @patch("netbox_librenms_plugin.views.base.librenms_sync_view.django_settings")
+    def test_whitespace_padded_string_did_is_accepted(self, mock_settings):
+        """A whitespace-padded id (' 42 ') resolves via coerce_librenms_id like the rest of the app — the old inline str.isdigit() wrongly dropped it (drift fix)."""
+        mock_settings.PLUGINS_CONFIG = {"netbox_librenms_plugin": {"servers": {}}}
+        obj = MagicMock()
+        obj.custom_field_data = {"librenms_id": {"prod": " 42 "}}
+        result = self._call(obj)
+        assert len(result) == 1
+        assert result[0]["device_id"] == 42
+
 
 # ---------------------------------------------------------------------------
 # render_device_selection — XSS escape
