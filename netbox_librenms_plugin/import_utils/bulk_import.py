@@ -714,13 +714,36 @@ def _refresh_existing_device(validation: dict, libre_device: dict = None, server
 
         name_ambiguous = False
         if not new_device:
-            new_device, match_type, name_ambiguous = _lookup_in_model(Model)
-
-        if not new_device and not name_ambiguous:
-            # Try the opposite model: catches cross-model imports that happened
-            # after the cache was built (e.g. LibreNMS device imported as VM).
-            new_device, match_type, name_ambiguous = _lookup_in_model(CrossModel)
-            if new_device:
+            # Look up BOTH models by name, not preferred-first. The old code returned on the
+            # first Model name hit and never consulted CrossModel, so a cached row whose
+            # resolved name/hostname/sysName exists as BOTH a Device and a VirtualMachine was
+            # pinned to the preferred model. validate_device_for_import()'s hostname path treats
+            # that cross-model case as ambiguous and binds NEITHER (it warns and lets the user
+            # import as new, then set librenms_id on the correct object), so the refresh re-check
+            # must do the same or it drifts and renders/links the wrong target.
+            model_match, model_mt, model_amb = _lookup_in_model(Model)
+            cross_match, cross_mt, cross_amb = _lookup_in_model(CrossModel)
+            if model_amb or cross_amb:
+                # >1 match within a single model — terminal ambiguity, fail closed below.
+                name_ambiguous = True
+            elif model_match and cross_match:
+                # Same name resolves in BOTH models: warn and leave unmatched (do NOT block),
+                # exactly like the validator's cross-model hostname branch. A serial/IP match can
+                # still bind below (a stronger identity), mirroring the validator's fall-through.
+                msgs = validation.get("warnings")
+                if isinstance(msgs, list):
+                    msgs.append(
+                        f"Both a VM and Device exist with hostname '{hostname}' in NetBox. Cannot "
+                        "determine which to match. Please set the librenms_id custom field on the "
+                        "correct object."
+                    )
+            elif model_match:
+                new_device, match_type = model_match, model_mt
+            elif cross_match:
+                # Cross-model import that happened after the cache was built (e.g. a LibreNMS
+                # device imported as a VM): the preferred model has no name match, the opposite
+                # one does.
+                new_device, match_type = cross_match, cross_mt
                 found_as_cross_model = True
 
         if not new_device and name_ambiguous:

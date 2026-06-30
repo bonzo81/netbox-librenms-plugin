@@ -5463,6 +5463,32 @@ class TestRefreshExistingDeviceCrossModelIdWins:
         # found_as_cross_model flips import_as_vm so future refreshes query the right model.
         assert validation["import_as_vm"] is True
 
+    def test_cross_model_name_match_in_both_models_binds_neither(self):
+        """When the name resolves to BOTH a Device and a VM (no id link, no serial/IP), the refresh binds neither and warns, mirroring the validator's cross-model hostname branch."""
+        from netbox_librenms_plugin.import_utils.bulk_import import _refresh_existing_device
+        from netbox_librenms_plugin.tests.conftest import make_device, make_vm
+
+        # Same name in both models, neither carrying a librenms_id link, no serial/IP identity.
+        device = make_device("twin-name-host")
+        make_vm("twin-name-host")
+        libre_device = {"device_id": 4242, "hostname": "twin-name-host", "sysName": "twin-name-host"}
+        validation = {
+            "existing_device": None,
+            "existing_vm": None,
+            "import_as_vm": False,  # Model=Device, CrossModel=VirtualMachine
+            "is_ready": False,
+            "can_import": False,
+            "issues": [],
+            "warnings": [],
+        }
+
+        _refresh_existing_device(validation, libre_device=libre_device, server_key="default")
+
+        # Pre-fix the preferred model (Device) was pinned by name; now neither is bound.
+        assert validation["existing_device"] is None
+        assert validation["existing_device"] != device
+        assert any("Both a VM and Device exist with hostname" in w for w in validation.get("warnings", []))
+
     def test_serial_fallback_ambiguity_fails_closed(self):
         """When the serial fallback resolves more than one NetBox device, the refresh re-check must fail closed (ambiguous match + can_import False), not bind to an arbitrary duplicate."""
         from netbox_librenms_plugin.import_utils.bulk_import import _refresh_existing_device
