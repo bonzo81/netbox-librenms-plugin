@@ -57,8 +57,25 @@ class Migration(migrations.Migration):
                     "custom_field_data",
                     models.JSONField(blank=True, default=dict, encoder=utilities.json.CustomFieldJSONEncoder),
                 ),
-                ("librenms_os", models.CharField(max_length=50, unique=True)),
-                ("lag_name_pattern", models.CharField(max_length=200)),
+                (
+                    "librenms_os",
+                    models.CharField(
+                        help_text="LibreNMS OS identifier (e.g. 'ios', 'timos', 'junos')",
+                        max_length=50,
+                        unique=True,
+                    ),
+                ),
+                (
+                    "lag_name_pattern",
+                    models.CharField(
+                        help_text=(
+                            "Regular expression matching LAG aggregate interface names. "
+                            "Used as fallback when ifType is not 'ieee8023adLag'. "
+                            r"Example: ^Po\d+$"
+                        ),
+                        max_length=200,
+                    ),
+                ),
                 ("description", models.TextField(blank=True)),
                 ("tags", taggit.managers.TaggableManager(through="extras.TaggedItem", to="extras.Tag")),
             ],
