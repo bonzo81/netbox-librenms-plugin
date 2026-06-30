@@ -78,6 +78,16 @@ def _post_with_links(view, request, device, links):
     return json.loads(response.content)
 
 
+@pytest.fixture(autouse=True)
+def _clear_cache_around_each_test():
+    """Clear the real cache before and after each test so cache.set() link/port payloads (keyed by device PK, NOT rolled back with the test DB) can't feed a reused PK stale data."""
+    from django.core.cache import cache
+
+    cache.clear()
+    yield
+    cache.clear()
+
+
 @pytest.mark.django_db
 class TestStaleFieldStripping:
     """Cached derived fields (URLs/ids from a previous enrichment) must be recomputed from live state."""
@@ -464,7 +474,11 @@ class TestRemoteDeviceResolutionExcludesOOB:
         make_device("oob-referencer", librenms_cf={"default": {"oob": {"id": 42}}})
 
         view = object.__new__(BaseCableTableView)
-        device, found, error = view.get_device_by_id_or_name(42, "remote-host", "default")
+        # Pass a hostname that matches NO device so the resolution can only succeed via the id-42
+        # path: with "remote-host" as the hint, get_device_by_id_or_name() could still return host
+        # through the hostname fallback even if the id lookup regressed to MultipleObjectsReturned,
+        # making the test pass vacuously.
+        device, found, error = view.get_device_by_id_or_name(42, "no-matching-hostname", "default")
 
         # Resolves to the device whose own LibreNMS id is 42, not MultipleObjectsReturned.
         assert found is True
