@@ -288,6 +288,12 @@ class MockLibreNMSServer:
             by_route.setdefault((method, path), []).append((qdict, status, body))
 
         for (method, path), variants in by_route.items():
+            # A single queryless variant is registered as a bare path on purpose: capture.py keys
+            # response-irrelevant endpoints (e.g. /ports) with key_params=None precisely so "the
+            # loader serves it for any query the production readers send" (capture.py comment) —
+            # get_ports() sends columns=…&with=vlans that the recording deliberately doesn't store.
+            # A strict exact-match here would 404 that legitimate replay. Multiple variants of one
+            # path ARE query-keyed, so those route through the exact-match selector.
             if len(variants) == 1 and not variants[0][0]:
                 qdict, status, body = variants[0]
                 self.register(path, body, status=status, method=method)

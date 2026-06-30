@@ -107,6 +107,21 @@ def test_load_recording_distinguishes_repeated_query_params():
         server._server.server_close()
 
 
+def test_queryless_recording_serves_any_query_by_design():
+    """A single queryless variant is registered as a bare path that serves ANY query — capture.py keys response-irrelevant endpoints (e.g. /ports) with key_params=None, and get_ports() sends columns=… the recording deliberately doesn't store, so the loader must match regardless."""
+    from netbox_librenms_plugin.tests.mock_librenms_server import MockLibreNMSServer
+
+    server = MockLibreNMSServer()
+    try:
+        server.load_recording({"responses": {"GET /api/v0/devices/1/ports": {"status": "ok"}}})
+        route = server.routes["GET /api/v0/devices/1/ports"]
+        # Bare-path static tuple (not a query-selecting handler) so a production reader's
+        # columns=…&with=vlans query still resolves the recorded body.
+        assert route == (200, {"status": "ok"})
+    finally:
+        server._server.server_close()
+
+
 def test_replay_matches_request_with_blank_valued_query_param(recording_server):
     """A recorded route whose only variant carries a blank-valued query param (?probe=) must still match a byte-for-byte request that carries ?probe= — the request side must parse with keep_blank_values too (load_recording already does), or replay 404s on an exact-shape match."""
     import http.client
