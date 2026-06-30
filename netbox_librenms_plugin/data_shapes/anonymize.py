@@ -156,7 +156,20 @@ SNMP_CREDENTIAL_KEYS = frozenset(
 )
 # Safety-net (find_pii) key denylist: any non-empty string under a key whose name suggests a
 # secret is flagged for review, even if it's a field the rules above don't explicitly cover.
-_SECRET_KEY_HINTS = ("pass", "community", "secret", "token", "cryptopass", "privkey", "authkey", "apikey")
+_SECRET_KEY_HINTS = (
+    "pass",
+    "community",
+    "secret",
+    "token",
+    "cryptopass",
+    "privkey",
+    "priv_key",
+    "private_key",
+    "authkey",
+    "auth_key",
+    "apikey",
+    "api_key",
+)
 
 # Documentation/synthetic ranges this module emits — find_pii() allows them.
 _DOC_IP_PREFIXES = ("192.0.2.", "198.51.100.", "203.0.113.", "2001:db8")

@@ -216,6 +216,35 @@ def test_find_pii_redacts_nested_secret_container_without_echoing_children():
     assert not any(f["value"] == "8.8.8.8" for f in findings)
 
 
+def test_find_pii_flags_snake_case_secret_keys():
+    """Snake_case secret-key variants (api_key, private_key, auth_key) must be caught by the find_pii denylist."""
+    rec = _ports()
+    rec["responses"]["GET /api/v0/devices/1"] = {
+        "status": "ok",
+        "devices": [
+            {
+                "device_id": 1,
+                # Opaque secrets that match no IP/MAC/email pattern — only the key-name denylist
+                # can catch them. The substring hints (apikey/authkey/privkey) miss the
+                # underscored forms, so pre-fix these slip through entirely.
+                "api_key": "AKIAOPAQUESECRET123",
+                "private_key": "PRIVATEKEYBLOBxyz",
+                "auth_key": "s3cr3tauthvalue",
+            }
+        ],
+    }
+
+    findings = find_pii(rec)
+
+    for key in ("api_key", "private_key", "auth_key"):
+        assert any(key in f["path"] and f["kind"] == "credential" and f["value"] == "<redacted>" for f in findings), (
+            f"{key} secret value was not flagged"
+        )
+    # The raw secret values must never be echoed.
+    for value in ("AKIAOPAQUESECRET123", "PRIVATEKEYBLOBxyz", "s3cr3tauthvalue"):
+        assert not any(f["value"] == value for f in findings)
+
+
 def test_find_pii_scans_top_level_fields_not_just_responses():
     """find_pii must scan the whole recording — residual PII in a top-level field (name/description/meta) is missed if only `responses` is scanned."""
     rec = _ports()
