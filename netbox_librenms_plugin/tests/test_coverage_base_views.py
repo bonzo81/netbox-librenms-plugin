@@ -47,6 +47,20 @@ def _mock_request(path="/plugins/librenms/device/1/cables/"):
 # =============================================================================
 
 
+class TestBaseCableTableViewGetPortsData:
+    """get_ports_data must be safe to call before get_links_data sets self.librenms_id."""
+
+    def test_get_ports_data_before_get_links_data_returns_empty(self):
+        from netbox_librenms_plugin.views.base.cables_view import BaseCableTableView
+
+        view = object.__new__(BaseCableTableView)
+        view._librenms_api = MagicMock(server_key="default")
+        # self.librenms_id is deliberately NOT set: get_links_data (its only in-tree caller)
+        # hasn't run. The public method must degrade to the OOB-only/no-host result, not raise.
+        result = view.get_ports_data(_mock_obj(), server_key="default")
+        assert result == {"ports": []}
+
+
 class TestBaseCableTableViewGetLinksData:
     """Tests for BaseCableTableView.get_links_data."""
 
