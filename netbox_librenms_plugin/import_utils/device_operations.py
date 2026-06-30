@@ -1505,7 +1505,7 @@ def import_single_device(
                 "success": False,
                 "device": None,
                 "message": "",
-                "error": "Import blocked: this device's hostname/serial matches multiple NetBox devices; resolve the duplicate first.",
+                "error": "Import blocked: this device's hostname, serial, or management IP matches multiple NetBox devices; resolve the duplicate first.",
                 "synced": {},
             }
 

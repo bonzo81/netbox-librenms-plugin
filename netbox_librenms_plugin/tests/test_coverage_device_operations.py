@@ -849,6 +849,10 @@ class TestImportSingleDevice:
         assert result["success"] is False
         assert result["device"] is None
         assert any(t in result["error"].lower() for t in ("hostname", "serial", "duplicate", "ambiguous"))
+        # validate_device_for_import reuses this match type for a duplicate *management-IP*
+        # collision too (device_operations.py ~1042), so the hard-block error must name the IP
+        # path — otherwise it sends operators chasing a hostname/serial duplicate that isn't there.
+        assert "management ip" in result["error"].lower()
         assert Device.objects.count() == before
 
 
