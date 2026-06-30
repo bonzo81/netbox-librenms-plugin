@@ -1845,29 +1845,59 @@ class TestSyncIPAddressesViewProcessIpSync:
         assert "10.0.0.1" in results["skipped_no_interface"]
         assert not IPAddress.objects.filter(address="10.0.0.1/24").exists()
 
-    def test_ambiguous_interface_name_skips_without_binding(self):
-        """Two interfaces share a name across VC members and carry no stored port id → the name match is ambiguous (None) → skip."""
+    def test_shared_vc_interface_name_binds_to_viewed_member(self):
+        """A name shared across VC members (no stored port id) binds to the VIEWED member's own interface, matching the rendered table."""
         from dcim.models import VirtualChassis
         from ipam.models import IPAddress
 
         view = self._setup_view()
-        vc = VirtualChassis.objects.create(name="vc-ipsync-amb")
-        m1 = make_device("ipsync-amb-m1")
+        vc = VirtualChassis.objects.create(name="vc-ipsync-shared")
+        m1 = make_device("ipsync-shared-m1")
         m1.virtual_chassis = vc
         m1.vc_position = 1
         m1.save()
-        m2 = make_device("ipsync-amb-m2")
+        m2 = make_device("ipsync-shared-m2")
         m2.virtual_chassis = vc
         m2.vc_position = 2
         m2.save()
-        make_interface(m1, "eth0")
-        make_interface(m2, "eth0")  # same name on a sibling member → ambiguous across the VC
+        m1_eth0 = make_interface(m1, "eth0")
+        make_interface(m2, "eth0")  # sibling reuses the name — must NOT block binding to m1's own
         cached = [{"ip_address": "10.0.0.1", "ip_with_mask": "10.0.0.1/24", "interface_name": "eth0"}]
 
         results = self._run(view, ["10.0.0.1"], cached, m1, "device")
 
-        assert "10.0.0.1" in results["skipped_no_interface"]
-        assert not IPAddress.objects.filter(address="10.0.0.1/24").exists()
+        # The render (obj-only) shows this IP linked to m1's eth0; the sync must agree, not skip.
+        assert "10.0.0.1" in results["created"]
+        assert IPAddress.objects.get(address="10.0.0.1/24").assigned_object == m1_eth0
+
+    def test_sibling_only_name_collision_stays_ambiguous(self):
+        """A name the viewed member doesn't own, shared by two siblings, is genuinely ambiguous → skip."""
+        from dcim.models import VirtualChassis
+        from ipam.models import IPAddress
+
+        view = self._setup_view()
+        vc = VirtualChassis.objects.create(name="vc-ipsync-sibamb")
+        m1 = make_device("ipsync-sibamb-m1")
+        m1.virtual_chassis = vc
+        m1.vc_position = 1
+        m1.save()
+        m2 = make_device("ipsync-sibamb-m2")
+        m2.virtual_chassis = vc
+        m2.vc_position = 2
+        m2.save()
+        m3 = make_device("ipsync-sibamb-m3")
+        m3.virtual_chassis = vc
+        m3.vc_position = 3
+        m3.save()
+        # m1 (the viewed member) has NO eth9; two siblings share it → can't pick one → skip.
+        make_interface(m2, "eth9")
+        make_interface(m3, "eth9")
+        cached = [{"ip_address": "10.0.0.9", "ip_with_mask": "10.0.0.9/24", "interface_name": "eth9"}]
+
+        results = self._run(view, ["10.0.0.9"], cached, m1, "device")
+
+        assert "10.0.0.9" in results["skipped_no_interface"]
+        assert not IPAddress.objects.filter(address="10.0.0.9/24").exists()
 
 
 class TestSyncIPAddressesViewDisplaySyncResults:

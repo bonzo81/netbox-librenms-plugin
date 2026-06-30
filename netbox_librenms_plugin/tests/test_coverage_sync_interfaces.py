@@ -600,6 +600,48 @@ class TestSyncInterfacesViewSyncInterfaceDevice:
         assert iface.enabled is True
         assert iface.type  # a real NetBox type was resolved from ifType (non-empty)
 
+    @pytest.mark.django_db
+    def test_foreign_port_id_falls_back_to_local_same_named_interface(self):
+        """A port_id owned by another device's interface still updates this device's own same-named interface."""
+        from netbox_librenms_plugin.utils import get_librenms_device_id, set_librenms_device_id
+
+        view = self._make_view()
+        del view.update_interface_attributes  # run the real attribute sync + save
+
+        # The device the user is syncing — it legitimately owns its own Gi0/1.
+        dev = make_device("sync-fallback-own")
+        own_iface = make_interface(dev, "Gi0/1")
+
+        # A DIFFERENT device whose Gi0/1 carries the LibreNMS port_id (stale/duplicate id).
+        other = make_device("sync-fallback-other")
+        other_iface = make_interface(other, "Gi0/1")
+        set_librenms_device_id(other_iface, 77, "default")
+        other_iface.save()
+
+        librenms_port = {
+            "ifName": "Gi0/1",
+            "ifType": "ethernetCsmacd",
+            "ifSpeed": 1000000000,
+            "ifAlias": "uplink-desc",
+            "ifMtu": 9000,
+            "port_id": 77,
+            "ifAdminStatus": "up",
+        }
+
+        view.sync_interface(dev, librenms_port, ["vlans"], "ifName")
+
+        own_iface.refresh_from_db()
+        other_iface.refresh_from_db()
+        # The current device's own interface was updated (not skipped).
+        assert own_iface.mtu == 9000
+        assert own_iface.description == "uplink-desc"
+        assert own_iface.speed == 1000000
+        # The other device's interface (the real owner of port_id 77) is untouched...
+        assert other_iface.mtu != 9000
+        assert get_librenms_device_id(other_iface, "default") == 77
+        # ...and the port_id is NOT reassigned onto the current device's interface.
+        assert get_librenms_device_id(own_iface, "default") is None
+
     def test_foreign_port_id_skip_is_recorded(self):
         """When the resolver returns None (port_id belongs to another device), the row is skipped and its name recorded in _skipped_conflicts for the post() summary."""
         from dcim.models import Device
@@ -706,59 +748,69 @@ class TestSyncInterfacesViewSyncInterfaceDevice:
         call_kwargs = mock_intf_cls.objects.get_or_create.call_args[1]
         assert call_kwargs["device"] is mock_device
 
+    @pytest.mark.django_db
     def test_device_port_id_prefers_existing_librenms_id_match(self):
-        from dcim.models import Device
+        """A port_id stored on this device's own interface updates that interface directly, no duplicate."""
+        from dcim.models import Interface
+
+        from netbox_librenms_plugin.utils import set_librenms_device_id
 
         view = self._make_view()
-        mock_device = MagicMock()
-        mock_device.__class__ = Device
-        mock_device.id = 1
-        mock_device.virtual_chassis = None
+        del view.update_interface_attributes  # run the real attribute sync + save
 
-        matched_interface = MagicMock()
-        matched_interface.device_id = 1
-        librenms_port = {"ifName": "Gi0/1", "port_id": 42}
+        dev = make_device("sync-prefers-own")
+        iface = make_interface(dev, "Gi0/1")
+        set_librenms_device_id(iface, 42, "default")
+        iface.save()
 
-        with (
-            patch("netbox_librenms_plugin.views.sync.interfaces.Interface") as mock_intf_cls,
-            patch("netbox_librenms_plugin.views.sync.interfaces.find_by_librenms_id", return_value=matched_interface),
-        ):
-            view.get_netbox_interface_type = MagicMock(return_value="other")
-            view.sync_interface(mock_device, librenms_port, [], "ifName")
+        librenms_port = {
+            "ifName": "Gi0/1",
+            "ifType": "ethernetCsmacd",
+            "ifSpeed": 1000000000,
+            "ifAlias": "by-id",
+            "ifMtu": 1400,
+            "port_id": 42,
+            "ifAdminStatus": "up",
+        }
 
-        mock_intf_cls.objects.get_or_create.assert_not_called()
-        view.update_interface_attributes.assert_called_once_with(
-            matched_interface,
-            librenms_port,
-            "other",
-            [],
-            "ifName",
-        )
+        view.sync_interface(dev, librenms_port, ["vlans"], "ifName")
 
+        iface.refresh_from_db()
+        assert iface.mtu == 1400
+        assert iface.description == "by-id"
+        # The existing interface matched by port_id — no duplicate was created.
+        assert Interface.objects.filter(device=dev, name="Gi0/1").count() == 1
+
+    @pytest.mark.django_db
     def test_device_port_id_conflict_without_local_name_match_skips(self):
-        from dcim.models import Device
+        """A port_id owned by another device with no same-named local interface is skipped, not created."""
+        from dcim.models import Interface
+
+        from netbox_librenms_plugin.utils import set_librenms_device_id
 
         view = self._make_view()
-        mock_device = MagicMock()
-        mock_device.__class__ = Device
-        mock_device.id = 1
-        mock_device.virtual_chassis = None
+        view._skipped_conflicts = []
+        del view.update_interface_attributes
 
-        conflicting_interface = MagicMock()
-        conflicting_interface.device_id = 2
-        librenms_port = {"ifName": "Gi0/1", "port_id": 77}
+        dev = make_device("sync-conflict-nolocal")  # deliberately has NO Gi0/1
+        other = make_device("sync-conflict-other")
+        other_iface = make_interface(other, "Gi0/1")
+        set_librenms_device_id(other_iface, 77, "default")
+        other_iface.save()
 
-        with (
-            patch("netbox_librenms_plugin.views.sync.interfaces.Interface") as mock_intf_cls,
-            patch(
-                "netbox_librenms_plugin.views.sync.interfaces.find_by_librenms_id", return_value=conflicting_interface
-            ),
-        ):
-            mock_intf_cls.objects.filter.return_value.first.return_value = None
-            view.get_netbox_interface_type = MagicMock(return_value="other")
-            view.sync_interface(mock_device, librenms_port, [], "ifName")
+        librenms_port = {
+            "ifName": "Gi0/1",
+            "ifType": "ethernetCsmacd",
+            "ifSpeed": 1000000000,
+            "ifMtu": 9000,
+            "port_id": 77,
+            "ifAdminStatus": "up",
+        }
+        view.sync_interface(dev, librenms_port, ["vlans"], "ifName")
 
-        view.update_interface_attributes.assert_not_called()
+        # No same-named local interface to fall back to, and we never get_or_create one here.
+        assert view._skipped_conflicts == ["Gi0/1"]
+        assert not Interface.objects.filter(device=dev, name="Gi0/1").exists()
 
 
 class TestSyncInterfacesViewSyncInterfaceVM:

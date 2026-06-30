@@ -174,9 +174,12 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
         For a Device in a Virtual Chassis, all member interfaces are indexed (not just the viewed
         member's), mirroring ``_resolve_interface_by_port_id`` in ``views/sync/interfaces``: LibreNMS
         treats a VC as one logical device, so a VC member IP can legitimately resolve to an interface
-        on another member. Duplicate names are marked ambiguous (None) the same way duplicate port
-        ids are, so a same-named interface on another member can't silently rebind the address to the
-        wrong interface.
+        on another member by stable port id. For the name fallback the viewed object's own interface
+        wins — that's exactly what the rendered IP table binds to (the render indexes only
+        ``obj.interfaces``; see ``ip_addresses_view._prefetch_netbox_data``), so the sync must agree
+        rather than skip what the user sees linked. A name shared only by sibling members (none on the
+        viewed object) stays ambiguous (None) so the address can't silently rebind to an arbitrary
+        member; duplicate port ids are always ambiguous.
 
         Args:
             obj (Device | VirtualMachine): The synced object whose current interfaces to index.
@@ -190,8 +193,10 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
             # so this can't drift from the VC member set used by the interface-sync path.
             member_devices = get_virtual_chassis_members(obj)
             interfaces = list(Interface.objects.filter(device__in=member_devices))
+            obj_device_id = obj.pk
         else:
             interfaces = list(obj.interfaces.all())
+            obj_device_id = None
         by_librenms_id = {}
         by_name = {}
         for iface in interfaces:
@@ -205,11 +210,18 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
                     by_librenms_id[key] = None
                 else:
                     by_librenms_id[key] = iface
-            if iface.name in by_name:
-                # Same fail-safe for duplicate names (common across VC members): ambiguous → None.
-                by_name[iface.name] = None
-            else:
+            # Name fallback: the VIEWED object's OWN interface always wins. NetBox enforces a unique
+            # (device, name), so obj has at most one interface of a given name, and binding the IP to
+            # it matches exactly what the rendered table shows (the render indexes only obj.interfaces).
+            # A sibling VC member only fills a name obj doesn't own; a collision among siblings alone
+            # (none on obj) stays ambiguous (None) so the address can't rebind to an arbitrary member.
+            iface_is_obj = obj_device_id is not None and getattr(iface, "device_id", None) == obj_device_id
+            if iface_is_obj:
                 by_name[iface.name] = iface
+            elif iface.name not in by_name:
+                by_name[iface.name] = iface
+            elif by_name[iface.name] is not None and getattr(by_name[iface.name], "device_id", None) != obj_device_id:
+                by_name[iface.name] = None
         return by_librenms_id, by_name
 
     @staticmethod

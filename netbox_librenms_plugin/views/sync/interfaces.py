@@ -272,9 +272,17 @@ class SyncInterfacesView(
             if by_id is not None:
                 if by_id.device_id == target_device.id:
                     return by_id
-                # The port_id resolves to an interface on a DIFFERENT device. Don't fall
-                # back to a same-named local interface — that would overwrite it with
-                # another device's port data. Return None so the caller skips this row.
+                # The port_id resolves to an interface on a DIFFERENT device (a stale or
+                # duplicate stored port_id, e.g. after a device replacement). The LibreNMS row
+                # still describes THIS device's interface, and the rendered table binds it to the
+                # current device's same-named interface, so fall back to that and update it —
+                # but only if it already exists. Don't get_or_create here: spawning a new
+                # interface when the id really belongs elsewhere would create a duplicate.
+                # update_interface_attributes won't reassign the port_id off the other
+                # interface (its existing_owner guard), so the foreign binding stays intact.
+                existing_by_name = Interface.objects.filter(device=target_device, name=interface_name).first()
+                if existing_by_name:
+                    return existing_by_name
                 return None
         interface, _ = Interface.objects.get_or_create(device=target_device, name=interface_name)
         return interface
@@ -290,9 +298,15 @@ class SyncInterfacesView(
             if by_id is not None:
                 if by_id.virtual_machine_id == vm.id:
                     return by_id
-                # The port_id resolves to an interface on a DIFFERENT VM. Don't fall back
-                # to a same-named local interface — that would overwrite it with another
-                # VM's port data. Return None so the caller skips this row.
+                # The port_id resolves to an interface on a DIFFERENT VM (a stale or duplicate
+                # stored port_id). The LibreNMS row still describes THIS VM's interface, and the
+                # rendered table binds it to this VM's same-named interface, so fall back to that
+                # and update it — but only if it already exists (don't get_or_create a duplicate
+                # for an id that really belongs elsewhere). update_interface_attributes won't
+                # reassign the port_id off the other interface (its existing_owner guard).
+                existing_by_name = VMInterface.objects.filter(virtual_machine=vm, name=interface_name).first()
+                if existing_by_name:
+                    return existing_by_name
                 return None
         interface, _ = VMInterface.objects.get_or_create(virtual_machine=vm, name=interface_name)
         return interface
