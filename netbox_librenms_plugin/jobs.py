@@ -240,10 +240,13 @@ class ImportDevicesJob(JobRunner):
                 batch_blocked_msg = msg
             elif collisions:
                 pks = ", ".join(str(group["nb_device_pk"]) for group in collisions)
+                # Object-neutral wording: collision_check_ids includes vm_imports, so a blocked
+                # group can be a VirtualMachine, not just a Device. Mirror the confirm modal's
+                # "NetBox object collisions" copy so a VM-only block doesn't mislabel the type.
                 msg = (
-                    f"Import blocked: {len(collisions)} NetBox device collision(s) in this batch "
+                    f"Import blocked: {len(collisions)} NetBox object collision(s) in this batch "
                     f"(pk(s): {pks}). Two or more selected LibreNMS devices resolve to the same "
-                    f"NetBox device; resolve each individually."
+                    f"NetBox object; resolve each individually."
                 )
                 self.logger.error(msg)
                 device_result["failed"] = [{"device_id": device_id, "error": msg} for device_id in device_ids]

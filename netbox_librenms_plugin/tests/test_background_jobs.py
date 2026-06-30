@@ -858,6 +858,10 @@ class TestImportDevicesJob:
         errors = job.job.data["errors"]
         assert {e["device_id"] for e in errors} == {1, 2, 10}
         assert all("Import blocked" in e["error"] for e in errors)
+        # The gate spans device + VM ids (vm_imports here), so the block message must be
+        # object-neutral — a VM collision must not be mislabelled a "NetBox device" collision.
+        assert all("NetBox object collision" in e["error"] for e in errors)
+        assert not any("NetBox device collision" in e["error"] for e in errors)
         assert job.job.data["failed_count"] == 3
         assert job.job.data["success_count"] == 0
 
