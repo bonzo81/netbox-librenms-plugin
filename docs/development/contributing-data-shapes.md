@@ -27,8 +27,8 @@ The plugin never submits on your behalf — you stay in control of what leaves y
 
 ## What gets anonymized
 
-`data_shapes/anonymize.py` applies field-aware rules so the shape stays test-useful while losing
-identifying detail:
+`netbox_librenms_plugin/data_shapes/anonymize.py` applies field-aware rules so the shape stays
+test-useful while losing identifying detail:
 
 - **Preserved verbatim** — the logic-bearing fields the tests read: `ifName`, `ifType`, port
   ids, `entPhysicalClass` / `entPhysicalIndex` / `entPhysicalContainedIn` /
@@ -73,8 +73,8 @@ modal surfaces its findings; **review them before submitting.**
 
 - `--validate PATH` — schema-check a recording, re-run the PII safety-net, and report novelty.
   Exits non-zero on a schema or PII failure (suitable for CI/pre-commit).
-- `--rebuild-manifest` — regenerate `data_shapes/recordings/manifest.json` (the novelty reference the
-  capture view reads).
+- `--rebuild-manifest` — regenerate `netbox_librenms_plugin/data_shapes/recordings/manifest.json` (the
+  novelty reference the capture view reads).
 - `--list` — print each bundled recording with its computed signature.
 
 ## CI guards
