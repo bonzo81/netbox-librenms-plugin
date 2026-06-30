@@ -2620,3 +2620,21 @@ class TestResolvePortRelationships:
         # The invalid pattern was reported at WARNING, naming the offending pattern string.
         warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
         assert any(bad in r.getMessage() for r in warnings)
+
+    def test_ambiguous_shared_name_is_not_indexed_to_either_port(self, mock_librenms_api):
+        """A name carried by two different ports indexes neither, so a duplicate label can't hijack the base-name lookup and bind a sub-unit's LAG membership onto the wrong aggregate."""
+        ports = [
+            {"port_id": 201, "ifName": "xe-0/0/0", "ifType": "ethernetCsmacd"},  # physical member
+            {"port_id": 203, "ifName": "ae1", "ifType": "ieee8023adLag"},  # the REAL ae1 aggregate
+            {"port_id": 204, "ifName": "ae1.0", "ifType": "ieee8023adLag"},  # sub-unit of ae1
+            # A DIFFERENT aggregate whose ifDescr coincidentally equals "ae1" (ifName mode still
+            # indexes ifDescr). Processed last, so last-write-wins would point by_name["ae1"] HERE.
+            {"port_id": 999, "ifName": "ae99", "ifDescr": "ae1", "ifType": "ieee8023adLag"},
+        ]
+        port_stack = [{"high_port_id": 201, "low_port_id": 204}]  # xe-0/0/0 <-> ae1.0
+        result = mock_librenms_api.resolve_port_relationships(ports, port_stack, lag_patterns={})
+        # "ae1" is ambiguous (203 vs 999) -> dropped from the index, so ae1.0 no longer collapses
+        # to a stored aggregate and the membership binds to ae1.0 itself, NOT to the 999 hijacker.
+        # Pre-fix (last-write-wins) this returned {201: 999} — the member on the wrong aggregate.
+        assert 999 not in result["lag_members"].values()
+        assert result["lag_members"] == {201: 204}

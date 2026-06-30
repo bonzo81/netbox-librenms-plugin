@@ -678,9 +678,24 @@ class LibreNMSAPI:
         by_id = {str(p["port_id"]): p for p in safe_named_ports}
         # Index every name a port is known by (selected field + ifName/ifDescr) so the
         # physical-name / sub-unit lookups below resolve regardless of which field carries it.
+        # Drop AMBIGUOUS names: a name shared by two DIFFERENT ports (distinct port_ids) can't
+        # disambiguate which port a base/sub-unit lookup means. The old `by_name[name] = p`
+        # was last-write-wins, so in ifDescr mode a later port whose ifDescr happens to equal
+        # another port's structured base name would hijack `_resolve_physical_port()` /
+        # sub-interface matching and bind the relationship onto the wrong interface. Mirror the
+        # by_librenms_id collision drop in interfaces_view._build_interface_lookup_maps: keep a
+        # name only when it resolves to exactly one port, otherwise drop it entirely.
         by_name: dict = {}
+        ambiguous_names: set = set()
         for p in safe_named_ports:
             for name in _port_names(p):
+                if name in ambiguous_names:
+                    continue
+                existing = by_name.get(name)
+                if existing is not None and str(existing.get("port_id")) != str(p.get("port_id")):
+                    del by_name[name]
+                    ambiguous_names.add(name)
+                    continue
                 by_name[name] = p
 
         if lag_patterns is None:
