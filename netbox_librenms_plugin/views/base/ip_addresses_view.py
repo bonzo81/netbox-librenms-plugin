@@ -479,7 +479,38 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMix
             "cache_expiry": cache_expiry,
             "server_key": server_key,
             "set_primary_ip": resolve_set_primary_ip(request),
+            # Donor "Move IP to winner" candidates (empty unless this device carries a
+            # _migrated_to marker for server_key); drives the migrated-mode action card.
+            "movable_ips": self._movable_ips_for_migration(obj, server_key),
         }
+
+    @staticmethod
+    def _movable_ips_for_migration(obj, server_key):
+        """
+        List the donor's interface-assigned IPs as Move-to-winner candidates (empty unless migrated).
+
+        Only NetBox Device ``Interface`` assignments are listed: MoveIPAddressToWinnerView re-homes an
+        IP from a donor interface to the winner's same-named interface and rejects non-Interface (e.g.
+        VMInterface) assignments, so VM-owned IPs are intentionally excluded. Gated on the marker so a
+        non-migrated device pays no extra query.
+        """
+        from dcim.models import Device, Interface
+        from django.contrib.contenttypes.models import ContentType
+
+        from netbox_librenms_plugin.utils import get_migrated_to_marker
+
+        if not isinstance(obj, Device) or not get_migrated_to_marker(obj, server_key):
+            return []
+        name_by_id = {iface.pk: iface.name for iface in obj.interfaces.all()}
+        if not name_by_id:
+            return []
+        iface_ct = ContentType.objects.get_for_model(Interface)
+        return [
+            {"id": ip.pk, "address": str(ip.address), "interface_name": name_by_id.get(ip.assigned_object_id, "")}
+            for ip in IPAddress.objects.filter(
+                assigned_object_type=iface_ct, assigned_object_id__in=list(name_by_id)
+            ).order_by("address")
+        ]
 
     def get_context_data(self, request, obj):
         """Get the context data for the IP address sync view."""
@@ -498,8 +529,14 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMix
             return {"table": None, "object": obj, "cache_expiry": None, "server_key": scoped}
         context = self._prepare_context(request, obj, interface_name_field, fetch_fresh=False, server_key=scoped)
         if context is None:
-            # No data found; return context with empty table
-            context = {"table": None, "object": obj, "cache_expiry": None, "server_key": scoped}
+            # No data found; return context with empty table (still surface migrated move actions).
+            context = {
+                "table": None,
+                "object": obj,
+                "cache_expiry": None,
+                "server_key": scoped,
+                "movable_ips": self._movable_ips_for_migration(obj, scoped),
+            }
         return context
 
     def post(self, request, pk):

@@ -409,7 +409,9 @@ class MoveInterfaceToWinnerView(_BaseMoveToWinnerView):
         if donor is None:
             return self._fail(request, "Interface has no device.")
 
-        server_key = _server_key_from_request(request, default_factory=lambda: self.librenms_api.server_key)
+        # Fall back to active_server_key (never builds LibreNMSAPI) so a misconfigured default
+        # server can't 500 a move that only needs the marker's server namespace, not the live API.
+        server_key = _server_key_from_request(request, default_factory=lambda: self.active_server_key)
         self._fallback_url = _sync_tab_url(donor.pk, "interfaces", server_key)
         winner, marker = _resolve_winner_for_donor(donor, server_key)
         if marker is None:
@@ -572,7 +574,9 @@ class MoveIPAddressToWinnerView(_BaseMoveToWinnerView):
         if donor is None:
             return self._fail(request, "IP's interface has no device.", status=409)
 
-        server_key = _server_key_from_request(request, default_factory=lambda: self.librenms_api.server_key)
+        # Fall back to active_server_key (never builds LibreNMSAPI) so a misconfigured default
+        # server can't 500 a move that only needs the marker's server namespace, not the live API.
+        server_key = _server_key_from_request(request, default_factory=lambda: self.active_server_key)
         self._fallback_url = _sync_tab_url(donor.pk, "ipaddresses", server_key)
         winner, marker = _resolve_winner_for_donor(donor, server_key)
         if marker is None:
@@ -676,7 +680,9 @@ class TransferDeviceIPView(_BaseMoveToWinnerView):
         field, human = self._FIELD_MAP[ip_kind]
 
         donor = get_object_or_404(Device, pk=pk)
-        server_key = _server_key_from_request(request, default_factory=lambda: self.librenms_api.server_key)
+        # Fall back to active_server_key (never builds LibreNMSAPI) so a misconfigured default
+        # server can't 500 a move that only needs the marker's server namespace, not the live API.
+        server_key = _server_key_from_request(request, default_factory=lambda: self.active_server_key)
         self._fallback_url = _sync_tab_url(donor.pk, "ipaddresses", server_key)
         winner, marker = _resolve_winner_for_donor(donor, server_key)
         if marker is None:

@@ -144,3 +144,60 @@
     </div>
 </div>
 {% endif %}
+
+{% comment %}
+Migrated donor: per-row "Move IP to winner" actions. Re-homes an interface-assigned IP to the
+winner's same-named interface (the backend validates and fails closed via an OOB toast). Mirrors
+the interface move-to-winner control in _interface_sync_content.html.
+{% endcomment %}
+{% if migrated_to_marker and ip_sync.movable_ips %}
+<div class="card mt-3">
+    <div class="card-header">
+        <i class="mdi mdi-transfer-right"></i>
+        Move IP addresses{% if migrated_to_winner %} to {{ migrated_to_winner.name }}{% endif %}
+    </div>
+    <div class="card-body">
+        <p class="text-muted small mb-2">
+            Re-home a donor interface-assigned IP to the winner's same-named interface
+            (move the interface first if it doesn't exist on the winner yet).
+        </p>
+        <div class="table-responsive">
+            <table class="table table-hover" id="librenms-ipaddress-migrate-table">
+                <thead>
+                    <tr>
+                        <th>IP Address</th>
+                        <th>Interface</th>
+                        <th class="text-end">Migrate</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for ip in ip_sync.movable_ips %}
+                    <tr>
+                        <td>{{ ip.address }}</td>
+                        <td>{{ ip.interface_name|default:"-" }}</td>
+                        <td class="text-end">
+                            {% if has_write_permission and migrated_to_winner %}
+                            <button type="button"
+                                class="btn btn-sm btn-outline-warning"
+                                hx-post="{% url 'plugins:netbox_librenms_plugin:ipaddress_move_to_winner' pk=ip.id %}"
+                                hx-headers='{"X-CSRFToken": "{{ csrf_token }}"}'
+                                {% if migrated_to_marker.server_key %}hx-vals='{"server_key": "{{ migrated_to_marker.server_key|escapejs }}"}'{% elif ip_sync.server_key %}hx-vals='{"server_key": "{{ ip_sync.server_key|escapejs }}"}'{% endif %}
+                                hx-swap="none"
+                                hx-confirm="Move IP '{{ ip.address }}' to {{ migrated_to_winner.name }}?"
+                                title="Reassign this IP to {{ migrated_to_winner.name }}'s '{{ ip.interface_name }}' interface">
+                                <i class="mdi mdi-transfer-right"></i> Move
+                            </button>
+                            {% elif migrated_to_winner %}
+                            <span class="text-muted small">read-only</span>
+                            {% else %}
+                            <span class="text-muted small">winner missing</span>
+                            {% endif %}
+                        </td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </div>
+</div>
+{% endif %}

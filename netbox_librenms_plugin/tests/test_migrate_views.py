@@ -414,6 +414,30 @@ class TestMoveInterfaceToWinnerView:
         interface.refresh_from_db()
         assert interface.device_id == winner.pk  # really moved to the winner
 
+    def test_missing_server_key_falls_back_without_constructing_api(self):
+        """A no-server_key POST resolves the marker via active_server_key, never constructing LibreNMSAPI() (a misconfigured default would 500 the move)."""
+        view = self._setup_view()
+        donor = make_device("mi-nokey-donor")
+        winner = make_device("mi-nokey-winner")  # no "Eth0" -> the move can proceed
+        self._mark(donor, winner)  # marker namespaced under "default"
+        interface = make_interface(donor, "Eth0")
+        req = _hx_request({})  # POST omits server_key -> default_factory fires
+
+        # Simulate a misconfigured default server: constructing the client raises ValueError,
+        # exactly as the lazy librenms_api property would on a bad deployment. The fixed view
+        # must not touch it; the unfixed view calls self.librenms_api.server_key and 500s.
+        with patch(
+            "netbox_librenms_plugin.views.mixins.LibreNMSAPI",
+            side_effect=ValueError("LibreNMS URL or API token is not configured for server 'default'."),
+        ) as api_ctor:
+            resp = view.post(req, pk=interface.pk)
+
+        api_ctor.assert_not_called()  # the fix never builds the (broken) client
+        assert resp.status_code == 200
+        assert resp.headers.get("HX-Refresh") == "true"  # the move still happened
+        interface.refresh_from_db()
+        assert interface.device_id == winner.pk
+
     def test_cross_device_relationship_rejected_with_409(self):
         """Real cross-device LAG: the donor interface is a member of a LAG that lives on the donor."""
         view = self._setup_view()
@@ -1412,3 +1436,99 @@ class TestMigratedContextServerKeyFallback:
 
         ip_sync = mock_render.call_args.args[2]["ip_sync"]
         assert ip_sync["set_primary_ip"] is True
+
+
+@pytest.mark.django_db
+class TestMovableIpsForMigration:
+    """_movable_ips_for_migration lists a migrated donor's interface-assigned IPs (Move-to-winner candidates)."""
+
+    @staticmethod
+    def _movable(donor, server_key="default"):
+        from netbox_librenms_plugin.views.object_sync.devices import DeviceIPAddressTableView
+
+        return DeviceIPAddressTableView._movable_ips_for_migration(donor, server_key)
+
+    def test_empty_when_not_migrated(self):
+        donor = make_device("mv-nomark")
+        ip_on(donor, "10.10.0.5/24", "eth0")  # real IP on a real interface, but no marker
+        assert self._movable(donor) == []
+
+    def test_lists_interface_assigned_ips_when_migrated(self):
+        from netbox_librenms_plugin.utils import mark_librenms_migrated
+
+        winner = make_device("mv-winner")
+        donor = make_device("mv-donor")
+        ip = ip_on(donor, "10.10.0.5/24", "eth0")
+        mark_librenms_migrated(donor, winner.pk, "default")
+        donor.save()
+
+        result = self._movable(donor)
+        assert len(result) == 1
+        assert result[0]["id"] == ip.pk
+        assert result[0]["address"] == "10.10.0.5/24"
+        assert result[0]["interface_name"] == "eth0"
+
+    def test_excludes_unassigned_ip(self):
+        from netbox_librenms_plugin.tests.conftest import make_ip
+        from netbox_librenms_plugin.utils import mark_librenms_migrated
+
+        winner = make_device("mv-winner2")
+        donor = make_device("mv-donor2")
+        ip_on(donor, "10.10.0.6/24", "eth0")  # assigned -> candidate
+        make_ip("10.10.0.99/24")  # unassigned -> not a candidate
+        mark_librenms_migrated(donor, winner.pk, "default")
+        donor.save()
+
+        assert [r["address"] for r in self._movable(donor)] == ["10.10.0.6/24"]
+
+    def test_scoped_to_marker_server_key(self):
+        from netbox_librenms_plugin.utils import mark_librenms_migrated
+
+        winner = make_device("mv-winner3")
+        donor = make_device("mv-donor3")
+        ip_on(donor, "10.10.0.7/24", "eth0")
+        mark_librenms_migrated(donor, winner.pk, "edgelondon")  # marker under a non-default server
+        donor.save()
+
+        # The marker's own key surfaces the candidates; an unrelated key sees none.
+        assert self._movable(donor, "default") == []
+        assert len(self._movable(donor, "edgelondon")) == 1
+
+
+@pytest.mark.django_db
+class TestMigratedDonorRendersSyncTabs:
+    """A migrated (not-found) donor must render the sync tabs so the per-row Move-to-winner controls are reachable.
+
+    The merge clears the donor's active librenms_id, so it is never found_in_librenms; without gating the
+    tabs on migrated_to_marker too, the banner promises per-row interface/IP move actions that never render.
+    Full HTTP request -> view -> DB -> template, no LibreNMS API (librenms_id is None for a migrated donor).
+    """
+
+    def test_full_page_shows_tabs_and_reachable_ip_move_button(self, client):
+        from django.contrib.auth import get_user_model
+        from django.urls import reverse
+
+        from netbox_librenms_plugin.tests.conftest import ip_on, make_device
+        from netbox_librenms_plugin.utils import mark_librenms_migrated
+
+        user = get_user_model().objects.create_superuser("mig-tabs-admin", "a@b.c", "pw")
+        client.force_login(user)
+
+        winner = make_device("mt-winner")
+        donor = make_device("mt-donor")
+        ip = ip_on(donor, "10.50.0.5/24", "eth0")  # a real interface-assigned IP to move
+        mark_librenms_migrated(donor, winner.pk, "default")  # clears the active id -> donor not found
+        donor.save()
+
+        url = reverse("plugins:netbox_librenms_plugin:device_librenms_sync", args=[donor.pk])
+        resp = client.get(url, {"tab": "ipaddresses"})
+
+        assert resp.status_code == 200
+        html = resp.content.decode()
+        # Migrated mode now renders the tab structure (not the "device not found, match it" dead-end)...
+        assert 'id="librenmsTabContent"' in html
+        assert "To match a device, use one of these methods" not in html
+        # ...so the per-row IP "Move to winner" button is actually reachable.
+        move_url = reverse("plugins:netbox_librenms_plugin:ipaddress_move_to_winner", kwargs={"pk": ip.pk})
+        assert move_url in html
+        assert "Move IP addresses" in html  # the migrated move card header

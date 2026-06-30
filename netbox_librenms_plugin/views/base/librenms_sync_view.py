@@ -31,6 +31,9 @@ class BaseLibreNMSSyncView(LibreNMSPermissionMixin, LibreNMSAPIMixin, generic.Ob
     model = None  # Will be set in subclasses
     tab = None  # Will be set in subclasses
     template_name = "netbox_librenms_plugin/librenms_sync_base.html"
+    # Render server key resolved in get(); read by get_context_data for the migrated-mode banner.
+    # None until get() runs (e.g. a direct get_context_data() call), then active_server_key is used.
+    _render_server_key = None
 
     def get(self, request, pk, context=None):
         """Handle GET request for the LibreNMS sync view."""
@@ -42,6 +45,12 @@ class BaseLibreNMSSyncView(LibreNMSPermissionMixin, LibreNMSAPIMixin, generic.Ob
         # — an internally inconsistent page. A blank/absent key keeps the session/default client, so
         # single-server and default renders are unchanged.
         _scoped_key, unresolved = self.resolve_get_render_server_key(request)
+        # Stash the resolved render key so get_context_data builds the migrated-mode banner under
+        # the SAME namespace as the header/tabs. On the unresolved (stale ?server_key) path the
+        # rebind declines and self.librenms_api.server_key falls back to "default" — using that for
+        # the marker lookup would hide a real migration (marker under the requested server) or show
+        # a spurious one (unrelated "default" marker). _scoped_key keeps the page self-consistent.
+        self._render_server_key = _scoped_key
 
         # The resolve can decline WITHOUT binding a client: a blank/absent key with a
         # misconfigured default (build_librenms_api(None) → None), or an unresolved
@@ -230,7 +239,9 @@ class BaseLibreNMSSyncView(LibreNMSPermissionMixin, LibreNMSAPIMixin, generic.Ob
                 # The _migrated_to marker lives on the viewed device itself, not on
                 # the VC sync/lookup device — build migrated mode from obj so a
                 # VC-member donor renders consistently with the HTMX tab partials.
-                **self._build_migrated_context(obj, self.librenms_api.server_key),
+                # Use the resolved render key (not the lazy librenms_api property, which re-derives
+                # the global default and mis-namespaces the marker on the stale-?server_key path).
+                **self._build_migrated_context(obj, self._render_server_key or self.active_server_key),
             }
         )
 

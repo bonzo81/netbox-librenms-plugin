@@ -280,23 +280,6 @@ class TestFindByLibreNMSId:
         mock_model.objects.filter.assert_not_called()
 
 
-class TestIsLegacyLibreNMSId:
-    """is_legacy_librenms_id(): detect the pre-migration bare-int/int-string librenms_id format."""
-
-    def test_legacy_forms_are_detected(self):
-        from netbox_librenms_plugin.utils import is_legacy_librenms_id
-
-        for legacy in (42, "42", "007", -3, "-3"):
-            assert is_legacy_librenms_id(legacy) is True, legacy
-
-    def test_modern_and_invalid_forms_are_not_legacy(self):
-        from netbox_librenms_plugin.utils import is_legacy_librenms_id
-
-        # Multi-server dict (modern), bool (not a real id), None, and non-numeric strings.
-        for modern in ({"default": {"id": 42}}, {}, True, False, None, "abc", "4.2", 4.2):
-            assert is_legacy_librenms_id(modern) is False, modern
-
-
 @pytest.mark.django_db
 class TestMigrateLegacyLibreNMSId:
     """Tests for migrate_legacy_librenms_id() — mutates custom_field_data, never saves."""
@@ -397,12 +380,31 @@ class TestIsLegacyLibreNMSId:
             ({"default": 5}, False),  # multi-server dict
             ({"default": {"id": 5}}, False),
             ([], False),
+            ("007", True),  # zero-padded numeric string is still legacy
+            ("-3", True),  # negative numeric string parses via int()
+            ("4.2", False),  # float-form string is not the legacy int format
+            (4.2, False),  # float is not the legacy format
+            ({}, False),  # empty dict is the (empty) modern form, not legacy
         ],
     )
     def test_classifies_legacy_values(self, value, expected):
         from netbox_librenms_plugin.utils import is_legacy_librenms_id
 
         assert is_legacy_librenms_id(value) is expected
+
+    def test_defined_exactly_once_in_utils(self):
+        """Guard is_legacy_librenms_id has exactly one module-level def (a duplicate silently shadows the other)."""
+        import ast
+        import inspect
+
+        from netbox_librenms_plugin import utils
+
+        defs = [
+            node
+            for node in ast.parse(inspect.getsource(utils)).body
+            if isinstance(node, ast.FunctionDef) and node.name == "is_legacy_librenms_id"
+        ]
+        assert len(defs) == 1, f"is_legacy_librenms_id defined {len(defs)}x — a duplicate shadows the other"
 
 
 @pytest.mark.django_db

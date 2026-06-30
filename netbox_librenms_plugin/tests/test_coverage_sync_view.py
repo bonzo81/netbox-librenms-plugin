@@ -1153,3 +1153,62 @@ class TestInterfaceSyncRefreshButtonServerKey:
         assert '<input type="hidden" name="server_key" value="prod">' in html
         # ...and the refresh button posts it alongside interface_name_field.
         assert "[name='interface_name_field'], [name='server_key']" in html
+
+
+@pytest.mark.django_db
+class TestFullPageMigratedContextServerScope:
+    """The full-page migrated banner must use the resolved render key, not the global default."""
+
+    def test_stale_server_key_builds_migrated_banner_under_requested_key(self):
+        """A stale ?server_key whose marker lives on a non-default server still shows the banner (scoped to the requested key, not 'default')."""
+        from django.http import HttpResponse
+
+        from netbox_librenms_plugin.tests.conftest import make_device
+        from netbox_librenms_plugin.views.object_sync.devices import DeviceLibreNMSSyncView
+
+        winner = make_device("f4-winner")
+        donor = make_device("f4-donor")
+        # The migration marker lives under a NON-default server that is now stale/deleted.
+        donor.custom_field_data["librenms_id"] = {
+            "edgelondon": {"_migrated_to": {"device_id": winner.pk, "server_key": "edgelondon", "at": "x"}}
+        }
+        donor.save()
+
+        view = DeviceLibreNMSSyncView()
+        view.has_write_permission = MagicMock(return_value=True)
+        # Sibling context builders are independently tested; null them so this isolates the migrated
+        # banner's server namespace. get_librenms_device_info stays REAL — with librenms_id None
+        # (fail-closed) it returns empty details without touching the API.
+        view.get_interface_context = MagicMock(return_value=None)
+        view.get_cable_context = MagicMock(return_value=None)
+        view.get_ip_context = MagicMock(return_value=None)
+        view.get_vlan_context = MagicMock(return_value=None)
+        view.get_module_context = MagicMock(return_value=None)
+        view._get_platform_info = MagicMock(return_value={})
+
+        request = RequestFactory().get("/?server_key=edgelondon")
+        request.user = MagicMock(is_superuser=True)
+
+        captured = {}
+
+        def _capture(req, template, ctx):
+            captured.update(ctx)
+            return HttpResponse("ok")
+
+        # build_librenms_api → None makes 'edgelondon' unresolvable regardless of test config, so
+        # the rebind declines and get() takes the stale-?server_key (unresolved) path.
+        with (
+            patch("netbox_librenms_plugin.librenms_api.build_librenms_api", return_value=None),
+            patch("netbox_librenms_plugin.views.base.librenms_sync_view.render", side_effect=_capture),
+            patch(
+                "netbox_librenms_plugin.views.base.librenms_sync_view.LibreNMSAPIMixin.get_context_data",
+                return_value={},
+            ),
+        ):
+            view.get(request, pk=donor.pk)
+
+        # Fixed: banner built under 'edgelondon' (the requested/scoped key). The unfixed code used
+        # self.librenms_api.server_key ('default') and looked up no marker → banner silently absent.
+        assert captured.get("migrated_to_marker"), "migration banner missing — marker looked up under the wrong server"
+        assert captured.get("migrated_to_winner") is not None
+        assert captured["migrated_to_winner"].pk == winner.pk
