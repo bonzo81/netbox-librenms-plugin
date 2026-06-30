@@ -1942,6 +1942,117 @@ class TestBaseInterfaceTablePostCoercesLibreNMSId:
         assert response.status_code == 302
 
 
+def _real_api_for_coerce():
+    """A real LibreNMSAPI bound to a stub 'default' server (no real HTTP made by these tests)."""
+    from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+
+    with patch(
+        "netbox_librenms_plugin.librenms_api.get_plugin_config",
+        return_value={
+            "default": {
+                "librenms_url": "https://lnms.example.com",
+                "api_token": "tok",
+                "cache_timeout": 300,
+                "verify_ssl": True,
+            }
+        },
+    ):
+        return LibreNMSAPI(server_key="default")
+
+
+@pytest.mark.django_db
+class TestBaseVLANTablePostCoercesLibreNMSId:
+    """VLAN refresh must coerce the (cache-path) librenms_id before get_device_vlans()."""
+
+    def test_corrupt_cached_id_fails_closed_before_get_device_vlans(self):
+        """A boolean cached under the device-id key fails closed at the view, never reaching get_device_vlans()."""
+        from django.core.cache import cache as real_cache
+        from django.test import RequestFactory
+
+        from netbox_librenms_plugin.views.object_sync.devices import DeviceVLANTableView
+
+        device = make_device("coerce-vlan-host")  # no librenms_id CF → forces the cache path
+        api = _real_api_for_coerce()
+        real_cache.set(api._get_cache_key(device), True)
+        try:
+            assert api.get_librenms_id(device) is True  # the uncoerced cache path really returns the bool
+
+            view = object.__new__(DeviceVLANTableView)
+            view._librenms_api = api
+            view.rebind_api_for_server = MagicMock(return_value="default")  # keep the real api bound
+            api.get_device_vlans = MagicMock(name="get_device_vlans", return_value=(False, "should-not-be-called"))
+
+            request = RequestFactory().post(f"/plugins/librenms/devices/{device.pk}/vlan-sync/", data={})
+            view.request = request
+            # The error-path render moves up the stack: this branch returns render(...), but a
+            # higher branch routes the same exit through self.render_sync_partial(). Patch BOTH with
+            # create=True so the test passes on every branch regardless of which one is the live exit.
+            view.render_sync_partial = MagicMock(return_value=MagicMock())
+            with (
+                patch("netbox_librenms_plugin.views.base.vlan_table_view.messages") as mock_messages,
+                patch(
+                    "netbox_librenms_plugin.views.base.vlan_table_view.render",
+                    return_value=MagicMock(),
+                    create=True,
+                ),
+            ):
+                view.post(request, pk=device.pk)
+        finally:
+            real_cache.delete(api._get_cache_key(device))
+
+        assert view.librenms_id is None
+        api.get_device_vlans.assert_not_called()
+        mock_messages.error.assert_called_once_with(request, "Device not found in LibreNMS.")
+
+
+@pytest.mark.django_db
+class TestBaseModuleTablePostCoercesLibreNMSId:
+    """Module refresh must coerce the (cache-path) librenms_id before get_device_inventory()."""
+
+    def test_corrupt_cached_id_fails_closed_before_get_device_inventory(self):
+        """A boolean cached under the device-id key fails closed at the view, never reaching get_device_inventory()."""
+        from django.core.cache import cache as real_cache
+        from django.test import RequestFactory
+
+        from netbox_librenms_plugin.views.object_sync.devices import DeviceModuleTableView
+
+        device = make_device("coerce-mod-host")  # no librenms_id CF → forces the cache path
+        api = _real_api_for_coerce()
+        real_cache.set(api._get_cache_key(device), True)
+        try:
+            assert api.get_librenms_id(device) is True
+
+            view = object.__new__(DeviceModuleTableView)
+            view._librenms_api = api
+            view.rebind_api_for_server = MagicMock(return_value="default")
+            view.has_write_permission = MagicMock(return_value=True)
+            api.get_device_inventory = MagicMock(
+                name="get_device_inventory", return_value=(False, "should-not-be-called")
+            )
+
+            request = RequestFactory().post(f"/plugins/librenms/devices/{device.pk}/module-sync/", data={})
+            view.request = request
+            # The error-path render moves up the stack (return render(...) here vs
+            # self.render_sync_partial() on a higher branch); patch BOTH with create=True so the
+            # test is branch-agnostic.
+            view.render_sync_partial = MagicMock(return_value=MagicMock())
+            with (
+                patch("netbox_librenms_plugin.views.base.modules_view.messages") as mock_messages,
+                patch(
+                    "netbox_librenms_plugin.views.base.modules_view.render",
+                    return_value=MagicMock(),
+                    create=True,
+                ),
+            ):
+                view.post(request, pk=device.pk)
+        finally:
+            real_cache.delete(api._get_cache_key(device))
+
+        assert view.librenms_id is None
+        api.get_device_inventory.assert_not_called()
+        mock_messages.error.assert_called_once_with(request, "Device not found in LibreNMS.")
+
+
 class TestBaseInterfaceTableViewGetContextData:
     """Tests for BaseInterfaceTableView.get_context_data."""
 

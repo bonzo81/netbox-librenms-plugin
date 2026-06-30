@@ -186,7 +186,9 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
             server_key (str): LibreNMS server key scoping the per-server librenms_id lookup.
 
         Returns:
-            tuple[dict, dict]: The (by_librenms_id, by_name) maps; an ambiguous key maps to None.
+            tuple[dict, dict, dict]: The (by_librenms_id, by_name, by_pk) maps; an ambiguous
+                id/name key maps to None. ``by_pk`` keys the same interface set by string PK so a
+                cached ``interface_url`` (which survives a rename) can still resolve the target.
         """
         if isinstance(obj, Device):
             # Route member expansion through the shared helper (returns [obj] when not in a VC)
@@ -199,7 +201,12 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
             obj_device_id = None
         by_librenms_id = {}
         by_name = {}
+        by_pk = {}
         for iface in interfaces:
+            # Key by PK for the cached-interface_url fallback (rename-safe identity). Scoped to
+            # this object's (and its VC members') interfaces, so a stale URL can never bind the
+            # address to an unrelated device's interface — stricter than the old direct .get(id=).
+            by_pk[str(iface.pk)] = iface
             lib_id = get_librenms_device_id(iface, server_key, auto_save=False)
             if lib_id is not None:
                 key = str(lib_id)
@@ -222,23 +229,30 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
                 by_name[iface.name] = iface
             elif by_name[iface.name] is not None and getattr(by_name[iface.name], "device_id", None) != obj_device_id:
                 by_name[iface.name] = None
-        return by_librenms_id, by_name
+        return by_librenms_id, by_name, by_pk
 
     @staticmethod
-    def _match_interface(ip_data, by_librenms_id, by_name):
+    def _match_interface(ip_data, by_librenms_id, by_name, by_pk=None):
         """
         Resolve the NetBox interface for a cached IP row against current state.
 
         The cached ``interface_url`` is enrichment captured when the rows were fetched, so an
         interface synced *afterwards* is missed and the sync would wrongly report "no interface"
         until a manual cache refresh. The rendered table re-enriches on every load (so it already
-        shows the link); matching here on the stable LibreNMS port id (preferred) then interface
-        name keeps the sync consistent with what the user sees.
+        shows the link); matching here on the stable LibreNMS port id (preferred), then interface
+        name, then the cached ``interface_url`` PK keeps the sync consistent with what the user
+        sees. The PK fallback is what recovers a *renamed* interface that has no stored port id
+        (e.g. the common VMInterface case): its name no longer matches the cached LibreNMS name,
+        but the PK in ``interface_url`` survives the rename — without it the row is silently
+        skipped (regression vs. the pre-refactor code that resolved purely by ``interface_url``).
 
         Args:
-            ip_data (dict): The cached IP row (carries ``port_id`` and ``interface_name``).
+            ip_data (dict): The cached IP row (carries ``port_id``, ``interface_name`` and
+                ``interface_url``).
             by_librenms_id (dict): Current interfaces keyed by LibreNMS port id (str).
             by_name (dict): Current interfaces keyed by name.
+            by_pk (dict | None): Current interfaces keyed by string PK, scoped to the object's own
+                (and VC members') interfaces; used for the rename-safe ``interface_url`` fallback.
 
         Returns:
             Interface | VMInterface | None: The matched interface, or None if none resolves.
@@ -252,6 +266,14 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
         name = ip_data.get("interface_name")
         if name and name in by_name:
             return by_name[name]
+        # Rename-safe fallback: the cached interface_url PK still points at the (renamed)
+        # interface. Scope to by_pk (the object's own interfaces) so a stale URL can't bind the
+        # address to an unrelated device's interface.
+        interface_url = ip_data.get("interface_url")
+        if interface_url and by_pk:
+            pk = interface_url.rstrip("/").rsplit("/", 1)[-1]
+            if pk in by_pk:
+                return by_pk[pk]
         return None
 
     @staticmethod
@@ -301,7 +323,7 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
         # interface_url) so an interface synced after these rows were cached is
         # picked up without a manual cache refresh.
         server_key = getattr(self, "_post_server_key", None) or self.librenms_api.server_key
-        interfaces_by_librenms_id, interfaces_by_name = self._build_interface_maps(obj, server_key)
+        interfaces_by_librenms_id, interfaces_by_name, interfaces_by_pk = self._build_interface_maps(obj, server_key)
 
         for ip_address in selected_ips:
             try:
@@ -312,7 +334,9 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
 
                     vrf = self.get_vrf_selection(request, ip_address)
 
-                    interface = self._match_interface(ip_data, interfaces_by_librenms_id, interfaces_by_name)
+                    interface = self._match_interface(
+                        ip_data, interfaces_by_librenms_id, interfaces_by_name, interfaces_by_pk
+                    )
 
                     if interface is None:
                         # No matching NetBox interface — the row is stale, the interface isn't

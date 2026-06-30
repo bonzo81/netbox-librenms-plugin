@@ -1458,6 +1458,32 @@ class TestPrepareContextInterfaceNameFieldNone:
         view._librenms_api.server_key = "default"
         return view
 
+    def test_cached_render_coerces_poisoned_stored_id(self):
+        """On the cached render with no stored mgmt_ip, a poisoned stored librenms_id is coerced to None so the live mgmt-IP lookup (get_device_info) is never hit."""
+        view = self._make_view()
+        # The device-id cache path returns its value verbatim — a poisoned bool.
+        view._librenms_api.get_stored_librenms_id.return_value = True
+        view._librenms_api.cache_timeout = 300
+
+        obj = _mock_obj()
+        request = _mock_request()
+        # Cached IP rows present but NO mgmt_ip key → drives the cached_mgmt_ip_missing backfill.
+        cached = {"ip_addresses": [{"port_id": 1, "ip_address": "10.0.0.1", "prefix_length": 24}]}
+
+        with (
+            patch("netbox_librenms_plugin.views.base.ip_addresses_view.cache") as mock_cache,
+            patch.object(view, "get_cache_key", return_value="ck"),
+            patch.object(view, "enrich_ip_data", return_value=[]),
+            patch.object(view, "get_table", return_value=MagicMock()),
+        ):
+            mock_cache.get.return_value = cached
+            mock_cache.ttl.return_value = None
+            view._prepare_context(request, obj, "ifName", fetch_fresh=False, server_key="default")
+
+        # Poisoned True → coerced to None → _resolve_management_ip bails before any HTTP call.
+        assert view.librenms_id is None
+        view._librenms_api.get_device_info.assert_not_called()
+
     def test_calls_get_interface_name_field_when_none(self):
         """When interface_name_field=None, _prepare_context calls get_interface_name_field."""
         view = self._make_view()

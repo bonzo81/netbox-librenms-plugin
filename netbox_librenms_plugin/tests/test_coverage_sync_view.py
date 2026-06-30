@@ -404,6 +404,58 @@ class TestContextAllTabsPresent:
         assert ctx["interface_sync"] is interface_ctx
         assert ctx["module_sync"] is module_ctx
 
+    @pytest.mark.django_db
+    def test_get_context_data_exposes_active_server_key(self):
+        """The active server_key is in context so the create-platform modal forwards it (preserving the server tab on redirect)."""
+        from netbox_librenms_plugin.tests.conftest import make_device
+
+        view = _make_view()
+        view.librenms_id = 42
+        view._librenms_api.server_key = "production"  # non-default active server
+
+        obj = make_device("ctx-serverkey-dev", librenms_cf={"production": 42})
+
+        view.get_librenms_device_info = MagicMock(
+            return_value={
+                "found_in_librenms": True,
+                "librenms_device_details": {
+                    "librenms_device_serial": "SN001",
+                    "librenms_device_hardware": "Cisco",
+                    "librenms_device_os": "ios",
+                    "librenms_device_version": "16.9",
+                    "librenms_device_features": "-",
+                    "librenms_device_location": "NYC",
+                    "librenms_device_hardware_match": None,
+                    "vc_inventory_serials": [],
+                },
+                "mismatched_device": False,
+            }
+        )
+        view.get_interface_context = MagicMock(return_value=None)
+        view.get_cable_context = MagicMock(return_value=None)
+        view.get_ip_context = MagicMock(return_value=None)
+        view.get_vlan_context = MagicMock(return_value=None)
+        view.get_module_context = MagicMock(return_value=None)
+
+        with patch(
+            "netbox_librenms_plugin.views.base.librenms_sync_view.LibreNMSAPIMixin.get_context_data",
+            return_value={},
+        ):
+            with patch(
+                "netbox_librenms_plugin.views.base.librenms_sync_view.get_interface_name_field", return_value="ifName"
+            ):
+                with patch(
+                    "netbox_librenms_plugin.views.base.librenms_sync_view.BaseLibreNMSSyncView._get_platform_info",
+                    return_value={},
+                ):
+                    with patch("netbox_librenms_plugin.views.base.librenms_sync_view.AddToLIbreSNMPV1V2"):
+                        with patch("netbox_librenms_plugin.views.base.librenms_sync_view.AddToLIbreSNMPV3"):
+                            ctx = view.get_context_data(MagicMock(), obj)
+
+        # The create-platform modal include (no `only`) inherits this; without it the modal's
+        # {% if server_key %} hidden field never renders and the redirect drops the server tab.
+        assert ctx["server_key"] == "production"
+
 
 class TestModuleContextDefaults:
     """Tests for module-context defaults and concrete overrides."""

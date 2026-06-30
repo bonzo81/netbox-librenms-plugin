@@ -2625,6 +2625,25 @@ class TestDetectSerialMatchRole:
         # Both oob_candidate and promote_to_host are feasible → user may flip the default.
         assert out["serial_role_choice_available"] is True
 
+    def test_oob_candidate_type_falls_back_to_generic_sentinel(self):
+        # Chassis pair signalled by the EXISTING name ("-bmc"), but the INCOMING row has no OS/
+        # hardware/name OOB token, so the oob_candidate type takes the real `... or "oob"` fallback
+        # (the production sentinel the AddAsOOBView tests must not reimplement inline).
+        from netbox_librenms_plugin.tests.conftest import make_device
+
+        device = make_device("rack1-bmc")  # existing name carries the OOB signal
+        libre_device = {
+            "device_id": 7,
+            "os": "ubuntu",  # normalize_oob_type -> None
+            "hardware": "",
+            "hostname": "rack1",  # differs from existing, no OOB token
+            "serial": "ABC123",
+        }
+        out = self._role(device, "rack1", libre_device)
+
+        assert out["serial_action"] == "oob_candidate"
+        assert out["oob_candidate"]["type"] == "oob"  # the real generic fallback, not a test copy
+
     def test_plain_link_when_names_match_and_unlinked(self):
         # Names match and the existing device has no LibreNMS link → not a chassis pair; fall
         # back to a plain "link" with the unlinked warning, no role choice.

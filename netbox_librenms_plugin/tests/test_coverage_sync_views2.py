@@ -1389,7 +1389,7 @@ class TestSyncIPAddressesViewInterfaceResolution:
         set_librenms_device_id(eth0, 7, "default")  # mutates custom_field_data...
         eth0.save()  # ...which set_librenms_device_id does not persist; _build_interface_maps re-queries
 
-        by_id, by_name = view._build_interface_maps(dev, "default")
+        by_id, by_name, _by_pk = view._build_interface_maps(dev, "default")
 
         assert set(by_id) == {"7"}
         assert by_id["7"].pk == eth0.pk
@@ -1409,7 +1409,7 @@ class TestSyncIPAddressesViewInterfaceResolution:
         a.save()
         b.save()
 
-        by_id, by_name = view._build_interface_maps(dev, "default")
+        by_id, by_name, _by_pk = view._build_interface_maps(dev, "default")
 
         assert by_id == {"7": None}  # ambiguous → no usable target
         assert set(by_name) == {"eth0", "eth1"}
@@ -1492,7 +1492,7 @@ class TestSyncIPAddressesViewInterfaceResolution:
         i2.save()
 
         # Build the maps from the viewed member m1 — m2's interface must still be present.
-        by_id, by_name = self._view()._build_interface_maps(m1, "default")
+        by_id, by_name, _by_pk = self._view()._build_interface_maps(m1, "default")
 
         assert by_id["101"].pk == i1.pk
         assert by_id["202"].pk == i2.pk  # cross-member: resolved from a different member
@@ -1546,7 +1546,7 @@ class TestSyncIPAddressesViewInterfaceResolution:
         own = make_interface(members[1], "Ethernet1")
         make_interface(members[2], "Ethernet1")  # sibling reuses the name — must NOT block binding
 
-        _by_id, by_name = self._view()._build_interface_maps(members[1], "default")
+        _by_id, by_name, _by_pk = self._view()._build_interface_maps(members[1], "default")
 
         # The render indexes only the viewed object's interfaces, so the sync must agree:
         # the viewed member's own Ethernet1 wins rather than being nulled as ambiguous.
@@ -1559,7 +1559,7 @@ class TestSyncIPAddressesViewInterfaceResolution:
         make_interface(members[2], "Ethernet9")
         make_interface(members[3], "Ethernet9")
 
-        _by_id, by_name = self._view()._build_interface_maps(members[1], "default")
+        _by_id, by_name, _by_pk = self._view()._build_interface_maps(members[1], "default")
 
         assert by_name["Ethernet9"] is None
 
@@ -1570,7 +1570,7 @@ class TestSyncIPAddressesViewInterfaceResolution:
         own = make_interface(dev, "Ethernet1")
         make_interface(other, "Ethernet1")  # unrelated device, must NOT appear
 
-        _by_id, by_name = self._view()._build_interface_maps(dev, "default")
+        _by_id, by_name, _by_pk = self._view()._build_interface_maps(dev, "default")
 
         assert set(by_name) == {"Ethernet1"}
         assert by_name["Ethernet1"].pk == own.pk

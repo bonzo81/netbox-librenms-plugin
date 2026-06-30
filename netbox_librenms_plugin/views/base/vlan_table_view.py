@@ -6,7 +6,7 @@ from django.views import View
 
 from netbox_librenms_plugin.constants import LIBRENMS_VLAN_STATE_ACTIVE
 from netbox_librenms_plugin.tables.vlans import LibreNMSVLANTable
-from netbox_librenms_plugin.utils import cache_remaining_ttl, is_list_of_dicts
+from netbox_librenms_plugin.utils import cache_remaining_ttl, coerce_librenms_id, is_list_of_dicts
 from netbox_librenms_plugin.views.mixins import (
     CacheMixin,
     LibreNMSAPIMixin,
@@ -52,10 +52,13 @@ class BaseVLANTableView(VlanAssignmentMixin, LibreNMSAPIMixin, LibreNMSPermissio
             }
             return render(request, self.partial_template_name, context)
 
-        # Get librenms_id (now scoped to the POSTed server).
-        self.librenms_id = self.librenms_api.get_librenms_id(obj)
+        # Get librenms_id (now scoped to the POSTed server). coerce_librenms_id fails closed on a
+        # poisoned cached value (bool/zero/negative/garbage) — the device-id cache path of
+        # get_librenms_id returns its value verbatim, so a stray True would otherwise int() to 1
+        # and fetch a stranger's VLANs. Mirrors the cables/interfaces/IP views in this PR.
+        self.librenms_id = coerce_librenms_id(self.librenms_api.get_librenms_id(obj))
 
-        if not self.librenms_id:
+        if self.librenms_id is None:
             # Drop any prior snapshot for this server: a failed refresh on a previously-synced
             # device must not leave a stale VLAN table the next GET can render and act on. The
             # cache is scoped by server_key, so evict the same scoped keys.

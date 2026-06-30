@@ -418,7 +418,10 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMix
             # "Set Primary IP" auto-select works without forcing a manual refresh first.
             cached_mgmt_ip_missing = "mgmt_ip" not in cached_ip_data
             if cached_mgmt_ip_missing:
-                self.librenms_id = self.librenms_api.get_stored_librenms_id(obj)
+                # coerce_librenms_id fails closed on a poisoned cached value (bool/zero/garbage):
+                # get_stored_librenms_id reads the device-id cache verbatim, so a stray True would
+                # otherwise int() to 1 in _resolve_management_ip and fetch a stranger's mgmt IP.
+                self.librenms_id = coerce_librenms_id(self.librenms_api.get_stored_librenms_id(obj))
                 mgmt_ip = self._resolve_management_ip()
             else:
                 mgmt_ip = cached_ip_data["mgmt_ip"]
@@ -451,7 +454,7 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMix
             # cache.ttl() isn't part of Django's core cache API (only django-redis-style backends
             # expose it). Guard it like base/modules_view does so a non-Redis backend degrades to
             # "no backfill" rather than raising AttributeError while rendering.
-            remaining_ttl = getattr(cache, "ttl", lambda k: None)(cache_key)
+            remaining_ttl = cache_remaining_ttl(cache, cache_key)
             if remaining_ttl and remaining_ttl > 0:
                 cache.set(
                     cache_key,

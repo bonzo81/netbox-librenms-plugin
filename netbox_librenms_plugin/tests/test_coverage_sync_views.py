@@ -1801,6 +1801,31 @@ class TestSyncIPAddressesViewProcessIpSync:
         assert "10.0.0.1" not in results["created"]
         assert not IPAddress.objects.filter(address="10.0.0.1/24").exists()
 
+    def test_renamed_interface_resolved_via_cached_url_pk(self):
+        """A renamed interface with no port_id and a stale cached name still resolves via the cached interface_url PK."""
+        from ipam.models import IPAddress
+
+        view = self._setup_view()
+        obj = make_device("ipsync-renamed-dev")
+        # Current NetBox name differs from the LibreNMS-cached name ("eth0"); no librenms_id
+        # seeded, so the row has no usable port_id either — only interface_url can resolve it.
+        iface = make_interface(obj, "eth0-renamed")
+        cached = [
+            {
+                "ip_address": "10.0.0.1",
+                "ip_with_mask": "10.0.0.1/24",
+                "port_id": None,
+                "interface_name": "eth0",  # stale LibreNMS name — no longer matches
+                "interface_url": iface.get_absolute_url(),  # PK survives the rename
+            }
+        ]
+
+        results = self._run(view, ["10.0.0.1"], cached, obj, "device")
+
+        assert "10.0.0.1" in results["created"], results
+        created = IPAddress.objects.get(address="10.0.0.1/24")
+        assert created.assigned_object == iface
+
     def test_ip_assigned_to_interface_matched_by_port_id(self):
         from ipam.models import IPAddress
 

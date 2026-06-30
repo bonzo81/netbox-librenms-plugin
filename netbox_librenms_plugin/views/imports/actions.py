@@ -40,8 +40,8 @@ from netbox_librenms_plugin.import_validation_helpers import (
 )
 from netbox_librenms_plugin.tables.device_status import DeviceImportTable
 from netbox_librenms_plugin.utils import (
-    is_legacy_librenms_id,
     coerce_librenms_id,
+    is_legacy_librenms_id,
     resolve_naming_preferences,
     save_user_pref,
     set_device_ip_fk,
@@ -1519,9 +1519,9 @@ class DeviceConflictActionView(
 
                 # Reject legacy bare-int/string librenms_id: set_librenms_device_id
                 # silently skips writes for legacy formats, leaving the device partially
-                # updated. User must run "Convert mapping" migration first.
-                stored_id = existing_device.custom_field_data.get("librenms_id")
-                if is_legacy_librenms_id(stored_id):
+                # updated. User must run "Convert mapping" migration first. Shared predicate
+                # with AddAsOOBView and set_librenms_device_id so the three can't drift.
+                if is_legacy_librenms_id(existing_device.custom_field_data.get("librenms_id")):
                     return _htmx_error_response(
                         "Device has a legacy bare-integer librenms_id; use 'Convert mapping' "
                         "to migrate to the multi-server format before linking."
@@ -2373,16 +2373,9 @@ class AddAsOOBView(
         if librenms_id is None:
             return _htmx_error_response("Invalid or missing LibreNMS device_id")
 
-        # Reject legacy bare-int librenms_id (same guard as DeviceConflictActionView).
-        stored_id = existing_device.custom_field_data.get("librenms_id")
-        _is_legacy = isinstance(stored_id, int) and not isinstance(stored_id, bool)
-        if not _is_legacy and isinstance(stored_id, str):
-            try:
-                int(stored_id)
-                _is_legacy = True
-            except (ValueError, TypeError):
-                pass
-        if _is_legacy:
+        # Reject legacy bare-int librenms_id (shared predicate with DeviceConflictActionView and
+        # set_librenms_device_id, so the three can't drift on what counts as legacy).
+        if is_legacy_librenms_id(existing_device.custom_field_data.get("librenms_id")):
             return _htmx_error_response(
                 "Device has a legacy bare-integer librenms_id; use 'Convert mapping' to migrate first."
             )
@@ -2534,6 +2527,21 @@ class AddAsOOBView(
                         deferred_messages.append(
                             (messages.INFO, f"Set OOB IP {oob_ip_str} on interface {oob_iface.name}.")
                         )
+            elif oob_ip_str:
+                # The device already has an OOB IP set. Don't silently overwrite it — that could
+                # clobber an operator-set address — but don't let the user believe the controller's
+                # IP was applied either. Surface that the existing OOB IP was kept when it differs
+                # from the LibreNMS controller's IP (an equal one needs no message; it's correct).
+                existing_oob_host = str(existing_device.oob_ip).split("/")[0]
+                if existing_oob_host != oob_ip_str:
+                    deferred_messages.append(
+                        (
+                            messages.WARNING,
+                            f"OOB linked, but OOB IP {oob_ip_str} not set — the device already has a "
+                            f"different OOB IP ({existing_oob_host}). Clear the existing OOB IP first "
+                            "to set the controller's IP.",
+                        )
+                    )
 
             if err := _save_device(existing_device, update_fields=update_fields, request=request):
                 # _save_device returns an error response (it doesn't raise), so returning

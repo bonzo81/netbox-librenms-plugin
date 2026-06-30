@@ -1244,6 +1244,36 @@ def get_librenms_device_id(obj, server_key: str = "default", *, auto_save: bool 
     return None
 
 
+def is_legacy_librenms_id(value) -> bool:
+    """
+    Return True if *value* is a legacy bare-integer librenms_id (or its string form).
+
+    The multi-server format is a ``{server_key: ...}`` dict; the legacy format is a bare int (or
+    the string that parses as one). ``set_librenms_device_id`` refuses to overwrite a legacy value
+    (it would silently migrate it), so the link/OOB-attach views gate on this and ask the user to
+    "Convert mapping" first. Centralised so those call sites can't drift from each other or from
+    ``set_librenms_device_id``'s own skip rule. A bool is never a valid id
+    (``isinstance(True, int)`` is True), so it is excluded.
+
+    Args:
+        value: The raw ``librenms_id`` custom-field value to classify.
+
+    Returns:
+        bool: True for a legacy bare int / numeric string; False otherwise.
+    """
+    if isinstance(value, bool):
+        return False
+    if isinstance(value, int):
+        return True
+    if isinstance(value, str):
+        try:
+            int(value)
+        except (ValueError, TypeError):
+            return False
+        return True
+    return False
+
+
 def set_librenms_device_id(obj, device_id, server_key: str = "default"):
     """
     Set the LibreNMS device/port ID for a specific server on the JSON custom field.
@@ -1265,7 +1295,8 @@ def set_librenms_device_id(obj, device_id, server_key: str = "default"):
         )
         return
     cf_value = obj.custom_field_data.get("librenms_id") or {}
-    if isinstance(cf_value, int) and not isinstance(cf_value, bool):
+    if is_legacy_librenms_id(cf_value):
+        # Legacy bare int OR its numeric-string form — skip the write so we don't silently migrate.
         logger.warning(
             "librenms_id on %r has legacy bare integer %r; skipping write to prevent "
             "silent migration. Use the migration workflow to convert.",
@@ -1274,22 +1305,13 @@ def set_librenms_device_id(obj, device_id, server_key: str = "default"):
         )
         return
     elif isinstance(cf_value, str):
-        try:
-            int(cf_value)
-            logger.warning(
-                "librenms_id on %r has legacy bare integer string %r; skipping write to "
-                "prevent silent migration. Use the migration workflow to convert.",
-                obj,
-                cf_value,
-            )
-            return
-        except (ValueError, TypeError):
-            logger.warning(
-                "librenms_id custom field has unexpected string %r on %r; resetting to empty dict.",
-                cf_value,
-                obj,
-            )
-            cf_value = {}
+        # A non-numeric string is corrupt (is_legacy_librenms_id already excluded numeric ones).
+        logger.warning(
+            "librenms_id custom field has unexpected string %r on %r; resetting to empty dict.",
+            cf_value,
+            obj,
+        )
+        cf_value = {}
     elif not isinstance(cf_value, dict):
         logger.warning(
             "librenms_id custom field has unexpected type %s on %r; resetting to empty dict.",

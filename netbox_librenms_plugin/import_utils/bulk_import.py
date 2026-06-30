@@ -656,27 +656,32 @@ def _refresh_existing_device(validation: dict, libre_device: dict = None, server
 
         def _lookup_in_model(m):
             """
-            Return (device, match_type) by NAME for model m, or (None, None).
+            Return (device, match_type, ambiguous) by NAME for model m.
 
             The librenms_id match is resolved up-front by the cross-model collision check below
             and short-circuits (sets ``new_device``) before this is ever reached, so re-running
             ``find_by_librenms_id(m, ...)`` here would just repeat that query for no result. This
             does only the name/hostname/sysName fallbacks.
+
+            NetBox device names are unique only per-site, so a name can resolve to MORE THAN ONE
+            device. Fail closed exactly like the serial/IP fallback below (and the full
+            validate_device_for_import() path): when a name matches >1 device, return
+            ``(None, None, True)`` so the caller blocks the row instead of binding ``.first()``
+            to an arbitrary one.
             """
-            resolved_name = validation.get("resolved_name")
-            if resolved_name:
-                dev = m.objects.filter(name__iexact=resolved_name).first()
-                if dev:
-                    return dev, "resolved_name"
-            if hostname:
-                dev = m.objects.filter(name__iexact=hostname).first()
-                if dev:
-                    return dev, "hostname"
-            if sys_name:
-                dev = m.objects.filter(name__iexact=sys_name).first()
-                if dev:
-                    return dev, "sysname"
-            return None, None
+            for value, mt in (
+                (validation.get("resolved_name"), "resolved_name"),
+                (hostname, "hostname"),
+                (sys_name, "sysname"),
+            ):
+                if not value:
+                    continue
+                matches = list(m.objects.filter(name__iexact=value)[:2])
+                if len(matches) > 1:
+                    return None, None, True
+                if matches:
+                    return matches[0], mt, False
+            return None, None, False
 
         # Fail closed on a CROSS-MODEL librenms_id collision before selecting a match — i.e.
         # the same (server_key, librenms_id) bound to BOTH a Device and a VirtualMachine. A
@@ -707,17 +712,34 @@ def _refresh_existing_device(validation: dict, libre_device: dict = None, server
                 new_device, match_type = cross_id_match, "librenms_id"
                 found_as_cross_model = True
 
+        name_ambiguous = False
         if not new_device:
-            new_device, match_type = _lookup_in_model(Model)
+            new_device, match_type, name_ambiguous = _lookup_in_model(Model)
 
-        if not new_device:
+        if not new_device and not name_ambiguous:
             # Try the opposite model: catches cross-model imports that happened
             # after the cache was built (e.g. LibreNMS device imported as VM).
-            new_device, match_type = _lookup_in_model(CrossModel)
+            new_device, match_type, name_ambiguous = _lookup_in_model(CrossModel)
             if new_device:
                 found_as_cross_model = True
 
-        if not new_device and not import_as_vm:
+        if not new_device and name_ambiguous:
+            # A hostname/sysName resolved to MORE THAN ONE NetBox device (names are unique only
+            # per-site). Binding to whichever sorts first would render the wrong device as the
+            # existing match, so fail closed exactly like the serial/IP fallback below and the
+            # full validate_device_for_import() path — block instead of picking arbitrarily. The
+            # "hostname/serial" marker keeps this in lock-step with the stale-blocker cleanup above.
+            msgs = validation.get("issues")
+            if isinstance(msgs, list):
+                msgs.append(
+                    "Multiple NetBox devices share this device's hostname/serial; resolve the "
+                    "duplicate before importing."
+                )
+            validation["existing_match_type"] = "ambiguous_hostname_or_serial"
+            validation["can_import"] = False
+            validation["is_ready"] = False
+
+        if not new_device and not name_ambiguous and not import_as_vm:
             # Serial- and IP-based matches: validate_device_for_import() catches these, so the
             # refresh re-check must have the same breadth. Without them a row whose
             # librenms_id/name link disappeared (or that never matched) can flip to importable

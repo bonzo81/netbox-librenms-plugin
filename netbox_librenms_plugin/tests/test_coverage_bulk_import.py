@@ -876,6 +876,36 @@ class TestRefreshExistingDevice:
         assert validation["existing_device"] is refreshed
         assert validation["device_role"] == {"found": False, "role": None, "available_roles": []}
 
+    def test_duplicate_hostname_across_sites_fails_closed(self):
+        """A hostname matching two NetBox devices in different sites fails closed (ambiguous), not bound to an arbitrary one."""
+        from dcim.models import Device, Site
+        from netbox_librenms_plugin.import_utils.bulk_import import _refresh_existing_device
+
+        # Two devices share the name "core-sw1" but live in DIFFERENT sites — NetBox allows this
+        # (name is unique only per-site), so a bare .first() would bind an arbitrary one.
+        dev_a = make_device("core-sw1")  # shared infra site
+        site_b = Site.objects.create(name="crfix-site-b", slug="crfix-site-b")
+        Device.objects.create(
+            name="core-sw1",
+            device_type=dev_a.device_type,
+            role=dev_a.role,
+            site=site_b,
+            status="active",
+        )
+
+        validation = self._device_validation(resolved_name="core-sw1")
+        libre_device = {"device_id": 999, "hostname": "core-sw1", "sysName": "core-sw1"}
+
+        _refresh_existing_device(validation, libre_device=libre_device, server_key="default")
+
+        # Fail closed: no arbitrary existing_device bound; the row is blocked + marked ambiguous,
+        # matching validate_device_for_import()'s duplicate-hostname behaviour.
+        assert validation.get("existing_device") is None
+        assert validation["existing_match_type"] == "ambiguous_hostname_or_serial"
+        assert validation["can_import"] is False
+        assert validation["is_ready"] is False
+        assert any("hostname/serial" in i for i in validation["issues"])
+
     def test_neutralized_link_but_other_match_type_keeps_block(self):
         """A non-librenms cached match (hostname) must survive the linkage refresh: only a neutralized librenms/OOB link triggers re-evaluation, so the device stays matched and the row stays blocked."""
         from netbox_librenms_plugin.import_utils.bulk_import import _refresh_existing_device
@@ -2514,38 +2544,27 @@ class TestCacheIndexTTLRefresh:
 class TestCrossModelConflictDetection:
     """#36: stale-cache refresh must detect device imported as VM (or vice versa)."""
 
+    @pytest.mark.django_db
     def test_vm_found_when_device_imported_as_vm(self):
-        """
-        import_as_vm=False (cached as device) but the object was actually imported as VM.
-        The refresh should detect the VM and mark the import as conflicting.
-        """
+        """import_as_vm=False but a REAL VM exists under the name; the refresh detects it cross-model and blocks the import."""
         from netbox_librenms_plugin.import_utils.bulk_import import _refresh_existing_device
 
         validation = _make_validation(import_as_vm=False)
         # existing_device=None means "check if imported since caching" branch
         validation["existing_device"] = None
+        validation["resolved_name"] = "sw-cross"
         libre_device = {"device_id": 99, "hostname": "sw-cross", "sysName": "sw-cross"}
 
-        mock_vm = MagicMock()
-        mock_vm.role = None
+        # A real VM owns the name; no Device does → the preferred (Device) model finds nothing and
+        # the cross-model (VM) lookup matches. find_by_librenms_id runs for real (no CF → None).
+        vm = make_vm("sw-cross")
 
-        with (
-            patch("netbox_librenms_plugin.import_utils.bulk_import.find_by_librenms_id", return_value=None),
-            patch("dcim.models.Device") as mock_dev_cls,
-            patch("virtualization.models.VirtualMachine") as mock_vm_cls,
-        ):
-            # Primary model (Device) finds nothing; cross model (VirtualMachine) finds it
-            mock_dev_cls.objects.filter.return_value.first.return_value = None
-            mock_vm_cls.objects.filter.return_value.first.return_value = mock_vm
+        _refresh_existing_device(validation, libre_device, server_key="default")
 
-            _refresh_existing_device(validation, libre_device, server_key="default")
-
-        assert validation["existing_device"] is mock_vm
+        assert validation["existing_device"] == vm
         # import_as_vm must be flipped to True so future refreshes query VirtualMachine
         assert validation["import_as_vm"] is True
-        # A late-found cross-model match must never be import-ready:
-        # _refresh_existing_device re-asserts can_import=False/is_ready=False after
-        # recalculate_validation_status regardless of issues/fields state.
+        # A late-found cross-model match must never be import-ready.
         assert validation["can_import"] is False
         assert validation["is_ready"] is False
 
@@ -2580,37 +2599,26 @@ class TestCrossModelConflictDetection:
         assert validation["existing_match_type"] == "librenms_id"
         assert validation["import_as_vm"] is True  # cross-model → flipped
 
+    @pytest.mark.django_db
     def test_device_found_when_vm_imported_as_device(self):
-        """
-        import_as_vm=True but the object was imported as a Device.
-        The refresh should detect the Device through cross-model lookup.
-        """
+        """import_as_vm=True but a REAL Device exists under the name; the cross-model lookup detects it and blocks the import."""
         from netbox_librenms_plugin.import_utils.bulk_import import _refresh_existing_device
 
         validation = _make_validation(import_as_vm=True)
         validation["existing_device"] = None
+        validation["resolved_name"] = "vm-but-device"
         libre_device = {"device_id": 77, "hostname": "vm-but-device", "sysName": "vm-but-device"}
 
-        mock_device = MagicMock()
-        mock_device.role = MagicMock()
+        # A real Device owns the name; no VM does → preferred (VM) model finds nothing, cross-model
+        # (Device) matches.
+        device = make_device("vm-but-device")
 
-        with (
-            patch("netbox_librenms_plugin.import_utils.bulk_import.find_by_librenms_id", return_value=None),
-            patch("dcim.models.Device") as mock_dev_cls,
-            patch("virtualization.models.VirtualMachine") as mock_vm_cls,
-        ):
-            # Primary model (VirtualMachine) finds nothing; cross model (Device) finds it
-            mock_vm_cls.objects.filter.return_value.first.return_value = None
-            mock_dev_cls.objects.filter.return_value.first.return_value = mock_device
+        _refresh_existing_device(validation, libre_device, server_key="default")
 
-            _refresh_existing_device(validation, libre_device, server_key="default")
-
-        assert validation["existing_device"] is mock_device
+        assert validation["existing_device"] == device
         # import_as_vm must be flipped to False so future refreshes query Device
         assert validation["import_as_vm"] is False
-        # A late-found cross-model match must never be import-ready:
-        # _refresh_existing_device re-asserts can_import=False/is_ready=False after
-        # recalculate_validation_status regardless of issues/fields state.
+        # A late-found cross-model match must never be import-ready.
         assert validation["can_import"] is False
         assert validation["is_ready"] is False
 

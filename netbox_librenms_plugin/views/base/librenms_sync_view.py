@@ -151,6 +151,11 @@ class BaseLibreNMSSyncView(LibreNMSPermissionMixin, LibreNMSAPIMixin, generic.Ob
                 "vlan_sync": vlan_context,
                 "module_sync": module_context,
                 "has_write_permission": self.has_write_permission(),
+                # Active server key, so the create-platform modal (included without `only`, hence
+                # inheriting this context) forwards it as a hidden field — otherwise
+                # CreateAndAssignPlatformView redirects back to the default-server tab, dropping
+                # the non-default server context the user was acting on.
+                "server_key": self.librenms_api.server_key,
                 "v1v2form": AddToLIbreSNMPV1V2(prefix="v1v2"),
                 "v3form": AddToLIbreSNMPV3(prefix="v3"),
                 "librenms_device_id": self.librenms_id,

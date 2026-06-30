@@ -763,6 +763,33 @@ class TestCreateAndAssignPlatformView:
         mock_msg.error.assert_called_once()
         assert "required" in mock_msg.error.call_args[0][1].lower()
 
+    @pytest.mark.django_db
+    def test_rebinds_to_posted_server_for_redirect_fallback(self):
+        """The view rebinds to the POSTed server so the _sync_redirect server_key fallback is live, not a dead None."""
+        from django.test import override_settings
+
+        view = self._view()  # _make_view seeds a default-server mock client
+        dev = make_device("plat-rebind")
+        # Empty platform_name → returns right after the rebind, which is all this asserts.
+        req = _make_request({"platform_name": "", "server_key": "production"})
+
+        servers = {
+            "staging": {"librenms_url": "https://stg.example.com", "api_token": "t", "verify_ssl": False},
+            "production": {"librenms_url": "https://prod.example.com", "api_token": "t", "verify_ssl": False},
+        }
+        with (
+            override_settings(PLUGINS_CONFIG={"netbox_librenms_plugin": {"servers": servers}}),
+            patch("netbox_librenms_plugin.views.sync.device_fields.get_object_or_404", return_value=dev),
+            patch("netbox_librenms_plugin.views.sync.device_fields.messages"),
+            patch("netbox_librenms_plugin.views.sync.device_fields.redirect"),
+        ):
+            view.post(req, pk=dev.pk)
+
+        # Rebound to the POSTed server (not left on the initial/global client), so the
+        # getattr(self._librenms_api, "server_key") fallback in _sync_redirect is meaningful.
+        assert view._librenms_api is not None
+        assert view._librenms_api.server_key == "production"
+
     def test_platform_already_exists_is_reused_and_assigned(self):
         """Existing platform is reused (not re-created) and assigned to the device."""
         from dcim.models import Device, Platform
@@ -2192,6 +2219,38 @@ class TestConvertLegacyLibreNMSIdViewPost:
             view.post(_make_request({"object_type": "device"}), pk=1)
         mock_msg.error.assert_called_once()
 
+    @pytest.mark.django_db
+    def test_convert_refused_when_id_collides_with_another_devices_oob(self):
+        """Fail-closed pin: converting a legacy id is refused when another device uses it as its OOB controller id."""
+        from dcim.models import Device
+
+        view = self._view()
+        # Blank-key rebind returns "default" without rebuilding the (mock) client.
+        view.rebind_api_for_server = MagicMock(return_value="default")
+        view._librenms_api.get_device_info.return_value = (True, {"serial": "SN-A"})
+
+        # Device A: legacy bare-int librenms_id 42, serial matches LibreNMS so the convert proceeds
+        # to the conflict check.
+        dev_a = make_device("convert-a", serial="SN-A", librenms_cf=42)
+        # Device B: a DIFFERENT device using 42 as its OOB controller id under "default" — only the
+        # OOB sub-key query (oob_q) surfaces this collision.
+        make_device("convert-b", librenms_cf={"default": {"id": 99, "oob": {"id": 42}}})
+
+        with (
+            patch("netbox_librenms_plugin.views.sync.device_fields.get_object_or_404", return_value=dev_a),
+            patch("netbox_librenms_plugin.views.sync.device_fields.messages") as mock_msg,
+            patch("netbox_librenms_plugin.views.sync.device_fields.redirect"),
+        ):
+            view.post(_make_request({"object_type": "device"}), pk=dev_a.pk)
+
+        # Refused (fail closed): an error, never a success, and the legacy id is left untouched
+        # (NOT silently converted to the JSON dict form).
+        mock_msg.success.assert_not_called()
+        mock_msg.error.assert_called_once()
+        body = mock_msg.error.call_args[0][1].lower()
+        assert "ambiguous" in body or "already has" in body
+        assert Device.objects.get(pk=dev_a.pk).custom_field_data["librenms_id"] == 42
+
     def test_get_device_info_failure(self):
         view = self._view()
         mock_obj = MagicMock()
@@ -2732,3 +2791,82 @@ class TestSyncRedirectServerKeyValidation:
         ):
             resp = CreateAndAssignPlatformView._sync_redirect(req, 1)
         assert "server_key" not in resp.url
+
+
+# ---------------------------------------------------------------------------
+# Multi-server: Update* views must rebind to the POSTed server_key
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.django_db
+class TestUpdateDeviceFieldsServerRebind:
+    """Each Update* field view must rebind the API client to the POSTed server_key."""
+
+    # "staging" first so the global/default fallback (LibreNMSSettings absent) resolves THERE,
+    # not "production" — a missing rebind then looks up the per-server id under the wrong server.
+    SERVERS = {
+        "staging": {"librenms_url": "https://stg.example.com", "api_token": "t", "verify_ssl": False},
+        "production": {"librenms_url": "https://prod.example.com", "api_token": "t", "verify_ssl": False},
+    }
+
+    def _view(self, ViewClass):
+        view = object.__new__(ViewClass)
+        view.kwargs = {}
+        view._librenms_api = None  # force a real build via rebind / the lazy property
+        view.require_all_permissions = MagicMock(return_value=None)
+        return view
+
+    def _post(self, view, pk, device_info):
+        from django.test import RequestFactory, override_settings
+
+        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+
+        request = RequestFactory().post(f"/sync/{pk}/", {"server_key": "production"})
+        global_settings = MagicMock()
+        global_settings.first.return_value = None  # no selected server -> default -> first config key
+        with (
+            override_settings(PLUGINS_CONFIG={"netbox_librenms_plugin": {"servers": self.SERVERS}}),
+            patch("netbox_librenms_plugin.models.LibreNMSSettings.objects", global_settings),
+            patch.object(LibreNMSAPI, "get_device_info", return_value=(True, device_info)),
+            patch("netbox_librenms_plugin.views.sync.device_fields.messages"),
+            patch("netbox_librenms_plugin.views.sync.device_fields.redirect"),
+        ):
+            view.post(request, pk=pk)
+
+    def test_update_name_rebinds_and_renames_from_posted_server(self):
+        """The id lives only under 'production'; the rename only resolves if the view rebinds to the POSTed key."""
+        from netbox_librenms_plugin.views.sync.device_fields import UpdateDeviceNameView
+
+        device = make_device("rebind-name", librenms_cf={"production": 5})
+        view = self._view(UpdateDeviceNameView)
+
+        self._post(view, device.pk, {"sysName": "renamed-from-prod"})
+
+        # Rebound to the POSTed server…
+        assert view._librenms_api.server_key == "production"
+        # …and the per-server id (5) resolved, so the device actually renamed.
+        device.refresh_from_db()
+        assert device.name == "renamed-from-prod"
+
+    @pytest.mark.parametrize(
+        "view_path",
+        [
+            "UpdateDeviceNameView",
+            "UpdateDeviceSerialView",
+            "UpdateDeviceTypeView",
+            "UpdateDevicePlatformView",
+        ],
+    )
+    def test_update_views_rebind_to_posted_server(self, view_path):
+        """Every Update* view rebinds self.librenms_api to the POSTed server_key before lookup."""
+        import netbox_librenms_plugin.views.sync.device_fields as df
+
+        ViewClass = getattr(df, view_path)
+        device = make_device(f"rebind-{view_path.lower()}", librenms_cf={"production": 5})
+        view = self._view(ViewClass)
+
+        self._post(view, device.pk, {"sysName": "h", "serial": "", "hardware": "", "os": ""})
+
+        # The fix: the client is rebound to 'production' (not left on the global 'staging').
+        assert view._librenms_api is not None
+        assert view._librenms_api.server_key == "production"

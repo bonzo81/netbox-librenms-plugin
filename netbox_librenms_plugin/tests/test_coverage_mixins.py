@@ -16,6 +16,29 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 
+class TestCacheRemainingTtl:
+    """cache_remaining_ttl centralises the django-redis-only cache.ttl() guard."""
+
+    def test_returns_value_when_backend_exposes_ttl(self):
+        from netbox_librenms_plugin.views.mixins import cache_remaining_ttl
+
+        backend = MagicMock()
+        backend.ttl.return_value = 123
+        assert cache_remaining_ttl(backend, "some-key") == 123
+        backend.ttl.assert_called_once_with("some-key")
+
+    def test_returns_none_when_backend_lacks_ttl(self):
+        from netbox_librenms_plugin.views.mixins import cache_remaining_ttl
+
+        # A core Django backend (e.g. LocMemCache) exposes no ttl() — the guard must degrade to
+        # None rather than raising AttributeError mid-render.
+        class _NoTtlCache:
+            def get(self, *args, **kwargs):
+                return None
+
+        assert cache_remaining_ttl(_NoTtlCache(), "some-key") is None
+
+
 # =============================================================================
 # LibreNMSAPIMixin.get_context_data
 # =============================================================================

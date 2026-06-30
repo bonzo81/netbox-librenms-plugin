@@ -280,21 +280,17 @@ class BaseInterfaceTableView(VlanAssignmentMixin, LibreNMSAPIMixin, LibreNMSPerm
                         return ""
                     return normalized
 
-                main_macs: set[str] = set()
-                for port in enriched_ports:
-                    mac = _normalized_mac(port)
-                    if mac:
-                        main_macs.add(mac)
-                oob_macs: set[str] = set()
-                for port in oob_enriched:
-                    mac = _normalized_mac(port)
-                    if mac:
-                        oob_macs.add(mac)
+                # Normalize each port's MAC exactly once and carry it alongside the port, so the
+                # set-building and the conflict-tagging pass below reuse it instead of re-deriving
+                # the same value 2-3x per port on a high-port-count chassis.
+                main_pairs = [(port, _normalized_mac(port)) for port in enriched_ports]
+                oob_pairs = [(port, _normalized_mac(port)) for port in oob_enriched]
+                main_macs: set[str] = {mac for _port, mac in main_pairs if mac}
+                oob_macs: set[str] = {mac for _port, mac in oob_pairs if mac}
                 shared_macs = main_macs & oob_macs
                 if shared_macs:
-                    for port in enriched_ports + oob_enriched:
-                        mac = _normalized_mac(port)
-                        if mac in shared_macs:
+                    for port, mac in main_pairs + oob_pairs:
+                        if mac and mac in shared_macs:
                             port["_dedup_conflict"] = True
                 librenms_data["ports"] = enriched_ports + oob_enriched
             else:

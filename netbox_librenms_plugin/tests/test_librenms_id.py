@@ -339,9 +339,53 @@ class TestLibreNMSIdRoundtrip:
         assert get_librenms_device_id(dev, "default") == 55
 
 
+class TestIsLegacyLibreNMSId:
+    """Unit coverage for the shared is_legacy_librenms_id predicate (no DB)."""
+
+    @pytest.mark.parametrize(
+        "value,expected",
+        [
+            (42, True),  # legacy bare int
+            (0, True),
+            (-5, True),
+            ("42", True),  # legacy numeric string
+            ("0", True),
+            (True, False),  # bool is never a valid id (isinstance(True, int) is True)
+            (False, False),
+            ("abc", False),  # corrupt string, not a legacy id
+            ("", False),
+            (None, False),
+            (1.5, False),  # float is not the legacy format
+            ({"default": 5}, False),  # multi-server dict
+            ({"default": {"id": 5}}, False),
+            ([], False),
+        ],
+    )
+    def test_classifies_legacy_values(self, value, expected):
+        from netbox_librenms_plugin.utils import is_legacy_librenms_id
+
+        assert is_legacy_librenms_id(value) is expected
+
+
 @pytest.mark.django_db
 class TestSetLibreNMSDeviceId:
     """Tests for set_librenms_device_id in utils.py."""
+
+    def test_legacy_bare_int_cf_skips_write(self):
+        """A legacy bare-int cf value is left untouched (no silent migration) — the refactored guard still fails closed."""
+        from netbox_librenms_plugin.utils import set_librenms_device_id
+
+        dev = _dev(42)  # legacy bare-int format
+        set_librenms_device_id(dev, 99, server_key="primary")
+        assert dev.custom_field_data["librenms_id"] == 42
+
+    def test_legacy_numeric_string_cf_skips_write(self):
+        """A legacy numeric-string cf value is also left untouched by the shared predicate."""
+        from netbox_librenms_plugin.utils import set_librenms_device_id
+
+        dev = _dev("42")
+        set_librenms_device_id(dev, 99, server_key="primary")
+        assert dev.custom_field_data["librenms_id"] == "42"
 
     def test_stores_int_for_valid_device_id(self):
         from netbox_librenms_plugin.utils import set_librenms_device_id

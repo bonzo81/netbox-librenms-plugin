@@ -92,42 +92,42 @@ class TestSaveDevice:
         result = _save_device(device)
         assert result is None
 
+    @pytest.mark.django_db
     def test_update_fields_dataerror_returns_400_not_500(self):
-        """save(update_fields=...) skips full_clean; an overlong value from LibreNMS raises DataError at the DB layer and must become a 400 toast, not a 500."""
-        from django.db import DataError
-
+        """A REAL overlong value persisted via save(update_fields=...) (skips full_clean) raises Postgres DataError, which _save_device must turn into a 400, not a 500."""
         from netbox_librenms_plugin.views.imports.actions import _save_device
 
-        device = MagicMock()
-        raw_error = "value too long for type character varying(64)"
-        device.save.side_effect = DataError(raw_error)
+        device = make_device("dataerr-dev")
+        # Exceed the Device.name varchar(64) column. update_fields skips full_clean(), so the
+        # overlong value reaches the DB and the real backend raises DataError — proving the
+        # production except clause catches the ACTUAL exception class, not an assumed one.
+        device.name = "x" * 100
 
         response = _save_device(device, update_fields=["name"])
-        # Pin the partial-save contract: the DataError must originate from save(), not from a
-        # full_clean() call — update_fields saves skip validation by design.
-        device.save.assert_called_once_with(update_fields=["name"])
-        device.full_clean.assert_not_called()
+
         assert response.status_code == 400
         assert b"field value is invalid" in response.content
-        # No part of the raw DB exception (incl. the schema-revealing column type) leaks.
-        assert raw_error.encode().lower() not in response.content.lower()
+        # No schema-revealing DB text (e.g. the column type) leaks to the client.
         assert b"character varying" not in response.content.lower()
+        # NOTE: the real DataError aborts the surrounding test transaction, so no ORM query
+        # may follow here — assert only on the returned response.
 
+    @pytest.mark.django_db
     def test_update_fields_databaseerror_returns_409_not_500(self):
-        """save(update_fields=...) forces an UPDATE; a concurrent delete makes it affect 0 rows and raises DatabaseError."""
+        """A backend-level UPDATE failure maps to 409, not 500 — on a REAL Device, with only the backend save() simulating the failure (the 0-row forced-update path is not reliably raised on Django 6.0, per _save_device's own note, so it can't be triggered for real)."""
         from django.db import DatabaseError
 
         from netbox_librenms_plugin.views.imports.actions import _save_device
 
-        device = MagicMock()
-        raw_error = "Save with update_fields did not affect any rows."
-        device.save.side_effect = DatabaseError(raw_error)
+        device = make_device("dberr-dev")
+        raw_error = "could not serialize access due to concurrent update"
+        # Real Device + real platform/device_type preflight; only the backend save() — the genuine
+        # external boundary — is forced to raise, since this failure class can't be provoked
+        # deterministically against the test DB.
+        with patch.object(device, "save", side_effect=DatabaseError(raw_error)) as mock_save:
+            response = _save_device(device, update_fields=["name"])
 
-        response = _save_device(device, update_fields=["name"])
-        # The DatabaseError must come from the partial-update save(), so confirm
-        # update_fields was actually forwarded (not a fallback to a plain save()).
-        device.save.assert_called_once_with(update_fields=["name"])
-        device.full_clean.assert_not_called()
+        mock_save.assert_called_once_with(update_fields=["name"])
         assert response.status_code == 409
         assert b"changed or deleted" in response.content
         # Full raw DB exception text must not leak to the client (case-insensitive).
@@ -5090,43 +5090,35 @@ class TestAddAsOOBViewGenericSentinel:
         assert cf["default"]["oob"] == {"id": 55, "type": "idrac"}
         assert get_librenms_oob(obj, "default") == {"id": 55, "type": "idrac"}
 
-    def test_sentinel_from_detection_layer_flows_to_storage(self):
-        """The three-layer fallback in device_operations produces oob_type='oob' when neither the LibreNMS OS field nor either device name contains an OOB keyword."""
+    def test_generic_sentinel_from_detection_layer_flows_to_storage(self):
+        """The generic 'oob' sentinel that _detect_serial_match_role produces (see TestDetectSerialMatchRole) is accepted by set_librenms_oob and stored."""
         from netbox_librenms_plugin.utils import set_librenms_oob
 
-        # Simulate: oob_type_from_libre=None, _detect_oob_type_from_name(...)=None
-        # → inferred_oob_type = "oob"  (device_operations.py line ~563)
-        oob_type_from_libre = None
-        detected_from_hostname = None
-        inferred_oob_type = oob_type_from_libre or detected_from_hostname or "oob"
-        assert inferred_oob_type == "oob"
-
+        # The 'oob' sentinel is REAL production output (verified against _detect_serial_match_role
+        # in test_coverage_device_operations.py); here we only assert storage accepts it — no
+        # inline reimplementation of the production fallback chain to drift against.
         obj = MagicMock()
         obj.custom_field_data = {"librenms_id": {"default": {"id": 99}}}
 
-        # Must not raise
-        set_librenms_oob(obj, 42, "default", oob_type=inferred_oob_type)
+        set_librenms_oob(obj, 42, "default", oob_type="oob")  # must not raise
         assert obj.custom_field_data["librenms_id"]["default"]["oob"]["id"] == 42
+        assert obj.custom_field_data["librenms_id"]["default"]["oob"]["type"] == "oob"
 
 
 class TestSetLibreNMSOOBGenericSentinel:
     """set_librenms_oob must accept the generic "oob" sentinel oob_type."""
 
     def test_promote_generic_oob_sentinel_accepted_by_set_librenms_oob(self):
-        """Promote path: set_librenms_oob with oob_type='oob' must not raise."""
+        """The generic 'oob' sentinel from the promote path's existing_oob_type fallback must not raise in set_librenms_oob."""
         from netbox_librenms_plugin.utils import set_librenms_oob
 
         obj = MagicMock()
         obj.custom_field_data = {"librenms_id": {"default": {"id": 10}}}
 
-        # Simulate: existing_oob_from_name = None
-        # → promote["existing_oob_type"] = None or "oob" = "oob"
-        existing_oob_type = None or "oob"
-        assert existing_oob_type == "oob"
-
-        # Previously: ValueError("oob_type 'oob' does not match any known OOB type")
-        # → PromoteToHostView returned HTTP 400 "Invalid promotion data: ..."
-        set_librenms_oob(obj, 7, "default", oob_type=existing_oob_type)
+        # 'oob' is the promote path's real `existing_oob_from_name or "oob"` fallback (production
+        # output); this asserts only that storage accepts it. Previously set_librenms_oob raised
+        # ValueError("oob_type 'oob' does not match any known OOB type") here.
+        set_librenms_oob(obj, 7, "default", oob_type="oob")
         assert obj.custom_field_data["librenms_id"]["default"]["oob"]["type"] == "oob"
 
 
@@ -5375,6 +5367,44 @@ class TestAddAsOOBViewPost:
         # The OOB link was never persisted either (cf reloaded from the DB has no oob sub-block).
         entry = Device.objects.get(pk=existing_device.pk).custom_field_data["librenms_id"]["default"]
         assert "oob" not in entry
+
+    def test_existing_different_oob_ip_kept_but_user_warned(self):
+        """A different existing oob_ip is kept, but a deferred WARNING tells the user it was not changed."""
+        from dcim.models import Device
+        from django.contrib import messages as dj_messages
+        from django.http import HttpResponse
+
+        view = self._make_view()
+        # Real device already carrying an OOB IP (10.50.50.50) on one of its interfaces.
+        existing_device = make_device("oob-haship", librenms_cf={"default": {"id": 10}})
+        iface = make_interface(existing_device, "mgmt0")
+        existing_ip = make_ip("10.50.50.50/24", assigned_object=iface)
+        existing_device.oob_ip = existing_ip
+        existing_device.save()
+        assert existing_device.oob_ip_id is not None
+
+        request = _make_request(post={"existing_device_id": str(existing_device.pk)})
+
+        # Incoming OOB controller carries a DIFFERENT ip (10.99.99.9).
+        libre_device = {"device_id": 17}
+        validation = {"oob_candidate": {"device": existing_device, "type": "oob", "ip": "10.99.99.9"}}
+        view.get_validated_device_with_selections = MagicMock(return_value=(libre_device, validation, {}))
+        view.render_device_row = MagicMock(return_value=HttpResponse("row"))
+
+        response = view.post(request, device_id=17)
+
+        assert response.status_code == 200
+        # The OOB link still committed (the attach itself succeeds)…
+        entry = Device.objects.get(pk=existing_device.pk).custom_field_data["librenms_id"]["default"]
+        assert entry["oob"] == {"id": 17, "type": "oob"}
+        # …the existing oob_ip was NOT overwritten…
+        assert Device.objects.get(pk=existing_device.pk).oob_ip_id == existing_ip.pk
+        # …and a deferred WARNING naming both the un-applied controller IP and the kept one
+        # was surfaced (real messages.add_message -> request._messages.add).
+        warn_calls = [c for c in request._messages.add.call_args_list if c.args[0] == dj_messages.WARNING]
+        assert warn_calls, "expected a deferred WARNING about the un-applied OOB IP"
+        body = warn_calls[0].args[1]
+        assert "10.99.99.9" in body and "10.50.50.50" in body
 
     def test_aborts_when_librenms_id_owned_by_another_device(self):
         """The incoming OOB controller id must not already belong to another NetBox device."""

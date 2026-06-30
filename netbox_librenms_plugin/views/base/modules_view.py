@@ -333,8 +333,11 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
             )
         sync_device = self._get_sync_device(obj, server_key=server_key)
 
-        self.librenms_id = self.librenms_api.get_librenms_id(sync_device)
-        if not self.librenms_id:
+        # coerce_librenms_id fails closed on a poisoned cached value (bool/zero/negative/garbage):
+        # get_librenms_id's device-id cache path returns its value verbatim, so a stray True would
+        # otherwise int() to 1 and fetch a stranger's inventory. Mirrors the cables/IP views.
+        self.librenms_id = coerce_librenms_id(self.librenms_api.get_librenms_id(sync_device))
+        if self.librenms_id is None:
             cache.delete(self.get_cache_key(sync_device, "inventory", server_key=server_key))
             messages.error(request, "Device not found in LibreNMS.")
             return render(
@@ -522,7 +525,11 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
             # empty table scoped to that key instead of silently falling back to the default
             # server's cached inventory and attributing it to the requested server.
             return {"table": None, "object": obj, "cache_expiry": None, "server_key": scoped_server}
-        sync_device = self._get_sync_device(obj)
+        # Scope the VC sync-device resolution to the RESOLVED server explicitly, rather than
+        # relying on resolve_get_render_server_key having rebound self.librenms_api as a side
+        # effect — otherwise a future ordering/rebind change would silently key VC resolution on
+        # the default server while the cache read (below) uses scoped_server.
+        sync_device = self._get_sync_device(obj, server_key=scoped_server)
         cache_key = self.get_cache_key(sync_device, "inventory", server_key=scoped_server)
         cached_payload = cache.get(cache_key)
         if not isinstance(cached_payload, dict) or "inventory" not in cached_payload:
