@@ -9,6 +9,7 @@ from django.views import View
 
 from netbox_librenms_plugin.utils import (
     cache_remaining_ttl,
+    coerce_librenms_id,
     get_librenms_device_id,
     get_librenms_oob,
     get_librenms_sync_device,
@@ -52,6 +53,23 @@ _SKIP_TRANSCEIVER_TYPES = {"Port Container", "Port", ""}
 
 # Physical classes filtered out when counting hardware siblings under a parent bay.
 _NON_HARDWARE_CLASSES = {"sensor", "backplane", "stack"}
+
+
+def _oob_item_offsettable(item: dict) -> bool:
+    """
+    Return True if an OOB inventory item's index fields can be offset arithmetically.
+
+    The OOB merge shifts ``entPhysicalIndex`` / ``entPhysicalContainedIn`` by a numeric
+    offset, so both must be an int (or absent / the 0 root) — a non-int from a malformed
+    OOB payload would raise ``TypeError`` (e.g. ``"5" + offset``) and 500 the module tab.
+    Used to fail the whole OOB fetch closed to a host-only snapshot, the same way the
+    non-dict element guard does, rather than crash the offset loop.
+    """
+    idx = item.get("entPhysicalIndex")
+    parent = item.get("entPhysicalContainedIn")
+    idx_ok = idx is None or (isinstance(idx, int) and not isinstance(idx, bool))
+    parent_ok = parent in (None, 0) or (isinstance(parent, int) and not isinstance(parent, bool))
+    return idx_ok and parent_ok
 
 
 def _check_ignore_rules(
@@ -403,16 +421,23 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
         # that is always above the main device's highest observed index,
         # including any synthetic transceiver rows added above.
         oob = get_librenms_oob(sync_device, server_key=server_key)
-        oob_id = oob.get("id") if isinstance(oob, dict) else None
+        # Coerce to a positive int (or None) like interfaces_view.py:212 / cables_view.py — a
+        # bool/negative/non-numeric stored OOB id must not be treated as valid and fired at
+        # get_device_inventory(). It also normalizes the value cached as the OOB fingerprint
+        # below so get_context_data()'s comparison is int-vs-int (see the read side).
+        oob_id = coerce_librenms_id(oob.get("id")) if isinstance(oob, dict) else None
         oob_failed = False
         if oob_id:
             oob_success, oob_inventory = self.librenms_api.get_device_inventory(oob_id)
             # Same element-shape guard as the main inventory above: a list with non-dict
-            # entries would crash the index-offset/merge loop below, so fail closed.
+            # entries — or dicts whose entPhysicalIndex/entPhysicalContainedIn aren't ints —
+            # would crash the index-offset/merge loop below (TypeError on "5" + offset), so
+            # fail closed to a host-only snapshot rather than 500 the tab.
             if (
                 oob_success
                 and isinstance(oob_inventory, list)
                 and all(isinstance(item, dict) for item in oob_inventory)
+                and all(_oob_item_offsettable(item) for item in oob_inventory)
             ):
                 main_max_idx = max(
                     (idx for item in inventory_data if (idx := item.get("entPhysicalIndex")) is not None),
@@ -520,7 +545,11 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
         # controller must drop merged inventory built for the old one. Symmetric on
         # None so had-OOB→none and none→has-OOB both invalidate.
         current_oob = get_librenms_oob(sync_device, server_key=scoped_server)
-        current_oob_id = current_oob.get("id") if isinstance(current_oob, dict) else None
+        # Coerce both sides of the fingerprint so a stored string id ("5") and an int id (5) of
+        # the same value compare equal — otherwise the merged inventory is wrongly treated as
+        # stale on every GET and the module table renders empty until a manual refresh. The write
+        # side (post()) now caches the coerced value, so this matches it.
+        current_oob_id = coerce_librenms_id(current_oob.get("id")) if isinstance(current_oob, dict) else None
         if cached_payload.get("oob_librenms_id") != current_oob_id:
             cache.delete(cache_key)
             return {"table": None, "object": obj, "cache_expiry": None, "server_key": scoped_server}

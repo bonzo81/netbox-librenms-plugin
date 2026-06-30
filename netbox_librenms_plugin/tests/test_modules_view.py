@@ -552,6 +552,111 @@ class TestMergeTransceiverDataPortIdentity:
         mock_messages.warning.assert_called_once()  # malformed OOB inventory treated as a fetch failure
         mock_messages.success.assert_not_called()
 
+    def test_post_ignores_non_numeric_oob_id(self):
+        """A bool/non-numeric stored OOB id is coerced to None and never fired at get_device_inventory."""
+        view = _make_view()
+        view.model = MagicMock()
+        obj = MagicMock()
+        request = MagicMock()
+        request.POST.get.side_effect = lambda key, default=None: default
+
+        view.get_object = MagicMock(return_value=obj)
+        view._get_sync_device = MagicMock(return_value=obj)
+        view.has_write_permission = MagicMock(return_value=True)
+        view._build_context = MagicMock(
+            return_value={"table": None, "object": obj, "cache_expiry": None, "server_key": "default"}
+        )
+
+        view._librenms_api.get_librenms_id.return_value = 777
+        view._librenms_api.get_device_transceivers.return_value = (True, [])
+        view._librenms_api.get_ports.return_value = (True, {"ports": []})
+        # Only the main device (777) is a valid id; a second call with a garbage OOB id would
+        # return failure and trip the OOB-failed path.
+        view._librenms_api.get_device_inventory.side_effect = lambda dev_id: (
+            (True, []) if dev_id == 777 else (False, "should never be called")
+        )
+
+        with (
+            patch("netbox_librenms_plugin.views.base.modules_view.cache") as mock_cache,
+            patch("netbox_librenms_plugin.views.base.modules_view.messages") as mock_messages,
+            patch("netbox_librenms_plugin.views.base.modules_view.render", return_value=MagicMock()),
+            patch(
+                "netbox_librenms_plugin.views.base.modules_view.get_librenms_oob",
+                return_value={"id": "not-a-number"},
+            ),
+        ):
+            view.post(request, pk=1)
+
+        # The non-numeric OOB id was coerced to None: no OOB inventory fetch, no OOB-failed warning.
+        view._librenms_api.get_device_inventory.assert_called_once_with(777)
+        mock_messages.success.assert_called_once()
+        # The cached fingerprint stores the coerced value (None), not the raw garbage string.
+        assert mock_cache.set.call_args[0][1]["oob_librenms_id"] is None
+
+    def test_post_treats_non_int_oob_index_as_fetch_failure(self):
+        """An OOB inventory row with a non-int entPhysicalIndex fails closed (no offset TypeError, no cache)."""
+        view = _make_view()
+        view.model = MagicMock()
+        obj = MagicMock()
+        request = MagicMock()
+        request.POST.get.side_effect = lambda key, default=None: default
+
+        view.get_object = MagicMock(return_value=obj)
+        view._get_sync_device = MagicMock(return_value=obj)
+        view.has_write_permission = MagicMock(return_value=True)
+        view._build_context = MagicMock(
+            return_value={"table": None, "object": obj, "cache_expiry": None, "server_key": "default"}
+        )
+
+        view._librenms_api.get_librenms_id.return_value = 777
+        view._librenms_api.get_device_transceivers.return_value = (True, [])
+        view._librenms_api.get_ports.return_value = (True, {"ports": []})
+        # Main inventory OK; OOB returns a row whose entPhysicalIndex is a string — the offset
+        # arithmetic ("5" + offset) would TypeError and 500 the tab without the guard.
+        view._librenms_api.get_device_inventory.side_effect = lambda dev_id: (
+            (True, []) if dev_id == 777 else (True, [{"entPhysicalIndex": "5", "entPhysicalName": "oob-fan"}])
+        )
+
+        with (
+            patch("netbox_librenms_plugin.views.base.modules_view.cache") as mock_cache,
+            patch("netbox_librenms_plugin.views.base.modules_view.messages") as mock_messages,
+            patch("netbox_librenms_plugin.views.base.modules_view.render", return_value=MagicMock()),
+            patch("netbox_librenms_plugin.views.base.modules_view.get_librenms_oob", return_value={"id": 999}),
+        ):
+            view.post(request, pk=1)  # must not raise
+
+        mock_cache.set.assert_not_called()  # no partial snapshot persisted
+        mock_messages.warning.assert_called_once()  # malformed OOB indices treated as a fetch failure
+        mock_messages.success.assert_not_called()
+
+    def test_get_context_data_oob_fingerprint_equates_int_and_string(self):
+        """Cached int oob id and a current string id of the same value compare equal — cache not wrongly invalidated."""
+        view = _make_view()
+        obj = MagicMock()
+        view._get_sync_device = MagicMock(return_value=obj)
+        view._librenms_api.get_librenms_id.return_value = 1
+        sentinel = {"table": "built", "object": obj}
+        view._build_context = MagicMock(return_value=sentinel)
+        request = MagicMock()
+        request.GET = {}
+
+        with (
+            patch("netbox_librenms_plugin.views.base.modules_view.cache") as mock_cache,
+            # Stored fingerprint is the coerced int 5; the live OOB CF reads back the string "5".
+            patch("netbox_librenms_plugin.views.base.modules_view.get_librenms_oob", return_value={"id": "5"}),
+        ):
+            mock_cache.get.return_value = {
+                "inventory": [{"entPhysicalIndex": 1}],
+                "librenms_id": 1,
+                "oob_librenms_id": 5,
+            }
+            result = view.get_context_data(request, obj)
+
+        # int 5 == coerce("5") → fingerprint matches → cache kept → real context built.
+        view._build_context.assert_called_once()
+        assert result is sentinel
+        mock_cache.delete.assert_not_called()
+
     def test_post_skips_cache_on_transceiver_failure(self):
         """A transceiver-enrichment failure drops the synthetic transceiver rows, so the truncated inventory must NOT be cached — same reasoning as the OOB-failure case."""
         view = _make_view()
