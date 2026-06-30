@@ -1540,15 +1540,28 @@ class TestSyncIPAddressesViewInterfaceResolution:
         assert results["primary_set"] == []
         assert results["primary_no_interface"] == ["10.0.0.1"]
 
-    def test_build_interface_maps_marks_cross_member_duplicate_name_ambiguous(self):
-        """A name shared by interfaces on two VC members can't silently rebind the address — mark it ambiguous (None), the same fail-safe as a duplicate port id."""
+    def test_build_interface_maps_vc_shared_name_prefers_viewed_member(self):
+        """A name shared across VC members resolves to the VIEWED member's own interface (matching the rendered table), not ambiguous."""
         _vc, members = self._make_vc("ipres-vcdup", [1, 2])
-        make_interface(members[1], "Ethernet1")
-        make_interface(members[2], "Ethernet1")  # same name on another member
+        own = make_interface(members[1], "Ethernet1")
+        make_interface(members[2], "Ethernet1")  # sibling reuses the name — must NOT block binding
 
         _by_id, by_name = self._view()._build_interface_maps(members[1], "default")
 
-        assert by_name["Ethernet1"] is None  # ambiguous across members → fail safe
+        # The render indexes only the viewed object's interfaces, so the sync must agree:
+        # the viewed member's own Ethernet1 wins rather than being nulled as ambiguous.
+        assert by_name["Ethernet1"].pk == own.pk
+
+    def test_build_interface_maps_sibling_only_shared_name_is_ambiguous(self):
+        """A name owned only by sibling members (none on the viewed one) stays ambiguous (None) — fail safe."""
+        _vc, members = self._make_vc("ipres-vcsib", [1, 2, 3])
+        # members[1] (the viewed member) has NO Ethernet9; two siblings share it → can't pick one.
+        make_interface(members[2], "Ethernet9")
+        make_interface(members[3], "Ethernet9")
+
+        _by_id, by_name = self._view()._build_interface_maps(members[1], "default")
+
+        assert by_name["Ethernet9"] is None
 
     def test_build_interface_maps_non_vc_device_only_its_own_interfaces(self):
         """A standalone (non-VC) device must index only its own interfaces — not another device's same-named interface."""
