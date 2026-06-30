@@ -321,9 +321,15 @@
                 <div class="alert alert-warning">
                     <i class="mdi mdi-alert me-2"></i>
                     {% if migrated_to_marker %}
+                    {% if migrated_to_winner %}
                     <strong>Warning:</strong> The following interfaces exist on the migrated donor but are not found in
                     the LibreNMS data. Moving an interface reassigns it, along with related cables/IPs/MACs, to the
                     migration winner.
+                    {% else %}
+                    <strong>Warning:</strong> The following interfaces exist on the migrated donor but are not found in
+                    the LibreNMS data. The migration winner is unavailable, so these interfaces can't be moved until the
+                    stale marker is resolved.
+                    {% endif %}
                     {% else %}
                     <strong>Warning:</strong> The following interfaces exist in NetBox but are not found in the LibreNMS
                     data.

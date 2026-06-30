@@ -98,13 +98,26 @@ class TestInterfaceSyncContentTemplateMigratedMode:
         assert "Delete Selected Interfaces" in html
 
     def test_migrated_warning_describes_move_not_delete(self):
-        # In migrated (move) mode the modal warning must not threaten permanent deletion.
+        # In migrated (move) mode WITH a resolved winner, the modal warning must not threaten deletion.
+        from netbox_librenms_plugin.tests.conftest import make_device
+
         html = self._render(
             migrated={"server_key": "default", "device_id": 1, "at": "now"},
             netbox_only=[{"id": 1, "name": "eth-only"}],
+            winner=make_device("iface-warn-winner"),
         )
         assert "Moving an interface reassigns it" in html
         assert "permanently remove them from NetBox" not in html
+
+    def test_migrated_warning_handles_missing_winner(self):
+        """With the marker present but the winner gone (stale), the warning must not instruct a Move to a non-existent winner."""
+        html = self._render(
+            migrated={"server_key": "default", "device_id": 1, "at": "now"},
+            netbox_only=[{"id": 1, "name": "eth-only"}],
+            winner=None,
+        )
+        assert "migration winner is unavailable" in html
+        assert "Moving an interface reassigns it" not in html  # the move instruction is gated out
 
     def test_normal_warning_describes_delete(self):
         html = self._render(migrated=None, netbox_only=[{"id": 1, "name": "eth-only"}])
