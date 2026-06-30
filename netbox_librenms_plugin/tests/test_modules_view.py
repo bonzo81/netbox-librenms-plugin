@@ -579,7 +579,11 @@ class TestMergeTransceiverDataPortIdentity:
         with (
             patch("netbox_librenms_plugin.views.base.modules_view.cache") as mock_cache,
             patch("netbox_librenms_plugin.views.base.modules_view.messages") as mock_messages,
-            patch("netbox_librenms_plugin.views.base.modules_view.render", return_value=MagicMock()),
+            # post() renders here via modules_view.render; a higher branch refactors that to
+            # render_sync_partial() (mixins.render). Patch both (create=True) so this test stays
+            # robust as it rides up the stack regardless of which render site post() uses.
+            patch("netbox_librenms_plugin.views.base.modules_view.render", return_value=MagicMock(), create=True),
+            patch("netbox_librenms_plugin.views.mixins.render", return_value=MagicMock(), create=True),
             patch(
                 "netbox_librenms_plugin.views.base.modules_view.get_librenms_oob",
                 return_value={"id": "not-a-number"},
@@ -620,7 +624,10 @@ class TestMergeTransceiverDataPortIdentity:
         with (
             patch("netbox_librenms_plugin.views.base.modules_view.cache") as mock_cache,
             patch("netbox_librenms_plugin.views.base.modules_view.messages") as mock_messages,
-            patch("netbox_librenms_plugin.views.base.modules_view.render", return_value=MagicMock()),
+            # Patch both render sites (create=True) — see test_post_ignores_non_numeric_oob_id:
+            # a higher branch moves post()'s render to render_sync_partial() (mixins.render).
+            patch("netbox_librenms_plugin.views.base.modules_view.render", return_value=MagicMock(), create=True),
+            patch("netbox_librenms_plugin.views.mixins.render", return_value=MagicMock(), create=True),
             patch("netbox_librenms_plugin.views.base.modules_view.get_librenms_oob", return_value={"id": 999}),
         ):
             view.post(request, pk=1)  # must not raise
