@@ -3009,28 +3009,34 @@ class TestDetectCollisionsForDeviceIds:
         assert collisions == []  # only one resolvable row → no collision
 
     def test_validation_error_id_is_reported_unresolved(self):
-        """A row whose validation raises is returned unresolved, not collision-checked on a partial result.
-
-        validate_device_for_import() catches any exception and appends a "Validation error: ..."
-        issue to an otherwise-incomplete result. The collision-relevant match fields may be
-        missing, so detect_collisions_for_device_ids must fail closed on it (mirroring the
-        unfetchable-id case) rather than group it on unreliable data.
-        """
+        """A row whose validator returns a "Validation error:" issue is reported unresolved, not collision-checked on the partial result."""
+        from netbox_librenms_plugin.import_utils import bulk_import as bulk_import_module
         from netbox_librenms_plugin.import_utils.bulk_import import detect_collisions_for_device_ids
 
         make_device("validatable-host")
         cache = {
             9101: {"device_id": 9101, "sysName": "validatable-host", "hostname": "validatable-host"},
-            # A non-string sysName + strip_domain makes the REAL validator raise on `"." in name`
-            # inside _determine_device_name, so validate_device_for_import returns a partial result
-            # tagged "Validation error: ..." — exactly the except branch this fix must fail closed on.
-            9102: {"device_id": 9102, "sysName": 12345},
+            9102: {"device_id": 9102, "sysName": "unvalidatable-host", "hostname": "unvalidatable-host"},
         }
-        collisions, unresolved = detect_collisions_for_device_ids(
-            [9101, 9102],
-            self._api(),
-            libre_devices_cache=cache,
-            sync_options={"use_sysname": True, "strip_domain": True},
-        )
+
+        # Stub the consumer's validator so 9102 returns the except-branch shape ("Validation
+        # error: ...") directly, instead of relying on _determine_device_name crashing on a
+        # non-string sysName — which would silently stop exercising the fail-closed path if name
+        # coercion is ever hardened. 9101 delegates to the REAL validator so the clean-row
+        # collision logic this test asserts on stays genuine.
+        real_validate = bulk_import_module.validate_device_for_import
+
+        def fake_validate(libre_device, *args, **kwargs):
+            if libre_device.get("device_id") == 9102:
+                return {"issues": ["Validation error: simulated validator exception"], "resolved_name": None}
+            return real_validate(libre_device, *args, **kwargs)
+
+        with patch.object(bulk_import_module, "validate_device_for_import", side_effect=fake_validate):
+            collisions, unresolved = detect_collisions_for_device_ids(
+                [9101, 9102],
+                self._api(),
+                libre_devices_cache=cache,
+                sync_options={"use_sysname": True, "strip_domain": True},
+            )
         assert unresolved == [9102]
         assert collisions == []  # only one validatable row → no collision
