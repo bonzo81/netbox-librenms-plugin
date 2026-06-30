@@ -25,13 +25,18 @@ def merge_candidate_pks(validation: dict) -> set:
     Returns:
         set: The non-None ``pk`` values from the ``host_named`` / ``oob_named`` slots.
     """
+    from netbox_librenms_plugin.utils import coerce_positive_int
+
     merge = (validation or {}).get("merge_candidates") or {}
     if not isinstance(merge, dict):
         return set()
     pks = set()
     for slot in MERGE_CANDIDATE_SLOTS:
         entry = merge.get(slot) or {}
-        pk = entry.get("pk") if isinstance(entry, dict) else None
+        # Coerce to a positive int (a NetBox pk) before adding: a corrupt payload like
+        # {"pk": []} is unhashable and would crash set.add(), breaking the safe-extraction
+        # contract instead of failing closed on the bad slot.
+        pk = coerce_positive_int(entry.get("pk")) if isinstance(entry, dict) else None
         if pk is not None:
             pks.add(pk)
     return pks

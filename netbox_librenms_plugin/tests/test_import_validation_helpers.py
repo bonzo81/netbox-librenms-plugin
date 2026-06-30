@@ -696,3 +696,26 @@ class TestApplyMergeCandidates:
         assert result["serial_role_choice_available"] is False
         # And the merge path is now the single source of truth.
         assert result["serial_action"] == "merge_netbox_devices"
+
+
+class TestMergeCandidatePks:
+    """merge_candidate_pks must fail closed on corrupt pk values, never crash on an unhashable one."""
+
+    def test_returns_positive_pks_from_both_slots(self):
+        from netbox_librenms_plugin.import_validation_helpers import merge_candidate_pks
+
+        validation = {"merge_candidates": {"host_named": {"pk": 5}, "oob_named": {"pk": 9}}}
+        assert merge_candidate_pks(validation) == {5, 9}
+
+    def test_corrupt_unhashable_pk_is_skipped_not_crashing(self):
+        from netbox_librenms_plugin.import_validation_helpers import merge_candidate_pks
+
+        # {"pk": []} is unhashable; the old set.add(pk) raised TypeError on this row.
+        validation = {"merge_candidates": {"host_named": {"pk": []}, "oob_named": {"pk": 7}}}
+        assert merge_candidate_pks(validation) == {7}
+
+    def test_non_positive_and_non_int_pks_are_dropped(self):
+        from netbox_librenms_plugin.import_validation_helpers import merge_candidate_pks
+
+        validation = {"merge_candidates": {"host_named": {"pk": 0}, "oob_named": {"pk": "not-int"}}}
+        assert merge_candidate_pks(validation) == set()
