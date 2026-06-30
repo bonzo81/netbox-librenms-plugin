@@ -95,6 +95,30 @@ def _describe_existing_librenms_link(obj, server_key):
     return info
 
 
+def _describe_link_note(existing_link):
+    """
+    Return a human-readable phrase describing an existing LibreNMS link.
+
+    Centralizes the host-id / OOB / unlinked wording that was copy-pasted — and had
+    drifted ("already linked" vs "currently linked", "OOB already linked" vs "as an OOB
+    controller") — across the VM-hostname, device-hostname, primary-IP and serial-match
+    import branches, so the phrasing stays consistent and a future change lands in one place.
+
+    Args:
+        existing_link: A :func:`_describe_existing_librenms_link` dict, or None.
+
+    Returns:
+        str: One of "currently linked to LibreNMS device #N", "currently linked to LibreNMS
+            as an OOB controller", or "not linked to LibreNMS".
+    """
+    link = existing_link or {}
+    if link.get("host_id"):
+        return f"currently linked to LibreNMS device #{link['host_id']}"
+    if link.get("oob_id"):
+        return "currently linked to LibreNMS as an OOB controller"
+    return "not linked to LibreNMS"
+
+
 def resolve_device_by_host_ip(primary_ip):
     """
     Resolve the unique NetBox device whose interface or oob_ip carries a host address.
@@ -417,16 +441,10 @@ def _detect_serial_match_role(existing_by_serial, existing_link, hostname, seria
         # Neither role is feasible -- fall back to legacy hostname/serial
         # warning behaviour so the user still sees a useful message.
         if existing_by_serial.name and existing_by_serial.name.lower() == hostname.lower():
-            if existing_link and existing_link["host_id"]:
-                block_warnings.append(
-                    f"Device with same serial and hostname exists as '{existing_by_serial.name}' "
-                    f"(currently linked to LibreNMS device #{existing_link['host_id']})"
-                )
-            else:
-                block_warnings.append(
-                    f"Device with same serial and hostname exists as '{existing_by_serial.name}' "
-                    f"(not linked to LibreNMS)"
-                )
+            block_warnings.append(
+                f"Device with same serial and hostname exists as '{existing_by_serial.name}' "
+                f"({_describe_link_note(existing_link)})"
+            )
             serial_action_value = "link"
         else:
             block_warnings.append(
@@ -779,12 +797,7 @@ def validate_device_for_import(
                 # so a flat "not linked" would contradict the badge. Mirrors the primary-IP path.
                 existing_link = _describe_existing_librenms_link(existing_vm, server_key)
                 result["existing_librenms_link"] = existing_link
-                if existing_link.get("host_id"):
-                    link_note = f"already linked to LibreNMS device #{existing_link['host_id']}"
-                elif existing_link.get("oob_id"):
-                    link_note = "already linked to LibreNMS as an OOB controller"
-                else:
-                    link_note = "not linked to LibreNMS"
+                link_note = _describe_link_note(existing_link)
                 result["warnings"].append(
                     f"VM with same hostname exists in NetBox as '{existing_vm.name}' ({link_note})"
                 )
@@ -821,13 +834,7 @@ def validate_device_for_import(
                             f"LibreNMS: '{incoming_serial}'). Hardware may have been replaced."
                         )
                 else:
-                    existing_link = result["existing_librenms_link"] or {}
-                    if existing_link.get("host_id"):
-                        link_note = f"currently linked to LibreNMS device #{existing_link['host_id']}"
-                    elif existing_link.get("oob_id"):
-                        link_note = "OOB already linked"
-                    else:
-                        link_note = "not linked to LibreNMS"
+                    link_note = _describe_link_note(result["existing_librenms_link"])
                     result["warnings"].append(
                         f"Device with same hostname exists in NetBox as '{existing_device.name}' ({link_note})"
                     )
@@ -1137,13 +1144,7 @@ def validate_device_for_import(
                             # Line 728 may already have populated a host/OOB
                             # linkage; describe it accurately instead of always
                             # claiming "not linked to LibreNMS".
-                            existing_link = result.get("existing_librenms_link") or {}
-                            if existing_link.get("host_id"):
-                                link_note = f"currently linked to LibreNMS device #{existing_link['host_id']}"
-                            elif existing_link.get("oob_id"):
-                                link_note = "OOB already linked"
-                            else:
-                                link_note = "not linked to LibreNMS"
+                            link_note = _describe_link_note(result.get("existing_librenms_link"))
                             result["warnings"].append(
                                 f"IP address {primary_ip} already assigned to device '{device.name}' ({link_note})"
                             )

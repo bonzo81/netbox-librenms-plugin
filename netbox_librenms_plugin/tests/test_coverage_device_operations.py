@@ -2540,6 +2540,31 @@ class TestValidateDeviceForImportOOBIPFallback:
         assert result["oob_candidate"]["device"] == device
 
 
+class TestDescribeLinkNote:
+    """_describe_link_note: single source of truth for the host/OOB/unlinked phrasing."""
+
+    def _note(self, link):
+        from netbox_librenms_plugin.import_utils.device_operations import _describe_link_note
+
+        return _describe_link_note(link)
+
+    def test_host_id_phrasing(self):
+        assert self._note({"host_id": 42, "oob_id": None}) == "currently linked to LibreNMS device #42"
+
+    def test_oob_only_phrasing(self):
+        # host_id absent but oob_id present → reported as OOB, not "not linked" (the old serial-match drift).
+        assert self._note({"host_id": None, "oob_id": 7}) == "currently linked to LibreNMS as an OOB controller"
+
+    def test_host_id_wins_over_oob(self):
+        assert self._note({"host_id": 42, "oob_id": 7}) == "currently linked to LibreNMS device #42"
+
+    def test_unlinked_phrasing(self):
+        assert self._note({"host_id": None, "oob_id": None}) == "not linked to LibreNMS"
+
+    def test_none_input_is_unlinked(self):
+        assert self._note(None) == "not linked to LibreNMS"
+
+
 @pytest.mark.django_db
 class TestDetectSerialMatchRole:
     """_detect_serial_match_role is the pure role-decision step extracted from validate_device_for_import's serial-match branch."""
