@@ -47,13 +47,26 @@ class TestPortStackLagPattern:
         assert "lag_name_pattern" in exc_info.value.message_dict
 
     def test_unique_librenms_os_rejects_case_variant_duplicate(self):
-        """librenms_os is unique AND lower-cased in clean(), so a case-variant duplicate ('ZZDUP' for an existing 'zzdup') must be rejected by full_clean's unique check — not silently inserted as a second row."""
+        """librenms_os is unique case-insensitively (functional UniqueConstraint) AND lower-cased in clean(), so a case-variant duplicate ('ZZDUP' for an existing 'zzdup') is rejected by full_clean's constraint check — not silently inserted as a second row."""
         model = self._model()
         model.objects.create(librenms_os="zzdup", lag_name_pattern=r"^Po\d+$")
-        with pytest.raises(ValidationError) as exc_info:
+        with pytest.raises(ValidationError):
             model.objects.create(librenms_os="ZZDUP", lag_name_pattern=r"^Bundle-Ether\d+$")
-        assert "librenms_os" in exc_info.value.message_dict
         assert model.objects.filter(librenms_os="zzdup").count() == 1
+
+    def test_db_enforces_case_insensitive_unique_when_full_clean_bypassed(self):
+        """The functional unique on Lower(librenms_os) rejects a case-variant duplicate at the DB level even via bulk_create (which skips full_clean/clean), so a path that bypasses the lowercasing can't insert 'IOS' alongside 'ios'."""
+        from django.db import IntegrityError, transaction
+
+        model = self._model()
+        model.objects.create(librenms_os="zzci", lag_name_pattern=r"^Po\d+$")  # clean() lowercases -> "zzci"
+        with pytest.raises(IntegrityError):
+            # bulk_create skips full_clean, so "ZZCI" reaches the DB un-lowercased; the functional
+            # unique on Lower(librenms_os) must still reject it. atomic() so the aborted DB state
+            # rolls back to a savepoint and the test transaction stays usable.
+            with transaction.atomic():
+                model.objects.bulk_create([model(librenms_os="ZZCI", lag_name_pattern=r"^X\d+$")])
+        assert model.objects.filter(librenms_os="zzci").count() == 1
 
 
 @pytest.mark.django_db
