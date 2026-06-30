@@ -501,6 +501,10 @@ class LibreNMSAPIMixin:
         migration controls and doesn't re-expose ordinary sync buttons. Routing all exits through
         this one chokepoint makes the spread impossible to forget on a new error/success branch.
 
+        ``build_migrated_context`` returns ``migrated_to_winner`` as a lazy proxy, so the
+        cable/module/VLAN partials (which render only the marker banner, never the winner) don't
+        pay the winner ``Device`` lookup on every HTMX refresh.
+
         Args:
             request: The current HTTP request.
             obj: The device/VM whose migration marker is resolved.

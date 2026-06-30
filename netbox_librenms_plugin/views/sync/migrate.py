@@ -19,14 +19,19 @@ from django.contrib import messages
 from django.core.exceptions import ValidationError
 from django.db import IntegrityError, transaction
 from django.http import HttpResponse
-from django.utils.html import format_html
 from django.shortcuts import get_object_or_404, redirect
 from django.urls import get_script_prefix, reverse
 from django.utils.http import url_has_allowed_host_and_scheme
 from django.views import View
 from ipam.models import IPAddress
 
-from netbox_librenms_plugin.utils import DEVICE_IP_FK_FIELDS, get_migrated_to_marker, set_device_ip_fk
+from netbox_librenms_plugin.utils import (
+    DEVICE_IP_FK_FIELDS,
+    DEVICE_IP_FK_LABELS,
+    get_migrated_to_marker,
+    set_device_ip_fk,
+)
+from netbox_librenms_plugin.views.imports.actions import _htmx_error_response
 from netbox_librenms_plugin.views.mixins import (
     LibreNMSAPIMixin,
     LibreNMSPermissionMixin,
@@ -270,9 +275,8 @@ def _reconcile_donor_device_ip_fks(donor, winner):
     # Drive the loop off utils.DEVICE_IP_FK_FIELDS — the canonical list set_device_ip_fk()
     # validates against — so a fourth device IP FK added there is reconciled here too instead of
     # being silently skipped by a stale hardcoded copy. The labels are display-only.
-    _human_labels = {"primary_ip4": "primary IPv4", "primary_ip6": "primary IPv6", "oob_ip": "OOB IP"}
     for field in DEVICE_IP_FK_FIELDS:
-        human = _human_labels.get(field, field)
+        human = DEVICE_IP_FK_LABELS.get(field, field)
         donor_ip_id = getattr(donor, f"{field}_id", None)
         # Real FK columns are plain ints; the isinstance guard also makes this a clean no-op
         # against the mock-based unit tests (a MagicMock id is not an int).
@@ -358,24 +362,9 @@ class _BaseMoveToWinnerView(LibreNMSAPIMixin, LibreNMSPermissionMixin, NetBoxObj
             HttpResponse: The OOB-toast response (HTMX) or a redirect (non-HTMX).
         """
         if request.headers.get("HX-Request"):
-            toast_html = format_html(
-                '<div id="django-messages"'
-                ' class="toast-container position-fixed bottom-0 end-0 p-3"'
-                ' hx-swap-oob="true">'
-                '<div class="toast toast-dark border-0 shadow-sm" role="alert"'
-                ' aria-live="assertive" aria-atomic="true" data-bs-delay="12000">'
-                '<div class="toast-header text-bg-danger">'
-                '<i class="mdi mdi-alert-circle me-1"></i>Error'
-                '<button type="button" class="btn-close me-0 m-auto"'
-                ' data-bs-dismiss="toast" aria-label="Close"></button>'
-                "</div>"
-                '<div class="toast-body">{}</div>'
-                "</div></div>",
-                msg,
-            )
-            resp = HttpResponse(toast_html, content_type="text/html")
-            resp["HX-Reswap"] = "none"
-            return resp
+            # Reuse the shared OOB-toast builder (same #django-messages container, toast classes and
+            # HX-Reswap:none) so move-to-winner error toasts can't drift from the import flow's markup.
+            return _htmx_error_response(msg)
         messages.error(request, msg)
         return redirect(_safe_referer(request, self._fallback_url))
 
@@ -664,20 +653,19 @@ class TransferDeviceIPView(_BaseMoveToWinnerView):
 
     required_object_permissions = {"POST": [("change", Device)]}
 
-    _FIELD_MAP = {
-        "primary4": ("primary_ip4", "primary IPv4"),
-        "primary6": ("primary_ip6", "primary IPv6"),
-        "oob": ("oob_ip", "OOB IP"),
-    }
+    # URL ``ip_kind`` kwarg → device IP FK field name; the human label comes from the single
+    # utils.DEVICE_IP_FK_LABELS map so it can't drift from the reconcile-notes wording.
+    _IP_KIND_TO_FIELD = {"primary4": "primary_ip4", "primary6": "primary_ip6", "oob": "oob_ip"}
 
     def post(self, request, pk, ip_kind):
         gate = self._gate(request)
         if gate is not None:
             return gate
 
-        if ip_kind not in self._FIELD_MAP:
+        field = self._IP_KIND_TO_FIELD.get(ip_kind)
+        if field is None:
             return self._fail(request, f"Unknown ip_kind '{ip_kind}'.")
-        field, human = self._FIELD_MAP[ip_kind]
+        human = DEVICE_IP_FK_LABELS[field]
 
         donor = get_object_or_404(Device, pk=pk)
         # Fall back to active_server_key (never builds LibreNMSAPI) so a misconfigured default

@@ -6266,10 +6266,11 @@ class TestPromoteToHostViewPost:
 
         response = view.post(request, device_id=17)
 
-        # Rejected with a clear cross-field message; the promote is not committed.
+        # Rejected by the SHARED _platform_device_type_mismatch() check inside _save_device()
+        # (not a now-removed inline duplicate); the promote is not committed.
         assert response.status_code == 200
         assert response["HX-Reswap"] == "none"
-        assert b"not compatible" in response.content
+        assert b"update the platform first" in response.content
         reloaded = Device.objects.get(pk=existing_device.pk)
         assert reloaded.platform_id is None  # the bad override was never persisted
         assert reloaded.custom_field_data["librenms_id"]["default"] == {"id": 10}  # host swap not committed

@@ -3232,27 +3232,10 @@ class PromoteToHostView(
                 existing_device.platform = override_platform
                 update_fields.append("platform")
 
-            # _save_device() persists via update_fields, which skips full_clean() — so an override
-            # device_type/platform the user just picked would be stored without NetBox's
-            # Device.clean() cross-field check. When an override actually changes the type or
-            # platform, enforce the one invariant clean() applies to that pair (a platform's
-            # manufacturer must match the device type's) so an incompatible override is rejected
-            # with a clear message rather than silently persisted. Gated on a real override so the
-            # update_fields contract of not blocking on unrelated pre-existing issues is preserved.
-            if "device_type" in update_fields or "platform" in update_fields:
-                eff_dt = existing_device.device_type
-                eff_platform = existing_device.platform
-                if (
-                    eff_platform is not None
-                    and eff_platform.manufacturer_id is not None
-                    and eff_dt is not None
-                    and eff_platform.manufacturer_id != eff_dt.manufacturer_id
-                ):
-                    return _htmx_error_response(
-                        f"Platform '{eff_platform}' is not compatible with device type "
-                        f"'{eff_dt}': their manufacturers differ. Choose a matching platform or device type."
-                    )
-
+            # _save_device() persists via update_fields (skipping full_clean()) but re-runs the
+            # platform/device_type manufacturer invariant via _platform_device_type_mismatch()
+            # whenever those columns are written, so an incompatible override is rejected there —
+            # no inline duplicate (which would only drift in wording from the shared check).
             if err := _save_device(existing_device, update_fields=update_fields, request=request):
                 return err
 

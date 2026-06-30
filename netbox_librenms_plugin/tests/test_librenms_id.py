@@ -1289,3 +1289,38 @@ class TestMarkLibreNMSMigrated:
 
         # The real model query must not return the migrated-only donor for id 99.
         assert find_by_librenms_id(Device, 99, "default") is None
+
+
+class TestNormalizeMergeEntry:
+    """_normalize_merge_entry: the shared fail-closed shape validation for the merge winner/donor entries."""
+
+    @staticmethod
+    def _norm(entry, *, copy=True, owner="winner"):
+        from netbox_librenms_plugin.utils import _normalize_merge_entry
+
+        return _normalize_merge_entry(entry, owner_label=owner, owner_name="X", server_key="default", copy_dict=copy)
+
+    def test_coerces_scalars_and_blank_to_no_link(self):
+        assert self._norm(42) == {"id": 42}
+        assert self._norm("42") == {"id": 42}
+        assert self._norm("") == {}  # blank string is a genuine "no active link"
+        assert self._norm(None) == {}
+
+    def test_fails_closed_on_corrupt_shapes(self):
+        import pytest
+
+        with pytest.raises(ValueError, match="unparseable"):
+            self._norm("abc")  # non-blank, non-numeric string
+        with pytest.raises(ValueError, match="unsupported"):
+            self._norm([1])  # list
+        with pytest.raises(ValueError, match="unsupported"):
+            self._norm(True)  # bool is never a valid id
+
+    def test_dict_copy_flag_controls_isolation(self):
+        src = {"id": 5, "oob": {"id": 7}}
+        # Winner entry is copied (it is mutated downstream): mutating the result must not touch src.
+        copied = self._norm(src, copy=True)
+        copied["id"] = 99
+        assert src["id"] == 5
+        # Donor entry is read-only: returned as-is (same object).
+        assert self._norm(src, copy=False, owner="donor") is src

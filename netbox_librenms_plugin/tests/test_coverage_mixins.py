@@ -66,30 +66,87 @@ class TestLibreNMSAPIMixinActiveServerKey:
         mock_api_cls.assert_not_called()
 
 
+@pytest.mark.django_db
 class TestRenderSyncPartial:
     """render_sync_partial: the chokepoint that injects migrated-context into every partial render."""
 
-    def test_merges_migrated_context_into_view_context(self):
+    def test_merges_real_migrated_context_into_view_context(self):
+        """A real migrated donor's marker + winner are merged into the partial context (real build_migrated_context, not a stub re-asserting the dict merge)."""
+        from netbox_librenms_plugin.tests.conftest import make_device
+        from netbox_librenms_plugin.utils import mark_librenms_migrated
         from netbox_librenms_plugin.views.mixins import LibreNMSAPIMixin
+
+        winner = make_device("rsp-winner")
+        donor = make_device("rsp-donor")
+        mark_librenms_migrated(donor, winner.pk, "prod")  # real _migrated_to marker under "prod"
+        donor.save()
 
         m = object.__new__(LibreNMSAPIMixin)
         m.partial_template_name = "tmpl.html"
-        obj = MagicMock()
-        with (
-            patch("netbox_librenms_plugin.views.mixins.render") as mock_render,
-            patch(
-                "netbox_librenms_plugin.utils.build_migrated_context",
-                return_value={"migrated_to_marker": "M", "migrated_to_winner": "W"},
-            ) as mock_bmc,
-        ):
-            m.render_sync_partial("REQ", obj, "prod", {"vlan_sync": "X"})
+        # Only render is stubbed (it needs a full request + template machinery); build_migrated_context
+        # resolves the donor's real marker against the real winner row.
+        with patch("netbox_librenms_plugin.views.mixins.render") as mock_render:
+            m.render_sync_partial("REQ", donor, "prod", {"vlan_sync": "X"})
 
-        mock_bmc.assert_called_once_with(obj, "prod")
         _req, template, context = mock_render.call_args.args
         assert template == "tmpl.html"
-        # The view's payload AND the migrated-context flags are both present — a partial-render
-        # exit routed through here can never silently drop the migration controls.
-        assert context == {"vlan_sync": "X", "migrated_to_marker": "M", "migrated_to_winner": "W"}
+        # The view's payload AND the real migration flags are present — a partial-render exit routed
+        # through here can never silently drop the migration controls.
+        assert context["vlan_sync"] == "X"
+        assert context["migrated_to_marker"]["device_id"] == winner.pk
+        assert context["migrated_to_winner"].pk == winner.pk
+
+
+@pytest.mark.django_db
+class TestBuildMigratedContextLazyWinner:
+    """build_migrated_context defers the winner Device lookup to a lazy proxy (cable/module/VLAN partials never read it)."""
+
+    @staticmethod
+    def _winner_lookups(cap, pk):
+        return [q["sql"] for q in cap.captured_queries if "dcim_device" in q["sql"] and f"= {pk}" in q["sql"]]
+
+    def test_winner_lookup_deferred_until_the_proxy_is_read(self):
+        from django.db import connection
+        from django.test.utils import CaptureQueriesContext
+
+        from netbox_librenms_plugin.tests.conftest import make_device
+        from netbox_librenms_plugin.utils import build_migrated_context, mark_librenms_migrated
+
+        winner = make_device("bmc-winner")
+        donor = make_device("bmc-donor")
+        mark_librenms_migrated(donor, winner.pk, "default")
+        donor.save()
+
+        # Building the context must NOT fetch the winner row (the boolean-only partials never read it).
+        with CaptureQueriesContext(connection) as cap_build:
+            ctx = build_migrated_context(donor, "default")
+        assert ctx["migrated_to_marker"]["device_id"] == winner.pk  # banner boolean present
+        assert self._winner_lookups(cap_build, winner.pk) == []  # winner Device not fetched yet
+
+        # Reading the proxy (the interface/IP partials do) resolves the real Device — one query.
+        with CaptureQueriesContext(connection) as cap_access:
+            assert ctx["migrated_to_winner"].pk == winner.pk
+        assert self._winner_lookups(cap_access, winner.pk)  # the deferred lookup fired on access
+
+    def test_self_pointing_marker_suppressed_without_a_winner_query(self):
+        from django.db import connection
+        from django.test.utils import CaptureQueriesContext
+
+        from netbox_librenms_plugin.tests.conftest import make_device
+        from netbox_librenms_plugin.utils import build_migrated_context
+
+        donor = make_device("bmc-self")
+        # A self-pointing marker (device_id == donor.pk) is corrupt: it must not flip the donor into
+        # migrated mode, and the suppression happens in memory — no winner Device fetch.
+        donor.custom_field_data["librenms_id"] = {
+            "default": {"_migrated_to": {"device_id": donor.pk, "server_key": "default", "at": "x"}}
+        }
+        donor.save()
+        with CaptureQueriesContext(connection) as cap:
+            ctx = build_migrated_context(donor, "default")
+        assert ctx["migrated_to_marker"] is None
+        assert ctx["migrated_to_winner"] is None
+        assert self._winner_lookups(cap, donor.pk) == []  # suppression is in-memory
 
 
 class TestLibreNMSAPIMixinRebindApiForServer:

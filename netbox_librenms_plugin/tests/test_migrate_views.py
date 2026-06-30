@@ -3,10 +3,13 @@ Tests for Stage 2b: get_migrated_to_marker helper + the per-row
 "Move to winner" view endpoints (MoveInterfaceToWinnerView,
 MoveIPAddressToWinnerView, TransferDeviceIPView).
 
-The view tests use light MagicMock-based plumbing — we patch the model
-queryset chain so the views never touch a real database.  This is
-appropriate because the views' job is glue: validate the marker, look
-up the winner, run a small ORM mutation, and return an HTMX response.
+The view tests are real-DB end-to-end: they build real donor/winner devices,
+interfaces and IPs (conftest make_device/make_interface/make_ip/ip_on), write a
+real ``_migrated_to`` marker, drive the view's full select_for_update /
+full_clean / save move path, and reload from the DB to prove what persisted.
+MagicMock is reserved for the request object and the permission gate (exercised
+separately); a handful of legacy unit tests still stub the ORM and are being
+migrated to real rows.
 """
 
 from unittest.mock import MagicMock, patch
@@ -14,7 +17,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 # Shared real-DB builders (see tests/conftest.py).
-from netbox_librenms_plugin.tests.conftest import ip_on, make_device, make_interface, make_ip
+from netbox_librenms_plugin.tests.conftest import ip_on, make_device, make_interface, make_ip, make_vm
 
 
 # ── helper: get_migrated_to_marker ────────────────────────────────────────
@@ -462,96 +465,78 @@ class TestMoveInterfaceToWinnerView:
         assert member.lag_id == donor_lag.pk  # relationship untouched
 
     def test_save_integrity_error_rejected_with_409(self):
-        """A concurrent winner-side rename/create can trip a unique constraint at save() time (after our name re-check); surface it as a 409, not a 500."""
+        """A winner-side create that trips the (device,name) unique constraint at save() — after every in-transaction check passes — is caught and surfaced as a 409 toast, and the whole move rolls back."""
+        from dcim.models import Interface
         from django.db import IntegrityError
 
         view = self._setup_view()
+        donor = make_device("mi-ie-donor")
+        winner = make_device("mi-ie-winner")  # no "Eth0" -> the pre-check, re-check and full_clean all pass
+        self._mark(donor, winner)
+        interface = make_interface(donor, "Eth0")
         req = _hx_request({"server_key": "default"})
 
-        donor = MagicMock(pk=10)
-        winner = MagicMock(pk=20)
-        winner.name = "winner"
-        interface = MagicMock(pk=5, device=donor)
-        interface.name = "Eth0"
-        locked_iface = MagicMock(pk=5, device=donor)
-        locked_iface.name = "Eth0"
-        locked_iface.full_clean.return_value = None
-        locked_iface.save.side_effect = IntegrityError("duplicate key value")
+        # The IntegrityError handler guards a true concurrency boundary: another transaction creates
+        # the winner's same-named interface AFTER our full_clean() but BEFORE our save(), tripping the
+        # DB unique constraint. That race can't be reproduced single-threaded (full_clean would see an
+        # in-transaction collision first), so simulate only the move save() raising; all rows, locks,
+        # full_clean and the atomic rollback are real.
+        real_save = Interface.save
 
-        with (
-            patch("netbox_librenms_plugin.views.sync.migrate.get_object_or_404", return_value=interface),
-            patch(
-                "netbox_librenms_plugin.views.sync.migrate._resolve_winner_for_donor",
-                return_value=(winner, {"device_id": 20, "server_key": "default", "at": "x"}),
-            ),
-            patch("netbox_librenms_plugin.views.sync.migrate.Interface") as mock_iface_cls,
-            patch("netbox_librenms_plugin.views.sync.migrate.Device") as mock_device_cls,
-            patch("netbox_librenms_plugin.views.sync.migrate.transaction"),
-            patch("netbox_librenms_plugin.views.sync.migrate.messages"),
-        ):
-            collision_qs = MagicMock()
-            collision_qs.exists.return_value = False
-            mock_iface_cls.objects.filter.return_value = collision_qs
-            mock_iface_cls.objects.select_for_update.return_value.filter.return_value.first.return_value = locked_iface
-            mock_device_cls.objects.select_for_update.return_value.filter.return_value.order_by.return_value = [
-                donor,
-                winner,
-            ]
-            resp = view.post(req, pk=5)
+        def boom(self, *args, **kwargs):
+            if self.pk == interface.pk:
+                raise IntegrityError("duplicate key value violates unique constraint")
+            return real_save(self, *args, **kwargs)
 
-        # save() raised → surfaced as the collision OOB toast (HTMX path), not a 500.
-        # As above: HTMX errors are an OOB toast at HTTP 200, distinguished from the
-        # success response by the absence of the HX-Refresh header.
-        locked_iface.save.assert_called_once()
-        assert b"django-messages" in resp.content
-        # Error contract (see _fail): HTMX errors are an OOB toast at HTTP 200 with
-        # HX-Reswap:none and no HX-Refresh — never the success refresh response.
+        with patch.object(Interface, "save", boom):
+            resp = view.post(req, pk=interface.pk)
+
+        # Caught and surfaced as the collision 409 OOB toast (HTTP 200, HX-Reswap:none, no HX-Refresh).
         assert resp.status_code == 200
+        assert b"already has an interface named" in resp.content
         assert resp.headers.get("HX-Reswap") == "none"
         assert resp.headers.get("HX-Refresh") is None
+        # The atomic block rolled back for real: the interface is still on the donor.
+        interface.refresh_from_db()
+        assert interface.device_id == donor.pk
 
     def test_marker_repointed_under_lock_is_rejected(self):
-        """If the donor's _migrated_to is repointed between the unlocked resolve and acquiring the row locks, the move must abort instead of targeting the stale winner."""
+        """If the donor's _migrated_to is repointed between the unlocked resolve and the under-lock re-resolve, the move aborts instead of targeting the stale winner."""
+        import netbox_librenms_plugin.views.sync.migrate as migrate_mod
+        from netbox_librenms_plugin.utils import mark_librenms_migrated
+
         view = self._setup_view()
+        donor = make_device("mi-repoint-donor")
+        winner = make_device("mi-repoint-winner")  # the original (now stale) target
+        other_winner = make_device("mi-repoint-other")  # the marker is concurrently repointed here
+        self._mark(donor, winner)
+        interface = make_interface(donor, "Eth0")
         req = _hx_request({"server_key": "default"})
 
-        donor = MagicMock(pk=10)
-        winner = MagicMock(pk=20)
-        winner.name = "winner"
-        other_winner = MagicMock(pk=99)  # marker now points here
-        interface = MagicMock(pk=5, device=donor)
-        interface.name = "Eth0"
+        # The REAL _resolve_winner_for_donor runs for both calls; between the unlocked resolve and the
+        # under-lock re-resolve we really repoint the donor's marker (a committed write that lands
+        # before the atomic block re-reads it), so the under-lock winner differs and the move aborts.
+        real_resolve = migrate_mod._resolve_winner_for_donor
+        state = {"repointed": False}
 
-        with (
-            patch("netbox_librenms_plugin.views.sync.migrate.get_object_or_404", return_value=interface),
-            patch(
-                "netbox_librenms_plugin.views.sync.migrate._resolve_winner_for_donor",
-                # 1st call (pre-lock) → winner; 2nd call (under lock) → a different winner.
-                side_effect=[
-                    (winner, {"device_id": 20, "server_key": "default", "at": "x"}),
-                    (other_winner, {"device_id": 99, "server_key": "default", "at": "y"}),
-                ],
-            ),
-            patch("netbox_librenms_plugin.views.sync.migrate.Interface") as mock_iface_cls,
-            patch("netbox_librenms_plugin.views.sync.migrate.Device") as mock_device_cls,
-            patch("netbox_librenms_plugin.views.sync.migrate.transaction"),
-            patch("netbox_librenms_plugin.views.sync.migrate.messages"),
-        ):
-            mock_iface_cls.objects.filter.return_value.exists.return_value = False
-            mock_device_cls.objects.select_for_update.return_value.filter.return_value.order_by.return_value = [
-                donor,
-                winner,
-            ]
-            resp = view.post(req, pk=5)
+        def repoint_then_resolve(d, server_key):
+            result = real_resolve(d, server_key)
+            if not state["repointed"]:
+                state["repointed"] = True
+                mark_librenms_migrated(donor, other_winner.pk, "default")
+                donor.save()
+            return result
 
-        # Aborts with a conflict toast; the move query is never issued.
-        assert b"django-messages" in resp.content
-        # Reject path flows through _fail(): the HTMX response carries HX-Reswap:none and
-        # never the success HX-Refresh header, so a regression that returned HX-Refresh=true
-        # (refreshing as if the move/transfer succeeded) would be caught here.
+        with patch.object(migrate_mod, "_resolve_winner_for_donor", side_effect=repoint_then_resolve):
+            resp = view.post(req, pk=interface.pk)
+
+        # Aborted with the concurrency conflict toast; the interface is moved to neither winner.
+        assert resp.status_code == 200
+        assert b"changed concurrently" in resp.content
         assert resp.headers.get("HX-Reswap") == "none"
         assert resp.headers.get("HX-Refresh") is None
-        mock_iface_cls.objects.select_for_update.assert_not_called()
+        interface.refresh_from_db()
+        assert interface.device_id == donor.pk
 
     def test_perm_gate_short_circuits(self):
         from django.http import HttpResponse
@@ -563,6 +548,17 @@ class TestMoveInterfaceToWinnerView:
         req = _hx_request()
         resp = view.post(req, pk=5)
         assert resp.status_code == 403
+
+    def test_fail_htmx_toast_is_the_shared_helper_markup(self):
+        """_fail's HTMX toast is byte-identical to _htmx_error_response (one source of toast markup, not a divergent copy)."""
+        from netbox_librenms_plugin.views.imports.actions import _htmx_error_response
+        from netbox_librenms_plugin.views.sync.migrate import MoveInterfaceToWinnerView
+
+        view = MoveInterfaceToWinnerView()
+        resp = view._fail(_hx_request(), "boom message")
+        expected = _htmx_error_response("boom message")
+        assert resp.content == expected.content
+        assert resp["HX-Reswap"] == expected["HX-Reswap"] == "none"
 
 
 # ── TransferDeviceIPView ──────────────────────────────────────────────────
@@ -690,47 +686,33 @@ class TestTransferDeviceIPView:
         assert winner.primary_ip4_id is None
 
     def test_rejects_when_assignment_is_not_an_interface(self):
-        """A non-Interface assignment (e.g. a VMInterface) must fail closed: the device_id check sees None and the transfer is refused."""
+        """A donor oob_ip whose address lives on a VMInterface (not a dcim Interface) fails closed: isinstance(assigned, Interface) is False, device_id never matches the winner, and nothing transfers."""
+        from virtualization.models import VMInterface
+
         view = self._setup_view()
+        donor = make_device("tx-vmi-donor")
+        winner = make_device("tx-vmi-winner")
+        self._mark(donor, winner)
+        # The donor's oob_ip address is assigned to a real VMInterface (an owned NetBox model,
+        # not an external boundary) — the cross-type case the isinstance guard fails closed on.
+        vm = make_vm("tx-vmi-vm")
+        vmi = VMInterface.objects.create(virtual_machine=vm, name="eth0")
+        oob_ip = make_ip("10.0.0.5/24", assigned_object=vmi)
+        donor.oob_ip = oob_ip
+        donor.save()  # save() skips full_clean(), so the cross-type dangling FK persists
         req = _hx_request({"server_key": "default"})
 
-        oob_ip = MagicMock(address="10.0.0.5/24")
-        # NOT spec=Interface → isinstance(assigned, Interface) is False → re-lock skipped.
-        oob_ip.assigned_object = MagicMock(pk=99)
-        donor = MagicMock(pk=10, oob_ip=oob_ip)
-        winner = MagicMock(pk=20, name="winner", oob_ip=None)
-        locked_donor = MagicMock(pk=10, oob_ip=oob_ip)
-        locked_winner = MagicMock(pk=20, name="winner", oob_ip=None)
+        resp = view.post(req, pk=donor.pk, ip_kind="oob")
 
-        with (
-            patch("netbox_librenms_plugin.views.sync.migrate.get_object_or_404", return_value=donor),
-            patch(
-                "netbox_librenms_plugin.views.sync.migrate._resolve_winner_for_donor",
-                return_value=(winner, {"device_id": 20, "server_key": "default", "at": "x"}),
-            ),
-            patch("netbox_librenms_plugin.views.sync.migrate.Device") as mock_device_cls,
-            patch("netbox_librenms_plugin.views.sync.migrate.IPAddress") as mock_ip_cls,
-            patch("netbox_librenms_plugin.views.sync.migrate.Interface.objects") as mock_iface_objects,
-            patch("netbox_librenms_plugin.views.sync.migrate.transaction"),
-            patch("netbox_librenms_plugin.views.sync.migrate.messages"),
-        ):
-            mock_device_cls.objects.select_for_update.return_value.filter.return_value.order_by.return_value = [
-                locked_donor,
-                locked_winner,
-            ]
-            mock_ip_cls.objects.select_for_update.return_value.filter.return_value.first.return_value = oob_ip
-            resp = view.post(req, pk=10, ip_kind="oob")
-
-        # Refused; the Interface manager was never queried (re-lock skipped), nothing saved.
+        # Reject path flows through _fail(): HX-Reswap:none and never the success HX-Refresh header.
+        assert resp.status_code == 200
         assert b"django-messages" in resp.content
-        # Reject path flows through _fail(): the HTMX response carries HX-Reswap:none and
-        # never the success HX-Refresh header, so a regression that returned HX-Refresh=true
-        # (refreshing as if the move/transfer succeeded) would be caught here.
         assert resp.headers.get("HX-Reswap") == "none"
         assert resp.headers.get("HX-Refresh") is None
-        mock_iface_objects.select_for_update.assert_not_called()
-        locked_winner.save.assert_not_called()
-        locked_donor.save.assert_not_called()
+        donor.refresh_from_db()
+        winner.refresh_from_db()
+        assert winner.oob_ip_id is None  # winner never claimed the VMInterface-attached address
+        assert donor.oob_ip_id == oob_ip.pk  # donor FK untouched
 
 
 # ── MoveIPAddressToWinnerView ────────────────────────────────────────────
@@ -1521,7 +1503,10 @@ class TestMigratedDonorRendersSyncTabs:
         donor.save()
 
         url = reverse("plugins:netbox_librenms_plugin:device_librenms_sync", args=[donor.pk])
-        resp = client.get(url, {"tab": "ipaddresses"})
+        # Pass an explicit ?server_key so the view resolves the server via LibreNMSAPI("default")
+        # (which skips the LibreNMSSettings.selected_server read); otherwise this real-client render
+        # is flaky under a suite where another test leaks a LibreNMSSettings mock.
+        resp = client.get(url, {"tab": "ipaddresses", "server_key": "default"})
 
         assert resp.status_code == 200
         html = resp.content.decode()
@@ -1532,3 +1517,19 @@ class TestMigratedDonorRendersSyncTabs:
         move_url = reverse("plugins:netbox_librenms_plugin:ipaddress_move_to_winner", kwargs={"pk": ip.pk})
         assert move_url in html
         assert "Move IP addresses" in html  # the migrated move card header
+        # The gating-rationale comment must be a {% comment %} block, not a multi-line {# #} (which
+        # Django can't span across lines and would leak into the page as visible text).
+        assert "never found_in_librenms" not in html
+
+
+class TestDeviceIpLabelsSingleSource:
+    """Device IP FK labels live in one map (utils.DEVICE_IP_FK_LABELS); the transfer view derives from it."""
+
+    def test_labels_cover_all_fk_fields_and_view_maps_only_to_them(self):
+        from netbox_librenms_plugin.utils import DEVICE_IP_FK_FIELDS, DEVICE_IP_FK_LABELS
+        from netbox_librenms_plugin.views.sync.migrate import TransferDeviceIPView
+
+        # One label per reconcilable FK field, and the transfer view maps ip_kind kwargs only to those
+        # fields — the human label is then read from the shared map, so there is no second copy to drift.
+        assert set(DEVICE_IP_FK_LABELS) == set(DEVICE_IP_FK_FIELDS)
+        assert set(TransferDeviceIPView._IP_KIND_TO_FIELD.values()) == set(DEVICE_IP_FK_FIELDS)
