@@ -504,15 +504,25 @@ class BaseInterfaceTableView(VlanAssignmentMixin, LibreNMSAPIMixin, LibreNMSPerm
                     device_interfaces = interfaces_by_device.get(obj.id, {"by_name": {}, "by_librenms_id": {}})
 
                 port_id = normalize_librenms_port_id(port.get("port_id"))
-                netbox_interface = device_interfaces["by_librenms_id"].get(port_id) if port_id else None
-                if not netbox_interface:
-                    netbox_interface = device_interfaces["by_name"].get(port.get(interface_name_field))
+                # OOB-controller rows live on a SEPARATE LibreNMS device. Matching them against the
+                # HOST device's interfaces (by port_id or name) would mislabel a shared-LOM OOB port
+                # (e.g. both sides report "eth0"/"idrac0") as an in-sync host interface — rendering
+                # its name green/"matched" and comparing its speed/MTU/MAC against an unrelated host
+                # interface. The shared-name collision has its own signal (the "Shared LOM"
+                # _dedup_conflict badge) and sync_selected_interfaces skips _source=="oob" rows, so
+                # never bind an OOB row to a host interface: leave it unmatched (exists_in_netbox False).
+                if port.get("_source") == "oob":
+                    netbox_interface = None
+                else:
+                    netbox_interface = device_interfaces["by_librenms_id"].get(port_id) if port_id else None
+                    if not netbox_interface:
+                        netbox_interface = device_interfaces["by_name"].get(port.get(interface_name_field))
                 port["exists_in_netbox"] = bool(netbox_interface)
                 port["netbox_interface"] = netbox_interface
-                # OOB-controller rows live on a separate LibreNMS device; never
-                # let them mark a main-device interface as matched, or a genuine
-                # netbox-only interface gets hidden by a same-named OOB port.
-                if netbox_interface is not None and port.get("_source") != "oob":
+                # A bound interface is now always a genuine host match (OOB rows resolved to None
+                # above), so it correctly counts toward the matched set used for netbox-only detection
+                # without an OOB row ever hiding a same-named host interface.
+                if netbox_interface is not None:
                     matched_interface_ids.add(netbox_interface.id)
 
                 if port.get("ifAlias") in (port.get("ifDescr"), port.get("ifName")):
