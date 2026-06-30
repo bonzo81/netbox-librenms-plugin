@@ -667,10 +667,6 @@ class LibreNMSAPI:
         def _port_names(port: dict) -> list[str]:
             return [name for field in name_fields if isinstance(name := port.get(field), str) and name]
 
-        def _primary_name(port: dict) -> str:
-            names = _port_names(port)
-            return names[0] if names else ""
-
         # Only ports with a usable port_id and at least one non-empty string name feed the lookup
         # maps: downstream resolution does string ops (regex .search(), `":" in name`, suffix
         # splits), so a nameless / non-string-name port can't be matched anyway.
@@ -734,16 +730,26 @@ class LibreNMSAPI:
             if key_id is not None and value_id is not None:
                 mapping[key_id] = value_id
 
-        def _resolve_physical(name: str):
-            """Strip a numeric .N sub-unit suffix and return the physical-level port if its base exists."""
-            if "." in name:
+        def _resolve_physical_port(port: dict):
+            """
+            Resolve a port to its physical-level port, stripping a Junos sub-unit ``.N`` suffix.
+
+            Scans ALL known names (not just the primary), mirroring the SAP and sub-unit guards:
+            with interface_name_field="ifDescr" the structured ``xe-0/0/0.0`` / ``ae1.0`` name can
+            live in ifName while the primary (ifDescr) carries an arbitrary label. A primary-only
+            check would then fail to collapse the logical pair, and LAG sync would bind the wrong
+            (logical) ports — e.g. ``202 -> 204`` instead of the physical ``201 -> 203``.
+            """
+            for name in _port_names(port):
+                if "." not in name:
+                    continue
                 base, suffix = name.rsplit(".", 1)
-                # Only treat a NUMERIC suffix as a sub-unit (e.g. Gi0/1.100). A dotted name whose
-                # suffix isn't a number is a legitimate physical name, not a sub-interface, so it
-                # must not be remapped to a spurious base.
+                # Only treat a NUMERIC suffix as a sub-unit (e.g. Gi0/1.100, ae1.0). A dotted name
+                # whose suffix isn't a number is a legitimate physical name, not a sub-interface,
+                # so it must not be remapped to a spurious base.
                 if suffix.isdigit() and base in by_name:
                     return by_name[base]
-            return by_name.get(name)
+            return port
 
         def _is_sub_unit_of(child_name: str, parent_name: str) -> bool:
             """True when child_name is parent_name + '.<digits>' (a numeric sub-interface)."""
@@ -780,9 +786,6 @@ class LibreNMSAPI:
             if not high_port or not low_port:
                 continue
 
-            h_name = _primary_name(high_port)
-            l_name = _primary_name(low_port)
-
             # Universal rule: skip Nokia SAP entries (colon notation: lag1:0, lag-1:10). Check
             # ALL known names, not just the primary: when interface_name_field="ifDescr" a SAP port
             # can carry a clean ifDescr but the real lag1:0 marker in ifName, so a primary-only
@@ -796,7 +799,7 @@ class LibreNMSAPI:
             # ordering is NOT guaranteed (the LAG branch below is already position-independent,
             # and ifStack can emit the sub-interface as either the high or the low side), so
             # check BOTH directions. Without the reverse check a parent=low/child=high pair
-            # falls through to the LAG branch, where _resolve_physical collapses both names to
+            # falls through to the LAG branch, where _resolve_physical_port collapses both ports to
             # the same base and the self-reference guard silently drops the relationship.
             if _has_sub_unit_relationship(low_port, high_port):
                 _relate(sub_interfaces, low_port, high_port)  # low is the child, high the parent
@@ -805,9 +808,11 @@ class LibreNMSAPI:
                 _relate(sub_interfaces, high_port, low_port)  # high is the child, low the parent
                 continue
 
-            # LAG membership: resolve physical-level names (strips Junos sub-unit .N suffix)
-            high_phys = _resolve_physical(h_name)
-            low_phys = _resolve_physical(l_name)
+            # LAG membership: resolve each side to its physical-level port (strips the Junos
+            # sub-unit .N suffix), checking every known name so an ifDescr-mode device whose
+            # structured name lives in ifName still collapses to the physical port.
+            high_phys = _resolve_physical_port(high_port)
+            low_phys = _resolve_physical_port(low_port)
             if not high_phys or not low_phys:
                 continue
 

@@ -1,4 +1,5 @@
 import json as json_module
+from functools import cached_property
 
 import django_tables2 as tables
 from django.utils.html import escape, format_html
@@ -481,6 +482,30 @@ class LibreNMSInterfaceTable(tables.Table):
 
         return mark_safe("".join(str(p) for p in parts))
 
+    @cached_property
+    def _vc_members_by_position(self):
+        """
+        Prefetch ``{vc_position: member Device}`` once per table render.
+
+        :meth:`_resolve_row_member_id` is hit per row from BOTH the relationship sync button and
+        the VC member dropdown, and its name-based fallback otherwise issues a
+        ``members.get(vc_position=...)`` query per unresolved row — quadratic query load on a
+        large chassis table. Resolving from this map keeps it O(1) per row (one prefetch total).
+        """
+        device = self.device
+        if device is None or not getattr(device, "virtual_chassis", None):
+            return {}
+        try:
+            return {
+                member.vc_position: member
+                for member in device.virtual_chassis.members.all()
+                if member.vc_position is not None
+            }
+        except (TypeError, AttributeError):
+            # A non-iterable / attribute-less stand-in device (unit tests) — fall back to the
+            # per-call query path inside get_virtual_chassis_member.
+            return {}
+
     def _resolve_row_member_id(self, record):
         """
         Resolve the id of the device/VM that owns this row's interface.
@@ -504,7 +529,12 @@ class LibreNMSInterfaceTable(tables.Table):
             # record name can be None; get_virtual_chassis_member -> re.match() would raise on a
             # None value while rendering a missing relationship button. Coerce to "".
             interface_name = record.get(self.interface_name_field) or ""
-            member = get_virtual_chassis_member(self.device, interface_name)
+            # Resolve from the per-table prefetched member map (O(1) per row). An empty map (a
+            # mock/attribute-less device in tests) is passed as None so the helper keeps its
+            # original per-call query path / patch point unchanged.
+            member = get_virtual_chassis_member(
+                self.device, interface_name, members_by_position=self._vc_members_by_position or None
+            )
             return (member or self.device).pk
         return self.device.pk if self.device else ""
 

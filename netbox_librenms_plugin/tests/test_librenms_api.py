@@ -2432,6 +2432,30 @@ class TestResolvePortRelationships:
         # old behaviour) scanned ifDescr alone and left sub_interfaces empty — child 402 -> parent 401.
         assert result["sub_interfaces"] == {402: 401}
 
+    def test_lag_physical_resolution_uses_ifname_when_namefield_is_ifdescr(self, mock_librenms_api):
+        """LAG physical resolution must scan ifName for the .N structure in ifDescr mode, not just the primary name."""
+        # With interface_name_field='ifDescr' the structured xe-/ae- name can live in ifName while
+        # the primary (ifDescr) is an arbitrary label. A primary-only check leaves the Junos logical
+        # units uncollapsed and binds the wrong (logical) ports: 202 -> 204 instead of 201 -> 203.
+        ports = [
+            # Physical member + its logical unit. The .N structure is in ifName; ifDescr (the
+            # primary in this mode) is an arbitrary label with no dotted relationship.
+            {"port_id": 201, "ifName": "xe-0/0/0", "ifDescr": "member-phys", "ifType": "ethernetCsmacd"},
+            {"port_id": 202, "ifName": "xe-0/0/0.0", "ifDescr": "member-unit", "ifType": "l2vlan"},
+            # Aggregate + its logical unit, likewise structured only in ifName.
+            {"port_id": 203, "ifName": "ae1", "ifDescr": "bundle-core", "ifType": "ieee8023adLag"},
+            {"port_id": 204, "ifName": "ae1.0", "ifDescr": "bundle-unit", "ifType": "l2vlan"},
+        ]
+        # ifStack relates the LOGICAL units (their ifDescr primaries are arbitrary labels).
+        port_stack = [{"high_port_id": 204, "low_port_id": 202}]
+        result = mock_librenms_api.resolve_port_relationships(
+            ports, port_stack, lag_patterns={"junos": r"^ae\d"}, interface_name_field="ifDescr"
+        )
+        # Both sides collapse to their physical ports via the ifName .N suffix: member 201 -> ae1 203.
+        assert result["lag_members"] == {201: 203}
+        # The uncollapsed logical member must NOT be the one bound.
+        assert 202 not in result["lag_members"]
+
     def test_cisco_ios_lag_via_name_pattern(self, mock_librenms_api, ios_lag_patterns):
         """Cisco IOS: Po10 has propVirtual type but is a LAG via name pattern."""
         result = mock_librenms_api.resolve_port_relationships(

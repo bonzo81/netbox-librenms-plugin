@@ -3653,6 +3653,27 @@ class TestRelationshipOwnerResolutionConsistency:
         assert f'data-object-id="{m2.id}"' in button  # button agrees
         assert f'data-object-id="{m1.id}"' not in button  # not the viewed member
 
+    def test_vc_member_resolution_is_prefetched_not_per_row(self, db):
+        """The name-based VC owner resolution must prefetch members once, not query per row."""
+        from django.db import connection
+        from django.test.utils import CaptureQueriesContext
+
+        m1, m2 = self._vc()  # positions 1 and 2
+        table = self._vc_table(m1)  # viewing member1
+        # Rows that fall through to the name-based VC heuristic (no netbox_interface /
+        # selected_object_id), alternating between the two members' positions.
+        records = [{"ifName": f"Ethernet{pos}"} for pos in (1, 2, 1, 2, 1, 2)]
+
+        with CaptureQueriesContext(connection) as ctx:
+            owners = [table._resolve_row_member_id(r) for r in records]
+
+        # Behaviour preserved: each row resolves to the member at its name's vc_position.
+        assert owners == [m1.pk, m2.pk, m1.pk, m2.pk, m1.pk, m2.pk]
+        # Perf (the finding): the member set is prefetched once via a cached_property, so six rows
+        # issue far fewer than six queries. The old path ran members.get(vc_position=...) per row
+        # — one query each — which this would catch (6 queries, not < 6).
+        assert len(ctx.captured_queries) < len(records)
+
 
 class TestVMTableHidesLagSyncButton:
     """LAG sync is device-only (VMInterface has no lag field); a VM table must not render a LAG sync button that would 404. Parent sync stays available for VMs."""

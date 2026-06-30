@@ -157,6 +157,7 @@ def validate_regex_field(value, field_name):
 def get_virtual_chassis_member(
     device: Device,
     port_name: str,
+    members_by_position: dict | None = None,
     *,
     return_device_on_failure: bool = True,
 ) -> Device | None:
@@ -166,6 +167,11 @@ def get_virtual_chassis_member(
     Args:
         device (Device): The NetBox device instance.
         port_name (str): The name of the port (e.g., 'Ethernet1').
+        members_by_position (dict | None): Optional prefetched ``{vc_position: member Device}``
+            map. When provided, the member is resolved from it instead of issuing a per-call
+            ``members.get(vc_position=...)`` query — pass it when resolving many rows of the same
+            chassis (e.g. a VC interface table) to keep resolution O(1) per row instead of one
+            query per row.
         return_device_on_failure: Return ``device`` when member matching fails. Callers
             resolving a remote VC endpoint can disable this fallback to avoid binding the
             advertised port against the wrong member.
@@ -193,6 +199,8 @@ def get_virtual_chassis_member(
 
         # Get the port number and use it
         vc_position = int(match.group(1))
+        if members_by_position is not None:
+            return members_by_position.get(vc_position, fallback)
         return device.virtual_chassis.members.get(vc_position=vc_position)
     except (re.error, ValueError, ObjectDoesNotExist):
         return fallback
