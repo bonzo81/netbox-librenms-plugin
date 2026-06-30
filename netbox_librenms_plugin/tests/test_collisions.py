@@ -376,6 +376,11 @@ def test_collision_template_renders_correct_link_targets_and_escapes():
     assert "same NetBox device" not in html
     assert "Add as OOB" not in html
     assert "Promote to host" not in html
+    # The per-group "targeting this ..." label must follow nb_model_name too: the VM group says
+    # "VM", the device group says "device". Line 49 previously hardcoded "device" for both, so a
+    # VM collision fell back to device-only wording.
+    assert "Selected LibreNMS rows targeting this VM:" in html
+    assert "Selected LibreNMS rows targeting this device:" in html
     # Device-supplied hostname is auto-escaped (no raw <script> injected into the modal).
     assert "<script>alpha</script>" not in html
     assert "&lt;script&gt;alpha&lt;/script&gt;" in html

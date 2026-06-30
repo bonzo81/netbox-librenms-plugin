@@ -46,7 +46,7 @@
         {% endif %}
         <span class="text-muted small">(pk {{ group.nb_device_pk }})</span>
       </div>
-      <div class="text-muted small mb-1">Selected LibreNMS rows targeting this device:</div>
+      <div class="text-muted small mb-1">Selected LibreNMS rows targeting this {% if group.nb_model_name == 'virtualmachine' %}VM{% else %}device{% endif %}:</div>
       <ul class="list-unstyled mb-0 ps-2 small">
         {% for row in group.librenms_rows %}
           <li class="mb-1">
