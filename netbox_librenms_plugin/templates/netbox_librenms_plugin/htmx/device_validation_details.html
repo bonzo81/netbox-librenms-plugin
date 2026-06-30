@@ -939,17 +939,19 @@
               }
               if (!modal.dataset.promoteResetBound) {
                 modal.dataset.promoteResetBound = "1";
-                if (typeof bootstrap !== "undefined" && bootstrap.Modal) {
-                  modal.addEventListener("hidden.bs.modal", resetPromoteForm);
-                } else {
-                  // Fallback only when Bootstrap's modal JS isn't active: the dismiss buttons
-                  // then only hide the modal and never fire hidden.bs.modal, so a stale "Use
-                  // new" selection would persist across reopen. Reset on their click instead —
-                  // binding both would call resetPromoteForm twice when Bootstrap IS present.
-                  modal.querySelectorAll('[data-bs-dismiss="modal"]').forEach(function (btn) {
-                    btn.addEventListener("click", resetPromoteForm);
-                  });
-                }
+                // Bind BOTH close paths rather than choosing one by the Bootstrap state at
+                // render time. hidden.bs.modal fires for every Bootstrap close — including the
+                // backdrop click, which the dismiss-button handler never catches — while the
+                // dismiss-button click covers the no-Bootstrap fallback where hidden.bs.modal
+                // never fires. (The open trigger decides Bootstrap-vs-fallback again at click
+                // time, so a render-time-only choice could close via a path the reset isn't
+                // wired to and leave the _promote_* radios / override_* inputs sticky on
+                // reopen.) resetPromoteForm is idempotent, so the harmless double-call when
+                // Bootstrap is present is worth covering the backdrop-dismiss path.
+                modal.addEventListener("hidden.bs.modal", resetPromoteForm);
+                modal.querySelectorAll('[data-bs-dismiss="modal"]').forEach(function (btn) {
+                  btn.addEventListener("click", resetPromoteForm);
+                });
               }
               modal.addEventListener("change", function (e) {
                 var t = e.target;

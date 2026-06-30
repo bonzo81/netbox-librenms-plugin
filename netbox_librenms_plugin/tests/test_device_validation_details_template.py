@@ -442,3 +442,33 @@ def test_promote_override_handler_clears_hidden_when_switching_back_to_keep():
     assert "hidden.value = r.checked ?" in source
     # The buggy keep-branch (which never fired, since Keep has no data-override-target) is gone.
     assert 'r.value === "keep"' not in source
+
+
+def test_promote_form_reset_is_wired_to_both_close_paths():
+    """The promote reset binds hidden.bs.modal and the dismiss-button click unconditionally, so a Bootstrap backdrop dismiss can't leave the form sticky on reopen."""
+    from pathlib import Path
+
+    import netbox_librenms_plugin
+
+    source = (
+        Path(netbox_librenms_plugin.__file__).parent
+        / "templates"
+        / "netbox_librenms_plugin"
+        / "htmx"
+        / "device_validation_details.html"
+    ).read_text()
+
+    # Isolate the reset-binding block (between the bound-guard flag and the next handler).
+    start = source.index('modal.dataset.promoteResetBound = "1"')
+    end = source.index('modal.addEventListener("change"', start)
+    block = source[start:end]
+
+    # hidden.bs.modal fires for EVERY Bootstrap close, including the backdrop click that the
+    # dismiss-button handler never catches; the dismiss-button click covers the no-Bootstrap
+    # fallback where hidden.bs.modal never fires.
+    assert 'modal.addEventListener("hidden.bs.modal", resetPromoteForm)' in block
+    assert 'btn.addEventListener("click", resetPromoteForm)' in block
+    # Both are now bound unconditionally: the old render-time if/else picked exactly ONE path,
+    # so a Bootstrap backdrop dismiss (fires only hidden.bs.modal) was unhandled whenever the
+    # fallback branch had been taken at render. That either/or is gone.
+    assert "} else {" not in block
