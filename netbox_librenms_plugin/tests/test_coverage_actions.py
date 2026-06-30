@@ -3,6 +3,7 @@
 from unittest.mock import MagicMock, patch
 
 import pytest
+from django.test import RequestFactory
 
 from netbox_librenms_plugin.tests.conftest import make_device, make_interface, make_ip, make_vm
 
@@ -657,10 +658,16 @@ class TestDeviceValidationDetailsView:
     @patch("netbox_librenms_plugin.views.imports.actions.render")
     def test_get_device_not_found_returns_200_html_fragment(self, mock_render):
         # HTMX fragment: a 4xx makes HTMX skip the swap, so the inline alert must come back 200.
+        # Use a real request with NO ?server_key: resolve_get_render_server_key then keeps the
+        # already-bound default client instead of trying to rebuild a client for a key. A bare
+        # MagicMock() request makes request.GET.get("server_key") a truthy MagicMock, which the
+        # view treats as an unresolvable ?server_key and fails closed before reaching this branch
+        # (deterministic only when no multi-server config is loaded — hence flaky under the full suite).
         view = self._make_view()
+        request = RequestFactory().get("/x/")
         with patch.object(view, "get_validated_device_with_selections", return_value=(None, None, {})):
             with patch.object(view, "require_write_permission", return_value=None):
-                result = view.get(MagicMock(), device_id=1)
+                result = view.get(request, device_id=1)
         assert result.status_code == 200
         assert b"not found in LibreNMS" in result.content
 
@@ -668,6 +675,9 @@ class TestDeviceValidationDetailsView:
     def test_get_with_existing_device_adds_sync_info(self, mock_render):
         view = self._make_view()
         mock_render.return_value = MagicMock()
+        # Real request, no ?server_key — see the note in test_get_device_not_found_*: a bare
+        # MagicMock() request trips the unresolved-server_key fail-closed guard before render.
+        request = RequestFactory().get("/x/")
 
         libre_device = {"device_id": 1, "serial": "SN001", "os": "ios", "hardware": "Cisco C9300"}
         existing = MagicMock()
@@ -685,7 +695,7 @@ class TestDeviceValidationDetailsView:
             ):
                 with patch.object(view, "_build_sync_info", return_value={"serial_synced": True}):
                     with patch.object(view, "_build_id_server_info", return_value=None):
-                        view.get(MagicMock(), device_id=1)
+                        view.get(request, device_id=1)
 
         mock_render.assert_called_once()
         ctx = mock_render.call_args[0][2]
