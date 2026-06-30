@@ -100,8 +100,11 @@ _FORCE_REQUIRED_ACTIONS = frozenset({"link", "update", "update_serial", "update_
 # Derived from OOB_TYPES (the single source of truth for OOB controller types — so a new type can't
 # silently drift out of the UI suggestion, as "cimc" had) plus the interface-name-only mgmt tokens.
 _OOB_INTERFACE_NAME_TOKENS = (*OOB_TYPES, "mgmt", "management")
+# Anchor on word boundaries with an optional trailing index, mirroring constants.OOB_TYPE_PATTERN
+# (\b(...)\d*\b). Without \b the tokens matched as bare substrings, so a name merely CONTAINING a
+# token (e.g. "bmcswitch-uplink", "submgmt") was wrongly pre-selected as the OOB-IP interface.
 _OOB_INTERFACE_NAME_PATTERN = re.compile(
-    "(" + "|".join(re.escape(token) for token in _OOB_INTERFACE_NAME_TOKENS) + ")", re.IGNORECASE
+    r"\b(" + "|".join(re.escape(token) for token in _OOB_INTERFACE_NAME_TOKENS) + r")\d*\b", re.IGNORECASE
 )
 
 # Actions that operate on Device-only fields and cannot be applied to VMs.

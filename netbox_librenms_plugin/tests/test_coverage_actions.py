@@ -5491,6 +5491,30 @@ class TestSuggestOOBInterface:
         assert sid is None
         assert new_name == "oob0"
 
+    def test_substring_token_is_not_matched(self):
+        """A name that merely contains an OOB token as a substring (no word boundary) is not pre-selected."""
+        from netbox_librenms_plugin.views.imports.actions import _suggest_oob_interface
+
+        dev = make_device("oob-suggest-substring")
+        # "bmcswitch-uplink" contains "bmc" and "submgmt" contains "mgmt", but neither is an
+        # OOB/management interface — without word-boundary anchoring both falsely matched.
+        make_interface(dev, "bmcswitch-uplink")
+        make_interface(dev, "submgmt")
+        sid, new_name = _suggest_oob_interface(dev, {"type": "bmc"})
+        assert sid is None
+        assert new_name == "bmc0"
+
+    def test_token_with_trailing_index_still_matches(self):
+        """A genuine OOB/management interface (token + optional index) is still pre-selected."""
+        from netbox_librenms_plugin.views.imports.actions import _suggest_oob_interface
+
+        dev = make_device("oob-suggest-mgmt")
+        make_interface(dev, "eth0")
+        mgmt = make_interface(dev, "mgmt0")
+        sid, new_name = _suggest_oob_interface(dev, {"type": "oob"})
+        assert sid == mgmt.pk
+        assert new_name == "oob0"
+
 
 @pytest.mark.django_db
 class TestResolveOOBInterface:
