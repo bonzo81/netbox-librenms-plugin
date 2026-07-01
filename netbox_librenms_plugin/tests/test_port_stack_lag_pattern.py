@@ -155,3 +155,53 @@ class TestHasLagSignalsOsScoped:
         agg = [{"ifName": "agg0", "ifType": "ieee8023adLag"}]
         # ieee8023adLag is structural -> fires regardless of OS scope.
         assert view._has_lag_signals(agg, device_os="some-other-os") is True
+
+
+@pytest.mark.django_db
+class TestMigration0012Preflight:
+    """Exercise 0012's RunPython preflight (normalize_librenms_os_case) against the real ORM: it canonicalizes casing and aborts with an actionable error before the CI-unique constraint would fail opaquely on legacy mixed-case duplicates."""
+
+    @staticmethod
+    def _preflight():
+        import importlib
+
+        mig = importlib.import_module("netbox_librenms_plugin.migrations.0012_portstacklagpattern_ci_unique")
+        return mig.normalize_librenms_os_case
+
+    def test_preflight_lowercases_mixed_case_rows(self):
+        """A mixed-case librenms_os an old full_clean-bypassing path left behind is canonicalized to lowercase."""
+        from django.apps import apps as django_apps
+
+        from netbox_librenms_plugin.models import PortStackLagPattern
+
+        # bulk_create skips clean()'s lowercasing, so "ZZOSX" reaches the row verbatim (unique on its
+        # own, so the CI constraint permits it). The preflight must then canonicalize it. Use a
+        # distinctive OS name so it can't collide with a migration-seeded default pattern.
+        PortStackLagPattern.objects.bulk_create([PortStackLagPattern(librenms_os="ZZOSX", lag_name_pattern=r"^zz\d+$")])
+        self._preflight()(django_apps, None)
+        assert PortStackLagPattern.objects.filter(librenms_os="zzosx").exists()
+        assert not PortStackLagPattern.objects.filter(librenms_os="ZZOSX").exists()
+
+    def test_preflight_blocks_case_variant_duplicates_with_clear_error(self):
+        """When case-variant duplicates predate the CI-unique, the preflight raises a clear RuntimeError naming the value rather than letting AddConstraint fail with an opaque IntegrityError."""
+        from django.apps import apps as django_apps
+        from django.db import connection
+
+        from netbox_librenms_plugin.models import PortStackLagPattern
+
+        constraint = next(
+            c for c in PortStackLagPattern._meta.constraints if c.name == "unique_portstacklagpattern_librenms_os_ci"
+        )
+        # Reproduce the pre-0012 world (case-sensitive unique only) so the colliding rows can
+        # coexist. Postgres DDL is transactional and this runs inside the test's transaction, so
+        # the drop — and the rows below — roll back on teardown, restoring the constraint.
+        with connection.schema_editor() as schema_editor:
+            schema_editor.remove_constraint(PortStackLagPattern, constraint)
+        PortStackLagPattern.objects.bulk_create(
+            [
+                PortStackLagPattern(librenms_os="iosdup", lag_name_pattern=r"^ae\d+$"),
+                PortStackLagPattern(librenms_os="IOSDUP", lag_name_pattern=r"^bundle\d+$"),
+            ]
+        )
+        with pytest.raises(RuntimeError, match="iosdup"):
+            self._preflight()(django_apps, None)
