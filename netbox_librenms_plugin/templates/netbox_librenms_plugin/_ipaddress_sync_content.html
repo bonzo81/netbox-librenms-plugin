@@ -175,22 +175,7 @@ the interface move-to-winner control in _interface_sync_content.html.
                     <td>{{ ip.address }}</td>
                     <td>{{ ip.interface_name|default:"-" }}</td>
                     <td class="text-end">
-                        {% if has_write_permission and migrated_to_winner %}
-                        <button type="button"
-                            class="btn btn-sm btn-outline-warning"
-                            hx-post="{% url 'plugins:netbox_librenms_plugin:ipaddress_move_to_winner' pk=ip.id %}"
-                            hx-headers='{"X-CSRFToken": "{{ csrf_token }}"}'
-                            {% if migrated_to_marker.server_key %}hx-vals='{"server_key": "{{ migrated_to_marker.server_key|escapejs }}"}'{% elif ip_sync.server_key %}hx-vals='{"server_key": "{{ ip_sync.server_key|escapejs }}"}'{% endif %}
-                            hx-swap="none"
-                            hx-confirm="Move IP '{{ ip.address }}' to {{ migrated_to_winner.name }}?"
-                            title="Reassign this IP to {{ migrated_to_winner.name }}'s '{{ ip.interface_name }}' interface">
-                            <i class="mdi mdi-transfer-right"></i> Move
-                        </button>
-                        {% elif migrated_to_winner %}
-                        <span class="text-muted small">read-only</span>
-                        {% else %}
-                        <span class="text-muted small">winner missing</span>
-                        {% endif %}
+                        {% include "netbox_librenms_plugin/inc/_migrate_move_button.html" with move_url_name="plugins:netbox_librenms_plugin:ipaddress_move_to_winner" obj_id=ip.id obj_label=ip.address entity_word="IP" obj_interface_name=ip.interface_name winner=migrated_to_winner server_key=migrated_to_marker.server_key|default:ip_sync.server_key %}
                     </td>
                 </tr>
                 {% endfor %}

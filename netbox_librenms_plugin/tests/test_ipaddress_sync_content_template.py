@@ -85,6 +85,38 @@ class TestIpAddressSyncContentTemplateMigratedMode:
         assert move_url not in html  # no live mutating button for read-only users
         assert "read-only" in html
 
+    def test_move_button_degrades_to_read_only_when_url_unregistered(self):
+        """A missing/restacked ipaddress_move_to_winner route must degrade to read-only, not 500.
+
+        The shared include uses ``{% url ... as move_url %}`` + ``and move_url``, so an unresolved
+        route yields an empty move_url and the read-only fallback instead of a bare {% url %} that
+        would NoReverseMatch and 500 the whole IP tab.
+        """
+        from unittest.mock import patch
+
+        from django.urls import NoReverseMatch
+        from django.urls import reverse as real_reverse
+
+        from netbox_librenms_plugin.tests.conftest import make_device
+
+        winner = make_device("ip-tmpl-winner-degrade")
+        movable = [{"id": 88, "address": "10.0.0.11/24", "interface_name": "eth2"}]
+
+        def _reverse(viewname, *args, **kwargs):
+            if str(viewname).endswith("ipaddress_move_to_winner"):
+                raise NoReverseMatch(viewname)
+            return real_reverse(viewname, *args, **kwargs)
+
+        with patch("django.urls.reverse", _reverse):
+            html = self._render(
+                migrated={"server_key": "default", "device_id": winner.pk, "at": "now"},
+                movable=movable,
+                winner=winner,
+                has_write=True,
+            )
+        assert "Move IP '" not in html  # route unresolved → move_url empty → no live button
+        assert "read-only" in html
+
     def test_no_move_card_outside_migrated_mode(self):
         """Without a migration marker the IP tab must not render the move card at all."""
         from netbox_librenms_plugin.tests.conftest import make_device

@@ -1047,7 +1047,10 @@ class TestNonHtmxFallbackRedirect:
         view = self._setup_view()
         req = _nonhtmx_request({"server_key": "siteB"})
         donor = MagicMock(pk=10, cf={})
-        interface = MagicMock(pk=5, name="Eth0", device=donor)
+        # `name` is a reserved MagicMock constructor kwarg (sets the mock's repr, not `.name`),
+        # so set the attribute explicitly — otherwise interface.name is a Mock, not "Eth0".
+        interface = MagicMock(pk=5, device=donor)
+        interface.name = "Eth0"
 
         with (
             patch("netbox_librenms_plugin.views.sync.migrate.get_object_or_404", return_value=interface),
