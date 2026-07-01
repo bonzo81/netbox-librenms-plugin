@@ -10,6 +10,10 @@ Conventions:
 - object.__new__(TableClass) for render method tests where __init__ is complex
 - MagicMock for all external dependencies
 - assert x == y style assertions
+
+Exception: TestRenderLibreNMSId runs against real Interface rows (@pytest.mark.django_db) — the
+LibreNMS-id cell's colour depends on the real get_librenms_device_id custom-field read, which a
+MagicMock interface would let drift silently.
 """
 
 from unittest.mock import MagicMock, patch
@@ -3716,3 +3720,52 @@ class TestVMTableHidesLagSyncButton:
         html = str(table.render_parent(None, record))
         assert "parent-sync-btn" in html  # parent sync IS supported for VMs
         assert f'data-object-id="{vm.id}"' in html
+
+
+@pytest.mark.django_db
+class TestRenderLibreNMSId:
+    """render_librenms_id colours the LibreNMS-id cell by how the stored port_id compares to NetBox.
+
+    Restores real coverage (deleted on the parent/LAG UI work) using real Interface custom-field
+    reads — a mock netbox_interface would let the get_librenms_device_id contract drift silently.
+    """
+
+    def test_no_exists_in_netbox_renders_red(self):
+        table = _make_interface_table(server_key="default")
+        html = table.render_librenms_id("42", {"exists_in_netbox": False})
+        assert "text-danger" in html and ">42<" in html
+
+    def test_exists_but_no_netbox_interface_renders_red(self):
+        table = _make_interface_table(server_key="default")
+        html = table.render_librenms_id("42", {"exists_in_netbox": True, "netbox_interface": None})
+        assert "text-danger" in html
+
+    def test_interface_without_librenms_cf_renders_red_with_title(self):
+        from netbox_librenms_plugin.tests.conftest import make_device, make_interface
+
+        iface = make_interface(make_device("rid-nocf"), "Gi0/1")  # no librenms_id CF
+        table = _make_interface_table(server_key="default")
+        html = table.render_librenms_id("42", {"exists_in_netbox": True, "netbox_interface": iface})
+        assert "text-danger" in html and "No librenms_id" in html
+
+    def test_mismatch_renders_orange_with_existing_id(self):
+        from netbox_librenms_plugin.tests.conftest import make_device, make_interface
+        from netbox_librenms_plugin.utils import set_librenms_device_id
+
+        iface = make_interface(make_device("rid-mismatch"), "Gi0/1")
+        set_librenms_device_id(iface, 99, "default")
+        iface.save()
+        table = _make_interface_table(server_key="default")
+        html = table.render_librenms_id("42", {"exists_in_netbox": True, "netbox_interface": iface})
+        assert "text-warning" in html and "Existing LibreNMS ID: 99" in html and ">42<" in html
+
+    def test_match_renders_green(self):
+        from netbox_librenms_plugin.tests.conftest import make_device, make_interface
+        from netbox_librenms_plugin.utils import set_librenms_device_id
+
+        iface = make_interface(make_device("rid-match"), "Gi0/1")
+        set_librenms_device_id(iface, 42, "default")
+        iface.save()
+        table = _make_interface_table(server_key="default")
+        html = table.render_librenms_id("42", {"exists_in_netbox": True, "netbox_interface": iface})
+        assert "text-success" in html and ">42<" in html
