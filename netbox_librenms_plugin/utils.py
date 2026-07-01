@@ -2371,10 +2371,6 @@ def build_migrated_context(obj, server_key: str = "default") -> dict:
     render and after a tab refresh (the partial-render views build their own context
     and would otherwise drop the marker).
 
-    Args:
-        obj: The donor device to build migrated-mode context for.
-        server_key (str): The LibreNMS server key the marker is namespaced under.
-
     ``migrated_to_winner`` is a lazy proxy: the winner ``Device`` row is fetched only when a template
     actually reads it (the interface/IP partials, which render the per-row "Move to winner" controls).
     The cable/module/VLAN partials render only the marker banner and never touch it, so they avoid the
