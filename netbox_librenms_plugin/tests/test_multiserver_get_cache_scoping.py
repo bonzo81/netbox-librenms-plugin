@@ -125,6 +125,46 @@ class TestMultiServerGetRenderCacheScoping:
         finally:
             real_cache.delete(ip_key)
 
+    def test_modules_build_context_receives_scoped_server_key(self):
+        """get_context_data must thread the RESOLVED server into _build_context explicitly.
+
+        _build_context keys _active_server_key on server_key or self.librenms_api.server_key. Both
+        equal 'prod' today (the rebind side effect), so the bug is unobservable via the result —
+        it only bites if a future reorder makes them diverge. Spy the call contract instead:
+        unfixed passes no server_key (None); fixed passes 'prod'. The real get_context_data runs
+        end to end (real cache read + real librenms_id/oob guards); only the downstream
+        _build_context (tested elsewhere) is stubbed to capture the kwarg.
+        """
+        from netbox_librenms_plugin.views.object_sync.devices import DeviceModuleTableView
+
+        device = make_device("scoped-mod")
+        view = DeviceModuleTableView()
+        view._librenms_api = MagicMock(server_key="default")
+        prod_api = MagicMock(server_key="prod")
+        prod_api.get_librenms_id.return_value = 7
+        request = _get_request("prod")
+        view.request = request
+
+        inv_key = view.get_cache_key(device, "inventory", "prod")
+        real_cache.set(inv_key, {"inventory": [{"entPhysicalIndex": 1}], "librenms_id": 7, "oob_librenms_id": None})
+
+        captured = {}
+
+        def _spy(*args, **kwargs):
+            captured["server_key"] = kwargs.get("server_key")
+            return {"table": None, "object": device}
+
+        try:
+            with (
+                patch("netbox_librenms_plugin.librenms_api.build_librenms_api", return_value=prod_api),
+                patch("netbox_librenms_plugin.views.base.modules_view.get_librenms_oob", return_value=None),
+                patch.object(view, "_build_context", side_effect=_spy),
+            ):
+                view.get_context_data(request, device)
+            assert captured.get("server_key") == "prod"
+        finally:
+            real_cache.delete(inv_key)
+
 
 @pytest.mark.django_db
 class TestUnresolvedServerKeyRendersEmpty:
@@ -222,6 +262,53 @@ class TestUnresolvedServerKeyRendersEmpty:
             assert ctx["table"] is None
         finally:
             real_cache.delete(default_key)
+
+    # The two tests above seed the DEFAULT-server cache and prove the request doesn't fall back to
+    # it — but they pass even unfixed, because the read is already scoped to the requested key so
+    # default's cache never surfaces. The real regression is subtler: when the UNRESOLVED requested
+    # server's OWN cache still holds a stale snapshot, the pre-fix code renders it while the
+    # per-object librenms_id index is built against the default-bound client (the failed rebind left
+    # librenms_api on the default) — mismatching already-synced rows. These seed the *requested*
+    # (ghost) key to exercise that path; only honoring the `unresolved` flag renders empty.
+
+    def test_interfaces_unresolved_key_ignores_that_servers_own_stale_cache(self):
+        from dcim.models import Interface
+
+        from netbox_librenms_plugin.views.object_sync.devices import DeviceInterfaceTableView
+
+        device = make_device("ghost-iface-stale")
+        Interface.objects.create(device=device, name="Gi0/1", type="1000base-t")
+        view = DeviceInterfaceTableView()
+        view._librenms_api = MagicMock(server_key="default")
+        view.request = self._ghost_request()
+        ghost_key = view.get_cache_key(device, "ports", "ghost")
+        real_cache.set(ghost_key, {"ports": [{"port_id": 5, "ifName": "Gi0/1", "ifAdminStatus": "up"}]})
+        try:
+            with patch("netbox_librenms_plugin.librenms_api.build_librenms_api", return_value=None):
+                ctx = view.get_context_data(view.request, device, "ifName")
+            assert ctx["server_key"] == "ghost"
+            # Unfixed renders the stale ghost ports (table populated); fixed forces a miss → None.
+            assert ctx["table"] is None
+        finally:
+            real_cache.delete(ghost_key)
+
+    def test_ip_unresolved_key_ignores_that_servers_own_stale_cache(self):
+        from netbox_librenms_plugin.views.object_sync.devices import DeviceIPAddressTableView
+
+        device = make_device("ghost-ip-stale")
+        view = DeviceIPAddressTableView()
+        view._librenms_api = MagicMock(server_key="default")
+        view.request = self._ghost_request()
+        ghost_key = view.get_cache_key(device, "ip_addresses", "ghost")
+        real_cache.set(ghost_key, {"ip_addresses": [], "mgmt_ip": "", "ports_by_id": {}})
+        try:
+            with patch("netbox_librenms_plugin.librenms_api.build_librenms_api", return_value=None):
+                ctx = view.get_context_data(view.request, device)
+            assert ctx["server_key"] == "ghost"
+            # Unfixed renders from the stale ghost IP cache (truthy entry → table); fixed short-circuits.
+            assert ctx["table"] is None
+        finally:
+            real_cache.delete(ghost_key)
 
 
 @pytest.mark.django_db

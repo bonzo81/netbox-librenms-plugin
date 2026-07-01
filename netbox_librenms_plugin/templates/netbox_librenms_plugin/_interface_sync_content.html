@@ -376,10 +376,17 @@
                                     <td>{{ interface.description|default:"-" }}</td>
                                     {% if migrated_to_marker %}
                                     <td class="text-end">
-                                        {% if has_write_permission and migrated_to_winner %}
+                                        {% comment %}
+                                        'as' form does not raise NoReverseMatch: the move-to-winner URL is
+                                        registered by the device-merge feature further up the stack, so on
+                                        branches without it move_url is '' and the live button degrades to
+                                        read-only instead of 500ing the whole tab.
+                                        {% endcomment %}
+                                        {% url 'plugins:netbox_librenms_plugin:interface_move_to_winner' pk=interface.id as move_url %}
+                                        {% if has_write_permission and migrated_to_winner and move_url %}
                                         <button type="button"
                                             class="btn btn-sm btn-outline-warning"
-                                            hx-post="{% url 'plugins:netbox_librenms_plugin:interface_move_to_winner' pk=interface.id %}"
+                                            hx-post="{{ move_url }}"
                                             hx-headers='{"X-CSRFToken": "{{ csrf_token }}"}'
                                             {% if migrated_to_marker.server_key %}hx-vals='{"server_key": "{{ migrated_to_marker.server_key|escapejs }}"}'{% endif %}
                                             hx-swap="none"

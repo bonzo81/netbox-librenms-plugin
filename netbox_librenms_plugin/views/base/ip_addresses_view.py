@@ -489,7 +489,13 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMix
         # default's — without this the IP tab renders empty after a successful refresh on a
         # non-default server. An unresolved non-blank key scopes to that key (cache miss →
         # empty) rather than falling back to the default server's cached IPs.
-        scoped, _unresolved = self.resolve_get_render_server_key(request)
+        scoped, unresolved = self.resolve_get_render_server_key(request)
+        if unresolved:
+            # ?server_key named a server that no longer resolves (deleted/misconfigured). Its IP
+            # snapshot may still be cached, but the failed rebind left self.librenms_api bound to the
+            # DEFAULT server; render an empty table scoped to the requested key rather than that
+            # stale server's cached IPs (mirrors modules_view.get_context_data's unresolved guard).
+            return {"table": None, "object": obj, "cache_expiry": None, "server_key": scoped}
         context = self._prepare_context(request, obj, interface_name_field, fetch_fresh=False, server_key=scoped)
         if context is None:
             # No data found; return context with empty table

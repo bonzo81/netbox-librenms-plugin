@@ -4901,8 +4901,11 @@ class TestGetContextDataOOBCacheFingerprint:
 
         # The reuse contract: the unchanged-fingerprint path must rebuild from the cached
         # inventory snapshot, not some other payload. It also forwards the already-resolved
-        # sync_device so _build_context doesn't re-resolve it.
-        view._build_context.assert_called_once_with(request, obj, cached["inventory"], sync_device=obj)
+        # sync_device AND the resolved server_key (so _build_context keys on the scoped server
+        # explicitly, not the rebind side effect) — matching post()'s call shape.
+        view._build_context.assert_called_once_with(
+            request, obj, cached["inventory"], server_key="test-server", sync_device=obj
+        )
         assert ctx == {"built": True}
         # Lock in the "cache preserved when OOB linkage is unchanged" contract: the
         # unchanged-fingerprint path must rebuild from cache without deleting it.

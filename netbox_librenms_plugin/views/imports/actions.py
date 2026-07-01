@@ -245,6 +245,47 @@ def _platform_device_type_mismatch(device) -> HttpResponse | None:
     return None
 
 
+def _device_type_rack_fit_error(device) -> HttpResponse | None:
+    """
+    Mirror NetBox Device.clean()'s rack-space rule for the ``save(update_fields=...)`` path.
+
+    ``save(update_fields=["device_type", ...])`` skips ``full_clean()`` (it would abort on
+    unrelated legacy fields), which also bypasses ``Device.clean()``'s rack-fit check: the new
+    device_type's ``u_height`` must fit in the free units at the device's rack position/face. A
+    taller LibreNMS-matched device_type would otherwise persist an out-of-bounds rack elevation
+    with a success toast and no DB backstop. Re-validate only that one rule (like
+    :func:`_platform_device_type_mismatch`): return an HTMX error response when it won't fit, else
+    ``None``. A device that isn't rack-mounted (no rack/position) is unaffected.
+    """
+    rack = getattr(device, "rack", None)
+    position = getattr(device, "position", None)
+    device_type = getattr(device, "device_type", None)
+    if not (rack and position and device_type):
+        return None
+    try:
+        # Full-depth types occupy both faces, so fit is checked rack-wide (rack_face=None); exclude
+        # the device's own current occupancy so a same-position resize is measured against the space
+        # it would free. Mirrors Device.clean()'s rack-space validation.
+        rack_face = device.face if not device_type.is_full_depth else None
+        available_units = rack.get_available_units(
+            u_height=device_type.u_height,
+            rack_face=rack_face,
+            exclude=[device.pk] if device.pk else [],
+        )
+    except Exception:
+        # Best-effort backstop around a deliberately-bypassed full_clean(); if NetBox's helper
+        # signature/behaviour differs across versions, don't block a legitimate device_type write —
+        # fall back to the pre-fix behaviour (no rack-fit check) rather than 500.
+        logger.exception("Rack-fit precheck failed for device pk=%s", getattr(device, "pk", None))
+        return None
+    if position not in available_units:
+        return _htmx_error_response(
+            f"Can't set device type to '{device_type}' ({device_type.u_height}U): U{position} in "
+            f"rack '{rack}' is already occupied or lacks sufficient space to accommodate it."
+        )
+    return None
+
+
 def _save_device(device, update_fields: list[str] | None = None, request=None) -> HttpResponse | None:
     """
     Persist a Device row, returning an HttpResponse on failure or None on success.
@@ -300,6 +341,11 @@ def _save_device(device, update_fields: list[str] | None = None, request=None) -
     if update_fields and ({"device_type", "platform"} & set(update_fields)):
         if mismatch := _platform_device_type_mismatch(device):
             return mismatch
+    # A device_type write also bypasses Device.clean()'s rack-fit check; re-validate just that rule
+    # so a taller device_type can't overflow the rack elevation with a success toast.
+    if update_fields and "device_type" in update_fields:
+        if rack_fit := _device_type_rack_fit_error(device):
+            return rack_fit
 
     try:
         device.save(update_fields=update_fields)

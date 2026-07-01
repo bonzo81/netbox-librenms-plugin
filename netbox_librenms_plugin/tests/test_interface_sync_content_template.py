@@ -142,3 +142,16 @@ class TestInterfaceSyncContentTemplateMigratedMode:
         ro = self._render(migrated=marker, netbox_only=[iface], winner=winner, has_write=False)
         assert "interface_move_to_winner" not in ro  # no live mutating button for read-only users
         assert "read-only" in ro
+
+    def test_migrated_move_button_write_perm_degrades_when_url_unregistered(self):
+        """With write perm, the move-to-winner URL (registered only up-stack) must degrade to read-only, not 500."""
+        from netbox_librenms_plugin.tests.conftest import make_device
+
+        winner = make_device("iface-winner-wp")
+        iface = {"id": 1, "name": "eth-only", "type": "1000base-t", "enabled": True, "url": "/dcim/x/"}
+        marker = {"server_key": "default", "device_id": 1, "at": "now"}
+        # Unfixed this raises NoReverseMatch (bare {% url %}); the {% url ... as %} guard renders the
+        # read-only fallback instead, so the migrated tab never 500s where the URL isn't registered.
+        html = self._render(migrated=marker, netbox_only=[iface], winner=winner, has_write=True)
+        assert "interface_move_to_winner" not in html  # URL absent → move_url empty → no live button
+        assert "read-only" in html

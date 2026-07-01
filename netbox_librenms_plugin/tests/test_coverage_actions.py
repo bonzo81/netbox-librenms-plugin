@@ -133,6 +133,77 @@ class TestSaveDevice:
         # Full raw DB exception text must not leak to the client (case-insensitive).
         assert raw_error.encode().lower() not in response.content.lower()
 
+    @pytest.mark.django_db
+    def test_update_fields_device_type_rack_overflow_is_blocked(self):
+        """A taller device_type that overflows the device's rack slot must be rejected, not saved.
+
+        save(update_fields=["device_type"]) skips full_clean(), so NetBox's Device.clean()
+        rack-space check is bypassed. Re-validate just that rule: a 4U type at U40 in a 42U rack
+        (would need U40-43, but the rack ends at U42) must be blocked with an error response, and
+        the DB row must keep its original 1U type. Real Site/Rack/DeviceType/Device end to end.
+        """
+        from dcim.models import Device, DeviceRole, DeviceType, Manufacturer, Rack, Site
+
+        from netbox_librenms_plugin.views.imports.actions import _save_device
+
+        mfr, _ = Manufacturer.objects.get_or_create(name="RackFitMfr", slug="rackfit-mfr")
+        role, _ = DeviceRole.objects.get_or_create(name="RackFitRole", slug="rackfit-role")
+        site, _ = Site.objects.get_or_create(name="RackFitSite", slug="rackfit-site")
+        rack = Rack.objects.create(name="RackFit-R1", site=site, u_height=42, status="active")
+        one_u = DeviceType.objects.create(manufacturer=mfr, model="RackFit-1U", slug="rackfit-1u", u_height=1)
+        four_u = DeviceType.objects.create(manufacturer=mfr, model="RackFit-4U", slug="rackfit-4u", u_height=4)
+        device = Device.objects.create(
+            name="rackfit-dev",
+            device_type=one_u,
+            role=role,
+            site=site,
+            rack=rack,
+            position=40,
+            face="front",
+            status="active",
+        )
+
+        # Swap to the 4U type in memory and persist via the update_fields fast path.
+        device.device_type = four_u
+        response = _save_device(device, update_fields=["device_type"])
+
+        # Blocked: an error response is returned (not a silent success/None)...
+        assert response is not None
+        assert b"sufficient space" in response.content
+        # ...and the DB row still carries the original 1U type (nothing was persisted).
+        assert Device.objects.get(pk=device.pk).device_type_id == one_u.pk
+
+    @pytest.mark.django_db
+    def test_update_fields_device_type_that_fits_still_saves(self):
+        """The rack-fit guard must not block a legitimate device_type change that fits the slot."""
+        from dcim.models import Device, DeviceRole, DeviceType, Manufacturer, Rack, Site
+
+        from netbox_librenms_plugin.views.imports.actions import _save_device
+
+        mfr, _ = Manufacturer.objects.get_or_create(name="RackFitMfr", slug="rackfit-mfr")
+        role, _ = DeviceRole.objects.get_or_create(name="RackFitRole", slug="rackfit-role")
+        site, _ = Site.objects.get_or_create(name="RackFitSite", slug="rackfit-site")
+        rack = Rack.objects.create(name="RackFit-R2", site=site, u_height=42, status="active")
+        one_u = DeviceType.objects.create(manufacturer=mfr, model="RackFit-1Ub", slug="rackfit-1ub", u_height=1)
+        two_u = DeviceType.objects.create(manufacturer=mfr, model="RackFit-2U", slug="rackfit-2u", u_height=2)
+        device = Device.objects.create(
+            name="rackfit-ok-dev",
+            device_type=one_u,
+            role=role,
+            site=site,
+            rack=rack,
+            position=10,
+            face="front",
+            status="active",
+        )
+
+        # A 2U type at U10 fits (U10-11 free); the write must succeed (None) and persist.
+        device.device_type = two_u
+        response = _save_device(device, update_fields=["device_type"])
+
+        assert response is None
+        assert Device.objects.get(pk=device.pk).device_type_id == two_u.pk
+
 
 class TestResolveNamingPreferences:
     """Tests for resolve_naming_preferences (utils.resolve_naming_preferences)."""
@@ -2920,6 +2991,7 @@ class TestDeviceConflictMoreActions:
         mock_existing.pk = 1
         mock_existing.name = "router01"
         mock_existing.platform = None  # no platform → no platform/device_type manufacturer constraint
+        mock_existing.rack = None  # not rack-mounted → no device_type rack-fit constraint
         libre_device = {"device_id": 42, "hostname": "router01", "serial": "SN001", "hardware": "Cisco", "os": "ios"}
         validation = {
             "existing_device": mock_existing,
@@ -3126,6 +3198,7 @@ class TestMoreSaveErrorPaths:
         mock_existing.pk = 1
         mock_existing.name = "router01"
         mock_existing.platform = None  # no platform → no platform/device_type manufacturer constraint
+        mock_existing.rack = None  # not rack-mounted → no device_type rack-fit constraint
         libre_device = {"device_id": 42, "hostname": "router01", "serial": "SN001", "hardware": "Cisco", "os": "ios"}
         validation = {
             "existing_device": mock_existing,

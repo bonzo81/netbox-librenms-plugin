@@ -179,3 +179,51 @@ class TestExistingLinkStateText:
     def test_hostname_match_genuinely_unlinked_still_says_not_linked(self):
         html = self._render(match_type="hostname", link={"host_id": None, "oob_id": None})
         assert "not linked to LibreNMS" in html
+
+
+@pytest.mark.django_db
+class TestSerialMatchFormServerKey:
+    """The serial-match Link/Update form must carry ?server_key like the adjacent Add-as-OOB form."""
+
+    def _render(self, serial_action):
+        from django.contrib.auth.models import AnonymousUser
+        from django.template.loader import render_to_string
+        from django.test import RequestFactory
+
+        from netbox_librenms_plugin.tests.conftest import make_device
+
+        existing = make_device("serial-key-existing")
+        request = RequestFactory().get("/")
+        request.user = AnonymousUser()
+        ctx = {
+            "validation": {
+                "existing_device": existing,
+                "existing_match_type": "serial",
+                "serial_action": serial_action,
+                "device_type_mismatch": False,
+                "warnings": [],
+            },
+            "libre_device": {"device_id": 7, "sysName": "serial-key", "hostname": "serial-key"},
+            "server_key": "prod",
+            "existing_device_model_name": "device",
+            "existing_device_url": existing.get_absolute_url(),
+            "sync_info": {},
+            "existing_id_servers": [],
+            "use_sysname": True,
+            "strip_domain": False,
+        }
+        return render_to_string("netbox_librenms_plugin/htmx/device_validation_details.html", ctx, request=request)
+
+    def test_link_form_carries_server_key(self):
+        html = self._render("link")
+        # Precondition: no oob_candidate → the Add-as-OOB form (which has its OWN server_key) is
+        # absent, so the only server_key input is the serial-match one under test.
+        assert "device_add_as_oob" not in html
+        assert "Link to LibreNMS" in html
+        assert 'name="server_key" value="prod"' in html
+
+    def test_update_form_carries_server_key(self):
+        html = self._render("hostname_differs")
+        assert "device_add_as_oob" not in html
+        assert "Update &amp; Link" in html
+        assert 'name="server_key" value="prod"' in html

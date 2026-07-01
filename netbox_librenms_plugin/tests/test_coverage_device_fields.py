@@ -88,7 +88,9 @@ class TestUpdateDeviceNameView:
 
         with (
             patch("netbox_librenms_plugin.views.sync.device_fields.messages") as mock_msg,
-            patch("netbox_librenms_plugin.views.sync.device_fields.redirect") as mock_redir,
+            # The redirect now flows through the server_key-preserving helper (_device_sync_redirect
+            # → redirect_with_server_key), so patch that rather than the bare redirect.
+            patch("netbox_librenms_plugin.views.sync.device_fields.redirect_with_server_key") as mock_redir,
         ):
             view.post(_make_request(), pk=dev.pk)
 

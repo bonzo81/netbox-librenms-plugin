@@ -80,6 +80,47 @@ def test_modules_redirect_response_htmx_propagates_server_key():
     assert "server_key=prod" in target
 
 
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    "view_name",
+    ["UpdateDeviceNameView", "UpdateDeviceSerialView", "UpdateDeviceTypeView", "UpdateDevicePlatformView"],
+)
+def test_field_sync_views_preserve_server_key_on_redirect(view_name):
+    """The four device field-sync views rebind to the POSTed server, so their redirects must carry it.
+
+    Each view resolves ``server_key`` via ``rebind_api_for_server`` up front; without preserving it
+    on the redirect the page reloads scoped to the session/default server and the non-default tab
+    context is lost. This drives the real ``post()`` to the shared "Device not found" early redirect
+    (``server_key`` already resolved to 'prod') and asserts the follow-up URL carries it. Only
+    ``build_librenms_api`` (the HTTP boundary) is stubbed — real request, real superuser permission
+    gate, real ``_device_sync_redirect`` / ``redirect_with_server_key``.
+    """
+    from unittest.mock import MagicMock, patch
+
+    from django.contrib.auth import get_user_model
+    from django.contrib.messages.storage.cookie import CookieStorage
+
+    from netbox_librenms_plugin.views.sync import device_fields
+
+    user = get_user_model().objects.create(username=f"redir-{view_name}", is_superuser=True, is_active=True)
+    device = make_device(f"redir-{view_name.lower()}")
+
+    request = RequestFactory().post("/", {"server_key": "prod"})
+    request.user = user
+    request._messages = CookieStorage(request)  # messages.error() needs storage (session-free) on a bare request
+
+    view = getattr(device_fields, view_name)()
+    view.request = request  # require_all_permissions reads self.request
+
+    prod_api = MagicMock(server_key="prod")
+    prod_api.get_librenms_id.return_value = None  # → the shared "Device not found" early redirect
+    with patch("netbox_librenms_plugin.librenms_api.build_librenms_api", return_value=prod_api):
+        resp = view.post(request, device.pk)
+
+    assert resp.status_code in (301, 302), f"{view_name} did not redirect (perm gate?): {resp}"
+    assert "server_key=prod" in resp.url, f"{view_name} dropped server_key on redirect: {resp.url}"
+
+
 def test_scoped_tab_builders_exist():
     """Structural canary (not a behavioral assertion): the scoped view packages still contain
     ``?tab=`` redirect builders, so the behavioral tests above are pointed at a tree that actually

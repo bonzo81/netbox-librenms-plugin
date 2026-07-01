@@ -568,7 +568,12 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
         if cached_payload.get("oob_librenms_id") != current_oob_id:
             cache.delete(cache_key)
             return {"table": None, "object": obj, "cache_expiry": None, "server_key": scoped_server}
-        return self._build_context(request, obj, cached_payload["inventory"], sync_device=sync_device)
+        # Pass the resolved server explicitly (like post() does) so _active_server_key keys on it
+        # rather than falling back to self.librenms_api.server_key — the same rebind-side-effect
+        # avoidance the sync_device resolution above documents.
+        return self._build_context(
+            request, obj, cached_payload["inventory"], server_key=scoped_server, sync_device=sync_device
+        )
 
     def _build_context(self, request, obj, inventory_data, server_key=None, sync_device=None):
         """Build context with matched inventory items and table."""

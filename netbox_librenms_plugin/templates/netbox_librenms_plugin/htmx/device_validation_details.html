@@ -654,6 +654,12 @@
           <input type="hidden" name="server_key" value="{{ server_key }}">
           <input type="hidden" name="existing_device_id" value="{{ validation.existing_device.pk }}">
           <input type="hidden" name="existing_device_type" value="{{ existing_device_model_name|default:'device' }}">
+          {% comment %}
+          Carry the server the modal was rendered for (mirrors the Add-as-OOB form above) so a
+          multi-server link/update runs against that server, not the session/default one -- otherwise
+          set_librenms_device_id writes the mapping under the wrong server namespace.
+          {% endcomment %}
+          <input type="hidden" name="server_key" value="{{ server_key }}">
           {% if validation.device_type_mismatch %}
             <div class="form-check mb-2">
               <input class="form-check-input" type="checkbox" name="force" id="force-serial-{{ libre_device.device_id }}"

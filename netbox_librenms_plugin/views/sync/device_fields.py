@@ -36,6 +36,21 @@ from netbox_librenms_plugin.views.mixins import (
 logger = logging.getLogger(__name__)
 
 
+def _device_sync_redirect(request, pk, server_key):
+    """
+    Redirect to the device sync tab, carrying the already-resolved ``server_key``.
+
+    The four field-sync views (name/serial/type/platform) rebind the API to the POSTed server up
+    front; their redirects must preserve that key so a multi-server user returns to the same
+    server's tab instead of the session/default one. ``server_key`` here is the config-matched key
+    from ``rebind_api_for_server`` (not a raw POST value), so it is reflected directly; a None key
+    (a stale/removed server) redirects to the bare tab. ``redirect_with_server_key`` still gates the
+    final URL on the open-redirect barrier (CWE-601).
+    """
+    url = reverse("plugins:netbox_librenms_plugin:device_librenms_sync", kwargs={"pk": pk})
+    return redirect_with_server_key(request, url, server_key)
+
+
 class UpdateDeviceNameView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreNMSAPIMixin, View):
     """Update NetBox device name from LibreNMS sysName."""
 
@@ -57,7 +72,7 @@ class UpdateDeviceNameView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin,
         server_key = self.rebind_api_for_server(request.POST.get("server_key"))
         if server_key is None:
             messages.error(request, "Selected LibreNMS server is no longer configured.")
-            return redirect("plugins:netbox_librenms_plugin:device_librenms_sync", pk=pk)
+            return _device_sync_redirect(request, pk, server_key)
 
         # For VC members without their own librenms_id, use the VC sync device
         librenms_lookup_device = device
@@ -71,20 +86,20 @@ class UpdateDeviceNameView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin,
 
         if not self.librenms_id:
             messages.error(request, "Device not found in LibreNMS")
-            return redirect("plugins:netbox_librenms_plugin:device_librenms_sync", pk=pk)
+            return _device_sync_redirect(request, pk, server_key)
 
         success, device_info = self.get_live_device_info(self.librenms_id)
 
         if not success or not device_info:
             messages.error(request, "Failed to retrieve device info from LibreNMS")
-            return redirect("plugins:netbox_librenms_plugin:device_librenms_sync", pk=pk)
+            return _device_sync_redirect(request, pk, server_key)
 
         # Bail out early when LibreNMS has no usable name – the fallback
         # names that _determine_device_name generates (e.g. "device-42")
         # are only useful during import, not for renaming an existing device.
         if not (device_info.get("sysName") or device_info.get("hostname")):
             messages.warning(request, "No name could be determined from LibreNMS")
-            return redirect("plugins:netbox_librenms_plugin:device_librenms_sync", pk=pk)
+            return _device_sync_redirect(request, pk, server_key)
 
         use_sysname, strip_domain = resolve_naming_preferences(request)
 
@@ -109,7 +124,7 @@ class UpdateDeviceNameView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin,
 
         if not resolved_name:
             messages.warning(request, "No name could be determined from LibreNMS")
-            return redirect("plugins:netbox_librenms_plugin:device_librenms_sync", pk=pk)
+            return _device_sync_redirect(request, pk, server_key)
 
         old_name = device.name
         device.name = resolved_name
@@ -120,11 +135,11 @@ class UpdateDeviceNameView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin,
             device.name = old_name
             error_msg = e.message_dict if hasattr(e, "message_dict") else str(e)
             messages.error(request, f"Failed to update device name to '{resolved_name}': {error_msg}")
-            return redirect("plugins:netbox_librenms_plugin:device_librenms_sync", pk=pk)
+            return _device_sync_redirect(request, pk, server_key)
 
         messages.success(request, f"Device name updated from '{old_name}' to '{resolved_name}'")
 
-        return redirect("plugins:netbox_librenms_plugin:device_librenms_sync", pk=pk)
+        return _device_sync_redirect(request, pk, server_key)
 
 
 class UpdateDeviceSerialView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreNMSAPIMixin, View):
@@ -149,25 +164,25 @@ class UpdateDeviceSerialView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixi
         server_key = self.rebind_api_for_server(request.POST.get("server_key"))
         if server_key is None:
             messages.error(request, "Selected LibreNMS server is no longer configured.")
-            return redirect("plugins:netbox_librenms_plugin:device_librenms_sync", pk=pk)
+            return _device_sync_redirect(request, pk, server_key)
 
         self.librenms_id = self.librenms_api.get_librenms_id(device)
 
         if not self.librenms_id:
             messages.error(request, "Device not found in LibreNMS")
-            return redirect("plugins:netbox_librenms_plugin:device_librenms_sync", pk=pk)
+            return _device_sync_redirect(request, pk, server_key)
 
         success, device_info = self.get_live_device_info(self.librenms_id)
 
         if not success or not device_info:
             messages.error(request, "Failed to retrieve device info from LibreNMS")
-            return redirect("plugins:netbox_librenms_plugin:device_librenms_sync", pk=pk)
+            return _device_sync_redirect(request, pk, server_key)
 
         serial = device_info.get("serial")
 
         if not serial or serial == "-":
             messages.warning(request, "No serial number available in LibreNMS")
-            return redirect("plugins:netbox_librenms_plugin:device_librenms_sync", pk=pk)
+            return _device_sync_redirect(request, pk, server_key)
 
         old_serial = device.serial
         device.serial = serial
@@ -178,7 +193,7 @@ class UpdateDeviceSerialView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixi
             device.serial = old_serial
             error_msg = e.message_dict if hasattr(e, "message_dict") else str(e)
             messages.error(request, f"Failed to update serial to '{serial}': {error_msg}")
-            return redirect("plugins:netbox_librenms_plugin:device_librenms_sync", pk=pk)
+            return _device_sync_redirect(request, pk, server_key)
 
         if old_serial:
             messages.success(
@@ -188,7 +203,7 @@ class UpdateDeviceSerialView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixi
         else:
             messages.success(request, f"Device serial set to '{serial}'")
 
-        return redirect("plugins:netbox_librenms_plugin:device_librenms_sync", pk=pk)
+        return _device_sync_redirect(request, pk, server_key)
 
 
 class UpdateDeviceTypeView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreNMSAPIMixin, View):
@@ -213,25 +228,25 @@ class UpdateDeviceTypeView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin,
         server_key = self.rebind_api_for_server(request.POST.get("server_key"))
         if server_key is None:
             messages.error(request, "Selected LibreNMS server is no longer configured.")
-            return redirect("plugins:netbox_librenms_plugin:device_librenms_sync", pk=pk)
+            return _device_sync_redirect(request, pk, server_key)
 
         self.librenms_id = self.librenms_api.get_librenms_id(device)
 
         if not self.librenms_id:
             messages.error(request, "Device not found in LibreNMS")
-            return redirect("plugins:netbox_librenms_plugin:device_librenms_sync", pk=pk)
+            return _device_sync_redirect(request, pk, server_key)
 
         success, device_info = self.get_live_device_info(self.librenms_id)
 
         if not success or not device_info:
             messages.error(request, "Failed to retrieve device info from LibreNMS")
-            return redirect("plugins:netbox_librenms_plugin:device_librenms_sync", pk=pk)
+            return _device_sync_redirect(request, pk, server_key)
 
         hardware = device_info.get("hardware")
 
         if not hardware:
             messages.warning(request, "No hardware information available in LibreNMS")
-            return redirect("plugins:netbox_librenms_plugin:device_librenms_sync", pk=pk)
+            return _device_sync_redirect(request, pk, server_key)
 
         match_result = match_librenms_hardware_to_device_type(hardware)
 
@@ -240,14 +255,14 @@ class UpdateDeviceTypeView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin,
                 request,
                 f"Ambiguous hardware match for '{hardware}': multiple matching mappings/device types found.",
             )
-            return redirect("plugins:netbox_librenms_plugin:device_librenms_sync", pk=pk)
+            return _device_sync_redirect(request, pk, server_key)
 
         if not match_result["matched"]:
             messages.error(
                 request,
                 f"No matching DeviceType found for hardware '{hardware}'",
             )
-            return redirect("plugins:netbox_librenms_plugin:device_librenms_sync", pk=pk)
+            return _device_sync_redirect(request, pk, server_key)
 
         device_type = match_result["device_type"]
         old_device_type = device.device_type
@@ -259,14 +274,14 @@ class UpdateDeviceTypeView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin,
             device.device_type = old_device_type
             error_msg = e.message_dict if hasattr(e, "message_dict") else str(e)
             messages.error(request, f"Failed to update device type to '{device_type}': {error_msg}")
-            return redirect("plugins:netbox_librenms_plugin:device_librenms_sync", pk=pk)
+            return _device_sync_redirect(request, pk, server_key)
 
         messages.success(
             request,
             f"Device type updated from '{old_device_type}' to '{device_type}'",
         )
 
-        return redirect("plugins:netbox_librenms_plugin:device_librenms_sync", pk=pk)
+        return _device_sync_redirect(request, pk, server_key)
 
 
 class UpdateDevicePlatformView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreNMSAPIMixin, View):
@@ -291,25 +306,25 @@ class UpdateDevicePlatformView(LibreNMSPermissionMixin, NetBoxObjectPermissionMi
         server_key = self.rebind_api_for_server(request.POST.get("server_key"))
         if server_key is None:
             messages.error(request, "Selected LibreNMS server is no longer configured.")
-            return redirect("plugins:netbox_librenms_plugin:device_librenms_sync", pk=pk)
+            return _device_sync_redirect(request, pk, server_key)
 
         self.librenms_id = self.librenms_api.get_librenms_id(device)
 
         if not self.librenms_id:
             messages.error(request, "Device not found in LibreNMS")
-            return redirect("plugins:netbox_librenms_plugin:device_librenms_sync", pk=pk)
+            return _device_sync_redirect(request, pk, server_key)
 
         success, device_info = self.get_live_device_info(self.librenms_id)
 
         if not success or not device_info:
             messages.error(request, "Failed to retrieve device info from LibreNMS")
-            return redirect("plugins:netbox_librenms_plugin:device_librenms_sync", pk=pk)
+            return _device_sync_redirect(request, pk, server_key)
 
         os_name = device_info.get("os")
 
         if not os_name:
             messages.warning(request, "No OS information available in LibreNMS")
-            return redirect("plugins:netbox_librenms_plugin:device_librenms_sync", pk=pk)
+            return _device_sync_redirect(request, pk, server_key)
 
         result = find_matching_platform(os_name)
         if result["match_type"] == "ambiguous":
@@ -317,7 +332,7 @@ class UpdateDevicePlatformView(LibreNMSPermissionMixin, NetBoxObjectPermissionMi
                 request,
                 "Multiple platforms match '{}'. Please resolve the ambiguity via a Platform Mapping.".format(os_name),
             )
-            return redirect("plugins:netbox_librenms_plugin:device_librenms_sync", pk=pk)
+            return _device_sync_redirect(request, pk, server_key)
         if not result["found"] or result["platform"] is None:
             messages.error(
                 request,
@@ -325,7 +340,7 @@ class UpdateDevicePlatformView(LibreNMSPermissionMixin, NetBoxObjectPermissionMi
                     os_name
                 ),
             )
-            return redirect("plugins:netbox_librenms_plugin:device_librenms_sync", pk=pk)
+            return _device_sync_redirect(request, pk, server_key)
 
         platform = result["platform"]
 
@@ -338,7 +353,7 @@ class UpdateDevicePlatformView(LibreNMSPermissionMixin, NetBoxObjectPermissionMi
             device.platform = old_platform
             error_msg = e.message_dict if hasattr(e, "message_dict") else str(e)
             messages.error(request, f"Failed to update platform to '{platform}': {error_msg}")
-            return redirect("plugins:netbox_librenms_plugin:device_librenms_sync", pk=pk)
+            return _device_sync_redirect(request, pk, server_key)
 
         if old_platform:
             messages.success(
@@ -348,7 +363,7 @@ class UpdateDevicePlatformView(LibreNMSPermissionMixin, NetBoxObjectPermissionMi
         else:
             messages.success(request, f"Device platform set to '{platform}'")
 
-        return redirect("plugins:netbox_librenms_plugin:device_librenms_sync", pk=pk)
+        return _device_sync_redirect(request, pk, server_key)
 
 
 class CreateAndAssignPlatformView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreNMSAPIMixin, View):

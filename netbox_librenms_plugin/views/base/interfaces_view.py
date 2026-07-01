@@ -408,11 +408,12 @@ class BaseInterfaceTableView(VlanAssignmentMixin, LibreNMSAPIMixin, LibreNMSPerm
         if interface_name_field is None:
             interface_name_field = get_interface_name_field(request)
 
+        unresolved = False
         if server_key is None:
             # GET render (no POST-resolved key threaded in): rebind + scope the ports-cache read
             # to ?server_key (shared helper) so a non-default-server tab reads that server's
             # cache, not the default's. An unresolved non-blank key scopes to that key (miss).
-            server_key, _unresolved = self.resolve_get_render_server_key(request)
+            server_key, unresolved = self.resolve_get_render_server_key(request)
 
         # Scope the ports cache to the VC sync device (not the viewed member) so all VC
         # members share one entry instead of fragmenting / re-fetching per member. Mirrors
@@ -424,6 +425,15 @@ class BaseInterfaceTableView(VlanAssignmentMixin, LibreNMSAPIMixin, LibreNMSPerm
         if fresh_data is not None:
             cached_data = fresh_data
             last_fetched = timezone.now()
+        elif unresolved:
+            # ?server_key named a server that no longer resolves (deleted/misconfigured). Its ports
+            # snapshot may still be cached, but the failed rebind left self.librenms_api bound to the
+            # DEFAULT server, so the per-interface librenms_id index (_get_object_librenms_id) is
+            # keyed on a different server than this cache read would be — mismatching an
+            # already-synced port as a new "NetBox only" row. Render empty, scoped to the requested
+            # key, instead (mirrors modules_view.get_context_data's unresolved guard).
+            cached_data = None
+            last_fetched = None
         else:
             cached_data = cache.get(self.get_cache_key(cache_device, "ports", server_key))
             last_fetched = cache.get(self.get_last_fetched_key(cache_device, "ports", server_key))
@@ -576,7 +586,14 @@ class BaseInterfaceTableView(VlanAssignmentMixin, LibreNMSAPIMixin, LibreNMSPerm
         if hasattr(obj, "virtual_chassis") and obj.virtual_chassis:
             virtual_chassis_members = obj.virtual_chassis.members.all()
 
-        cache_ttl = cache_remaining_ttl(cache, self.get_cache_key(cache_device, "ports", server_key))
+        # ``ttl()`` is Redis-specific; the Django cache API doesn't guarantee it. Guard with
+        # getattr so non-Redis backends return None instead of raising AttributeError at render
+        # (mirrors ip_addresses_view / modules_view).
+        # On an unresolved key the render is empty (above); don't surface the stale server's TTL as
+        # a misleading "cached until" on an empty table.
+        cache_ttl = (
+            None if unresolved else cache_remaining_ttl(cache, self.get_cache_key(cache_device, "ports", server_key))
+        )
         cache_expiry = (
             timezone.now() + timezone.timedelta(seconds=cache_ttl) if cache_ttl is not None and cache_ttl > 0 else None
         )

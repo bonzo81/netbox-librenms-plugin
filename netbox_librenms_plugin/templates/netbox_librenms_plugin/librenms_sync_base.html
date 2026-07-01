@@ -57,7 +57,14 @@
             Marked at {{ migrated_to_marker.at }} on server
             <code>{{ migrated_to_marker.server_key }}</code>.
         </div>
-        {% if migrated_to_winner and has_write_permission and object|meta:"model_name" == "device" %}
+        {% comment %}
+        'as' form does not raise NoReverseMatch: device_transfer_ip is registered by the device-merge
+        feature further up the stack. Probe it here so on branches without the URL transfer_url is ''
+        and the whole transfer block is skipped rather than 500ing. All three buttons below share this
+        URL name, so one probe gates them all.
+        {% endcomment %}
+        {% url 'plugins:netbox_librenms_plugin:device_transfer_ip' pk=object.pk ip_kind='primary4' as transfer_url %}
+        {% if migrated_to_winner and has_write_permission and object|meta:"model_name" == "device" and transfer_url %}
         {% comment %}
         device_transfer_ip resolves a Device by pk; this template also serves VMs, so gate the
         transfer buttons to Device pages or a same-pk Device could be mutated by mistake.
