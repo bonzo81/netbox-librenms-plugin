@@ -1,38 +1,48 @@
 from django.db import migrations, models
-from django.db.models import Count
 from django.db.models.functions import Lower
 
 
 def normalize_librenms_os_case(apps, schema_editor):
-    """Canonicalize librenms_os casing and fail clearly on real duplicates before the CI-unique.
+    """Canonicalize librenms_os and fail clearly on real duplicates before the CI-unique.
 
     UniqueConstraint(Lower("librenms_os")) is validated against existing rows the instant it is
     added, so a database the old case-sensitive unique let accumulate both "ios" and "IOS" would
     fail this migration with an opaque IntegrityError at deploy time. Detect genuine
     case-insensitive collisions first and abort with an actionable message (they need a human
-    merge — the migration can't know which pattern wins); then lowercase the surviving rows to the
+    merge — the migration can't know which pattern wins); then rewrite the surviving rows to the
     same canonical form clean() already writes on every save, so a full_clean-bypassing insert
-    (bulk_create / raw SQL / loaddata) can't leave a mixed-case value behind the constraint.
+    (bulk_create / raw SQL / loaddata) can't leave a noncanonical value behind the constraint.
+
+    Normalize with ``.strip().lower()`` — exactly what ``clean()`` applies — NOT a bare ``Lower()``:
+    rows a bypassing path left as ``" IOS "`` and ``"ios"`` are the same pattern to ``clean()`` but
+    differ under ``Lower()`` alone, so a Lower()-only collision check would miss them and a
+    Lower()-only rewrite would leave the surrounding whitespace behind the new constraint.
     """
     PortStackLagPattern = apps.get_model("netbox_librenms_plugin", "PortStackLagPattern")
-    collisions = sorted(
-        row["os_ci"]
-        for row in (
-            PortStackLagPattern.objects.annotate(os_ci=Lower("librenms_os"))
-            .values("os_ci")
-            .annotate(n=Count("pk"))
-            .filter(n__gt=1)
-        )
-    )
+    seen_pk_by_value = {}
+    collisions = set()
+    normalized_by_pk = {}
+    for pattern in PortStackLagPattern.objects.all():
+        normalized = (pattern.librenms_os or "").strip().lower()
+        if not normalized:
+            raise RuntimeError(
+                "Cannot add the case-insensitive PortStackLagPattern.librenms_os uniqueness: a row "
+                "has a blank librenms_os after normalization; fix it by hand first."
+            )
+        if seen_pk_by_value.get(normalized, pattern.pk) != pattern.pk:
+            collisions.add(normalized)
+        seen_pk_by_value.setdefault(normalized, pattern.pk)
+        normalized_by_pk[pattern.pk] = normalized
     if collisions:
         raise RuntimeError(
             "Cannot add the case-insensitive PortStackLagPattern.librenms_os uniqueness: these "
-            "values already have case-variant duplicates that must be merged by hand first: " + ", ".join(collisions)
+            "values already have case-variant duplicates that must be merged by hand first: "
+            + ", ".join(sorted(collisions))
         )
     for pattern in PortStackLagPattern.objects.all():
-        lowered = (pattern.librenms_os or "").lower()
-        if pattern.librenms_os != lowered:
-            pattern.librenms_os = lowered
+        normalized = normalized_by_pk[pattern.pk]
+        if pattern.librenms_os != normalized:
+            pattern.librenms_os = normalized
             pattern.save(update_fields=["librenms_os"])
 
 

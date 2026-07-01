@@ -220,6 +220,42 @@ class TestMigration0012Preflight:
         with pytest.raises(RuntimeError, match="iosdup"):
             self._preflight()(django_apps, None)
 
+    def test_preflight_strips_surrounding_whitespace(self):
+        """A whitespace-padded librenms_os a bypassing path left behind is canonicalized to .strip().lower() (matching clean()), not left with surrounding spaces behind the Lower()-only constraint."""
+        from django.apps import apps as django_apps
+
+        from netbox_librenms_plugin.models import PortStackLagPattern
+
+        # bulk_create skips clean(): " ZZWS " reaches the row verbatim (Lower() of it is unique, so
+        # the CI constraint permits it). The preflight must strip+lower it, not just lower it.
+        PortStackLagPattern.objects.bulk_create(
+            [PortStackLagPattern(librenms_os=" ZZWS ", lag_name_pattern=r"^zw\d+$")]
+        )
+        self._preflight()(django_apps, None)
+        assert PortStackLagPattern.objects.filter(librenms_os="zzws").exists()
+        assert not PortStackLagPattern.objects.filter(librenms_os=" ZZWS ").exists()
+
+    def test_preflight_blocks_whitespace_and_case_variant_duplicates(self):
+        """Rows differing only by surrounding whitespace/case (' WSDUP ' vs 'wsdup') are the same pattern to clean(); the preflight must flag them as a collision via .strip().lower() — a Lower()-only check misses the whitespace variant and would leave a semantic duplicate behind the constraint."""
+        from django.apps import apps as django_apps
+        from django.db import connection
+
+        from netbox_librenms_plugin.models import PortStackLagPattern
+
+        constraint = next(
+            c for c in PortStackLagPattern._meta.constraints if c.name == "unique_portstacklagpattern_librenms_os_ci"
+        )
+        with connection.schema_editor() as schema_editor:
+            schema_editor.remove_constraint(PortStackLagPattern, constraint)
+        PortStackLagPattern.objects.bulk_create(
+            [
+                PortStackLagPattern(librenms_os="wsdup", lag_name_pattern=r"^ae\d+$"),
+                PortStackLagPattern(librenms_os=" WSDUP ", lag_name_pattern=r"^bundle\d+$"),
+            ]
+        )
+        with pytest.raises(RuntimeError, match="wsdup"):
+            self._preflight()(django_apps, None)
+
 
 @pytest.mark.django_db
 class TestLagPatternSharedLoad:
