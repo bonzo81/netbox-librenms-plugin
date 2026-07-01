@@ -900,7 +900,11 @@ class BaseInterfaceTableView(
         name_fields = {"ifName", "ifDescr", interface_name_field}
 
         def _names(port: dict) -> list:
-            return [name for field in name_fields if (name := port.get(field))]
+            # Guard isinstance(str): a truthy non-string ifName/ifDescr (numeric/list from a
+            # malformed payload) would otherwise reach pat.search()/sub_iface_re.match() below and
+            # raise TypeError, 500-ing the whole refresh. Mirrors the resolver's _port_names, which
+            # this method is documented to track.
+            return [name for field in name_fields if isinstance(name := port.get(field), str) and name]
 
         port_names = {name for p in ports for name in _names(p)}
         sub_iface_re = re.compile(r"^(.+)\.\d+$")

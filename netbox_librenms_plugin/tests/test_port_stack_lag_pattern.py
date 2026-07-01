@@ -126,6 +126,20 @@ class TestHasLagSignalsFieldSelection:
         # triggers it via the name-pattern branch — so real IOS LAGs are unaffected.
         assert view._has_lag_signals([{"ifName": "Po10", "ifType": "propVirtual"}]) is True
 
+    def test_non_string_name_is_skipped_not_crashed(self):
+        """A truthy non-string ifName/ifDescr (numeric/list from a malformed payload) is skipped, not crashed.
+
+        Without the isinstance(str) guard the non-string reaches pat.search()/sub_iface_re.match() and
+        raises TypeError, which 500s the whole interface refresh — the resolver's _port_names skips it.
+        """
+        view = self._make_view()
+        ports = [
+            {"ifName": 123, "ifType": "ethernetCsmacd"},  # truthy non-string name
+            {"ifDescr": ["x", "y"], "ifType": "ethernetCsmacd"},  # truthy non-string in another field
+        ]
+        # Returns a bool (no TypeError); neither is a real LAG/sub-interface signal.
+        assert view._has_lag_signals(ports) is False
+
 
 @pytest.mark.django_db
 class TestHasLagSignalsOsScoped:
