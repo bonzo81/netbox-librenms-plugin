@@ -1125,6 +1125,84 @@ class TestSaveVlanGroupOverridesView:
         assert mock_get_sync_device.call_args[0][0].pk == device.pk
 
 
+@pytest.mark.django_db
+class TestSaveVlanGroupOverridesRealCacheBackend:
+    """Drive SaveVlanGroupOverridesView against a REAL cache backend, not a MagicMock.
+
+    The MagicMock-cache tests above synthesise a ``.ttl()`` on the cache; ``cache.ttl()``
+    is a django-redis extension that every other Django backend (e.g. the LocMemCache
+    NetBox falls back to) lacks, so those tests stay green even though the raw ``cache.ttl()``
+    call raised ``AttributeError`` mid-request. These exercise the real view against a real
+    LocMemCache so the backend-agnostic ``cache_remaining_ttl`` guard is actually tested.
+    """
+
+    def _post(self, device, cache_backend, *, vid_group_map=None):
+        import json
+
+        from django.test import RequestFactory
+
+        from netbox_librenms_plugin.views.object_sync.devices import SaveVlanGroupOverridesView
+
+        request = RequestFactory().post(
+            "/save-vlan-group-overrides/",
+            data=json.dumps(
+                {
+                    "device_id": device.pk,
+                    "vid_group_map": vid_group_map or {"10": "5"},
+                    "server_key": "default",
+                }
+            ),
+            content_type="application/json",
+        )
+        view = object.__new__(SaveVlanGroupOverridesView)
+        view._librenms_api = MagicMock()
+        view._librenms_api.server_key = "default"
+        with patch.object(view, "require_write_permission_json", return_value=None):
+            with patch("netbox_librenms_plugin.views.object_sync.devices.cache", cache_backend):
+                return view.post(request)
+
+    def test_backend_without_ttl_returns_graceful_400_not_attributeerror(self):
+        """A ttl-less backend (LocMemCache) yields the graceful 400 — the old cache.ttl() raised."""
+        from django.core.cache.backends.locmem import LocMemCache
+        from django.http import JsonResponse
+
+        from netbox_librenms_plugin.tests.conftest import make_device
+
+        device = make_device("vlan-override-locmem")
+        real_locmem = LocMemCache("vlan-override-real", {})
+        # Precondition that made the old code crash: a real non-redis backend has no ttl().
+        assert not hasattr(real_locmem, "ttl")
+
+        response = self._post(device, real_locmem)
+
+        assert isinstance(response, JsonResponse)
+        assert response.status_code == 400
+
+    def test_backend_with_ttl_saves_overrides(self):
+        """A backend that exposes ttl() (redis-like) still saves through the shared guard."""
+        import json
+
+        from django.core.cache.backends.locmem import LocMemCache
+        from django.http import JsonResponse
+
+        from netbox_librenms_plugin.tests.conftest import make_device
+
+        class _TtlLocMemCache(LocMemCache):
+            """Real LocMemCache with a redis-like ttl() so the success path stays real, not mocked."""
+
+            def ttl(self, key):
+                return 300
+
+        device = make_device("vlan-override-ttl")
+        redis_like = _TtlLocMemCache("vlan-override-ttl-real", {})
+
+        response = self._post(device, redis_like, vid_group_map={"10": "5", "20": "5"})
+
+        assert isinstance(response, JsonResponse)
+        assert response.status_code == 200
+        assert json.loads(response.content)["status"] == "success"
+
+
 class TestDeviceCableTableView:
     """Tests for DeviceCableTableView."""
 
