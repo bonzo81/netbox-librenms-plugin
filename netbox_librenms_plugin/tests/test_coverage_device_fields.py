@@ -2045,6 +2045,10 @@ class TestConvertLegacyLibreNMSIdViewHelpers:
         ):
             response = view._sync_url("device", 1)  # must not raise
         assert "server_key" not in response["Location"]
+        # Prove the claim explicitly: _sync_url read the _librenms_api attr (None) and never
+        # triggered the lazy librenms_api property (which constructs the patched-to-raise
+        # LibreNMSAPI from views.mixins) — otherwise _librenms_api would be set here or it'd raise.
+        assert view._librenms_api is None
 
     def test_sync_url_drops_server_key_when_url_validation_fails(self):
         """Even for an allowlisted server_key, if url_has_allowed_host_and_scheme rejects the candidate (the CodeQL open-redirect barrier — now shared via redirect_with_server_key), fall back to the bare URL."""

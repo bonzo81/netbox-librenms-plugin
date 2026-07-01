@@ -511,6 +511,36 @@ class TestGetLinksDataOobOnlyEmptyRefresh:
         view._librenms_api.get_device_links.assert_not_called()
         view._librenms_api.get_ports.assert_not_called()
 
+    def test_oob_corrupt_id_flags_fetch_failed_not_silently_dropped(self):
+        """A linked OOB controller with a corrupt id must surface the failure, not silently drop it."""
+        view = self._make_view()
+        obj = _mock_obj()
+        obj.consoleserverports.exists.return_value = False
+        view._librenms_api.get_librenms_id.return_value = None  # OOB-only: no host id
+        view._librenms_api.get_device_links.return_value = (True, {"links": []})
+        view._librenms_api.get_ports.return_value = (True, {"ports": []})
+
+        with (
+            patch("netbox_librenms_plugin.views.base.cables_view.cache") as mock_cache,
+            patch.object(view, "get_cache_key", return_value="k"),
+            patch(
+                "netbox_librenms_plugin.views.base.cables_view.get_interface_name_field",
+                return_value="ifName",
+            ),
+            patch("netbox_librenms_plugin.views.base.cables_view.get_librenms_sync_device", return_value=obj),
+            patch(
+                "netbox_librenms_plugin.views.base.cables_view.get_librenms_oob",
+                return_value={"id": "not-a-number"},  # OOB IS linked, but its id is corrupt
+            ),
+        ):
+            mock_cache.get.return_value = None
+            view.get_links_data(obj)
+
+        # Unfixed: _merge_oob_cable_links returns False (looks like "no OOB") and never flags, so
+        # post() shows a "successful" banner while the OOB rows silently vanish. Fixed: the
+        # linked-but-corrupt case flags the failure so the user is warned.
+        assert view._oob_links_fetch_failed is True
+
     def test_oob_only_failed_oob_fetch_returns_none_not_empty(self):
         """The OOB-scoped exemption holds ONLY when the OOB fetch succeeded."""
         view = self._make_view()

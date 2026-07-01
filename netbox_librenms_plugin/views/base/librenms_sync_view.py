@@ -197,6 +197,8 @@ class BaseLibreNMSSyncView(LibreNMSPermissionMixin, LibreNMSAPIMixin, generic.Ob
         * ``device_url``    – direct URL to the device page on that server (or ``None``).
         * ``is_configured`` – True when the server key exists in current plugin config.
         * ``is_active``     – True when this is the currently active server.
+        * ``is_oob_only``   – True when the mapping was surfaced via an OOB-only linkage
+          (no host ``id``, only a nested ``oob.id``).
 
         Returns ``None`` for legacy bare-int format (no per-server info to show)
         and ``None`` when the CF is absent/invalid.

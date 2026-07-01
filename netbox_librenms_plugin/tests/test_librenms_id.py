@@ -163,6 +163,27 @@ class TestFindByLibreNMSId:
         assert Device.objects.filter(_librenms_id_q("default", 42, include_oob=False)).first() is None
         oob_only.delete()
 
+    def test_build_librenms_id_qs_fails_closed_on_invalid_value(self):
+        """A malformed value must build match-nothing predicates so it can't resolve a corrupt legacy row."""
+        from dcim.models import Device
+
+        from netbox_librenms_plugin.utils import build_librenms_id_qs
+
+        # A device carrying a corrupt legacy bare-string id. Unfixed, build_librenms_id_qs("abc")
+        # emits Q(custom_field_data__librenms_id="abc") and this row is matched; the central
+        # coerce_librenms_id() guard now returns match-nothing predicates instead.
+        corrupt = _dev("abc")
+        host_q, oob_q = build_librenms_id_qs("prod", "abc")
+        assert Device.objects.filter(host_q).first() is None
+        assert Device.objects.filter(oob_q).first() is None
+        corrupt.delete()
+
+        # bool / zero / negative also fail closed (return match-nothing) rather than building a lookup.
+        for bad in (True, 0, -5, None):
+            hq, oq = build_librenms_id_qs("prod", bad)
+            assert Device.objects.filter(hq).first() is None
+            assert Device.objects.filter(oq).first() is None
+
     def test_returns_matching_object(self):
         from dcim.models import Device
 

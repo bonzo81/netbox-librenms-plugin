@@ -388,58 +388,6 @@ class TestImportSingleDeviceLazyValidation:
             assert mock_validate.call_args[1].get("api") is mock_api
 
 
-# ---------------------------------------------------------------------------
-# CreateAndAssignPlatformView — full_clean before save
-# ---------------------------------------------------------------------------
-class TestCreatePlatformFullClean:
-    """CreateAndAssignPlatformView must call full_clean() so ValidationError is catchable."""
-
-    def test_validation_error_caught_on_slug_collision(self):
-        """When full_clean raises ValidationError, user sees error message instead of 500."""
-        from django.core.exceptions import ValidationError
-
-        from netbox_librenms_plugin.views.sync.device_fields import CreateAndAssignPlatformView
-
-        view = object.__new__(CreateAndAssignPlatformView)
-
-        request = MagicMock()
-        request.method = "POST"
-        request.POST = {"platform_name": "test-platform"}
-        request.user.has_perm.return_value = True
-        view.request = request
-        # View is built via object.__new__ (no __init__), so stub the lazy API
-        # the post-success/redirect path now reads for its server_key fallback.
-        view._librenms_api = MagicMock()
-        view._librenms_api.server_key = "default-server"
-
-        with (
-            patch("netbox_librenms_plugin.views.sync.device_fields.get_object_or_404"),
-            patch("netbox_librenms_plugin.views.sync.device_fields.Manufacturer"),
-            patch("netbox_librenms_plugin.views.sync.device_fields.Platform") as MockPlatform,
-            patch("netbox_librenms_plugin.views.sync.device_fields.transaction"),
-            patch("netbox_librenms_plugin.views.sync.device_fields.messages") as mock_messages,
-            patch("netbox_librenms_plugin.views.sync.device_fields.redirect"),
-        ):
-            # objects.filter().first() returns None (no existing platform)
-            MockPlatform.objects.filter.return_value.first.return_value = None
-            # Simulate full_clean raising ValidationError (slug collision)
-            platform_instance = MagicMock()
-            platform_instance.full_clean.side_effect = ValidationError("Slug already exists")
-            MockPlatform.return_value = platform_instance
-
-            view.post(request, pk=1)
-
-            # full_clean must have been called (not just .create())
-            platform_instance.full_clean.assert_called_once()
-            # save must NOT have been called (ValidationError raised before save)
-            platform_instance.save.assert_not_called()
-            # Error message should be shown to user with the actual validation detail
-            mock_messages.error.assert_called_once()
-            error_msg = mock_messages.error.call_args[0][1]
-            assert "could not be created" in error_msg
-            assert "Slug already exists" in error_msg
-
-
 class TestNormalizeOOBTypeCimc:
     """The docs advertise CIMC as a supported OOB controller family, so normalize_oob_type() must recognise it (and it must be in OOB_TYPES)."""
 

@@ -1222,7 +1222,11 @@
                     // submits a form or triggers an hx-* request must still execute that action, so
                     // don't preventDefault for those (we still close the nested modal below).
                     const isActionControl =
-                        dismissTrigger.type === 'submit' ||
+                        // Check the EXPLICIT type attribute, not the computed .type: a <button>
+                        // in a <form> without a type attribute computes .type === 'submit', which
+                        // would misclassify a plain Cancel button as an action control and let it
+                        // natively submit the form.
+                        dismissTrigger.getAttribute('type') === 'submit' ||
                         ['hx-post', 'hx-get', 'hx-put', 'hx-delete', 'hx-patch'].some((attr) =>
                             dismissTrigger.hasAttribute(attr)
                         );

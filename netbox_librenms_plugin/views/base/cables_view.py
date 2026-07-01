@@ -257,12 +257,24 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin, 
         rather than silently dropping OOB rows.
         """
         oob = get_librenms_oob(lookup_device, server_key=server_key)
+        if not oob:
+            # No OOB controller linked — a genuinely unmapped/host-only device.
+            return False
         # Coerce the OOB controller id like the host id: a non-numeric/bool/zero/negative stored
         # id fails closed (skip the fetch) rather than building a GET /devices/<garbage>/... that
         # 404s and silently drops OOB rows.
-        oob_id = coerce_librenms_id(oob.get("id")) if oob else None
+        oob_id = coerce_librenms_id(oob.get("id"))
         if not oob_id:
-            return False
+            # An OOB controller IS linked, but its stored id is corrupt. Mirror interfaces_view's
+            # fail-closed pattern: flag + warn and return True (OOB linked) so post() surfaces the
+            # dropped OOB rows instead of showing a "successful" banner over silently-missing rows.
+            self._oob_links_fetch_failed = True
+            logger.warning(
+                "OOB controller linked for device %s but its stored id is invalid (%r); skipping OOB links",
+                self.librenms_id,
+                oob.get("id"),
+            )
+            return True
         oob_success, oob_data = self.librenms_api.get_device_links(oob_id)
         # Mirror the main-device branch: a 200 {"status": "error", ...} body is also a failure.
         oob_ok = (
