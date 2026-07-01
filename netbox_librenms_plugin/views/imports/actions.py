@@ -43,6 +43,7 @@ from netbox_librenms_plugin.utils import (
     coerce_librenms_id,
     is_legacy_librenms_id,
     resolve_naming_preferences,
+    same_host,
     save_user_pref,
     set_device_ip_fk,
     set_librenms_device_id,
@@ -2533,7 +2534,10 @@ class AddAsOOBView(
                 # IP was applied either. Surface that the existing OOB IP was kept when it differs
                 # from the LibreNMS controller's IP (an equal one needs no message; it's correct).
                 existing_oob_host = str(existing_device.oob_ip).split("/")[0]
-                if existing_oob_host != oob_ip_str:
+                # Compare version-aware (same_host parses both sides) so an equal address in a
+                # different textual form — expanded vs compressed IPv6, or hex case — isn't reported
+                # as "a different OOB IP". A raw != would warn on 2001:db8::1 vs 2001:0db8:...:0001.
+                if not same_host(existing_oob_host, oob_ip_str):
                     deferred_messages.append(
                         (
                             messages.WARNING,

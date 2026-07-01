@@ -5406,6 +5406,43 @@ class TestAddAsOOBViewPost:
         body = warn_calls[0].args[1]
         assert "10.99.99.9" in body and "10.50.50.50" in body
 
+    def test_existing_oob_ip_equal_in_different_textual_form_no_warning(self):
+        """An existing OOB IP equal to the controller's — just a different IPv6 textual form — must NOT warn."""
+        from dcim.models import Device
+        from django.contrib import messages as dj_messages
+        from django.http import HttpResponse
+
+        view = self._make_view()
+        # Existing OOB IP stored in COMPRESSED IPv6 form.
+        existing_device = make_device("oob-samehost-v6", librenms_cf={"default": {"id": 10}})
+        iface = make_interface(existing_device, "mgmt0")
+        existing_ip = make_ip("2001:db8::1/64", assigned_object=iface)
+        existing_device.oob_ip = existing_ip
+        existing_device.save()
+
+        request = _make_request(post={"existing_device_id": str(existing_device.pk)})
+
+        # Controller reports the SAME address in fully-EXPANDED form (textually different, same host).
+        libre_device = {"device_id": 17}
+        validation = {
+            "oob_candidate": {
+                "device": existing_device,
+                "type": "oob",
+                "ip": "2001:0db8:0000:0000:0000:0000:0000:0001",
+            }
+        }
+        view.get_validated_device_with_selections = MagicMock(return_value=(libre_device, validation, {}))
+        view.render_device_row = MagicMock(return_value=HttpResponse("row"))
+
+        response = view.post(request, device_id=17)
+
+        assert response.status_code == 200
+        # The OOB link still committed, the existing oob_ip kept…
+        assert Device.objects.get(pk=existing_device.pk).oob_ip_id == existing_ip.pk
+        # …and NO "different OOB IP" warning was surfaced (the addresses are the same host).
+        warn_bodies = [c.args[1] for c in request._messages.add.call_args_list if c.args[0] == dj_messages.WARNING]
+        assert not any("different OOB IP" in body for body in warn_bodies), warn_bodies
+
     def test_aborts_when_librenms_id_owned_by_another_device(self):
         """The incoming OOB controller id must not already belong to another NetBox device."""
         from dcim.models import Device
