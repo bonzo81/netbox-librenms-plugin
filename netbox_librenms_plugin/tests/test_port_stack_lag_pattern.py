@@ -222,18 +222,34 @@ class TestMigration0012Preflight:
 
     def test_preflight_strips_surrounding_whitespace(self):
         """A whitespace-padded librenms_os a bypassing path left behind is canonicalized to .strip().lower() (matching clean()), not left with surrounding spaces behind the Lower()-only constraint."""
-        from django.apps import apps as django_apps
+        from django.db import connection
+        from django.db.migrations.executor import MigrationExecutor
 
         from netbox_librenms_plugin.models import PortStackLagPattern
+
+        # Invoke the preflight with the HISTORICAL model as the migration actually sees it (state at
+        # 0011, before 0012). Its save() has no FullCleanOnSaveMixin/clean(), so — unlike the real
+        # model, whose save() would silently strip regardless of the migration code — the migration's
+        # OWN normalization is what persists. That is the only way this test can tell a Lower()-only
+        # rewrite (leaves " zzws ") apart from the fix's .strip().lower() (writes "zzws").
+        historical_apps = (
+            MigrationExecutor(connection)
+            .loader.project_state(("netbox_librenms_plugin", "0011_portstacklagpattern"))
+            .apps
+        )
 
         # bulk_create skips clean(): " ZZWS " reaches the row verbatim (Lower() of it is unique, so
         # the CI constraint permits it). The preflight must strip+lower it, not just lower it.
         PortStackLagPattern.objects.bulk_create(
             [PortStackLagPattern(librenms_os=" ZZWS ", lag_name_pattern=r"^zw\d+$")]
         )
-        self._preflight()(django_apps, None)
-        assert PortStackLagPattern.objects.filter(librenms_os="zzws").exists()
-        assert not PortStackLagPattern.objects.filter(librenms_os=" ZZWS ").exists()
+        pk = PortStackLagPattern.objects.get(lag_name_pattern=r"^zw\d+$").pk
+        # Sanity: the padded value really landed in the row (bulk_create did not canonicalize it).
+        assert PortStackLagPattern.objects.get(pk=pk).librenms_os == " ZZWS "
+        self._preflight()(historical_apps, None)
+        # Exact canonical value, not a DB filter: trailing/leading-space equality is collation-fuzzy
+        # and would let " zzws " match "zzws".
+        assert PortStackLagPattern.objects.get(pk=pk).librenms_os == "zzws"
 
     def test_preflight_blocks_whitespace_and_case_variant_duplicates(self):
         """Rows differing only by surrounding whitespace/case (' WSDUP ' vs 'wsdup') are the same pattern to clean(); the preflight must flag them as a collision via .strip().lower() — a Lower()-only check misses the whitespace variant and would leave a semantic duplicate behind the constraint."""
