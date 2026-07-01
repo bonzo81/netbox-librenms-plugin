@@ -75,13 +75,14 @@ def port_has_vlan(port):
     """
     Return whether a port row carries real VLAN data (the signature's ``vlans`` axis predicate).
 
-    Keyed on the VALUE, not mere key presence: ``ifVlan`` ``None``/``""``/``0`` (LibreNMS's
-    no-/default-VLAN sentinels) do NOT count, only a real id or a non-empty ``vlans`` list. The
-    compressor's port fingerprint imports this so its VLAN axis stays in lockstep with the signature
-    (otherwise two same-shape ports — one with ``ifVlan: 0``/``None`` — could collapse to a
-    representative whose value flips the signature's vlans axis).
+    Keyed on the VALUE, not mere key presence: ``ifVlan`` ``None``/``""``/``0``/``"0"`` (LibreNMS's
+    no-/default-VLAN sentinels — ifVlan is string-valued JSON elsewhere in the client, so the
+    string ``"0"`` is the same sentinel as the int ``0``) do NOT count, only a real id or a
+    non-empty ``vlans`` list. The compressor's port fingerprint imports this so its VLAN axis stays
+    in lockstep with the signature (otherwise two same-shape ports — one with ``ifVlan: 0``/``None``
+    — could collapse to a representative whose value flips the signature's vlans axis).
     """
-    return port.get("ifVlan") not in (None, "", 0) or bool(port.get("vlans"))
+    return port.get("ifVlan") not in (None, "", 0, "0") or bool(port.get("vlans"))
 
 
 def _ports(recording):
@@ -141,10 +142,30 @@ def compute_shape_signature(recording):
         "position_base": min(positions) if positions else None,
     }
 
-    # LAG + sub-interface styles from ports.
+    # LAG + sub-interface styles from ports. LAG detection mirrors the client's
+    # resolve_port_relationships._is_lag_aggregate: an ieee8023adLag ifType OR a name matching a
+    # configured per-OS LAG pattern (captured in the recording's lag_patterns). Reading ifType alone
+    # would fingerprint a pattern-based LAG shape (e.g. Cisco "Po1") as lag.present=False, collapsing
+    # a real LAG into a non-LAG novelty bucket.
     ports = _ports(recording)
-    lag_ports = [p for p in ports if p.get("ifType") == "ieee8023adLag" and isinstance(p.get("ifName"), str)]
-    name_prefix = re.sub(r"\d+$", "", lag_ports[0]["ifName"]) if lag_ports else None
+    compiled_lag_patterns = []
+    for pattern_str in (recording.get("lag_patterns") or {}).values():
+        try:
+            compiled_lag_patterns.append(re.compile(pattern_str))
+        except re.error:
+            continue
+
+    def _lag_names(port):
+        return [n for n in (port.get("ifName"), port.get("ifDescr")) if isinstance(n, str) and n]
+
+    def _is_lag_port(port):
+        if port.get("ifType") == "ieee8023adLag":
+            return True
+        return any(pat.search(name) for pat in compiled_lag_patterns for name in _lag_names(port))
+
+    lag_ports = [p for p in ports if _is_lag_port(p)]
+    lag_port_names = [name for p in lag_ports for name in _lag_names(p)]
+    name_prefix = re.sub(r"\d+$", "", lag_port_names[0]) if lag_port_names else None
     sub_styles = set()
     for p in ports:
         name = p.get("ifName")

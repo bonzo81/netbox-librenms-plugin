@@ -196,6 +196,23 @@ def test_compression_vlan_axis_stays_in_lockstep_with_signature():
     assert comp["vlans"] == full["vlans"]  # compression must not flip the vlans axis to False
 
 
+def test_fingerprint_detects_subinterface_named_in_ifdescr():
+    """_fingerprint must scan BOTH name fields (like the retention path's _port_names).
+
+    An ifDescr-mode sub-interface ('.N' in ifDescr, ifName blank) must fingerprint distinctly from a
+    non-subinterface — otherwise dedup could fold it into a non-sub representative, dropping the
+    base/sub port a downstream _port_names consumer (the resolver) needs.
+    """
+    from netbox_librenms_plugin.data_shapes.compress import _fingerprint
+
+    base = {"port_id": 1, "ifName": "", "ifType": "ethernetCsmacd", "ifDescr": "ge-1/0/0"}
+    sub = {"port_id": 2, "ifName": "", "ifType": "ethernetCsmacd", "ifDescr": "ge-1/0/0.5"}
+    # Same ifType + no VLAN, so only the sub-interface naming axis (index 1) can distinguish them.
+    assert _fingerprint(base)[1] is False
+    assert _fingerprint(sub)[1] is True
+    assert _fingerprint(base) != _fingerprint(sub)
+
+
 def _ifdescr_mode_recording():
     """An ifDescr-mode junos recording: the structured ``.N`` names live in ifDescr, ifName is blank.
 

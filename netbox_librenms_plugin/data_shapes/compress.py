@@ -155,11 +155,13 @@ def _add_base_name_ports(dict_ports, by_name, keep_ids):
 
 def _fingerprint(port):
     """Reduce a port to the shape axes the outcome tests/signature distinguish (for dedup)."""
-    name = port.get("ifName")
-    name = name if isinstance(name, str) else ""
     return (
         port.get("ifType"),
-        bool(_SUB_RE.search(name)),  # sub-interface naming style (drives signature sub_interfaces)
+        # Sub-interface naming style (drives signature sub_interfaces). Scan BOTH name fields via
+        # _port_names, not just ifName: an ifDescr-mode capture's ".N" sub-unit name can live in
+        # ifDescr, and the retention path already keys on _port_names — a fingerprint that read only
+        # ifName could fold such a sub-interface into a non-subinterface representative.
+        any(_SUB_RE.search(name) for name in _port_names(port)),
         # VLAN axis — use the signature's own value-based predicate (not key presence) so a
         # no-VLAN port (ifVlan None/0) and a real-VLAN port get distinct fingerprints and the
         # representative kept can't flip compute_shape_signature's vlans axis.

@@ -60,9 +60,32 @@ def test_signature_vlans_requires_actual_vlan_data():
     assert compute_shape_signature(_rec([{"port_id": 1, "ifName": "Gi0/1", "ifVlan": ""}]))["vlans"] is False
     # ifVlan 0 is LibreNMS's no-/default-VLAN sentinel on an access port, not real VLAN data → False.
     assert compute_shape_signature(_rec([{"port_id": 1, "ifName": "Gi0/1", "ifVlan": 0}]))["vlans"] is False
+    # ifVlan is string-valued JSON elsewhere in the client, so the string "0" is the SAME no-VLAN
+    # sentinel as the int 0 and must not flip the vlans axis true.
+    assert compute_shape_signature(_rec([{"port_id": 1, "ifName": "Gi0/1", "ifVlan": "0"}]))["vlans"] is False
     # Real VLAN data → vlans True.
     assert compute_shape_signature(_rec([{"port_id": 1, "ifName": "Gi0/1", "ifVlan": 10}]))["vlans"] is True
     assert compute_shape_signature(_rec([{"port_id": 1, "ifName": "Gi0/1", "vlans": [10, 20]}]))["vlans"] is True
+
+
+def test_signature_lag_present_via_configured_pattern():
+    """A pattern-matched LAG (name matches a configured per-OS lag_patterns entry, ifType NOT ieee8023adLag) must set lag.present, mirroring resolve_port_relationships — otherwise a pattern-based aggregate collapses into a non-LAG novelty bucket."""
+    rec = {
+        "schema_version": 1,
+        "name": "x",
+        "device_id": 1,
+        "lag_patterns": {"ios": r"^Po\d+$"},
+        "responses": {
+            "GET /api/v0/devices/1/ports": {
+                "status": "ok",
+                # propVirtual, NOT ieee8023adLag — only the configured Cisco "Po\d+" pattern marks it.
+                "ports": [{"port_id": 1, "ifName": "Po1", "ifType": "propVirtual"}],
+            }
+        },
+    }
+    sig = compute_shape_signature(rec)
+    assert sig["lag"]["present"] is True
+    assert sig["lag"]["name_prefix"] == "Po"
 
 
 def test_signature_handles_null_meta():
