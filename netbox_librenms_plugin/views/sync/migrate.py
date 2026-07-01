@@ -21,7 +21,6 @@ from django.db import IntegrityError, transaction
 from django.http import HttpResponse
 from django.shortcuts import get_object_or_404, redirect
 from django.urls import get_script_prefix, reverse
-from django.utils.http import url_has_allowed_host_and_scheme
 from django.views import View
 from ipam.models import IPAddress
 
@@ -36,6 +35,7 @@ from netbox_librenms_plugin.views.mixins import (
     LibreNMSAPIMixin,
     LibreNMSPermissionMixin,
     NetBoxObjectPermissionMixin,
+    validated_referer,
 )
 
 logger = logging.getLogger(__name__)
@@ -210,12 +210,9 @@ def _safe_referer(request, fallback=None):
     Returns:
         str: The validated Referer, or *fallback* / the app mount path.
     """
-    referer = request.META.get("HTTP_REFERER")
-    if referer and url_has_allowed_host_and_scheme(
-        referer,
-        allowed_hosts={request.get_host()},
-        require_https=request.is_secure(),
-    ):
+    # Delegate the CWE-601 Referer check to the shared barrier so this and _get_safe_redirect_url
+    # can't drift; this endpoint keeps its own fallback (a server-built sync-tab URL, else prefix).
+    if referer := validated_referer(request):
         return referer
     return fallback or get_script_prefix()
 

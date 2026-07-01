@@ -1015,6 +1015,21 @@ class TestSafeRefererFallback:
 
         assert _safe_referer(self._req(), fallback=None) == get_script_prefix()
 
+    def test_referer_validation_delegates_to_shared_barrier(self):
+        """_safe_referer routes the CWE-601 Referer check through the shared validated_referer helper.
+
+        Patching the shared barrier (not a hand-copied inline copy) changes the outcome, so the two
+        redirect helpers can't drift on the open-redirect guard.
+        """
+        from unittest.mock import patch
+
+        from netbox_librenms_plugin.views.sync.migrate import _safe_referer
+
+        with patch("netbox_librenms_plugin.views.sync.migrate.validated_referer", return_value="http://ok/x"):
+            assert _safe_referer(self._req(referer="whatever"), fallback="/sync/") == "http://ok/x"
+        with patch("netbox_librenms_plugin.views.sync.migrate.validated_referer", return_value=None):
+            assert _safe_referer(self._req(referer="whatever"), fallback="/sync/") == "/sync/"
+
 
 class TestNonHtmxFallbackRedirect:
     """A plain POST with no Referer still lands on the donor sync tab + server."""

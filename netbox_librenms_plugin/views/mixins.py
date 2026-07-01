@@ -59,12 +59,14 @@ def extract_cached_ports(cached, cache_key=None):
     return cached
 
 
-def _get_safe_redirect_url(request):
+def validated_referer(request):
     """
-    Return a validated redirect URL from the HTTP Referer header.
+    Return the request's ``Referer`` when it passes the open-redirect barrier, else None.
 
-    Validates the Referer against allowed hosts and schemes to prevent
-    open-redirect attacks. Falls back to the current request path or "/".
+    The single home for the CWE-601 Referer check (``url_has_allowed_host_and_scheme`` against the
+    current host/scheme) so every redirect helper that trusts the Referer — ``_get_safe_redirect_url``
+    here and ``migrate._safe_referer`` — validates it identically and can't drift. Callers own their
+    own fallback when this returns None.
     """
     referrer = request.META.get("HTTP_REFERER")
     if referrer and url_has_allowed_host_and_scheme(
@@ -72,6 +74,18 @@ def _get_safe_redirect_url(request):
         allowed_hosts={request.get_host()},
         require_https=request.is_secure(),
     ):
+        return referrer
+    return None
+
+
+def _get_safe_redirect_url(request):
+    """
+    Return a validated redirect URL from the HTTP Referer header.
+
+    Validates the Referer against allowed hosts and schemes to prevent
+    open-redirect attacks. Falls back to the current request path or "/".
+    """
+    if referrer := validated_referer(request):
         return referrer
     # No usable Referer. On a non-GET request, request.path is often a POST-only
     # action endpoint, so redirecting the browser there would 405 — fall back to a
