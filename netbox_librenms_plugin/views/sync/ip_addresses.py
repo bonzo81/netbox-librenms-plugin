@@ -260,11 +260,16 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
         port_id = ip_data.get("port_id")
         if port_id is not None and str(port_id) in by_librenms_id:
             iface = by_librenms_id[str(port_id)]
-            # None marks an ambiguous port id (>1 interface shares it) — fail safe: don't
-            # fall through to a name match for the same id, which could be just as wrong.
-            return iface
+            if iface is not None:
+                return iface
+            # None marks an ambiguous port id (>1 interface shares it). Fall through to the name /
+            # interface_url match rather than skipping the row — the render path does the same
+            # (_add_interface_info_to_ip drops the ambiguous id and links by name), so returning
+            # None here would skip a row the table shows linked. Safe because by_name is itself
+            # fail-closed: the object's own interface wins and a sibling-only name collision maps
+            # to None, so the fall-through can't bind the address to an arbitrary interface.
         name = ip_data.get("interface_name")
-        if name and name in by_name:
+        if name and by_name.get(name) is not None:
             return by_name[name]
         # Rename-safe fallback: the cached interface_url PK still points at the (renamed)
         # interface. Scope to by_pk (the object's own interfaces) so a stale URL can't bind the

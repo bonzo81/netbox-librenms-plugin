@@ -1853,8 +1853,13 @@ class TestSyncIPAddressesViewProcessIpSync:
 
         assert IPAddress.objects.get(address="10.0.0.1/24").assigned_object == vmiface
 
-    def test_ambiguous_port_id_skips_without_binding(self):
-        """Two current interfaces carry the same stored LibreNMS port id → the row must skip (fail-safe) rather than bind the IP to an arbitrary interface."""
+    def test_ambiguous_port_id_binds_by_name(self):
+        """Two interfaces share a port id (id ambiguous), but the row names one uniquely → it binds by name.
+
+        This is what the rendered IP table shows (its render drops the ambiguous id and links by name),
+        so the sync must agree and NOT drop the row into skipped_no_interface. by_name is fail-closed
+        (obj's own interface wins), so the fall-through binds only to the uniquely-named interface.
+        """
         from ipam.models import IPAddress
 
         view = self._setup_view()
@@ -1864,6 +1869,24 @@ class TestSyncIPAddressesViewProcessIpSync:
         self._seed_lib_id(a, 5)
         self._seed_lib_id(b, 5)  # both share port id 5 → ambiguous
         cached = [{"ip_address": "10.0.0.1", "ip_with_mask": "10.0.0.1/24", "port_id": 5, "interface_name": "eth0"}]
+
+        results = self._run(view, ["10.0.0.1"], cached, obj, "device")
+
+        assert IPAddress.objects.get(address="10.0.0.1/24").assigned_object == a
+        assert "10.0.0.1" not in results["skipped_no_interface"]
+
+    def test_ambiguous_port_id_and_unresolvable_name_still_skips(self):
+        """When the port id is ambiguous AND the row's name matches no interface, it still fails closed (skip, no bind)."""
+        from ipam.models import IPAddress
+
+        view = self._setup_view()
+        obj = make_device("ipsync-ambport-noname")
+        a = make_interface(obj, "eth0")
+        b = make_interface(obj, "eth1")
+        self._seed_lib_id(a, 5)
+        self._seed_lib_id(b, 5)  # both share port id 5 → ambiguous
+        # interface_name "eth9" resolves nowhere, and interface_url is absent → nothing to fall through to.
+        cached = [{"ip_address": "10.0.0.1", "ip_with_mask": "10.0.0.1/24", "port_id": 5, "interface_name": "eth9"}]
 
         results = self._run(view, ["10.0.0.1"], cached, obj, "device")
 
