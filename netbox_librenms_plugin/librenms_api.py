@@ -615,6 +615,7 @@ class LibreNMSAPI:
         lag_patterns: dict | None = None,
         device_os: str | None = None,
         interface_name_field: str = "ifName",
+        compiled_lag_patterns: list | None = None,
     ) -> dict:
         """
         Resolve LAG membership and sub-interface parent relationships from LibreNMS data.
@@ -698,7 +699,12 @@ class LibreNMSAPI:
                     continue
                 by_name[name] = p
 
-        if lag_patterns is None:
+        if compiled_lag_patterns is not None:
+            # Caller (e.g. the interface-refresh gating) already loaded + compiled the OS-scoped
+            # patterns for this device_os and shares them here, so the DB read + regex compile
+            # happen once per refresh instead of once in _has_lag_signals and again here.
+            compiled_patterns = compiled_lag_patterns
+        elif lag_patterns is None:
             # OS-scoped pattern loading + compile-with-skip lives on the model so the resolver
             # and the _has_lag_signals fetch-trigger can't diverge on which patterns apply. A
             # PRESENT but unusable device_os disables name-pattern matching (returns []), so a

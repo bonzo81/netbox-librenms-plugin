@@ -402,11 +402,22 @@ class BaseInterfaceTableView(
             info_success, device_info = self.librenms_api.get_device_info(self.librenms_id)
             if info_success and isinstance(device_info, dict):
                 device_os = device_info.get("os")
-            if self._has_lag_signals(host_ports_final, interface_name_field, device_os=device_os):
+            # Load + compile the OS-scoped patterns ONCE and share them with both the scoped signal
+            # re-check and resolve_port_relationships, instead of each re-querying + re-compiling.
+            from netbox_librenms_plugin.models import PortStackLagPattern
+
+            scoped_patterns = PortStackLagPattern.compiled_patterns_for_os(device_os)
+            if self._has_lag_signals(
+                host_ports_final, interface_name_field, device_os=device_os, lag_patterns=scoped_patterns
+            ):
                 ps_success, ps_data = self.librenms_api.get_port_stack(self.librenms_id)
                 if ps_success:
                     relationships = self.librenms_api.resolve_port_relationships(
-                        host_ports_final, ps_data, device_os=device_os, interface_name_field=interface_name_field
+                        host_ports_final,
+                        ps_data,
+                        device_os=device_os,
+                        interface_name_field=interface_name_field,
+                        compiled_lag_patterns=scoped_patterns,
                     )
                     librenms_data["port_stack_relationships"] = relationships
                 else:
@@ -852,7 +863,9 @@ class BaseInterfaceTableView(
 
         port["missing_vlans"] = missing_vlans
 
-    def _has_lag_signals(self, ports: list, interface_name_field: str = "ifName", device_os=None) -> bool:
+    def _has_lag_signals(
+        self, ports: list, interface_name_field: str = "ifName", device_os=None, lag_patterns=None
+    ) -> bool:
         """
         Return True if any port appears to be a LAG interface or sub-interface.
 
@@ -888,14 +901,21 @@ class BaseInterfaceTableView(
             ports (list): The LibreNMS port dicts to scan.
             interface_name_field (str): The user-selected name field, scanned in
                 addition to ifName/ifDescr.
+            device_os (str | None): The device OS to scope the name-pattern match to.
+            lag_patterns (list | None): Pre-compiled PortStackLagPattern list for *device_os*.
+                Pass it when the caller already loaded the patterns (e.g. to share one load
+                between the scoped pre-check and resolve_port_relationships) so this method does
+                not re-query + re-compile them.
 
         Returns:
             bool: True if any port looks like a LAG aggregate or a sub-interface.
         """
         from netbox_librenms_plugin.models import PortStackLagPattern
 
-        # OS-scoped compiled patterns (shared with the resolver via the model helper).
-        lag_patterns = PortStackLagPattern.compiled_patterns_for_os(device_os)
+        # OS-scoped compiled patterns (shared with the resolver via the model helper). Reuse the
+        # caller's pre-loaded list when given so the DB read + regex compile happen once per refresh.
+        if lag_patterns is None:
+            lag_patterns = PortStackLagPattern.compiled_patterns_for_os(device_os)
 
         name_fields = {"ifName", "ifDescr", interface_name_field}
 
@@ -906,14 +926,14 @@ class BaseInterfaceTableView(
             # this method is documented to track.
             return [name for field in name_fields if isinstance(name := port.get(field), str) and name]
 
-        port_names = {name for p in ports for name in _names(p)}
+        # Compute each port's names once and reuse for both the base-name set and the per-port scan.
+        names_per_port = [_names(p) for p in ports]
+        port_names = {name for names in names_per_port for name in names}
         sub_iface_re = re.compile(r"^(.+)\.\d+$")
 
-        for port in ports:
-            if_type = port.get("ifType", "")
-            if if_type == "ieee8023adLag":
+        for port, names in zip(ports, names_per_port):
+            if port.get("ifType", "") == "ieee8023adLag":
                 return True
-            names = _names(port)
             if any(pat.search(name) for pat in lag_patterns for name in names):
                 return True
             # Sub-interface: a name ends with '.<digits>' and the parent name also present

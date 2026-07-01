@@ -219,3 +219,67 @@ class TestMigration0012Preflight:
         )
         with pytest.raises(RuntimeError, match="iosdup"):
             self._preflight()(django_apps, None)
+
+
+@pytest.mark.django_db
+class TestLagPatternSharedLoad:
+    """The interface-refresh LAG gating loads OS-scoped patterns once and shares them.
+
+    _has_lag_signals and resolve_port_relationships each re-queried + re-compiled
+    PortStackLagPattern per call, so a single refresh loaded the scoped patterns twice (plus the
+    resolver's own load). Both now accept a pre-loaded compiled list so the caller loads once.
+    """
+
+    def _view(self):
+        from netbox_librenms_plugin.views.base.interfaces_view import BaseInterfaceTableView
+
+        return object.__new__(BaseInterfaceTableView)
+
+    @staticmethod
+    def _seed_and_compile(os_name="sharedos"):
+        from netbox_librenms_plugin.models import PortStackLagPattern
+
+        PortStackLagPattern.objects.create(librenms_os=os_name, lag_name_pattern=r"^Po\d+$")
+        return PortStackLagPattern.compiled_patterns_for_os(os_name)
+
+    @staticmethod
+    def _no_pattern_query(ctx):
+        return not any("portstacklagpattern" in q["sql"].lower() for q in ctx.captured_queries)
+
+    def test_has_lag_signals_reuses_supplied_patterns_without_db(self):
+        """Passing lag_patterns skips the PortStackLagPattern query inside _has_lag_signals."""
+        from django.db import connection
+        from django.test.utils import CaptureQueriesContext
+
+        compiled = self._seed_and_compile()
+        view = self._view()
+        ports = [{"ifName": "Gi0/0", "ifType": "ethernetCsmacd"}]
+
+        with CaptureQueriesContext(connection) as ctx:
+            view._has_lag_signals(ports, device_os="sharedos", lag_patterns=compiled)
+
+        assert self._no_pattern_query(ctx)
+
+    def test_resolver_reuses_supplied_compiled_patterns_without_db(self):
+        """resolve_port_relationships(compiled_lag_patterns=...) resolves without re-loading patterns."""
+        from django.db import connection
+        from django.test.utils import CaptureQueriesContext
+
+        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+
+        compiled = self._seed_and_compile()
+        api = LibreNMSAPI(server_key="default")
+        ports = [
+            {"port_id": 11, "ifName": "Gi0/1", "ifType": "ethernetCsmacd"},
+            {"port_id": 12, "ifName": "Po1", "ifType": "propVirtual"},
+        ]
+        port_stack = [{"high_port_id": 11, "low_port_id": 12}]
+
+        with CaptureQueriesContext(connection) as ctx:
+            result = api.resolve_port_relationships(
+                ports, port_stack, device_os="sharedos", compiled_lag_patterns=compiled
+            )
+
+        # Po1 aggregate matched via the supplied pattern (behavior preserved) and no pattern query.
+        assert result["lag_members"] == {11: 12}
+        assert self._no_pattern_query(ctx)
