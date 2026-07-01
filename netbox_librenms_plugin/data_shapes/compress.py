@@ -91,12 +91,52 @@ def _transceiver_referenced(recording):
     return referenced
 
 
+def _port_names(port):
+    """
+    Return the non-empty string names a port is known by (ifName + ifDescr).
+
+    Mirrors ``resolve_port_relationships._port_names``: that resolver keys its lookup maps on every
+    known name field, not just ifName, because an ifDescr-mode device's structured ``.N`` sub-unit
+    name can live in ifDescr while ifName carries an arbitrary label. Compress must scan the same
+    fields or it can drop a base port the resolver needs, breaking the relationship-integrity
+    invariant this module promises.
+    """
+    return [name for field in ("ifName", "ifDescr") if isinstance(name := port.get(field), str) and name]
+
+
+def _build_name_index(dict_ports):
+    """
+    Index ports by every name they're known by (ifName + ifDescr), dropping AMBIGUOUS names.
+
+    A name carried by two DIFFERENT ports (distinct port_ids) can't disambiguate which port a
+    base/sub-unit lookup means, so it's dropped entirely — mirroring the ambiguous-name drop in
+    ``resolve_port_relationships`` (whose old last-write-wins ``by_name`` would bind the wrong
+    aggregate). Keying the same way here keeps compress's base-port retention consistent with what
+    the resolver actually resolves.
+    """
+    by_name: dict = {}
+    ambiguous_names: set = set()
+    for p in dict_ports:
+        for name in _port_names(p):
+            if name in ambiguous_names:
+                continue
+            existing = by_name.get(name)
+            if existing is not None and str(existing.get("port_id")) != str(p.get("port_id")):
+                del by_name[name]
+                ambiguous_names.add(name)
+                continue
+            by_name[name] = p
+    return by_name
+
+
 def _add_base_name_ports(dict_ports, by_name, keep_ids):
     """
     Grow *keep_ids* to include base-level ports that kept ``parent.N`` names resolve to (fixpoint).
 
     resolve_port_relationships' _resolve_physical strips a ``.N`` suffix and looks the base up by
-    name; dropping that base would change the resolved LAG/sub maps, so keep it too.
+    name; dropping that base would change the resolved LAG/sub maps, so keep it too. Scan every
+    known name (ifName + ifDescr), not just ifName, so an ifDescr-mode device whose ``.N`` marker
+    lives in ifDescr still has its base port preserved.
     """
     changed = True
     while changed:
@@ -104,8 +144,9 @@ def _add_base_name_ports(dict_ports, by_name, keep_ids):
         for p in dict_ports:
             if str(p.get("port_id")) not in keep_ids:
                 continue
-            name = p.get("ifName")
-            if isinstance(name, str) and "." in name:
+            for name in _port_names(p):
+                if "." not in name:
+                    continue
                 base = by_name.get(name.rsplit(".", 1)[0])
                 if base is not None and str(base.get("port_id")) not in keep_ids:
                     keep_ids.add(str(base.get("port_id")))
@@ -155,7 +196,7 @@ def compress_recording(recording):
 
     ports = ports_body["ports"]
     dict_ports = [p for p in ports if isinstance(p, dict)]
-    by_name = {p["ifName"]: p for p in dict_ports if isinstance(p.get("ifName"), str)}
+    by_name = _build_name_index(dict_ports)
 
     # Always keep the ports whose relationships we must preserve: those named by port_stack, plus the
     # base-level ports their ``.N`` names resolve to.

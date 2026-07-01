@@ -194,3 +194,74 @@ def test_compression_vlan_axis_stays_in_lockstep_with_signature():
     comp = compute_shape_signature(compress_recording(rec))
     assert full["vlans"] is True  # the recording genuinely carries VLAN data (Gi0/2)
     assert comp["vlans"] == full["vlans"]  # compression must not flip the vlans axis to False
+
+
+def _ifdescr_mode_recording():
+    """An ifDescr-mode junos recording: the structured ``.N`` names live in ifDescr, ifName is blank.
+
+    The aggregate's physical base ports (500 ``ge-1/0/0`` and 502 ``ae5``) are reached ONLY by
+    stripping the ``.N`` off the port_stack-referenced sub-units (501 ``ge-1/0/0.0`` and 503
+    ``ae5.0``) and looking the base up by name — a name that lives in ifDescr. The bases are ordered
+    AFTER the sub-units and share their fingerprints, so fingerprint-dedup drops them unless
+    _add_base_name_ports keeps them; an ifName-only scan misses them entirely.
+    """
+    ports = [
+        _port(501, "", "ethernetCsmacd", ifDescr="ge-1/0/0.0"),  # member sub-unit (port_stack ref)
+        _port(503, "", "ieee8023adLag", ifDescr="ae5.0"),  # aggregate sub-unit (port_stack ref)
+        _port(500, "", "ethernetCsmacd", ifDescr="ge-1/0/0"),  # member base — reached only via ifDescr
+        _port(502, "", "ieee8023adLag", ifDescr="ae5"),  # aggregate base — reached only via ifDescr
+    ]
+    # Redundant same-shape access ports (distinct fingerprint: they carry VLAN) so the fixed path
+    # still compresses — proving the bases survive REAL compression, not a no-op.
+    for i in range(3):
+        ports.append(_port(1000 + i, "", "ethernetCsmacd", ifDescr=f"ge-2/0/{i}", ifVlan=10))
+    mappings = [{"high_port_id": 501, "low_port_id": 503}]  # ge-1/0/0.0 -> ae5.0 (phys 500 -> 502)
+    return {
+        "schema_version": 1,
+        "name": "ifdescr",
+        "description": "",
+        "meta": {"os": "junos"},
+        "device_id": 4242,
+        "responses": {
+            "GET /api/v0/devices/4242": {"status": "ok", "devices": [{"device_id": 4242, "os": "junos"}]},
+            "GET /api/v0/devices/4242/ports": {"status": "ok", "ports": ports},
+            "GET /api/v0/devices/4242/port_stack": {"status": "ok", "mappings": mappings},
+        },
+    }
+
+
+def test_compression_keeps_ifdescr_mode_base_ports(recording_server):
+    """Base ports reached only via a ``.N`` name in ifDescr survive compression, so the resolver yields the same relationships before and after — an ifName-only base scan silently dropped them."""
+    rec = _ifdescr_mode_recording()
+    full_lag, full_sub = _resolve(rec, recording_server)
+    comp = compress_recording(rec)
+    comp_lag, comp_sub = _resolve(comp, recording_server)
+
+    # Non-vacuous: the full recording really resolves a relationship through the ifDescr-only bases.
+    assert full_lag or full_sub
+    # The invariant: identical resolved relationships before and after compression.
+    assert full_lag == comp_lag
+    assert full_sub == comp_sub
+    # Compression actually ran (redundant access ports dropped) yet BOTH ifDescr-only base ports
+    # survived — the exact ports an ifName-only base scan would have dropped.
+    comp_ids = {p["port_id"] for p in comp["responses"]["GET /api/v0/devices/4242/ports"]["ports"]}
+    assert {500, 502}.issubset(comp_ids)
+    assert "compressed_ports" in comp["meta"]
+
+
+def test_build_name_index_scans_ifdescr_and_drops_ambiguous():
+    """_build_name_index keys ports by ifDescr as well as ifName, and drops a name two different ports share so it can't bind a base/sub-unit lookup to the wrong port."""
+    from netbox_librenms_plugin.data_shapes.compress import _build_name_index
+
+    ports = [
+        {"port_id": 1, "ifName": "", "ifDescr": "ae1"},  # name lives only in ifDescr
+        {"port_id": 2, "ifName": "xe-0/0/0", "ifDescr": ""},  # name lives only in ifName
+        {"port_id": 3, "ifName": "dup", "ifDescr": ""},  # 'dup' shared by 3 and 4 -> ambiguous
+        {"port_id": 4, "ifName": "dup", "ifDescr": ""},
+    ]
+    index = _build_name_index(ports)
+    # An ifDescr-only and an ifName-only name are both indexed to their single owning port.
+    assert index["ae1"]["port_id"] == 1
+    assert index["xe-0/0/0"]["port_id"] == 2
+    # A name two distinct ports carry is dropped entirely (can't disambiguate which port it means).
+    assert "dup" not in index
