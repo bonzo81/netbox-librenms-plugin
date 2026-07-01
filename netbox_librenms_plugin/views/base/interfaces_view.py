@@ -612,10 +612,18 @@ class BaseInterfaceTableView(
             lag_members, sub_interfaces, by_port_id = self._build_relationship_maps(cached_data)
 
             # Pre-fetch all interfaces for all potential chassis members
-            # (_build_interface_lookup_maps select_relateds lag/parent for devices).
+            # (_build_interface_lookup_maps select_relateds lag/parent for devices). Materialise the
+            # VC members once and index them by vc_position and id so the per-port member resolution
+            # and the netbox-only pass below reuse them instead of issuing a members.get(...) query
+            # per port / per netbox-only interface (N+1).
             interfaces_by_device = {}
+            members_by_position = None
+            members_by_id = None
             if hasattr(obj, "virtual_chassis") and obj.virtual_chassis:
-                for member in obj.virtual_chassis.members.all():
+                vc_members = list(obj.virtual_chassis.members.all())
+                members_by_position = {member.vc_position: member for member in vc_members}
+                members_by_id = {member.id: member for member in vc_members}
+                for member in vc_members:
                     interfaces_by_device[member.id] = self._build_interface_lookup_maps(member)
             else:
                 interfaces_by_device[obj.id] = self._build_interface_lookup_maps(obj)
@@ -632,7 +640,9 @@ class BaseInterfaceTableView(
                 )
 
                 if hasattr(obj, "virtual_chassis") and obj.virtual_chassis:
-                    chassis_member = get_virtual_chassis_member(obj, port.get(interface_name_field))
+                    chassis_member = get_virtual_chassis_member(
+                        obj, port.get(interface_name_field), members_by_position=members_by_position
+                    )
                     device_interfaces = interfaces_by_device.get(
                         chassis_member.id if chassis_member else obj.id,
                         {"by_name": {}, "by_librenms_id": {}},
@@ -702,10 +712,12 @@ class BaseInterfaceTableView(
                     if interface.id in matched_interface_ids:
                         continue
                     if interface_name not in librenms_interface_names:
-                        # Get device name for the interface
+                        # Get device name for the interface (reuse the pre-indexed members — the
+                        # device_id keys come from interfaces_by_device, which was built from them —
+                        # instead of a members.get(id=...) query per netbox-only interface).
                         if hasattr(obj, "virtual_chassis") and obj.virtual_chassis:
-                            device = obj.virtual_chassis.members.get(id=device_id)
-                            device_name = device.name
+                            device = members_by_id.get(device_id) if members_by_id else None
+                            device_name = device.name if device else obj.name
                         else:
                             device_name = obj.name
 

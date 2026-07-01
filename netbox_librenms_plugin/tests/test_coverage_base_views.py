@@ -4080,3 +4080,57 @@ class TestRenderSyncPartialInjectsWritePermission:
         # A genuine view-only plugin user gets muted text, not a live mutating button.
         assert "read-only" in html
         assert move_url not in html
+
+
+@pytest.mark.django_db
+class TestVCInterfaceRenderMemberResolutionNotPerPort:
+    """The VC interface render resolves the owning member from a prebuilt map, not a query per port."""
+
+    def _view(self):
+        from netbox_librenms_plugin.views.object_sync.devices import DeviceInterfaceTableView
+
+        view = object.__new__(DeviceInterfaceTableView)
+        view._librenms_api = MagicMock(server_key="default", cache_timeout=300)
+        return view
+
+    def test_render_query_count_invariant_to_port_count(self):
+        """Rendering 2 vs 8 cached ports issues the SAME number of queries (no per-port member lookup).
+
+        get_virtual_chassis_member was the only per-port DB query in the cached-render loop; passing
+        the prebuilt {vc_position: member} map makes it O(1), so the query count no longer scales
+        with the number of ports.
+        """
+        from django.contrib.auth.models import AnonymousUser
+        from django.core.cache import cache as dj_cache
+        from django.db import connection
+        from django.test import RequestFactory
+        from django.test.utils import CaptureQueriesContext
+
+        from netbox_librenms_plugin.tests.conftest import make_device, make_interface, make_virtual_chassis
+
+        m1 = make_device("vc-if-m1")
+        m2 = make_device("vc-if-m2")
+        make_virtual_chassis("vc-if-render", m1, m2)
+        make_interface(m1, "Gi1/0/1")
+        make_interface(m2, "Gi2/0/1")
+        obj = m1  # viewed member; obj.virtual_chassis is the VC
+
+        view = self._view()
+        request = RequestFactory().get("/x/")
+        request.user = AnonymousUser()
+        view.request = request
+        cache_key = view.get_cache_key(obj, "ports", "default")
+
+        def render(nports):
+            ports = [{"port_id": i, "ifName": f"Gi1/0/{i}", "ifType": "ethernetCsmacd"} for i in range(1, nports + 1)]
+            dj_cache.set(cache_key, {"ports": ports})
+            with CaptureQueriesContext(connection) as ctx:
+                view.get_context_data(request, obj, "ifName", server_key="default", sync_device=obj)
+            return len(ctx.captured_queries)
+
+        # Warm process-level caches (ContentType etc.) first so the two measured renders differ ONLY
+        # by port count, not by cold-cache one-time queries on the first call.
+        render(3)
+        q_small = render(2)
+        q_large = render(8)
+        assert q_large == q_small, f"query count scaled with ports: {q_small} -> {q_large} (per-port N+1)"
