@@ -1873,3 +1873,43 @@ class TestSyncInterfaceLagViewRealDB:
         assert "different owner" in body["error"]
         local.refresh_from_db()
         assert local.lag_id is None
+
+
+@pytest.mark.django_db
+class TestPromoteLagAggregateShared:
+    """The bulk and single-row LAG endpoints promote the aggregate through one shared helper."""
+
+    def test_bulk_returns_persist_restore_and_restore_reverts_in_memory(self):
+        """_prepare_bulk_lag_aggregate returns (persist, restore); restore reverts the in-memory type."""
+        from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
+
+        agg = make_interface(make_device("lag-bulk"), "ae0", iface_type="other")
+        result = SyncInterfacesView._prepare_bulk_lag_aggregate(agg)
+
+        assert isinstance(result, tuple)
+        persist, restore = result
+        assert agg.type == "lag"  # bumped in memory
+        restore()
+        assert agg.type == "other"  # restore reverts (aggregate reused across rows)
+
+    def test_single_row_returns_bare_persist_and_saves_only_type(self):
+        """SyncInterfaceLagView._prepare_related returns a bare persist that saves type=lag."""
+        from netbox_librenms_plugin.views.sync.interfaces import SyncInterfaceLagView
+
+        agg = make_interface(make_device("lag-single"), "ae0", iface_type="other")
+        view = object.__new__(SyncInterfaceLagView)
+        persist = view._prepare_related(agg)
+
+        assert callable(persist) and not isinstance(persist, tuple)
+        assert agg.type == "lag"  # bumped in memory
+        persist()
+        agg.refresh_from_db()
+        assert agg.type == "lag"  # persisted
+
+    def test_already_lag_returns_none(self):
+        """An aggregate already type=lag needs no promotion (both entry points return None)."""
+        from netbox_librenms_plugin.views.sync.interfaces import SyncInterfaceLagView, SyncInterfacesView
+
+        agg = make_interface(make_device("lag-noop"), "ae0", iface_type="lag")
+        assert SyncInterfacesView._prepare_bulk_lag_aggregate(agg) is None
+        assert object.__new__(SyncInterfaceLagView)._prepare_related(agg) is None

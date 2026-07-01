@@ -357,19 +357,10 @@ class SyncInterfacesView(
         is bumped in memory before validation. The aggregate object is reused across rows via
         the shared interface index, so a member whose link later fails validation must restore
         the in-memory type — otherwise a subsequent valid member sharing this aggregate would
-        skip the save() and leave the aggregate's type stale in the DB.
+        skip the save() and leave the aggregate's type stale in the DB. The restore path is why
+        this passes ``with_restore=True`` to the shared promotion helper.
         """
-        if not (isinstance(agg_iface, Interface) and agg_iface.type != "lag"):
-            return None
-        original_type = agg_iface.type
-        agg_iface.type = "lag"
-        # update_fields=["type"] so a concurrent edit to the aggregate's other columns isn't
-        # lost — it was loaded into the shared index outside the row lock (see
-        # _apply_interface_relationship).
-        return (
-            lambda: agg_iface.save(update_fields=["type"]),
-            lambda: setattr(agg_iface, "type", original_type),
-        )
+        return _promote_lag_aggregate(agg_iface, with_restore=True)
 
     def _resolve_relationship_ends(
         self,
@@ -1106,6 +1097,43 @@ def _interfaces_same_owner(a, b) -> bool:
     )
 
 
+def _promote_lag_aggregate(agg, *, with_restore):
+    """
+    Bump a LAG aggregate to ``type=lag`` in memory so a member's ``full_clean()`` accepts the link.
+
+    Single home for the "promote aggregate to type=lag, persist only that column" rule shared by the
+    bulk LAG pass (``SyncInterfacesView._prepare_bulk_lag_aggregate``) and the single-row LAG
+    endpoint (``SyncInterfaceLagView._prepare_related``) so they can't drift on the promotion or the
+    save fields. Returns None when *agg* isn't an Interface or is already ``type=lag``.
+
+    The persist saves ONLY the ``type`` column (``update_fields=["type"]``) so a concurrent edit to
+    the aggregate's other fields — loaded into the shared interface index outside the row lock — is
+    not clobbered.
+
+    Args:
+        agg: The aggregate interface to promote.
+        with_restore (bool): When True (the bulk pass, which reuses the aggregate across member
+            rows), return a ``(persist, restore)`` pair — ``restore`` reverts the in-memory type so
+            a later valid member sharing this aggregate still saves it if an earlier member's link
+            failed validation. When False, return the bare ``persist`` callable.
+
+    Returns:
+        callable | tuple | None: ``persist`` (or ``(persist, restore)``), or None when nothing to do.
+    """
+    if not (isinstance(agg, Interface) and agg.type != "lag"):
+        return None
+    original_type = agg.type
+    agg.type = "lag"
+
+    def _persist():
+        agg.save(update_fields=["type"])
+        logger.info("Set interface %s type=lag", agg.name)
+
+    if with_restore:
+        return (_persist, lambda: setattr(agg, "type", original_type))
+    return _persist
+
+
 def _apply_interface_relationship(source_iface, relation_field, related_iface, prepare_related=None):
     """
     Set ``source_iface.<relation_field> = related_iface``, validate, and persist both sides.
@@ -1297,17 +1325,8 @@ class SyncInterfaceLagView(_BaseRelationshipSyncView):
 
     def _prepare_related(self, related_iface):
         """Promote the aggregate to type=lag so member_iface.full_clean() accepts the link."""
-        if related_iface.type != "lag":
-            related_iface.type = "lag"
-
-            def _persist():
-                # update_fields=["type"]: only the type column changed, so don't risk
-                # clobbering a concurrent edit to the aggregate's other fields.
-                related_iface.save(update_fields=["type"])
-                logger.info("Set interface %s type=lag", related_iface.name)
-
-            return _persist
-        return None
+        # Single-row endpoint: no aggregate reuse across rows, so no restore needed.
+        return _promote_lag_aggregate(related_iface, with_restore=False)
 
 
 class SyncInterfaceParentView(_BaseRelationshipSyncView):
