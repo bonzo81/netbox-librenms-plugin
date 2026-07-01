@@ -1548,3 +1548,67 @@ class TestDeviceIpLabelsSingleSource:
         # fields — the human label is then read from the shared map, so there is no second copy to drift.
         assert set(DEVICE_IP_FK_LABELS) == set(DEVICE_IP_FK_FIELDS)
         assert set(TransferDeviceIPView._IP_KIND_TO_FIELD.values()) == set(DEVICE_IP_FK_FIELDS)
+
+
+@pytest.mark.django_db
+class TestMoveToWinnerConcurrencyHelpers:
+    """The move-to-winner resolve + lock/re-verify TOCTOU guards live in one shared pair of helpers.
+
+    Exercises _resolve_winner_or_fail and _lock_donor_winner_and_reverify directly (all three move
+    endpoints route through them) so the extracted concurrency guard is pinned in one place.
+    """
+
+    def _view(self):
+        from netbox_librenms_plugin.views.sync.migrate import MoveInterfaceToWinnerView
+
+        view = object.__new__(MoveInterfaceToWinnerView)
+        view._fallback_url = "/x/"
+        return view
+
+    def _req(self):
+        from django.test import RequestFactory
+
+        # HX-Request → _fail returns an HTMX toast response (no messages middleware needed).
+        return RequestFactory().post("/x/", HTTP_HX_REQUEST="true")
+
+    def _migrated_donor_and_winner(self):
+        donor = make_device("mv-helper-donor")
+        winner = make_device("mv-helper-winner")
+        donor.custom_field_data["librenms_id"] = {
+            "default": {"_migrated_to": {"device_id": winner.pk, "server_key": "default"}}
+        }
+        donor.save()
+        return donor, winner
+
+    def test_resolve_winner_or_fail_resolves_migrated_winner(self):
+        donor, winner = self._migrated_donor_and_winner()
+        got, err = self._view()._resolve_winner_or_fail(self._req(), donor, "default")
+        assert err is None
+        assert got.pk == winner.pk
+
+    def test_resolve_winner_or_fail_rejects_unmarked_donor(self):
+        donor = make_device("mv-helper-unmarked")
+        got, err = self._view()._resolve_winner_or_fail(self._req(), donor, "default")
+        assert got is None
+        assert err is not None  # "Donor device is not marked as migrated."
+
+    def test_lock_and_reverify_success_returns_locked_pair(self):
+        from django.db import transaction
+
+        donor, winner = self._migrated_donor_and_winner()
+        with transaction.atomic():
+            d, w, err = self._view()._lock_donor_winner_and_reverify(self._req(), donor, winner, "default")
+        assert err is None
+        assert d.pk == donor.pk and w.pk == winner.pk
+
+    def test_lock_and_reverify_detects_marker_cleared_under_lock(self):
+        from django.db import transaction
+
+        donor, winner = self._migrated_donor_and_winner()
+        # Marker cleared between the unlocked resolve and acquiring the row locks (TOCTOU):
+        donor.custom_field_data["librenms_id"] = {"default": {}}
+        donor.save()
+        with transaction.atomic():
+            d, w, err = self._view()._lock_donor_winner_and_reverify(self._req(), donor, winner, "default")
+        assert d is None and w is None
+        assert err is not None  # "Donor migration changed concurrently; refresh and retry."

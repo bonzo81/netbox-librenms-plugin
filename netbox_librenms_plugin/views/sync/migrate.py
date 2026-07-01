@@ -365,6 +365,64 @@ class _BaseMoveToWinnerView(LibreNMSAPIMixin, LibreNMSPermissionMixin, NetBoxObj
         messages.error(request, msg)
         return redirect(_safe_referer(request, self._fallback_url))
 
+    def _resolve_winner_or_fail(self, request, donor, server_key):
+        """
+        Resolve the migration winner for *donor*, or return an early failure response.
+
+        Returns ``(winner, None)`` when the donor is marked migrated and its winner resolves;
+        otherwise ``(None, error_response)`` — the caller returns the response verbatim. Shared by
+        the three move endpoints so the "not marked" / winner-unavailable branches can't drift.
+
+        Args:
+            request: The current HTTP request.
+            donor: The donor device whose migration marker is resolved.
+            server_key (str): The LibreNMS server key the marker is namespaced under.
+
+        Returns:
+            tuple: ``(winner, None)`` on success, or ``(None, error_response)`` on failure.
+        """
+        winner, marker = _resolve_winner_for_donor(donor, server_key)
+        if marker is None:
+            return None, self._fail(request, "Donor device is not marked as migrated.", status=409)
+        if winner is None:
+            return None, _fail_winner_unavailable(self, request, donor, marker)
+        return winner, None
+
+    def _lock_donor_winner_and_reverify(self, request, donor, winner, server_key):
+        """
+        Lock donor+winner by pk order and re-verify the migration marker under the lock.
+
+        Must be called inside a ``transaction.atomic()`` block. Locks both devices in pk order
+        (deadlock-safe), then re-resolves the winner under the lock so a concurrent request that
+        cleared or repointed ``_migrated_to`` between the unlocked resolve and acquiring these row
+        locks can't move the resource to a stale winner (TOCTOU). Shared by the three move endpoints
+        so this concurrency guard lives in one place.
+
+        Args:
+            request: The current HTTP request.
+            donor: The donor device (re-read under the lock).
+            winner: The winner device resolved before the lock (re-verified under it).
+            server_key (str): The LibreNMS server key the marker is namespaced under.
+
+        Returns:
+            tuple: ``(locked_donor, locked_winner, None)`` on success, or ``(None, None,
+                error_response)`` when a device was deleted or the marker changed concurrently.
+        """
+        ordered = sorted({donor.pk, winner.pk})
+        locked = {d.pk: d for d in Device.objects.select_for_update().filter(pk__in=ordered).order_by("pk")}
+        donor = locked.get(donor.pk)
+        winner = locked.get(winner.pk)
+        if donor is None or winner is None:
+            return None, None, self._fail(request, "Device was deleted concurrently.", status=410)
+        relocked_winner, relocked_marker = _resolve_winner_for_donor(donor, server_key)
+        if relocked_marker is None or relocked_winner is None or relocked_winner.pk != winner.pk:
+            return (
+                None,
+                None,
+                self._fail(request, "Donor migration changed concurrently; refresh and retry.", status=409),
+            )
+        return donor, winner, None
+
 
 class MoveInterfaceToWinnerView(_BaseMoveToWinnerView):
     """
@@ -399,11 +457,9 @@ class MoveInterfaceToWinnerView(_BaseMoveToWinnerView):
         # server can't 500 a move that only needs the marker's server namespace, not the live API.
         server_key = _server_key_from_request(request, default_factory=lambda: self.active_server_key)
         self._fallback_url = _sync_tab_url(donor.pk, "interfaces", server_key)
-        winner, marker = _resolve_winner_for_donor(donor, server_key)
-        if marker is None:
-            return self._fail(request, "Donor device is not marked as migrated.", status=409)
-        if winner is None:
-            return _fail_winner_unavailable(self, request, donor, marker)
+        winner, err = self._resolve_winner_or_fail(request, donor, server_key)
+        if err is not None:
+            return err
 
         # Quick pre-check before acquiring the lock (avoids round-trip in the
         # obvious already-taken case).  The check is repeated under the lock
@@ -417,20 +473,9 @@ class MoveInterfaceToWinnerView(_BaseMoveToWinnerView):
             )
 
         with transaction.atomic():
-            # Lock both devices in pk order to avoid cross-merge deadlocks.
-            ordered = sorted({donor.pk, winner.pk})
-            locked = {d.pk: d for d in Device.objects.select_for_update().filter(pk__in=ordered).order_by("pk")}
-            donor = locked.get(donor.pk)
-            winner = locked.get(winner.pk)
-            if donor is None or winner is None:
-                return self._fail(request, "Device was deleted concurrently.", status=410)
-            # Re-verify the migration marker under the lock: a concurrent request
-            # could have cleared or repointed _migrated_to between the unlocked
-            # resolve above and acquiring these row locks, which would otherwise
-            # move the interface to the wrong (stale) winner.
-            relocked_winner, relocked_marker = _resolve_winner_for_donor(donor, server_key)
-            if relocked_marker is None or relocked_winner is None or relocked_winner.pk != winner.pk:
-                return self._fail(request, "Donor migration changed concurrently; refresh and retry.", status=409)
+            donor, winner, err = self._lock_donor_winner_and_reverify(request, donor, winner, server_key)
+            if err is not None:
+                return err
             # Lock the donor interface row and re-read it under the lock. A
             # concurrent rename would otherwise let a stale name slip past the
             # collision check below while the row is still moved by pk.
@@ -564,11 +609,9 @@ class MoveIPAddressToWinnerView(_BaseMoveToWinnerView):
         # server can't 500 a move that only needs the marker's server namespace, not the live API.
         server_key = _server_key_from_request(request, default_factory=lambda: self.active_server_key)
         self._fallback_url = _sync_tab_url(donor.pk, "ipaddresses", server_key)
-        winner, marker = _resolve_winner_for_donor(donor, server_key)
-        if marker is None:
-            return self._fail(request, "Donor device is not marked as migrated.", status=409)
-        if winner is None:
-            return _fail_winner_unavailable(self, request, donor, marker)
+        winner, err = self._resolve_winner_or_fail(request, donor, server_key)
+        if err is not None:
+            return err
 
         # Quick pre-check before acquiring the lock.  Repeated under lock below.
         if not Interface.objects.filter(device=winner, name=assigned.name).exists():
@@ -580,17 +623,9 @@ class MoveIPAddressToWinnerView(_BaseMoveToWinnerView):
             )
 
         with transaction.atomic():
-            ordered = sorted({donor.pk, winner.pk})
-            locked = {d.pk: d for d in Device.objects.select_for_update().filter(pk__in=ordered).order_by("pk")}
-            donor = locked.get(donor.pk)
-            winner = locked.get(winner.pk)
-            if donor is None or winner is None:
-                return self._fail(request, "Device was deleted concurrently.", status=410)
-            # Re-verify the migration marker under the lock (it could have been
-            # cleared or repointed since the unlocked resolve above).
-            relocked_winner, relocked_marker = _resolve_winner_for_donor(donor, server_key)
-            if relocked_marker is None or relocked_winner is None or relocked_winner.pk != winner.pk:
-                return self._fail(request, "Donor migration changed concurrently; refresh and retry.", status=409)
+            donor, winner, err = self._lock_donor_winner_and_reverify(request, donor, winner, server_key)
+            if err is not None:
+                return err
             ip = IPAddress.objects.select_for_update().filter(pk=ip.pk).first()
             if ip is None:
                 return self._fail(request, "IP address no longer exists.", status=410)
@@ -669,11 +704,9 @@ class TransferDeviceIPView(_BaseMoveToWinnerView):
         # server can't 500 a move that only needs the marker's server namespace, not the live API.
         server_key = _server_key_from_request(request, default_factory=lambda: self.active_server_key)
         self._fallback_url = _sync_tab_url(donor.pk, "ipaddresses", server_key)
-        winner, marker = _resolve_winner_for_donor(donor, server_key)
-        if marker is None:
-            return self._fail(request, "Donor device is not marked as migrated.", status=409)
-        if winner is None:
-            return _fail_winner_unavailable(self, request, donor, marker)
+        winner, err = self._resolve_winner_or_fail(request, donor, server_key)
+        if err is not None:
+            return err
 
         donor_ip = getattr(donor, field, None)
         if donor_ip is None:
@@ -687,17 +720,9 @@ class TransferDeviceIPView(_BaseMoveToWinnerView):
             )
 
         with transaction.atomic():
-            ordered = sorted({donor.pk, winner.pk})
-            locked = {d.pk: d for d in Device.objects.select_for_update().filter(pk__in=ordered).order_by("pk")}
-            donor = locked.get(donor.pk)
-            winner = locked.get(winner.pk)
-            if donor is None or winner is None:
-                return self._fail(request, "Device was deleted concurrently.", status=410)
-            # Re-verify the migration marker under the lock (it could have been
-            # cleared or repointed since the unlocked resolve above).
-            relocked_winner, relocked_marker = _resolve_winner_for_donor(donor, server_key)
-            if relocked_marker is None or relocked_winner is None or relocked_winner.pk != winner.pk:
-                return self._fail(request, "Donor migration changed concurrently; refresh and retry.", status=409)
+            donor, winner, err = self._lock_donor_winner_and_reverify(request, donor, winner, server_key)
+            if err is not None:
+                return err
             # Re-check under the lock so concurrent transfers don't race.
             donor_ip = getattr(donor, field, None)
             if donor_ip is None:
