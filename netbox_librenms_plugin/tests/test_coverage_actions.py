@@ -1881,6 +1881,37 @@ class TestDeviceConflictActionMigrateLibreNMSId:
         # The real migrate_legacy_librenms_id + save converted the bare int under lock.
         assert VirtualMachine.objects.get(pk=vm.pk).custom_field_data["librenms_id"] == {"default": 42}
 
+    def test_migrate_classifies_signed_numeric_string_via_shared_helper(self):
+        """A signed numeric string is classified by is_legacy_librenms_id (int-parse), not the old isdigit inline.
+
+        "-42".isdigit() is False, so the old hand-inlined predicate treated it as "already JSON" and
+        bailed early; is_legacy_librenms_id parses it with int(), so the gate now agrees with the
+        link/OOB-attach paths and set_librenms_device_id's own skip rule — the value reaches the
+        real ID-match check (where the negative id fails as a genuine mismatch, not a phantom
+        "already migrated"). Pins the two gates to the shared classifier so they can't drift.
+        """
+        view = self._make_view()
+        vm = make_vm("vm01-migrate-signed")
+        vm.custom_field_data["librenms_id"] = "-42"  # int-parseable but not isdigit()
+        vm.save()
+        request = _make_request(
+            post={
+                "action": "migrate_librenms_id",
+                "existing_device_id": str(vm.pk),
+                "existing_device_type": "virtualmachine",
+            }
+        )
+        validation = {"existing_device": vm, "device_type_mismatch": False, "serial_confirmed": True}
+        view.get_validated_device_with_selections = MagicMock(return_value=({"device_id": 42}, validation, {}))
+
+        response = view.post(request, device_id=42)
+
+        assert response.status_code == 200
+        # Reached the ID-match check (helper classified it legacy) instead of the old
+        # "already in JSON format" early-return (which the isdigit inline would have hit).
+        assert b"does not match the active device ID" in response.content
+        assert b"already in JSON format" not in response.content
+
 
 class TestDeviceConflictActionMissingExisting:
     """Tests for DeviceConflictActionView when device not found (line 1008-1009)."""
