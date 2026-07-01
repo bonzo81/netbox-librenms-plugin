@@ -2565,8 +2565,12 @@ class TestBaseInterfaceTableViewGetContextData:
 
         # VC members should be included
         assert ctx["virtual_chassis_members"] is not None
-        # get_virtual_chassis_member should have been called with obj and the port name
-        mock_get_vc_member.assert_called_once_with(obj, "Gi0/0")
+        # get_virtual_chassis_member is called with obj and the port name, plus the prebuilt
+        # members_by_position map (the O(1) fast-path) instead of a query per port.
+        mock_get_vc_member.assert_called_once()
+        call = mock_get_vc_member.call_args
+        assert call.args == (obj, "Gi0/0")
+        assert "members_by_position" in call.kwargs
 
     def test_cache_hit_non_vc_ignores_duplicate_librenms_ids(self):
         """Conflicting interface librenms_id values must not create an arbitrary port-id match."""
