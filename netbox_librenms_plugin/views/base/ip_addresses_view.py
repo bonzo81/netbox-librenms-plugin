@@ -593,6 +593,12 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMix
                         # Preserve the set-primary-IP checkbox state across a failed refresh
                         # (the template binds it to ip_sync.set_primary_ip).
                         "set_primary_ip": resolve_set_primary_ip(request),
+                        # Keep the "Move IP addresses to <winner>" card available on a LibreNMS
+                        # fetch failure: the per-row moves (MoveIPAddressToWinnerView) are pure
+                        # NetBox operations that don't touch LibreNMS, and every other exit surfaces
+                        # movable_ips — omitting it here would make a migrated donor's move card
+                        # vanish just because LibreNMS was briefly unreachable.
+                        "movable_ips": self._movable_ips_for_migration(obj, server_key),
                     },
                 },
             )

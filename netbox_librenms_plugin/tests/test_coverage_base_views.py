@@ -3738,3 +3738,56 @@ class TestCableLinksDataCoercesLibreNMSId:
         api.get_device_links.assert_not_called()
         api.get_ports.assert_not_called()
         assert result is None
+
+
+@pytest.mark.django_db
+class TestIPSyncFetchFailureKeepsMoveCard:
+    """On a LibreNMS fetch failure the IP-sync error re-render still surfaces movable_ips.
+
+    The per-row "Move IP addresses to <winner>" moves are pure NetBox operations, so a migrated
+    donor must keep the move card when LibreNMS is briefly unreachable — the card is gated on
+    ip_sync.movable_ips, which every other exit provides.
+    """
+
+    def _view(self):
+        from netbox_librenms_plugin.views.object_sync.devices import DeviceIPAddressTableView
+
+        view = object.__new__(DeviceIPAddressTableView)
+        view._librenms_api = MagicMock(server_key="default")
+        return view
+
+    def test_fetch_failure_context_includes_movable_ips(self):
+        from django.http import HttpResponse
+        from django.test import RequestFactory
+
+        donor = make_device("ipsync-donor-mig")
+        # Migrated donor: _migrated_to marker under the server sub-block, no live id.
+        donor.custom_field_data["librenms_id"] = {
+            "default": {"_migrated_to": {"device_id": 7, "server_key": "default"}}
+        }
+        donor.save()
+        iface = make_interface(donor, "Gi0/1")
+        make_ip("10.0.0.5/24", assigned_object=iface)
+
+        view = self._view()
+        request = RequestFactory().post("/x/", data={"server_key": "default"})
+
+        captured = {}
+
+        def fake_render(req, obj, server_key, ctx):
+            captured["ctx"] = ctx
+            return HttpResponse("x")
+
+        with (
+            patch.object(view, "get_object", return_value=donor),
+            patch.object(view, "rebind_api_for_server", return_value="default"),
+            # A valid server whose live IP fetch fails → _prepare_context(fetch_fresh=True) is None.
+            patch.object(view, "_prepare_context", return_value=None),
+            patch.object(view, "render_sync_partial", side_effect=fake_render),
+            patch("netbox_librenms_plugin.views.base.ip_addresses_view.messages"),
+        ):
+            view.post(request, pk=donor.pk)
+
+        ip_sync = captured["ctx"]["ip_sync"]
+        assert ip_sync["movable_ips"], "Move-IP card context lost on fetch failure"
+        assert any(m["address"].startswith("10.0.0.5") for m in ip_sync["movable_ips"])
