@@ -90,24 +90,38 @@ def _serial_sensor(port_num: int, label: str | None = None) -> dict:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.django_db
 class TestGetLinksDataSerial:
-    """get_links_data() appends serial rows when device has ConsoleServerPorts."""
+    """get_links_data() appends serial rows when the (sync) device has ConsoleServerPorts.
+
+    Drives the serial-append path against REAL Device + ConsoleServerPort rows (make_serial_device)
+    so the CSP gate (``consoleserverports.exists()``) and the ``lookup_device.id`` fed into
+    map_sensors_to_serial_links run against the real ORM. Only the LibreNMS API (get_device_links /
+    get_serial_port_sensors / get_librenms_id) stays mocked — a true external HTTP boundary — so a
+    renamed field or a regressed CSP gate fails these tests instead of a MagicMock hiding it.
+    """
+
+    def _obj_with_csps(self, name="serial-obj", csp_names=("ttyS3", "ttyS7")):
+        obj, _csps, _ = make_serial_device(name, csp_names=csp_names)
+        return obj
+
+    def _obj_no_csps(self, name="serial-obj-nocsp"):
+        from netbox_librenms_plugin.tests.conftest import make_device
+
+        return make_device(name)
 
     def _base_setup(self, view, sensors=None):
-        """Configure view with a minimal successful LLDP response and optional sensors."""
+        """Configure the mocked LibreNMS API with a minimal successful LLDP response and sensors."""
         view._librenms_api.get_device_links.return_value = (True, {"links": []})
         view._librenms_api.get_librenms_id.return_value = 12
-        if sensors is not None:
-            view._librenms_api.get_serial_port_sensors.return_value = (True, sensors)
-        else:
-            view._librenms_api.get_serial_port_sensors.return_value = (True, [])
+        view._librenms_api.get_serial_port_sensors.return_value = (True, sensors if sensors is not None else [])
 
     def test_serial_rows_appended_when_device_has_csps(self):
-        """Sensors are mapped and appended to links_data."""
+        """Sensors are mapped and appended to links_data for a real console-server device."""
         view = _make_view()
         sensors = [_serial_sensor(3, "router-a"), _serial_sensor(7, "switch-b")]
         self._base_setup(view, sensors=sensors)
-        obj = _mock_obj(has_csps=True)
+        obj = self._obj_with_csps("serial-append", csp_names=("ttyS3", "ttyS7"))
 
         with (
             patch("netbox_librenms_plugin.views.base.cables_view.get_librenms_oob", return_value=None),
@@ -127,9 +141,8 @@ class TestGetLinksDataSerial:
         view = _make_view()
         sensors = [_serial_sensor(3, "router-a")]
         self._base_setup(view, sensors=sensors)
-        obj = _mock_obj(pk=1, has_csps=False)  # viewed VC member: NO CSPs
-        obj.virtual_chassis = MagicMock()  # VC page
-        sync_device = _mock_obj(pk=99, has_csps=True)  # resolved sync device: HAS CSPs
+        obj = self._obj_no_csps("serial-vc-member")  # viewed VC member: NO CSPs
+        sync_device = self._obj_with_csps("serial-vc-sync", csp_names=("ttyS3",))  # sync device: HAS CSPs
 
         with (
             patch("netbox_librenms_plugin.views.base.cables_view.get_librenms_oob", return_value=None),
@@ -142,14 +155,14 @@ class TestGetLinksDataSerial:
             result = view.get_links_data(obj)
 
         serial_rows = [r for r in result if r.get("_source") == "serial"]
-        assert len(serial_rows) == 1  # gate passed via the sync device's CSPs
+        assert len(serial_rows) == 1  # gate passed via the sync device's real CSPs
         view._librenms_api.get_serial_port_sensors.assert_called_once()
 
     def test_no_serial_rows_when_no_csps(self):
-        """Serial fetch is skipped entirely when device has no ConsoleServerPorts."""
+        """Serial fetch is skipped entirely when the device has no ConsoleServerPorts."""
         view = _make_view()
         self._base_setup(view)
-        obj = _mock_obj(has_csps=False)
+        obj = self._obj_no_csps("serial-none")
 
         with (
             patch("netbox_librenms_plugin.views.base.cables_view.get_librenms_oob", return_value=None),
@@ -169,7 +182,7 @@ class TestGetLinksDataSerial:
         view._librenms_api.get_device_links.return_value = (True, {"links": []})
         view._librenms_api.get_librenms_id.return_value = 12
         view._librenms_api.get_serial_port_sensors.return_value = (False, "timeout")
-        obj = _mock_obj(has_csps=True)
+        obj = self._obj_with_csps("serial-fail")
 
         with (
             patch("netbox_librenms_plugin.views.base.cables_view.get_librenms_oob", return_value=None),
@@ -188,7 +201,7 @@ class TestGetLinksDataSerial:
         view = _make_view()
         sensors = [_serial_sensor(3, "router-a")]
         self._base_setup(view, sensors=sensors)
-        obj = _mock_obj(has_csps=True)
+        obj = self._obj_with_csps("serial-ok")
 
         with (
             patch("netbox_librenms_plugin.views.base.cables_view.get_librenms_oob", return_value=None),
@@ -202,7 +215,7 @@ class TestGetLinksDataSerial:
     def test_serial_fetch_success_with_non_list_payload_is_skipped(self):
         """A malformed non-list payload on the success path is skipped by the call-site isinstance(list) guard (a non-iterable would otherwise crash the mapper), not flagged as a failure."""
         view = _make_view()
-        obj = _mock_obj(has_csps=True)
+        obj = self._obj_with_csps("serial-badpayload")
 
         for bad in (42, "garbage", {"sensor_id": 1}):  # truthy but not a list
             view._librenms_api.get_device_links.return_value = (True, {"links": []})
@@ -224,7 +237,7 @@ class TestGetLinksDataSerial:
         view = _make_view()
         sensors = [_serial_sensor(5, "prod-router-01")]
         self._base_setup(view, sensors=sensors)
-        obj = _mock_obj(has_csps=True)
+        obj = self._obj_with_csps("serial-shape", csp_names=("ttyS5",))
 
         with (
             patch("netbox_librenms_plugin.views.base.cables_view.get_librenms_oob", return_value=None),
