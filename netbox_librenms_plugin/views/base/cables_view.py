@@ -210,6 +210,12 @@ _RAW_LINK_KEYS = frozenset(
         "sensor_id",
         "sensor_index_int",
         "is_configured",
+        # device_id must also survive the strip for serial rows: enrich_links_data re-sets it to
+        # obj.id for host/OOB rows, but the serial branch `continue`s before that (a serial row must
+        # keep its CSP-owning sync device_id, not obj.id). Dropping it here would leave a cached
+        # serial row with no device_id, and the Cables-tab render reads record["device_id"]
+        # (tables/cables.py) — a KeyError that 500s the whole tab on any cached replay.
+        "device_id",
     }
 )
 

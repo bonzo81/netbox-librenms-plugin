@@ -427,7 +427,14 @@ class TestRawKeysPreservation:
     """Serial-specific source fields survive the _raw_keys strip in _prepare_context."""
 
     def test_serial_fields_survive_strip(self):
-        """sensor_id, sensor_index_int, is_configured are kept after stripping derived keys."""
+        """sensor_id, sensor_index_int, is_configured AND device_id survive; derived keys are stripped.
+
+        Exercises the PRODUCTION _RAW_LINK_KEYS (not a hand-copied set). device_id must survive for
+        serial rows: enrich_links_data's serial branch continues before re-setting it, and the
+        Cables-tab render reads record["device_id"], so dropping it 500s the tab on a cached replay.
+        """
+        from netbox_librenms_plugin.views.base.cables_view import _RAW_LINK_KEYS
+
         serial_link = {
             "local_port": "ttyS7",
             "local_port_id": "serial:1007",
@@ -436,38 +443,64 @@ class TestRawKeysPreservation:
             "remote_port_id": None,
             "remote_device_id": None,
             "_source": "serial",
-            # Serial-specific
+            # Serial-specific source fields (must survive)
             "sensor_id": 1007,
             "sensor_index_int": 7,
             "is_configured": True,
+            "device_id": 1,
             # Derived (should be stripped)
             "local_port_url": "/dcim/csp/99/",
             "netbox_local_interface_id": 99,
             "cable_status": "No Cable",
             "can_create_cable": False,
-            "device_id": 1,
         }
 
-        _raw_keys = {
-            "local_port",
-            "local_port_id",
-            "remote_port",
-            "remote_device",
-            "remote_port_id",
-            "remote_device_id",
-            "_source",
-            "sensor_id",
-            "sensor_index_int",
-            "is_configured",
-        }
-        stripped = {k: v for k, v in serial_link.items() if k in _raw_keys}
+        stripped = {k: v for k, v in serial_link.items() if k in _RAW_LINK_KEYS}
 
         assert stripped["sensor_id"] == 1007
         assert stripped["sensor_index_int"] == 7
         assert stripped["is_configured"] is True
+        assert stripped["device_id"] == 1  # serial rows keep their CSP-owning device_id
         assert "local_port_url" not in stripped
         assert "netbox_local_interface_id" not in stripped
         assert "cable_status" not in stripped
+
+
+@pytest.mark.django_db
+class TestSerialLinkDeviceIdSurvivesCachedRender:
+    """A cached serial row must retain device_id through strip+re-enrich (the Cables render reads it)."""
+
+    def test_cached_serial_link_keeps_device_id_through_enrich(self):
+        """Strip a cached serial link to _RAW_LINK_KEYS, re-enrich, and confirm device_id survives.
+
+        Reproduces the Cables-tab 500: on a cached render _prepare_context strips links to
+        _RAW_LINK_KEYS then calls enrich_links_data, whose serial branch continues without re-setting
+        device_id. The render (tables/cables.py) then does record["device_id"] → KeyError before the
+        fix. Uses a real console-server device (not a MagicMock) so the CSP resolution is exercised.
+        """
+        from netbox_librenms_plugin.views.base.cables_view import _RAW_LINK_KEYS
+
+        view = _make_view()
+        obj, (csp,), _ = make_serial_device("ser-cached-devid", csp_names=["ttyS0"])
+
+        # A serial link as it sits in the cache — the fresh build set device_id to the CSP-owning
+        # sync device (map_sensors_to_serial_links), NOT the viewed obj.id.
+        cached_serial = {
+            "_source": "serial",
+            "device_id": obj.id,
+            "local_port": "ttyS0",
+            "local_port_id": "serial:1000",
+            "sensor_id": 1000,
+            "sensor_index_int": 0,
+            "is_configured": True,
+        }
+
+        # Exactly what _prepare_context does on a cached render: strip, then re-enrich.
+        stripped = {k: v for k, v in cached_serial.items() if k in _RAW_LINK_KEYS}
+        enriched = view.enrich_links_data([stripped], obj, server_key="default")
+
+        # The Cables-tab render does record["device_id"] — must be present (no KeyError / 500).
+        assert enriched[0]["device_id"] == obj.id
 
 
 # ---------------------------------------------------------------------------
