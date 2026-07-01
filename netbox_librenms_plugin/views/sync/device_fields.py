@@ -1,5 +1,4 @@
 import logging
-from urllib.parse import quote_plus
 
 from dcim.models import Device, Manufacturer, Platform
 from django.contrib import messages
@@ -11,7 +10,6 @@ from django.http import HttpResponse
 from django.shortcuts import get_object_or_404, redirect
 from django.urls import reverse
 from django.utils.html import escape
-from django.utils.http import url_has_allowed_host_and_scheme
 from django.views import View
 from virtualization.models import VirtualMachine
 
@@ -851,15 +849,16 @@ class ConvertLegacyLibreNMSIdView(LibreNMSPermissionMixin, NetBoxObjectPermissio
 
         name = "vm_librenms_sync" if object_type == "vm" else "device_librenms_sync"
         url = reverse(f"plugins:netbox_librenms_plugin:{name}", kwargs={"pk": pk})
-        # Propagate the active multi-server server_key so redirects land on the server the
-        # user was working in. Reflect it only for a configured server, and gate the final
-        # redirect on Django's url_has_allowed_host_and_scheme with the sink inside the
-        # validated branch — the open-redirect barrier CodeQL recognises (CWE-601). Mirrors
-        # mixins._safe_redirect_response.
+        # Propagate the active multi-server server_key so redirects land on the server the user was
+        # working in. Source it here (re-match against the trusted config, with a bound-API
+        # fallback), then delegate the redirect to the shared redirect_with_server_key — like the
+        # sibling _sync_redirect / _failure_redirect — so the open-redirect barrier
+        # (url_has_allowed_host_and_scheme, sink inside the validated branch — CWE-601) lives in one
+        # place and can't drift between the two server_key-preserving redirects.
         request = getattr(self, "request", None)
-        requested = ""
-        if request is not None:
-            requested = (request.POST.get("server_key") or request.GET.get("server_key") or "").strip()
+        if request is None:
+            return redirect(url)
+        requested = (request.POST.get("server_key") or request.GET.get("server_key") or "").strip()
         # Re-source the matched key from the trusted config rather than echoing the raw request
         # value. A stale/unconfigured POST key (server removed since the page loaded, or tampered)
         # resolves to None here — so it must NOT short-circuit the fallback below.
@@ -869,33 +868,19 @@ class ConvertLegacyLibreNMSIdView(LibreNMSPermissionMixin, NetBoxObjectPermissio
         if not server_key:
             # POST omitted server_key OR sent an unconfigured one — fall back to the active API
             # server the action ran against so a non-default-server user isn't dropped onto the
-            # default tab. Prefer the already-bound _librenms_api; only when nothing is bound (e.g.
-            # after a failed rebind that returned None) fall back to the property to resolve the
-            # default server, but swallow a construction failure (misconfigured default) so the
-            # redirect degrades gracefully instead of re-raising. Re-source the fallback through
-            # the same allowlist so the redirect stays open-redirect safe.
+            # default tab. Prefer the already-bound _librenms_api; when nothing is bound (e.g. a
+            # fail-closed rebind returned None on a missing/misconfigured default) leave server_key
+            # unset so the redirect lands on the bare sync tab, rather than re-running the lazy
+            # self.librenms_api construction the rebind deliberately avoided (it can raise, or
+            # silently resolve to a different first-configured server → wrong tab).
             bound = getattr(self, "_librenms_api", None)
-            if bound is not None:
-                fallback = (getattr(bound, "server_key", "") or "").strip()
-            else:
-                # Nothing bound — e.g. a fail-closed rebind already returned None on a
-                # missing/misconfigured default. Don't re-run the construction the rebind
-                # deliberately avoided via the lazy self.librenms_api property: it can raise, or
-                # silently resolve to a different first-configured server and redirect the user to
-                # the wrong tab. Leave server_key unset so the redirect lands on the bare sync tab.
-                fallback = ""
+            fallback = (getattr(bound, "server_key", "") or "").strip() if bound is not None else ""
             server_key = (
                 next((key for key in LibreNMSAPI.get_available_servers() if key == fallback), None)
                 if fallback
                 else None
             )
-        if request is not None and server_key:
-            candidate = f"{url}?server_key={quote_plus(server_key)}"
-            if url_has_allowed_host_and_scheme(
-                candidate, allowed_hosts={request.get_host()}, require_https=request.is_secure()
-            ):
-                return redirect(candidate)
-        return redirect(url)
+        return redirect_with_server_key(request, url, server_key)
 
     def post(self, request, pk):
         object_type = request.POST.get("object_type", "device")

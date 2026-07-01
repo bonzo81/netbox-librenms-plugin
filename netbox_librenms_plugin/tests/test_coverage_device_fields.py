@@ -1985,95 +1985,82 @@ class TestConvertLegacyLibreNMSIdViewHelpers:
         (url,), _ = mock_redir.call_args
         assert isinstance(url, str) and "server_key" not in url
 
+    @staticmethod
+    def _request(post):
+        """A MagicMock request with concrete host/scheme so the real open-redirect barrier evaluates deterministically."""
+        request = MagicMock()
+        request.POST = post
+        request.GET = {}
+        request.get_host.return_value = "testserver"
+        request.is_secure.return_value = False
+        return request
+
     def test_sync_url_propagates_known_server_key(self):
         """A POST-scoped server_key that matches a configured server is preserved so multi-server users return to the server they were working in."""
         view = self._view()
-        view.request = MagicMock()
-        view.request.POST = {"server_key": "prod"}
-        view.request.GET = {}
-        with (
-            patch(
-                "netbox_librenms_plugin.librenms_api.LibreNMSAPI.get_available_servers",
-                return_value={"prod": "Prod LibreNMS"},
-            ),
-            patch("netbox_librenms_plugin.views.sync.device_fields.redirect") as mock_redir,
+        view.request = self._request({"server_key": "prod"})
+        with patch(
+            "netbox_librenms_plugin.librenms_api.LibreNMSAPI.get_available_servers",
+            return_value={"prod": "Prod LibreNMS"},
         ):
-            view._sync_url("device", 1)
-        (url,), _ = mock_redir.call_args
-        assert "server_key=prod" in url
+            # No redirect patch: exercise the real redirect + shared redirect_with_server_key barrier.
+            response = view._sync_url("device", 1)
+        assert "server_key=prod" in response["Location"]
 
     def test_sync_url_stale_post_key_falls_back_to_active_server(self):
         """A POST server_key that is no longer configured (stale page / removed server) must not drop the server context: it doesn't match the allowlist, so the redirect falls back to the active/default server the action ran against (here the bound _librenms_api='default'), re-validated through the allowlist — instead of emitting a bare URL."""
         view = self._view()  # _view() binds _librenms_api = MagicMock(server_key="default")
-        view.request = MagicMock()
-        view.request.POST = {"server_key": "ghost"}  # unconfigured / stale
-        view.request.GET = {}
-        with (
-            patch(
-                "netbox_librenms_plugin.librenms_api.LibreNMSAPI.get_available_servers",
-                return_value={"default": "Default LibreNMS"},
-            ),
-            patch("netbox_librenms_plugin.views.sync.device_fields.redirect") as mock_redir,
+        view.request = self._request({"server_key": "ghost"})  # unconfigured / stale
+        with patch(
+            "netbox_librenms_plugin.librenms_api.LibreNMSAPI.get_available_servers",
+            return_value={"default": "Default LibreNMS"},
         ):
-            view._sync_url("device", 1)
-        (url,), _ = mock_redir.call_args
-        assert "server_key=default" in url
-        assert "ghost" not in url
+            response = view._sync_url("device", 1)
+        assert "server_key=default" in response["Location"]
+        assert "ghost" not in response["Location"]
 
     def test_sync_url_drops_unknown_server_key(self):
         """An unconfigured/spoofed server_key is not reflected into the redirect URL (allowlist guard — open-redirect safe)."""
         view = self._view()
-        view.request = MagicMock()
-        view.request.POST = {"server_key": "//evil.com/steal"}
-        view.request.GET = {}
-        with (
-            patch(
-                "netbox_librenms_plugin.librenms_api.LibreNMSAPI.get_available_servers",
-                return_value={"prod": "Prod LibreNMS"},
-            ),
-            patch("netbox_librenms_plugin.views.sync.device_fields.redirect") as mock_redir,
+        view.request = self._request({"server_key": "//evil.com/steal"})
+        with patch(
+            "netbox_librenms_plugin.librenms_api.LibreNMSAPI.get_available_servers",
+            return_value={"prod": "Prod LibreNMS"},
         ):
-            view._sync_url("device", 1)
-        (url,), _ = mock_redir.call_args
-        assert "evil.com" not in url
-        assert "server_key" not in url
+            response = view._sync_url("device", 1)
+        assert "evil.com" not in response["Location"]
+        assert "server_key" not in response["Location"]
 
     def test_sync_url_unbound_api_misconfigured_default_degrades_without_500(self):
         """On a redirect after a failed rebind, _librenms_api is unbound (None) and the request carries no server_key."""
         view = self._view()
         view._librenms_api = None
-        view.request = MagicMock()
-        view.request.POST = {}
-        view.request.GET = {}
-        with (
-            # Property constructs the default client → misconfigured default raises.
-            patch("netbox_librenms_plugin.views.mixins.LibreNMSAPI", side_effect=KeyError("ghost")),
-            patch("netbox_librenms_plugin.views.sync.device_fields.redirect") as mock_redir,
+        view.request = self._request({})
+        with patch(
+            # Property construction would raise; _sync_url must not touch it (uses the _librenms_api attr).
+            "netbox_librenms_plugin.views.mixins.LibreNMSAPI",
+            side_effect=KeyError("ghost"),
         ):
-            view._sync_url("device", 1)  # must not raise
-        (url,), _ = mock_redir.call_args
-        assert "server_key" not in url
+            response = view._sync_url("device", 1)  # must not raise
+        assert "server_key" not in response["Location"]
 
     def test_sync_url_drops_server_key_when_url_validation_fails(self):
-        """Even for an allowlisted server_key, if url_has_allowed_host_and_scheme rejects the candidate (the CodeQL open-redirect barrier), fall back to the bare URL."""
+        """Even for an allowlisted server_key, if url_has_allowed_host_and_scheme rejects the candidate (the CodeQL open-redirect barrier — now shared via redirect_with_server_key), fall back to the bare URL."""
         view = self._view()
-        view.request = MagicMock()
-        view.request.POST = {"server_key": "prod"}
-        view.request.GET = {}
+        view.request = self._request({"server_key": "prod"})
         with (
             patch(
                 "netbox_librenms_plugin.librenms_api.LibreNMSAPI.get_available_servers",
                 return_value={"prod": "Prod LibreNMS"},
             ),
+            # Barrier now lives in the shared helper, so patch it where redirect_with_server_key uses it.
             patch(
-                "netbox_librenms_plugin.views.sync.device_fields.url_has_allowed_host_and_scheme",
+                "netbox_librenms_plugin.views.mixins.url_has_allowed_host_and_scheme",
                 return_value=False,
             ),
-            patch("netbox_librenms_plugin.views.sync.device_fields.redirect") as mock_redir,
         ):
-            view._sync_url("device", 1)
-        (url,), _ = mock_redir.call_args
-        assert "server_key" not in url
+            response = view._sync_url("device", 1)
+        assert "server_key" not in response["Location"]
 
 
 # ---------------------------------------------------------------------------
