@@ -4940,11 +4940,12 @@ class TestInterfacePortIdActiveServerScope:
     def _real_default_api(self):
         from netbox_librenms_plugin.librenms_api import LibreNMSAPI
 
-        api = LibreNMSAPI()
-        # Pin the client to the default server so the fix (read under _active_server_key) and the
-        # bug (read under the client's key) resolve to visibly different port_ids.
-        api.server_key = "default"
-        return api
+        # Pass server_key explicitly so construction skips the LibreNMSSettings.objects.first()
+        # selected-server lookup — in the full suite a prior test can leave that mocked, which would
+        # otherwise make LibreNMSAPI() resolve to a MagicMock server and raise KeyError. Pinning to
+        # "default" keeps the fix (read under _active_server_key) and the bug (read under the client
+        # key) resolving to visibly different port_ids.
+        return LibreNMSAPI(server_key="default")
 
     def test_reads_port_id_under_active_server_not_default_client(self):
         """With _active_server_key set, the per-server port_id for THAT server is returned."""
