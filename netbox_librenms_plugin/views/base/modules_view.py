@@ -220,8 +220,16 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
         return serial
 
     def _get_interface_port_id(self, interface):
-        """Resolve an interface's stored LibreNMS port_id without discovery fallback."""
-        return normalize_librenms_port_id(self.librenms_api.get_stored_librenms_id(interface))
+        """
+        Resolve an interface's stored LibreNMS port_id (no discovery), scoped to the active server.
+
+        The verify path (SingleModuleVerifyView) sets ``_active_server_key`` but leaves the API
+        bound to the default client, so read the interface's per-server port_id under the active
+        key — not ``self.librenms_api.server_key`` — to match the server the row's interface match
+        (``_attach_interface_match``) resolves against.
+        """
+        server_key = getattr(self, "_active_server_key", None) or self.librenms_api.server_key
+        return normalize_librenms_port_id(self.librenms_api.get_stored_librenms_id(interface, server_key=server_key))
 
     def _count_adoptable_template_interfaces(self, module):
         """Count standalone interfaces that match an installed module's interface templates."""

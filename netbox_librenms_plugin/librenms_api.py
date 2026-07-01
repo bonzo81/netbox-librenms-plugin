@@ -251,7 +251,7 @@ class LibreNMSAPI:
                 return {"default": f"Default Server ({legacy_url})"}
             return {"default": "Default Server"}
 
-    def get_stored_librenms_id(self, obj):
+    def get_stored_librenms_id(self, obj, server_key=None):
         """
         Return the stored or cached LibreNMS ID for an object without discovery.
 
@@ -260,18 +260,25 @@ class LibreNMSAPI:
 
         Args:
             obj: NetBox object with a librenms_id custom field or cache identity
+            server_key: LibreNMS server key to read the per-server id under; defaults
+                to this client's bound ``server_key``. A caller scoped to a specific
+                server (e.g. the module verify path, which sets ``_active_server_key``
+                but leaves the API bound to the default client) must pass its key so
+                the multi-server dict CF is read under the right server rather than the
+                client's default.
 
         Returns:
             int: LibreNMS ID if found in the custom field or cache, None otherwise
         """
         from netbox_librenms_plugin.utils import get_librenms_device_id
 
-        librenms_id = get_librenms_device_id(obj, self.server_key, auto_save=False)
+        resolved_key = server_key or self.server_key
+        librenms_id = get_librenms_device_id(obj, resolved_key, auto_save=False)
         if librenms_id is not None:
             return librenms_id
 
-        # Check cache
-        cache_key = self._get_cache_key(obj)
+        # Check cache (scoped to the same server the CF was read under)
+        cache_key = self._get_cache_key(obj, server_key=resolved_key)
         librenms_id = cache.get(cache_key)
         if librenms_id is not None:
             return librenms_id
@@ -350,19 +357,22 @@ class LibreNMSAPI:
 
         return coerce_librenms_id(value)
 
-    def _get_cache_key(self, obj):
+    def _get_cache_key(self, obj, server_key=None):
         """
         Generate a unique cache key for an object.
 
         Args:
             obj: NetBox device or VM object
+            server_key: LibreNMS server key to scope the key to; defaults to this
+                client's bound ``server_key``. Pass an explicit key when reading on
+                behalf of a different (scoped) server than the client is bound to.
 
         Returns:
             str: Cache key
         """
         object_type = obj._meta.model_name
-        server_key = getattr(self, "server_key", "default")
-        return f"librenms_device_id_{object_type}_{obj.pk}_{server_key}"
+        resolved_key = server_key if server_key is not None else getattr(self, "server_key", "default")
+        return f"librenms_device_id_{object_type}_{obj.pk}_{resolved_key}"
 
     def _store_librenms_id(self, obj, librenms_id):
         """

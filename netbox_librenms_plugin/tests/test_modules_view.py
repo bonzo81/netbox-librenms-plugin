@@ -4924,3 +4924,54 @@ class TestGetContextDataOOBCacheFingerprint:
             view.get_context_data(request, obj)
 
         view.rebind_api_for_server.assert_called_once_with("prod")
+
+
+@pytest.mark.django_db
+class TestInterfacePortIdActiveServerScope:
+    """_get_interface_port_id must read the interface's port_id under the ACTIVE server key.
+
+    The module verify path (SingleModuleVerifyView) sets ``_active_server_key`` to the POSTed
+    server but leaves the API bound to the default client. With the multi-server dict CF form an
+    interface stores different port_ids per server, so reading under the default-bound client's
+    key (instead of ``_active_server_key``) returns the wrong server's port_id — and the verify
+    row's interface index then disagrees with the interface match, which uses the active key.
+    """
+
+    def _real_default_api(self):
+        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+
+        api = LibreNMSAPI()
+        # Pin the client to the default server so the fix (read under _active_server_key) and the
+        # bug (read under the client's key) resolve to visibly different port_ids.
+        api.server_key = "default"
+        return api
+
+    def test_reads_port_id_under_active_server_not_default_client(self):
+        """With _active_server_key set, the per-server port_id for THAT server is returned."""
+        from netbox_librenms_plugin.tests.conftest import make_device, make_interface
+        from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
+
+        device = make_device("mod-verify-scope")
+        iface = make_interface(device, "Gi0/1")
+        iface.custom_field_data["librenms_id"] = {"default": 111, "server2": 222}
+        iface.save()
+
+        view = object.__new__(BaseModuleTableView)
+        view._librenms_api = self._real_default_api()
+        view._active_server_key = "server2"
+
+        # Must resolve under the active server (222), not the default-bound client (111).
+        assert view._get_interface_port_id(iface) == 222
+
+    def test_get_stored_librenms_id_honors_explicit_server_key(self):
+        """LibreNMSAPI.get_stored_librenms_id(obj, server_key=...) reads that server's dict entry."""
+        from netbox_librenms_plugin.tests.conftest import make_device, make_interface
+
+        device = make_device("mod-verify-scope-api")
+        iface = make_interface(device, "Gi0/2")
+        iface.custom_field_data["librenms_id"] = {"default": 111, "server2": 222}
+        iface.save()
+
+        api = self._real_default_api()
+        assert api.get_stored_librenms_id(iface) == 111  # bound (default) key
+        assert api.get_stored_librenms_id(iface, server_key="server2") == 222  # explicit override
