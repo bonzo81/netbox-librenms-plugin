@@ -668,15 +668,18 @@ class LibreNMSAPI:
         def _port_names(port: dict) -> list[str]:
             return [name for field in name_fields if isinstance(name := port.get(field), str) and name]
 
-        # Only ports with a usable port_id and at least one non-empty string name feed the lookup
-        # maps: downstream resolution does string ops (regex .search(), `":" in name`, suffix
-        # splits), so a nameless / non-string-name port can't be matched anyway.
-        safe_named_ports = [p for p in safe_ports if p.get("port_id") is not None and _port_names(p)]
+        # by_id indexes EVERY port with a usable port_id, even a nameless one: a port_stack pair
+        # references ports by id, and _is_lag_aggregate classifies an aggregate authoritatively by
+        # ifType (ieee8023adLag) which needs no name. Excluding nameless ports here would drop a
+        # LAG relationship the port_stack + ifType define, even though ifType alone is enough to
+        # resolve it. (All downstream NAME ops iterate _port_names(port), which is empty for a
+        # nameless port, so it simply won't match any name-based rule — no string op sees a None.)
+        ports_with_id = [p for p in safe_ports if p.get("port_id") is not None]
         # Normalize port_id keys to str: ports (this map) and port_stack (high/low_port_id
         # below) are independent LibreNMS payloads, so a str-vs-int discrepancy between them
         # would silently miss every by_id.get() lookup and drop valid relationships. Coercing
         # both sides to str makes the match type-agnostic.
-        by_id = {str(p["port_id"]): p for p in safe_named_ports}
+        by_id = {str(p["port_id"]): p for p in ports_with_id}
         # Index every name a port is known by (selected field + ifName/ifDescr) so the
         # physical-name / sub-unit lookups below resolve regardless of which field carries it.
         # Drop AMBIGUOUS names: a name shared by two DIFFERENT ports (distinct port_ids) can't
@@ -686,9 +689,11 @@ class LibreNMSAPI:
         # sub-interface matching and bind the relationship onto the wrong interface. Mirror the
         # by_librenms_id collision drop in interfaces_view._build_interface_lookup_maps: keep a
         # name only when it resolves to exactly one port, otherwise drop it entirely.
+        # by_name indexes only ports that actually carry a string name (the inner _port_names loop
+        # yields nothing for a nameless port, so iterating ports_with_id keeps by_name name-only).
         by_name: dict = {}
         ambiguous_names: set = set()
-        for p in safe_named_ports:
+        for p in ports_with_id:
             for name in _port_names(p):
                 if name in ambiguous_names:
                     continue

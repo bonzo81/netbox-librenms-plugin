@@ -2326,6 +2326,21 @@ class TestResolvePortRelationships:
         assert result["lag_members"] == {101: 102}
         assert result["sub_interfaces"] == {}
 
+    def test_nameless_lag_aggregate_resolved_by_iftype(self, mock_librenms_api):
+        """A nameless aggregate (ifType=ieee8023adLag, empty ifName/ifDescr) still resolves via ifType.
+
+        ifType alone authoritatively classifies a LAG aggregate, so a valid port_id with no name must
+        stay in the by_id lookup — otherwise the port_stack pair referencing it is skipped and the
+        member's LAG membership is silently dropped.
+        """
+        ports = [
+            {"port_id": 201, "ifName": "1/1/c1/1", "ifType": "ethernetCsmacd"},
+            {"port_id": 202, "ifName": "", "ifDescr": "", "ifType": "ieee8023adLag"},  # nameless aggregate
+        ]
+        port_stack = [{"high_port_id": 201, "low_port_id": 202}]
+        result = mock_librenms_api.resolve_port_relationships(ports, port_stack, lag_patterns={})
+        assert result["lag_members"] == {201: 202}
+
     def test_subinterface_resolved_from_ifdescr_mode(self, mock_librenms_api):
         """On an ifDescr-mode device the sub-unit name lives in ifDescr (ifName empty); the resolver must still pair child -> parent instead of dropping both ports (which only matched ifName before)."""
         ports = [
@@ -2552,16 +2567,21 @@ class TestResolvePortRelationships:
         result = mock_librenms_api.resolve_port_relationships(ports, NOKIA_PORT_STACK[:1], lag_patterns={})
         assert result["lag_members"] == {101: 102}
 
-    def test_non_string_ifname_ports_are_skipped(self, mock_librenms_api):
-        """A port with a non-string ifName must not crash the downstream string ops (regex .search(), ':' membership, suffix splits); it is dropped from the maps."""
+    def test_non_string_ifname_does_not_crash_and_resolves_by_iftype(self, mock_librenms_api):
+        """A non-string ifName must not crash the downstream string ops; membership still resolves by ifType.
+
+        The member's malformed name is irrelevant to LAG classification — the aggregate (502) is
+        authoritatively a LAG via ifType, and the port_stack pairs 501 to it — so the membership
+        resolves. The no-crash guarantee holds because every name op iterates _port_names (which
+        skips the non-string), never the raw ifName.
+        """
         ports = [
             {"port_id": 501, "ifName": 12345, "ifType": "ethernetCsmacd"},  # malformed: non-string
             {"port_id": 502, "ifName": "lag9", "ifType": "ieee8023adLag"},
         ]
         stack = [{"high_port_id": 501, "low_port_id": 502}]
-        # Must not raise; the malformed port is excluded so the pair is simply skipped.
         result = mock_librenms_api.resolve_port_relationships(ports, stack, lag_patterns={})
-        assert result == {"lag_members": {}, "sub_interfaces": {}}
+        assert result == {"lag_members": {501: 502}, "sub_interfaces": {}}
 
     @pytest.mark.django_db
     def test_db_patterns_scoped_to_device_os(self, mock_librenms_api):
