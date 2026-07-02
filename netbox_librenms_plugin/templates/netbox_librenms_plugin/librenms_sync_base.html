@@ -253,7 +253,7 @@
                                     server_key, so omitting it would verify and write the mapping under the
                                     GLOBAL selected server, not the ?server_key tab the user is acting on.
                                     {% endcomment %}
-                                    {% if server_key %}<input type="hidden" name="server_key" value="{{ server_key }}">{% endif %}
+                                    {% include "netbox_librenms_plugin/inc/_hidden_server_key.html" %}
                                     <input type="hidden" name="object_type" value="{{ lookup_device_model_name }}">
                                     {% if librenms_id_serial_confirmed %}
                                     <button type="submit" class="btn btn-sm btn-outline-warning py-0 px-1 ms-1"
@@ -442,7 +442,7 @@
                                             The view rebinds from the POSTed server_key; without it the sync runs
                                             against the global selected server, not this tab's server.
                                             {% endcomment %}
-                                            {% if server_key %}<input type="hidden" name="server_key" value="{{ server_key }}">{% endif %}
+                                            {% include "netbox_librenms_plugin/inc/_hidden_server_key.html" %}
                                             <button type="submit" class="btn btn-sm btn-outline-primary"
                                                     title="Sync name to {{ resolved_name }}">
                                                 <i class="mdi mdi-sync"></i> Sync to NetBox
@@ -478,7 +478,7 @@
                                                   action="{% url 'plugins:netbox_librenms_plugin:update_device_type' pk=object.pk %}"
                                                   style="display: inline;">
                                                 {% csrf_token %}
-                                                {% if server_key %}<input type="hidden" name="server_key" value="{{ server_key }}">{% endif %}
+                                                {% include "netbox_librenms_plugin/inc/_hidden_server_key.html" %}
                                                 <button type="submit" class="btn btn-sm btn-outline-danger"
                                                         title="Sync to {{ librenms_device_hardware_match.device_type }}">
                                                     <i class="mdi mdi-sync"></i> Sync to NetBox
@@ -532,7 +532,7 @@
                                                       action="{% url 'plugins:netbox_librenms_plugin:update_device_serial' pk=object.pk %}"
                                                       style="display: inline;">
                                                     {% csrf_token %}
-                                                    {% if server_key %}<input type="hidden" name="server_key" value="{{ server_key }}">{% endif %}
+                                                    {% include "netbox_librenms_plugin/inc/_hidden_server_key.html" %}
                                                     <button type="submit" class="btn btn-sm btn-outline-primary"
                                                             title="Sync serial from LibreNMS: {{ librenms_device_serial }}">
                                                         <i class="mdi mdi-sync"></i> Sync to NetBox
@@ -575,7 +575,7 @@
                                                       action="{% url 'plugins:netbox_librenms_plugin:update_device_platform' pk=object.pk %}"
                                                       style="display: inline;">
                                                     {% csrf_token %}
-                                                    {% if server_key %}<input type="hidden" name="server_key" value="{{ server_key }}">{% endif %}
+                                                    {% include "netbox_librenms_plugin/inc/_hidden_server_key.html" %}
                                                     <button type="submit" class="btn btn-sm btn-outline-primary"
                                                             title="Set platform to {{ platform_info.matching_platform }}">
                                                         <i class="mdi mdi-sync"></i> Sync to NetBox
@@ -622,7 +622,7 @@
                                               action="{% url 'plugins:netbox_librenms_plugin:update_device_location' pk=object.pk %}"
                                               style="display: inline;">
                                             {% csrf_token %}
-                                            {% if server_key %}<input type="hidden" name="server_key" value="{{ server_key }}">{% endif %}
+                                            {% include "netbox_librenms_plugin/inc/_hidden_server_key.html" %}
                                             <button type="submit" class="btn btn-sm btn-outline-primary"
                                                     title="Update LibreNMS location to match NetBox site: {{ object.site.name }}">
                                                 <i class="mdi mdi-sync"></i> Sync to LibreNMS

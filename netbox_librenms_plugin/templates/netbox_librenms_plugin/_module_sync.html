@@ -10,7 +10,7 @@
             server_key (not server_info.server_key — that context var never existed, so the
             input always posted blank and the refresh fell back to the GLOBAL selected server).
             {% endcomment %}
-            {% if server_key %}<input type="hidden" name="server_key" value="{{ server_key }}">{% endif %}
+            {% include "netbox_librenms_plugin/inc/_hidden_server_key.html" %}
             {% if has_librenms_id %}
                 {% with model_name=object|meta:"model_name" %}
                     {% if model_name == "device" %}
