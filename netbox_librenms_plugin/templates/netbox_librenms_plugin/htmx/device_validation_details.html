@@ -497,6 +497,8 @@
               hx-swap="none"
               hx-include="#use-sysname-toggle, #strip-domain-toggle">
           {% csrf_token %}
+          {# server_key keeps the action scoped to the active LibreNMS server (issue #106). #}
+          <input type="hidden" name="server_key" value="{{ server_key }}">
           <input type="hidden" name="existing_device_id" value="{{ validation.existing_device.pk }}">
           <input type="hidden" name="existing_device_type" value="{{ existing_device_model_name|default:'device' }}">
           {% if validation.device_type_mismatch %}
@@ -546,6 +548,8 @@
               hx-swap="none"
               hx-include="#use-sysname-toggle, #strip-domain-toggle">
           {% csrf_token %}
+          {# server_key keeps the action scoped to the active LibreNMS server (issue #106). #}
+          <input type="hidden" name="server_key" value="{{ server_key }}">
           <input type="hidden" name="existing_device_id" value="{{ validation.existing_device.pk }}">
           <input type="hidden" name="existing_device_type" value="{{ existing_device_model_name|default:'device' }}">
           {% if validation.device_type_mismatch %}

@@ -7,19 +7,24 @@
     <div class="btn-list">
         <form method="post">
             {% csrf_token %}
+            {# Carry the active server_key so the refresh hits the right LibreNMS server/cache (else a non-default server tab uses the fallback). #}
+            {% if server_key %}<input type="hidden" name="server_key" value="{{ server_key }}">{% endif %}
             {% if has_librenms_id %}
                 {% with model_name=object|meta:"model_name" %}
                     {% if model_name == "device" %}
-                        <button hx-post="{% url 'plugins:netbox_librenms_plugin:device_interface_sync' pk=object.pk %}"
+                        {# type="button": HTMX drives the POST via hx-post; the default type="submit" would also fire a native form submit. #}
+                        <button type="button"
+                                hx-post="{% url 'plugins:netbox_librenms_plugin:device_interface_sync' pk=object.pk %}"
                                 hx-target="#interface-sync-content"
-                                hx-include="[name='interface_name_field']"
+                                hx-include="[name='interface_name_field'], [name='server_key']"
                                 class="btn btn-outline-primary">
                             Refresh Interfaces
                         </button>
                     {% elif model_name == "virtualmachine" %}
-                        <button hx-post="{% url 'plugins:netbox_librenms_plugin:vm_interface_sync' pk=object.pk %}"
+                        <button type="button"
+                                hx-post="{% url 'plugins:netbox_librenms_plugin:vm_interface_sync' pk=object.pk %}"
                                 hx-target="#interface-sync-content"
-                                hx-include="[name='interface_name_field']"
+                                hx-include="[name='interface_name_field'], [name='server_key']"
                                 class="btn btn-outline-primary">
                             Refresh Interfaces
                         </button>

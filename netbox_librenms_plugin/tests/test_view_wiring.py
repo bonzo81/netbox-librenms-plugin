@@ -207,6 +207,16 @@ class TestRequiredObjectPermissionsWiring:
         self._assert_has_mixins(RemoveServerMappingView)
         assert "POST" in RemoveServerMappingView.required_object_permissions
 
+    def test_single_cable_verify_has_object_permission_gate(self):
+        """The read-only verify-cable endpoint exposes device cable/topology rows, so it must gate on dcim.view_device like the interface/module verify views (object-permission mixin in MRO + declared perms)."""
+        from dcim.models import Device
+
+        from netbox_librenms_plugin.views.base.cables_view import SingleCableVerifyView
+        from netbox_librenms_plugin.views.mixins import NetBoxObjectPermissionMixin
+
+        assert NetBoxObjectPermissionMixin in SingleCableVerifyView.__mro__
+        assert ("view", Device) in SingleCableVerifyView.required_object_permissions.get("POST", [])
+
     def test_convert_legacy_id_has_required_object_permissions(self):
         from netbox_librenms_plugin.views.sync.device_fields import ConvertLegacyLibreNMSIdView
 
@@ -227,6 +237,38 @@ class TestRequiredObjectPermissionsWiring:
 
         assert ("delete", Interface) in perms_device
         assert ("delete", VMInterface) in perms_vm
+
+    def test_verify_views_have_object_permission_mixin_and_perms(self):
+        """Read-only verify endpoints must wire NetBoxObjectPermissionMixin so their declared gate enforces instead of raising AttributeError (a missing mixin 500s; mock-based perm tests mask it)."""
+        from netbox_librenms_plugin.views.base.ip_addresses_view import SingleIPAddressVerifyView
+        from netbox_librenms_plugin.views.object_sync.devices import (
+            SingleInterfaceVerifyView,
+            SingleModuleVerifyView,
+            SingleVlanGroupVerifyView,
+            VerifyVlanSyncGroupView,
+        )
+
+        for view_class in (
+            SingleInterfaceVerifyView,
+            SingleModuleVerifyView,
+            SingleVlanGroupVerifyView,
+            VerifyVlanSyncGroupView,
+            SingleIPAddressVerifyView,
+        ):
+            self._assert_has_mixins(view_class)
+            assert "POST" in view_class.required_object_permissions, (
+                f"{view_class.__name__} must declare a POST object-permission requirement"
+            )
+
+    def test_single_ipaddress_verify_has_object_permission_gate(self):
+        """The read-only verify-ipaddress endpoint resolves an arbitrary device_id and returns its data, so it must gate on dcim.view_device like the other verify views."""
+        from dcim.models import Device
+
+        from netbox_librenms_plugin.views.base.ip_addresses_view import SingleIPAddressVerifyView
+        from netbox_librenms_plugin.views.mixins import NetBoxObjectPermissionMixin
+
+        assert NetBoxObjectPermissionMixin in SingleIPAddressVerifyView.__mro__
+        assert ("view", Device) in SingleIPAddressVerifyView.required_object_permissions.get("POST", [])
 
 
 class TestViewPropertyLazyInit:
@@ -299,7 +341,7 @@ class TestRenderDeviceSelectionEscape:
     """VCCableTable.render_device_selection must HTML-escape member.name."""
 
     def test_member_name_is_escaped(self):
-        from unittest.mock import MagicMock, patch
+        from unittest.mock import MagicMock
 
         from netbox_librenms_plugin.tables.cables import VCCableTable
 
@@ -312,14 +354,10 @@ class TestRenderDeviceSelectionEscape:
         vc.members.all.return_value = [member]
         device.virtual_chassis = vc
 
+        # The dropdown options render from the member set cached in __init__.
         table = VCCableTable([], device=device)
         record = {"local_port": "eth0", "local_port_id": "42"}
-
-        with patch(
-            "netbox_librenms_plugin.tables.cables.get_virtual_chassis_member",
-            return_value=member,
-        ):
-            html = str(table.render_device_selection(None, record))
+        html = str(table.render_device_selection(None, record))
 
         assert "<script>" not in html
         assert "&lt;script&gt;" in html
@@ -395,6 +433,10 @@ class TestSingleCableVerifyServerKey:
 
         view = object.__new__(SingleCableVerifyView)
         view._librenms_api = MagicMock()
+        # dispatch() sets self.request in production; this direct post() call needs an authorized
+        # request for the object-permission gate (reads self.request.user.has_perm).
+        view.request = MagicMock()
+        view.request.user.has_perm.return_value = True
         view._librenms_api.server_key = "default-server"
 
         request = MagicMock()
@@ -407,6 +449,13 @@ class TestSingleCableVerifyServerKey:
         ).encode()
 
         with (
+            # The posted key is honoured only when it names a configured server; post() checks the
+            # LibreNMSAPI.get_available_servers() CLASSMETHOD (not the instance) so it never builds a
+            # possibly-broken default client just to validate membership.
+            patch(
+                "netbox_librenms_plugin.librenms_api.LibreNMSAPI.get_available_servers",
+                return_value={"production": "Production"},
+            ),
             patch("netbox_librenms_plugin.views.base.cables_view.get_object_or_404") as mock_get_obj,
             patch(
                 "netbox_librenms_plugin.views.base.cables_view.get_librenms_sync_device",
@@ -434,6 +483,10 @@ class TestSingleCableVerifyServerKey:
 
         view = object.__new__(SingleCableVerifyView)
         view._librenms_api = MagicMock()
+        # dispatch() sets self.request in production; this direct post() call needs an authorized
+        # request for the object-permission gate (reads self.request.user.has_perm).
+        view.request = MagicMock()
+        view.request.user.has_perm.return_value = True
         view._librenms_api.server_key = "fallback-server"
 
         request = MagicMock()
