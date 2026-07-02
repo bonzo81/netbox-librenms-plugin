@@ -1093,6 +1093,13 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
         "no matching bay" even though the table matched it and a single install (which
         trusts the table's bay) succeeds.
 
+        This is the WRITE path (bulk install), so a bay name that appears under more
+        than one installed module — and isn't overridden by a device-level bay — is
+        dropped rather than resolved by lowest module PK: installing into an
+        arbitrarily-picked sibling module's same-named bay would be a wrong-bay write.
+        The row then skips as "no matching bay", exactly as it did when the fallback
+        only considered device-level bays.
+
         Args:
             bays: The candidate module bays for the device.
             parent_module_id: The installed parent module id, or falsy to use the
@@ -1111,7 +1118,30 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
         for bay in bays:
             if bay.module_id:
                 module_scoped_bays.setdefault(bay.module_id, {})[bay.name] = bay
-        return BaseModuleTableView._compute_all_bays(device_bays, module_scoped_bays)
+        all_bays = BaseModuleTableView._compute_all_bays(device_bays, module_scoped_bays)
+
+        # Names defined by two or more DIFFERENT modules are ambiguous install targets.
+        seen_module: dict = {}
+        ambiguous: set = set()
+        for mid, named in module_scoped_bays.items():
+            for bay_name in named:
+                if bay_name in seen_module and seen_module[bay_name] != mid:
+                    ambiguous.add(bay_name)
+                seen_module[bay_name] = mid
+        # A device-level bay with the same name isn't ambiguous — device bays win the
+        # merge in _compute_all_bays, matching the pre-fallback behaviour.
+        ambiguous -= set(device_bays)
+        if ambiguous:
+            logger.info(
+                "Bulk install: dropping ambiguous module-scoped bay name(s) %s — defined by "
+                "multiple installed modules and the item's hierarchy resolves no parent module; "
+                "matching rows will skip as 'no matching bay' instead of installing into an "
+                "arbitrary module's bay.",
+                sorted(ambiguous),
+            )
+            for bay_name in ambiguous:
+                all_bays.pop(bay_name, None)
+        return all_bays
 
     @staticmethod
     def _match_bay(

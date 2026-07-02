@@ -574,6 +574,30 @@ class TestCandidateBaysForItem:
         # Device-level bay takes precedence over a same-named module-scoped bay (mirrors all_bays).
         assert result["Bay 1"] is device_bay
 
+    def test_ambiguous_cross_module_bay_name_is_dropped(self):
+        """A bay name defined by TWO different installed modules is not an install target: picking the lowest-PK module's bay would install the item into the wrong sibling line card — the row must skip as 'no matching bay' (develop behaviour) instead."""
+        from netbox_librenms_plugin.views.sync.modules import InstallBranchView
+
+        a = self._b("Transceiver 1", module_id=942)
+        b = self._b("Transceiver 1", module_id=943)  # same child-bay name on a sibling module
+        unique = self._b("Transceiver 2", module_id=943)
+        result = InstallBranchView._candidate_bays_for_item([a, b, unique], parent_module_id=None)
+
+        assert "Transceiver 1" not in result
+        # Unique module-scoped names stay reachable — the fallback's whole purpose.
+        assert result.get("Transceiver 2") is unique
+
+    def test_ambiguous_name_overridden_by_device_bay_is_kept(self):
+        """A device-level bay sharing the ambiguous name IS the unambiguous target (device bays win the merge, matching the pre-fallback behaviour)."""
+        from netbox_librenms_plugin.views.sync.modules import InstallBranchView
+
+        a = self._b("Bay 9", module_id=942)
+        b = self._b("Bay 9", module_id=943)
+        dev = self._b("Bay 9", module_id=None)
+        result = InstallBranchView._candidate_bays_for_item([a, b, dev], parent_module_id=None)
+
+        assert result["Bay 9"] is dev
+
 
 class TestMatchBayByPosition:
     """_match_bay_by_position resolves position-based bay names for SFPs in converters."""
