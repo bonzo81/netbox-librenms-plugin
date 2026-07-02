@@ -590,6 +590,55 @@
           <span class="text-muted small">(heuristic guess pre-selected -- flip if wrong)</span>
         </div>
       {% endif %}
+      {% if validation.promote_to_host %}
+      {% comment %}
+      Fallback Host pane. The full promote-to-host flow (side-by-side modal + the
+      device_promote_to_host endpoint) is introduced by the device-merge feature; probe its URL
+      with the 'as' form (never raises) — absent on this branch, so offer the legacy
+      'Update & Link' conflict action instead of leaving a promote-classified row with no action
+      (the Host radio above would otherwise toggle to an empty pane). On branches where the URL
+      IS registered the real pane renders and this whole block stays hidden.
+      {% endcomment %}
+      {% url 'plugins:netbox_librenms_plugin:device_promote_to_host' device_id=libre_device.device_id as promote_url %}
+      {% if not promote_url %}
+      <div id="serial-role-host-{{ libre_device.device_id }}"
+           {% if validation.serial_role_choice_available and validation.serial_action != 'promote_to_host' %}style="display:none"{% endif %}>
+        <div class="alert alert-info py-2 mb-3 small">
+          <i class="mdi mdi-server"></i>
+          <strong>Host detected:</strong>
+          <a href="{{ existing_device_url }}" target="_blank" rel="noopener noreferrer">{{ validation.existing_device.name }}</a>
+          is currently linked to LibreNMS device #{{ validation.promote_to_host.existing_libre_id }}
+          ({{ validation.promote_to_host.existing_oob_type }}); this LibreNMS device
+          (#{{ libre_device.device_id }}) appears to be the real host.
+          <em>Update &amp; Link</em> re-points the NetBox device at it.
+        </div>
+        <div class="mb-3">
+          <form style="display:inline"
+                hx-post="{% url 'plugins:netbox_librenms_plugin:device_conflict_action' device_id=libre_device.device_id %}"
+                hx-swap="none"
+                hx-include="#use-sysname-toggle, #strip-domain-toggle">
+            {% csrf_token %}
+            <input type="hidden" name="existing_device_id" value="{{ validation.existing_device.pk }}">
+            <input type="hidden" name="existing_device_type" value="{{ existing_device_model_name|default:'device' }}">
+            {% comment %}Carry the modal's server scope (mirrors the Add-as-OOB form below).{% endcomment %}
+            <input type="hidden" name="server_key" value="{{ server_key }}">
+            {% if validation.device_type_mismatch %}
+              <div class="form-check mb-2">
+                <input class="form-check-input" type="checkbox" name="force" id="force-promote-{{ libre_device.device_id }}"
+                       onchange="this.closest('form').querySelector('.force-action-btn').disabled = !this.checked">
+                <label class="form-check-label text-danger" for="force-promote-{{ libre_device.device_id }}">
+                  <i class="mdi mdi-alert-circle"></i> Device type mismatch -- check to force
+                </label>
+              </div>
+            {% endif %}
+            <button type="submit" name="action" value="update" class="btn btn-sm btn-warning{% if validation.device_type_mismatch %} force-action-btn{% endif %}"{% if validation.device_type_mismatch %} disabled{% endif %}>
+              <i class="mdi mdi-pencil"></i> Update &amp; Link
+            </button>
+          </form>
+        </div>
+      </div>
+      {% endif %}
+      {% endif %}
       {% if validation.oob_candidate %}
       <div id="serial-role-oob-{{ libre_device.device_id }}"
            {% if validation.serial_role_choice_available and validation.serial_action != 'oob_candidate' %}style="display:none"{% endif %}>

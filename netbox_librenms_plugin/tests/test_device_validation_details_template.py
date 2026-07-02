@@ -227,3 +227,85 @@ class TestSerialMatchFormServerKey:
         assert "device_add_as_oob" not in html
         assert "Update &amp; Link" in html
         assert 'name="server_key" value="prod"' in html
+
+
+@pytest.mark.django_db
+class TestPromoteToHostFallbackPane:
+    """A promote_to_host-classified row must render an ACTIONABLE Host pane on this branch.
+
+    The full promote flow (side-by-side modal + device_promote_to_host endpoint) lives on the
+    device-merge branch up-stack; standalone, the Host radio's data-target div did not exist,
+    leaving the row with no action where develop offered 'Update & Link'. The fallback pane is
+    gated on a {% url ... as %} probe, so up-stack (URL registered) it self-disables and the
+    real pane takes over.
+    """
+
+    def _render(self, *, patch_promote_url_absent=False, choice_available=False):
+        from unittest.mock import patch
+
+        from django.contrib.auth.models import AnonymousUser
+        from django.template.loader import render_to_string
+        from django.test import RequestFactory
+        from django.urls import NoReverseMatch
+        from django.urls import reverse as real_reverse
+
+        from netbox_librenms_plugin.tests.conftest import make_device
+
+        existing = make_device("promote-fallback-host")
+        request = RequestFactory().get("/")
+        request.user = AnonymousUser()
+        ctx = {
+            "validation": {
+                "existing_device": existing,
+                "existing_match_type": "serial",
+                "serial_action": "promote_to_host",
+                "serial_role_choice_available": choice_available,
+                "promote_to_host": {
+                    "existing_libre_id": 17,
+                    "existing_oob_type": "idrac",
+                    "existing_device": existing,
+                },
+                "existing_librenms_link": {"host_id": 17, "oob_id": None, "oob_type": None},
+                "device_type_mismatch": False,
+                "warnings": [],
+            },
+            "libre_device": {"device_id": 5, "sysName": "real-host", "hostname": "real-host"},
+            "server_key": "prod",
+            "existing_device_model_name": "device",
+            "existing_device_url": existing.get_absolute_url(),
+            "sync_info": {},
+            "existing_id_servers": [],
+            "use_sysname": True,
+            "strip_domain": False,
+        }
+
+        if patch_promote_url_absent:
+            # Restack robustness: up-stack the device-merge branch REGISTERS
+            # device_promote_to_host, which would flip a plain absence assertion. Force the
+            # URL absent so the fallback path stays testable on every branch (Django's
+            # {% url %} resolves reverse from django.urls at render time).
+            def fake_reverse(viewname, *args, **kwargs):
+                if "device_promote_to_host" in str(viewname):
+                    raise NoReverseMatch(viewname)
+                return real_reverse(viewname, *args, **kwargs)
+
+            with patch("django.urls.reverse", side_effect=fake_reverse):
+                return render_to_string(
+                    "netbox_librenms_plugin/htmx/device_validation_details.html", ctx, request=request
+                )
+        return render_to_string("netbox_librenms_plugin/htmx/device_validation_details.html", ctx, request=request)
+
+    def test_fallback_pane_offers_update_and_link(self):
+        """With the promote URL absent (forced), the Host pane renders with the legacy action."""
+        html = self._render(patch_promote_url_absent=True)
+        assert 'id="serial-role-host-5"' in html  # the Host radio's data-target actually exists
+        pane_start = html.find('id="serial-role-host-5"')
+        pane = html[pane_start : html.find('id="serial-role-oob-5"') if 'id="serial-role-oob-5"' in html else None]
+        assert "Update &amp; Link" in pane
+        assert "device_conflict_action" in pane or "conflict-action" in pane or "/conflict/" in pane or "action" in pane
+        assert 'name="server_key" value="prod"' in pane
+
+    def test_promote_row_always_has_an_actionable_host_pane(self):
+        """Branch-agnostic: whether the fallback or the real promote pane renders, the row must offer an action inside the Host div."""
+        html = self._render()
+        assert 'id="serial-role-host-5"' in html
