@@ -6,7 +6,9 @@
     <div class="btn-list">
         <form method="post">
             {% csrf_token %}
-            <input type="hidden" name="server_key" value="{{ server_info.server_key|default:'' }}">
+            {# server_key (not server_info.server_key — that context var never existed, so the
+               input always posted blank and the refresh fell back to the GLOBAL selected server). #}
+            {% if server_key %}<input type="hidden" name="server_key" value="{{ server_key }}">{% endif %}
             {% if has_librenms_id %}
                 {% with model_name=object|meta:"model_name" %}
                     {% if model_name == "device" %}
