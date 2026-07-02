@@ -927,6 +927,39 @@ class TestSyncInterfacesViewGetCachedPortsData:
                 result = view.get_cached_ports_data(view.request, obj, "default")
         assert result == ports
 
+    @pytest.mark.django_db
+    def test_vc_member_with_own_legacy_id_reads_sync_device_key(self):
+        """The reader must resolve the VC sync device UNCONDITIONALLY like the writers: a viewed member's own legacy bare-int id must not shadow a sibling's explicit per-server mapping, else the sync POST reads a cache key the refresh never wrote and always fails with 'No cached data found'."""
+        from dcim.models import VirtualChassis
+        from django.core.cache import cache
+
+        from netbox_librenms_plugin.tests.conftest import make_device
+        from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
+
+        # Viewed member holds a legacy bare-int id (a universal per-server fallback);
+        # its sibling holds the explicit dict mapping that get_librenms_sync_device
+        # prefers (priority 1 beats the legacy fallback 1b).
+        viewed = make_device("vc-cache-viewed", librenms_cf=42)
+        sibling = make_device("vc-cache-sibling", librenms_cf={"secondary": {"id": 99}})
+        vc = VirtualChassis.objects.create(name="vc-cache-read")
+        for pos, member in enumerate((viewed, sibling), start=1):
+            member.virtual_chassis = vc
+            member.vc_position = pos
+            member.save()
+
+        view = _make_view(SyncInterfacesView)
+        ports = [{"ifName": "eth0"}]
+        # BaseInterfaceTableView.post/get_context_data cache under the RESOLVED sync
+        # device (the sibling) — seed exactly what the refresh writes.
+        writer_key = view.get_cache_key(sibling, "ports", "secondary")
+        cache.set(writer_key, {"ports": ports}, 60)
+        try:
+            with patch("netbox_librenms_plugin.views.sync.interfaces.messages"):
+                result = view.get_cached_ports_data(view.request, viewed, "secondary")
+        finally:
+            cache.delete(writer_key)
+        assert result == ports
+
 
 class TestSyncInterfacesViewPost:
     def test_permission_denied_device_returns_early(self):

@@ -17,7 +17,6 @@ from netbox_librenms_plugin.utils import (
     convert_speed_to_kbps,
     find_by_librenms_id,
     get_interface_name_field,
-    get_librenms_device_id,
     get_librenms_sync_device,
     normalize_librenms_port_id,
     set_librenms_device_id,
@@ -148,12 +147,13 @@ class SyncInterfacesView(
         if server_key is None:
             server_key = self.librenms_api.server_key
         # On VC member pages the GET tab writes ports under the resolved sync device's
-        # cache key. Resolve the same device here so the POST path reads the same entry.
-        cache_obj = obj
-        if isinstance(obj, Device) and not get_librenms_device_id(obj, server_key, auto_save=False):
-            sync_device = get_librenms_sync_device(obj, server_key=server_key)
-            if sync_device is not None:
-                cache_obj = sync_device
+        # cache key. Resolve the same device here — UNCONDITIONALLY, mirroring the
+        # writers (BaseInterfaceTableView.post/get_context_data) — so the POST path
+        # reads the same entry. Gating the resolve on the viewed member having no id
+        # of its own diverges from the writers when the member holds a legacy bare-int
+        # while a sibling holds the preferred explicit per-server mapping: the refresh
+        # then caches under the sibling and this reader misses forever.
+        cache_obj = get_librenms_sync_device(obj, server_key=server_key) or obj
         cached_data = cache.get(self.get_cache_key(cache_obj, "ports", server_key))
         # No cached entry at all (or a non-dict one) → ask the user to refresh before syncing.
         if not isinstance(cached_data, dict):
