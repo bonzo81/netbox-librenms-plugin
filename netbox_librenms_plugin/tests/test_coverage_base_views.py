@@ -3421,165 +3421,117 @@ class TestBaseInterfaceTableViewMissingLines:
 
         mock_gnf.assert_called_once_with(request)
 
+    # ---- Real-DB coverage for get_context_data (concrete DeviceInterfaceTableView) ----
+    # These replace the prior MagicMock-only versions, which fed a bare MagicMock request into the
+    # real server-key resolution: request.GET.get("server_key") returned truthy garbage, so
+    # rebind_api_for_server -> build_librenms_api(garbage) resolved against ambient config/DB state
+    # and flaked under full-suite ordering (nulling cached_data -> the lines under test never ran).
+    # Here everything is real (Device/VC/Interface + Django cache); only build_librenms_api, the
+    # LibreNMS HTTP-client factory boundary, is faked so no server is contacted.
+
+    @staticmethod
+    def _real_view_and_request():
+        from django.contrib.auth import get_user_model
+        from django.test import RequestFactory
+
+        from netbox_librenms_plugin.views.object_sync.devices import DeviceInterfaceTableView
+
+        view = DeviceInterfaceTableView()
+        request = RequestFactory().get("/")  # GET render, no ?server_key -> default server
+        user_model = get_user_model()
+        request.user = user_model.objects.first() or user_model.objects.create_user(username="iface-ctx-tester")
+        view.request = request
+        return view, request
+
+    @staticmethod
+    def _seed_ports(view, device, ports):
+        from django.core.cache import cache as real_cache
+
+        from netbox_librenms_plugin.utils import get_librenms_sync_device
+
+        # Scope the seed to the exact key the view will read (VC devices scope to the sync device).
+        cache_device = get_librenms_sync_device(device, server_key="default") or device
+        real_cache.set(view.get_cache_key(cache_device, "ports", "default"), {"ports": ports})
+
+    @pytest.mark.django_db
     def test_ifalias_cleared_when_matches_ifdescr(self):
-        """port['ifAlias'] is set to '' when it equals ifDescr (line 203)."""
+        """A cached port whose ifAlias equals its ifDescr renders with ifAlias cleared to ''."""
         from unittest.mock import MagicMock, patch
 
-        view = self._make_view()
-        obj = MagicMock()
-        obj.virtual_chassis = None
-        obj.id = 1
-        request = MagicMock()
+        device = make_device("iface-ctx-ifalias")
+        make_interface(device, "Gi0/0", iface_type="1000base-t")
+        view, request = self._real_view_and_request()
+        self._seed_ports(
+            view,
+            device,
+            [
+                {
+                    "port_id": 1,
+                    "ifName": "Gi0/0",
+                    "ifDescr": "GigabitEthernet0/0",
+                    "ifAlias": "GigabitEthernet0/0",  # equals ifDescr -> cleared
+                    "ifAdminStatus": "up",
+                }
+            ],
+        )
 
-        ports_data = [
-            {
-                "port_id": 1,
-                "ifName": "Gi0/0",
-                "ifDescr": "GigabitEthernet0/0",
-                "ifAlias": "GigabitEthernet0/0",  # matches ifDescr -> cleared
-                "ifAdminStatus": "up",
-            }
-        ]
-        cached_data = {"ports": ports_data}
-
-        mock_iface = MagicMock()
-        mock_iface.name = "Gi0/0"
-        mock_ifaces_qs = MagicMock()
-        mock_ifaces_qs.select_related.return_value.prefetch_related.return_value = [mock_iface]
-
-        mock_table = MagicMock()
-        mock_table.configure = MagicMock()
-
-        with (
-            patch.object(view, "get_cache_key", return_value="k"),
-            patch.object(view, "get_last_fetched_key", return_value="lk"),
-            patch.object(view, "get_vlan_overrides_key", return_value="vk"),
-            patch.object(view, "get_vlan_groups_for_device", return_value=[]),
-            patch.object(view, "_build_vlan_lookup_maps", return_value={"vid_to_groups": {}, "vid_to_vlans": {}}),
-            patch.object(view, "get_interfaces", return_value=mock_ifaces_qs),
-            patch.object(view, "_add_vlan_group_selection"),
-            patch.object(view, "_add_missing_vlans_info"),
-            patch.object(view, "get_table", return_value=mock_table),
-            patch("netbox_librenms_plugin.views.base.interfaces_view.get_interface_name_field", return_value="ifName"),
-            patch("netbox_librenms_plugin.views.base.interfaces_view.cache") as mock_cache,
-            patch("netbox_librenms_plugin.views.base.interfaces_view.timezone") as mock_tz,
+        with patch(
+            "netbox_librenms_plugin.librenms_api.build_librenms_api",
+            return_value=MagicMock(server_key="default"),
         ):
-            mock_cache.get.side_effect = lambda key: cached_data if key == "k" else None
-            mock_cache.ttl.return_value = 300
-            mock_tz.now.return_value = MagicMock()
-            mock_tz.timedelta.return_value = MagicMock()
-            view.get_context_data(request, obj, "ifName")
+            ctx = view.get_context_data(request, device, "ifName")
 
-        assert ports_data[0]["ifAlias"] == ""
+        rendered = next(p for p in ctx["table"].data if p.get("ifName") == "Gi0/0")
+        assert rendered["ifAlias"] == ""
 
-    def test_netbox_only_interfaces_vc_device_name_lookup(self):
-        """VC branch fetches device_name from VC members for netbox-only interfaces (lines 224-226)."""
+    @pytest.mark.django_db
+    def test_netbox_only_interface_vc_gets_member_device_name(self):
+        """A VC member interface absent from LibreNMS is flagged netbox-only with the member's name."""
         from unittest.mock import MagicMock, patch
 
-        view = self._make_view()
+        from dcim.models import VirtualChassis
 
-        member1 = MagicMock()
-        member1.id = 10
-        member1.name = "switch-1"
+        vc = VirtualChassis.objects.create(name="vc-nbonly")
+        switch = make_device("vc-nbonly-switch")
+        switch.virtual_chassis = vc
+        switch.vc_position = 1
+        switch.save()
+        make_interface(switch, "Gi0/1", iface_type="1000base-t")  # only in NetBox
 
-        vc = MagicMock()
-        vc.members.all.return_value = [member1]
-        vc.members.get.return_value = member1
+        view, request = self._real_view_and_request()
+        self._seed_ports(view, switch, [{"port_id": 1, "ifName": "Gi0/0", "ifAdminStatus": "up", "ifAlias": "x"}])
 
-        obj = MagicMock()
-        obj.virtual_chassis = vc
-        obj.id = 10
-        request = MagicMock()
-
-        # Gi0/0 is in LibreNMS; Gi0/1 is only in NetBox
-        cached_data = {"ports": [{"port_id": 1, "ifName": "Gi0/0", "ifAdminStatus": "up", "ifAlias": "x"}]}
-
-        netbox_only_iface = MagicMock()
-        netbox_only_iface.name = "Gi0/1"
-        netbox_only_iface.id = 99
-        netbox_only_iface.type = "1000base-t"
-
-        mock_ifaces_qs = MagicMock()
-        mock_ifaces_qs.select_related.return_value.prefetch_related.return_value = [netbox_only_iface]
-
-        mock_table = MagicMock()
-        mock_table.configure = MagicMock()
-
-        with (
-            patch.object(view, "get_cache_key", return_value="k"),
-            patch.object(view, "get_last_fetched_key", return_value="lk"),
-            patch.object(view, "get_vlan_overrides_key", return_value="vk"),
-            patch.object(view, "get_vlan_groups_for_device", return_value=[]),
-            patch.object(view, "_build_vlan_lookup_maps", return_value={"vid_to_groups": {}, "vid_to_vlans": {}}),
-            patch.object(view, "get_interfaces", return_value=mock_ifaces_qs),
-            patch.object(view, "_add_vlan_group_selection"),
-            patch.object(view, "_add_missing_vlans_info"),
-            patch.object(view, "get_table", return_value=mock_table),
-            patch("netbox_librenms_plugin.views.base.interfaces_view.get_virtual_chassis_member", return_value=member1),
-            patch("netbox_librenms_plugin.views.base.interfaces_view.get_interface_name_field", return_value="ifName"),
-            patch("netbox_librenms_plugin.views.base.interfaces_view.cache") as mock_cache,
-            patch("netbox_librenms_plugin.views.base.interfaces_view.timezone") as mock_tz,
+        with patch(
+            "netbox_librenms_plugin.librenms_api.build_librenms_api",
+            return_value=MagicMock(server_key="default"),
         ):
-            mock_cache.get.side_effect = lambda key: cached_data if key == "k" else None
-            mock_cache.ttl.return_value = 300
-            mock_tz.now.return_value = MagicMock()
-            mock_tz.timedelta.return_value = MagicMock()
-            ctx = view.get_context_data(request, obj, "ifName")
+            ctx = view.get_context_data(request, switch, "ifName")
 
-        netbox_only = ctx.get("netbox_only_interfaces", [])
-        assert any(item["name"] == "Gi0/1" for item in netbox_only)
-        gi01 = next(i for i in netbox_only if i["name"] == "Gi0/1")
-        assert gi01["device_name"] == "switch-1"
-
-    def test_netbox_only_interfaces_non_vc_device_name_from_obj(self):
-        """Non-VC branch uses obj.name directly for device_name (line 228)."""
-        from unittest.mock import MagicMock, patch
-
-        view = self._make_view()
-        obj = MagicMock()
-        obj.virtual_chassis = None
-        obj.id = 1
-        obj.name = "router-1"
-        request = MagicMock()
-
-        # Gi0/0 in LibreNMS; Gi0/1 only in NetBox
-        cached_data = {"ports": [{"port_id": 1, "ifName": "Gi0/0", "ifAdminStatus": "up", "ifAlias": None}]}
-
-        netbox_only_iface = MagicMock()
-        netbox_only_iface.name = "Gi0/1"
-        netbox_only_iface.id = 55
-        netbox_only_iface.type = "1000base-t"
-
-        mock_ifaces_qs = MagicMock()
-        mock_ifaces_qs.select_related.return_value.prefetch_related.return_value = [netbox_only_iface]
-
-        mock_table = MagicMock()
-        mock_table.configure = MagicMock()
-
-        with (
-            patch.object(view, "get_cache_key", return_value="k"),
-            patch.object(view, "get_last_fetched_key", return_value="lk"),
-            patch.object(view, "get_vlan_overrides_key", return_value="vk"),
-            patch.object(view, "get_vlan_groups_for_device", return_value=[]),
-            patch.object(view, "_build_vlan_lookup_maps", return_value={"vid_to_groups": {}, "vid_to_vlans": {}}),
-            patch.object(view, "get_interfaces", return_value=mock_ifaces_qs),
-            patch.object(view, "_add_vlan_group_selection"),
-            patch.object(view, "_add_missing_vlans_info"),
-            patch.object(view, "get_table", return_value=mock_table),
-            patch("netbox_librenms_plugin.views.base.interfaces_view.get_interface_name_field", return_value="ifName"),
-            patch("netbox_librenms_plugin.views.base.interfaces_view.cache") as mock_cache,
-            patch("netbox_librenms_plugin.views.base.interfaces_view.timezone") as mock_tz,
-        ):
-            mock_cache.get.side_effect = lambda key: cached_data if key == "k" else None
-            mock_cache.ttl.return_value = 300
-            mock_tz.now.return_value = MagicMock()
-            mock_tz.timedelta.return_value = MagicMock()
-            ctx = view.get_context_data(request, obj, "ifName")
-
-        netbox_only = ctx.get("netbox_only_interfaces", [])
-        gi01 = next((i for i in netbox_only if i["name"] == "Gi0/1"), None)
+        gi01 = next((i for i in ctx["netbox_only_interfaces"] if i["name"] == "Gi0/1"), None)
         assert gi01 is not None
-        assert gi01["device_name"] == "router-1"
+        assert gi01["device_name"] == "vc-nbonly-switch"
+
+    @pytest.mark.django_db
+    def test_netbox_only_interface_non_vc_gets_obj_device_name(self):
+        """A non-VC device interface absent from LibreNMS is flagged netbox-only with the device name."""
+        from unittest.mock import MagicMock, patch
+
+        device = make_device("router-nbonly")
+        make_interface(device, "Gi0/0", iface_type="1000base-t")  # matched by the cached port
+        make_interface(device, "Gi0/1", iface_type="1000base-t")  # only in NetBox
+
+        view, request = self._real_view_and_request()
+        self._seed_ports(view, device, [{"port_id": 1, "ifName": "Gi0/0", "ifAdminStatus": "up", "ifAlias": None}])
+
+        with patch(
+            "netbox_librenms_plugin.librenms_api.build_librenms_api",
+            return_value=MagicMock(server_key="default"),
+        ):
+            ctx = view.get_context_data(request, device, "ifName")
+
+        gi01 = next((i for i in ctx["netbox_only_interfaces"] if i["name"] == "Gi0/1"), None)
+        assert gi01 is not None
+        assert gi01["device_name"] == "router-nbonly"
 
 
 # =============================================================================
