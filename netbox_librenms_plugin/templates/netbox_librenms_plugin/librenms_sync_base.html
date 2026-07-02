@@ -248,9 +248,11 @@
                                 <form style="display:inline" method="post"
                                       action="{% url 'plugins:netbox_librenms_plugin:convert_legacy_librenms_id' pk=lookup_device_pk %}">
                                     {% csrf_token %}
-                                    {# Scope the conversion to the tab's server: the view rebinds from the POSTed
-                                       server_key, so omitting it would verify and write the mapping under the
-                                       GLOBAL selected server, not the ?server_key tab the user is acting on. #}
+                                    {% comment %}
+                                    Scope the conversion to the tab's server: the view rebinds from the POSTed
+                                    server_key, so omitting it would verify and write the mapping under the
+                                    GLOBAL selected server, not the ?server_key tab the user is acting on.
+                                    {% endcomment %}
                                     {% if server_key %}<input type="hidden" name="server_key" value="{{ server_key }}">{% endif %}
                                     <input type="hidden" name="object_type" value="{{ lookup_device_model_name }}">
                                     {% if librenms_id_serial_confirmed %}
@@ -436,8 +438,10 @@
                                               action="{% url 'plugins:netbox_librenms_plugin:update_device_name' pk=object.pk %}"
                                               style="display: inline;">
                                             {% csrf_token %}
-                                            {# The view rebinds from the POSTed server_key; without it the sync runs
-                                               against the global selected server, not this tab's server. #}
+                                            {% comment %}
+                                            The view rebinds from the POSTed server_key; without it the sync runs
+                                            against the global selected server, not this tab's server.
+                                            {% endcomment %}
                                             {% if server_key %}<input type="hidden" name="server_key" value="{{ server_key }}">{% endif %}
                                             <button type="submit" class="btn btn-sm btn-outline-primary"
                                                     title="Sync name to {{ resolved_name }}">

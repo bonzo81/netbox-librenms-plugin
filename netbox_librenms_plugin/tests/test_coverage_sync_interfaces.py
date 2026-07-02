@@ -217,6 +217,12 @@ class TestSyncInterfacesViewGetCachedPortsData:
         with (
             patch("netbox_librenms_plugin.views.sync.interfaces.cache") as mock_cache,
             patch("netbox_librenms_plugin.views.sync.interfaces.messages"),
+            # The reader resolves the VC sync device unconditionally (mirroring the
+            # writers); identity here = the non-VC case.
+            patch(
+                "netbox_librenms_plugin.views.sync.interfaces.get_librenms_sync_device",
+                side_effect=lambda obj, server_key=None: obj,
+            ),
             patch.object(type(view), "librenms_api", new_callable=lambda: property(lambda s: mock_api)),
         ):
             mock_cache.get.return_value = None
@@ -361,6 +367,7 @@ class TestSyncInterfacesViewPost:
         view.require_all_permissions = MagicMock(return_value=None)
         view.get_required_permissions_for_object_type = MagicMock(return_value=[])
         mock_api = MagicMock(server_key="default")
+        view._librenms_api = mock_api  # blank-POST rebind reuses the cached client
 
         mock_device = MagicMock(pk=1)
         req = _make_request(post_data={})  # No selection
@@ -405,6 +412,7 @@ class TestSyncInterfacesViewPost:
         view.require_all_permissions = MagicMock(return_value=None)
         view.get_required_permissions_for_object_type = MagicMock(return_value=[])
         mock_api = MagicMock(server_key="default")
+        view._librenms_api = mock_api  # blank-POST rebind reuses the cached client
 
         mock_device = MagicMock(pk=1)
         req = _make_request(post_data={"select": ["Gi0/1"]})

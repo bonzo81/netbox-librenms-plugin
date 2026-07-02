@@ -7,7 +7,11 @@
     <div class="btn-list">
         <form method="post">
             {% csrf_token %}
-            {# Carry the active server_key so the refresh hits the right LibreNMS server/cache (else a non-default server tab uses the fallback). #}
+            {% comment %}
+            htmx includes the enclosing form's values on non-GET requests, so the refresh
+            POST carries the tab's server_key and the view rebinds to it — otherwise the
+            refresh fetches and caches under the GLOBAL selected server (mirrors _module_sync.html).
+            {% endcomment %}
             {% if server_key %}<input type="hidden" name="server_key" value="{{ server_key }}">{% endif %}
             {% if has_librenms_id %}
                 {% with model_name=object|meta:"model_name" %}
