@@ -509,7 +509,16 @@ class LibreNMSInterfaceTable(tables.Table):
         # Add NetBox interface data
         interface_name = port_data.get(self.interface_name_field)
 
-        port_data["netbox_interface"] = device.interfaces.filter(name=interface_name).first()
+        # OOB-controller rows live on a SEPARATE LibreNMS device — mirror the
+        # interfaces-tab guard (BaseInterfaceTableView.get_context_data): never bind
+        # one to a host interface by name. Otherwise a row-level re-render (the VC
+        # member dropdown via SingleInterfaceVerifyView) flips a deliberately-unmatched
+        # shared-LOM row to green "matched", comparing speed/MTU/MAC against an
+        # unrelated host interface and inviting a sync the server then silently skips.
+        if port_data.get("_source") == "oob":
+            port_data["netbox_interface"] = None
+        else:
+            port_data["netbox_interface"] = device.interfaces.filter(name=interface_name).first()
         port_data["exists_in_netbox"] = bool(port_data["netbox_interface"])
 
         # Clear description if it matches interface name

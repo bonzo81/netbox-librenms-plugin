@@ -2738,6 +2738,72 @@ class TestFormatInterfaceData:
             # render_description is called with "" (cleared alias)
             mock_desc.assert_called_once_with("", port_data)
 
+    def test_oob_row_never_binds_to_host_interface_by_name(self):
+        """An OOB-controller row (shared-LOM 'eth0') must stay unmatched on row re-render, mirroring the interfaces-tab guard — otherwise the VC-dropdown re-render flips it to green 'matched' against an unrelated host interface."""
+        table = self._table()
+        device = MagicMock()
+        host_iface = MagicMock()  # a host interface named eth0 exists
+        device.interfaces.filter.return_value.first.return_value = host_iface
+
+        port_data = {
+            "_source": "oob",
+            "ifName": "eth0",
+            "ifType": "ethernetCsmacd",
+            "ifSpeed": 0,
+            "ifPhysAddress": "",
+            "ifMtu": 1500,
+            "ifAdminStatus": "up",
+            "ifAlias": "",
+            "ifDescr": "eth0",
+        }
+
+        with (
+            patch.object(table, "render_name", return_value=""),
+            patch.object(table, "render_type", return_value=""),
+            patch.object(table, "render_speed", return_value=""),
+            patch.object(table, "render_mac_address", return_value=""),
+            patch.object(table, "render_mtu", return_value=""),
+            patch.object(table, "render_enabled", return_value=""),
+            patch.object(table, "render_description", return_value=""),
+        ):
+            table.format_interface_data(port_data, device)
+
+        assert port_data["netbox_interface"] is None
+        assert port_data["exists_in_netbox"] is False
+
+    def test_main_row_still_binds_by_name(self):
+        """The guard is OOB-specific: a main-source row keeps the name binding."""
+        table = self._table()
+        device = MagicMock()
+        host_iface = MagicMock()
+        device.interfaces.filter.return_value.first.return_value = host_iface
+
+        port_data = {
+            "_source": "main",
+            "ifName": "eth0",
+            "ifType": "ethernetCsmacd",
+            "ifSpeed": 0,
+            "ifPhysAddress": "",
+            "ifMtu": 1500,
+            "ifAdminStatus": "up",
+            "ifAlias": "",
+            "ifDescr": "eth0",
+        }
+
+        with (
+            patch.object(table, "render_name", return_value=""),
+            patch.object(table, "render_type", return_value=""),
+            patch.object(table, "render_speed", return_value=""),
+            patch.object(table, "render_mac_address", return_value=""),
+            patch.object(table, "render_mtu", return_value=""),
+            patch.object(table, "render_enabled", return_value=""),
+            patch.object(table, "render_description", return_value=""),
+        ):
+            table.format_interface_data(port_data, device)
+
+        assert port_data["netbox_interface"] is host_iface
+        assert port_data["exists_in_netbox"] is True
+
 
 # ===========================================================================
 # LibreNMSInterfaceTable configure tests
