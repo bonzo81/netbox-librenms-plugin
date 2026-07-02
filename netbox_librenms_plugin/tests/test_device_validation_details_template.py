@@ -316,7 +316,9 @@ class TestPromoteToHostFallbackPane:
         pane_start = html.find('id="serial-role-host-5"')
         pane = html[pane_start : html.find('id="serial-role-oob-5"') if 'id="serial-role-oob-5"' in html else None]
         assert "Update &amp; Link" in pane
-        assert "device_conflict_action" in pane or "conflict-action" in pane or "/conflict/" in pane or "action" in pane
+        # No generic '"action" in pane' fallback: any <form action=...> (or the submit
+        # button's own name="action") would match it, so it asserts nothing.
+        assert "device_conflict_action" in pane or "conflict-action" in pane or "/conflict/" in pane
         assert 'name="server_key" value="prod"' in pane
 
     def test_promote_row_always_has_an_actionable_host_pane(self):
