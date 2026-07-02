@@ -87,3 +87,27 @@ class TestResolveRequestedServerKey:
     def test_missing_key_falls_back(self):
         view = self._view()
         assert view.resolve_requested_server_key({}) == view._render_server_key()
+
+
+class TestGetLiveDeviceInfo:
+    """get_live_device_info centralizes the write-path rule: always fetch uncached (use_cache=False)."""
+
+    def test_delegates_to_get_device_info_with_cache_bypassed(self):
+        from netbox_librenms_plugin.views.object_sync.devices import DeviceInterfaceTableView
+
+        calls = []
+
+        class _RecordingAPI:
+            # Default use_cache=True so a helper that forgot to pass the flag would record True.
+            def get_device_info(self, librenms_id, use_cache=True):
+                calls.append((librenms_id, use_cache))
+                return (True, {"sysName": "sw1", "device_id": librenms_id})
+
+        view = DeviceInterfaceTableView()
+        view._librenms_api = _RecordingAPI()
+
+        result = view.get_live_device_info(42)
+
+        # The whole point of the helper: every write path bypasses the possibly-stale render cache.
+        assert calls == [(42, False)]
+        assert result == (True, {"sysName": "sw1", "device_id": 42})

@@ -57,9 +57,7 @@ class UpdateDeviceNameView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin,
             messages.error(request, "Device not found in LibreNMS")
             return redirect("plugins:netbox_librenms_plugin:device_librenms_sync", pk=pk)
 
-        # use_cache=False: this is a write path — persist LIVE LibreNMS values, not the stale
-        # snapshot the sync-tab render may have cached for up to DEVICE_INFO_CACHE_TIMEOUT.
-        success, device_info = self.librenms_api.get_device_info(self.librenms_id, use_cache=False)
+        success, device_info = self.get_live_device_info(self.librenms_id)
 
         if not success or not device_info:
             messages.error(request, "Failed to retrieve device info from LibreNMS")
@@ -133,9 +131,7 @@ class UpdateDeviceSerialView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixi
             messages.error(request, "Device not found in LibreNMS")
             return redirect("plugins:netbox_librenms_plugin:device_librenms_sync", pk=pk)
 
-        # use_cache=False: this is a write path — persist LIVE LibreNMS values, not the stale
-        # snapshot the sync-tab render may have cached for up to DEVICE_INFO_CACHE_TIMEOUT.
-        success, device_info = self.librenms_api.get_device_info(self.librenms_id, use_cache=False)
+        success, device_info = self.get_live_device_info(self.librenms_id)
 
         if not success or not device_info:
             messages.error(request, "Failed to retrieve device info from LibreNMS")
@@ -189,9 +185,7 @@ class UpdateDeviceTypeView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin,
             messages.error(request, "Device not found in LibreNMS")
             return redirect("plugins:netbox_librenms_plugin:device_librenms_sync", pk=pk)
 
-        # use_cache=False: this is a write path — persist LIVE LibreNMS values, not the stale
-        # snapshot the sync-tab render may have cached for up to DEVICE_INFO_CACHE_TIMEOUT.
-        success, device_info = self.librenms_api.get_device_info(self.librenms_id, use_cache=False)
+        success, device_info = self.get_live_device_info(self.librenms_id)
 
         if not success or not device_info:
             messages.error(request, "Failed to retrieve device info from LibreNMS")
@@ -259,9 +253,7 @@ class UpdateDevicePlatformView(LibreNMSPermissionMixin, NetBoxObjectPermissionMi
             messages.error(request, "Device not found in LibreNMS")
             return redirect("plugins:netbox_librenms_plugin:device_librenms_sync", pk=pk)
 
-        # use_cache=False: this is a write path — persist LIVE LibreNMS values, not the stale
-        # snapshot the sync-tab render may have cached for up to DEVICE_INFO_CACHE_TIMEOUT.
-        success, device_info = self.librenms_api.get_device_info(self.librenms_id, use_cache=False)
+        success, device_info = self.get_live_device_info(self.librenms_id)
 
         if not success or not device_info:
             messages.error(request, "Failed to retrieve device info from LibreNMS")
@@ -716,9 +708,9 @@ class ConvertLegacyLibreNMSIdView(LibreNMSPermissionMixin, NetBoxObjectPermissio
             return self._sync_url(object_type, pk)
         librenms_id = int(cf_value)
 
-        # Verify serial match before converting — live fetch (use_cache=False): the serial gate
-        # decides whether to rewrite the id, so it must not read a stale sync-tab cache snapshot.
-        success, device_info = self.librenms_api.get_device_info(librenms_id, use_cache=False)
+        # Verify serial match before converting — get_live_device_info reads live (uncached): the
+        # serial gate decides whether to rewrite the id, so it must not read a stale sync-tab snapshot.
+        success, device_info = self.get_live_device_info(librenms_id)
         if not success or not device_info:
             messages.error(request, "Could not retrieve device info from LibreNMS to verify serial.")
             return self._sync_url(object_type, pk)

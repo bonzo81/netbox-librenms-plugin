@@ -388,6 +388,23 @@ class LibreNMSAPIMixin:
             return requested_server_key
         return self._render_server_key()
 
+    def get_live_device_info(self, librenms_id):
+        """
+        Fetch LIVE LibreNMS device info for a write path (``use_cache=False``).
+
+        Device-mutating actions (name/serial/type/platform update, legacy-id convert, OOB IP
+        resolution) must persist current LibreNMS values, not the possibly-stale sync-tab render
+        snapshot cached for up to ``DEVICE_INFO_CACHE_TIMEOUT``. Centralizing this here keeps every
+        write path opting out of the cache the same way instead of repeating the rationale inline.
+
+        Args:
+            librenms_id: The device's LibreNMS id.
+
+        Returns:
+            tuple[bool, dict | None]: ``(success, device_info)`` from ``get_device_info``.
+        """
+        return self.librenms_api.get_device_info(librenms_id, use_cache=False)
+
     def get_server_info(self):
         """
         Get information about the currently active LibreNMS server.

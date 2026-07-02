@@ -115,9 +115,9 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
             librenms_id = self.librenms_api.get_librenms_id(obj)
             if not librenms_id:
                 return None
-            # use_cache=False: this feeds the Primary-IP write decision, so it must read the live
-            # management IP, not a stale snapshot the sync-tab render may have cached.
-            success, info = self.librenms_api.get_device_info(librenms_id, use_cache=False)
+            # get_live_device_info reads live (uncached): this feeds the Primary-IP write decision,
+            # so it must read the current management IP, not a stale sync-tab snapshot.
+            success, info = self.get_live_device_info(librenms_id)
             if not success or not isinstance(info, dict):
                 return None
             ip = info.get("ip")
