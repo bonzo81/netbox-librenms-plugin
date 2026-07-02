@@ -1447,21 +1447,34 @@ class TestBaseInterfaceTableViewPost:
             patch.object(view, "rebind_api_for_server", return_value=None),
             patch("netbox_librenms_plugin.views.base.interfaces_view.get_interface_name_field", return_value="ifName"),
             patch("netbox_librenms_plugin.views.base.interfaces_view.messages") as mock_messages,
-            patch("netbox_librenms_plugin.views.base.interfaces_view.render") as mock_render,
+            # post() renders here via interfaces_view.render; a higher branch refactors that
+            # to render_sync_partial() (mixins.render). Patch both (create=True) so this test
+            # stays valid as it rides up the stack regardless of which render site post() uses.
+            patch(
+                "netbox_librenms_plugin.views.base.interfaces_view.render",
+                return_value=MagicMock(status_code=200),
+                create=True,
+            ) as mock_render_local,
+            patch(
+                "netbox_librenms_plugin.views.mixins.render",
+                return_value=MagicMock(status_code=200),
+                create=True,
+            ) as mock_render_mixin,
         ):
-            mock_render.return_value = MagicMock(status_code=200)
             response = view.post(request, pk=1)
 
         mock_messages.error.assert_called_once()
         # The fragment is rendered in place with the message — no 302 anywhere.
-        mock_render.assert_called_once()
-        args = mock_render.call_args[0]
+        calls = mock_render_local.call_args_list + mock_render_mixin.call_args_list
+        assert len(calls) == 1
+        args = calls[0][0]
         assert args[1] == view.partial_template_name
         ctx = args[2]
         assert ctx["interface_sync"]["table"] is None
         # Explicit None: the fragment must not fall back to the session/default server.
         assert ctx["interface_sync"]["server_key"] is None
-        assert response is mock_render.return_value  # the rendered fragment, not a 302
+        expected = mock_render_local.return_value if mock_render_local.called else mock_render_mixin.return_value
+        assert response is expected  # the rendered fragment, not a 302
 
     def test_post_no_librenms_id_redirects_with_error(self):
         """When librenms_id not found, error message and redirect — and the stale ports snapshot is cleared FIRST, so a failed refresh on a previously-synced device can't leave old interface data for the redirected tab or downstream sync to consume."""

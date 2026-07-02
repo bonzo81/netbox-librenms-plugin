@@ -297,6 +297,20 @@ class TestPromoteToHostFallbackPane:
 
     def test_fallback_pane_offers_update_and_link(self):
         """With the promote URL absent (forced), the Host pane renders with the legacy action."""
+        from django.urls import NoReverseMatch, reverse
+
+        # On branches where the real promote flow exists (device-merge and above), the
+        # template ALSO renders a bare {% url 'device_promote_to_host' %} inside the real
+        # pane — forcing reverse to raise there would 500 the whole render, and the
+        # fallback is inert by design (its probe resolves). The real pane has its own
+        # coverage up-stack; this test only guards the fallback branch.
+        try:
+            reverse("plugins:netbox_librenms_plugin:device_promote_to_host", kwargs={"device_id": 1})
+        except NoReverseMatch:
+            pass
+        else:
+            pytest.skip("real promote pane registered on this branch; fallback is inert by design")
+
         html = self._render(patch_promote_url_absent=True)
         assert 'id="serial-role-host-5"' in html  # the Host radio's data-target actually exists
         pane_start = html.find('id="serial-role-host-5"')
