@@ -129,6 +129,15 @@ class TestBulkImportDevices:
 class TestBulkImportDevicesShared:
     """Tests for ``bulk_import_devices_shared``."""
 
+    @pytest.fixture(autouse=True)
+    def _stub_norm_preload(self):
+        """bulk_import_devices_shared preloads device_type NormalizationRule once (issue #90); these are mock-based (no DB), so stub the preload to avoid real DB access."""
+        with patch(
+            "netbox_librenms_plugin.import_utils.bulk_import.preload_normalization_rules",
+            return_value={},
+        ):
+            yield
+
     # ------------------------------------------------------------------
     # Lines 129 & 140 – "else: logger.warning(...)" when job.logger=None
     # ------------------------------------------------------------------
@@ -942,7 +951,10 @@ class TestRefreshExistingDevice:
             _refresh_existing_device(validation)  # must not raise
 
         mock_logger.error.assert_called_once()
-        assert "99" in mock_logger.error.call_args[0][0]
+        # Inspect every positional arg, not just the format string, so this still passes if the
+        # production call switches to parameterized logging (logger.error("... %s", pk)) — the
+        # id would then land in a separate arg (issue #98).
+        assert any("99" in str(a) for a in mock_logger.error.call_args.args)
 
     # ------------------------------------------------------------------
     # Line 373: no existing_device, no libre_device → early return
@@ -1054,13 +1066,12 @@ class TestRefreshExistingDevice:
 
         mock_logger.error.assert_called()
 
-    def test_no_existing_device_non_numeric_librenms_id_skips_id_lookup(self):
-        """Non-numeric device_id raises ValueError → except pass, falls back to name."""
+    def test_no_existing_device_non_numeric_librenms_id_falls_back_to_name(self):
+        """Non-numeric device_id yields no id match → falls back to resolved_name."""
         from netbox_librenms_plugin.import_utils.bulk_import import _refresh_existing_device
 
         new_device = MagicMock()
         new_device.role = None
-        # Non-numeric device_id triggers ValueError inside int() → except (ValueError, TypeError): pass
         libre_device = {"device_id": "not-an-int", "hostname": "sw05", "sysName": "sw05"}
 
         validation = {
@@ -1071,17 +1082,18 @@ class TestRefreshExistingDevice:
 
         with (
             patch("dcim.models.Device") as mock_Device,
-            patch("netbox_librenms_plugin.import_utils.bulk_import.find_by_librenms_id") as mock_find,
+            # find_by_librenms_id returns None for a non-numeric id (its real contract), so the
+            # id lookup misses and the flow falls back to the resolved_name match.
+            patch(
+                "netbox_librenms_plugin.import_utils.bulk_import.find_by_librenms_id",
+                return_value=None,
+            ),
         ):
             mock_Device.objects.filter.return_value.first.return_value = new_device
             _refresh_existing_device(validation, libre_device=libre_device, server_key="default")
 
-        # Should find via resolved_name (librenms_id lookup was skipped due to ValueError)
         assert validation["existing_device"] is new_device
         assert validation["existing_match_type"] == "resolved_name"
-        # Crucially: find_by_librenms_id must never have been called — int("not-an-int")
-        # raises ValueError before the call site is reached.
-        mock_find.assert_not_called()
 
     def test_no_existing_device_hostname_fallback(self):
         """existing=None, not found by id or resolved_name → hostname fallback."""
@@ -2301,6 +2313,37 @@ class TestCrossModelConflictDetection:
         # recalculate_validation_status regardless of issues/fields state.
         assert validation["can_import"] is False
         assert validation["is_ready"] is False
+
+    def test_id_match_in_cross_model_wins_over_name_in_preferred_model(self):
+        """When the scanned LibreNMS id is linked to the cross model (VM) while the preferred model (Device) merely shares the name, the id-linked object must win — binding the name-colliding Device would disagree with validation and render actions for the wrong object."""
+        from netbox_librenms_plugin.import_utils.bulk_import import _refresh_existing_device
+
+        validation = _make_validation(import_as_vm=False)  # Model=Device, CrossModel=VM
+        validation["existing_device"] = None
+        libre_device = {"device_id": 99, "hostname": "shared-name", "sysName": "shared-name"}
+
+        mock_vm = MagicMock()
+        mock_vm.role = None  # the id-linked VM
+        mock_device = MagicMock()
+        mock_device.role = MagicMock()  # a Device that merely shares the name
+
+        with (
+            patch("netbox_librenms_plugin.import_utils.bulk_import.find_by_librenms_id") as fbi,
+            patch("dcim.models.Device") as mock_dev_cls,
+            patch("virtualization.models.VirtualMachine") as mock_vm_cls,
+        ):
+            # id 99 is linked to the VM (cross model), not the Device (preferred model).
+            fbi.side_effect = lambda m, lid, sk: mock_vm if m is mock_vm_cls else None
+            # The Device shares the name → a name fallback would (wrongly) match it.
+            mock_dev_cls.objects.filter.return_value.first.return_value = mock_device
+            mock_vm_cls.objects.filter.return_value.first.return_value = None
+
+            _refresh_existing_device(validation, libre_device, server_key="default")
+
+        # The id-linked VM wins across models, not the name-colliding Device.
+        assert validation["existing_device"] is mock_vm
+        assert validation["existing_match_type"] == "librenms_id"
+        assert validation["import_as_vm"] is True  # cross-model → flipped
 
     def test_device_found_when_vm_imported_as_device(self):
         """

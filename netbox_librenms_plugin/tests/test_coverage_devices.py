@@ -2,6 +2,19 @@
 
 from unittest.mock import MagicMock, patch
 
+import pytest
+
+
+def _make_real_device(tag):
+    """Create and return a real NetBox Device (with its required FKs) for DB-backed tests."""
+    from dcim.models import Device, DeviceRole, DeviceType, Manufacturer, Site
+
+    mfr, _ = Manufacturer.objects.get_or_create(name=f"Mfr-{tag}", slug=f"mfr-{tag}")
+    dt, _ = DeviceType.objects.get_or_create(manufacturer=mfr, model=f"DT-{tag}", slug=f"dt-{tag}")
+    role, _ = DeviceRole.objects.get_or_create(name=f"Role-{tag}", slug=f"role-{tag}")
+    site, _ = Site.objects.get_or_create(name=f"Site-{tag}", slug=f"site-{tag}")
+    return Device.objects.create(name=f"host-{tag}", device_type=dt, role=role, site=site, status="active")
+
 
 def _make_device_view():
     """Create a DeviceLibreNMSSyncView instance bypassing __init__."""
@@ -231,6 +244,9 @@ class TestSingleInterfaceVerifyView:
         view = object.__new__(SingleInterfaceVerifyView)
         view._librenms_api = MagicMock()
         view._librenms_api.server_key = "default"
+        # Direct post() calls bypass dispatch() (which sets self.request), so null the object-perm
+        # gate here; the dedicated perm test overrides it. Mirrors the other verify-view harnesses.
+        view.require_object_permissions_json = MagicMock(return_value=None)
         return view
 
     def test_returns_400_when_no_device_id(self):
@@ -246,6 +262,27 @@ class TestSingleInterfaceVerifyView:
         response = view.post(request)
         assert isinstance(response, JsonResponse)
         assert response.status_code == 400
+
+    def test_checks_permission_before_resolving_device(self):
+        """The object-view gate must run BEFORE get_object_or_404 so an unauthorized caller can't probe arbitrary device IDs (existence via 404). Exercises the REAL require_object_permissions_json (only request.user.has_perm is mocked) — mocking the gate itself would mask a missing NetBoxObjectPermissionMixin base (AttributeError/500 in production)."""
+        import json
+        from unittest.mock import patch
+
+        from netbox_librenms_plugin.views.object_sync.devices import SingleInterfaceVerifyView
+
+        view = object.__new__(SingleInterfaceVerifyView)
+        view._librenms_api = MagicMock()
+        view._librenms_api.server_key = "default"
+        request = MagicMock()
+        request.body = json.dumps({"device_id": 999, "interface_name": "eth0"}).encode()
+        request.user.has_perm.return_value = False  # unauthorized → real gate returns 403
+        view.request = request  # check_object_permissions reads self.request.user
+
+        with patch("netbox_librenms_plugin.views.object_sync.devices.get_object_or_404") as mock_get_obj:
+            response = view.post(request)
+
+        assert response.status_code == 403
+        mock_get_obj.assert_not_called()  # device never resolved → no arbitrary-ID probing
 
     def test_returns_404_when_no_cached_data(self):
         """Returns 404 when cached ports data not found."""
@@ -389,6 +426,27 @@ class TestSingleModuleVerifyView:
         view.get_cache_key = MagicMock(return_value="test_key")
         return view
 
+    def test_checks_permission_before_resolving_device(self):
+        """The object-view gate must run BEFORE get_object_or_404 so an unauthorized caller can't probe arbitrary device IDs (existence via 404). Exercises the real require_object_permissions_json (only request.user.has_perm is mocked)."""
+        import json
+        from unittest.mock import patch
+
+        from netbox_librenms_plugin.views.object_sync.devices import SingleModuleVerifyView
+
+        view = object.__new__(SingleModuleVerifyView)
+        view._librenms_api = MagicMock()
+        view._librenms_api.server_key = "default"
+        request = MagicMock()
+        request.body = json.dumps({"device_id": 999, "ent_physical_index": 10}).encode()
+        request.user.has_perm.return_value = False  # unauthorized → real gate returns 403
+        view.request = request  # check_object_permissions reads self.request.user
+
+        with patch("netbox_librenms_plugin.views.object_sync.devices.get_object_or_404") as mock_get_obj:
+            response = view.post(request)
+
+        assert response.status_code == 403
+        mock_get_obj.assert_not_called()  # device never resolved → no arbitrary-ID probing
+
     def test_success_propagates_can_change_interface_to_verify_table(self):
         """Verify-row table keeps Update Interface available for users with change permission."""
         import json
@@ -486,7 +544,31 @@ class TestSingleVlanGroupVerifyView:
         view = object.__new__(SingleVlanGroupVerifyView)
         view._librenms_api = MagicMock()
         view._librenms_api.server_key = "default"
+        # Direct post() calls bypass dispatch() (which sets self.request), so null the object-perm
+        # gate here; the dedicated perm test exercises the real gate. Mirrors the other harnesses.
+        view.require_object_permissions_json = MagicMock(return_value=None)
         return view
+
+    def test_checks_permission_before_resolving_device(self):
+        """The object-view gate must run BEFORE get_object_or_404 so an unauthorized caller can't probe arbitrary device IDs (existence via 404). Exercises the real require_object_permissions_json (only request.user.has_perm is mocked)."""
+        import json
+        from unittest.mock import patch
+
+        from netbox_librenms_plugin.views.object_sync.devices import SingleVlanGroupVerifyView
+
+        view = object.__new__(SingleVlanGroupVerifyView)
+        view._librenms_api = MagicMock()
+        view._librenms_api.server_key = "default"
+        request = MagicMock()
+        request.body = json.dumps({"device_id": 999, "vid": "100"}).encode()
+        request.user.has_perm.return_value = False  # unauthorized → real gate returns 403
+        view.request = request
+
+        with patch("netbox_librenms_plugin.views.object_sync.devices.get_object_or_404") as mock_get_obj:
+            response = view.post(request)
+
+        assert response.status_code == 403
+        mock_get_obj.assert_not_called()  # device never resolved → no arbitrary-ID probing
 
     def test_returns_400_when_no_device_id(self):
         """Returns 400 when no device_id provided."""
@@ -533,174 +615,84 @@ class TestSingleVlanGroupVerifyView:
         assert isinstance(response, JsonResponse)
         assert response.status_code == 400
 
+    @pytest.mark.django_db
     def test_returns_success_with_vlan_group(self):
-        """Returns success with css_class when valid vlan_group_id provided."""
+        """A VID present in the selected group is reported not-missing — real Device/Interface/VLAN/VLANGroup, no mocks."""
         import json
 
+        from dcim.models import Interface
         from django.http import JsonResponse
+        from ipam.models import VLAN, VLANGroup
+
+        device = _make_real_device("vg-with")
+        Interface.objects.create(device=device, name="eth0", type="1000base-t")
+        group = VLANGroup.objects.create(name="Grp-vg-with", slug="grp-vg-with")
+        VLAN.objects.create(vid=10, name="ten", group=group)
 
         view = self._make_view()
         request = MagicMock()
         request.body = json.dumps(
-            {
-                "device_id": 1,
-                "vid": "10",
-                "vlan_group_id": "5",
-                "vlan_type": "U",
-            }
+            {"device_id": device.pk, "interface_name": "eth0", "vid": "10", "vlan_group_id": group.pk, "vlan_type": "U"}
         ).encode()
-
-        mock_device = MagicMock()
-        mock_netbox_iface = MagicMock()
-        mock_netbox_iface.untagged_vlan = None
-        mock_netbox_iface.tagged_vlans.all.return_value = []
-        mock_device.interfaces.filter.return_value.first.return_value = mock_netbox_iface
-
-        mock_vlan_group = MagicMock()
-        mock_vlan_qs = MagicMock()
-        mock_vlan_qs.values_list.return_value = [10]
-        mock_global_qs = MagicMock()
-        mock_global_qs.values_list.return_value = []
-
-        mock_vlan_model = MagicMock()
-        mock_vlan_model.objects.filter.return_value = mock_vlan_qs
-        mock_vlan_group_model = MagicMock()
-        mock_vlan_group_model.objects.filter.return_value = mock_global_qs
-
-        with patch("netbox_librenms_plugin.views.object_sync.devices.get_object_or_404") as mock_get_obj:
-            mock_get_obj.side_effect = [mock_device, mock_vlan_group]
-            with patch(
-                "netbox_librenms_plugin.views.object_sync.devices.get_untagged_vlan_css_class",
-                return_value="text-success",
-            ):
-                with patch(
-                    "netbox_librenms_plugin.views.object_sync.devices.get_tagged_vlan_css_class",
-                    return_value="text-success",
-                ):
-                    with patch(
-                        "netbox_librenms_plugin.views.object_sync.devices.get_missing_vlan_warning", return_value=""
-                    ):
-                        # Patch the VLAN/VLANGroup imports inside the method
-                        mock_ipam = MagicMock()
-                        mock_ipam.VLAN = mock_vlan_model
-                        mock_ipam.VLANGroup = mock_vlan_group_model
-
-                        with patch.dict("sys.modules", {"ipam.models": mock_ipam}):
-                            response = view.post(request)
+        response = view.post(request)
 
         assert isinstance(response, JsonResponse)
         assert response.status_code == 200
         data = json.loads(response.content)
         assert data["status"] == "success"
-        assert data["css_class"] == "text-success"
-        assert data["is_missing"] is False
+        assert data["is_missing"] is False  # vid 10 exists in the selected group
+        assert data["css_class"]  # a real CSS class was computed
 
+    @pytest.mark.django_db
     def test_returns_success_without_vlan_group(self):
-        """Returns success with global VLANs when no vlan_group_id provided."""
+        """With no group selected and no global VLANs, the VID is reported missing — real DB, no mocks."""
         import json
 
         from django.http import JsonResponse
 
+        device = _make_real_device("vg-without")
+
         view = self._make_view()
         request = MagicMock()
-        request.body = json.dumps(
-            {
-                "device_id": 1,
-                "vid": "100",
-                "vlan_type": "T",
-            }
-        ).encode()
-
-        mock_device = MagicMock()
-        mock_device.interfaces.filter.return_value.first.return_value = None
-
-        mock_vlan_qs = MagicMock()
-        mock_vlan_qs.values_list.return_value = []
-        mock_vlan_model = MagicMock()
-        mock_vlan_model.objects.filter.return_value = mock_vlan_qs
-
-        with patch("netbox_librenms_plugin.views.object_sync.devices.get_object_or_404", return_value=mock_device):
-            with patch(
-                "netbox_librenms_plugin.views.object_sync.devices.get_untagged_vlan_css_class",
-                return_value="text-danger",
-            ):
-                with patch(
-                    "netbox_librenms_plugin.views.object_sync.devices.get_tagged_vlan_css_class",
-                    return_value="text-danger",
-                ):
-                    with patch(
-                        "netbox_librenms_plugin.views.object_sync.devices.get_missing_vlan_warning", return_value=""
-                    ):
-                        mock_ipam = MagicMock()
-                        mock_ipam.VLAN = mock_vlan_model
-                        mock_ipam.VLANGroup = MagicMock()
-
-                        with patch.dict("sys.modules", {"ipam.models": mock_ipam}):
-                            response = view.post(request)
+        request.body = json.dumps({"device_id": device.pk, "vid": "100", "vlan_type": "T"}).encode()
+        response = view.post(request)
 
         assert isinstance(response, JsonResponse)
         assert response.status_code == 200
         data = json.loads(response.content)
         assert data["status"] == "success"
-        assert data["css_class"] == "text-danger"
-        assert data["is_missing"] is True  # vid=100 not in empty group VID list
+        assert data["is_missing"] is True  # vid 100 not present in any global VLAN
 
+    @pytest.mark.django_db
     def test_existing_interface_with_untagged_and_tagged_vlans(self):
-        """Covers NetBox VLAN extraction branches for untagged and tagged VLANs."""
+        """The NetBox untagged + tagged VLAN assignments are read off a real interface (no mocks)."""
         import json
 
+        from dcim.models import Interface
         from django.http import JsonResponse
+        from ipam.models import VLAN, VLANGroup
+
+        device = _make_real_device("vg-iface")
+        group = VLANGroup.objects.create(name="Grp-vg-iface", slug="grp-vg-iface")
+        untagged = VLAN.objects.create(vid=1, name="native", group=group)
+        tagged = VLAN.objects.create(vid=10, name="ten", group=group)
+        iface = Interface.objects.create(device=device, name="eth0", type="1000base-t", mode="tagged")
+        iface.untagged_vlan = untagged
+        iface.save()
+        iface.tagged_vlans.add(tagged)
 
         view = self._make_view()
         request = MagicMock()
         request.body = json.dumps(
-            {
-                "device_id": 1,
-                "vid": "10",
-                "vlan_group_id": "5",
-                "vlan_type": "T",
-                "interface_name": "eth0",
-            }
+            {"device_id": device.pk, "vid": "10", "vlan_group_id": group.pk, "vlan_type": "T", "interface_name": "eth0"}
         ).encode()
-
-        untagged = MagicMock()
-        untagged.vid = 1
-        untagged.group_id = 9
-        tagged = MagicMock()
-        tagged.vid = 10
-        tagged.group_id = 5
-
-        mock_iface = MagicMock()
-        mock_iface.untagged_vlan = untagged
-        mock_iface.tagged_vlans.all.return_value = [tagged]
-        mock_device = MagicMock()
-        mock_device.interfaces.filter.return_value.first.return_value = mock_iface
-
-        mock_vlan_group = MagicMock()
-        mock_group_qs = MagicMock()
-        mock_group_qs.values_list.return_value = [10]
-        mock_global_qs = MagicMock()
-        mock_global_qs.values_list.return_value = []
-        mock_vlan_model = MagicMock()
-        mock_vlan_model.objects.filter.side_effect = [mock_group_qs, mock_global_qs]
-
-        with patch("netbox_librenms_plugin.views.object_sync.devices.get_object_or_404") as mock_get_obj:
-            mock_get_obj.side_effect = [mock_device, mock_vlan_group]
-            with patch(
-                "netbox_librenms_plugin.views.object_sync.devices.get_tagged_vlan_css_class",
-                return_value="text-success",
-            ):
-                with patch(
-                    "netbox_librenms_plugin.views.object_sync.devices.get_missing_vlan_warning", return_value=""
-                ):
-                    mock_ipam = MagicMock()
-                    mock_ipam.VLAN = mock_vlan_model
-                    mock_ipam.VLANGroup = MagicMock()
-                    with patch.dict("sys.modules", {"ipam.models": mock_ipam}):
-                        response = view.post(request)
+        response = view.post(request)
 
         assert isinstance(response, JsonResponse)
         assert response.status_code == 200
+        data = json.loads(response.content)
+        assert data["status"] == "success"
+        assert data["is_missing"] is False  # tagged vid 10 exists in the selected group
 
     def test_render_vlans_cell_returns_dash_for_empty_values(self):
         """Empty VLAN inputs render em dash placeholder."""
@@ -717,7 +709,31 @@ class TestVerifyVlanSyncGroupView:
         view = object.__new__(VerifyVlanSyncGroupView)
         view._librenms_api = MagicMock()
         view._librenms_api.server_key = "default"
+        # Direct post() calls bypass dispatch() (which sets self.request), so null the object-perm
+        # gate here; the dedicated perm test exercises the real gate. Mirrors the other harnesses.
+        view.require_object_permissions_json = MagicMock(return_value=None)
         return view
+
+    def test_checks_permission_before_resolving_group(self):
+        """The object-view gate (on VLAN — no device here) must run BEFORE get_object_or_404 so an unauthorized caller can't enumerate VLANs/groups (existence via 404). Exercises the real require_object_permissions_json (only request.user.has_perm is mocked)."""
+        import json
+        from unittest.mock import patch
+
+        from netbox_librenms_plugin.views.object_sync.devices import VerifyVlanSyncGroupView
+
+        view = object.__new__(VerifyVlanSyncGroupView)
+        view._librenms_api = MagicMock()
+        view._librenms_api.server_key = "default"
+        request = MagicMock()
+        request.body = json.dumps({"vlan_group_id": 5, "vid": "100"}).encode()
+        request.user.has_perm.return_value = False  # unauthorized → real gate returns 403
+        view.request = request
+
+        with patch("netbox_librenms_plugin.views.object_sync.devices.get_object_or_404") as mock_get_obj:
+            response = view.post(request)
+
+        assert response.status_code == 403
+        mock_get_obj.assert_not_called()  # group never resolved → no enumeration
 
     def test_returns_400_when_no_vid(self):
         """Returns 400 when no vid provided."""
@@ -747,43 +763,33 @@ class TestVerifyVlanSyncGroupView:
         assert isinstance(response, JsonResponse)
         assert response.status_code == 400
 
+    @pytest.mark.django_db
     def test_returns_success_with_vlan_group(self):
-        """Returns success with exists_in_netbox and css_class for vlan_group_id path."""
+        """A VLAN that exists in the selected group with a matching name reports exists_in_netbox — real DB, no mocks."""
         import json
 
         from django.http import JsonResponse
+        from ipam.models import VLAN, VLANGroup
+
+        group = VLANGroup.objects.create(name="Grp-sync-with", slug="grp-sync-with")
+        VLAN.objects.create(vid=10, name="vlan10", group=group)
 
         view = self._make_view()
         request = MagicMock()
-        request.body = json.dumps({"vid": "10", "vlan_group_id": "3", "name": "vlan10"}).encode()
-
-        mock_vlan = MagicMock()
-        mock_vlan.name = "vlan10"
-        mock_vlan_group = MagicMock()
-
-        with patch("netbox_librenms_plugin.views.object_sync.devices.get_object_or_404") as mock_get_obj:
-            mock_get_obj.return_value = mock_vlan_group
-            with patch(
-                "netbox_librenms_plugin.views.object_sync.devices.get_vlan_sync_css_class", return_value="text-success"
-            ):
-                mock_ipam = MagicMock()
-                mock_vlan_model = MagicMock()
-                mock_vlan_model.objects.filter.return_value.first.return_value = mock_vlan
-                mock_ipam.VLAN = mock_vlan_model
-                mock_ipam.VLANGroup = MagicMock()
-
-                with patch.dict("sys.modules", {"ipam.models": mock_ipam}):
-                    response = view.post(request)
+        request.body = json.dumps({"vid": "10", "vlan_group_id": group.pk, "name": "vlan10"}).encode()
+        response = view.post(request)
 
         assert isinstance(response, JsonResponse)
         data = json.loads(response.content)
         assert response.status_code == 200
         assert data["status"] == "success"
-        assert "exists_in_netbox" in data
-        assert data["css_class"] == "text-success"
+        assert data["exists_in_netbox"] is True
+        assert data["name_matches"] is True
+        assert data["css_class"]  # a real CSS class was computed
 
+    @pytest.mark.django_db
     def test_returns_success_without_vlan_group(self):
-        """Returns success with global VLAN lookup when no vlan_group_id."""
+        """With no group and no matching global VLAN, exists_in_netbox is False — real DB, no mocks."""
         import json
 
         from django.http import JsonResponse
@@ -791,25 +797,14 @@ class TestVerifyVlanSyncGroupView:
         view = self._make_view()
         request = MagicMock()
         request.body = json.dumps({"vid": "20", "name": "vlan20"}).encode()
-
-        with patch(
-            "netbox_librenms_plugin.views.object_sync.devices.get_vlan_sync_css_class", return_value="text-danger"
-        ):
-            mock_ipam = MagicMock()
-            mock_vlan_model = MagicMock()
-            mock_vlan_model.objects.filter.return_value.first.return_value = None
-            mock_ipam.VLAN = mock_vlan_model
-            mock_ipam.VLANGroup = MagicMock()
-
-            with patch.dict("sys.modules", {"ipam.models": mock_ipam}):
-                response = view.post(request)
+        response = view.post(request)
 
         assert isinstance(response, JsonResponse)
         data = json.loads(response.content)
         assert response.status_code == 200
         assert data["status"] == "success"
         assert data["exists_in_netbox"] is False
-        assert data["css_class"] == "text-danger"
+        assert data["css_class"]  # a real CSS class was computed
 
 
 class TestSaveVlanGroupOverridesView:
@@ -876,6 +871,36 @@ class TestSaveVlanGroupOverridesView:
                         with patch.object(view, "get_cache_key", return_value="ports_key"):
                             response = view.post(request)
 
+        assert isinstance(response, JsonResponse)
+        assert response.status_code == 400
+
+    def test_post_does_not_500_on_cache_backend_without_ttl(self):
+        """A cache backend without .ttl() (e.g. the default LocMemCache) must degrade gracefully, not AttributeError-500."""
+        import json
+        from django.core.cache.backends.locmem import LocMemCache
+        from django.http import JsonResponse
+
+        view = self._make_view()
+        request = MagicMock()
+        request.body = json.dumps({"device_id": 1, "vid_group_map": {"10": "5"}, "server_key": "default"}).encode()
+        mock_device = MagicMock()
+        # A REAL LocMemCache genuinely has no .ttl() — unlike the MagicMock cache other tests use,
+        # which fabricates one and so masks this exact AttributeError.
+        real_locmem = LocMemCache("test-no-ttl", {})
+
+        with (
+            patch.object(view, "require_write_permission_json", return_value=None),
+            patch("netbox_librenms_plugin.views.object_sync.devices.get_object_or_404", return_value=mock_device),
+            patch(
+                "netbox_librenms_plugin.views.object_sync.devices.get_librenms_sync_device",
+                return_value=mock_device,
+            ),
+            patch("netbox_librenms_plugin.views.object_sync.devices.cache", real_locmem),
+            patch.object(view, "get_cache_key", return_value="ports_key"),
+        ):
+            response = view.post(request)  # must not raise AttributeError
+
+        # No ttl available → treated as "no cached ports" → graceful 400, never a 500.
         assert isinstance(response, JsonResponse)
         assert response.status_code == 400
 

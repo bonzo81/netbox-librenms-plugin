@@ -2,6 +2,8 @@
 
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 
 class TestTryChassisDeviceTypeMatch:
     """Tests for _try_chassis_device_type_match (lines 45-65)."""
@@ -78,7 +80,8 @@ class TestTryChassisDeviceTypeMatch:
 
         call_count = [0]
 
-        def match_side_effect(value):
+        def match_side_effect(value, **kwargs):
+            # **kwargs accepts the preloaded_rules the chassis fallback now threads through (#90 N+1).
             call_count[0] += 1
             if value == "Unrecognized":
                 return {"matched": False}
@@ -860,6 +863,67 @@ class TestValidateDeviceForImportEdgeCases:
             self._stop_patches(patches)
 
         assert result.get("existing_device") is existing_vm
+        assert result.get("librenms_id_needs_migration") is True
+
+    def test_vm_whitespace_padded_legacy_id_flags_migration(self):
+        """A whitespace-padded legacy id (' 42 ') is detected via the shared int-coercion helper, not the stricter isdigit()."""
+        from netbox_librenms_plugin.import_utils.device_operations import validate_device_for_import
+
+        libre_device = {
+            "device_id": 42,
+            "hostname": "vm01",
+            "sysName": "vm01",
+            "hardware": "-",
+            "serial": "-",
+            "os": "-",
+            "location": "-",
+        }
+        api = self._make_api()
+
+        existing_vm = MagicMock()
+        existing_vm.name = "vm01"
+        existing_vm.serial = ""
+        existing_vm.custom_field_data = {"librenms_id": " 42 "}  # legacy, whitespace-padded → isdigit() is False
+
+        patches, _ = self._start_patches()
+        try:
+            with patch("netbox_librenms_plugin.import_utils.device_operations.find_by_librenms_id") as mock_find:
+                mock_find.side_effect = [existing_vm, None]  # VM found, then no Device
+                result = validate_device_for_import(libre_device, import_as_vm=True, api=api)
+        finally:
+            self._stop_patches(patches)
+
+        assert result.get("librenms_id_needs_migration") is True
+
+    def test_device_whitespace_padded_legacy_id_flags_migration(self):
+        """The Device branch also uses the shared helper, so a padded legacy id flags migration consistently with the VM branch."""
+        from netbox_librenms_plugin.import_utils.device_operations import validate_device_for_import
+
+        libre_device = {
+            "device_id": 42,
+            "hostname": "sw01",
+            "sysName": "sw01",
+            "hardware": "-",
+            "serial": "-",
+            "os": "-",
+            "location": "-",
+        }
+        api = self._make_api()
+
+        existing_device = MagicMock()
+        existing_device.name = "sw01"
+        existing_device.serial = ""
+        existing_device.virtual_chassis = None
+        existing_device.custom_field_data = {"librenms_id": " 42 "}  # legacy, whitespace-padded
+
+        patches, _ = self._start_patches()
+        try:
+            with patch("netbox_librenms_plugin.import_utils.device_operations.find_by_librenms_id") as mock_find:
+                mock_find.side_effect = [None, existing_device]  # no VM, then Device found
+                result = validate_device_for_import(libre_device, api=api)
+        finally:
+            self._stop_patches(patches)
+
         assert result.get("librenms_id_needs_migration") is True
 
     def test_vc_detection_called_for_device_with_api(self):
@@ -1679,3 +1743,138 @@ class TestValidateDeviceChassisMatch:
             device_patch.stop()
 
         assert result["device_type"].get("device_type") is chassis_dt
+
+
+@pytest.mark.django_db
+class TestValidateForcesDeviceModeRealDB:
+    """A Device match must force import_as_vm=False even when VM mode was selected (real DB)."""
+
+    def _api(self):
+        api = MagicMock()
+        api.server_key = "default"
+        api.cache_timeout = 300
+        api.get_device_info.return_value = (True, {"device_id": 50})
+        return api
+
+    def _make_device(self, name, librenms_cf=None):
+        from dcim.models import Device, DeviceRole, DeviceType, Manufacturer, Site
+
+        mfr, _ = Manufacturer.objects.get_or_create(name="ACME-114d", slug="acme-114d")
+        dt, _ = DeviceType.objects.get_or_create(manufacturer=mfr, model="DT-114d", slug="dt-114d")
+        role, _ = DeviceRole.objects.get_or_create(name="Role-114d", slug="role-114d")
+        site, _ = Site.objects.get_or_create(name="Site-114d", slug="site-114d")
+        cf = {"librenms_id": librenms_cf} if librenms_cf else {}
+        return Device.objects.create(
+            name=name, device_type=dt, role=role, site=site, status="active", custom_field_data=cf
+        )
+
+    def test_librenms_id_device_match_forces_device_mode(self):
+        """A librenms_id Device match flips a user-selected VM mode back to Device mode."""
+        from netbox_librenms_plugin.import_utils.device_operations import validate_device_for_import
+
+        device = self._make_device("force-dev-mode", librenms_cf={"default": 50})
+        libre_device = {
+            "device_id": 50,
+            "hostname": "force-dev-mode",
+            "sysName": "force-dev-mode",
+            "serial": "-",
+            "hardware": "-",
+            "os": "-",
+            "location": "-",
+        }
+
+        result = validate_device_for_import(
+            libre_device, import_as_vm=True, api=self._api(), include_vc_detection=False
+        )
+
+        assert result["existing_match_type"] == "librenms_id"
+        assert result["existing_device"].pk == device.pk
+        assert result["import_as_vm"] is False
+
+    def test_hostname_device_match_forces_device_mode(self):
+        """A hostname Device match (no librenms_id) also flips selected VM mode back to Device mode."""
+        from netbox_librenms_plugin.import_utils.device_operations import validate_device_for_import
+
+        device = self._make_device("force-dev-host")
+        libre_device = {
+            "device_id": 777,
+            "hostname": "force-dev-host",
+            "sysName": "force-dev-host",
+            "serial": "-",
+            "hardware": "-",
+            "os": "-",
+            "location": "-",
+        }
+
+        result = validate_device_for_import(
+            libre_device, import_as_vm=True, api=self._api(), include_vc_detection=False
+        )
+
+        assert result["existing_match_type"] == "hostname"
+        assert result["existing_device"].pk == device.pk
+        assert result["import_as_vm"] is False
+
+
+@pytest.mark.django_db
+class TestImportFallbackReadsLive:
+    """Import fallbacks read LibreNMS live (use_cache=False) rather than the 60s get_device_info snapshot."""
+
+    def _seed_stale(self, server_key="default", device_id=4242):
+        from django.core.cache import cache
+
+        cache.set(
+            f"librenms_device_info_{server_key}_{device_id}",
+            (True, {"hostname": "STALE-HOST", "device_id": device_id}),
+            60,
+        )
+
+    def test_get_librenms_device_by_id_bypasses_stale_cache(self):
+        """use_cache=False skips the seeded snapshot and does a (here-failing) live fetch."""
+        from django.test import override_settings
+        from requests.exceptions import ConnectionError as RequestsConnectionError
+
+        from netbox_librenms_plugin.import_utils.device_operations import get_librenms_device_by_id
+        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+
+        cfg = {"netbox_librenms_plugin": {"servers": {"default": {"librenms_url": "http://d", "api_token": "t"}}}}
+        # Mock the live HTTP boundary instead of relying on a real request to "http://d" failing:
+        # a real call is non-deterministic and slow (DNS/timeout, and behind a proxy it can 503 or
+        # hang rather than refuse). RequestsConnectionError subclasses requests.RequestException, so
+        # get_device_info's `except requests.exceptions.RequestException` catches it → (False, ...).
+        with (
+            override_settings(PLUGINS_CONFIG=cfg),
+            patch(
+                "netbox_librenms_plugin.librenms_api.requests.get",
+                side_effect=RequestsConnectionError("offline"),
+            ),
+        ):
+            self._seed_stale()
+            api = LibreNMSAPI(server_key="default")
+            # Positive control: the cache IS populated and use_cache=True returns the stale snapshot.
+            assert get_librenms_device_by_id(api, 4242, use_cache=True)["hostname"] == "STALE-HOST"
+            # The fix: the import fallback reads live, so it does NOT serve the stale snapshot; the
+            # live HTTP call fails in-test (mocked offline) -> None, proving the cache was bypassed.
+            assert get_librenms_device_by_id(api, 4242, use_cache=False) is None
+
+    def test_import_single_device_does_not_build_from_stale_snapshot(self):
+        """import_single_device's None-branch fallback reads live, so a stale snapshot can't seed a device."""
+        from django.test import override_settings
+        from requests.exceptions import ConnectionError as RequestsConnectionError
+
+        from netbox_librenms_plugin.import_utils.device_operations import import_single_device
+
+        cfg = {"netbox_librenms_plugin": {"servers": {"default": {"librenms_url": "http://d", "api_token": "t"}}}}
+        # Mock the live HTTP boundary (see the sibling test): deterministic offline failure instead of
+        # depending on a real request to "http://d" refusing.
+        with (
+            override_settings(PLUGINS_CONFIG=cfg),
+            patch(
+                "netbox_librenms_plugin.librenms_api.requests.get",
+                side_effect=RequestsConnectionError("offline"),
+            ),
+        ):
+            self._seed_stale()
+            result = import_single_device(4242, server_key="default", libre_device=None)
+
+        assert result["success"] is False
+        assert "retrieve" in (result.get("error") or "").lower()

@@ -8,7 +8,7 @@ from django.core.cache import cache
 
 from ..import_validation_helpers import apply_role_to_validation, recalculate_validation_status, remove_validation_issue
 from ..librenms_api import LibreNMSAPI
-from ..utils import find_by_librenms_id
+from ..utils import find_by_librenms_id, preload_normalization_rules
 from .cache import get_cache_metadata_key, get_import_device_cache_key, get_validated_device_cache_key
 from .device_operations import import_single_device, validate_device_for_import
 from .filters import _safe_disabled, get_librenms_devices_for_import
@@ -117,6 +117,10 @@ def bulk_import_devices_shared(
     # Initialize API client once for all devices to avoid repeated config parsing
     api = LibreNMSAPI(server_key=server_key)
 
+    # Preload the device_type NormalizationRule set once so the per-device hardware→device-type
+    # match doesn't re-query it for every device in the loop (issue #90 / N+1 avoidance, #92).
+    device_type_norm_rules = preload_normalization_rules("device_type")
+
     for idx, device_id in enumerate(device_ids, start=1):
         # Check for job cancellation on first iteration and every 5th thereafter.
         if job and (idx == 1 or idx % 5 == 0) and _is_job_cancelled(job):
@@ -133,7 +137,16 @@ def bulk_import_devices_shared(
                 libre_device = libre_devices_cache[device_id]
                 success = True
             else:
-                success, libre_device = api.get_device_info(device_id)
+                # Import decisions (DeviceType match, serial-conflict, hostname) must run against
+                # live LibreNMS data: bypass the short device-info read cache so a value the user
+                # just corrected in LibreNMS isn't read back stale within the cache window.
+                success, libre_device = api.get_device_info(device_id, use_cache=False)
+                # Backfill the shared cache so the synchronous import's post-import row re-render
+                # (which reads the same dict via fetch_device_with_cache) doesn't issue a second
+                # LibreNMS round-trip per device on a cold cache. The background path passes a
+                # serialized copy and skips that re-render, so this is a harmless no-op there.
+                if success and libre_device is not None and libre_devices_cache is not None:
+                    libre_devices_cache[device_id] = libre_device
 
             if not success or not libre_device:
                 error_msg = f"Failed to retrieve device {device_id} from LibreNMS"
@@ -156,6 +169,7 @@ def bulk_import_devices_shared(
                 # LibreNMS inventory so stack members are created even when preview
                 # flags are stale or omitted.
                 include_vc_detection=True,
+                preloaded_device_type_rules=device_type_norm_rules,
             )
 
             vc_data = validation.get("virtual_chassis", {})
@@ -410,15 +424,21 @@ def _refresh_existing_device(validation: dict, libre_device: dict = None, server
         match_type = None
         found_as_cross_model = False
 
-        def _lookup_in_model(m):
-            """Return (device, match_type) for model m, or (None, None)."""
+        def _id_lookup(m):
+            """librenms_id match in model m, or None."""
             if librenms_id is not None and not isinstance(librenms_id, bool):
-                try:
-                    dev = find_by_librenms_id(m, int(librenms_id), server_key)
-                    if dev:
-                        return dev, "librenms_id"
-                except (ValueError, TypeError):
-                    pass
+                # int/str only (find_by_librenms_id's contract). Don't int()-coerce:
+                # int(42.9) -> 42 would bind an unrelated object by a truncated id. A float
+                # (or any other type) carries no exact id, so fail closed; str-digit ids are
+                # canonicalized by find_by_librenms_id itself (mirrors _librenms_id_q's
+                # lossy-coercion guard, #103).
+                if not isinstance(librenms_id, (int, str)):
+                    return None
+                return find_by_librenms_id(m, librenms_id, server_key)
+            return None
+
+        def _name_lookup(m):
+            """name-based match in model m → (device, match_type) or (None, None)."""
             resolved_name = validation.get("resolved_name")
             if resolved_name:
                 dev = m.objects.filter(name__iexact=resolved_name).first()
@@ -434,14 +454,24 @@ def _refresh_existing_device(validation: dict, libre_device: dict = None, server
                     return dev, "sysname"
             return None, None
 
-        new_device, match_type = _lookup_in_model(Model)
-
-        if not new_device:
-            # Try the opposite model: catches cross-model imports that happened
-            # after the cache was built (e.g. LibreNMS device imported as VM).
-            new_device, match_type = _lookup_in_model(CrossModel)
-            if new_device:
-                found_as_cross_model = True
+        # An exact librenms_id match wins across BOTH models before any name fallback. Otherwise a
+        # refresh could bind a name-colliding object in the preferred model even when the scanned
+        # LibreNMS id is already linked to the *other* model (e.g. a VM), disagreeing with
+        # validation and rendering actions for the wrong object.
+        dev = _id_lookup(Model)
+        if dev:
+            new_device, match_type = dev, "librenms_id"
+        else:
+            dev = _id_lookup(CrossModel)
+            if dev:
+                new_device, match_type, found_as_cross_model = dev, "librenms_id", True
+            else:
+                new_device, match_type = _name_lookup(Model)
+                if not new_device:
+                    # Catches cross-model imports made after the cache was built.
+                    new_device, match_type = _name_lookup(CrossModel)
+                    if new_device:
+                        found_as_cross_model = True
 
         if new_device:
             validation["existing_device"] = new_device

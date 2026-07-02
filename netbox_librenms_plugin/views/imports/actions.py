@@ -36,6 +36,7 @@ from netbox_librenms_plugin.import_validation_helpers import (
 )
 from netbox_librenms_plugin.tables.device_status import DeviceImportTable
 from netbox_librenms_plugin.utils import (
+    is_legacy_librenms_id,
     resolve_naming_preferences,
     save_user_pref,
     set_librenms_device_id,
@@ -169,53 +170,6 @@ def _get_hostname_for_action(request, validation: dict, libre_device: dict) -> s
 class DeviceImportHelperMixin:
     """Mixin providing common validation and rendering helpers for device import views."""
 
-    def _should_enable_vc_detection(self, device_id: int, request) -> bool:
-        """
-        Determine if VC detection should be enabled for this request.
-
-        VC detection is always enabled for role/rack changes and detail views,
-        regardless of the initial user preference. This implements smart caching:
-
-        1. If user originally requested VC detection: Uses cached data from initial load
-        2. If VC data is already cached: Reuses cached data (no API call)
-        3. Otherwise: Fetches VC data from LibreNMS API and caches it
-
-        This approach ensures:
-        - Role/rack changes always have VC context available (required for import)
-        - No redundant API calls when VC data is already cached
-        - Consistent VC detection behavior across dropdowns and detail modals
-        - Since role assignment is required before import, VC data is always
-          available by the time bulk import/confirm operations run
-
-        Args:
-            device_id: LibreNMS device ID
-            request: Django request object
-
-        Returns:
-            bool: Always returns True to enable VC detection with smart caching
-        """
-        # Check if user originally requested VC detection
-        vc_requested = _resolve_vc_detection_enabled(request)
-
-        if vc_requested:
-            # User explicitly enabled it - use it (will use cache if available)
-            return True
-
-        # Check if VC data is already cached (no API call will be made)
-        from netbox_librenms_plugin.import_utils import _vc_cache_key
-
-        cache_key = _vc_cache_key(self.librenms_api, device_id)
-        vc_cached = cache.get(cache_key) is not None
-
-        if vc_cached:
-            # Data already in cache - enable detection (no API call)
-            return True
-
-        # Not requested and not cached - make API call to get VC data
-        # This handles the case where user didn't initially request it
-        # but is now changing role/rack (so we fetch it now)
-        return True
-
     def get_validated_device_with_selections(self, device_id: int, request) -> tuple[dict | None, dict | None, dict]:
         """
         Get LibreNMS device, validate it, and apply user selections.
@@ -230,26 +184,48 @@ class DeviceImportHelperMixin:
             Tuple of (libre_device, validation, selections)
             Returns (None, None, selections) if device not found
         """
-        selections = extract_device_selections(request, device_id)
-        cluster_id = selections["cluster_id"]
-        is_vm = bool(cluster_id)
-
         # Try to use cached device data from table load (eliminates redundant API calls)
         libre_device = fetch_device_with_cache(device_id, self.librenms_api)
 
         if not libre_device:
-            return None, None, selections
+            return None, None, extract_device_selections(request, device_id)
 
-        # Determine if we should enable VC detection for this request
-        # This checks: user preference, cache status, and VM vs Device
-        enable_vc = not is_vm and self._should_enable_vc_detection(device_id, request)
+        validation, selections = self.validate_and_apply_selections(device_id, request, libre_device)
+        return libre_device, validation, selections
+
+    def validate_and_apply_selections(self, device_id: int, request, libre_device: dict) -> tuple[dict, dict]:
+        """
+        Validate an already-fetched LibreNMS device and apply user selections.
+
+        Split out of :meth:`get_validated_device_with_selections` so callers that already hold
+        the LibreNMS device dict (e.g. ``AddDeviceTypeMappingView.post`` right after a mapping
+        write) can re-validate without a second LibreNMS round-trip (issue #66). Re-validation
+        still reflects NetBox-side changes — a freshly created ``DeviceTypeMapping``, role, etc.
+        — because :func:`validate_device_for_import` reads those from the database, not from the
+        cached ``libre_device``.
+
+        Args:
+            device_id (int): LibreNMS device ID.
+            request: Django request object.
+            libre_device (dict): Already-fetched LibreNMS device dict.
+
+        Returns:
+            tuple[dict, dict]: The (validation, selections) pair.
+        """
+        selections = extract_device_selections(request, device_id)
+        cluster_id = selections["cluster_id"]
+        requested_vm = bool(cluster_id)
+
+        # VC detection runs for every non-VM import: role/rack changes and detail views need
+        # VC context (served from cache when already fetched), so it's gated purely on not-a-VM.
+        enable_vc = not requested_vm
 
         # Extract naming preferences: POST data (hx-include) → user pref → plugin settings.
         use_sysname, strip_domain = resolve_naming_preferences(request)
 
         validation = validate_device_for_import(
             libre_device,
-            import_as_vm=is_vm,
+            import_as_vm=requested_vm,
             api=self.librenms_api if enable_vc else None,
             include_vc_detection=enable_vc,
             use_sysname=use_sysname,
@@ -257,13 +233,28 @@ class DeviceImportHelperMixin:
             server_key=self.librenms_api.server_key,
         )
         # Recompute is_vm from validate_device_for_import's own detection
-        # (it may have found an existing VM via hostname/IP lookup)
+        # (it may have bound an existing Device by librenms_id/hostname/IP and flipped
+        # import_as_vm back to False).
         is_vm = bool(validation.get("import_as_vm"))
+        if requested_vm and not is_vm:
+            # The row flipped VM→Device, but the first pass skipped VC detection / chassis-fallback
+            # device-type matching because VM mode was requested (api=None, include_vc_detection=
+            # False). Re-validate in device mode so VC metadata and chassis device-type matching are
+            # applied for the device it actually resolved to.
+            validation = validate_device_for_import(
+                libre_device,
+                import_as_vm=False,
+                api=self.librenms_api,
+                include_vc_detection=True,
+                use_sysname=use_sysname,
+                strip_domain=strip_domain,
+                server_key=self.librenms_api.server_key,
+            )
 
         # Apply user selections (cluster, role, rack) to validation
         _apply_user_selections_to_validation(validation, selections, is_vm)
 
-        return libre_device, validation, selections
+        return validation, selections
 
     def render_device_row(self, request, libre_device: dict, validation: dict, selections: dict):
         """
@@ -360,7 +351,12 @@ class BulkImportConfirmView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
         if post_server_key:
             from netbox_librenms_plugin.librenms_api import LibreNMSAPI
 
-            self._librenms_api = LibreNMSAPI(server_key=post_server_key)
+            # Only rebind to a CONFIGURED server: a stale/forged key passed straight into
+            # LibreNMSAPI(server_key=...) raises KeyError in a multi-server config and 500s this
+            # HTMX action (the hidden server_key form field widened where this fires). When the key
+            # isn't configured, keep the default-server client — mirrors the sync/cables/ip check.
+            if post_server_key in LibreNMSAPI.get_available_servers():
+                self._librenms_api = LibreNMSAPI(server_key=post_server_key)
 
         device_ids = request.POST.getlist("select")
         if not device_ids:
@@ -502,6 +498,11 @@ class BulkImportConfirmView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
             "devices": devices,
             "device_count": len(devices),
             "errors": errors,
+            # Surface partial cache-expiry: when SOME rows survive (devices non-empty) the
+            # all-expired / partial-expired warnings above are skipped, so without this the modal
+            # hides that N selected rows were dropped to stale cache and shows only generic errors.
+            "cache_expired_count": cache_expired_count,
+            "selected_count": len(seen_ids),
             "use_sysname": use_sysname,
             "strip_domain": strip_domain,
             "server_key": self.librenms_api.server_key,
@@ -549,7 +550,12 @@ class BulkImportDevicesView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
         if post_server_key:
             from netbox_librenms_plugin.librenms_api import LibreNMSAPI
 
-            self._librenms_api = LibreNMSAPI(server_key=post_server_key)
+            # Only rebind to a CONFIGURED server: a stale/forged key passed straight into
+            # LibreNMSAPI(server_key=...) raises KeyError in a multi-server config and 500s this
+            # HTMX action (the hidden server_key form field widened where this fires). When the key
+            # isn't configured, keep the default-server client — mirrors the sync/cables/ip check.
+            if post_server_key in LibreNMSAPI.get_available_servers():
+                self._librenms_api = LibreNMSAPI(server_key=post_server_key)
 
         device_ids = request.POST.getlist("select")
         if not device_ids:
@@ -625,12 +631,23 @@ class BulkImportDevicesView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
         device_ids_to_import = [d for d in parsed_ids if d not in vm_imports]
         vm_ids_to_import = list(vm_imports.keys())
 
-        # Build cache of already-fetched device data to avoid redundant API calls
-        libre_devices_cache = {}
-        for device_id in parsed_ids:
-            cached_device = fetch_device_with_cache(device_id, self.librenms_api)
-            if cached_device:
-                libre_devices_cache[device_id] = cached_device
+        # Seed the shared device cache from ALREADY-cached entries only, before the
+        # background-vs-sync decision. Reading the Django cache directly (not
+        # fetch_device_with_cache, which falls through to the LibreNMS HTTP API on a miss)
+        # keeps this request handler from making one synchronous LibreNMS round-trip per
+        # selected device on a cold/expired cache — which would defeat the background path's
+        # whole point of returning fast. Misses are left out and fetched by whichever path
+        # runs: the background job (async, off the request) or the synchronous import (inline).
+        # One batched round-trip instead of one cache.get() per selected device: on Redis a bulk
+        # import of N devices otherwise issues N sequential GETs before the fast background path
+        # even starts. Map each cache key back to its device_id, then keep only the hits.
+        server_key = self.librenms_api.server_key
+        key_to_device_id = {get_import_device_cache_key(device_id, server_key): device_id for device_id in parsed_ids}
+        libre_devices_cache = {
+            key_to_device_id[key]: cached_device
+            for key, cached_device in cache.get_many(list(key_to_device_id)).items()
+            if cached_device
+        }
 
         # Check if we should use background job for import
         total_import_count = len(parsed_ids)
@@ -684,14 +701,7 @@ class BulkImportDevicesView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
                     f"Background job requested but no workers available. Importing {total_import_count} devices synchronously...",
                 )
 
-        # Synchronous import execution
-        # Build cache of already-fetched device data to avoid redundant API calls
-        libre_devices_cache_sync = {}
-        for device_id in parsed_ids:
-            cached_device = fetch_device_with_cache(device_id, self.librenms_api)
-            if cached_device:
-                libre_devices_cache_sync[device_id] = cached_device
-
+        # Synchronous import execution (reuses libre_devices_cache built above).
         # Import devices and VMs separately
         device_result = {
             "success": [],
@@ -709,7 +719,7 @@ class BulkImportDevicesView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
                     server_key=self.librenms_api.server_key,
                     sync_options=sync_options,
                     manual_mappings_per_device=manual_mappings_per_device,  # type: ignore
-                    libre_devices_cache=libre_devices_cache_sync,
+                    libre_devices_cache=libre_devices_cache,
                     user=request.user,  # Pass user for permission checks
                 )
 
@@ -719,7 +729,7 @@ class BulkImportDevicesView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
                     vm_imports,
                     self.librenms_api,
                     sync_options,
-                    libre_devices_cache_sync,
+                    libre_devices_cache,
                     user=request.user,  # Pass user for permission checks
                 )
 
@@ -774,6 +784,9 @@ class BulkImportDevicesView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
             imported_device_ids = [item["device_id"] for item in device_result.get("success", [])] + [
                 item["device_id"] for item in vm_result.get("success", [])
             ]
+            # VM-success ids as a set so the per-row is_vm check below is O(1). Rebuilding the list
+            # inside the loop made re-render O(n*m) for an import of n devices and m VM successes.
+            imported_vm_ids = {item["device_id"] for item in vm_result.get("success", [])}
 
             # Re-validate and render each imported device with fresh status
             for device_id in imported_device_ids:
@@ -781,12 +794,12 @@ class BulkImportDevicesView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
                 libre_device = fetch_device_with_cache(
                     device_id,
                     self.librenms_api,
-                    libre_devices_cache=libre_devices_cache_sync,
+                    libre_devices_cache=libre_devices_cache,
                 )
 
                 if libre_device:
                     # Determine if this was imported as VM or device
-                    is_vm = device_id in [item["device_id"] for item in vm_result.get("success", [])]
+                    is_vm = device_id in imported_vm_ids
 
                     # Re-validate with fresh status (will now show as imported)
                     # Pass naming preferences so name comparison uses the same
@@ -1012,12 +1025,22 @@ class DeviceValidationDetailsView(LibreNMSPermissionMixin, LibreNMSAPIMixin, Dev
             servers_config = {}
         result = []
         for sk, did in cf_value.items():
-            if isinstance(did, bool) or not isinstance(did, (int, str)):
+            # Coerce with int() (not str.isdigit()) so this per-server panel accepts exactly what
+            # librenms_sync_view._build_all_server_mappings accepts over the SAME CF dict: a value
+            # written as " 42 " is a valid link everywhere else, so isdigit() here silently dropped
+            # it and the sync page and import-conflict panel reported contradictory server links
+            # for one device (issue #99). Reject bool/None/non-numeric and non-positive ids to match.
+            if isinstance(did, bool) or did is None:
                 continue
             if isinstance(did, str):
-                if not did.isdigit():
+                try:
+                    did = int(did)
+                except (TypeError, ValueError):
                     continue
-                did = int(did)
+            elif not isinstance(did, int):
+                continue
+            if did <= 0:
+                continue
             srv_cfg = servers_config.get(sk)
             # Legacy single-server config: "default" key with no matching servers entry —
             # fall back to root-level display_name in plugins_config.
@@ -1090,7 +1113,10 @@ class DeviceConflictActionView(
         # If the form submitted a specific server_key, honour it so the handler uses
         # the same server context as the import page when the user clicked the button.
         post_server_key = (request.POST.get("server_key") or "").strip()
-        if post_server_key:
+        # Only rebind to a CONFIGURED server: a stale/forged key would raise KeyError in a
+        # multi-server config and 500 this action; keep the default client otherwise (mirrors
+        # the membership check used across the sync/cables/ip paths).
+        if post_server_key and post_server_key in LibreNMSAPI.get_available_servers():
             self._librenms_api = LibreNMSAPI(server_key=post_server_key)
 
         if not action or not existing_device_id:
@@ -1182,14 +1208,7 @@ class DeviceConflictActionView(
                 # silently skips writes for legacy formats, leaving the device partially
                 # updated. User must run "Convert mapping" migration first.
                 stored_id = existing_device.custom_field_data.get("librenms_id")
-                _is_legacy = isinstance(stored_id, int) and not isinstance(stored_id, bool)
-                if not _is_legacy and isinstance(stored_id, str):
-                    try:
-                        int(stored_id)
-                        _is_legacy = True
-                    except (ValueError, TypeError):
-                        pass
-                if _is_legacy:
+                if is_legacy_librenms_id(stored_id):
                     return _htmx_error_response(
                         "Device has a legacy bare-integer librenms_id; use 'Convert mapping' "
                         "to migrate to the multi-server format before linking."
@@ -1369,9 +1388,7 @@ class DeviceConflictActionView(
             # LibreNMSAPI.get_librenms_id() returns an int in both formats; only the raw
             # type check on custom_field_data reveals whether migration is needed.
             cf_value = existing_device.custom_field_data.get("librenms_id")
-            if isinstance(cf_value, bool) or not (
-                isinstance(cf_value, int) or (isinstance(cf_value, str) and cf_value.isdigit())
-            ):
+            if not is_legacy_librenms_id(cf_value):
                 return _htmx_error_response("Device librenms_id is already in JSON format; no migration needed.")
             # Normalise string-digit to int for consistent comparison
             cf_int = int(cf_value) if isinstance(cf_value, str) else cf_value
@@ -1393,9 +1410,7 @@ class DeviceConflictActionView(
                     return _htmx_error_response("Object no longer exists; it may have been deleted concurrently.")
                 # Re-check under lock — another request may have already migrated it
                 cf_locked = locked_device.custom_field_data.get("librenms_id")
-                if isinstance(cf_locked, bool) or not (
-                    isinstance(cf_locked, int) or (isinstance(cf_locked, str) and cf_locked.isdigit())
-                ):
+                if not is_legacy_librenms_id(cf_locked):
                     return _htmx_error_response("Device librenms_id is already in JSON format; no migration needed.")
                 cf_locked_int = int(cf_locked) if isinstance(cf_locked, str) else cf_locked
                 if cf_locked_int != librenms_id:
@@ -1468,7 +1483,12 @@ class AddDeviceTypeMappingView(
         if post_server_key:
             from netbox_librenms_plugin.librenms_api import LibreNMSAPI
 
-            self._librenms_api = LibreNMSAPI(server_key=post_server_key)
+            # Only rebind to a CONFIGURED server: a stale/forged key passed straight into
+            # LibreNMSAPI(server_key=...) raises KeyError in a multi-server config and 500s this
+            # HTMX action (the hidden server_key form field widened where this fires). When the key
+            # isn't configured, keep the default-server client — mirrors the sync/cables/ip check.
+            if post_server_key in LibreNMSAPI.get_available_servers():
+                self._librenms_api = LibreNMSAPI(server_key=post_server_key)
 
         from dcim.models import DeviceType
 
@@ -1479,6 +1499,18 @@ class AddDeviceTypeMappingView(
         hardware = (libre_device.get("hardware") or "").strip()
         if not hardware or hardware == "-":
             return _htmx_error_response("Device has no hardware string — cannot create mapping.")
+
+        # Key the mapping on the NORMALISED hardware string. match_librenms_hardware_to_device_type
+        # normalises via the device_type rules before the DeviceTypeMapping lookup, so a mapping
+        # saved under the raw value (e.g. "WS-C9300" when a rule strips it to "C9300") would never
+        # be found by the revalidation below. Strip the rule output too: DeviceTypeMapping.clean()
+        # strips before save, so an untrimmed key (e.g. " C9300 ") would miss the stored "c9300"
+        # mapping and take the add path, then fail uniqueness validation generically on save.
+        from netbox_librenms_plugin.utils import apply_normalization_rules
+
+        mapping_hardware = (apply_normalization_rules(value=hardware, scope="device_type") or "").strip()
+        if not mapping_hardware or mapping_hardware == "-":
+            return _htmx_error_response("Device hardware normalised to an empty value — cannot create mapping.")
 
         device_type_id = request.POST.get("device_type_id", "").strip()
         if not device_type_id:
@@ -1496,7 +1528,7 @@ class AddDeviceTypeMappingView(
 
         # Resolve the existing mapping first so we only require the permission
         # actually needed: "add" for a new mapping, "change" for an update.
-        existing_mapping = DeviceTypeMapping.objects.filter(librenms_hardware__iexact=hardware).first()
+        existing_mapping = DeviceTypeMapping.objects.filter(librenms_hardware__iexact=mapping_hardware).first()
         if existing_mapping:
             self.required_object_permissions = {"POST": [("change", DeviceTypeMapping)]}
         else:
@@ -1510,7 +1542,9 @@ class AddDeviceTypeMappingView(
                 # check and the actual write (select_for_update prevents a concurrent
                 # INSERT from slipping through undetected).
                 locked = (
-                    DeviceTypeMapping.objects.select_for_update().filter(librenms_hardware__iexact=hardware).first()
+                    DeviceTypeMapping.objects.select_for_update()
+                    .filter(librenms_hardware__iexact=mapping_hardware)
+                    .first()
                 )
                 if locked and not existing_mapping:
                     # A concurrent request created the mapping after our upfront read.
@@ -1535,7 +1569,7 @@ class AddDeviceTypeMappingView(
                 else:
                     try:
                         DeviceTypeMapping.objects.create(
-                            librenms_hardware=hardware.lower(),
+                            librenms_hardware=mapping_hardware.lower(),
                             netbox_device_type=device_type,
                         )
                     except IntegrityError:
@@ -1548,14 +1582,32 @@ class AddDeviceTypeMappingView(
             logger.exception("AddDeviceTypeMappingView: failed to save mapping: %s", exc)
             return _htmx_error_response("Error saving mapping. Please try again.")
 
-        # Clear cached LibreNMS device data so re-validation picks up the new mapping
+        # Repopulate (rather than clear) the cache with the LibreNMS device we already fetched
+        # at the top of this request. Re-validation reads the new mapping from the NetBox DB, so
+        # the cached LibreNMS payload stays correct; keeping it means the modal/row refresh below
+        # never issues a second LibreNMS round-trip — and a transient LibreNMS outage after the
+        # commit can no longer downgrade the refresh to a stale/"not found" state (issue #66).
+        # Preserve the entry's REMAINING TTL rather than granting a fresh full window: the
+        # snapshot may be minutes old, and re-arming it full-length would keep serving it to
+        # the bulk-import seed long after the original expiry. When the entry has already
+        # expired mid-request, leave it expired (next read fetches live); when the backend
+        # can't report TTLs (non-Redis, e.g. tests' LocMemCache), keep the full-timeout
+        # repopulate — NetBox deployments are Redis-backed, so that branch is test-only.
+        from netbox_librenms_plugin.utils import cache_remaining_ttl
+
         cache_key = get_import_device_cache_key(device_id, self.librenms_api.server_key)
-        cache.delete(cache_key)
+        remaining_ttl = cache_remaining_ttl(cache, cache_key)
+        if remaining_ttl is None:
+            cache.set(cache_key, libre_device, timeout=self.librenms_api.cache_timeout)
+        elif remaining_ttl > 0:
+            cache.set(cache_key, libre_device, timeout=remaining_ttl)
 
         # Re-render the modal content as an OOB swap so it updates in place.
         # The inner views render via Django templates (auto-escaped), so the
         # decoded content is already safe HTML; wrap with format_html + mark_safe
         # to compose the OOB envelope without introducing new escape boundaries.
+        # The cache repopulation above keeps DeviceValidationDetailsView.get's
+        # fetch_device_with_cache a cache hit, so no extra LibreNMS call is made.
         detail_view = DeviceValidationDetailsView()
         detail_view._librenms_api = self._librenms_api
         modal_html = detail_view.get(request, device_id).content.decode("utf-8")
@@ -1566,7 +1618,8 @@ class AddDeviceTypeMappingView(
 
         # Re-validate and include the background table row as a second OOB swap so the
         # row reflects the new mapping immediately without a secondary JS-triggered request.
-        libre_device, validation, selections = self.get_validated_device_with_selections(device_id, request)
+        # Reuse the in-memory libre_device directly (no re-fetch) via validate_and_apply_selections.
+        validation, selections = self.validate_and_apply_selections(device_id, request, libre_device)
         if libre_device is not None and validation is not None:
             row_response = self.render_device_row(request, libre_device, validation, selections)
             row_html = row_response.content.decode("utf-8")
@@ -1599,7 +1652,12 @@ class CreatePlatformFromImportView(
         if post_server_key:
             from netbox_librenms_plugin.librenms_api import LibreNMSAPI
 
-            self._librenms_api = LibreNMSAPI(server_key=post_server_key)
+            # Only rebind to a CONFIGURED server: a stale/forged key passed straight into
+            # LibreNMSAPI(server_key=...) raises KeyError in a multi-server config and 500s this
+            # HTMX action (the hidden server_key form field widened where this fires). When the key
+            # isn't configured, keep the default-server client — mirrors the sync/cables/ip check.
+            if post_server_key in LibreNMSAPI.get_available_servers():
+                self._librenms_api = LibreNMSAPI(server_key=post_server_key)
 
         libre_device = fetch_device_with_cache(device_id, self.librenms_api)
         if not libre_device:
@@ -1661,7 +1719,12 @@ class CreatePlatformFromImportView(
         if post_server_key:
             from netbox_librenms_plugin.librenms_api import LibreNMSAPI
 
-            self._librenms_api = LibreNMSAPI(server_key=post_server_key)
+            # Only rebind to a CONFIGURED server: a stale/forged key passed straight into
+            # LibreNMSAPI(server_key=...) raises KeyError in a multi-server config and 500s this
+            # HTMX action (the hidden server_key form field widened where this fires). When the key
+            # isn't configured, keep the default-server client — mirrors the sync/cables/ip check.
+            if post_server_key in LibreNMSAPI.get_available_servers():
+                self._librenms_api = LibreNMSAPI(server_key=post_server_key)
 
         create_mapping = _parse_boolish(request.POST.get("create_mapping")) is True
         device_pk_str = (request.POST.get("device_pk") or "").strip()
@@ -1735,34 +1798,6 @@ class CreatePlatformFromImportView(
                 platform.full_clean()
                 platform.save()
 
-                if target_model is not None and target_pk is not None:
-                    try:
-                        target = target_model.objects.select_for_update().get(pk=target_pk)
-                        target.platform = platform
-                        target.full_clean()
-                        target.save()
-                        logger.info(
-                            "CreatePlatformFromImportView: assigned platform '%s' to %s pk=%s",
-                            platform.name,
-                            target_model.__name__,
-                            target_pk,
-                        )
-                    except target_model.DoesNotExist:
-                        logger.warning(
-                            "CreatePlatformFromImportView: %s pk=%s not found; platform "
-                            "'%s' created but not assigned to any object",
-                            target_model.__name__,
-                            target_pk,
-                            platform.name,
-                        )
-                else:
-                    logger.info(
-                        "CreatePlatformFromImportView: no existing NetBox object matched "
-                        "for LibreNMS device_id=%s; platform '%s' created without assignment",
-                        device_id,
-                        platform.name,
-                    )
-
                 if create_mapping and librenms_os:
                     if not PlatformMapping.objects.filter(librenms_os__iexact=librenms_os).exists():
                         try:
@@ -1778,8 +1813,68 @@ class CreatePlatformFromImportView(
             logger.exception("CreatePlatformFromImportView: failed to create platform: %s", exc)
             return _htmx_error_response("Error creating platform. Please try again.")
 
+        # Assign the new platform to the existing object as a best-effort side effect, in its
+        # OWN transaction. The platform create above is the primary action and is already
+        # committed; a failure here — the target vanishing before the lock, or full_clean()
+        # tripping on unrelated legacy data on that record — must NOT roll back the platform.
+        # It must, however, be reported to the user (see assignment_error below): silently
+        # rendering the success swap would imply the device received the platform when it did not.
+        assignment_error = None
+        if target_model is not None and target_pk is not None:
+            try:
+                with transaction.atomic():
+                    target = target_model.objects.select_for_update().get(pk=target_pk)
+                    target.platform = platform
+                    target.full_clean()
+                    target.save()
+                logger.info(
+                    "CreatePlatformFromImportView: assigned platform '%s' to %s pk=%s",
+                    platform.name,
+                    target_model.__name__,
+                    target_pk,
+                )
+            except target_model.DoesNotExist:
+                logger.warning(
+                    "CreatePlatformFromImportView: %s pk=%s not found; platform "
+                    "'%s' created but not assigned to any object",
+                    target_model.__name__,
+                    target_pk,
+                    platform.name,
+                )
+                assignment_error = (
+                    f'Platform "{platform.name}" was created, but the target '
+                    f"{target_model._meta.verbose_name} no longer exists, so it could not be "
+                    "assigned. Assign the platform manually if it is still needed."
+                )
+            except (ValidationError, IntegrityError) as exc:
+                logger.warning(
+                    "CreatePlatformFromImportView: platform '%s' created but assignment to "
+                    "%s pk=%s failed and was skipped: %s",
+                    platform.name,
+                    target_model.__name__,
+                    target_pk,
+                    exc,
+                )
+                assignment_error = (
+                    f'Platform "{platform.name}" was created, but could not be assigned to the '
+                    f"{target_model._meta.verbose_name}. Assign the platform manually if needed."
+                )
+        else:
+            logger.info(
+                "CreatePlatformFromImportView: no existing NetBox object matched "
+                "for LibreNMS device_id=%s; platform '%s' created without assignment",
+                device_id,
+                platform.name,
+            )
+
         cache_key = get_import_device_cache_key(device_id, self.librenms_api.server_key)
         cache.delete(cache_key)
+
+        if assignment_error:
+            # The platform (and any mapping) were intentionally kept, but the device assignment
+            # failed. Surface that to the user instead of a success swap — the failure detail is
+            # already logged above; the toast carries a fixed, non-sensitive message.
+            return _htmx_error_response(assignment_error)
 
         # Re-render the modal content as an OOB swap so it updates in place.
         # The inner views render via Django templates (auto-escaped), so the
@@ -1822,6 +1917,10 @@ class SaveUserPrefView(LibreNMSPermissionMixin, View):
             data = json.loads(request.body)
         except (json.JSONDecodeError, ValueError):
             return JsonResponse({"error": "Invalid JSON"}, status=400)
+        # json.loads can return any JSON type (list, str, number, null); a non-object payload would
+        # AttributeError on data.get() below. Reject it as a 400 rather than 500.
+        if not isinstance(data, dict):
+            return JsonResponse({"error": "Invalid JSON payload"}, status=400)
 
         key = data.get("key")
         value = data.get("value")
@@ -1848,7 +1947,10 @@ class AddPlatformMappingView(
         from netbox_librenms_plugin.models import PlatformMapping
 
         post_server_key = (request.POST.get("server_key") or "").strip()
-        if post_server_key:
+        # Only rebind to a CONFIGURED server: a stale/forged key would raise KeyError in a
+        # multi-server config and 500 this action; keep the default client otherwise (mirrors
+        # the membership check used across the sync/cables/ip paths).
+        if post_server_key and post_server_key in LibreNMSAPI.get_available_servers():
             self._librenms_api = LibreNMSAPI(server_key=post_server_key)
 
         libre_device = fetch_device_with_cache(device_id, self.librenms_api)

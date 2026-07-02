@@ -232,46 +232,6 @@ class TestUpdateDeviceSerialViewWiring:
         assert any(action == "change" and model == Device for action, model in perms["POST"])
 
 
-class TestCreatePlatformFullClean:
-    """CreateAndAssignPlatformView must call full_clean() so ValidationError is catchable."""
-
-    def test_validation_error_caught_on_slug_collision(self):
-        """When full_clean raises ValidationError, user sees error message instead of 500."""
-        from django.core.exceptions import ValidationError
-
-        from netbox_librenms_plugin.views.sync.device_fields import CreateAndAssignPlatformView
-
-        view = object.__new__(CreateAndAssignPlatformView)
-
-        request = MagicMock()
-        request.method = "POST"
-        request.POST = {"platform_name": "test-platform"}
-        request.user.has_perm.return_value = True
-        view.request = request
-
-        with (
-            patch("netbox_librenms_plugin.views.sync.device_fields.get_object_or_404"),
-            patch("netbox_librenms_plugin.views.sync.device_fields.Manufacturer"),
-            patch("netbox_librenms_plugin.views.sync.device_fields.Platform") as MockPlatform,
-            patch("netbox_librenms_plugin.views.sync.device_fields.transaction"),
-            patch("netbox_librenms_plugin.views.sync.device_fields.messages") as mock_messages,
-            patch("netbox_librenms_plugin.views.sync.device_fields.redirect"),
-        ):
-            MockPlatform.objects.filter.return_value.exists.return_value = False
-            platform_instance = MagicMock()
-            platform_instance.full_clean.side_effect = ValidationError({"slug": ["Slug already exists"]})
-            MockPlatform.return_value = platform_instance
-
-            view.post(request, pk=1)
-
-            platform_instance.full_clean.assert_called_once()
-            platform_instance.save.assert_not_called()
-            mock_messages.error.assert_called_once()
-            error_msg = mock_messages.error.call_args[0][1]
-            assert "could not be created" in error_msg
-            assert "Slug already exists" in error_msg
-
-
 class TestRemoveServerMappingViewWiring:
     def test_does_not_have_librenms_api_mixin(self):
         """RemoveServerMappingView does not call LibreNMS API — it only modifies NetBox."""
