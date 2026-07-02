@@ -2,7 +2,7 @@ import logging
 
 from django.contrib import messages
 from django.core.cache import cache
-from django.shortcuts import get_object_or_404, redirect, render
+from django.shortcuts import get_object_or_404, render
 from django.utils import timezone
 from django.views import View
 
@@ -155,7 +155,27 @@ class BaseInterfaceTableView(VlanAssignmentMixin, LibreNMSAPIMixin, LibreNMSPerm
         post_server_key = self.rebind_api_for_server(request.POST.get("server_key"))
         if post_server_key is None:
             messages.error(request, "Selected LibreNMS server is no longer configured.")
-            return redirect(self.get_redirect_url(obj))
+            # Render the fragment with the message (like the cables/ip/modules/vlan
+            # failed-rebind branches) — a redirect here points at this same POST-only URL,
+            # which the hx-post XHR transparently follows with a GET: 405, no swap, a dead
+            # button, and the queued error only surfacing on a later full page load.
+            return render(
+                request,
+                self.partial_template_name,
+                {
+                    "interface_sync": {
+                        "table": None,
+                        "object": obj,
+                        "cache_expiry": None,
+                        "last_fetched": None,
+                        # Explicit None so the fragment doesn't silently fall back to the
+                        # session/default server for the next retry (mirrors vlan_table_view's
+                        # stale-server branch).
+                        "server_key": None,
+                    },
+                    "interface_name_field": interface_name_field,
+                },
+            )
 
         # Resolve the VC sync device once (the priority member for a VC, else obj) and use it
         # for the main librenms_id lookup too — not just the cache/OOB scope below. On VC-member

@@ -1351,13 +1351,14 @@ class TestBaseInterfaceTableViewBasics:
         # A real failure redirect came back (the rebound client has no host id).
         assert result.status_code == 302
 
-    def test_post_stale_server_key_redirects(self):
-        """A posted server_key that no longer resolves (build returns None) → error + redirect, not an unhandled 500."""
+    def test_post_stale_server_key_renders_partial_without_session_fallback(self):
+        """A posted server_key that no longer resolves (build returns None) → error + fragment render, not an unhandled 500 — and the session client is never queried."""
         from unittest.mock import patch
 
         from netbox_librenms_plugin.views.base.interfaces_view import BaseInterfaceTableView
 
         view = object.__new__(BaseInterfaceTableView)
+        view.partial_template_name = "test_template.html"
         obj = MagicMock(pk=1)
         view.get_object = MagicMock(return_value=obj)
         # Real property again, so a None rebind result leaves self._librenms_api untouched
@@ -1372,16 +1373,15 @@ class TestBaseInterfaceTableViewBasics:
             patch("netbox_librenms_plugin.librenms_api.build_librenms_api", return_value=None),
             patch("netbox_librenms_plugin.views.base.interfaces_view.get_interface_name_field", return_value="name"),
             patch("netbox_librenms_plugin.views.base.interfaces_view.messages") as mock_messages,
-            patch("netbox_librenms_plugin.views.base.interfaces_view.redirect", return_value="redir") as mock_redirect,
+            patch("netbox_librenms_plugin.views.base.interfaces_view.render", return_value="fragment") as mock_render,
         ):
-            view.get_redirect_url = MagicMock(return_value="/back/")
             result = view.post(req, pk=1)
 
-        # Never reached the live id lookup; surfaced an error and redirected.
+        # Never reached the live id lookup; surfaced an error and rendered the fragment in place.
         session_api.get_librenms_id.assert_not_called()
         mock_messages.error.assert_called_once()
-        assert result == "redir"
-        mock_redirect.assert_called_once()
+        assert result == "fragment"
+        mock_render.assert_called_once()
 
     def test_get_select_related_field_for_vm(self):
         """Returns 'virtual_machine' for VirtualMachine model."""
@@ -1434,6 +1434,34 @@ class TestBaseInterfaceTableViewPost:
         view.model = MagicMock()
         view.partial_template_name = "test_template.html"
         return view
+
+    def test_post_failed_rebind_renders_partial_not_redirect(self):
+        """A stale POSTed server_key renders the fragment with the error, NOT a redirect: the redirect target is this same POST-only URL, so the hx-post XHR would follow it with GET → 405, no swap, a dead button (every sibling tab renders its partial here)."""
+        view = self._make_view()
+        obj = _mock_obj()
+        request = _mock_request()
+
+        with (
+            patch.object(view, "get_object", return_value=obj),
+            patch.object(view, "get_redirect_url", return_value="/device/1/"),
+            patch.object(view, "rebind_api_for_server", return_value=None),
+            patch("netbox_librenms_plugin.views.base.interfaces_view.get_interface_name_field", return_value="ifName"),
+            patch("netbox_librenms_plugin.views.base.interfaces_view.messages") as mock_messages,
+            patch("netbox_librenms_plugin.views.base.interfaces_view.render") as mock_render,
+        ):
+            mock_render.return_value = MagicMock(status_code=200)
+            response = view.post(request, pk=1)
+
+        mock_messages.error.assert_called_once()
+        # The fragment is rendered in place with the message — no 302 anywhere.
+        mock_render.assert_called_once()
+        args = mock_render.call_args[0]
+        assert args[1] == view.partial_template_name
+        ctx = args[2]
+        assert ctx["interface_sync"]["table"] is None
+        # Explicit None: the fragment must not fall back to the session/default server.
+        assert ctx["interface_sync"]["server_key"] is None
+        assert response is mock_render.return_value  # the rendered fragment, not a 302
 
     def test_post_no_librenms_id_redirects_with_error(self):
         """When librenms_id not found, error message and redirect — and the stale ports snapshot is cleared FIRST, so a failed refresh on a previously-synced device can't leave old interface data for the redirected tab or downstream sync to consume."""
