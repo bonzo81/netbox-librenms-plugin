@@ -65,26 +65,22 @@ class SyncInterfacesView(
         obj = self.get_object(object_type, object_id)
         self.object = obj  # Store for use in sync methods
 
-        # Read server_key from POST so we use the exact server the user was viewing, but only
-        # honour it when it names a configured server: the raw value scopes cache entries and
-        # librenms_id custom-field reads/writes (find_by_librenms_id / set_librenms_device_id),
-        # so a forged/unconfigured key must not address another server's namespace (issues
-        # #108/#109). Fall back to the active server when the POSTed key isn't configured.
-        # Validate via the LibreNMSAPI classmethod (like the cables/module/import sibling paths),
-        # NOT the self.librenms_api instance: touching the property builds the default/selected
-        # client, so a misconfigured default would 500 a sync the user requested on a working
-        # non-default server (the POSTed key only scopes cache + librenms_id CF reads).
-        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
-
-        requested_server_key = request.POST.get("server_key")
-        if requested_server_key and requested_server_key in LibreNMSAPI.get_available_servers():
-            server_key = requested_server_key
-        else:
-            server_key = self.librenms_api.server_key
-        self._post_server_key = server_key
-
         interface_name_field = get_interface_name_field(request)
         self.interface_name_field = interface_name_field
+
+        # Rebind the client to the POSTed server so cache reads, per-server id writes and
+        # the redirect all use the exact server the user was viewing. Fail closed on a
+        # stale/unknown key — the old `or self.librenms_api.server_key` fallback rebuilt
+        # the lazy client, which can resolve to a different server (wrong-server sync) or
+        # raise on a misconfigured default (500).
+        server_key = self.rebind_api_for_server(request.POST.get("server_key"))
+        if server_key is None:
+            messages.error(request, "Selected LibreNMS server is no longer configured.")
+            return redirect(
+                reverse(url_name, kwargs={"pk": object_id})
+                + f"?tab=interfaces&interface_name_field={interface_name_field}"
+            )
+        self._post_server_key = server_key
         selected_interfaces = self.get_selected_interfaces(request, interface_name_field)
         exclude_columns = request.POST.getlist("exclude_columns")
 

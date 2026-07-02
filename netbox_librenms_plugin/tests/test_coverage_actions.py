@@ -1117,7 +1117,7 @@ class TestDeviceRoleUpdateView:
     def test_device_not_found_renders_htmx_error_toast(self):
         view = self._make_view()
         with patch.object(view, "get_validated_device_with_selections", return_value=(None, None, {})):
-            result = view.post(MagicMock(), device_id=1)
+            result = view.post(_make_request(post={}), device_id=1)
         assert result.status_code == 200
         assert result.headers.get("HX-Reswap") == "none"
         assert b"Device not found" in result.content
@@ -1135,7 +1135,7 @@ class TestDeviceRoleUpdateView:
             view, "get_validated_device_with_selections", return_value=(libre_device, validation, selections)
         ):
             with patch.object(view, "render_device_row", return_value=MagicMock()) as mock_render_row:
-                view.post(MagicMock(), device_id=1)
+                view.post(_make_request(post={}), device_id=1)
 
         mock_render_row.assert_called_once()
 
@@ -1153,7 +1153,7 @@ class TestDeviceClusterUpdateView:
     def test_device_not_found_renders_htmx_error_toast(self):
         view = self._make_view()
         with patch.object(view, "get_validated_device_with_selections", return_value=(None, None, {})):
-            result = view.post(MagicMock(), device_id=1)
+            result = view.post(_make_request(post={}), device_id=1)
         assert result.status_code == 200
         assert result.headers.get("HX-Reswap") == "none"
         assert b"Device not found" in result.content
@@ -1172,10 +1172,51 @@ class TestDeviceRackUpdateView:
     def test_device_not_found_renders_htmx_error_toast(self):
         view = self._make_view()
         with patch.object(view, "get_validated_device_with_selections", return_value=(None, None, {})):
-            result = view.post(MagicMock(), device_id=1)
+            result = view.post(_make_request(post={}), device_id=1)
         assert result.status_code == 200
         assert result.headers.get("HX-Reswap") == "none"
         assert b"Device not found" in result.content
+
+
+class TestRowUpdateViewsServerRebind:
+    """DeviceRole/Cluster/RackUpdateView must pin the client to the POSTed server_key.
+
+    The import page's row selects post the page's server_key (hx-vals); without the
+    rebind the lookup routes through the global selected server and re-validates/caches
+    the WRONG server's device for the row.
+    """
+
+    VIEWS = ["DeviceRoleUpdateView", "DeviceClusterUpdateView", "DeviceRackUpdateView"]
+
+    def _view(self, view_name):
+        from netbox_librenms_plugin.views.imports import actions
+
+        return object.__new__(getattr(actions, view_name))
+
+    @pytest.mark.parametrize("view_name", VIEWS)
+    def test_stale_server_key_fails_closed_before_lookup(self, view_name):
+        """An unresolvable POSTed key errors out without any device lookup (mirrors the sibling import endpoints)."""
+        view = self._view(view_name)
+        req = _make_request(post={"server_key": "ghost"})
+        with patch("netbox_librenms_plugin.librenms_api.build_librenms_api", return_value=None):
+            with patch.object(view, "get_validated_device_with_selections", return_value=(None, None, {})) as lookup:
+                result = view.post(req, device_id=42)
+        lookup.assert_not_called()
+        assert result.headers.get("HX-Reswap") == "none"
+        assert b"no longer configured" in result.content
+
+    @pytest.mark.parametrize("view_name", VIEWS)
+    def test_rebinds_to_posted_server(self, view_name):
+        """The POSTed server_key is bound before the lookup, so the row re-validates against the page's server."""
+        view = self._view(view_name)
+        api = MagicMock()
+        api.server_key = "secondary"
+        req = _make_request(post={"server_key": "secondary"})
+        with patch("netbox_librenms_plugin.librenms_api.build_librenms_api", return_value=api) as mock_build:
+            with patch.object(view, "get_validated_device_with_selections", return_value=(None, None, {})):
+                view.post(req, device_id=42)
+        mock_build.assert_called_once_with("secondary")
+        assert view._librenms_api is api
 
 
 @pytest.mark.django_db

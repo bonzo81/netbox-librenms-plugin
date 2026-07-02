@@ -961,6 +961,55 @@ class TestSyncInterfacesViewGetCachedPortsData:
         assert result == ports
 
 
+class TestSyncInterfacesViewServerRebind:
+    """SyncInterfacesView.post must rebind to the POSTed server_key, failing closed."""
+
+    def test_stale_server_key_fails_closed_without_sync(self):
+        """A POSTed key that no longer resolves redirects with an error — no lazy client rebuild, no sync."""
+        from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
+
+        view = _make_view(SyncInterfacesView)
+        view._librenms_api = None  # no cached client; the posted key must resolve on its own
+        req = _make_request({"server_key": "ghost", "select": ["eth0"]})
+        with (
+            patch.object(view, "require_all_permissions", return_value=None),
+            patch.object(view, "get_object", return_value=MagicMock()),
+            patch("netbox_librenms_plugin.views.sync.interfaces.get_interface_name_field", return_value="ifName"),
+            patch("netbox_librenms_plugin.librenms_api.build_librenms_api", return_value=None),
+            patch("netbox_librenms_plugin.views.sync.interfaces.messages") as mock_msg,
+            patch.object(view, "sync_selected_interfaces") as mock_sync,
+        ):
+            resp = view.post(req, "device", 1)
+        mock_sync.assert_not_called()
+        mock_msg.error.assert_called_once()
+        assert resp.status_code == 302
+        assert "server_key=" not in resp["Location"]
+
+    def test_posted_server_key_is_bound_for_the_sync(self):
+        """The POSTed key rebinds the client (not just a string pass-through), so cache reads and per-server id writes use the tab's server."""
+        from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
+
+        view = _make_view(SyncInterfacesView)
+        view._librenms_api = None
+        api = MagicMock()
+        api.server_key = "secondary"
+        req = _make_request({"server_key": "secondary", "select": ["eth0"]})
+        with (
+            patch.object(view, "require_all_permissions", return_value=None),
+            patch.object(view, "get_object", return_value=MagicMock()),
+            patch("netbox_librenms_plugin.views.sync.interfaces.get_interface_name_field", return_value="ifName"),
+            patch("netbox_librenms_plugin.librenms_api.build_librenms_api", return_value=api) as mock_build,
+            patch.object(view, "get_cached_ports_data", return_value=None),
+            patch("netbox_librenms_plugin.views.sync.interfaces.messages"),
+        ):
+            resp = view.post(req, "device", 1)
+        mock_build.assert_called_once_with("secondary")
+        assert view._librenms_api is api
+        assert view._post_server_key == "secondary"
+        assert resp.status_code == 302
+        assert "server_key=secondary" in resp["Location"]
+
+
 class TestSyncInterfacesViewPost:
     def test_permission_denied_device_returns_early(self):
         from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView

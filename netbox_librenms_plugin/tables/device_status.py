@@ -107,6 +107,20 @@ class DeviceImportTable(tables.Table):
         self._cached_clusters = list(Cluster.objects.all().order_by("name"))
         self._cached_roles = list(DeviceRole.objects.all().order_by("name"))
 
+    def _server_key_hx_vals(self):
+        """
+        hx-vals attribute carrying the import page's server_key on row-update posts.
+
+        The role/cluster/rack selects hx-post to DeviceRole/Cluster/RackUpdateView, which
+        rebind to the POSTed server_key before re-fetching/re-validating the row. Without
+        this value the rebind falls back to the global selected server — with overlapping
+        device_ids across servers that live-fetches and caches the WRONG server's device.
+        """
+        server_key = getattr(self, "server_key", None)
+        if not server_key:
+            return ""
+        return f"hx-vals='{escape(json.dumps({'server_key': str(server_key)}))}' "
+
         # Apply sorting if order_by is specified
         # Since we're working with dictionaries, not QuerySets, we handle sorting manually
         if self.order_by:
@@ -287,6 +301,7 @@ class DeviceImportTable(tables.Table):
             f'hx-post="{update_url}{vc_detection_flag}" '
             f'hx-trigger="change" '
             f'hx-swap="none" '
+            f"{self._server_key_hx_vals()}"
             f'hx-include="[name=role_{device_id}], [name=rack_{device_id}]" '
             f'style="width: 180px;">'
             f"{''.join(options)}"
@@ -354,6 +369,7 @@ class DeviceImportTable(tables.Table):
             f'hx-post="{update_url}{vc_detection_flag}" '
             f'hx-trigger="change" '
             f'hx-swap="none" '
+            f"{self._server_key_hx_vals()}"
             f'hx-include="[name=cluster_{device_id}], [name=rack_{device_id}]" '
             f'style="width: 150px;">'
             f"{''.join(options)}"
@@ -428,6 +444,7 @@ class DeviceImportTable(tables.Table):
             f'hx-post="{update_url}{vc_detection_flag}" '
             f'hx-trigger="change" '
             f'hx-swap="none" '
+            f"{self._server_key_hx_vals()}"
             f'hx-include="[name=cluster_{device_id}], [name=role_{device_id}]" '
             f'style="width: 200px;">'
             f"{''.join(options)}"

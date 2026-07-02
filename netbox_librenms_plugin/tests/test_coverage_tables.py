@@ -515,6 +515,56 @@ class TestDeviceImportTableRenderNetboxCluster:
         assert "enable_vc_detection=true" in result
 
 
+class TestDeviceImportTableRowSelectsServerKey:
+    """The role/cluster/rack row selects must post the import page's server_key.
+
+    Their hx-posts reach DeviceRole/Cluster/RackUpdateView, which rebind to the POSTed
+    server_key; without an hx-vals carrying it the rebind falls back to the GLOBAL
+    selected server and re-validates/caches the wrong server's device for the row.
+    """
+
+    def _table(self, server_key="secondary"):
+        from netbox_librenms_plugin.tables.device_status import DeviceImportTable
+
+        t = object.__new__(DeviceImportTable)
+        t._cached_clusters = []
+        t._cached_roles = []
+        t.server_key = server_key
+        return t
+
+    def _record(self):
+        rack = MagicMock()
+        rack.pk = 3
+        rack.name = "R1"
+        rack.location = None
+        return {
+            "device_id": 5,
+            "_validation": {
+                "existing_device": None,
+                "import_as_vm": False,
+                "cluster": {"found": False, "cluster": None},
+                "device_role": {"found": False, "role": None},
+                "site": {"found": True},
+                "rack": {"rack": None, "available_racks": [rack]},
+            },
+        }
+
+    @pytest.mark.parametrize("renderer", ["render_netbox_cluster", "render_netbox_role", "render_netbox_rack"])
+    def test_select_carries_server_key_hx_vals(self, renderer):
+        table = self._table()
+        with patch("django.urls.reverse", return_value="/row-update/5/"):
+            result = str(getattr(table, renderer)(value=5, record=self._record()))
+        assert "hx-vals=" in result and "server_key" in result and "secondary" in result, result
+
+    @pytest.mark.parametrize("renderer", ["render_netbox_cluster", "render_netbox_role", "render_netbox_rack"])
+    def test_no_server_key_renders_no_hx_vals(self, renderer):
+        """Single-server pages (no server_key threaded) keep the select unchanged."""
+        table = self._table(server_key=None)
+        with patch("django.urls.reverse", return_value="/row-update/5/"):
+            result = str(getattr(table, renderer)(value=5, record=self._record()))
+        assert "hx-vals" not in result
+
+
 # ===========================================================================
 # DeviceImportTable render_netbox_role tests
 # ===========================================================================

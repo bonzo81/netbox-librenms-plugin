@@ -1440,6 +1440,13 @@ class DeviceRoleUpdateView(LibreNMSPermissionMixin, LibreNMSAPIMixin, DeviceImpo
 
     def post(self, request, device_id):
         """Update the table row after a device role selection change."""
+        # Pin the client to the import page's server (the selects post it via hx-vals)
+        # before get_validated_device_with_selections routes through the lazy client —
+        # otherwise a global server switch mid-session re-validates and caches the WRONG
+        # server's device under this row. Mirrors the sibling import endpoints.
+        if err := _rebind_or_htmx_error(self, request):
+            return err
+
         libre_device, validation, selections = self.get_validated_device_with_selections(device_id, request)
 
         if not libre_device:
@@ -1453,6 +1460,10 @@ class DeviceClusterUpdateView(LibreNMSPermissionMixin, LibreNMSAPIMixin, DeviceI
 
     def post(self, request, device_id):
         """Update the table row after a cluster selection change."""
+        # Pin to the import page's server before any lookup (see DeviceRoleUpdateView).
+        if err := _rebind_or_htmx_error(self, request):
+            return err
+
         libre_device, validation, selections = self.get_validated_device_with_selections(device_id, request)
 
         if not libre_device:
@@ -1466,6 +1477,10 @@ class DeviceRackUpdateView(LibreNMSPermissionMixin, LibreNMSAPIMixin, DeviceImpo
 
     def post(self, request, device_id):
         """Update the table row after a rack selection change."""
+        # Pin to the import page's server before any lookup (see DeviceRoleUpdateView).
+        if err := _rebind_or_htmx_error(self, request):
+            return err
+
         libre_device, validation, selections = self.get_validated_device_with_selections(device_id, request)
 
         if not libre_device:
