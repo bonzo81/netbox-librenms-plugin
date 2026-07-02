@@ -47,13 +47,19 @@ class BaseLibreNMSSyncView(LibreNMSPermissionMixin, LibreNMSAPIMixin, generic.Ob
         # ?server_key on a fresh view. Everything below (and get_context_data) reads the
         # lazy self.librenms_api property, which would reconstruct LibreNMSAPI() and
         # re-raise the very KeyError/ValueError the helper just swallowed — an unhandled
-        # 500 for every device page. Bind the default via the fail-closed factory; if even
-        # that can't build, degrade to a minimal render with an error banner.
+        # 500 for every device page. Bind the default via the fail-closed factory. If even
+        # that can't build: for a blank/absent key (the page IS the default server's view)
+        # degrade to a minimal render with an error banner; for an unresolved ?server_key
+        # continue instead — that path already fails closed (librenms_id=None) and must
+        # still render its degraded page (e.g. the migrated banner scoped to the requested
+        # key), which an early return here would suppress.
         if getattr(self, "_librenms_api", None) is None:
             from netbox_librenms_plugin.librenms_api import build_librenms_api
 
             default_api = build_librenms_api(None)
-            if default_api is None:
+            if default_api is not None:
+                self._librenms_api = default_api
+            elif not unresolved:
                 messages.error(
                     request,
                     "LibreNMS server is not configured correctly (missing URL or API token). "
@@ -71,7 +77,6 @@ class BaseLibreNMSSyncView(LibreNMSPermissionMixin, LibreNMSAPIMixin, generic.Ob
                         "platform_info": {},
                     },
                 )
-            self._librenms_api = default_api
 
         # For Virtual Chassis members, always delegate to get_librenms_sync_device() so
         # self._librenms_lookup_device and self.librenms_id are consistent with the
