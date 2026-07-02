@@ -5508,6 +5508,46 @@ class TestAddAsOOBViewPost:
         assert entry["id"] == 10
         assert entry["oob"] == {"id": 17, "type": "oob"}
 
+    def test_legacy_id_written_in_race_window_is_rejected_post_lock(self):
+        """TOCTOU: the legacy gate must be re-verified on the LOCKED row (mirrors DeviceConflictActionView's post-lock gate).
+
+        The unlocked gate reads the modal's in-memory snapshot; a legacy bare-int written
+        concurrently (valid on EVERY server as the documented universal fallback) would reach
+        set_librenms_oob, whose legacy-promotion branch silently namespaces it under this
+        server only — dropping the device's LibreNMS linkage on all others.
+        """
+        from dcim.models import Device
+
+        view = self._make_view()
+        view._librenms_api.server_key = "secondary"
+
+        existing_device = make_device("oob-legacy-race", librenms_cf={"secondary": {"id": 10}})
+
+        libre_device = {"device_id": 17}
+        validation = {"oob_candidate": {"device": existing_device, "type": "oob", "ip": None}}
+
+        def _racing_validation(_device_id, _request):
+            # Lands AFTER the view's unlocked fetch (its in-memory snapshot still carries the
+            # dict form, so the unlocked gate passes) and BEFORE the select_for_update
+            # re-fetch — the exact race window.
+            Device.objects.filter(pk=existing_device.pk).update(custom_field_data={"librenms_id": 42})
+            return (libre_device, validation, {})
+
+        view.get_validated_device_with_selections = MagicMock(side_effect=_racing_validation)
+        request = _make_request(post={"existing_device_id": str(existing_device.pk)})
+        # Success-path row re-render is not under test; the discriminator is the CF state.
+        from django.http import HttpResponse
+
+        view.render_device_row = MagicMock(return_value=HttpResponse("row"))
+
+        response = view.post(request, device_id=17)
+
+        assert response.status_code == 200
+        assert b"legacy" in response.content.lower()
+        assert response["HX-Reswap"] == "none"
+        # The universal-fallback id was NOT silently namespaced under one server.
+        assert Device.objects.get(pk=existing_device.pk).custom_field_data["librenms_id"] == 42
+
     def test_save_device_error_marks_transaction_rollback(self):
         """_save_device returns an error response (it doesn't raise), so the view must mark the transaction rollback-only before returning — otherwise any Interface/IPAddress created earlier in the atomic block by the OOB-attach would commit."""
         from django.http import HttpResponse

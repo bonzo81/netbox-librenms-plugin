@@ -2474,6 +2474,17 @@ class AddAsOOBView(
             except Device.DoesNotExist:
                 return _htmx_error_response("Device no longer exists; it may have been deleted concurrently.")
 
+            # Re-verify the legacy gate on the LOCKED row (mirrors DeviceConflictActionView's
+            # post-lock gate): a legacy bare-int written between the unlocked check above and
+            # this lock is valid on EVERY server as the documented universal fallback, and
+            # letting it reach set_librenms_oob would trigger its legacy-promotion branch —
+            # silently namespacing the id under this server only and dropping the device's
+            # LibreNMS linkage on all others.
+            if is_legacy_librenms_id(existing_device.custom_field_data.get("librenms_id")):
+                return _htmx_error_response(
+                    "Device has a legacy bare-integer librenms_id; use 'Convert mapping' to migrate first."
+                )
+
             from netbox_librenms_plugin.utils import (
                 AmbiguousLibreNMSIdError,
                 find_by_librenms_id,
