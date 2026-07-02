@@ -11,6 +11,9 @@ from unittest.mock import MagicMock, patch
 import pytest
 from django.test import RequestFactory
 
+from netbox_librenms_plugin.views.base.cables_view import SingleCableVerifyView
+from netbox_librenms_plugin.views.object_sync.devices import SingleInterfaceVerifyView
+
 
 def _make_request(body: dict) -> MagicMock:
     """Create a mock POST request with JSON body."""
@@ -20,45 +23,64 @@ def _make_request(body: dict) -> MagicMock:
     return request
 
 
-def _make_vc_device(pk=1, name="vc-device"):
-    """Create a mock Device that belongs to a virtual chassis."""
-    device = MagicMock()
-    device.pk = pk
-    device.id = pk
-    device.name = name
-    device._meta.model_name = "device"
-    device.virtual_chassis = MagicMock()
-    device.interfaces.filter.return_value.first.return_value = None
+def _verify_superuser(tag):
+    """A real superuser so the object-perm gate passes and restrict() resolves the real device."""
+    from django.contrib.auth import get_user_model
+
+    return get_user_model().objects.create_superuser(username=f"vv-{tag}", email="", password="x")
+
+
+def _real_vc_device(tag, name=None):
+    """A real Device that belongs to a VirtualChassis (so post() takes the VC sync-resolution branch)."""
+    from dcim.models import VirtualChassis
+
+    device = _make_gate_device(name=name or f"vc-{tag}")
+    vc = VirtualChassis.objects.create(name=f"VV-VC-{tag}")
+    device.virtual_chassis = vc
+    device.vc_position = 1
+    device.save()
     return device
+
+
+def _real_verify_view(view_cls, body, user, *, server_key="default"):
+    """Build a real verify view + real request; _librenms_api is stubbed only to supply the active-server key."""
+    from django.test import RequestFactory
+
+    view = view_cls()
+    view._librenms_api = MagicMock()
+    view._librenms_api.server_key = server_key
+    request = RequestFactory().post("/verify/", data=json.dumps(body), content_type="application/json")
+    request.user = user
+    view.request = request
+    view.kwargs = {}
+    view.args = ()
+    return view, request
 
 
 # ---------------------------------------------------------------------------
 # SingleCableVerifyView
 # ---------------------------------------------------------------------------
 class TestSingleCableVerifyView:
-    """SingleCableVerifyView.post() VC resolution and None guard."""
+    """SingleCableVerifyView.post() VC resolution and None guard (real device, real gate/restrict)."""
 
     def _make_view(self):
         from netbox_librenms_plugin.views.base.cables_view import SingleCableVerifyView
 
         view = object.__new__(SingleCableVerifyView)
         view._librenms_api = MagicMock()
-        # Direct post() calls bypass dispatch() (which sets self.request), so null the object-perm
-        # gate; the gate itself is covered in test_coverage_base_views.py.
         view.require_object_permissions_json = MagicMock(return_value=None)
         return view
 
-    @patch("netbox_librenms_plugin.views.base.cables_view.SingleCableVerifyView.restrict_object_or_404")
+    @pytest.mark.django_db
     @patch("netbox_librenms_plugin.views.base.cables_view.get_librenms_sync_device")
     @patch("netbox_librenms_plugin.views.base.cables_view.cache")
-    def test_vc_no_resolvable_sync_device_returns_empty_row(self, mock_cache, mock_sync, mock_get_obj):
-        """VC where get_librenms_sync_device returns None → empty row, no crash."""
-        device = _make_vc_device(pk=1)
-        mock_get_obj.return_value = device
+    def test_vc_no_resolvable_sync_device_returns_empty_row(self, mock_cache, mock_sync):
+        """VC where get_librenms_sync_device returns None -> empty row, no crash."""
+        device = _real_vc_device("cbl-nosync")
         mock_sync.return_value = None
-
-        view = self._make_view()
-        request = _make_request({"device_id": 1, "local_port_id": "42"})
+        view, request = _real_verify_view(
+            SingleCableVerifyView, {"device_id": device.pk, "local_port_id": "42"}, _verify_superuser("cbl-nosync")
+        )
         response = view.post(request)
 
         data = json.loads(response.content)
@@ -66,38 +88,36 @@ class TestSingleCableVerifyView:
         assert data["formatted_row"]["cable_status"] == "Missing Ports"
         mock_cache.get.assert_not_called()
 
-    @patch("netbox_librenms_plugin.views.base.cables_view.SingleCableVerifyView.restrict_object_or_404")
+    @pytest.mark.django_db
     @patch("netbox_librenms_plugin.views.base.cables_view.get_librenms_sync_device")
     @patch("netbox_librenms_plugin.views.base.cables_view.cache")
-    def test_vc_resolved_sync_device_uses_cache(self, mock_cache, mock_sync, mock_get_obj):
-        """VC with resolved sync device: cache is queried with that device's key."""
-        device = _make_vc_device(pk=1)
-        sync_device = _make_vc_device(pk=2, name="sync-device")
-        mock_get_obj.return_value = device
+    def test_vc_resolved_sync_device_uses_cache(self, mock_cache, mock_sync):
+        """VC with a resolved sync device: cache is queried with that device's key."""
+        device = _real_vc_device("cbl-sync")
+        sync_device = _real_vc_device("cbl-syncmember", name="cbl-sync-member")
         mock_sync.return_value = sync_device
-        mock_cache.get.return_value = None  # No cached data
-
-        view = self._make_view()
-        request = _make_request({"device_id": 1, "local_port_id": "42"})
+        mock_cache.get.return_value = None
+        view, request = _real_verify_view(
+            SingleCableVerifyView, {"device_id": device.pk, "local_port_id": "42"}, _verify_superuser("cbl-sync")
+        )
         view.post(request)
 
         mock_sync.assert_called_once_with(device, server_key=view._librenms_api.server_key)
         mock_cache.get.assert_called_once()
         cache_key = mock_cache.get.call_args[0][0]
         assert "device" in cache_key
-        assert "2" in cache_key
+        assert str(sync_device.pk) in cache_key
 
-    @patch("netbox_librenms_plugin.views.base.cables_view.SingleCableVerifyView.restrict_object_or_404")
+    @pytest.mark.django_db
     @patch("netbox_librenms_plugin.views.base.cables_view.get_librenms_sync_device")
     @patch("netbox_librenms_plugin.views.base.cables_view.cache")
-    def test_non_vc_device_skips_sync_device_lookup(self, mock_cache, mock_sync, mock_get_obj, mock_netbox_device):
+    def test_non_vc_device_skips_sync_device_lookup(self, mock_cache, mock_sync):
         """Non-VC device: get_librenms_sync_device is NOT called."""
-        mock_netbox_device.virtual_chassis = None
-        mock_get_obj.return_value = mock_netbox_device
+        device = _make_gate_device(name="cbl-nonvc")
         mock_cache.get.return_value = None
-
-        view = self._make_view()
-        request = _make_request({"device_id": 5, "local_port_id": "10"})
+        view, request = _real_verify_view(
+            SingleCableVerifyView, {"device_id": device.pk, "local_port_id": "10"}, _verify_superuser("cbl-nonvc")
+        )
         view.post(request)
 
         mock_sync.assert_not_called()
@@ -113,18 +133,17 @@ class TestSingleCableVerifyView:
         assert data["status"] == "success"
         assert data["formatted_row"]["cable_status"] == "Missing Ports"
 
-    @patch("netbox_librenms_plugin.views.base.cables_view.SingleCableVerifyView.restrict_object_or_404")
+    @pytest.mark.django_db
     @patch("netbox_librenms_plugin.views.base.cables_view.get_librenms_sync_device")
     @patch("netbox_librenms_plugin.views.base.cables_view.cache")
-    def test_malformed_cached_links_fail_closed(self, mock_cache, mock_sync, mock_get_obj, mock_netbox_device):
+    def test_malformed_cached_links_fail_closed(self, mock_cache, mock_sync):
         """A corrupt cached links entry must fail closed (empty row + purge), not 500 the verify path."""
-        mock_netbox_device.virtual_chassis = None
-        mock_get_obj.return_value = mock_netbox_device
-        # A non-dict link row: the old code iterates it and calls str.get(...) → AttributeError.
+        device = _make_gate_device(name="cbl-malformed")
+        # A non-dict link row: the old code iterates it and calls str.get(...) -> AttributeError.
         mock_cache.get.return_value = {"links": ["not-a-dict"]}
-
-        view = self._make_view()
-        request = _make_request({"device_id": 5, "local_port_id": "10"})
+        view, request = _real_verify_view(
+            SingleCableVerifyView, {"device_id": device.pk, "local_port_id": "10"}, _verify_superuser("cbl-malformed")
+        )
         response = view.post(request)
 
         data = json.loads(response.content)
@@ -159,34 +178,27 @@ def test_extract_cached_links_fails_closed_and_purges_malformed_entries():
 # SingleInterfaceVerifyView
 # ---------------------------------------------------------------------------
 class TestSingleInterfaceVerifyView:
-    """SingleInterfaceVerifyView.post() VC resolution and None guard."""
+    """SingleInterfaceVerifyView.post() VC resolution and None guard (real device, real gate/restrict)."""
 
     def _make_view(self):
         from netbox_librenms_plugin.views.object_sync.devices import SingleInterfaceVerifyView
 
         view = object.__new__(SingleInterfaceVerifyView)
         view._librenms_api = MagicMock()
-        # Direct post() calls bypass dispatch() (which sets self.request), so null the object-perm
-        # gate; permission ordering is covered in test_coverage_devices.py.
         view.require_object_permissions_json = MagicMock(return_value=None)
         return view
 
-    @patch("netbox_librenms_plugin.views.object_sync.devices.SingleInterfaceVerifyView.restrict_object_or_404")
+    @pytest.mark.django_db
     @patch("netbox_librenms_plugin.views.object_sync.devices.get_librenms_sync_device")
     @patch("netbox_librenms_plugin.views.object_sync.devices.cache")
-    def test_vc_no_resolvable_sync_device_returns_404(self, mock_cache, mock_sync, mock_get_obj):
-        """VC where get_librenms_sync_device returns None → 404 JSON error, no crash."""
-        device = _make_vc_device(pk=1)
-        mock_get_obj.return_value = device
+    def test_vc_no_resolvable_sync_device_returns_404(self, mock_cache, mock_sync):
+        """VC where get_librenms_sync_device returns None -> 404 JSON error, no crash."""
+        device = _real_vc_device("if-nosync")
         mock_sync.return_value = None
-
-        view = self._make_view()
-        request = _make_request(
-            {
-                "device_id": 1,
-                "interface_name": "eth0",
-                "interface_name_field": "ifName",
-            }
+        view, request = _real_verify_view(
+            SingleInterfaceVerifyView,
+            {"device_id": device.pk, "interface_name": "eth0", "interface_name_field": "ifName"},
+            _verify_superuser("if-nosync"),
         )
         response = view.post(request)
 
@@ -196,48 +208,38 @@ class TestSingleInterfaceVerifyView:
         assert "sync device" in data["message"].lower()
         mock_cache.get.assert_not_called()
 
-    @patch("netbox_librenms_plugin.views.object_sync.devices.SingleInterfaceVerifyView.restrict_object_or_404")
+    @pytest.mark.django_db
     @patch("netbox_librenms_plugin.views.object_sync.devices.get_librenms_sync_device")
     @patch("netbox_librenms_plugin.views.object_sync.devices.cache")
-    def test_vc_resolved_sync_device_uses_cache(self, mock_cache, mock_sync, mock_get_obj):
-        """VC with resolved sync device: cache is queried with that device's key."""
-        device = _make_vc_device(pk=1)
-        sync_device = _make_vc_device(pk=3, name="sync-member")
-        mock_get_obj.return_value = device
+    def test_vc_resolved_sync_device_uses_cache(self, mock_cache, mock_sync):
+        """VC with a resolved sync device: cache is queried with that device's key."""
+        device = _real_vc_device("if-sync")
+        sync_device = _real_vc_device("if-syncmember", name="if-sync-member")
         mock_sync.return_value = sync_device
         mock_cache.get.return_value = None
-
-        view = self._make_view()
-        request = _make_request(
-            {
-                "device_id": 1,
-                "interface_name": "eth0",
-                "interface_name_field": "ifName",
-            }
+        view, request = _real_verify_view(
+            SingleInterfaceVerifyView,
+            {"device_id": device.pk, "interface_name": "eth0", "interface_name_field": "ifName"},
+            _verify_superuser("if-sync"),
         )
         view.post(request)
 
         mock_sync.assert_called_once_with(device, server_key=view._librenms_api.server_key)
         mock_cache.get.assert_called_once()
         cache_key = mock_cache.get.call_args[0][0]
-        assert "3" in cache_key
+        assert str(sync_device.pk) in cache_key
 
-    @patch("netbox_librenms_plugin.views.object_sync.devices.SingleInterfaceVerifyView.restrict_object_or_404")
+    @pytest.mark.django_db
     @patch("netbox_librenms_plugin.views.object_sync.devices.get_librenms_sync_device")
     @patch("netbox_librenms_plugin.views.object_sync.devices.cache")
-    def test_non_vc_device_skips_sync_device_lookup(self, mock_cache, mock_sync, mock_get_obj, mock_netbox_device):
+    def test_non_vc_device_skips_sync_device_lookup(self, mock_cache, mock_sync):
         """Non-VC device: get_librenms_sync_device is NOT called."""
-        mock_netbox_device.virtual_chassis = None
-        mock_get_obj.return_value = mock_netbox_device
+        device = _make_gate_device(name="if-nonvc")
         mock_cache.get.return_value = None
-
-        view = self._make_view()
-        request = _make_request(
-            {
-                "device_id": 5,
-                "interface_name": "eth0",
-                "interface_name_field": "ifName",
-            }
+        view, request = _real_verify_view(
+            SingleInterfaceVerifyView,
+            {"device_id": device.pk, "interface_name": "eth0", "interface_name_field": "ifName"},
+            _verify_superuser("if-nonvc"),
         )
         view.post(request)
 
@@ -746,3 +748,100 @@ class TestVerifyViewObjectScope:
         scoped = Device.objects.restrict(user, "view")
         assert scoped.filter(pk=in_scope.pk).exists() is True
         assert scoped.filter(pk=out_of_scope.pk).exists() is False
+
+
+@pytest.mark.django_db
+class TestSaveVlanGroupOverridesObjectScope:
+    """SaveVlanGroupOverridesView WRITES overrides, so it must object-scope the device too.
+
+    require_write_permission_json only checks plugin-wide write access, so a plugin-writer with a
+    *constrained* view_device grant could otherwise persist VLAN overrides for a device they can't
+    see. The lookup must go through restrict() so an out-of-scope pk 404s.
+    """
+
+    SERVER_KEY = "default"
+
+    @staticmethod
+    def _plugin_writer_scoped_to(in_scope_device):
+        """A real user with plugin write access AND a pk-constrained view_device grant (no superuser)."""
+        from core.models import ObjectType
+        from dcim.models import Device
+        from django.apps import apps
+        from django.contrib.auth import get_user_model
+        from users.models import ObjectPermission
+
+        # Resolve via the app registry, not `from ...models import LibreNMSSettings`: the autouse
+        # mock_librenms_config fixture patches the module attribute to a MagicMock during the full
+        # suite, so a plain import would hand get_for_model() a mock class.
+        LibreNMSSettings = apps.get_model("netbox_librenms_plugin", "LibreNMSSettings")
+
+        user = get_user_model().objects.create_user(username="scoped-writer", password="x")
+
+        write = ObjectPermission.objects.create(name="plugin-write", actions=["change"])
+        write.object_types.set([ObjectType.objects.get_for_model(LibreNMSSettings)])
+        write.users.set([user])
+
+        view_dev = ObjectPermission.objects.create(
+            name="scoped-view-dev", actions=["view"], constraints={"pk": in_scope_device.pk}
+        )
+        view_dev.object_types.set([ObjectType.objects.get_for_model(Device)])
+        view_dev.users.set([user])
+
+        return get_user_model().objects.get(pk=user.pk)  # clear the per-request perm cache
+
+    def _view_and_request(self, user, device_pk):
+        from netbox_librenms_plugin.views.object_sync.devices import SaveVlanGroupOverridesView
+
+        view = SaveVlanGroupOverridesView()
+        request = RequestFactory().post(
+            "/plugins/librenms_plugin/save-vlan-overrides/",
+            data=json.dumps({"device_id": device_pk, "vid_group_map": {"10": 3}, "server_key": self.SERVER_KEY}),
+            content_type="application/json",
+        )
+        request.user = user
+        view.request = request
+        view.kwargs = {}
+        view.args = ()
+        return view, request
+
+    def test_out_of_scope_device_is_blocked(self):
+        """A plugin-writer scoped to another device cannot persist overrides for an out-of-scope device."""
+        from django.core.cache import cache as real_cache
+        from django.http import Http404
+
+        in_scope = _make_gate_device(name="ovr-in")
+        out_of_scope = _make_gate_device(name="ovr-out")
+        user = self._plugin_writer_scoped_to(in_scope)
+        view, request = self._view_and_request(user, out_of_scope.pk)
+
+        overrides_key = view.get_vlan_overrides_key(out_of_scope, self.SERVER_KEY)
+        real_cache.delete(overrides_key)
+        # Even with the ports cache warm (so the write path would otherwise proceed), the device
+        # must 404 at the restricted lookup before anything is persisted.
+        real_cache.set(view.get_cache_key(out_of_scope, "ports", self.SERVER_KEY), {"ports": []}, timeout=300)
+        try:
+            with pytest.raises(Http404):
+                view.post(request)
+            assert real_cache.get(overrides_key) is None  # nothing written for the out-of-scope device
+        finally:
+            real_cache.delete(overrides_key)
+            real_cache.delete(view.get_cache_key(out_of_scope, "ports", self.SERVER_KEY))
+
+    def test_in_scope_device_resolves_past_the_gate(self):
+        """The device the grant DOES cover resolves through restrict() (no over-block — reaches the write path)."""
+        from django.core.cache import cache as real_cache
+        from django.http import Http404, JsonResponse
+
+        in_scope = _make_gate_device(name="ovr-in-2")
+        user = self._plugin_writer_scoped_to(in_scope)
+        view, request = self._view_and_request(user, in_scope.pk)
+        try:
+            # Must NOT 404: an in-scope device is resolvable. (It then hits the ports-cache/TTL check,
+            # returning a JsonResponse either way — the point is the restricted lookup didn't block it.)
+            try:
+                response = view.post(request)
+            except Http404:
+                pytest.fail("in-scope device was wrongly blocked by restrict()")
+            assert isinstance(response, JsonResponse)
+        finally:
+            real_cache.delete(view.get_vlan_overrides_key(in_scope, self.SERVER_KEY))

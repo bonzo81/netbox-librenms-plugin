@@ -423,100 +423,97 @@ class TestAllServerMappingsDidValidation:
 
 
 class TestSingleCableVerifyServerKey:
-    """SingleCableVerifyView.post() must read server_key from POST body."""
+    """SingleCableVerifyView.post() must thread server_key from the POST body into VC resolution + cache key."""
 
-    def test_server_key_used_for_cache_lookup(self):
-        """The server_key from POST body is passed to get_cache_key and get_librenms_sync_device."""
+    @staticmethod
+    def _vc_device(tag):
+        """A real Device that belongs to a VirtualChassis (so post() takes the VC sync-resolution branch)."""
+        from dcim.models import Device, DeviceRole, DeviceType, Manufacturer, Site, VirtualChassis
+
+        mfr, _ = Manufacturer.objects.get_or_create(name=f"SkMfr-{tag}", slug=f"skmfr-{tag}")
+        dt, _ = DeviceType.objects.get_or_create(manufacturer=mfr, model=f"SkDT-{tag}", slug=f"skdt-{tag}")
+        role, _ = DeviceRole.objects.get_or_create(name="SkRole", slug="skrole")
+        site, _ = Site.objects.get_or_create(name="SkSite", slug="sksite")
+        vc = VirtualChassis.objects.create(name=f"SkVC-{tag}")
+        return Device.objects.create(
+            name=f"sk-{tag}", device_type=dt, role=role, site=site, status="active", virtual_chassis=vc, vc_position=1
+        )
+
+    @staticmethod
+    def _view_and_request(device, body, *, api_server_key):
+        """Real view + real superuser request; _librenms_api is stubbed only to supply the active-server key."""
         import json
+        from unittest.mock import MagicMock
+
+        from django.contrib.auth import get_user_model
+        from django.test import RequestFactory
 
         from netbox_librenms_plugin.views.base.cables_view import SingleCableVerifyView
 
-        view = object.__new__(SingleCableVerifyView)
+        view = SingleCableVerifyView()
         view._librenms_api = MagicMock()
-        # dispatch() sets self.request in production; this direct post() call needs an authorized
-        # request for the object-permission gate (reads self.request.user.has_perm).
-        view.request = MagicMock()
-        view.request.user.has_perm.return_value = True
-        view._librenms_api.server_key = "default-server"
+        view._librenms_api.server_key = api_server_key  # config boundary: the active-server fallback
+        request = RequestFactory().post("/verify-cable/", data=json.dumps(body), content_type="application/json")
+        request.user = get_user_model().objects.create_superuser(username=f"sk-{device.pk}", email="", password="x")
+        view.request = request
+        view.kwargs = {}
+        view.args = ()
+        return view, request
 
-        request = MagicMock()
-        request.body = json.dumps(
-            {
-                "device_id": 1,
-                "local_port_id": "42",
-                "server_key": "production",
-            }
-        ).encode()
+    @pytest.mark.django_db
+    def test_server_key_used_for_cache_lookup(self):
+        """The POSTed server_key is threaded into get_librenms_sync_device and the (real) cache key."""
+        from unittest.mock import patch
+
+        device = self._vc_device("used")
+        view, request = self._view_and_request(
+            device,
+            {"device_id": device.pk, "local_port_id": "42", "server_key": "production"},
+            api_server_key="default-server",
+        )
 
         with (
             # The posted key is honoured only when it names a configured server; post() checks the
-            # LibreNMSAPI.get_available_servers() CLASSMETHOD (not the instance) so it never builds a
-            # possibly-broken default client just to validate membership.
+            # LibreNMSAPI.get_available_servers() CLASSMETHOD (not the instance).
             patch(
                 "netbox_librenms_plugin.librenms_api.LibreNMSAPI.get_available_servers",
                 return_value={"production": "Production"},
             ),
             patch(
-                "netbox_librenms_plugin.views.mixins.NetBoxObjectPermissionMixin.restrict_object_or_404"
-            ) as mock_get_obj,
-            patch(
-                "netbox_librenms_plugin.views.base.cables_view.get_librenms_sync_device",
+                "netbox_librenms_plugin.views.base.cables_view.get_librenms_sync_device", return_value=device
             ) as mock_sync_device,
             patch("netbox_librenms_plugin.views.base.cables_view.cache") as mock_cache,
         ):
-            mock_device = MagicMock()
-            mock_sync_device.return_value = mock_device  # return a device so code reaches cache.get
-            mock_get_obj.return_value = mock_device
-            mock_cache.get.return_value = None  # No cached data
-
+            mock_cache.get.return_value = None  # no cached data -> early return once the key is built
             view.post(request)
 
-            # get_librenms_sync_device should be called with the posted server_key
-            mock_sync_device.assert_called_once_with(mock_device, server_key="production")
-            # cache lookup must also use the posted server_key (not the api default)
+            # get_librenms_sync_device gets the posted server_key (device compares by pk via Model.__eq__)
+            mock_sync_device.assert_called_once_with(device, server_key="production")
+            # the real cache key also carries the posted server_key (not the active default)
             cache_key_arg = mock_cache.get.call_args[0][0]
             assert "production" in cache_key_arg
 
+    @pytest.mark.django_db
     def test_fallback_to_api_server_key(self):
-        """When POST body has no server_key, falls back to self.librenms_api.server_key."""
-        import json
+        """With no server_key in the POST body, post() falls back to the active-server key."""
+        from unittest.mock import patch
 
-        from netbox_librenms_plugin.views.base.cables_view import SingleCableVerifyView
-
-        view = object.__new__(SingleCableVerifyView)
-        view._librenms_api = MagicMock()
-        # dispatch() sets self.request in production; this direct post() call needs an authorized
-        # request for the object-permission gate (reads self.request.user.has_perm).
-        view.request = MagicMock()
-        view.request.user.has_perm.return_value = True
-        view._librenms_api.server_key = "fallback-server"
-
-        request = MagicMock()
-        request.body = json.dumps(
-            {
-                "device_id": 1,
-                "local_port_id": "42",
-            }
-        ).encode()
+        device = self._vc_device("fallback")
+        view, request = self._view_and_request(
+            device, {"device_id": device.pk, "local_port_id": "42"}, api_server_key="fallback-server"
+        )
 
         with (
             patch(
-                "netbox_librenms_plugin.views.mixins.NetBoxObjectPermissionMixin.restrict_object_or_404"
-            ) as mock_get_obj,
-            patch(
                 "netbox_librenms_plugin.views.base.cables_view.get_librenms_sync_device",
+                side_effect=lambda dev, **kw: dev,
             ) as mock_sync_device,
             patch("netbox_librenms_plugin.views.base.cables_view.cache") as mock_cache,
         ):
-            mock_device = MagicMock()
-            mock_sync_device.return_value = mock_device  # return a device so code reaches cache.get
-            mock_get_obj.return_value = mock_device
             mock_cache.get.return_value = None
-
             view.post(request)
 
             mock_sync_device.assert_called_once()
             assert mock_sync_device.call_args[1]["server_key"] == "fallback-server"
-            # cache lookup must also use the fallback server_key
             cache_key_arg = mock_cache.get.call_args[0][0]
             assert "fallback-server" in cache_key_arg

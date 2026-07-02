@@ -555,7 +555,9 @@ class VerifyVlanSyncGroupView(LibreNMSPermissionMixin, NetBoxObjectPermissionMix
         )
 
 
-class SaveVlanGroupOverridesView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin, View):
+class SaveVlanGroupOverridesView(
+    LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreNMSAPIMixin, CacheMixin, View
+):
     """
     Persist user VLAN-group-override selections in cache.
 
@@ -584,7 +586,10 @@ class SaveVlanGroupOverridesView(LibreNMSPermissionMixin, LibreNMSAPIMixin, Cach
         # neither address an arbitrary namespace nor TypeError-500 the cf lookups below.
         server_key = self.resolve_requested_server_key(data)
 
-        device = get_object_or_404(Device, pk=device_id)
+        # Object-scope the lookup: require_write_permission_json above only checks plugin-wide write
+        # access, so without this any plugin-writer could persist VLAN overrides for a device they
+        # can't even view (out-of-scope pk). Restrict fail-closes it to a 404 like a nonexistent id.
+        device = self.restrict_object_or_404(Device, pk=device_id)
 
         # Normalise to the VC sync device so cache keys match what the sync view stored
         sync_device = get_librenms_sync_device(device, server_key=server_key)
