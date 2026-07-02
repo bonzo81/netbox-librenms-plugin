@@ -423,18 +423,17 @@ class SingleIPAddressVerifyView(NetBoxObjectPermissionMixin, LibreNMSPermissionM
         view perms, so a constrained grant must not resolve an out-of-scope id here — it 404s
         instead of exposing the object's cached IP verify payload.
         """
-        user = self.request.user
         if object_type == "device":
-            return get_object_or_404(Device.objects.restrict(user, "view"), pk=object_id)
+            return self.restrict_object_or_404(Device, pk=object_id)
         elif object_type == "virtualmachine":
-            return get_object_or_404(VirtualMachine.objects.restrict(user, "view"), pk=object_id)
+            return self.restrict_object_or_404(VirtualMachine, pk=object_id)
         else:
             # Try to find object without knowing its type (scoped to the caller's viewable objects).
-            obj = Device.objects.restrict(user, "view").filter(pk=object_id).first()
+            obj = self.restricted_queryset(Device).filter(pk=object_id).first()
             if obj:
                 return obj
 
-            obj = VirtualMachine.objects.restrict(user, "view").filter(pk=object_id).first()
+            obj = self.restricted_queryset(VirtualMachine).filter(pk=object_id).first()
             if obj:
                 return obj
 

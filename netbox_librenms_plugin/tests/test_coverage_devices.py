@@ -16,6 +16,13 @@ def _make_real_device(tag):
     return Device.objects.create(name=f"host-{tag}", device_type=dt, role=role, site=site, status="active")
 
 
+def _make_verify_superuser(tag):
+    """A real superuser so restrict(user, "view") returns the full queryset in DB-backed verify tests."""
+    from django.contrib.auth import get_user_model
+
+    return get_user_model().objects.create_superuser(username=f"verify-su-{tag}", email="", password="x")
+
+
 def _make_device_view():
     """Create a DeviceLibreNMSSyncView instance bypassing __init__."""
     from netbox_librenms_plugin.views.object_sync.devices import DeviceLibreNMSSyncView
@@ -297,7 +304,10 @@ class TestSingleInterfaceVerifyView:
         mock_device = MagicMock()
         mock_device.virtual_chassis = None
 
-        with patch("netbox_librenms_plugin.views.object_sync.devices.get_object_or_404", return_value=mock_device):
+        with patch(
+            "netbox_librenms_plugin.views.mixins.NetBoxObjectPermissionMixin.restrict_object_or_404",
+            return_value=mock_device,
+        ):
             with patch(
                 "netbox_librenms_plugin.views.object_sync.devices.get_librenms_sync_device", return_value=mock_device
             ):
@@ -324,7 +334,10 @@ class TestSingleInterfaceVerifyView:
 
         cached_data = {"ports": [{"ifName": "eth0", "speed": 1000}]}
 
-        with patch("netbox_librenms_plugin.views.object_sync.devices.get_object_or_404", return_value=mock_device):
+        with patch(
+            "netbox_librenms_plugin.views.mixins.NetBoxObjectPermissionMixin.restrict_object_or_404",
+            return_value=mock_device,
+        ):
             with patch(
                 "netbox_librenms_plugin.views.object_sync.devices.get_librenms_sync_device", return_value=mock_device
             ):
@@ -355,7 +368,10 @@ class TestSingleInterfaceVerifyView:
         mock_table = MagicMock()
         mock_table.format_interface_data.return_value = "<tr>row</tr>"
 
-        with patch("netbox_librenms_plugin.views.object_sync.devices.get_object_or_404", return_value=mock_device):
+        with patch(
+            "netbox_librenms_plugin.views.mixins.NetBoxObjectPermissionMixin.restrict_object_or_404",
+            return_value=mock_device,
+        ):
             with patch(
                 "netbox_librenms_plugin.views.object_sync.devices.get_librenms_sync_device", return_value=mock_device
             ):
@@ -391,7 +407,10 @@ class TestSingleInterfaceVerifyView:
         mock_table = MagicMock()
         mock_table.format_interface_data.return_value = "<tr>row</tr>"
 
-        with patch("netbox_librenms_plugin.views.object_sync.devices.get_object_or_404", return_value=mock_device):
+        with patch(
+            "netbox_librenms_plugin.views.mixins.NetBoxObjectPermissionMixin.restrict_object_or_404",
+            return_value=mock_device,
+        ):
             with patch(
                 "netbox_librenms_plugin.views.object_sync.devices.get_librenms_sync_device", return_value=None
             ) as mock_get_sync_device:
@@ -484,7 +503,10 @@ class TestSingleModuleVerifyView:
         mock_table.format_module_data.return_value = "<tr>row</tr>"
 
         with (
-            patch("netbox_librenms_plugin.views.object_sync.devices.get_object_or_404", return_value=selected_device),
+            patch(
+                "netbox_librenms_plugin.views.mixins.NetBoxObjectPermissionMixin.restrict_object_or_404",
+                return_value=selected_device,
+            ),
             patch("netbox_librenms_plugin.views.object_sync.devices.cache") as mock_cache,
             patch("netbox_librenms_plugin.utils.load_bay_mappings", return_value=([], [])),
             patch("netbox_librenms_plugin.utils.get_enabled_ignore_rules", return_value=[]),
@@ -609,7 +631,10 @@ class TestSingleVlanGroupVerifyView:
         request.body = json.dumps({"device_id": 1, "vid": "notanumber"}).encode()
 
         mock_device = MagicMock()
-        with patch("netbox_librenms_plugin.views.object_sync.devices.get_object_or_404", return_value=mock_device):
+        with patch(
+            "netbox_librenms_plugin.views.mixins.NetBoxObjectPermissionMixin.restrict_object_or_404",
+            return_value=mock_device,
+        ):
             response = view.post(request)
 
         assert isinstance(response, JsonResponse)
@@ -634,6 +659,8 @@ class TestSingleVlanGroupVerifyView:
         request.body = json.dumps(
             {"device_id": device.pk, "interface_name": "eth0", "vid": "10", "vlan_group_id": group.pk, "vlan_type": "U"}
         ).encode()
+        request.user = _make_verify_superuser("vg-with")
+        view.request = request
         response = view.post(request)
 
         assert isinstance(response, JsonResponse)
@@ -655,6 +682,8 @@ class TestSingleVlanGroupVerifyView:
         view = self._make_view()
         request = MagicMock()
         request.body = json.dumps({"device_id": device.pk, "vid": "100", "vlan_type": "T"}).encode()
+        request.user = _make_verify_superuser("vg-without")
+        view.request = request
         response = view.post(request)
 
         assert isinstance(response, JsonResponse)
@@ -686,6 +715,8 @@ class TestSingleVlanGroupVerifyView:
         request.body = json.dumps(
             {"device_id": device.pk, "vid": "10", "vlan_group_id": group.pk, "vlan_type": "T", "interface_name": "eth0"}
         ).encode()
+        request.user = _make_verify_superuser("vg-iface")
+        view.request = request
         response = view.post(request)
 
         assert isinstance(response, JsonResponse)

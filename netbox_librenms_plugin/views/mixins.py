@@ -4,7 +4,7 @@ from django.contrib import messages
 from django.contrib.auth.mixins import PermissionRequiredMixin
 from django.core.cache import cache
 from django.http import HttpResponse, JsonResponse
-from django.shortcuts import redirect
+from django.shortcuts import get_object_or_404, redirect
 from django.utils.http import url_has_allowed_host_and_scheme
 from utilities.permissions import get_permission_for_model
 
@@ -243,6 +243,42 @@ class NetBoxObjectPermissionMixin:
             missing_str = ", ".join(missing)
             return JsonResponse({"error": f"Missing permissions: {missing_str}"}, status=403)
         return None
+
+    def restricted_queryset(self, model, action="view"):
+        """
+        Scope *model*'s queryset to the objects the request user may *action*.
+
+        The permission gates (check_object_permissions / require_*_permissions) only ask
+        ``user.has_perm(perm)`` with no instance, so a constrained grant (e.g. a site-scoped
+        ``view_device``) passes the model-level check. Resolving an id against the plain manager
+        would then expose any object by raw pk, so scope through ``model.objects.restrict`` — the
+        same per-object constraint NetBox enforces everywhere else.
+
+        Args:
+            model: A NetBox model whose manager is a ``RestrictedQuerySet`` (exposes ``restrict``).
+            action: The permission action to scope by (default ``"view"``).
+
+        Returns:
+            A queryset filtered to the objects the request user may perform *action* on.
+        """
+        return model.objects.restrict(self.request.user, action)
+
+    def restrict_object_or_404(self, model, action="view", **kwargs):
+        """
+        Resolve one object through :meth:`restricted_queryset` (fail-closed lookup).
+
+        An out-of-scope id 404s exactly like a nonexistent one, so a constrained grant can't read
+        another object's data by raw pk. Mirrors ``get_object_or_404`` — pass the lookup as kwargs.
+
+        Args:
+            model: A NetBox model whose manager is a ``RestrictedQuerySet``.
+            action: The permission action to scope by (default ``"view"``).
+            **kwargs: Lookup kwargs forwarded to ``get_object_or_404`` (e.g. ``pk=...``).
+
+        Returns:
+            The resolved object the user is permitted to access.
+        """
+        return get_object_or_404(self.restricted_queryset(model, action), **kwargs)
 
     def require_all_permissions(self, method="POST"):
         """

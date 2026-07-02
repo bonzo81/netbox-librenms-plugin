@@ -518,7 +518,7 @@ class SingleCableVerifyView(NetBoxObjectPermissionMixin, BaseCableTableView):
         if selected_device_id:
             # Object-scope the lookup: the gate only checked model-level view_device, so an
             # out-of-scope pk must 404 rather than expose that device's cached cable row.
-            selected_device = get_object_or_404(Device.objects.restrict(request.user, "view"), pk=selected_device_id)
+            selected_device = self.restrict_object_or_404(Device, pk=selected_device_id)
 
             # Use the same sync-device resolution as the GET path so the cache
             # key matches what _prepare_context wrote. When the VC has no

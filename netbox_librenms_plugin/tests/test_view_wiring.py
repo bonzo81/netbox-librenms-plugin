@@ -456,7 +456,9 @@ class TestSingleCableVerifyServerKey:
                 "netbox_librenms_plugin.librenms_api.LibreNMSAPI.get_available_servers",
                 return_value={"production": "Production"},
             ),
-            patch("netbox_librenms_plugin.views.base.cables_view.get_object_or_404") as mock_get_obj,
+            patch(
+                "netbox_librenms_plugin.views.mixins.NetBoxObjectPermissionMixin.restrict_object_or_404"
+            ) as mock_get_obj,
             patch(
                 "netbox_librenms_plugin.views.base.cables_view.get_librenms_sync_device",
             ) as mock_sync_device,
@@ -498,7 +500,9 @@ class TestSingleCableVerifyServerKey:
         ).encode()
 
         with (
-            patch("netbox_librenms_plugin.views.base.cables_view.get_object_or_404") as mock_get_obj,
+            patch(
+                "netbox_librenms_plugin.views.mixins.NetBoxObjectPermissionMixin.restrict_object_or_404"
+            ) as mock_get_obj,
             patch(
                 "netbox_librenms_plugin.views.base.cables_view.get_librenms_sync_device",
             ) as mock_sync_device,

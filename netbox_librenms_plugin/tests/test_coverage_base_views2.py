@@ -709,7 +709,10 @@ class TestPostHandlerVC:
             return "ck"
 
         with (
-            patch("netbox_librenms_plugin.views.base.cables_view.get_object_or_404", return_value=mock_device),
+            patch(
+                "netbox_librenms_plugin.views.base.cables_view.SingleCableVerifyView.restrict_object_or_404",
+                return_value=mock_device,
+            ),
             patch("netbox_librenms_plugin.views.base.cables_view.cache") as mock_cache,
             patch.object(view, "get_cache_key", side_effect=fake_cache_key),
         ):
@@ -758,7 +761,7 @@ class TestPostHandlerVC:
 
         with (
             patch(
-                "netbox_librenms_plugin.views.base.cables_view.get_object_or_404",
+                "netbox_librenms_plugin.views.base.cables_view.SingleCableVerifyView.restrict_object_or_404",
                 return_value=mock_device,
             ),
             patch(
@@ -872,7 +875,7 @@ class TestPostHandlerInterfaceNotFound:
 
         with (
             patch(
-                "netbox_librenms_plugin.views.base.cables_view.get_object_or_404",
+                "netbox_librenms_plugin.views.base.cables_view.SingleCableVerifyView.restrict_object_or_404",
                 return_value=mock_device,
             ),
             patch(
@@ -953,7 +956,7 @@ class TestPostHandlerInterfaceNotFound:
 
         with (
             patch(
-                "netbox_librenms_plugin.views.base.cables_view.get_object_or_404",
+                "netbox_librenms_plugin.views.base.cables_view.SingleCableVerifyView.restrict_object_or_404",
                 return_value=mock_device,
             ),
             patch(
@@ -1986,7 +1989,7 @@ class TestPostHandlerCanCreateCable:
 
         with (
             patch(
-                "netbox_librenms_plugin.views.base.cables_view.get_object_or_404",
+                "netbox_librenms_plugin.views.base.cables_view.SingleCableVerifyView.restrict_object_or_404",
                 return_value=mock_device,
             ),
             patch(
@@ -2078,7 +2081,7 @@ class TestPostHandlerInterfaceNotFoundBranches:
 
         with (
             patch(
-                "netbox_librenms_plugin.views.base.cables_view.get_object_or_404",
+                "netbox_librenms_plugin.views.base.cables_view.SingleCableVerifyView.restrict_object_or_404",
                 return_value=mock_device,
             ),
             patch(

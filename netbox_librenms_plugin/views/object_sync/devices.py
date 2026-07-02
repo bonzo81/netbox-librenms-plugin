@@ -153,7 +153,7 @@ class SingleInterfaceVerifyView(
         # Restrict the lookup to the caller's viewable devices: the gate above only checked the
         # model-level view_device perm, so a site-scoped grant would otherwise read another
         # device's cached verify payload by raw pk.
-        selected_device = get_object_or_404(Device.objects.restrict(request.user, "view"), pk=selected_device_id)
+        selected_device = self.restrict_object_or_404(Device, pk=selected_device_id)
 
         # Normalise to the VC sync device so cache keys match what the sync view stored
         if selected_device.virtual_chassis:
@@ -237,7 +237,7 @@ class SingleModuleVerifyView(
         # Restrict the lookup to the caller's viewable devices: the gate above only checked the
         # model-level view_device perm, so a site-scoped grant would otherwise read another
         # device's cached verify payload by raw pk.
-        selected_device = get_object_or_404(Device.objects.restrict(request.user, "view"), pk=selected_device_id)
+        selected_device = self.restrict_object_or_404(Device, pk=selected_device_id)
 
         if selected_device.virtual_chassis:
             sync_device = get_librenms_sync_device(selected_device, server_key=server_key)
@@ -395,7 +395,7 @@ class SingleVlanGroupVerifyView(LibreNMSPermissionMixin, NetBoxObjectPermissionM
 
         # Object-scope the lookup (see SingleInterfaceVerifyView): the gate only checked model-level
         # view_device, so an out-of-scope pk must 404 rather than expose the device.
-        device = get_object_or_404(Device.objects.restrict(request.user, "view"), pk=device_id)
+        device = self.restrict_object_or_404(Device, pk=device_id)
         try:
             vid = int(vid_str)
         except (ValueError, TypeError):

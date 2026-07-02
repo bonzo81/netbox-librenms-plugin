@@ -91,7 +91,7 @@ class TestStaleFieldStripping:
         request = _make_request({"device_id": 1, "local_port_id": 100})
 
         with (
-            patch("netbox_librenms_plugin.views.base.cables_view.get_object_or_404", return_value=device),
+            patch.object(view, "restrict_object_or_404", return_value=device),
             patch("netbox_librenms_plugin.views.base.cables_view.cache") as mock_cache,
             patch.object(view, "get_cache_key", return_value="test_key"),
             patch.object(view, "check_cable_status", side_effect=fake_check_cable_status),
@@ -152,7 +152,7 @@ class TestStaleFieldStripping:
         view.process_remote_device = fake_process_remote
 
         with (
-            patch("netbox_librenms_plugin.views.base.cables_view.get_object_or_404") as mock_get,
+            patch.object(view, "restrict_object_or_404") as mock_get,
             patch("netbox_librenms_plugin.views.base.cables_view.cache") as mock_cache,
             patch("netbox_librenms_plugin.views.base.cables_view.get_librenms_sync_device", return_value=None),
             patch("netbox_librenms_plugin.views.base.cables_view.get_token", return_value="tok"),
@@ -224,7 +224,7 @@ class TestXSSEscaping:
         request = _make_request({"device_id": 1, "local_port_id": 100})
 
         with (
-            patch("netbox_librenms_plugin.views.base.cables_view.get_object_or_404", return_value=device),
+            patch.object(view, "restrict_object_or_404", return_value=device),
             patch("netbox_librenms_plugin.views.base.cables_view.cache") as mock_cache,
             patch.object(view, "get_cache_key", return_value="test_key"),
             patch.object(view, "check_cable_status", side_effect=fake_check_cable_status),
@@ -288,7 +288,7 @@ class TestXSSEscaping:
         request = _make_request({"device_id": 1, "local_port_id": 100})
 
         with (
-            patch("netbox_librenms_plugin.views.base.cables_view.get_object_or_404", return_value=device),
+            patch.object(view, "restrict_object_or_404", return_value=device),
             patch("netbox_librenms_plugin.views.base.cables_view.cache") as mock_cache,
             patch.object(view, "get_cache_key", return_value="test_key"),
             patch.object(view, "check_cable_status", side_effect=fake_check_cable_status),
@@ -439,6 +439,7 @@ class TestSingleCableVerifyMisconfiguredDefault:
         from django.contrib.auth import get_user_model
 
         request.user = get_user_model().objects.create_user(username="scv-user", password="x", is_superuser=True)
+        view.request = request  # dispatch() normally wires this; the object-scoped lookup reads self.request.user
         with override_settings(PLUGINS_CONFIG=cfg):
             response = view.post(request)
 

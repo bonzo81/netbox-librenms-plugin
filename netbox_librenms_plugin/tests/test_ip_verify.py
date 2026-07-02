@@ -74,26 +74,36 @@ class TestCacheKeyFormat:
         assert view.get_cache_key(device, "ip_addresses", "default") == expected_key
 
 
+@pytest.mark.django_db
 class TestServerKeyFromPost:
-    """server_key from POST body must be used for cache lookup."""
+    """server_key from POST body must be threaded into the cache lookup key, keyed on the REAL device pk.
 
-    @pytest.fixture(autouse=True)
-    def _patch_ip_models(self):
-        """Patch IPAddress.objects to avoid DB access."""
-        with patch("netbox_librenms_plugin.views.base.ip_addresses_view.IPAddress") as mock_ip:
-            mock_ip.objects.filter.return_value.first.return_value = None
-            yield
+    The device is resolved through the real object-scoped lookup (real Device + a real superuser on
+    the request, so ``restrict`` returns it); only the cache read is instrumented, to capture which
+    key the view queries.
+    """
 
-    def _run_post(self, body, device=None):
-        """Execute view.post() with mocks and return the cache key used."""
+    def _real_device(self):
+        from dcim.models import Device, DeviceRole, DeviceType, Manufacturer, Site
+
+        mfr, _ = Manufacturer.objects.get_or_create(name="IPSK-Mfr", slug="ipsk-mfr")
+        dt, _ = DeviceType.objects.get_or_create(manufacturer=mfr, model="IPSK-DT", slug="ipsk-dt")
+        role, _ = DeviceRole.objects.get_or_create(name="IPSK-Role", slug="ipsk-role")
+        site, _ = Site.objects.get_or_create(name="IPSK-Site", slug="ipsk-site")
+        return Device.objects.create(name="ipsk-dev", device_type=dt, role=role, site=site, status="active")
+
+    def _run_post(self, body):
+        """Execute view.post() against a real device and return (cache_key_queried, device_pk)."""
+        from django.contrib.auth import get_user_model
+
+        device = self._real_device()
+        body = {**body, "device_id": device.pk, "object_type": "device"}
+
         view = _make_view()
-        if device is None:
-            device = _mock_device()
-
         request = _make_request(body)
-        # Direct post() bypasses dispatch(); _get_object reads self.request.user to object-scope the
-        # lookup, so supply the request the view would otherwise get from dispatch.
+        request.user = get_user_model().objects.create_superuser(username="ipsk-user", email="", password="x")
         view.request = request
+
         captured_cache_key = {}
 
         def fake_cache_get(key):
@@ -101,13 +111,8 @@ class TestServerKeyFromPost:
             return {"ip_addresses": []}
 
         with (
-            patch(
-                "netbox_librenms_plugin.views.base.ip_addresses_view.get_object_or_404",
-                return_value=device,
-            ),
-            # The verify gate validates server_key against configured servers before using it as a
-            # cache namespace; configure "prod" so a posted "prod" threads through, while an absent
-            # or unconfigured key still falls back to "default".
+            # Configure "prod" so a posted "prod" threads through as the cache namespace, while an
+            # absent/unconfigured key falls back to "default".
             patch(
                 "netbox_librenms_plugin.librenms_api.LibreNMSAPI.get_available_servers",
                 return_value={"prod": "Prod"},
@@ -117,37 +122,22 @@ class TestServerKeyFromPost:
             mock_cache.get.side_effect = fake_cache_get
             view.post(request)
 
-        return captured_cache_key.get("key")
+        return captured_cache_key.get("key"), device.pk
 
     def test_server_key_threaded_to_cache_lookup(self):
         """post() must include server_key in the cache key."""
-        device = _mock_device(pk=5)
-        key = self._run_post(
-            {"device_id": 5, "ip_address": "10.0.0.1/24", "server_key": "prod", "object_type": "device"},
-            device=device,
-        )
-
-        assert key == "librenms_ip_addresses_device_5_prod"
+        key, pk = self._run_post({"ip_address": "10.0.0.1/24", "server_key": "prod"})
+        assert key == f"librenms_ip_addresses_device_{pk}_prod"
 
     def test_default_server_key_when_missing(self):
         """When server_key is absent from POST, default to 'default'."""
-        device = _mock_device(pk=5)
-        key = self._run_post(
-            {"device_id": 5, "ip_address": "10.0.0.1/24", "object_type": "device"},
-            device=device,
-        )
-
-        assert key == "librenms_ip_addresses_device_5_default"
+        key, pk = self._run_post({"ip_address": "10.0.0.1/24"})
+        assert key == f"librenms_ip_addresses_device_{pk}_default"
 
     def test_null_server_key_falls_back_to_default(self):
         """When server_key is explicitly null, fall back to 'default'."""
-        device = _mock_device(pk=5)
-        key = self._run_post(
-            {"device_id": 5, "ip_address": "10.0.0.1/24", "server_key": None, "object_type": "device"},
-            device=device,
-        )
-
-        assert key == "librenms_ip_addresses_device_5_default"
+        key, pk = self._run_post({"ip_address": "10.0.0.1/24", "server_key": None})
+        assert key == f"librenms_ip_addresses_device_{pk}_default"
 
 
 class TestVerifyPostRejectsNonObjectBody:

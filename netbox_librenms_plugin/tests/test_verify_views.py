@@ -48,7 +48,7 @@ class TestSingleCableVerifyView:
         view.require_object_permissions_json = MagicMock(return_value=None)
         return view
 
-    @patch("netbox_librenms_plugin.views.base.cables_view.get_object_or_404")
+    @patch("netbox_librenms_plugin.views.base.cables_view.SingleCableVerifyView.restrict_object_or_404")
     @patch("netbox_librenms_plugin.views.base.cables_view.get_librenms_sync_device")
     @patch("netbox_librenms_plugin.views.base.cables_view.cache")
     def test_vc_no_resolvable_sync_device_returns_empty_row(self, mock_cache, mock_sync, mock_get_obj):
@@ -66,7 +66,7 @@ class TestSingleCableVerifyView:
         assert data["formatted_row"]["cable_status"] == "Missing Ports"
         mock_cache.get.assert_not_called()
 
-    @patch("netbox_librenms_plugin.views.base.cables_view.get_object_or_404")
+    @patch("netbox_librenms_plugin.views.base.cables_view.SingleCableVerifyView.restrict_object_or_404")
     @patch("netbox_librenms_plugin.views.base.cables_view.get_librenms_sync_device")
     @patch("netbox_librenms_plugin.views.base.cables_view.cache")
     def test_vc_resolved_sync_device_uses_cache(self, mock_cache, mock_sync, mock_get_obj):
@@ -87,7 +87,7 @@ class TestSingleCableVerifyView:
         assert "device" in cache_key
         assert "2" in cache_key
 
-    @patch("netbox_librenms_plugin.views.base.cables_view.get_object_or_404")
+    @patch("netbox_librenms_plugin.views.base.cables_view.SingleCableVerifyView.restrict_object_or_404")
     @patch("netbox_librenms_plugin.views.base.cables_view.get_librenms_sync_device")
     @patch("netbox_librenms_plugin.views.base.cables_view.cache")
     def test_non_vc_device_skips_sync_device_lookup(self, mock_cache, mock_sync, mock_get_obj, mock_netbox_device):
@@ -113,7 +113,7 @@ class TestSingleCableVerifyView:
         assert data["status"] == "success"
         assert data["formatted_row"]["cable_status"] == "Missing Ports"
 
-    @patch("netbox_librenms_plugin.views.base.cables_view.get_object_or_404")
+    @patch("netbox_librenms_plugin.views.base.cables_view.SingleCableVerifyView.restrict_object_or_404")
     @patch("netbox_librenms_plugin.views.base.cables_view.get_librenms_sync_device")
     @patch("netbox_librenms_plugin.views.base.cables_view.cache")
     def test_malformed_cached_links_fail_closed(self, mock_cache, mock_sync, mock_get_obj, mock_netbox_device):
@@ -171,7 +171,7 @@ class TestSingleInterfaceVerifyView:
         view.require_object_permissions_json = MagicMock(return_value=None)
         return view
 
-    @patch("netbox_librenms_plugin.views.object_sync.devices.get_object_or_404")
+    @patch("netbox_librenms_plugin.views.object_sync.devices.SingleInterfaceVerifyView.restrict_object_or_404")
     @patch("netbox_librenms_plugin.views.object_sync.devices.get_librenms_sync_device")
     @patch("netbox_librenms_plugin.views.object_sync.devices.cache")
     def test_vc_no_resolvable_sync_device_returns_404(self, mock_cache, mock_sync, mock_get_obj):
@@ -196,7 +196,7 @@ class TestSingleInterfaceVerifyView:
         assert "sync device" in data["message"].lower()
         mock_cache.get.assert_not_called()
 
-    @patch("netbox_librenms_plugin.views.object_sync.devices.get_object_or_404")
+    @patch("netbox_librenms_plugin.views.object_sync.devices.SingleInterfaceVerifyView.restrict_object_or_404")
     @patch("netbox_librenms_plugin.views.object_sync.devices.get_librenms_sync_device")
     @patch("netbox_librenms_plugin.views.object_sync.devices.cache")
     def test_vc_resolved_sync_device_uses_cache(self, mock_cache, mock_sync, mock_get_obj):
@@ -222,7 +222,7 @@ class TestSingleInterfaceVerifyView:
         cache_key = mock_cache.get.call_args[0][0]
         assert "3" in cache_key
 
-    @patch("netbox_librenms_plugin.views.object_sync.devices.get_object_or_404")
+    @patch("netbox_librenms_plugin.views.object_sync.devices.SingleInterfaceVerifyView.restrict_object_or_404")
     @patch("netbox_librenms_plugin.views.object_sync.devices.get_librenms_sync_device")
     @patch("netbox_librenms_plugin.views.object_sync.devices.cache")
     def test_non_vc_device_skips_sync_device_lookup(self, mock_cache, mock_sync, mock_get_obj, mock_netbox_device):
