@@ -953,44 +953,62 @@ class TestCablePartialSnapshotNotCached:
 # =============================================================================
 
 
-class TestGetTableOverride:
-    """Tests for BaseCableTableView.get_table — sets htmx_url after calling super()."""
+class TestCableTableHtmxUrl:
+    """_prepare_context sets table.htmx_url from the RESOLVED server scope.
 
-    def _make_testable_view(self, server_key="default", path="/cables/"):
-        """Create a testable subclass that injects a concrete get_table via MRO."""
+    Set in _prepare_context (not a base get_table override): DeviceCableTableView
+    overrides get_table without calling super, so a base override never ran for the
+    device tab — and the base's lazy self.librenms_api.server_key could point at a
+    different server than the resolved scope.
+    """
+
+    def _run_prepare(self, server_key, path="/cables/"):
         from netbox_librenms_plugin.views.base.cables_view import BaseCableTableView
 
-        mock_table = MagicMock()
-
-        class _FakeParent:
-            def get_table(self, data, obj):
-                return mock_table
-
-        class _TestableCableView(BaseCableTableView, _FakeParent):
-            pass
-
-        view = object.__new__(_TestableCableView)
+        view = object.__new__(BaseCableTableView)
         view._librenms_api = MagicMock()
-        view._librenms_api.server_key = server_key
+        view._librenms_api.server_key = "session-server"  # must NOT leak into the URL
         view.request = _mock_request(path)
-        return view, mock_table
 
-    def test_sets_htmx_url_with_server_key(self):
-        """get_table sets htmx_url including server_key when present."""
-        view, mock_table = self._make_testable_view(server_key="default", path="/cables/")
+        mock_table = MagicMock()
+        with (
+            patch.object(view, "get_cache_key", return_value="cable-key"),
+            patch.object(view, "enrich_links_data", return_value=[]),
+            patch.object(view, "get_table", return_value=mock_table),
+            patch("netbox_librenms_plugin.views.base.cables_view.cache") as mock_cache,
+        ):
+            mock_cache.get.return_value = {"links": []}
+            mock_cache.ttl.return_value = 300
+            result = view._prepare_context(view.request, MagicMock(), fetch_fresh=False, server_key=server_key)
+        assert result is not None
+        return mock_table
 
-        result = view.get_table([], MagicMock())
+    def test_sets_htmx_url_with_resolved_server_key(self):
+        table = self._run_prepare("secondary")
+        assert table.htmx_url == "/cables/?tab=cables&server_key=secondary"
 
-        assert result is mock_table
-        assert result.htmx_url == "/cables/?tab=cables&server_key=default"
+    def test_htmx_url_without_server_key_when_scope_and_session_are_blank(self):
+        """No resolved key AND a blank session client -> no server_key parameter."""
+        from netbox_librenms_plugin.views.base.cables_view import BaseCableTableView
 
-    def test_htmx_url_without_server_key(self):
-        """When server_key is falsy, htmx_url has no server_key parameter."""
-        view, mock_table = self._make_testable_view(server_key=None, path="/cables/")
+        view = object.__new__(BaseCableTableView)
+        view._librenms_api = MagicMock()
+        view._librenms_api.server_key = None
+        view.request = _mock_request("/cables/")
 
-        result = view.get_table([], MagicMock())
+        mock_table = MagicMock()
+        with (
+            patch.object(view, "get_cache_key", return_value="cable-key"),
+            patch.object(view, "enrich_links_data", return_value=[]),
+            patch.object(view, "get_table", return_value=mock_table),
+            patch("netbox_librenms_plugin.views.base.cables_view.cache") as mock_cache,
+        ):
+            mock_cache.get.return_value = {"links": []}
+            mock_cache.ttl.return_value = 300
+            result = view._prepare_context(view.request, MagicMock(), fetch_fresh=False, server_key=None)
 
-        assert result.htmx_url == "/cables/?tab=cables"
+        assert result is not None
+        assert mock_table.htmx_url == "/cables/?tab=cables"
 
 
 # =============================================================================

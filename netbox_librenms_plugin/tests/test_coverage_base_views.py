@@ -1015,6 +1015,26 @@ class TestBaseCableTableViewPrepareContext:
         assert result["table"] is mock_table
         mock_cache.set.assert_called()
 
+    def test_table_htmx_url_uses_resolved_server_scope(self):
+        """The pagination/sort URL (table.htmx_url) is built from the RESOLVED server scope, not the lazy session client (which can point at another server after a failed rebind or global switch — silently swapping the dataset mid-view). It must be set in _prepare_context: DeviceCableTableView overrides get_table without calling super, so a base-class get_table override never ran for the device tab."""
+        view = self._make_view()
+        view._librenms_api.server_key = "default"  # session client points at ANOTHER server
+        obj = _mock_obj()
+
+        mock_table = MagicMock()
+        with (
+            patch.object(view, "get_cache_key", return_value="cable-key"),
+            patch.object(view, "enrich_links_data", return_value=[]),
+            patch.object(view, "get_table", return_value=mock_table),
+            patch("netbox_librenms_plugin.views.base.cables_view.cache") as mock_cache,
+        ):
+            mock_cache.get.return_value = {"links": []}
+            mock_cache.ttl.return_value = 300
+            result = view._prepare_context(view.request, obj, fetch_fresh=False, server_key="secondary")
+
+        assert result is not None
+        assert isinstance(mock_table.htmx_url, str) and "server_key=secondary" in mock_table.htmx_url
+
     def test_cache_hit_re_enriches_and_returns_context(self):
         """Cached data is re-enriched and returned."""
         view = self._make_view()
@@ -1116,6 +1136,50 @@ class TestBaseCableTableViewGetContextData:
             ctx = view.get_context_data(request, obj)
 
         assert ctx is fake_context
+
+    def test_unresolved_server_key_renders_empty_not_cached_rows(self):
+        """?server_key naming a removed server must render EMPTY: its links snapshot can still be cached until TTL, and serving it as a live table (while the sibling tabs render empty) lets 'Create cable' act on a gone server's stale data."""
+        view = self._make_view()
+        obj = _mock_obj()
+        request = _mock_request()
+        request.GET = {"server_key": "ghost"}
+
+        stale_context = {"table": MagicMock(), "object": obj, "cache_expiry": None, "server_key": "ghost"}
+        with (
+            patch("netbox_librenms_plugin.librenms_api.build_librenms_api", return_value=None),
+            patch.object(view, "_prepare_context", return_value=stale_context) as prep,
+        ):
+            ctx = view.get_context_data(request, obj)
+
+        prep.assert_not_called()  # the cached snapshot is never consulted
+        assert ctx["table"] is None
+        assert ctx["server_key"] == "ghost"
+
+
+class TestBaseVLANTableViewUnresolvedServerKey:
+    """BaseVLANTableView.get_vlan_context must honor the unresolved flag like its sibling tabs."""
+
+    def test_unresolved_server_key_renders_empty_not_cached_vlans(self):
+        """?server_key naming a removed server must render EMPTY, not the server's still-cached VLANs."""
+        from netbox_librenms_plugin.views.base.vlan_table_view import BaseVLANTableView
+
+        view = object.__new__(BaseVLANTableView)
+        view._librenms_api = MagicMock()
+        view._librenms_api.server_key = "default"
+        obj = _mock_obj()
+        request = _mock_request()
+        request.GET = {"server_key": "ghost"}
+
+        with (
+            patch("netbox_librenms_plugin.librenms_api.build_librenms_api", return_value=None),
+            patch("netbox_librenms_plugin.views.base.vlan_table_view.cache") as mock_cache,
+            patch.object(view, "get_vlan_groups_for_device", return_value=[]),
+        ):
+            ctx = view.get_vlan_context(request, obj)
+
+        mock_cache.get.assert_not_called()  # the removed server's snapshot is never consulted
+        assert ctx["vlan_table"] is None
+        assert ctx["server_key"] == "ghost"
 
 
 class TestBaseCableTableViewPost:

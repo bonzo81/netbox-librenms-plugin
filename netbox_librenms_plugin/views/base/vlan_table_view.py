@@ -133,9 +133,21 @@ class BaseVLANTableView(VlanAssignmentMixin, LibreNMSAPIMixin, LibreNMSPermissio
         # cache and renders empty after a successful refresh). Mirrors modules_view.get_context_data.
         if server_key is None:
             # GET render: rebind + scope the VLAN-cache read to ?server_key (shared helper) so a
-            # non-default-server tab reads that server's cache, not the default's. An unresolved
-            # non-blank key scopes to that key (cache miss → empty), not the default's VLANs.
-            server_key, _unresolved = self.resolve_get_render_server_key(request)
+            # non-default-server tab reads that server's cache, not the default's.
+            server_key, unresolved = self.resolve_get_render_server_key(request)
+            if unresolved:
+                # The query named a server that no longer resolves (deleted/misconfigured). Its
+                # VLAN snapshot may still be cached until TTL — render empty scoped to the
+                # requested key instead of serving a removed server's VLANs as live data
+                # (mirrors the interfaces/modules/cables tabs' unresolved guards).
+                return {
+                    "object": obj,
+                    "vlan_table": None,
+                    "vlan_groups": self.get_vlan_groups_for_device(obj),
+                    "last_fetched": None,
+                    "cache_expiry": None,
+                    "server_key": server_key,
+                }
         # Honour the POST-resolved server when provided; otherwise use the shared degrading resolver
         # (not a bare getattr on the lazy librenms_api property): on a missing/misconfigured default
         # the property raises KeyError/ValueError, which would 500 the VLAN tab on GET.

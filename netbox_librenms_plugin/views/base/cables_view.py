@@ -1,4 +1,5 @@
 import logging
+from urllib.parse import quote_plus
 
 from dcim.models import Device, Interface
 from django.contrib import messages
@@ -611,11 +612,8 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin, 
         return links_data
 
     def get_table(self, data, obj):
-        """Get the table instance for the view."""
-        table = super().get_table(data, obj)
-        server_key = self._render_server_key()
-        table.htmx_url = f"{self.request.path}?tab=cables" + (f"&server_key={server_key}" if server_key else "")
-        return table
+        """Return the cable table for *data*; concrete subclasses choose the table class."""
+        raise NotImplementedError
 
     def _prepare_context(self, request, obj, fetch_fresh=False, server_key=None):
         """Helper method to prepare the context data for cable sync views."""
@@ -694,6 +692,13 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin, 
             cache_expiry = timezone.now() + timezone.timedelta(seconds=cache_ttl)
         # Generate the table
         table = self.get_table(links_data, obj)
+        # Build the follow-up HTMX URL (pagination/sorting) on the RESOLVED server scope —
+        # not the lazy session client, which can point at a different server after a failed
+        # rebind or a global switch, silently swapping the dataset mid-view. Set here rather
+        # than in a get_table override: DeviceCableTableView overrides get_table without
+        # calling super, so a base-class override never ran for the device tab (htmx_url
+        # stayed None). quote_plus mirrors ip_addresses_view (a key isn't a guaranteed slug).
+        table.htmx_url = f"{request.path}?tab=cables" + (f"&server_key={quote_plus(server_key)}" if server_key else "")
 
         table.configure(request)
 
@@ -708,9 +713,14 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin, 
     def get_context_data(self, request, obj):
         """Get the context data for the cable sync view."""
         # GET render: rebind + scope the cache read to ?server_key (shared helper) so a
-        # non-default-server tab reads that server's cache, not the default's. An unresolved
-        # non-blank key scopes to that key (cache miss → empty) rather than the default's links.
-        scoped, _unresolved = self.resolve_get_render_server_key(request)
+        # non-default-server tab reads that server's cache, not the default's.
+        scoped, unresolved = self.resolve_get_render_server_key(request)
+        if unresolved:
+            # The query named a server that no longer resolves (deleted/misconfigured). Its
+            # links snapshot may still be cached until TTL — render empty scoped to the
+            # requested key instead of serving a removed server's cable rows as a live table
+            # (mirrors the interfaces/modules/IP tabs' unresolved guards).
+            return {"table": None, "object": obj, "cache_expiry": None, "server_key": scoped}
         context = self._prepare_context(request, obj, fetch_fresh=False, server_key=scoped)
         if context is None:
             # No data found; return context with empty table
