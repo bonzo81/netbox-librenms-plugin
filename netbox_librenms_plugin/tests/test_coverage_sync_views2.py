@@ -884,23 +884,29 @@ class TestUpdateDeviceLocationView:
         result = view.post(view.request, pk=1)
         assert result.status_code == 403
 
-    def test_device_with_site_updates_location(self):
+    def _view_with_api(self):
+        """View with a cached client — the blank-POST rebind reuses it (new contract)."""
         from netbox_librenms_plugin.views.sync.devices import UpdateDeviceLocationView
 
         view = object.__new__(UpdateDeviceLocationView)
         view.require_write_permission = MagicMock(return_value=None)
+        mock_api = MagicMock()
+        mock_api.server_key = "default"
+        view._librenms_api = mock_api
+        return view, mock_api
+
+    def test_device_with_site_updates_location(self):
+        view, mock_api = self._view_with_api()
 
         mock_device = MagicMock()
         mock_device.site.name = "London"
-        mock_api = MagicMock()
         mock_api.get_librenms_id.return_value = 42
         mock_api.update_device_field.return_value = (True, "ok")
 
         with (
             patch("netbox_librenms_plugin.views.sync.devices.get_object_or_404", return_value=mock_device),
             patch("netbox_librenms_plugin.views.sync.devices.messages") as mock_msgs,
-            patch("netbox_librenms_plugin.views.sync.devices.redirect"),
-            patch.object(type(view), "librenms_api", new_callable=lambda: property(lambda s: mock_api)),
+            patch("netbox_librenms_plugin.views.sync.devices._device_sync_redirect"),
         ):
             view.request = _make_request()
             view.post(view.request, pk=1)
@@ -909,22 +915,17 @@ class TestUpdateDeviceLocationView:
         mock_msgs.success.assert_called_once()
 
     def test_device_with_site_api_failure(self):
-        from netbox_librenms_plugin.views.sync.devices import UpdateDeviceLocationView
-
-        view = object.__new__(UpdateDeviceLocationView)
-        view.require_write_permission = MagicMock(return_value=None)
+        view, mock_api = self._view_with_api()
 
         mock_device = MagicMock()
         mock_device.site.name = "London"
-        mock_api = MagicMock()
         mock_api.get_librenms_id.return_value = 42
         mock_api.update_device_field.return_value = (False, "Connection refused")
 
         with (
             patch("netbox_librenms_plugin.views.sync.devices.get_object_or_404", return_value=mock_device),
             patch("netbox_librenms_plugin.views.sync.devices.messages") as mock_msgs,
-            patch("netbox_librenms_plugin.views.sync.devices.redirect"),
-            patch.object(type(view), "librenms_api", new_callable=lambda: property(lambda s: mock_api)),
+            patch("netbox_librenms_plugin.views.sync.devices._device_sync_redirect"),
         ):
             view.request = _make_request()
             view.post(view.request, pk=1)
@@ -932,20 +933,15 @@ class TestUpdateDeviceLocationView:
         mock_msgs.error.assert_called_once()
 
     def test_device_no_site_shows_warning(self):
-        from netbox_librenms_plugin.views.sync.devices import UpdateDeviceLocationView
-
-        view = object.__new__(UpdateDeviceLocationView)
-        view.require_write_permission = MagicMock(return_value=None)
+        view, _mock_api = self._view_with_api()
 
         mock_device = MagicMock()
         mock_device.site = None
-        mock_api = MagicMock()
 
         with (
             patch("netbox_librenms_plugin.views.sync.devices.get_object_or_404", return_value=mock_device),
             patch("netbox_librenms_plugin.views.sync.devices.messages") as mock_msgs,
-            patch("netbox_librenms_plugin.views.sync.devices.redirect"),
-            patch.object(type(view), "librenms_api", new_callable=lambda: property(lambda s: mock_api)),
+            patch("netbox_librenms_plugin.views.sync.devices._device_sync_redirect"),
         ):
             view.request = _make_request()
             view.post(view.request, pk=1)
@@ -1510,8 +1506,8 @@ class TestSyncIPAddressesViewInterfaceResolution:
         assert by_name["Ethernet1"].pk == i1.pk
         assert by_name["Ethernet2"].pk == i2.pk
 
-    def test_primary_ip_not_set_from_sibling_vc_member_interface(self):
-        """Because _build_interface_maps indexes every VC member, a synced IP can resolve to a SIBLING member's interface."""
+    def test_primary_ip_set_from_sibling_vc_member_interface(self):
+        """Because _build_interface_maps indexes every VC member, a synced IP can resolve to a SIBLING member's interface — and NetBox's Device.clean() explicitly ACCEPTS a primary IP on any same-VC member's non-mgmt-only interface (vc_interfaces(if_master=False)), so the sync must set it rather than warn 'sync interfaces first' forever."""
         from ipam.models import IPAddress
 
         from netbox_librenms_plugin.utils import set_librenms_device_id
@@ -1545,11 +1541,51 @@ class TestSyncIPAddressesViewInterfaceResolution:
         # The IP is created and bound to the sibling's interface (the maps include all members)...
         created = IPAddress.objects.get(address="10.0.0.1/24")
         assert created.assigned_object == sibling_iface
-        # ...but m1's primary IP must NOT be set from an address on m2's interface.
+        # ...and m1's primary IP IS set — the exact assignment NetBox accepts manually.
+        m1.refresh_from_db()
+        assert m1.primary_ip4_id == created.pk
+        assert results["primary_set"] == ["10.0.0.1"]
+        assert results["primary_no_interface"] == []
+        # Proof the persisted state satisfies NetBox's own invariants.
+        m1.full_clean()
+
+    def test_primary_ip_not_set_from_sibling_mgmt_only_interface(self):
+        """A sibling member's mgmt_only interface is excluded from vc_interfaces(if_master=False), so NetBox would REJECT it as primary — the sync must keep refusing exactly that case."""
+        from dcim.models import Interface
+        from ipam.models import IPAddress
+
+        from netbox_librenms_plugin.utils import set_librenms_device_id
+
+        _vc, members = self._make_vc("ipres-vc-mgmt", [1, 2])
+        m1, m2 = members[1], members[2]
+        sibling_iface = Interface.objects.create(device=m2, name="mgmt0", type="other", mgmt_only=True)
+        set_librenms_device_id(sibling_iface, 5, "default")
+        sibling_iface.save()
+
+        view = self._view()
+        view._post_server_key = "default"
+        view.get_management_ip = MagicMock(return_value="10.0.0.2")
+
+        ip_data = {
+            "ip_address": "10.0.0.2",
+            "ip_with_mask": "10.0.0.2/24",
+            "interface_url": None,
+            "port_id": 5,
+            "interface_name": "mgmt0",
+        }
+        request = _make_request(post_data={"select": ["10.0.0.2"]})
+        with patch(
+            "netbox_librenms_plugin.views.sync.ip_addresses.resolve_set_primary_ip",
+            return_value=True,
+        ):
+            results = view.process_ip_sync(request, ["10.0.0.2"], [ip_data], m1, "device")
+
+        created = IPAddress.objects.get(address="10.0.0.2/24")
+        assert created.assigned_object == sibling_iface
         m1.refresh_from_db()
         assert m1.primary_ip4_id is None
         assert results["primary_set"] == []
-        assert results["primary_no_interface"] == ["10.0.0.1"]
+        assert results["primary_no_interface"] == ["10.0.0.2"]
 
     def test_build_interface_maps_vc_shared_name_prefers_viewed_member(self):
         """A name shared across VC members resolves to the VIEWED member's own interface (matching the rendered table), not ambiguous."""

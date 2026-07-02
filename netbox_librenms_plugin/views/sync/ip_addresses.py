@@ -385,13 +385,22 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
                     # guaranteed interface-assigned and can satisfy NetBox's primary constraint.
                     if mgmt_ip and self._same_host(ip_data["ip_address"], mgmt_ip):
                         # _build_interface_maps indexes ALL VC member interfaces, so `interface`
-                        # can belong to a sibling member. Setting obj.primary_ip to an address on
-                        # another device's interface would persist an invalid primary (save() skips
-                        # full_clean), so only set it when the interface is obj's own.
+                        # can belong to a sibling member. NetBox's Device.clean() accepts a
+                        # primary IP on any same-VC member's non-mgmt-only interface
+                        # (vc_interfaces(if_master=False)) — mirror that exactly: refuse only an
+                        # interface NetBox itself would reject (outside obj's VC, or a sibling's
+                        # mgmt-only interface), instead of refusing every sibling match on the
+                        # very VC case _build_interface_maps exists to support.
                         if (
                             isinstance(obj, Device)
                             and isinstance(interface, Interface)
                             and interface.device_id != obj.pk
+                            and not (
+                                obj.virtual_chassis_id is not None
+                                and interface.device is not None
+                                and interface.device.virtual_chassis_id == obj.virtual_chassis_id
+                                and not interface.mgmt_only
+                            )
                         ):
                             results["primary_no_interface"].append(ip_address)
                         elif self._set_primary_ip(obj, ip_obj):
