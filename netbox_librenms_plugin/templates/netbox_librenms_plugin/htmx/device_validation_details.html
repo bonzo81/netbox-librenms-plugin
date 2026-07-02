@@ -807,7 +807,8 @@
             <i class="mdi mdi-server"></i> Promote to host of {{ validation.existing_device.name }}...
           </button>
 
-          <div class="modal fade" id="promote-modal-{{ libre_device.device_id }}" tabindex="-1" aria-hidden="true">
+          <div class="modal fade" id="promote-modal-{{ libre_device.device_id }}" tabindex="-1"
+               aria-labelledby="promote-modal-label-{{ libre_device.device_id }}" aria-hidden="true">
             <div class="modal-dialog modal-dialog-centered">
               <div class="modal-content">
                 <form hx-post="{% url 'plugins:netbox_librenms_plugin:device_promote_to_host' device_id=libre_device.device_id %}"
@@ -818,7 +819,7 @@
                   <input type="hidden" name="server_key" value="{{ server_key }}">
 
                   <div class="modal-header py-2">
-                    <h5 class="modal-title">Promote to host of {{ validation.existing_device.name }}</h5>
+                    <h5 class="modal-title" id="promote-modal-label-{{ libre_device.device_id }}">Promote to host of {{ validation.existing_device.name }}</h5>
                     <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
                   </div>
                   <div class="modal-body small">

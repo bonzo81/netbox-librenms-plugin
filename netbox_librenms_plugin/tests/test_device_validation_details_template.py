@@ -472,3 +472,46 @@ def test_promote_form_reset_is_wired_to_both_close_paths():
     # so a Bootstrap backdrop dismiss (fires only hidden.bs.modal) was unhandled whenever the
     # fallback branch had been taken at render. That either/or is gone.
     assert "} else {" not in block
+
+
+@pytest.mark.django_db
+class TestPromoteModalAccessibility:
+    """The promote modal must carry aria-labelledby pointing at its titled heading (screen readers)."""
+
+    def _render(self):
+        from django.contrib.auth.models import AnonymousUser
+        from django.template.loader import render_to_string
+        from django.test import RequestFactory
+
+        from netbox_librenms_plugin.tests.conftest import make_device
+
+        existing = make_device("promote-a11y")
+        request = RequestFactory().get("/")
+        request.user = AnonymousUser()
+        ctx = {
+            "validation": {
+                "existing_device": existing,
+                "existing_match_type": "serial",
+                "serial_action": "promote_to_host",
+                "promote_to_host": {"existing_libre_id": 88, "existing_oob_type": "idrac"},
+                "warnings": [],
+            },
+            "libre_device": {"device_id": 12, "sysName": "promote-a11y", "hostname": "promote-a11y"},
+            "server_key": "default",
+            "existing_device_model_name": "device",
+            "existing_device_url": existing.get_absolute_url(),
+            "sync_info": {},
+            "existing_id_servers": [],
+            "use_sysname": True,
+            "strip_domain": False,
+        }
+        return render_to_string("netbox_librenms_plugin/htmx/device_validation_details.html", ctx, request=request)
+
+    def test_promote_modal_labelledby_targets_its_title_id(self):
+        """The modal's aria-labelledby id matches the id on its modal-title heading (real linkage)."""
+        html = self._render()
+        # Precondition: the promote modal rendered for this context.
+        assert 'id="promote-modal-12"' in html
+        # The modal references its heading, and the heading actually carries that id.
+        assert 'aria-labelledby="promote-modal-label-12"' in html
+        assert 'id="promote-modal-label-12"' in html
