@@ -204,6 +204,84 @@ class TestSaveDevice:
         assert response is None
         assert Device.objects.get(pk=device.pk).device_type_id == two_u.pk
 
+    @pytest.mark.django_db
+    def test_update_fields_device_type_0u_at_rack_position_is_blocked(self):
+        """Device.clean() forbids a 0U device type at a rack position; the update_fields mirror must too.
+
+        get_available_units(u_height=0) contains every unit, so the space check alone passes
+        trivially — without the explicit 0U rule the write persists a rack-invariant violation
+        with a success toast.
+        """
+        from dcim.models import Device, DeviceRole, DeviceType, Manufacturer, Rack, Site
+
+        from netbox_librenms_plugin.views.imports.actions import _save_device
+
+        mfr, _ = Manufacturer.objects.get_or_create(name="RackFitMfr", slug="rackfit-mfr")
+        role, _ = DeviceRole.objects.get_or_create(name="RackFitRole", slug="rackfit-role")
+        site, _ = Site.objects.get_or_create(name="RackFitSite", slug="rackfit-site")
+        rack = Rack.objects.create(name="RackFit-R3", site=site, u_height=42, status="active")
+        one_u = DeviceType.objects.create(manufacturer=mfr, model="RackFit-1Uc", slug="rackfit-1uc", u_height=1)
+        zero_u = DeviceType.objects.create(manufacturer=mfr, model="RackFit-0U", slug="rackfit-0u", u_height=0)
+        device = Device.objects.create(
+            name="rackfit-0u-dev",
+            device_type=one_u,
+            role=role,
+            site=site,
+            rack=rack,
+            position=20,
+            face="front",
+            status="active",
+        )
+
+        device.device_type = zero_u
+        response = _save_device(device, update_fields=["device_type"])
+
+        assert response is not None
+        assert b"0U" in response.content
+        assert Device.objects.get(pk=device.pk).device_type_id == one_u.pk
+
+    @pytest.mark.django_db
+    def test_update_fields_child_device_type_on_rack_face_is_blocked(self):
+        """Device.clean() forbids a child device type at a rack face; the update_fields mirror must too (a DeviceTypeMapping can map a hardware string to a blade/child type).
+
+        Face-without-position is the case the 0U rule can't catch (child types are 0U, so
+        with a position set the 0U rule fires first — matching Device.clean()'s own order).
+        """
+        from dcim.models import Device, DeviceRole, DeviceType, Manufacturer, Rack, Site
+
+        from netbox_librenms_plugin.views.imports.actions import _save_device
+
+        mfr, _ = Manufacturer.objects.get_or_create(name="RackFitMfr", slug="rackfit-mfr")
+        role, _ = DeviceRole.objects.get_or_create(name="RackFitRole", slug="rackfit-role")
+        site, _ = Site.objects.get_or_create(name="RackFitSite", slug="rackfit-site")
+        rack = Rack.objects.create(name="RackFit-R4", site=site, u_height=42, status="active")
+        zero_u = DeviceType.objects.create(manufacturer=mfr, model="RackFit-0Ud", slug="rackfit-0ud", u_height=0)
+        child = DeviceType.objects.create(
+            manufacturer=mfr,
+            model="RackFit-Child",
+            slug="rackfit-child",
+            u_height=0,
+            subdevice_role="child",
+        )
+        # A 0U device mounted on a rack face with no position — a valid NetBox placement.
+        device = Device.objects.create(
+            name="rackfit-child-dev",
+            device_type=zero_u,
+            role=role,
+            site=site,
+            rack=rack,
+            position=None,
+            face="front",
+            status="active",
+        )
+
+        device.device_type = child
+        response = _save_device(device, update_fields=["device_type"])
+
+        assert response is not None
+        assert b"hild device type" in response.content
+        assert Device.objects.get(pk=device.pk).device_type_id == zero_u.pk
+
 
 class TestResolveNamingPreferences:
     """Tests for resolve_naming_preferences (utils.resolve_naming_preferences)."""

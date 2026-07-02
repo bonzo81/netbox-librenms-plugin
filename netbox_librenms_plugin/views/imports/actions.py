@@ -247,20 +247,40 @@ def _platform_device_type_mismatch(device) -> HttpResponse | None:
 
 def _device_type_rack_fit_error(device) -> HttpResponse | None:
     """
-    Mirror NetBox Device.clean()'s rack-space rule for the ``save(update_fields=...)`` path.
+    Mirror NetBox Device.clean()'s rack-placement rules for the ``save(update_fields=...)`` path.
 
     ``save(update_fields=["device_type", ...])`` skips ``full_clean()`` (it would abort on
-    unrelated legacy fields), which also bypasses ``Device.clean()``'s rack-fit check: the new
-    device_type's ``u_height`` must fit in the free units at the device's rack position/face. A
-    taller LibreNMS-matched device_type would otherwise persist an out-of-bounds rack elevation
-    with a success toast and no DB backstop. Re-validate only that one rule (like
-    :func:`_platform_device_type_mismatch`): return an HTMX error response when it won't fit, else
-    ``None``. A device that isn't rack-mounted (no rack/position) is unaffected.
+    unrelated legacy fields), which also bypasses ``Device.clean()``'s rack checks: a 0U device
+    type cannot hold a rack position, a child device type cannot be assigned to a rack
+    face/position, and the new device_type's ``u_height`` must fit in the free units at the
+    device's rack position/face. A LibreNMS-matched device_type violating any of these would
+    otherwise persist an invalid rack elevation with a success toast and no DB backstop.
+    Re-validate only those rules (like :func:`_platform_device_type_mismatch`): return an HTMX
+    error response on a violation, else ``None``. A device that isn't rack-mounted (no
+    rack/position/face) is unaffected. Note the 0U/child rules can't be left to the space check:
+    ``get_available_units(u_height=0)`` contains every unit, so it passes trivially for exactly
+    the types these rules reject.
     """
     rack = getattr(device, "rack", None)
     position = getattr(device, "position", None)
+    face = getattr(device, "face", None)
     device_type = getattr(device, "device_type", None)
-    if not (rack and position and device_type):
+    if device_type is None:
+        return None
+    # Device.clean(): "A 0U device type cannot be assigned to a rack position."
+    if position and device_type.u_height == 0:
+        return _htmx_error_response(
+            f"Can't set device type to '{device_type}' (0U): a 0U device type cannot be assigned "
+            f"to a rack position — clear the device's position (U{position}) first."
+        )
+    # Device.clean(): child device types cannot be assigned to a rack face/position
+    # (both are attributes of the parent device).
+    if rack and getattr(device_type, "is_child_device", False) and (face or position):
+        return _htmx_error_response(
+            f"Can't set device type to '{device_type}': child device types cannot be assigned to "
+            "a rack face or position — these are attributes of the parent device."
+        )
+    if not (rack and position):
         return None
     try:
         # Full-depth types occupy both faces, so fit is checked rack-wide (rack_face=None); exclude
