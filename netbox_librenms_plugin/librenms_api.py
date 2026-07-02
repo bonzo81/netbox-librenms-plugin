@@ -9,6 +9,12 @@ from netbox.plugins import get_plugin_config
 DEFAULT_API_TIMEOUT = 10
 EXTENDED_API_TIMEOUT = 20  # For endpoints that may take longer (e.g., device listing)
 
+# Short-lived cache for get_device_info(). The device-info header is fetched on every sync-tab
+# render (and again on the post-action redirect), but a device's identity/metadata is stable, so
+# a brief cache removes a redundant synchronous LibreNMS round-trip from each render without
+# meaningfully staling the displayed values.
+DEVICE_INFO_CACHE_TIMEOUT = 60
+
 logger = logging.getLogger(__name__)
 
 
@@ -24,6 +30,22 @@ class LibreNMSAPI:
         Args:
             server_key: Key for specific server configuration. If None, uses selected server or default.
         """
+        # Track whether the caller explicitly requested a specific server. A key auto-resolved
+        # from LibreNMSSettings.selected_server is NOT explicit, so a stale stored key falls back
+        # to the first available server rather than hard-failing (issue #110).
+        # A blank/whitespace-only string is "no key", not an explicit request: treating "" as
+        # explicit would mark the auto-resolved (and possibly stale) selected_server as explicit
+        # and defeat that fallback, raising KeyError instead.
+        if isinstance(server_key, str):
+            server_key = server_key.strip() or None
+        elif server_key is not None:
+            # A non-string key (e.g. a list/dict from a tampered payload) is not a valid server
+            # key and is unhashable — left as-is it would raise TypeError at the `not in
+            # servers_config` membership check below. Treat it as unset so it fails cleanly via
+            # the same fallback path as a blank string.
+            server_key = None
+        explicit_server_key = server_key is not None
+
         # If no server_key is provided, try to get the selected server from settings
         if not server_key:
             try:
@@ -46,31 +68,58 @@ class LibreNMSAPI:
         # If a specific (non-default) server_key was requested but not found, raise
         # immediately to avoid silently using the wrong LibreNMS instance.
         if servers_config and isinstance(servers_config, dict) and server_key not in servers_config:
-            if server_key != "default":
+            # Only fail closed for an *explicitly* requested non-default key (tampered or
+            # stale-page input). An auto-resolved/default key falls back instead (issue #110).
+            if explicit_server_key and server_key != "default":
                 available = list(servers_config.keys())
                 raise KeyError(
                     f"Server '{server_key}' not found in LibreNMS plugin configuration. Available servers: {available}"
                 )
-            first_key = next(iter(servers_config), None)
-            if first_key:
-                logger.info(
-                    "Server '%s' not found in config, falling back to '%s'",
-                    server_key,
-                    first_key,
-                )
-                server_key = first_key
+            # Pick the first *usable* mapping — a dict that actually carries a url + token. A
+            # non-dict or incomplete entry would otherwise be selected and then raise at the config
+            # read below, masking a perfectly usable later server (e.g. {"bad": {}, "prod": {...}}).
+            # If none are usable, fail with a clear error (issue #110).
+            first_key = next(
+                (
+                    key
+                    for key, config in servers_config.items()
+                    if isinstance(config, dict) and config.get("librenms_url") and config.get("api_token")
+                ),
+                None,
+            )
+            if first_key is None:
+                raise ValueError("No valid LibreNMS server configuration entries found.")
+            logger.info(
+                "Server '%s' not found in config, falling back to '%s'",
+                server_key,
+                first_key,
+            )
+            server_key = first_key
 
         self.server_key = server_key
 
         if servers_config and isinstance(servers_config, dict) and server_key in servers_config:
             # Multi-server configuration
             config = servers_config[server_key]
-            self.librenms_url = config["librenms_url"]
-            self.api_token = config["api_token"]
+            # The fallback above only guards the key-not-found case; a present-but-malformed
+            # entry (e.g. {"default": "not-a-dict"}) would otherwise raise an opaque TypeError
+            # at the key reads below. Fail with a clear configuration error instead (issue #110).
+            if not isinstance(config, dict):
+                raise ValueError(f"Invalid LibreNMS server configuration for '{server_key}': expected a mapping.")
+            # Read with .get() rather than direct indexing: a dict-shaped but incomplete entry
+            # (e.g. {"default": {}}) passes the isinstance check, so config["librenms_url"] would
+            # raise an opaque KeyError instead of the ValueError contract callers rely on. The
+            # url/token completeness is enforced by the single guard at the end of __init__.
+            self.librenms_url = config.get("librenms_url")
+            self.api_token = config.get("api_token")
             self.cache_timeout = config.get("cache_timeout", 300)
             self.verify_ssl = config.get("verify_ssl", True)
         else:
-            # Fallback to legacy single-server configuration
+            # Fallback to legacy single-server configuration. Legacy mode has only the implicit
+            # default server, so a stale/tampered request key (e.g. build_librenms_api("ghost"))
+            # must not survive as self.server_key — it would otherwise become the cache/redirect
+            # discriminator under an unconfigured value. Normalize to "default".
+            self.server_key = "default"
             self.librenms_url = get_plugin_config("netbox_librenms_plugin", "librenms_url")
             self.api_token = get_plugin_config("netbox_librenms_plugin", "api_token")
             self.cache_timeout = get_plugin_config("netbox_librenms_plugin", "cache_timeout", 300)
@@ -160,8 +209,14 @@ class LibreNMSAPI:
             # Multi-server configuration
             result = {}
             for key, config in servers_config.items():
-                display_name = config.get("display_name", key)
-                result[key] = display_name
+                # Skip non-usable entries: a non-dict raises on config.get(...) below, and a
+                # dict-shaped but incomplete entry (no librenms_url/api_token, e.g. {"bad": {}})
+                # would pass the redirect/rebind membership check that keys off this map and then
+                # blow up LibreNMSAPI(server_key="bad"). A server that can't be constructed must not
+                # be selectable — exposing it 500s a sync POST instead of degrading to the active one.
+                if not isinstance(config, dict) or not config.get("librenms_url") or not config.get("api_token"):
+                    continue
+                result[key] = config.get("display_name", key)
             return result
         else:
             # Legacy single-server configuration
@@ -346,16 +401,29 @@ class LibreNMSAPI:
         except (requests.exceptions.RequestException, ValueError, IndexError, KeyError, TypeError):
             return None
 
-    def get_device_info(self, device_id):
+    def get_device_info(self, device_id, use_cache=True):
         """
         Fetch device information from LibreNMS using its primary IP.
 
+        Successful lookups are cached briefly (``DEVICE_INFO_CACHE_TIMEOUT``) per
+        server/device so the device-info header doesn't re-hit LibreNMS on every
+        sync-tab render. Failures are never cached, so a transient error doesn't
+        persist for the cache window.
+
         Args:
             device_id: LibreNMS device ID
+            use_cache: When False, bypass the short read cache and fetch live data
+                (still refreshing the cache on success). Import decisions pass False so a
+                value just corrected in LibreNMS isn't read back stale within the cache window.
 
         Returns:
             tuple: (success: bool, data: dict)
         """
+        cache_key = f"librenms_device_info_{self.server_key}_{device_id}"
+        if use_cache:
+            cached = cache.get(cache_key)
+            if cached is not None:
+                return cached
 
         try:
             response = requests.get(
@@ -375,7 +443,9 @@ class LibreNMSAPI:
             location = device_data.get("location")
             if isinstance(location, dict):
                 device_data["location"] = location.get("location")
-            return True, device_data
+            result = (True, device_data)
+            cache.set(cache_key, result, timeout=DEVICE_INFO_CACHE_TIMEOUT)
+            return result
         except (requests.exceptions.RequestException, ValueError, IndexError, KeyError, TypeError):
             return False, None
 
