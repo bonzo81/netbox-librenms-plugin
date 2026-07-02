@@ -239,6 +239,19 @@ class TestDeviceImportTableSortData:
         # Should not raise
         table._sort_data()
 
+    @pytest.mark.django_db
+    def test_construction_time_order_by_sorts_case_insensitively(self):
+        """order_by passed to the constructor must apply _sort_data's case-insensitive sort — the import list view wires request.GET["sort"] straight into DeviceImportTable(...). django_tables2's native ordering also sorts on construction but case-SENSITIVELY ("Zulu" < "alpha"), so this catches the __init__ sort block going dead (the direct _sort_data tests above bypass __init__ and cannot)."""
+        from netbox_librenms_plugin.tables.device_status import DeviceImportTable
+
+        data = [
+            {"device_id": 1, "hostname": "Zulu"},
+            {"device_id": 2, "hostname": "alpha"},
+            {"device_id": 3, "hostname": "Mango"},
+        ]
+        table = DeviceImportTable(data=data, order_by="hostname")
+        assert [row["hostname"] for row in table.data.data] == ["alpha", "Mango", "Zulu"]
+
     def test_sort_by_hostname_ascending(self):
         data = [
             {"hostname": "zebra", "sysName": "z"},

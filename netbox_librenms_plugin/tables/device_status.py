@@ -107,6 +107,11 @@ class DeviceImportTable(tables.Table):
         self._cached_clusters = list(Cluster.objects.all().order_by("name"))
         self._cached_roles = list(DeviceRole.objects.all().order_by("name"))
 
+        # Apply sorting if order_by is specified
+        # Since we're working with dictionaries, not QuerySets, we handle sorting manually
+        if self.order_by:
+            self._sort_data()
+
     def _server_key_hx_vals(self):
         """
         hx-vals attribute carrying the import page's server_key on row-update posts.
@@ -120,11 +125,6 @@ class DeviceImportTable(tables.Table):
         if not server_key:
             return ""
         return f"hx-vals='{escape(json.dumps({'server_key': str(server_key)}))}' "
-
-        # Apply sorting if order_by is specified
-        # Since we're working with dictionaries, not QuerySets, we handle sorting manually
-        if self.order_by:
-            self._sort_data()
 
     def _sort_data(self):
         """Sort table data based on order_by parameter."""
