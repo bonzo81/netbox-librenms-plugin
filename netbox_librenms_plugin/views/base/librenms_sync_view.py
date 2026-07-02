@@ -1,6 +1,7 @@
 import re
 
 from django.conf import settings as django_settings
+from django.contrib import messages
 from django.shortcuts import get_object_or_404, render
 from netbox.views import generic
 
@@ -40,6 +41,37 @@ class BaseLibreNMSSyncView(LibreNMSPermissionMixin, LibreNMSAPIMixin, generic.Ob
         # — an internally inconsistent page. A blank/absent key keeps the session/default client, so
         # single-server and default renders are unchanged.
         _scoped_key, unresolved = self.resolve_get_render_server_key(request)
+
+        # The resolve can decline WITHOUT binding a client: a blank/absent key with a
+        # misconfigured default (build_librenms_api(None) → None), or an unresolved
+        # ?server_key on a fresh view. Everything below (and get_context_data) reads the
+        # lazy self.librenms_api property, which would reconstruct LibreNMSAPI() and
+        # re-raise the very KeyError/ValueError the helper just swallowed — an unhandled
+        # 500 for every device page. Bind the default via the fail-closed factory; if even
+        # that can't build, degrade to a minimal render with an error banner.
+        if getattr(self, "_librenms_api", None) is None:
+            from netbox_librenms_plugin.librenms_api import build_librenms_api
+
+            default_api = build_librenms_api(None)
+            if default_api is None:
+                messages.error(
+                    request,
+                    "LibreNMS server is not configured correctly (missing URL or API token). "
+                    "Check the plugin settings.",
+                )
+                return render(
+                    request,
+                    self.template_name,
+                    {
+                        "object": obj,
+                        "tab": self.tab,
+                        "has_librenms_id": False,
+                        "found_in_librenms": False,
+                        "librenms_device_details": {},
+                        "platform_info": {},
+                    },
+                )
+            self._librenms_api = default_api
 
         # For Virtual Chassis members, always delegate to get_librenms_sync_device() so
         # self._librenms_lookup_device and self.librenms_id are consistent with the

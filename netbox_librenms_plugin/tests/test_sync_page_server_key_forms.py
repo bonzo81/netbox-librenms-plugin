@@ -152,6 +152,48 @@ def reverse_fragment(url_name):
     return reverse(f"plugins:netbox_librenms_plugin:{url_name}", kwargs={"pk": pk})
 
 
+class TestSyncPageMisconfiguredDefaultDegrades:
+    """A misconfigured default server must degrade the sync page, not 500 it.
+
+    resolve_get_render_server_key deliberately swallows the construction error
+    (build_librenms_api(None) → None); get() must not re-enter the lazy
+    librenms_api property, which would reconstruct LibreNMSAPI() and re-raise it.
+    """
+
+    def test_get_with_broken_default_renders_degraded_page(self):
+        from django.contrib.auth import get_user_model
+        from django.contrib.messages.storage.fallback import FallbackStorage
+
+        from netbox_librenms_plugin.views.object_sync.devices import DeviceLibreNMSSyncView
+
+        device = make_device("sync-page-degraded")
+        user = get_user_model().objects.create_superuser(username="sync-degraded-su")
+
+        request = RequestFactory().get("/x/")  # plain GET, no ?server_key
+        request.user = user
+        request.htmx = False
+        request.session = {}
+        request._messages = FallbackStorage(request)
+
+        view = DeviceLibreNMSSyncView()
+        view.setup(request, pk=device.pk)
+
+        with (
+            # The default server can't build a client (config typo / rotated secret)...
+            patch("netbox_librenms_plugin.librenms_api.build_librenms_api", return_value=None),
+            # ...so any lazy LibreNMSAPI() reconstruction would raise — exactly what a
+            # misconfigured default does in production.
+            patch(
+                "netbox_librenms_plugin.views.mixins.LibreNMSAPI",
+                side_effect=ValueError("LibreNMS URL or API token is not configured"),
+            ),
+        ):
+            response = view.get(request, pk=device.pk)
+
+        assert response.status_code == 200
+        assert "not configured correctly" in response.content.decode()
+
+
 class TestUpdateDeviceLocationRebindsServer:
     """UpdateDeviceLocationView must write to the POSTed server, not the global default."""
 
