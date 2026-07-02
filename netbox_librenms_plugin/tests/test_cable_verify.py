@@ -15,7 +15,7 @@ Covers:
 """
 
 import json
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 from django.core.cache import cache as real_cache
@@ -220,3 +220,163 @@ class TestXSSEscaping:
         remote_device_html = content["formatted_row"]["remote_device"]
         assert "<img " not in remote_device_html
         assert "&lt;img" in remote_device_html
+
+
+def _cable_view_with_api(tag, body, *, api_server_key="default"):
+    """A real SingleCableVerifyView + real superuser request, with _librenms_api stubbed only to supply
+    the active-server fallback key (its constructor would otherwise need real LibreNMS config)."""
+    from django.contrib.auth import get_user_model
+
+    from netbox_librenms_plugin.views.base.cables_view import SingleCableVerifyView
+
+    view = SingleCableVerifyView()
+    view._librenms_api = MagicMock()
+    view._librenms_api.server_key = api_server_key
+    request = RequestFactory().post("/verify-cable/", data=json.dumps(body), content_type="application/json")
+    request.user = get_user_model().objects.create_superuser(username=f"guard-{tag}", email="", password="x")
+    view.request = request
+    view.kwargs = {}
+    view.args = ()
+    return view, request
+
+
+@pytest.mark.django_db
+class TestServerKeyGuard:
+    """A forged non-string server_key must not crash the membership check; a configured string is honoured."""
+
+    @pytest.mark.parametrize("forged", [["prod"], {"prod": 1}])
+    def test_unhashable_server_key_falls_back_without_crashing(self, forged):
+        """A JSON array/object server_key must fall back (the isinstance guard) — no unhashable TypeError."""
+        # No device_id → post() resolves server_key (the guarded line) then returns the empty row.
+        view, request = _cable_view_with_api("forged", {"server_key": forged})
+        response = view.post(request)  # must not raise an unhashable-type TypeError
+        assert response.status_code == 200
+
+    def test_valid_string_server_key_is_honoured_in_cache_namespace(self):
+        """A configured string key scopes the REAL links cache namespace, via the real classmethod check (#108/#109).
+
+        Unlike the old device_id="" version, this actually exercises the resolved server_key: it drives
+        the real LibreNMSAPI.get_available_servers() classmethod (patched to configure 'prod') and asserts
+        the resolved key threads into get_cache_key — so it fails if the membership check ever regresses.
+        """
+        device, _ = _cable_device("guard-valid", [("eth0", 100)])
+        view, request = _cable_view_with_api(
+            "valid", {"device_id": device.pk, "local_port_id": 100, "server_key": "prod"}
+        )
+
+        captured = {}
+        real_get_cache_key = view.get_cache_key
+
+        def spy(dev, kind, sk):
+            captured["server_key"] = sk
+            return real_get_cache_key(dev, kind, sk)
+
+        with (
+            patch(
+                "netbox_librenms_plugin.librenms_api.LibreNMSAPI.get_available_servers",
+                return_value={"prod": "Prod"},
+            ),
+            patch.object(view, "get_cache_key", side_effect=spy),
+        ):
+            view.post(request)
+
+        assert captured["server_key"] == "prod"  # the posted, CONFIGURED key was honoured, not the active default
+
+
+@pytest.mark.django_db
+class TestCablesGetRenderDegradesOnBrokenDefaultServer:
+    """A cached cables GET must degrade cleanly when the default LibreNMS server is misconfigured, not 500 on the lazy LibreNMSAPI() construction."""
+
+    def test_cached_render_does_not_500_when_default_server_build_fails(self):
+        from dcim.models import Device, DeviceRole, DeviceType, Manufacturer, Site
+        from django.contrib.auth import get_user_model
+        from django.core.cache import cache
+        from django.test import RequestFactory
+
+        from netbox_librenms_plugin.views.object_sync.devices import DeviceCableTableView
+
+        tag = "cables-broken-srv"
+        mfr, _ = Manufacturer.objects.get_or_create(name=f"Mfr-{tag}", slug=f"mfr-{tag}")
+        dt, _ = DeviceType.objects.get_or_create(manufacturer=mfr, model=f"DT-{tag}", slug=f"dt-{tag}")
+        role, _ = DeviceRole.objects.get_or_create(name=f"Role-{tag}", slug=f"role-{tag}")
+        site, _ = Site.objects.get_or_create(name=f"Site-{tag}", slug=f"site-{tag}")
+        device = Device.objects.create(name=f"host-{tag}", device_type=dt, role=role, site=site, status="active")
+        view = DeviceCableTableView()
+        request = RequestFactory().get("/")
+        User = get_user_model()
+        request.user = User.objects.filter(is_superuser=True, is_active=True).first() or User.objects.create(
+            username="cables-su", is_superuser=True, is_active=True
+        )
+        view.request = request
+
+        # Seed the links cache under the DEGRADED (None) server_key — what the broken-server render reads.
+        key = view.get_cache_key(device, "links", None)
+        cache.set(
+            key,
+            {"links": [{"local_port": "Gi0/1", "local_port_id": "1", "remote_device": None}]},
+            timeout=300,
+        )
+
+        def broken_cfg(_plugin, cfg_key, *args, **kwargs):
+            # A non-empty 'servers' with no 'default' and no valid dict entry makes LibreNMSAPI()
+            # raise ValueError in its constructor — the exact broken-default-server condition.
+            return {"alpha": "not-a-dict"} if cfg_key == "servers" else None
+
+        try:
+            with patch("netbox_librenms_plugin.librenms_api.get_plugin_config", side_effect=broken_cfg):
+                context = view.get_context_data(request, device)
+            # Degrades: the cached links still render (server_key falls back to None) instead of a 500.
+            assert context is not None
+            assert context["table"] is not None
+            assert context["server_key"] is None
+        finally:
+            cache.delete(key)
+
+
+@pytest.mark.django_db
+class TestSingleCableVerifyMisconfiguredDefault:
+    """SingleCableVerifyView resolves configured servers via the classmethod, not the raising instance property."""
+
+    def test_configured_key_does_not_500_when_default_broken(self):
+        """A configured 'prod' key resolves without constructing the broken default client (issue #108/#109)."""
+        from dcim.models import Device, DeviceRole, DeviceType, Manufacturer, Site
+        from django.test import RequestFactory, override_settings
+
+        from netbox_librenms_plugin.views.base.cables_view import SingleCableVerifyView
+
+        mfr, _ = Manufacturer.objects.get_or_create(name="Mfr-scv", slug="mfr-scv")
+        dt, _ = DeviceType.objects.get_or_create(manufacturer=mfr, model="DT-scv", slug="dt-scv")
+        role, _ = DeviceRole.objects.get_or_create(name="Role-scv", slug="role-scv")
+        site, _ = Site.objects.get_or_create(name="Site-scv", slug="site-scv")
+        device = Device.objects.create(name="host-scv", device_type=dt, role=role, site=site, status="active")
+
+        view = object.__new__(SingleCableVerifyView)
+        view._librenms_api = None  # live property: accessing it would build LibreNMSAPI() (default)
+        view.require_object_permissions_json = MagicMock(return_value=None)
+
+        # DEFAULT present-but-broken (no url/token) → LibreNMSAPI() raises; get_available_servers()={'prod'}.
+        cfg = {
+            "netbox_librenms_plugin": {
+                "servers": {
+                    "prod": {"librenms_url": "http://prod.example", "api_token": "tok"},
+                    "default": {},
+                }
+            }
+        }
+        request = RequestFactory().post(
+            "/verify/",
+            data=json.dumps({"device_id": device.pk, "local_port_id": "1", "server_key": "prod"}),
+            content_type="application/json",
+        )
+        # RequestFactory skips AuthenticationMiddleware; the object-scoped device lookup reads
+        # request.user, so attach a real superuser (this test is about server-key degradation, not
+        # object scope).
+        from django.contrib.auth import get_user_model
+
+        request.user = get_user_model().objects.create_user(username="scv-user", password="x", is_superuser=True)
+        view.request = request  # dispatch() normally wires this; the object-scoped lookup reads self.request.user
+        with override_settings(PLUGINS_CONFIG=cfg):
+            response = view.post(request)
+
+        assert response.status_code == 200
+        assert json.loads(response.content)["status"] == "success"
