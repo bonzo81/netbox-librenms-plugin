@@ -98,6 +98,7 @@ class SyncVLANsView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreN
         created_count = 0
         updated_count = 0
         skipped_count = 0
+        group_missing_count = 0
 
         with transaction.atomic():
             for vid_str in selected_vlans:
@@ -117,7 +118,19 @@ class SyncVLANsView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreN
                     try:
                         row_vlan_group = VLANGroup.objects.get(pk=int(group_id_str))
                     except (ValueError, VLANGroup.DoesNotExist):
-                        pass  # Fall back to global VLAN (no group)
+                        # A group was explicitly requested but doesn't exist (stale page or
+                        # tampered id). Fail closed: do NOT fall back to a global VLAN, which
+                        # would persist the VLAN in the wrong scope. Skip this VID and warn.
+                        messages.error(
+                            request,
+                            f"VLAN {vid}: the selected VLAN group no longer exists; skipped to avoid "
+                            "creating it in the wrong scope.",
+                        )
+                        # Count separately from genuine no-ops: this VID did NOT sync (it already
+                        # emitted its own error), so it must not inflate the "N unchanged" summary
+                        # and imply success.
+                        group_missing_count += 1
+                        continue
 
                 librenms_name = vlan_data.get("vlan_name", f"VLAN {vid}")
 
@@ -158,7 +171,10 @@ class SyncVLANsView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreN
                     else:
                         skipped_count += 1
 
-        # Build summary message
+        # Build summary message. created/updated/unchanged are all successful sync outcomes (an
+        # "unchanged" VID exists and already matches — nothing to do). Group-missing skips are NOT:
+        # each already emitted its own per-VID error, must never be folded into "N unchanged", and
+        # must not ride under a "VLANs synced" success when they're the only outcome.
         parts = []
         if created_count > 0:
             parts.append(f"{created_count} created")
@@ -168,7 +184,12 @@ class SyncVLANsView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreN
             parts.append(f"{skipped_count} unchanged")
 
         if parts:
+            if group_missing_count > 0:
+                parts.append(f"{group_missing_count} skipped (VLAN group missing)")
             messages.success(request, f"VLANs synced: {', '.join(parts)}.")
+        elif group_missing_count > 0:
+            # Nothing actually synced — only group-missing failures. Don't claim success.
+            messages.warning(request, f"No VLANs synced: {group_missing_count} skipped (VLAN group missing).")
         else:
             messages.warning(request, "No VLANs were created or updated.")
 
