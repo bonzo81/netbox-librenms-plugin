@@ -438,7 +438,21 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
         # below so get_context_data()'s comparison is int-vs-int (see the read side).
         oob_id = coerce_librenms_id(oob.get("id")) if isinstance(oob, dict) else None
         oob_failed = False
-        if oob_id:
+        if oob and oob_id is None:
+            # An OOB controller IS linked but its stored id is corrupt (non-numeric / bool /
+            # zero / negative — e.g. after a manual custom-field edit). A bare falsy check
+            # would conflate this with "no OOB linked": the controller's inventory rows would
+            # silently vanish, the host-only snapshot would be cached as complete, and every
+            # cached render would keep omitting them with no banner — while the Interfaces and
+            # Cables tabs fail closed with an explicit warning for the very same state. Take
+            # the same partial-outcome path as a fetch failure.
+            oob_failed = True
+            logger.warning(
+                "Invalid OOB controller id for device %s: %r",
+                self.librenms_id,
+                oob.get("id"),
+            )
+        elif oob_id:
             oob_success, oob_inventory = self.librenms_api.get_device_inventory(oob_id)
             # Same element-shape guard as the main inventory above: a list with non-dict
             # entries — or dicts whose entPhysicalIndex/entPhysicalContainedIn aren't ints —

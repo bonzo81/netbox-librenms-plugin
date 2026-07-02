@@ -574,8 +574,8 @@ class TestMergeTransceiverDataPortIdentity:
         mock_messages.warning.assert_called_once()  # malformed OOB inventory treated as a fetch failure
         mock_messages.success.assert_not_called()
 
-    def test_post_ignores_non_numeric_oob_id(self):
-        """A bool/non-numeric stored OOB id is coerced to None and never fired at get_device_inventory."""
+    def test_post_corrupt_oob_id_fails_closed(self):
+        """A linked OOB controller whose stored id is corrupt (bool/non-numeric) must fail CLOSED like the interfaces/cables tabs: no fetch with the garbage id, but a warning and NO cached host-only snapshot — a bare falsy check would conflate it with 'no OOB linked' and silently drop the controller's rows until TTL."""
         view = _make_view()
         view.model = MagicMock()
         obj = MagicMock()
@@ -613,10 +613,45 @@ class TestMergeTransceiverDataPortIdentity:
         ):
             view.post(request, pk=1)
 
-        # The non-numeric OOB id was coerced to None: no OOB inventory fetch, no OOB-failed warning.
+        # The garbage id is never fired at get_device_inventory...
         view._librenms_api.get_device_inventory.assert_called_once_with(777)
+        # ...but the user is warned and the host-only snapshot is NOT cached as complete.
+        mock_messages.warning.assert_called_once()
+        mock_messages.success.assert_not_called()
+        mock_cache.set.assert_not_called()
+        mock_cache.delete.assert_called_once_with("test_cache_key")
+
+    def test_post_no_oob_linked_stays_clean_success(self):
+        """No OOB linked at all (get_librenms_oob returns None) is NOT a failure: clean success toast and the snapshot is cached."""
+        view = _make_view()
+        view.model = MagicMock()
+        obj = MagicMock()
+        request = MagicMock()
+        request.POST.get.side_effect = lambda key, default=None: default
+
+        view.get_object = MagicMock(return_value=obj)
+        view._get_sync_device = MagicMock(return_value=obj)
+        view.has_write_permission = MagicMock(return_value=True)
+        view._build_context = MagicMock(
+            return_value={"table": None, "object": obj, "cache_expiry": None, "server_key": "default"}
+        )
+
+        view._librenms_api.get_librenms_id.return_value = 777
+        view._librenms_api.get_device_transceivers.return_value = (True, [])
+        view._librenms_api.get_ports.return_value = (True, {"ports": []})
+        view._librenms_api.get_device_inventory.return_value = (True, [])
+
+        with (
+            patch("netbox_librenms_plugin.views.base.modules_view.cache") as mock_cache,
+            patch("netbox_librenms_plugin.views.base.modules_view.messages") as mock_messages,
+            patch("netbox_librenms_plugin.views.base.modules_view.render", return_value=MagicMock(), create=True),
+            patch("netbox_librenms_plugin.views.mixins.render", return_value=MagicMock(), create=True),
+            patch("netbox_librenms_plugin.views.base.modules_view.get_librenms_oob", return_value=None),
+        ):
+            view.post(request, pk=1)
+
         mock_messages.success.assert_called_once()
-        # The cached fingerprint stores the coerced value (None), not the raw garbage string.
+        mock_messages.warning.assert_not_called()
         assert mock_cache.set.call_args[0][1]["oob_librenms_id"] is None
 
     def test_post_treats_non_int_oob_index_as_fetch_failure(self):
