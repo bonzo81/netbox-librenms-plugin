@@ -20,7 +20,7 @@
       <i class="mdi mdi-clock-alert"></i>
       {{ cache_expired_count }} of {{ selected_count }} selected device{{ selected_count|pluralize }} had expired cache data
       and {{ cache_expired_count|pluralize:"was,were" }} dropped or may be missing role/rack selections.
-      <a href="javascript:window.location.reload();" class="alert-link">Refresh</a> or re-run your filter to reload device data.
+      <button type="button" class="btn btn-link alert-link p-0 align-baseline" onclick="window.location.reload();">Refresh</button> or re-run your filter to reload device data.
     </div>
   {% endif %}
 

@@ -4667,6 +4667,9 @@ class TestBulkImportConfirmPartialCacheExpiry:
         assert "router01" in html
         assert "1 of 2 selected device" in html
         assert "expired cache data" in html
+        # The Refresh control is a real button, not a CSP-blocked javascript: pseudo-protocol href.
+        assert "javascript:" not in html
+        assert "<button" in html and "window.location.reload()" in html
 
 
 class TestBuildIdServerInfoPaddedId:

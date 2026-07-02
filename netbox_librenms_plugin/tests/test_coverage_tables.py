@@ -2713,3 +2713,19 @@ class TestInterfaceTableXSSEscaping:
         rendered = str(table.render_vlans(value=None, record=record))
         assert "<img" not in rendered
         assert "&lt;img" in rendered
+
+    def test_render_vlans_escapes_malicious_vid_when_missing(self):
+        """Same #105 sink but with the VLAN flagged missing, so the mark_safe(warning) missing-branch is exercised."""
+        table = _make_interface_table()
+        record = {
+            "untagged_vlan": self.XSS,
+            "tagged_vlans": [],
+            "missing_vlans": [self.XSS],  # vid in missing_vlans → missing branch (summary icon + tooltip)
+            "exists_in_netbox": False,
+            "netbox_interface": None,
+            "vlan_group_map": {},
+            "ifName": "eth0",
+        }
+        rendered = str(table.render_vlans(value=None, record=record))
+        assert "<img" not in rendered
+        assert "&lt;img" in rendered
