@@ -168,9 +168,13 @@ def compute_shape_signature(recording):
     name_prefix = re.sub(r"\d+$", "", lag_port_names[0]) if lag_port_names else None
     sub_styles = set()
     for p in ports:
-        name = p.get("ifName")
-        if isinstance(name, str) and re.search(r"\.\d+$", name):
-            sub_styles.add("dot-numeric")
+        # Scan BOTH name fields like every neighbouring detector (_lag_names above,
+        # compress._fingerprint, resolve_port_relationships): on ifDescr-mode devices the
+        # structured ".N" sub-unit name lives in ifDescr while ifName carries an arbitrary
+        # (anonymized) label, and an ifName-only scan fingerprints them as sub-interface-free.
+        for name in _lag_names(p):
+            if re.search(r"\.\d+$", name):
+                sub_styles.add("dot-numeric")
     port_stack_body = _body(recording, lambda k: k.endswith("/port_stack"))
     port_stack = bool(isinstance(port_stack_body, dict) and port_stack_body.get("mappings"))
 
@@ -193,7 +197,14 @@ def compute_shape_signature(recording):
     return {
         "os": os_name,
         "virtual_chassis": vc,
-        "lag": {"present": bool(lag_ports), "ieee8023ad": bool(lag_ports), "name_prefix": name_prefix},
+        "lag": {
+            "present": bool(lag_ports),
+            # ieee8023ad reflects the ifType-based detection style specifically — a LAG found
+            # only via a configured name pattern must not claim the 802.3ad-ifType style is
+            # covered (present and ieee8023ad are distinct axes, else they'd always be equal).
+            "ieee8023ad": any(p.get("ifType") == "ieee8023adLag" for p in lag_ports),
+            "name_prefix": name_prefix,
+        },
         "sub_interfaces": {"present": bool(sub_styles), "styles": sorted(sub_styles)},
         "port_stack": port_stack,
         "vlans": any(port_has_vlan(p) for p in ports),

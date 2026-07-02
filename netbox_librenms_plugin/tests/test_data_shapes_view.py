@@ -276,3 +276,23 @@ def test_capture_view_warns_on_residual_pii(recording_server):
     html = response.content.decode()
     assert "possible PII value" in html
     assert "10.7.8.9" in html
+
+
+@pytest.mark.django_db
+def test_capture_view_errors_on_mid_capture_transport_failure(recording_server):
+    """A mid-capture failure (capture raises RuntimeError) renders the error panel — an unhandled raise would 500, which htmx silently drops, leaving the Capture button apparently dead."""
+    server, api = recording_server(load_recording("cisco-stackwise-3member"))
+    device = make_device("cap-dev-transport", librenms_cf={"test": {"id": 1000}})
+    view = _view_with_api(api)
+
+    with patch(
+        "netbox_librenms_plugin.views.data_shapes.capture_device_recording",
+        side_effect=RuntimeError("Capture failed for 'devices/1000/ports': no HTTP response (status 0)"),
+    ):
+        response = _run_capture(view, server, device)
+
+    assert response.status_code == 200
+    html = response.content.decode()
+    assert "Capture failed" in html
+    assert "no HTTP response" in html
+    assert "Anonymized recording" not in html

@@ -59,13 +59,20 @@ class CaptureDataShapeView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin,
         # Include a linked OOB controller's ports (a separate LibreNMS device the interfaces view
         # merges into the host) so the submitted shape is complete for OOB hosts.
         oob = get_librenms_oob(sync_device, server_key=server_key)
-        recording = capture_device_recording(
-            self.librenms_api,
-            librenms_id,
-            name=f"{device.name}-shape",
-            description=f"Captured from {device.name}.",
-            oob_id=oob["id"] if oob and oob.get("id") else None,
-        )
+        try:
+            recording = capture_device_recording(
+                self.librenms_api,
+                librenms_id,
+                name=f"{device.name}-shape",
+                description=f"Captured from {device.name}.",
+                oob_id=oob["id"] if oob and oob.get("id") else None,
+            )
+        except RuntimeError as exc:
+            # capture deliberately raises on an incomplete capture (transport failure or an
+            # error status on a required structural route, e.g. a stale librenms_id). An
+            # unhandled raise would 500 — and htmx doesn't swap non-2xx responses, so the
+            # Capture button would just appear dead. Render the error panel built for this.
+            return self._error(request, device, f"Capture failed: {exc}")
         # Trim redundant high-cardinality ports BEFORE anonymizing — on the raw port names, which is
         # exactly what relationship resolution reads — so the shape stays intact while the recording
         # the contributor submits is small and reviewable.

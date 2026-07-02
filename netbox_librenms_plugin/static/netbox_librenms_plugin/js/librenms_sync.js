@@ -3569,20 +3569,19 @@ function initializeInstallSelectedForm() {
 let _activeVCReportController = null;
 
 /**
- * Wire the copy-to-clipboard button inside the VC report modal body.
- * Uses navigator.clipboard.writeText when available; falls back to the
- * textarea+execCommand path for older browsers / non-HTTPS contexts.
- * Called once after the fragment is injected into the modal.
+ * Wire a copy-to-clipboard button reading from a target element (textarea or any
+ * text-bearing node). Uses navigator.clipboard.writeText when available; falls back to a
+ * temporary textarea + execCommand for older browsers / insecure (plain-HTTP) contexts,
+ * and flashes "Copy failed" instead of silently doing nothing. Shared by the VC report
+ * modal and the capture-data-shape modal (which calls it from its inline script).
  */
-function initializeVCReportCopyButton() {
-    const btn = document.getElementById('vc-report-copy-btn');
+function wireCopyButton(btn, targetId, labels) {
     if (!btn || btn.dataset.copyInitialized) return;
     btn.dataset.copyInitialized = 'true';
 
-    const targetId = btn.dataset.target || 'vc-report-textarea';
-    const idleHtml = '<i class="mdi mdi-content-copy me-1"></i>Copy to clipboard';
-    const doneHtml = '<i class="mdi mdi-check me-1"></i>Copied';
-    const errHtml = '<i class="mdi mdi-alert me-1"></i>Copy failed';
+    const idleHtml = labels.idle;
+    const doneHtml = labels.done;
+    const errHtml = labels.err;
 
     const flash = (html, ms = 1500) => {
         btn.innerHTML = html;
@@ -3590,23 +3589,50 @@ function initializeVCReportCopyButton() {
     };
 
     btn.addEventListener('click', () => {
-        const ta = document.getElementById(targetId);
-        if (!ta) return;
-        const text = ta.value;
+        const target = document.getElementById(targetId);
+        if (!target) return;
+        const text = target.value !== undefined ? target.value : target.textContent;
         if (navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
             navigator.clipboard.writeText(text)
                 .then(() => flash(doneHtml))
                 .catch(() => flash(errHtml));
             return;
         }
-        // Fallback for older browsers or insecure contexts.
+        // Fallback for older browsers or insecure contexts: execCommand needs a selectable
+        // form control, so copy through a throwaway textarea when the target isn't one.
         try {
+            let ta = target;
+            let temp = null;
+            if (typeof ta.select !== 'function') {
+                temp = document.createElement('textarea');
+                temp.value = text;
+                temp.setAttribute('readonly', '');
+                temp.style.position = 'fixed';
+                temp.style.left = '-9999px';
+                document.body.appendChild(temp);
+                ta = temp;
+            }
             ta.select();
             const ok = document.execCommand('copy');
+            if (temp) document.body.removeChild(temp);
             flash(ok ? doneHtml : errHtml);
         } catch (e) {
             flash(errHtml);
         }
+    });
+}
+
+/**
+ * Wire the copy-to-clipboard button inside the VC report modal body.
+ * Called once after the fragment is injected into the modal.
+ */
+function initializeVCReportCopyButton() {
+    const btn = document.getElementById('vc-report-copy-btn');
+    if (!btn) return;
+    wireCopyButton(btn, btn.dataset.target || 'vc-report-textarea', {
+        idle: '<i class="mdi mdi-content-copy me-1"></i>Copy to clipboard',
+        done: '<i class="mdi mdi-check me-1"></i>Copied',
+        err: '<i class="mdi mdi-alert me-1"></i>Copy failed',
     });
 }
 

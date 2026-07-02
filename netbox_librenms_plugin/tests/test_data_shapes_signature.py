@@ -272,3 +272,58 @@ def test_classify_novelty_skips_malformed_manifest_entries():
     verdict = classify_novelty(sig, malformed_manifest)  # must not raise
     assert verdict["verdict"] == "likely-covered"
     assert verdict["closest"] == "cisco-stackwise-3member"
+
+
+def test_signature_pattern_only_lag_is_not_ieee8023ad():
+    """lag.ieee8023ad reflects the ifType detection style specifically — a pattern-only LAG must report present=True but ieee8023ad=False, else the manifest falsely claims the 802.3ad-ifType style is covered."""
+    rec = {
+        "schema_version": 1,
+        "name": "x",
+        "device_id": 1,
+        "lag_patterns": {"ios": r"^Po\d+$"},
+        "responses": {
+            "GET /api/v0/devices/1/ports": {
+                "status": "ok",
+                "ports": [{"port_id": 1, "ifName": "Po1", "ifType": "propVirtual"}],
+            }
+        },
+    }
+    sig = compute_shape_signature(rec)
+    assert sig["lag"]["present"] is True
+    assert sig["lag"]["ieee8023ad"] is False
+
+
+def test_signature_ieee8023ad_true_for_iftype_lag():
+    """A genuine ieee8023adLag ifType keeps the ieee8023ad axis true."""
+    rec = {
+        "schema_version": 1,
+        "name": "x",
+        "device_id": 1,
+        "responses": {
+            "GET /api/v0/devices/1/ports": {
+                "status": "ok",
+                "ports": [{"port_id": 1, "ifName": "Port-channel1", "ifType": "ieee8023adLag"}],
+            }
+        },
+    }
+    sig = compute_shape_signature(rec)
+    assert sig["lag"]["present"] is True
+    assert sig["lag"]["ieee8023ad"] is True
+
+
+def test_signature_subinterface_detected_in_ifdescr():
+    """ifDescr-mode devices carry the structured ".N" sub-unit name in ifDescr while ifName is an arbitrary (anonymized) label — the sub-interface axis must scan both name fields like every neighbouring detector."""
+    rec = {
+        "schema_version": 1,
+        "name": "x",
+        "device_id": 1,
+        "responses": {
+            "GET /api/v0/devices/1/ports": {
+                "status": "ok",
+                "ports": [{"port_id": 1, "ifName": "iface-4f2a", "ifDescr": "xe-0/0/0.100", "ifType": "l2vlan"}],
+            }
+        },
+    }
+    sig = compute_shape_signature(rec)
+    assert sig["sub_interfaces"]["present"] is True
+    assert sig["sub_interfaces"]["styles"] == ["dot-numeric"]

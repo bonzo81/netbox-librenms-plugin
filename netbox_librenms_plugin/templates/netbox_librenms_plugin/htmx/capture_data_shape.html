@@ -56,11 +56,16 @@
     var pre = document.getElementById("capture-json");
     if (!pre) return;
     var copyBtn = document.getElementById("capture-copy-btn");
-    if (copyBtn) {
-      copyBtn.addEventListener("click", function () {
-        navigator.clipboard.writeText(pre.textContent).then(function () {
-          copyBtn.innerHTML = '<i class="mdi mdi-check"></i> Copied';
-        });
+    {% comment %}
+    Reuse the shared guarded helper (librenms_sync.js): navigator.clipboard is undefined on
+    plain-HTTP deployments and can reject on permissions — the helper falls back to a
+    textarea+execCommand copy and flashes "Copy failed" instead of silently throwing.
+    {% endcomment %}
+    if (copyBtn && typeof wireCopyButton === "function") {
+      wireCopyButton(copyBtn, "capture-json", {
+        idle: '<i class="mdi mdi-content-copy"></i> Copy JSON',
+        done: '<i class="mdi mdi-check"></i> Copied',
+        err: '<i class="mdi mdi-alert"></i> Copy failed',
       });
     }
     var dlBtn = document.getElementById("capture-download-btn");

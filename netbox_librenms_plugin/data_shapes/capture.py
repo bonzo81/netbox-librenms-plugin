@@ -87,6 +87,12 @@ def capture_device_recording(api, device_id, *, name=None, description="", meta=
             if required:
                 raise RuntimeError(f"Capture failed for {path!r}: no HTTP response (status {status})")
             return status, body
+        # A real error status on a REQUIRED structural route is just as fatal: a stale
+        # librenms_id pointing at a device deleted from LibreNMS answers 404 on every route,
+        # and recording those [404, error-body] pairs would present a junk recording (all-false
+        # signature, "likely a new shape") as a successful capture inviting submission.
+        if required and not (200 <= status < 300):
+            raise RuntimeError(f"Capture failed for {path!r}: HTTP {status} (is the LibreNMS device id stale?)")
         responses[_route_key(path, key_params)] = body if 200 <= status < 300 else [status, body]
         return status, body
 
@@ -194,8 +200,13 @@ def capture_device_recording(api, device_id, *, name=None, description="", meta=
     meta_out["os"] = device_os
     # Skip a (misconfigured) OOB controller whose LibreNMS id equals the host's own id: its ports
     # route devices/<oob_id>/ports is the SAME key as the host's, so recording it would overwrite the
-    # host's ports — and a device is not its own out-of-band controller.
-    if oob_id is not None and oob_id != device_id:
+    # host's ports — and a device is not its own out-of-band controller. Compare COERCED ids: the
+    # custom field can store the OOB id as a string ("123"), and "123" != 123 would bypass this
+    # guard, re-record the host's own ports and falsely stamp the recording as an OOB topology.
+    from netbox_librenms_plugin.utils import coerce_librenms_id
+
+    oob_id = coerce_librenms_id(oob_id)
+    if oob_id is not None and oob_id != coerce_librenms_id(device_id):
         oob_status, _ = record(f"devices/{oob_id}/ports", {"columns": _PORTS_COLUMNS, "with": "vlans"}, key_params=None)
         # Only mark the recording OOB once the controller ports were actually captured: record()
         # silently skips a route that produced no HTTP response (transport failure), so stamping
@@ -204,11 +215,25 @@ def capture_device_recording(api, device_id, *, name=None, description="", meta=
         if 200 <= oob_status < 300:
             meta_out["oob_id"] = oob_id
 
+    # 8. LAG name patterns. compute_shape_signature and the replay's
+    #    resolve_port_relationships(lag_patterns=recording["lag_patterns"]) both read this key —
+    #    without it a LAG detected only via a configured PortStackLagPattern regex (ifType not
+    #    ieee8023adLag) fingerprints as lag.present=False and the fixture can never reproduce the
+    #    pattern-based behavior it was captured for. Scoped to the captured OS when known,
+    #    mirroring production's per-OS pattern load; all patterns when the OS is unknown.
+    from netbox_librenms_plugin.models import PortStackLagPattern
+
+    pattern_qs = PortStackLagPattern.objects.all()
+    if device_os:
+        pattern_qs = pattern_qs.filter(librenms_os__iexact=device_os)
+    lag_patterns = {row.librenms_os: row.lag_name_pattern for row in pattern_qs}
+
     return {
         "schema_version": SCHEMA_VERSION,
         "name": name or f"device-{device_id}",
         "description": description,
         "meta": meta_out,
         "device_id": device_id,
+        "lag_patterns": lag_patterns,
         "responses": responses,
     }

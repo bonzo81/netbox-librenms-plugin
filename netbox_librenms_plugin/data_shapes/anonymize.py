@@ -471,6 +471,12 @@ def anonymize_recording(recording, *, salt=""):
     if meta.get("os"):
         meta["os"] = pseudonymize_os(meta["os"])
     out["meta"] = meta
+    # lag_patterns keys are raw LibreNMS OS names — pseudonymize them like meta.os so the
+    # recording doesn't leak the platform. The pattern VALUES are what signature/replay
+    # consume (values-only), so the shape behaviour is unchanged.
+    lag_patterns = recording.get("lag_patterns")
+    if isinstance(lag_patterns, dict):
+        out["lag_patterns"] = {(pseudonymize_os(k) if k else k): v for k, v in lag_patterns.items()}
     out["name"] = f"{meta.get('os') or 'device'}-shape-{_hash(recording.get('name', ''), salt)}"
     out["description"] = "Anonymized LibreNMS data-shape capture."
     return out

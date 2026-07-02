@@ -14,6 +14,10 @@ from netbox_librenms_plugin.data_shapes.signature import compute_shape_signature
 from netbox_librenms_plugin.serial_utils import map_sensors_to_serial_links
 from netbox_librenms_plugin.tests.recordings import load_recording
 
+# capture_device_recording snapshots the device OS's PortStackLagPattern rows into the
+# recording (recording["lag_patterns"]), so every capture touches the DB.
+pytestmark = pytest.mark.django_db
+
 
 class _StubApi:
     """Minimal LibreNMS API serving recorded ``(status, body)`` per path — for capture-logic tests.
@@ -47,6 +51,10 @@ def _transceiver_serial_seed():
                 "status": "ok",
                 "devices": [{"device_id": 2000, "os": "sros", "hostname": "acs01.example.net"}],
             },
+            # Required structural routes: capture fails loudly on an error status for these
+            # (a stale librenms_id answers 404 everywhere), so the seed must serve them.
+            "GET /api/v0/devices/2000/ports": {"status": "ok", "ports": []},
+            "GET /api/v0/devices/2000/port_stack": {"status": "ok", "mappings": []},
             "GET /api/v0/devices/2000/transceivers": {
                 "status": "ok",
                 "transceivers": [
@@ -434,3 +442,48 @@ def test_capture_does_not_mark_oob_when_controller_ports_fail():
     assert "GET /api/v0/devices/2000/ports" not in captured["responses"]
     assert "oob_id" not in captured["meta"]
     assert compute_shape_signature(captured)["oob"] is False
+
+
+def test_capture_required_route_http_error_raises():
+    """A real HTTP error (404) on a required structural route must fail the capture loudly — a stale librenms_id answers 404 everywhere and would otherwise ship a junk all-404 recording presented as a success."""
+    api = _StubApi({"devices/55": (404, {"status": "error", "message": "Device not found"})})
+
+    with pytest.raises(RuntimeError, match="HTTP 404"):
+        capture_device_recording(api, 55)
+
+
+def test_capture_string_oob_id_equal_to_host_is_rejected():
+    """The self-OOB guard compares COERCED ids: a string-typed OOB id equal to the host's own int id must be treated as self (no oob_id stamp), not slip past on "123" != 123."""
+    api = _StubApi(
+        {
+            "devices/123": (200, {"status": "ok", "devices": [{"device_id": 123, "os": "ios"}]}),
+            "devices/123/ports": (200, {"status": "ok", "ports": []}),
+            "devices/123/port_stack": (200, {"status": "ok", "mappings": []}),
+        }
+    )
+
+    recording = capture_device_recording(api, 123, oob_id="123")
+
+    assert "oob_id" not in recording["meta"]
+
+
+@pytest.mark.django_db
+def test_capture_snapshots_os_scoped_lag_patterns():
+    """The recording carries the device OS's PortStackLagPattern regexes — signature and replay read recording["lag_patterns"], so a pattern-based LAG shape is unfingerprintable/unreplayable without the snapshot."""
+    from netbox_librenms_plugin.models import PortStackLagPattern
+
+    # Unique OS names: default patterns for real OSes may already be seeded (CI-unique).
+    PortStackLagPattern.objects.create(librenms_os="captest-os", lag_name_pattern=r"^Po\d+$")
+    PortStackLagPattern.objects.create(librenms_os="captest-other", lag_name_pattern=r"^ae\d+$")
+    api = _StubApi(
+        {
+            "devices/77": (200, {"status": "ok", "devices": [{"device_id": 77, "os": "captest-os"}]}),
+            "devices/77/ports": (200, {"status": "ok", "ports": []}),
+            "devices/77/port_stack": (200, {"status": "ok", "mappings": []}),
+        }
+    )
+
+    recording = capture_device_recording(api, 77)
+
+    # Scoped to the captured OS: the other platform's pattern is not embedded.
+    assert recording["lag_patterns"] == {"captest-os": r"^Po\d+$"}

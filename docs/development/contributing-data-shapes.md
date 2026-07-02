@@ -30,12 +30,14 @@ The plugin never submits on your behalf — you stay in control of what leaves y
 `netbox_librenms_plugin/data_shapes/anonymize.py` applies field-aware rules so the shape stays
 test-useful while losing identifying detail:
 
-- **Preserved verbatim** — the logic-bearing fields the tests read: `ifName`, `ifType`, port
+- **Preserved verbatim** — the logic-bearing fields the tests read: `ifType`, port
   ids, `entPhysicalClass` / `entPhysicalIndex` / `entPhysicalContainedIn` /
-  `entPhysicalParentRelPos`, VLANs, transceiver optics, `os`.
-- **Pseudonymized deterministically** — serials, hostnames, model SKUs become `SN-…` /
-  `device-…` / `MODEL-…`. The mapping is stable, so cross-references (a device serial that equals
-  a stack member's serial — how the master is identified) still match.
+  `entPhysicalParentRelPos`, VLANs, transceiver optics.
+- **Pseudonymized deterministically** — serials, hostnames, model SKUs and the `os` become
+  `SN-…` / `device-…` / `MODEL-…` / `os-…` tokens. The mapping is stable, so cross-references
+  (a device serial that equals a stack member's serial — how the master is identified) still
+  match. `ifName` gets *pattern-aware* anonymization: structured interface names (slots,
+  sub-units, channels) keep their shape while custom/free-form names become `iface-…` tokens.
 - **Scrubbed** — IPs → documentation ranges, MACs → a synthetic `02:00:00` block, lat/lng →
   null, location → `Lab`, free-text (`ifAlias`, `sysContact`, `sysDescr`, …) → empty.
 
