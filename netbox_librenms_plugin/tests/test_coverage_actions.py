@@ -5824,6 +5824,46 @@ class TestAttachOOBIp:
         existing.refresh_from_db()
         assert existing.assigned_object == iface
 
+    def test_vrf_scoped_ip_not_rehomed_creates_global_ip(self):
+        """A same-host IP that lives in a VRF must NOT be re-homed: the create path makes a global (no-VRF) /32, so the lookup must be scoped to the global table — overlapping RFC1918 space in a tenant VRF is a different address."""
+        from django.db import transaction
+
+        from ipam.models import VRF
+
+        view = self._view()
+        dev = make_device("oob-ip-vrf")
+        iface = make_interface(dev, "idrac0")
+        vrf = VRF.objects.create(name="cust-a")
+        from ipam.models import IPAddress
+
+        tenant_ip = IPAddress.objects.create(address="10.0.0.9/24", vrf=vrf, status="active")
+        with transaction.atomic():
+            ip, reason = view._attach_oob_ip(_make_request(post={}), "10.0.0.9", iface)
+        assert reason is None
+        # A NEW global /32 was created; the tenant's VRF row was not hijacked.
+        assert ip.pk != tenant_ip.pk
+        assert ip.vrf_id is None and str(ip.address) == "10.0.0.9/32"
+        assert ip.assigned_object == iface
+        tenant_ip.refresh_from_db()
+        assert tenant_ip.assigned_object is None and tenant_ip.vrf_id == vrf.pk
+
+    def test_vrf_row_does_not_make_global_match_ambiguous(self):
+        """A VRF row sharing the host IP must not trip the ambiguity refusal: the single global-table row is the unambiguous re-home candidate."""
+        from django.db import transaction
+
+        from ipam.models import VRF, IPAddress
+
+        view = self._view()
+        dev = make_device("oob-ip-vrf-ambig")
+        iface = make_interface(dev, "idrac0")
+        existing = make_ip("10.0.0.9/24")  # global, unassigned → the legitimate candidate
+        IPAddress.objects.create(address="10.0.0.9/24", vrf=VRF.objects.create(name="cust-b"), status="active")
+        with transaction.atomic():
+            ip, reason = view._attach_oob_ip(_make_request(post={}), "10.0.0.9", iface)
+        assert reason is None and ip.pk == existing.pk
+        existing.refresh_from_db()
+        assert existing.assigned_object == iface
+
     def test_does_not_steal_ip_from_other_device(self):
         from django.db import transaction
 
@@ -6003,6 +6043,20 @@ class TestMissingOOBIpPermissions:
         req.user.has_perm.side_effect = lambda p: "change_ipaddress" not in p
         msg = view._missing_oob_ip_permissions(req, "10.0.0.9", device=device)
         assert msg is not None and "change_ipaddress" in msg
+
+    def test_vrf_row_requires_add_not_change(self):
+        """A same-host IP in a VRF is invisible to the write path (it creates a global /32), so the preflight must demand 'add', not 'change' — a change-lacking user with 'add' must pass."""
+        from ipam.models import VRF, IPAddress
+
+        from netbox_librenms_plugin.tests.conftest import make_device, make_interface
+
+        view = self._view()
+        device = make_device("oob-perm-vrf")
+        iface = make_interface(device, "eth0")
+        IPAddress.objects.create(address="10.0.0.9/24", vrf=VRF.objects.create(name="cust-perm"), status="active")
+        req = _make_request(post={"oob_interface_id": str(iface.pk)})
+        req.user.has_perm.side_effect = lambda p: "change_ipaddress" not in p  # has add, lacks change
+        assert view._missing_oob_ip_permissions(req, "10.0.0.9", device=device) is None
 
     @pytest.mark.django_db
     def test_no_change_ipaddress_when_already_on_selected_interface(self):

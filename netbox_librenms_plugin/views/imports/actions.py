@@ -2703,7 +2703,10 @@ class AddAsOOBView(
         # than one row can match. Fetch up to two so an ambiguous match (which the write
         # path refuses) conservatively requires 'change' here rather than wrongly taking
         # the already-on-selected-interface shortcut and waving the request through.
-        matches = list(IPAddress.objects.filter(address__net_host=ip_str)[:2])
+        # Global table only (vrf__isnull) — the write path never touches VRF rows: it
+        # creates a global /32, so a same-host address in a tenant VRF must demand 'add',
+        # not 'change'.
+        matches = list(IPAddress.objects.filter(address__net_host=ip_str, vrf__isnull=True)[:2])
         ambiguous = len(matches) > 1
         existing = matches[0] if matches else None
         if existing is None:
@@ -2820,10 +2823,10 @@ class AddAsOOBView(
         """
         Resolve the OOB :class:`IPAddress` for *ip_str* assigned to *interface*.
 
-        Reuses an existing record for the host (matched via ``net_host`` so any prefix
-        length is accepted) and re-homes it to *interface*, unless it is already
-        assigned to a *different* device's object. Otherwise creates a ``/32`` (IPv4)
-        or ``/128`` (IPv6).
+        Reuses an existing global-table record for the host (matched via ``net_host``
+        so any prefix length is accepted; VRF rows are never touched) and re-homes it
+        to *interface*, unless it is already assigned to a *different* device's object.
+        Otherwise creates a global ``/32`` (IPv4) or ``/128`` (IPv6).
 
         Args:
             request: The current HTTP request (used for permission checks).
@@ -2851,7 +2854,10 @@ class AddAsOOBView(
         # create path stays best-effort: this narrows the TOCTOU window, it can't close it.
         # net_host ignores prefix length, so several rows can share the same host IP;
         # fetch up to two and refuse rather than re-home the wrong one by DB ordering.
-        candidates = list(IPAddress.objects.select_for_update().filter(address__net_host=ip_str)[:2])
+        # Scope to the global table (vrf__isnull): the create path below makes a global
+        # /32, and a same-host address inside a tenant VRF is a DIFFERENT address
+        # (overlapping RFC1918 space) — re-homing it would hijack that VRF's IPAM record.
+        candidates = list(IPAddress.objects.select_for_update().filter(address__net_host=ip_str, vrf__isnull=True)[:2])
         if len(candidates) > 1:
             return None, "conflict"
         existing = candidates[0] if candidates else None
