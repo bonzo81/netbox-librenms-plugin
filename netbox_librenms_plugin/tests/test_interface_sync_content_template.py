@@ -238,9 +238,9 @@ class TestInterfaceSyncContentTemplateMigratedMode:
         # hx-vals assertion to the Move button's own tag (mirroring the fallback test) so a
         # different element carrying the key can't mask the button dropping its hx-vals.
         assert "mdi-transfer-right" in html
-        move_idx = html.index("mdi-transfer-right")
-        btn_start = html.rindex("<button", 0, move_idx)
-        move_button_tag = html[btn_start : html.index(">", btn_start)]
+        from netbox_librenms_plugin.tests._html_helpers import extract_enclosing_tag
+
+        move_button_tag = extract_enclosing_tag(html, "mdi-transfer-right")
         assert 'hx-vals=\'{"server_key": "edgelondon"}\'' in move_button_tag
 
     def test_move_button_falls_back_to_active_server_key_when_marker_has_no_key(self):
@@ -262,7 +262,7 @@ class TestInterfaceSyncContentTemplateMigratedMode:
         assert 'hx-vals=\'{"server_key": ""}\'' not in html
         # Scope to the move button's own opening tag: it must carry the active server_key
         # (interface_sync.server_key == "default" in this harness) as the fallback discriminator.
-        move_idx = html.index("mdi-transfer-right")
-        btn_start = html.rindex("<button", 0, move_idx)
-        move_button_tag = html[btn_start : html.index(">", btn_start)]
+        from netbox_librenms_plugin.tests._html_helpers import extract_enclosing_tag
+
+        move_button_tag = extract_enclosing_tag(html, "mdi-transfer-right")
         assert 'hx-vals=\'{"server_key": "default"}\'' in move_button_tag

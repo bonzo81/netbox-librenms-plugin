@@ -153,9 +153,9 @@ class TestIpAddressSyncContentTemplateMigratedMode:
         )
         # Scope the hx-vals assertion to the Move button's own opening tag so another element
         # carrying the key can't mask the button dropping its discriminator.
-        move_idx = html.index("move-to-winner")
-        btn_start = html.rindex("<button", 0, move_idx)
-        move_button_tag = html[btn_start : html.index(">", btn_start)]
+        from netbox_librenms_plugin.tests._html_helpers import extract_enclosing_tag
+
+        move_button_tag = extract_enclosing_tag(html, "move-to-winner")
         assert 'hx-vals=\'{"server_key": "edgelondon"}\'' in move_button_tag
 
     def test_move_button_falls_back_to_active_server_key_when_marker_has_no_key(self):
@@ -171,7 +171,7 @@ class TestIpAddressSyncContentTemplateMigratedMode:
             server_key="default",
         )
         assert 'hx-vals=\'{"server_key": ""}\'' not in html
-        move_idx = html.index("move-to-winner")
-        btn_start = html.rindex("<button", 0, move_idx)
-        move_button_tag = html[btn_start : html.index(">", btn_start)]
+        from netbox_librenms_plugin.tests._html_helpers import extract_enclosing_tag
+
+        move_button_tag = extract_enclosing_tag(html, "move-to-winner")
         assert 'hx-vals=\'{"server_key": "default"}\'' in move_button_tag
