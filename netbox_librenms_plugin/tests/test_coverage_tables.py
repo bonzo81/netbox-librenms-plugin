@@ -1445,6 +1445,16 @@ class TestLibreNMSInterfaceTableInit:
 
         assert table.server_key == "prod"
 
+    def test_server_key_defaults_when_none(self):
+        """A None server_key must default to "default" — render_librenms_id passes self.server_key into get_librenms_device_id, and a None key would miss {"default": 42} custom-field values."""
+        from netbox_librenms_plugin.tables.interfaces import LibreNMSInterfaceTable
+
+        mock_device = MagicMock()
+        with patch("netbox_librenms_plugin.tables.interfaces.get_interface_name_field", return_value="ifName"):
+            table = LibreNMSInterfaceTable(data=[], device=mock_device, server_key=None)
+
+        assert table.server_key == "default"
+
 
 # ===========================================================================
 # LibreNMSInterfaceTable._parse_group_id tests
@@ -2158,14 +2168,21 @@ class TestGetInterfaceMapping:
 
         return object.__new__(LibreNMSInterfaceTable)
 
+    def _mapping(self, librenms_type, librenms_speed):
+        m = MagicMock()
+        m.librenms_type = librenms_type
+        m.librenms_speed = librenms_speed
+        return m
+
     def test_exact_match_returned(self):
         from netbox_librenms_plugin.tables.interfaces import LibreNMSInterfaceTable
 
         table = object.__new__(LibreNMSInterfaceTable)
-        mapping = MagicMock()
+        mapping = self._mapping("ethernetCsmacd", 1000000)
 
+        # The mappings are snapshotted once via .all() and resolved in memory.
         with patch("netbox_librenms_plugin.tables.interfaces.InterfaceTypeMapping") as mock_model:
-            mock_model.objects.filter.return_value.first.return_value = mapping
+            mock_model.objects.all.return_value = [mapping]
             result = table.get_interface_mapping("ethernetCsmacd", 1000000)
 
         assert result is mapping
@@ -2174,20 +2191,11 @@ class TestGetInterfaceMapping:
         from netbox_librenms_plugin.tables.interfaces import LibreNMSInterfaceTable
 
         table = object.__new__(LibreNMSInterfaceTable)
-        fallback_mapping = MagicMock()
-
-        def mock_filter_side_effect(**kwargs):
-            mock_qs = MagicMock()
-            if "librenms_speed" in kwargs and kwargs["librenms_speed"] is not None:
-                # Exact match with speed → returns None
-                mock_qs.first.return_value = None
-            else:
-                # Type-only match
-                mock_qs.first.return_value = fallback_mapping
-            return mock_qs
+        # Only a type-only (speed is None) mapping exists; the exact (type, speed) lookup misses.
+        fallback_mapping = self._mapping("ethernetCsmacd", None)
 
         with patch("netbox_librenms_plugin.tables.interfaces.InterfaceTypeMapping") as mock_model:
-            mock_model.objects.filter.side_effect = mock_filter_side_effect
+            mock_model.objects.all.return_value = [fallback_mapping]
             result = table.get_interface_mapping("ethernetCsmacd", 1000000)
 
         assert result is fallback_mapping
@@ -2198,10 +2206,25 @@ class TestGetInterfaceMapping:
         table = object.__new__(LibreNMSInterfaceTable)
 
         with patch("netbox_librenms_plugin.tables.interfaces.InterfaceTypeMapping") as mock_model:
-            mock_model.objects.filter.return_value.first.return_value = None
+            mock_model.objects.all.return_value = []
             result = table.get_interface_mapping("unknown_type", 0)
 
         assert result is None
+
+    def test_mappings_snapshotted_once_for_repeated_lookups(self):
+        """The mapping table is read once (InterfaceTypeMapping.objects.all()), not per lookup, so a multi-row render doesn't re-query the static table."""
+        from netbox_librenms_plugin.tables.interfaces import LibreNMSInterfaceTable
+
+        table = object.__new__(LibreNMSInterfaceTable)
+        m1 = self._mapping("ethernetCsmacd", 1000000)
+        m2 = self._mapping("ethernetCsmacd", None)
+
+        with patch("netbox_librenms_plugin.tables.interfaces.InterfaceTypeMapping") as mock_model:
+            mock_model.objects.all.return_value = [m1, m2]
+            for _ in range(5):
+                table.get_interface_mapping("ethernetCsmacd", 1000000)
+
+        assert mock_model.objects.all.call_count == 1
 
 
 # ===========================================================================
@@ -2647,3 +2670,46 @@ class TestRenderVlansTaggedVlansIteration:
 
         assert "200" in result
         assert "300" in result
+
+
+class TestInterfaceTableXSSEscaping:
+    """Issue #105: _render_field / render_librenms_id must escape untrusted LibreNMS values (ifName, description, MAC, …) instead of rendering them as live HTML (stored XSS)."""
+
+    XSS = "<img src=x onerror=alert(1)>"
+
+    def test_render_field_escapes_value_when_not_in_netbox(self):
+        table = _make_interface_table()
+        rendered = str(table._render_field(self.XSS, {"exists_in_netbox": False}, "ifName", "name"))
+        assert "<img" not in rendered
+        assert "&lt;img" in rendered
+
+    def test_render_field_escapes_value_on_mismatch(self):
+        table = _make_interface_table()
+        nb = MagicMock()
+        nb.name = "eth0"
+        record = {"exists_in_netbox": True, "netbox_interface": nb, "ifName": self.XSS}
+        rendered = str(table._render_field(self.XSS, record, "ifName", "name"))
+        assert "<img" not in rendered
+        assert "&lt;img" in rendered
+
+    def test_render_librenms_id_escapes_value(self):
+        table = _make_interface_table()
+        rendered = str(table.render_librenms_id(self.XSS, {"exists_in_netbox": False}))
+        assert "<img" not in rendered
+        assert "&lt;img" in rendered
+
+    def test_render_vlans_escapes_malicious_vid(self):
+        """Sibling sink to #105: a malicious VLAN id from LibreNMS must be escaped in both the inline summary and the tooltip rather than rendered as live HTML."""
+        table = _make_interface_table()
+        record = {
+            "untagged_vlan": self.XSS,
+            "tagged_vlans": [],
+            "missing_vlans": [],
+            "exists_in_netbox": False,
+            "netbox_interface": None,
+            "vlan_group_map": {},
+            "ifName": "eth0",
+        }
+        rendered = str(table.render_vlans(value=None, record=record))
+        assert "<img" not in rendered
+        assert "&lt;img" in rendered

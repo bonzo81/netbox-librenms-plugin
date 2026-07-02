@@ -167,6 +167,36 @@ class TestMergeTransceiverDataPortIdentity:
         assert item["_librenms_port_id"] == 99
         assert item["_librenms_ifname"] == "Eth2/1"
 
+    def test_string_index_matches_int_transceiver_index_no_duplicate(self):
+        # LibreNMS may report the ENTITY index as a string ("300") while the transceiver API
+        # returns it as an int (300). Without normalization the merge misses the existing ENTITY
+        # row and caches a duplicate synthetic transceiver; coercing both sides to int matches it.
+        view = _make_view()
+        view.librenms_id = 103
+        view._librenms_api.get_device_transceivers.return_value = (
+            True,
+            [{"entity_physical_index": 300, "model": "SFP-10G-SR", "serial": "TX-300", "type": "SFP", "port_id": 7}],
+        )
+        view._librenms_api.get_ports.return_value = (True, {"ports": [{"port_id": 7, "ifName": "Eth3/1"}]})
+        inventory_seed = [
+            {
+                "entPhysicalIndex": "300",  # string index from ENTITY-MIB
+                "entPhysicalName": "Transceiver slot",
+                "entPhysicalModelName": "builtin",
+                "entPhysicalSerialNum": "-",
+                "entPhysicalClass": "port",
+                "entPhysicalContainedIn": 0,
+            }
+        ]
+
+        inventory, error = view._merge_transceiver_data(inventory_seed)
+
+        assert error is None
+        assert len(inventory) == 1  # supplemented in place, NOT duplicated
+        item = inventory[0]
+        assert item["entPhysicalModelName"] == "SFP-10G-SR"
+        assert item["_librenms_port_id"] == 7
+
     def test_enrich_inventory_port_identity_backfills_port_rows_from_ports_api(self):
         view = _make_view()
         view.librenms_id = 102
@@ -3400,7 +3430,7 @@ class TestRenderStatusNoBayOnParent:
 class TestMatchedInterfaceLinking:
     """Rows should expose matched NetBox interface metadata and render as links."""
 
-    def test_get_interfaces_by_port_id_ignores_duplicate_port_ids(self):
+    def test_build_interface_indexes_ignores_duplicate_port_ids(self):
         view = _make_view()
         interface_a = MagicMock()
         interface_b = MagicMock()
@@ -3410,13 +3440,13 @@ class TestMatchedInterfaceLinking:
 
         view._librenms_api.get_stored_librenms_id.side_effect = [42, 42, 43]
 
-        interface_map = view._get_interfaces_by_port_id(member)
+        interface_map, _ = view._build_interface_indexes(member)
 
         assert 42 not in interface_map
         assert interface_map[43] is interface_c
         view._librenms_api.get_librenms_id.assert_not_called()
 
-    def test_get_interfaces_by_name_ignores_duplicate_names(self):
+    def test_build_interface_indexes_ignores_duplicate_names(self):
         view = _make_view()
         interface_a = MagicMock()
         interface_a.name = "Te1/1/1"
@@ -3427,7 +3457,7 @@ class TestMatchedInterfaceLinking:
         member = MagicMock()
         member.interfaces.all.return_value = [interface_a, interface_b, interface_c]
 
-        interface_map = view._get_interfaces_by_name(member)
+        _, interface_map = view._build_interface_indexes(member)
 
         assert "Te1/1/1" not in interface_map
         assert interface_map["Te1/1/2"] is interface_c
