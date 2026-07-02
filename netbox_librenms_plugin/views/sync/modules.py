@@ -738,8 +738,11 @@ class InstallModuleView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
                 locked_bay = ModuleBay.objects.select_for_update().get(pk=module_bay_id)
                 if hasattr(locked_bay, "installed_module") and locked_bay.installed_module:
                     messages.warning(request, f"Module bay '{locked_bay.name}' already has a module installed.")
+                    # Swap the PAGE device's panel (like every other exit path), not target_device:
+                    # for a VC-member row action (target_device != page_device) rendering the member's
+                    # panel here makes the page's own bays vanish.
                     return _render_modules_partial_after_action(
-                        request, target_device, sync_url, self.has_write_permission
+                        request, page_device, sync_url, self.has_write_permission
                     )
                 module = Module(
                     device=target_device,
@@ -1417,13 +1420,15 @@ class InstallSelectedView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
                             skipped.append(f"{result['name']}: {bind_result['reason']}")
         except (ValidationError, IntegrityError) as e:
             messages.error(request, f"Install failed: {e}")
-            return _modules_redirect_response(request, sync_url)
+            # HTMX partial swap on every exit, matching InstallBranchView + this view's own early
+            # exits — a full-page HX-Redirect here would flip this row action's swap behaviour.
+            return _render_modules_partial_after_action(request, page_device, sync_url, self.has_write_permission)
 
         if invalid_selection_seen:
             _warn_invalid_selected_device(request)
 
         _report_install_results(request, installed, skipped, failed)
-        return _modules_redirect_response(request, sync_url)
+        return _render_modules_partial_after_action(request, page_device, sync_url, self.has_write_permission)
 
 
 class UpdateModuleSerialView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, View):
@@ -1515,16 +1520,36 @@ class UpdateModuleInterfaceView(
 
         module = get_object_or_404(Module, pk=module_id, device=target_device)
 
-        try:
-            bind_result = None
-            if bind_item and server_key:
+        # Isolate the port-bind in its own guard (mirrors InstallModuleView): _bind_interface_librenms_id
+        # writes with no atomic wrapper, so a bind that commits must NOT be masked by a later adoption
+        # failure — the two steps get separate try/excepts.
+        bind_result = None
+        if bind_item and server_key:
+            try:
                 bind_result = _bind_interface_librenms_id(target_device, bind_item, module.pk, server_key)
-            # The port-bind above maps at most one LibreNMS port and is a no-op when that
-            # port already sits on the module's interface. Always reconcile standalone
-            # interfaces matching the module's predicted template names — adopting them (and
-            # folding in any raw duplicate a skipped rename left behind) is the action this
-            # button is offered for, so it must run even when the port-bind changed nothing.
+            except Exception:
+                bind_result = {
+                    "status": "failed",
+                    "reason": "unexpected error while binding interface to installed module",
+                }
+
+        # The port-bind above maps at most one LibreNMS port and is a no-op when that port already
+        # sits on the module's interface. Always reconcile standalone interfaces matching the module's
+        # predicted template names — adopting them (and folding in any raw duplicate a skipped rename
+        # left behind) is the action this button is offered for, so it must run even when the
+        # port-bind changed nothing.
+        try:
             adopt_result = _adopt_existing_template_interfaces(target_device, module, server_key)
+        except Exception:
+            # Adoption raised (its own transaction rolls back). Surface it, but do NOT overwrite a
+            # bind that already committed — a generic failure here would hide the port that WAS bound.
+            messages.warning(request, "Interface adoption failed unexpectedly after the port-binding step.")
+            if not (bind_result and bind_result.get("status") == "bound"):
+                bind_result = {
+                    "status": "failed",
+                    "reason": "unexpected error while adopting interfaces for installed module",
+                }
+        else:
             if adopt_result.get("status") == "bound":
                 # Adoption becomes the summary result, but don't let it SWALLOW a concurrent
                 # port-bind that ACTUALLY (re)bound a port: when both land in one click, surface the
@@ -1547,11 +1572,6 @@ class UpdateModuleInterfaceView(
                 bind_result = adopt_result
             elif bind_result is None:
                 bind_result = adopt_result
-        except Exception:
-            bind_result = {
-                "status": "failed",
-                "reason": "unexpected error while associating interface to installed module",
-            }
 
         if bind_result is None:
             messages.error(request, "No LibreNMS interface identity is available for this row.")

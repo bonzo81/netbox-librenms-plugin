@@ -1920,6 +1920,122 @@ class TestAdoptMergesRawDuplicateInterface:
         # The action ran against the member, but the swapped panel is the page device's.
         assert [d.pk for d in rendered_for] == [device.pk]
 
+    def test_install_bay_occupied_swaps_page_device_panel_not_vc_member(self):
+        """InstallModuleView's bay-occupied branch swaps the PAGE device's panel, not the targeted VC member's."""
+        from django.contrib.auth.models import AnonymousUser
+        from django.contrib.messages.storage.fallback import FallbackStorage
+        from django.test import RequestFactory
+
+        from dcim.models import Device, Module, ModuleBay, ModuleType, VirtualChassis
+
+        from netbox_librenms_plugin.views.object_sync.devices import DeviceModuleTableView
+        from netbox_librenms_plugin.views.sync.modules import InstallModuleView
+
+        device, module, _raw, _standalone, _cable = self._build()
+        # Page device is a VC master; the row action targets a member whose bay is already occupied.
+        vc = VirtualChassis.objects.create(name="vc-install-scope")
+        Device.objects.filter(pk=device.pk).update(virtual_chassis=vc, vc_position=1)
+        member = Device.objects.create(
+            name="install-member",
+            device_type=device.device_type,
+            role=device.role,
+            site=device.site,
+            status="active",
+            virtual_chassis=vc,
+            vc_position=2,
+        )
+        mt = ModuleType.objects.create(manufacturer=device.device_type.manufacturer, model="occupied-mt")
+        member_bay = ModuleBay.objects.create(device=member, name="occupied-bay")
+        Module.objects.create(device=member, module_bay=member_bay, module_type=mt)  # occupy the bay
+
+        view = object.__new__(InstallModuleView)
+        view.required_object_permissions = {}
+        view._librenms_api = MagicMock(server_key="production")
+        view.has_write_permission = MagicMock(return_value=True)
+
+        request = RequestFactory().post(
+            "/",
+            data={
+                "module_bay_id": str(member_bay.pk),
+                "module_type_id": str(mt.pk),
+                "selected_device_id": str(member.pk),
+                "server_key": "production",
+            },
+            HTTP_HX_REQUEST="true",
+        )
+        request.user = AnonymousUser()
+        request.session = "session"
+        request._messages = FallbackStorage(request)
+
+        rendered_for = []
+        original_get_context = DeviceModuleTableView.get_context_data
+
+        def _spy(self, request, obj, *args, **kwargs):
+            rendered_for.append(obj)
+            return original_get_context(self, request, obj, *args, **kwargs)
+
+        with (
+            patch.object(view, "require_all_permissions", return_value=None),
+            patch("netbox_librenms_plugin.views.sync.modules.messages"),
+            patch.object(DeviceModuleTableView, "get_context_data", _spy),
+        ):
+            response = view.post(request, pk=device.pk)
+
+        assert response.status_code == 200
+        # Bay was occupied → the swapped panel must be the PAGE device's, not the member's (target_device).
+        assert [d.pk for d in rendered_for] == [device.pk]
+
+    def test_bind_success_survives_adopt_failure(self):
+        """B2: a committed port-bind is still reported even if the later adoption step raises (not masked)."""
+        from django.contrib.auth.models import AnonymousUser
+        from django.contrib.messages.storage.fallback import FallbackStorage
+        from django.test import RequestFactory
+
+        from netbox_librenms_plugin.views.sync.modules import UpdateModuleInterfaceView
+
+        device, module, _raw, _standalone, _cable = self._build()
+
+        view = object.__new__(UpdateModuleInterfaceView)
+        view.required_object_permissions = {}
+        view._librenms_api = MagicMock(server_key="production")
+        view.has_write_permission = MagicMock(return_value=True)
+
+        request = RequestFactory().post(
+            "/",
+            data={"module_id": str(module.pk), "server_key": "production"},
+            HTTP_HX_REQUEST="true",
+        )
+        request.user = AnonymousUser()
+        request.session = "session"
+        request._messages = FallbackStorage(request)
+
+        # The port-bind commits; the subsequent adoption raises (its own transaction rolls back).
+        bound = {"status": "bound", "changed": True, "interface": "eth-bind", "port_id": 42}
+        with (
+            patch.object(view, "require_all_permissions", return_value=None),
+            patch(
+                "netbox_librenms_plugin.views.sync.modules._resolve_single_install_binding_item",
+                return_value={"ent_physical_index": 1},
+            ),
+            patch("netbox_librenms_plugin.views.sync.modules._bind_interface_librenms_id", return_value=bound),
+            patch(
+                "netbox_librenms_plugin.views.sync.modules._adopt_existing_template_interfaces",
+                side_effect=RuntimeError("adopt boom"),
+            ),
+            # Sentinel the swap so it doesn't consume the flash messages we assert on.
+            patch(
+                "netbox_librenms_plugin.views.sync.modules._render_modules_partial_after_action",
+                return_value="PARTIAL",
+            ),
+        ):
+            view.post(request, pk=device.pk)
+
+        joined = " | ".join(m.message for m in request._messages)
+        # The bind that DID commit is still reported...
+        assert "eth-bind" in joined
+        # ...and is NOT hidden behind the old generic "associating" failure that swallowed it.
+        assert "unexpected error while associating" not in joined
+
 
 class TestPredictModuleInterfaceRenameLengthGuard:
     """predict_module_interface_rename enforces the 1:1, order-preserving receiver contract."""
@@ -3162,6 +3278,62 @@ class TestInstallViewsDoNotDeleteCache:
 
         mock_messages.success.assert_called_once()
         mock_cache.delete.assert_not_called()
+
+    def test_install_selected_success_path_uses_htmx_partial_swap(self):
+        """B1: InstallSelectedView's success path swaps the HTMX partial, not a full-page HX-Redirect (matches InstallBranchView + its own early exits)."""
+        from netbox_librenms_plugin.views.sync.modules import InstallBranchView, InstallSelectedView
+
+        view = object.__new__(InstallSelectedView)
+        view.required_object_permissions = {}
+        view.has_write_permission = MagicMock(return_value=True)
+        device = _make_device()
+
+        request = _make_request("POST", data={"server_key": "default"})
+        post_mock = MagicMock()
+        post_mock.get = MagicMock(side_effect=lambda k, d=None: {"server_key": "default"}.get(k, d))
+        post_mock.getlist = MagicMock(return_value=["100"])
+        request.POST = post_mock
+
+        cached_inventory = [
+            {
+                "entPhysicalIndex": 100,
+                "entPhysicalClass": "module",
+                "entPhysicalModelName": "MOD-A",
+                "entPhysicalContainedIn": 0,
+                "entPhysicalName": "Slot 0",
+            },
+        ]
+        install_result = {"status": "installed", "name": "Slot 0"}
+
+        with (
+            patch.object(view, "require_all_permissions", return_value=None),
+            patch("netbox_librenms_plugin.views.sync.modules.get_object_or_404", return_value=device),
+            patch("netbox_librenms_plugin.views.sync.modules.reverse", return_value="/sync/"),
+            patch("netbox_librenms_plugin.views.sync.modules.cache") as mock_cache,
+            patch.object(view, "get_cache_key", return_value="test-key"),
+            patch.object(InstallBranchView, "_install_single", return_value=install_result),
+            patch("netbox_librenms_plugin.views.sync.modules.get_module_types_indexed", return_value={}),
+            patch("netbox_librenms_plugin.utils.get_enabled_ignore_rules", return_value=[]),
+            patch("netbox_librenms_plugin.utils.load_bay_mappings", return_value=([], [])),
+            patch("netbox_librenms_plugin.utils.preload_normalization_rules", return_value={}),
+            patch("netbox_librenms_plugin.views.sync.modules.transaction") as mock_tx,
+            patch("netbox_librenms_plugin.views.sync.modules.messages"),
+            patch(
+                "netbox_librenms_plugin.views.sync.modules._render_modules_partial_after_action",
+                return_value="PARTIAL",
+            ) as mock_partial,
+            patch(
+                "netbox_librenms_plugin.views.sync.modules._modules_redirect_response",
+                return_value="REDIRECT",
+            ) as mock_redirect,
+        ):
+            mock_cache.get.return_value = {"inventory": cached_inventory, "librenms_id": "test"}
+            mock_tx.atomic = lambda *a, **kw: MagicMock(__enter__=MagicMock(), __exit__=MagicMock(return_value=False))
+            result = view.post(request, pk=24)
+
+        assert result == "PARTIAL"  # not the full-page HX-Redirect
+        mock_partial.assert_called_once()
+        mock_redirect.assert_not_called()
 
     def test_install_branch_rejects_stale_cached_inventory_context(self):
         """Branch install should fail closed when cached inventory librenms_id mismatches target device context."""
