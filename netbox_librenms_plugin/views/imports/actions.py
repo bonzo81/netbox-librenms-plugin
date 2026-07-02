@@ -950,6 +950,10 @@ class BulkImportDevicesView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
         # Check if we should use background job for import
         total_import_count = len(parsed_ids)
 
+        # Set when a requested background import falls back to a synchronous run
+        # (no RQ workers); surfaced in the HTMX summary toasts below.
+        sync_fallback_msg = None
+
         # Decide whether to use background job
         if self.should_use_background_job_for_import(request):
             # Check if RQ workers are available
@@ -1000,6 +1004,14 @@ class BulkImportDevicesView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
             else:
                 # No workers available - warn user and proceed synchronously
                 logger.warning("No RQ workers available for import job, falling back to synchronous import")
+                # Remember the fallback for the HTMX summary toasts below: the normal import
+                # page is HTMX, and without an htmx_toasts entry the user's background-import
+                # request silently blocks for the whole synchronous run with no explanation
+                # (only Django messages were queued, which the HTMX path never renders).
+                sync_fallback_msg = (
+                    f"Background job requested but no workers available. "
+                    f"Imported {total_import_count} devices synchronously."
+                )
                 if not is_htmx:
                     messages.warning(
                         request,
@@ -1069,6 +1081,13 @@ class BulkImportDevicesView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
         # non-HTMX (redirect) path; the HTMX path relies solely on htmx_toasts. (is_htmx
         # was resolved at the top of post().)
         htmx_toasts = []  # [(bg_class, mdi_class, label, text), ...]
+
+        # Surface the background→synchronous fallback to HTMX users too: the non-HTMX
+        # path queued a Django message before the import ran, but the HTMX path renders
+        # only htmx_toasts — without this entry the blocking synchronous run happens
+        # with no explanation and the user may re-submit or assume the job system worked.
+        if sync_fallback_msg is not None:
+            htmx_toasts.append(("text-bg-warning", "mdi-alert", "Warning", sync_fallback_msg))
 
         if success_count:
             _msg = f"Successfully imported {success_count} LibreNMS device{'s' if success_count != 1 else ''}"

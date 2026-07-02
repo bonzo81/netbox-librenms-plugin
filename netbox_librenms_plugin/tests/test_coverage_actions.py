@@ -599,6 +599,34 @@ class TestBulkImportDevicesViewPost:
         result = view.should_use_background_job_for_import(request)
         assert result is False
 
+    def test_htmx_user_is_told_about_sync_fallback_when_no_workers(self):
+        """With RQ workers down, a background-import request silently blocks for a synchronous run — the HTMX summary (the normal import page's ONLY message channel) must say so, not just the never-rendered Django message."""
+        view = self._make_view()
+        empty_result = {"success": [], "failed": [], "skipped": [], "virtual_chassis_created": 0}
+        request = _make_request(
+            post={"select": ["1"], "use_background_job": "on"},
+            headers={"HX-Request": "true"},
+            user_is_superuser=True,
+        )
+
+        with (
+            patch.object(view, "require_write_permission", return_value=None),
+            patch("utilities.rqworker.get_workers_for_queue", return_value=0),
+            patch("netbox_librenms_plugin.views.imports.actions.fetch_device_with_cache", return_value=None),
+            patch(
+                "netbox_librenms_plugin.views.imports.actions.bulk_import_devices",
+                return_value=dict(empty_result),
+            ),
+            patch(
+                "netbox_librenms_plugin.views.imports.actions.bulk_import_vms",
+                return_value={"success": [], "failed": [], "skipped": []},
+            ),
+        ):
+            response = view.post(request)
+
+        assert response.status_code == 200
+        assert b"no workers available" in response.content
+
 
 class TestDeviceImportHelperMixin:
     """Tests for DeviceImportHelperMixin methods (lines 154-220)."""
