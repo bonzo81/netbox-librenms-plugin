@@ -8,11 +8,17 @@ platform matching, and conversion helper functions.
 import json
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 # =============================================================================
 # TestDeviceTypeMatching - 5 tests
 # =============================================================================
 
 
+# match_librenms_hardware_to_device_type now runs the device_type NormalizationRule query
+# (issue #90); enabling django_db lets that real (empty) query run while the lookups below
+# stay mocked, so the matching assertions are unaffected.
+@pytest.mark.django_db
 class TestDeviceTypeMatching:
     """Test device type matching logic."""
 
@@ -1096,3 +1102,306 @@ class TestBuildVCNormalizationReport:
         assert "Device type: _(unknown)_" in out
         # Template pairs section falls back to a no-templates note.
         assert "_(no templates)_" in out
+
+
+# =============================================================================
+# DeviceTypeMapping re-normalization data migration (0011)
+# =============================================================================
+@pytest.mark.django_db
+class TestRenormalizeDeviceTypeMappingsMigration:
+    """The 0011 data migration re-keys pre-existing DeviceTypeMapping rows through the
+    device_type NormalizationRule scope so they keep matching the normalized lookup.
+
+    Exercises the REAL objects end-to-end: a real NormalizationRule, a real
+    DeviceTypeMapping stored under its un-normalized key, the real
+    match_librenms_hardware_to_device_type lookup, and the real migration function.
+    """
+
+    @staticmethod
+    def _device_type(model="Renorm-DT"):
+        from dcim.models import DeviceType, Manufacturer
+
+        mfr, _ = Manufacturer.objects.get_or_create(name="Renorm-Mfr", slug="renorm-mfr")
+        dt, _ = DeviceType.objects.get_or_create(manufacturer=mfr, model=model, slug="renorm-dt")
+        return dt
+
+    @staticmethod
+    def _run_migration():
+        import importlib
+
+        from django.apps import apps
+
+        module = importlib.import_module("netbox_librenms_plugin.migrations.0011_renormalize_device_type_mappings")
+        module.renormalize_device_type_mappings(apps, None)
+
+    def test_existing_mapping_is_rekeyed_so_lookup_matches(self):
+        """A pre-normalization mapping only matches the normalized lookup after the migration re-keys it."""
+        from netbox_librenms_plugin.models import DeviceTypeMapping, NormalizationRule
+        from netbox_librenms_plugin.utils import match_librenms_hardware_to_device_type
+
+        dt = self._device_type()
+        # device_type rule strips the 'acme-' vendor prefix (capture-group replacement, since
+        # the replacement field cannot be blank).
+        NormalizationRule.objects.create(
+            scope=NormalizationRule.SCOPE_DEVICE_TYPE,
+            match_pattern=r"^acme-(.+)$",
+            replacement=r"\1",
+            priority=10,
+        )
+        # Pre-normalization row: stored under the raw (only lowercased) hardware key.
+        DeviceTypeMapping.objects.create(librenms_hardware="acme-router-x", netbox_device_type=dt)
+
+        # BEFORE the migration the normalized lookup ('router-x') misses the raw row, but the
+        # lookup's raw-key fallback still finds it — the migration's job is canonicalization,
+        # not rescue (a lookup for a DIFFERENT raw spelling, e.g. 'ACME-Router-X ', normalizes
+        # to 'router-x' and only matches once the row is re-keyed).
+        before = match_librenms_hardware_to_device_type("acme-router-x")
+        assert before["matched"] is True
+        assert not DeviceTypeMapping.objects.filter(librenms_hardware="router-x").exists()
+
+        self._run_migration()
+
+        # The row is re-keyed to the normalized value...
+        assert DeviceTypeMapping.objects.filter(librenms_hardware="router-x").exists()
+        # ...so the same lookup now resolves to the mapped device type.
+        after = match_librenms_hardware_to_device_type("acme-router-x")
+        assert after["matched"] is True
+        assert after["match_type"] == "mapping"
+        assert after["device_type"] == dt
+
+    def test_noop_when_no_device_type_rules(self):
+        """With no device_type rules the migration leaves the stored key untouched."""
+        from netbox_librenms_plugin.models import DeviceTypeMapping
+
+        dt = self._device_type(model="Renorm-DT2")
+        DeviceTypeMapping.objects.create(librenms_hardware="plain-hw-9000", netbox_device_type=dt)
+
+        self._run_migration()
+
+        assert DeviceTypeMapping.objects.filter(librenms_hardware="plain-hw-9000").exists()
+
+    def test_collision_is_skipped_not_crashed(self):
+        """Two raw mappings normalizing to the same key are skipped, not crashed on the unique constraint."""
+        from netbox_librenms_plugin.models import DeviceTypeMapping, NormalizationRule
+
+        dt = self._device_type(model="Renorm-DT3")
+        NormalizationRule.objects.create(
+            scope=NormalizationRule.SCOPE_DEVICE_TYPE,
+            match_pattern=r"^v\d+-(.+)$",
+            replacement=r"\1",
+            priority=10,
+        )
+        # Both collapse to 'switch-1' after stripping the version prefix; plus an already-clean row.
+        DeviceTypeMapping.objects.create(librenms_hardware="switch-1", netbox_device_type=dt)
+        DeviceTypeMapping.objects.create(librenms_hardware="v2-switch-1", netbox_device_type=dt)
+
+        # Must not raise (IntegrityError) on the unique librenms_hardware constraint.
+        self._run_migration()
+
+        # The clean row survives; the colliding raw row is left as-is (not silently dropped).
+        assert DeviceTypeMapping.objects.filter(librenms_hardware="switch-1").exists()
+        assert DeviceTypeMapping.objects.filter(librenms_hardware="v2-switch-1").exists()
+
+    def test_row_save_failure_is_skipped_not_aborted(self, monkeypatch):
+        """An unexpected DB error on one row's save must skip that row and continue, not abort the upgrade.
+
+        The pre-check only guards the known uniqueness clash; a different write failure (e.g. an
+        over-length value) would otherwise propagate out of the migration and block the whole
+        upgrade. The bad row is left at its original key and the rest are still re-keyed.
+        """
+        from netbox_librenms_plugin.models import DeviceTypeMapping, NormalizationRule
+
+        dt = self._device_type(model="Renorm-DT5")
+        NormalizationRule.objects.create(
+            scope=NormalizationRule.SCOPE_DEVICE_TYPE,
+            match_pattern=r"^x-(.+)$",
+            replacement=r"\1",
+            priority=10,
+        )
+        DeviceTypeMapping.objects.create(librenms_hardware="x-boom", netbox_device_type=dt)
+        DeviceTypeMapping.objects.create(librenms_hardware="x-good", netbox_device_type=dt)
+
+        real_save = DeviceTypeMapping.save
+
+        def flaky_save(inst, *args, **kwargs):
+            # The migration mutates librenms_hardware to the normalized value before save, so the
+            # boom row reaches save() keyed "boom". Fail only that write; let every other save run.
+            if inst.librenms_hardware == "boom":
+                raise RuntimeError("simulated write failure (e.g. value too long)")
+            return real_save(inst, *args, **kwargs)
+
+        monkeypatch.setattr(DeviceTypeMapping, "save", flaky_save)
+
+        # Must NOT propagate the boom row's save error out of the migration.
+        self._run_migration()
+
+        # The failed row is left at its original key (skipped); the good row is still re-keyed.
+        assert DeviceTypeMapping.objects.filter(librenms_hardware="x-boom").exists()
+        assert DeviceTypeMapping.objects.filter(librenms_hardware="good").exists()
+
+    def test_db_error_on_one_row_does_not_poison_the_rest(self, monkeypatch):
+        """A real DB error on one row's save must be confined to that row's savepoint so the rest still migrate.
+
+        A plain try/except cannot recover from a database error: on PostgreSQL it aborts the whole
+        transaction, so the NEXT row's query raises "current transaction is aborted". Only a per-row
+        transaction.atomic() savepoint lets the migration skip the bad row and continue. This drives
+        a genuine DB error (SELECT 1/0), not a Python raise, so it actually exercises the savepoint.
+        """
+        from django.db import connection
+
+        from netbox_librenms_plugin.models import DeviceTypeMapping, NormalizationRule
+
+        dt = self._device_type(model="Renorm-DT6")
+        NormalizationRule.objects.create(
+            scope=NormalizationRule.SCOPE_DEVICE_TYPE,
+            match_pattern=r"^y-(.+)$",
+            replacement=r"\1",
+            priority=10,
+        )
+        # Iterated in librenms_hardware order, so 'y-boom' (→ 'boom') is processed before 'y-good'.
+        DeviceTypeMapping.objects.create(librenms_hardware="y-boom", netbox_device_type=dt)
+        DeviceTypeMapping.objects.create(librenms_hardware="y-good", netbox_device_type=dt)
+
+        real_save = DeviceTypeMapping.save
+
+        def poisoning_save(inst, *args, **kwargs):
+            if inst.librenms_hardware == "boom":
+                # A genuine DB error poisons the transaction the way a real IntegrityError/DataError
+                # mid-migration would — recoverable only by rolling back this row's savepoint.
+                with connection.cursor() as cur:
+                    cur.execute("SELECT 1 / 0")
+            return real_save(inst, *args, **kwargs)
+
+        monkeypatch.setattr(DeviceTypeMapping, "save", poisoning_save)
+
+        # Without the savepoint, the good row's query would raise "current transaction is aborted".
+        self._run_migration()
+
+        # The poisoned row is left at its original key (savepoint rolled back); the good row re-keyed.
+        assert DeviceTypeMapping.objects.filter(librenms_hardware="y-boom").exists()
+        assert DeviceTypeMapping.objects.filter(librenms_hardware="good").exists()
+
+    def test_db_error_in_normalization_does_not_poison_the_rest(self, monkeypatch):
+        """A DB error inside apply_normalization_rules must be confined to that row's savepoint too.
+
+        The rule queries (and the clash .exists()) run inside the migration's outer atomic
+        transaction just like the save: an unguarded DB failure there aborts the transaction on
+        PostgreSQL, so the NEXT row's query raises "current transaction is aborted" and the
+        upgrade crashes partway — the exact failure the per-save savepoint was added to prevent.
+        This drives a genuine DB error (SELECT 1/0) through the normalization call.
+        """
+        from django.db import connection
+
+        from netbox_librenms_plugin import utils as plugin_utils
+        from netbox_librenms_plugin.models import DeviceTypeMapping, NormalizationRule
+
+        dt = self._device_type(model="Renorm-DT7")
+        NormalizationRule.objects.create(
+            scope=NormalizationRule.SCOPE_DEVICE_TYPE,
+            match_pattern=r"^z-(.+)$",
+            replacement=r"\1",
+            priority=10,
+        )
+        # Iterated in librenms_hardware order, so 'z-boom' is processed before 'z-good'.
+        DeviceTypeMapping.objects.create(librenms_hardware="z-boom", netbox_device_type=dt)
+        DeviceTypeMapping.objects.create(librenms_hardware="z-good", netbox_device_type=dt)
+
+        real_apply = plugin_utils.apply_normalization_rules
+
+        def poisoned_apply(value, scope, *args, **kwargs):
+            if value == "z-boom":
+                with connection.cursor() as cur:
+                    cur.execute("SELECT 1 / 0")
+            return real_apply(value, scope, *args, **kwargs)
+
+        # The migration imports the symbol inside the function body, so patching the module
+        # attribute is exactly what its runtime import resolves.
+        monkeypatch.setattr(plugin_utils, "apply_normalization_rules", poisoned_apply)
+
+        # Without a per-row savepoint around the normalization, the good row's clash check
+        # would raise "current transaction is aborted".
+        self._run_migration()
+
+        # The poisoned row is left untouched; the good row is still re-keyed.
+        assert DeviceTypeMapping.objects.filter(librenms_hardware="z-boom").exists()
+        assert DeviceTypeMapping.objects.filter(librenms_hardware="good").exists()
+
+
+class TestCacheRemainingTtl:
+    """cache_remaining_ttl reads .ttl on django-redis and degrades to None on backends without it."""
+
+    def test_returns_none_when_backend_has_no_ttl(self):
+        """A backend without .ttl (e.g. LocMemCache) yields None instead of AttributeError."""
+        from django.core.cache.backends.locmem import LocMemCache
+
+        from netbox_librenms_plugin.utils import cache_remaining_ttl
+
+        backend = LocMemCache("cr116-ttl", {})
+        backend.set("k", "v")
+        # Precondition: this backend lacks the django-redis .ttl the bare call sites assumed.
+        assert not hasattr(backend, "ttl")
+        assert cache_remaining_ttl(backend, "k") is None
+
+    def test_delegates_to_ttl_when_present(self):
+        """When the backend exposes .ttl (django-redis), the helper returns its value for the key."""
+        from types import SimpleNamespace
+
+        from netbox_librenms_plugin.utils import cache_remaining_ttl
+
+        seen = {}
+
+        def _ttl(key):
+            seen["key"] = key
+            return 123
+
+        backend = SimpleNamespace(ttl=_ttl)
+        assert cache_remaining_ttl(backend, "librenms_ports_device_1_default") == 123
+        assert seen["key"] == "librenms_ports_device_1_default"
+
+    def test_returns_none_when_ttl_call_raises(self):
+        """A present-but-raising .ttl (transient Redis error) degrades to None, not a 500 up the render."""
+        from types import SimpleNamespace
+
+        from netbox_librenms_plugin.utils import cache_remaining_ttl
+
+        def _boom(key):
+            raise ConnectionError("redis unreachable")
+
+        backend = SimpleNamespace(ttl=_boom)
+        # Precondition: the backend DOES expose .ttl, so the absence-guard doesn't cover this.
+        assert hasattr(backend, "ttl")
+        assert cache_remaining_ttl(backend, "librenms_ports_device_1_default") is None
+
+
+class TestPredictModuleInterfaceRenameSignalGuard:
+    """predict_module_interface_rename must not 500 on a receiver that returns a non-list."""
+
+    @staticmethod
+    def _call_with_receiver(return_value):
+        from django.dispatch import receiver
+
+        from netbox_librenms_plugin.signals import predict_module_interface_names
+        from netbox_librenms_plugin.utils import predict_module_interface_rename
+
+        class _Dev:
+            pass
+
+        class _Mod:
+            pass
+
+        @receiver(predict_module_interface_names)
+        def _bad(sender, device, module, names, **kwargs):  # noqa: ARG001
+            return return_value
+
+        try:
+            return predict_module_interface_rename(_Dev(), _Mod(), ["Gi0/0", "Gi0/1"])
+        finally:
+            predict_module_interface_names.disconnect(_bad)
+
+    def test_non_iterable_return_is_ignored(self):
+        """A receiver returning a scalar int is dropped, keeping the caller's names (was a TypeError-500)."""
+        assert self._call_with_receiver(1) == ["Gi0/0", "Gi0/1"]
+
+    def test_scalar_string_return_is_ignored(self):
+        """A bare string is iterable but must not be exploded into characters and mispaired."""
+        assert self._call_with_receiver("Gi0/0") == ["Gi0/0", "Gi0/1"]

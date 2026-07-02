@@ -10,6 +10,8 @@ full_clean before save.
 
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 
 # ---------------------------------------------------------------------------
 # _load_vc_member_name_pattern
@@ -195,14 +197,10 @@ class TestRenderDeviceSelectionEscape:
         vc.members.all.return_value = [member]
         device.virtual_chassis = vc
 
+        # The dropdown options render from the member set cached in __init__.
         table = VCCableTable([], device=device)
         record = {"local_port": "eth0", "local_port_id": "42"}
-
-        with patch(
-            "netbox_librenms_plugin.tables.cables.get_virtual_chassis_member",
-            return_value=member,
-        ):
-            html = str(table.render_device_selection(None, record))
+        html = str(table.render_device_selection(None, record))
 
         # The raw <script> tag must NOT appear — it should be escaped
         assert "<script>" not in html
@@ -267,6 +265,10 @@ class TestSingleCableVerifyServerKey:
 
         view = object.__new__(SingleCableVerifyView)
         view._librenms_api = MagicMock()
+        # dispatch() sets self.request in production; this direct post() call needs an authorized
+        # request for the object-permission gate (reads self.request.user.has_perm).
+        view.request = MagicMock()
+        view.request.user.has_perm.return_value = True
         view._librenms_api.server_key = "default-server"
 
         request = MagicMock()
@@ -281,6 +283,13 @@ class TestSingleCableVerifyServerKey:
         mock_device = MagicMock()
 
         with (
+            # The posted key is honoured only when it names a configured server; post() checks the
+            # LibreNMSAPI.get_available_servers() CLASSMETHOD (not the instance) so it never builds a
+            # possibly-broken default client just to validate membership.
+            patch(
+                "netbox_librenms_plugin.librenms_api.LibreNMSAPI.get_available_servers",
+                return_value={"production": "Production"},
+            ),
             patch("netbox_librenms_plugin.views.base.cables_view.get_object_or_404") as mock_get_obj,
             patch(
                 "netbox_librenms_plugin.views.base.cables_view.get_librenms_sync_device",
@@ -307,6 +316,10 @@ class TestSingleCableVerifyServerKey:
 
         view = object.__new__(SingleCableVerifyView)
         view._librenms_api = MagicMock()
+        # dispatch() sets self.request in production; this direct post() call needs an authorized
+        # request for the object-permission gate (reads self.request.user.has_perm).
+        view.request = MagicMock()
+        view.request.user.has_perm.return_value = True
         view._librenms_api.server_key = "fallback-server"
 
         request = MagicMock()
@@ -382,45 +395,52 @@ class TestImportSingleDeviceLazyValidation:
 # CreateAndAssignPlatformView — full_clean before save
 # ---------------------------------------------------------------------------
 class TestCreatePlatformFullClean:
-    """CreateAndAssignPlatformView must call full_clean() so ValidationError is catchable."""
+    """CreateAndAssignPlatformView must surface a real Platform.full_clean() ValidationError, not 500."""
 
-    def test_validation_error_caught_on_slug_collision(self):
-        """When full_clean raises ValidationError, user sees error message instead of 500."""
-        from django.core.exceptions import ValidationError
+    @staticmethod
+    def _make_device(name):
+        """Create a minimal real Device (this branch predates the conftest real-DB builders)."""
+        from dcim.models import Device, DeviceRole, DeviceType, Manufacturer, Site
+
+        site, _ = Site.objects.get_or_create(name="PFTestSite", slug="pf-test-site")
+        mfr, _ = Manufacturer.objects.get_or_create(name="PFTestMfr", slug="pf-test-mfr")
+        dtype, _ = DeviceType.objects.get_or_create(model="PFTestDT", slug="pf-test-dt", defaults={"manufacturer": mfr})
+        role, _ = DeviceRole.objects.get_or_create(name="PFTestRole", slug="pf-test-role", defaults={"color": "00ff00"})
+        return Device.objects.create(name=name, device_type=dtype, role=role, site=site, status="active")
+
+    @pytest.mark.django_db
+    def test_real_slug_collision_is_caught_and_reported(self):
+        """A real slug collision (different name, same slugify) is rejected by Platform.full_clean() and reported, not 500'd."""
+        from dcim.models import Platform
 
         from netbox_librenms_plugin.views.sync.device_fields import CreateAndAssignPlatformView
 
-        view = object.__new__(CreateAndAssignPlatformView)
+        device = self._make_device("platform-collision-dev")
+        # An existing platform already owns the slug "test-platform".
+        Platform.objects.create(name="Existing Platform", slug="test-platform")
 
+        view = object.__new__(CreateAndAssignPlatformView)
+        view.require_all_permissions = MagicMock(return_value=None)  # the permission boundary
         request = MagicMock()
         request.method = "POST"
-        request.POST = {"platform_name": "test-platform"}
-        request.user.has_perm.return_value = True
+        # A DIFFERENT name that slugifies to the SAME slug: passes the name-exists short-circuit
+        # but trips the real Platform.full_clean() unique-slug validation.
+        request.POST = {"platform_name": "Test Platform"}
         view.request = request
 
         with (
-            patch("netbox_librenms_plugin.views.sync.device_fields.get_object_or_404"),
-            patch("netbox_librenms_plugin.views.sync.device_fields.Manufacturer"),
-            patch("netbox_librenms_plugin.views.sync.device_fields.Platform") as MockPlatform,
-            patch("netbox_librenms_plugin.views.sync.device_fields.transaction"),
             patch("netbox_librenms_plugin.views.sync.device_fields.messages") as mock_messages,
-            patch("netbox_librenms_plugin.views.sync.device_fields.redirect"),
+            patch("netbox_librenms_plugin.views.sync.device_fields.redirect", return_value="redirected"),
         ):
-            # objects.filter().exists() returns False (no existing platform)
-            MockPlatform.objects.filter.return_value.exists.return_value = False
-            # Simulate full_clean raising ValidationError (slug collision)
-            platform_instance = MagicMock()
-            platform_instance.full_clean.side_effect = ValidationError("Slug already exists")
-            MockPlatform.return_value = platform_instance
+            result = view.post(request, pk=device.pk)
 
-            view.post(request, pk=1)
-
-            # full_clean must have been called (not just .create())
-            platform_instance.full_clean.assert_called_once()
-            # save must NOT have been called (ValidationError raised before save)
-            platform_instance.save.assert_not_called()
-            # Error message should be shown to user with the actual validation detail
-            mock_messages.error.assert_called_once()
-            error_msg = mock_messages.error.call_args[0][1]
-            assert "could not be created" in error_msg
-            assert "Slug already exists" in error_msg
+        # The real full_clean() rejected the duplicate slug — no second platform was created...
+        assert Platform.objects.filter(slug="test-platform").count() == 1
+        assert not Platform.objects.filter(name="Test Platform").exists()
+        # ...and the device's platform was left unset (the create rolled back before assignment).
+        device.refresh_from_db()
+        assert device.platform_id is None
+        # The user is shown the caught error, not a 500.
+        assert result == "redirected"
+        mock_messages.error.assert_called_once()
+        assert "could not be created" in mock_messages.error.call_args[0][1]

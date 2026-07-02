@@ -2,6 +2,7 @@ import json
 
 from django.contrib import messages
 from django.contrib.auth.mixins import PermissionRequiredMixin
+from django.core.cache import cache
 from django.http import HttpResponse, JsonResponse
 from django.shortcuts import redirect
 from django.utils.http import url_has_allowed_host_and_scheme
@@ -9,17 +10,51 @@ from utilities.permissions import get_permission_for_model
 
 from netbox_librenms_plugin.constants import PERM_CHANGE_PLUGIN, PERM_VIEW_PLUGIN
 from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+from netbox_librenms_plugin.utils import is_list_of_dicts
 
 
 def parse_request_json(request):
     """Parse JSON from request.body, returning (data, error_response).
 
     On success returns (dict, None). On malformed input returns (None, JsonResponse 400).
+    json.loads happily returns a bare list/str/number for a valid-JSON non-object body;
+    every caller immediately does ``data.get(...)``, which would 500 on those — so a
+    non-dict payload is rejected here with a 400, keeping the (dict, None) contract true
+    for every endpoint instead of only the ones that added their own guard.
     """
     try:
-        return json.loads(request.body), None
+        data = json.loads(request.body)
     except (TypeError, ValueError):
         return None, JsonResponse({"status": "error", "message": "Invalid JSON payload"}, status=400)
+    if not isinstance(data, dict):
+        return None, JsonResponse({"status": "error", "message": "JSON payload must be an object"}, status=400)
+    return data, None
+
+
+def extract_cached_ports(cached, cache_key=None):
+    """
+    Return the validated dict payload of a cached "ports" entry, or None when malformed.
+
+    Mirrors the cables view's ``_extract_cached_links``: a stale/corrupt but truthy cache
+    value — a non-dict snapshot (e.g. a legacy bare list), a non-list ``ports``, or a
+    non-dict port row — would AttributeError-500 the consumer's ``.get()``/row reads.
+    Treat those as a cache miss; when ``cache_key`` is given, purge the bad entry so the
+    next read doesn't keep serving garbage.
+
+    Args:
+        cached: The raw value read from the ports cache key.
+        cache_key: Optional cache key to delete when the entry is malformed.
+
+    Returns:
+        dict | None: The cached payload with a list of dict port rows, or None.
+    """
+    # ``is_list_of_dicts`` is the same shape check the VLAN/interface read-paths use: ports must
+    # be a list whose every row is a dict (an empty list is valid — a device with no ports).
+    if not isinstance(cached, dict) or not is_list_of_dicts(cached.get("ports")):
+        if cache_key is not None:
+            cache.delete(cache_key)
+        return None
+    return cached
 
 
 def _get_safe_redirect_url(request):
@@ -274,6 +309,48 @@ class LibreNMSAPIMixin:
             # The LibreNMSAPI will automatically use the selected server
             self._librenms_api = LibreNMSAPI()
         return self._librenms_api
+
+    def _render_server_key(self):
+        """
+        Resolve the LibreNMS ``server_key`` for cache/query scoping, degrading to ``None``.
+
+        The lazy ``librenms_api`` property builds ``LibreNMSAPI()``, whose constructor raises
+        KeyError/ValueError on a missing/misconfigured default server. A cached GET render (any sync
+        tab) must not 500 on that: fall back to ``None`` (default scope) so cached rows still render
+        and per-server lookups degrade to their bare-key clause instead of crashing during render.
+
+        Shared by the cables and IP-address table views so the degradation lives in one place
+        rather than being maintained per view.
+
+        Returns:
+            str | None: The active server key, or ``None`` when the client can't be constructed.
+        """
+        try:
+            return self.librenms_api.server_key
+        except (KeyError, ValueError):
+            return None
+
+    def resolve_requested_server_key(self, data):
+        """
+        Resolve a request payload's server key, degrading to the active-server resolve.
+
+        Honour an explicitly-posted CONFIGURED key only.
+        ``data["server_key"]`` is untrusted. A non-string (e.g. a JSON list) is unhashable and would
+        TypeError-500 a later ``cf_dict.get(server_key)``; a stale/forged string must not address
+        another server's cache namespace. Only a string that names a configured server is honoured —
+        anything else falls back to :meth:`_render_server_key` (default scope). Shared by the device
+        verify/render views so this "configured-string-key-or-fallback" rule lives in one place.
+
+        Args:
+            data: The parsed request payload (dict-like) carrying an optional ``server_key``.
+
+        Returns:
+            str | None: The validated posted key, or the degrading active-server key.
+        """
+        requested_server_key = data.get("server_key")
+        if isinstance(requested_server_key, str) and requested_server_key in LibreNMSAPI.get_available_servers():
+            return requested_server_key
+        return self._render_server_key()
 
     def get_server_info(self):
         """

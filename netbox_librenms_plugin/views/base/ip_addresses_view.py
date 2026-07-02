@@ -13,12 +13,18 @@ from virtualization.models import VirtualMachine
 
 from netbox_librenms_plugin.tables.ipaddresses import IPAddressTable
 from netbox_librenms_plugin.utils import (
+    cache_remaining_ttl,
     get_interface_name_field,
     get_librenms_device_id,
     resolve_set_primary_ip,
     same_host,
 )
-from netbox_librenms_plugin.views.mixins import CacheMixin, LibreNMSAPIMixin, LibreNMSPermissionMixin
+from netbox_librenms_plugin.views.mixins import (
+    CacheMixin,
+    LibreNMSAPIMixin,
+    LibreNMSPermissionMixin,
+    NetBoxObjectPermissionMixin,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -137,7 +143,7 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMix
         all_interfaces = list(obj.interfaces.all())
 
         # Create maps for efficient lookups
-        server_key = self.librenms_api.server_key
+        server_key = self._render_server_key()
         interfaces_by_librenms_id = {}
         for interface in all_interfaces:
             lib_id = get_librenms_device_id(interface, server_key, auto_save=False)
@@ -167,10 +173,13 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMix
         """Get port info from LibreNMS with caching to minimize API calls"""
         if port_id not in port_data_cache:
             success, port_data = self.librenms_api.get_port_by_id(port_id)
-            if success and "port" in port_data and port_data["port"]:
-                port_data_cache[port_id] = port_data["port"][0]
-            else:
-                port_data_cache[port_id] = None
+            # A truthy success can still carry a malformed payload: port_data=None ("port" in
+            # None raises), {"port": ["bad"]} (a non-dict row that later crashes at
+            # port_info.get(...)). Validate the shape and cache only a real dict row, else None
+            # (issue #111, same class as #100).
+            ports = port_data.get("port") if success and isinstance(port_data, dict) else None
+            first_port = ports[0] if isinstance(ports, list) and ports else None
+            port_data_cache[port_id] = first_port if isinstance(first_port, dict) else None
 
         return port_data_cache[port_id]
 
@@ -256,7 +265,7 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMix
     def get_table(self, data, obj, request):
         """Get the table instance for the view."""
         table = IPAddressTable(data)
-        server_key = self.librenms_api.server_key
+        server_key = self._render_server_key()
         table.htmx_url = f"{request.path}?tab=ipaddresses" + (f"&server_key={server_key}" if server_key else "")
         return table
 
@@ -264,7 +273,7 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMix
         """Helper method to prepare the context data for IP address sync views."""
         table = None
         cache_expiry = None
-        server_key = self.librenms_api.server_key
+        server_key = self._render_server_key()
 
         if interface_name_field is None:
             interface_name_field = get_interface_name_field(request)
@@ -273,9 +282,12 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMix
             success, ip_data = self.get_ip_addresses(obj)
         else:
             cached_ip_data = cache.get(self.get_cache_key(obj, "ip_addresses", server_key))
-            if cached_ip_data:
+            if isinstance(cached_ip_data, dict):
                 ip_data = cached_ip_data.get("ip_addresses", [])
             else:
+                # Missing, or a stale/corrupt non-dict entry (legacy snapshot shape): drop it and
+                # render empty rather than 500 on a .get() against a list/str. Mirrors the
+                # isinstance fail-closed guard the interfaces/modules cached paths use.
                 return None
 
         # Enrich data in both cases to ensure current NetBox state
@@ -290,7 +302,7 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMix
             )
 
         # Calculate cache expiry
-        cache_ttl = cache.ttl(self.get_cache_key(obj, "ip_addresses", server_key))
+        cache_ttl = cache_remaining_ttl(cache, self.get_cache_key(obj, "ip_addresses", server_key))
         if cache_ttl is not None and cache_ttl > 0:
             cache_expiry = timezone.now() + timezone.timedelta(seconds=cache_ttl)
 
@@ -314,7 +326,7 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMix
         context = self._prepare_context(request, obj, interface_name_field, fetch_fresh=False)
         if context is None:
             # No data found; return context with empty table
-            context = {"table": None, "object": obj, "cache_expiry": None, "server_key": self.librenms_api.server_key}
+            context = {"table": None, "object": obj, "cache_expiry": None, "server_key": self._render_server_key()}
         return context
 
     def post(self, request, pk):
@@ -333,7 +345,7 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMix
                         "object": obj,
                         "table": None,
                         "cache_expiry": None,
-                        "server_key": self.librenms_api.server_key,
+                        "server_key": self._render_server_key(),
                     }
                 },
             )
@@ -346,27 +358,83 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMix
         )
 
 
-class SingleIPAddressVerifyView(LibreNMSPermissionMixin, CacheMixin, View):
+class SingleIPAddressVerifyView(NetBoxObjectPermissionMixin, LibreNMSPermissionMixin, CacheMixin, View):
     """
     View for verifying single IP address data with different VRF.
     """
 
+    # Read-only verify endpoint: require object-view permission (mirrors the interface/module/
+    # cable verify views). Without it any user with mere plugin-view rights could POST an
+    # arbitrary device id and read back that object's name/url/cached IP rows. The effective
+    # requirement is narrowed per-request in post() to the model the request actually targets
+    # (Device vs VirtualMachine); this class-level default (both) is the fail-closed fallback the
+    # permission-wiring test asserts.
+    required_object_permissions = {"POST": [("view", Device), ("view", VirtualMachine)]}
+
+    def require_object_permissions_json(self, method, *, object_id=None, object_type=None):
+        """
+        Resolve the per-object view permission for this verify request, then run the base gate.
+
+        Computing the requirement here (rather than inline in :meth:`post`) keeps the DB
+        model-resolution behind the same method the post-flow tests mock out — so those tests
+        exercise the request flow without a DB hit, while the real gate path resolves Device vs
+        VirtualMachine and checks the matching view permission.
+
+        Args:
+            method: HTTP method to gate (``"POST"``).
+            object_id: The posted object id, used to resolve the model when no type is given.
+            object_type: The posted ``object_type`` (``"device"``/``"virtualmachine"``), if any.
+
+        Returns:
+            None if permitted, or a 403 JsonResponse if denied.
+        """
+        self.required_object_permissions = {method: self._required_perms_for_object(object_id, object_type)}
+        return super().require_object_permissions_json(method)
+
+    def _required_perms_for_object(self, object_id, object_type):
+        """
+        Object-view perms a verify POST must hold for the object it targets.
+
+        Mirrors :meth:`_get_object`'s resolution so the gate matches the model whose name/url/cache
+        the response would expose: an explicit ``object_type`` gates on exactly that model; with no
+        type, resolve the id to its model (an existence check that reads no object data) — Device
+        first, then VirtualMachine. Fall back to requiring BOTH view perms (fail closed) when the id
+        is unusable or resolves to neither, so a Device-only (or VM-only) caller can never read the
+        other model's data through this endpoint.
+        """
+        if object_type == "device":
+            return [("view", Device)]
+        if object_type == "virtualmachine":
+            return [("view", VirtualMachine)]
+        try:
+            if Device.objects.filter(pk=object_id).exists():
+                return [("view", Device)]
+            if VirtualMachine.objects.filter(pk=object_id).exists():
+                return [("view", VirtualMachine)]
+        except (ValueError, TypeError):
+            pass
+        return [("view", Device), ("view", VirtualMachine)]
+
     def _get_object(self, object_id, object_type=None):
         """
         Retrieve the object (Device or VirtualMachine) based on ID and optional type.
-        If type is not provided, tries to determine it by checking both Device and VM models.
+
+        Resolves through permission-restricted querysets: the POST gate only checks model-level
+        view perms, so a constrained grant must not resolve an out-of-scope id here — it 404s
+        instead of exposing the object's cached IP verify payload.
         """
+        user = self.request.user
         if object_type == "device":
-            return get_object_or_404(Device, pk=object_id)
+            return get_object_or_404(Device.objects.restrict(user, "view"), pk=object_id)
         elif object_type == "virtualmachine":
-            return get_object_or_404(VirtualMachine, pk=object_id)
+            return get_object_or_404(VirtualMachine.objects.restrict(user, "view"), pk=object_id)
         else:
-            # Try to find object without knowing its type
-            obj = Device.objects.filter(pk=object_id).first()
+            # Try to find object without knowing its type (scoped to the caller's viewable objects).
+            obj = Device.objects.restrict(user, "view").filter(pk=object_id).first()
             if obj:
                 return obj
 
-            obj = VirtualMachine.objects.filter(pk=object_id).first()
+            obj = VirtualMachine.objects.restrict(user, "view").filter(pk=object_id).first()
             if obj:
                 return obj
 
@@ -391,11 +459,22 @@ class SingleIPAddressVerifyView(LibreNMSPermissionMixin, CacheMixin, View):
 
     def _find_in_cache(self, cached_data, address, prefix_len):
         """Find IP address in cache data using unified fields only."""
-        if not cached_data:
+        # Fail closed on a missing OR truthy-but-malformed entry (a legacy/corrupt non-dict such
+        # as a list from an older snapshot shape): a bare ``cached_data.get(...)`` would raise
+        # AttributeError on a list -> the verify POST's broad except returns 500 on every retry
+        # until the entry expires. Treat it as a cache miss instead, mirroring the isinstance
+        # fail-closed guard the GET-render path (_prepare_context) already uses.
+        if not isinstance(cached_data, dict):
             return None, None, None
 
         for ip_entry in cached_data.get("ip_addresses", []):
-            if ip_entry["ip_address"] == address and str(ip_entry["prefix_length"]) == str(prefix_len):
+            # Per-item shape guard: a non-dict row (or one missing the unified fields) in a
+            # corrupt/legacy snapshot would otherwise TypeError/KeyError here and be swallowed by
+            # post()'s broad except as a 500. Skip it, mirroring _extract_cached_links /
+            # extract_cached_ports which validate each row.
+            if not isinstance(ip_entry, dict):
+                continue
+            if ip_entry.get("ip_address") == address and str(ip_entry.get("prefix_length")) == str(prefix_len):
                 return (ip_entry, ip_entry.get("vrf_id"), ip_entry.get("port_id"))
 
         return None, None, None
@@ -441,16 +520,38 @@ class SingleIPAddressVerifyView(LibreNMSPermissionMixin, CacheMixin, View):
         """
         POST request to return json response with formatted IP address status.
         """
+        # Parse the (caller-supplied) body first — this reads no object data — so the permission
+        # gate can target the model the request actually addresses. _get_object() resolves a Device
+        # OR a VirtualMachine, so a static Device-only gate would let a user with only
+        # dcim.view_device read VM name/url/cache data (and vice versa). Gate BELOW still runs
+        # before any object is resolved or any cached row is read.
         try:
-            try:
-                data = json.loads(request.body)
-            except json.JSONDecodeError:
-                return JsonResponse({"status": "error", "message": "Invalid JSON payload"}, status=400)
+            data = json.loads(request.body)
+        except json.JSONDecodeError:
+            return JsonResponse({"status": "error", "message": "Invalid JSON payload"}, status=400)
+        # json.loads accepts a bare list/string/number; calling .get() on those raises before the
+        # permission gate and the broad handler below, so 500s on a non-object body. Reject it.
+        if not isinstance(data, dict):
+            return JsonResponse({"status": "error", "message": "JSON payload must be an object"}, status=400)
+        object_id = data.get("device_id")
+        object_type = data.get("object_type")
+        if error := self.require_object_permissions_json("POST", object_id=object_id, object_type=object_type):
+            return error
+        try:
+            from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+
             ip_address = data.get("ip_address")
             vrf_id = data.get("vrf_id")
-            object_id = data.get("device_id")
-            object_type = data.get("object_type")
-            server_key = data.get("server_key") or "default"
+            # Validate the requested server key before using it as a cache namespace: an
+            # unconfigured/forged key would otherwise let a caller probe arbitrary server-key cache
+            # namespaces via get_cache_key(). Mirror the sync/cable membership check; anything
+            # unrecognized falls back to "default" (the prior missing-key behaviour), so a caller
+            # can only ever address a configured key or the fixed default — never an arbitrary one.
+            requested_server_key = data.get("server_key")
+            if isinstance(requested_server_key, str) and requested_server_key in LibreNMSAPI.get_available_servers():
+                server_key = requested_server_key
+            else:
+                server_key = "default"
 
             if not ip_address:
                 return JsonResponse({"status": "error", "message": "No IP address provided"}, status=400)

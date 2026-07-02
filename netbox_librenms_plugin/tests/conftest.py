@@ -4,6 +4,25 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+
+@pytest.fixture(autouse=True)
+def _clear_device_info_cache():
+    """Clear get_device_info()'s short-lived cache between tests.
+
+    get_device_info() caches successful lookups in the shared cache. Without this,
+    a cached success from one test leaks into another that reuses the same
+    (server_key, device_id) but mocks a different response — e.g. the failure-path
+    tests keyed on device_id=123 that run after test_get_device_info_success.
+    """
+    from django.core.cache import cache
+
+    try:
+        cache.delete_pattern("librenms_device_info_*")
+    except (AttributeError, NotImplementedError):
+        cache.clear()
+    yield
+
+
 # =============================================================================
 # Configuration Fixtures
 # =============================================================================

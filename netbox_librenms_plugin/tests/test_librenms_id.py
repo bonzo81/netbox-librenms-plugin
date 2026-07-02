@@ -4,6 +4,7 @@ Covers get_librenms_device_id, set_librenms_device_id, find_by_librenms_id,
 and migrate_legacy_librenms_id.
 """
 
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 
@@ -372,3 +373,47 @@ class TestSetLibreNMSDeviceId:
         obj.custom_field_data = {"librenms_id": "unexpected-string"}
         set_librenms_device_id(obj, 5, server_key="primary")
         assert obj.custom_field_data["librenms_id"] == {"primary": 5}
+
+
+class TestIsLegacyLibreNMSIdPositivity:
+    """is_legacy_librenms_id must treat only a *positive* bare int / int-string as a legacy link."""
+
+    def test_positive_int_and_string_are_legacy(self):
+        from netbox_librenms_plugin.utils import is_legacy_librenms_id
+
+        assert is_legacy_librenms_id(42) is True
+        assert is_legacy_librenms_id("42") is True
+        # int() coercion accepts surrounding whitespace / a leading +, so these stay legacy.
+        assert is_legacy_librenms_id(" 42 ") is True
+        assert is_legacy_librenms_id("+42") is True
+
+    def test_zero_and_negative_are_not_legacy(self):
+        """A LibreNMS device id is a positive PK; 0 / negative is not a real link and must not migrate."""
+        from netbox_librenms_plugin.utils import is_legacy_librenms_id
+
+        for value in (0, -1, "0", " 0 ", "-1", "-42", "+0"):
+            assert is_legacy_librenms_id(value) is False, value
+
+    def test_non_numeric_and_dict_and_bool_are_not_legacy(self):
+        from netbox_librenms_plugin.utils import is_legacy_librenms_id
+
+        for value in (None, True, False, "abc", "", {"default": 42}):
+            assert is_legacy_librenms_id(value) is False, value
+
+
+class TestMigrateLegacyRejectsNonPositive:
+    """migrate_legacy_librenms_id must never canonicalise a non-positive id into the JSON form."""
+
+    def test_zero_is_not_migrated(self):
+        from netbox_librenms_plugin.utils import migrate_legacy_librenms_id
+
+        obj = SimpleNamespace(custom_field_data={"librenms_id": 0})
+        assert migrate_legacy_librenms_id(obj, "default") is False
+        assert obj.custom_field_data["librenms_id"] == 0  # left untouched, not {"default": 0}
+
+    def test_negative_is_not_migrated(self):
+        from netbox_librenms_plugin.utils import migrate_legacy_librenms_id
+
+        obj = SimpleNamespace(custom_field_data={"librenms_id": "-5"})
+        assert migrate_legacy_librenms_id(obj, "default") is False
+        assert obj.custom_field_data["librenms_id"] == "-5"

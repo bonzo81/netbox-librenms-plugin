@@ -2,6 +2,8 @@
 
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 
 def _make_view():
     """Create a BaseLibreNMSSyncView instance bypassing __init__."""
@@ -871,3 +873,54 @@ class TestGetPlatformInfo:
 
         assert result["platform_exists"] is False
         assert result["matching_platform"] is None
+
+
+@pytest.mark.django_db
+class TestInterfaceSyncRefreshButtonServerKey:
+    """The 'Refresh Interfaces' buttons must carry the active server_key (hidden input + hx-include) so a non-default server tab refreshes from the right LibreNMS server/cache, not the fallback."""
+
+    def _render(self, *, server_key="prod"):
+        from django.contrib.auth.models import AnonymousUser
+        from django.template.loader import render_to_string
+        from django.test import RequestFactory
+        from django_tables2 import RequestConfig
+
+        from dcim.models import Device, DeviceRole, DeviceType, Manufacturer, Site
+
+        from netbox_librenms_plugin.tables.interfaces import LibreNMSInterfaceTable
+
+        mfr, _ = Manufacturer.objects.get_or_create(name="ACME-ifsync", slug="acme-ifsync")
+        dt, _ = DeviceType.objects.get_or_create(manufacturer=mfr, model="DT-ifsync", slug="dt-ifsync")
+        role, _ = DeviceRole.objects.get_or_create(name="Role-ifsync", slug="role-ifsync")
+        site, _ = Site.objects.get_or_create(name="Site-ifsync", slug="site-ifsync")
+        device = Device.objects.create(name="ifsync-refresh-dev", device_type=dt, role=role, site=site, status="active")
+        request = RequestFactory().get("/")
+        request.user = AnonymousUser()
+        table = LibreNMSInterfaceTable([], device=device, server_key=server_key)
+        RequestConfig(request).configure(table)
+        ctx = {
+            "object": device,
+            "has_librenms_id": True,
+            "server_key": server_key,
+            "interface_name_field": "ifName",
+            "migrated_to_marker": None,
+            "migrated_to_winner": None,
+            "has_write_permission": False,
+            "interface_sync": {
+                "object": device,
+                "table": table,
+                "server_key": server_key,
+                "netbox_only_interfaces": [],
+                "virtual_chassis_members": [],
+                "cache_expiry": None,
+                "oob_incomplete": False,
+            },
+        }
+        return render_to_string("netbox_librenms_plugin/_interface_sync.html", ctx, request=request)
+
+    def test_refresh_button_includes_server_key(self):
+        html = self._render(server_key="prod")
+        # Hidden input carries the active server key...
+        assert '<input type="hidden" name="server_key" value="prod">' in html
+        # ...and the refresh button posts it alongside interface_name_field.
+        assert "[name='interface_name_field'], [name='server_key']" in html

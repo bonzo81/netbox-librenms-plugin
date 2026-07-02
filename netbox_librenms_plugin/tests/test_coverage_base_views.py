@@ -984,6 +984,30 @@ class TestBaseInterfaceTableViewGetContextData:
 
         assert ctx["table"] is None
 
+    def test_malformed_non_dict_cache_degrades_to_empty_table(self):
+        """A truthy but non-dict ports cache entry (legacy/older-shape or corrupt) must degrade to an empty table, not AttributeError-500 on .get('ports')."""
+        view = self._make_view()
+        obj = _mock_obj()
+        request = _mock_request()
+
+        with (
+            patch.object(view, "get_cache_key", return_value="key"),
+            patch.object(view, "get_last_fetched_key", return_value="last-key"),
+            patch.object(view, "get_vlan_overrides_key", return_value="overrides-key"),
+            patch.object(view, "get_vlan_groups_for_device", return_value=[]),
+            patch.object(view, "_build_vlan_lookup_maps", return_value={}),
+            patch("netbox_librenms_plugin.views.base.interfaces_view.get_interface_name_field", return_value="ifName"),
+            patch("netbox_librenms_plugin.views.base.interfaces_view.cache") as mock_cache,
+            patch("netbox_librenms_plugin.views.base.interfaces_view.timezone"),
+        ):
+            # Truthy but wrong shape (a stale list-shaped snapshot). Unfixed `if cached_data:` calls
+            # .get("ports") on the list → AttributeError-500. Fixed isinstance(dict) guard skips it.
+            mock_cache.get.side_effect = lambda key: [{"ports": []}] if key == "key" else None
+            mock_cache.ttl.return_value = None
+            ctx = view.get_context_data(request, obj, "ifName")
+
+        assert ctx["table"] is None
+
     def test_cache_hit_non_vc_builds_table(self):
         """Cached data without VC produces table."""
         view = self._make_view()
@@ -998,7 +1022,7 @@ class TestBaseInterfaceTableViewGetContextData:
         mock_iface = MagicMock()
         mock_iface.name = "Gi0/0"
         mock_ifaces_qs = MagicMock()
-        mock_ifaces_qs.select_related.return_value = [mock_iface]
+        mock_ifaces_qs.select_related.return_value.prefetch_related.return_value = [mock_iface]
 
         mock_table = MagicMock()
         mock_table.configure = MagicMock()
@@ -1046,7 +1070,7 @@ class TestBaseInterfaceTableViewGetContextData:
         }
 
         mock_iface_qs = MagicMock()
-        mock_iface_qs.select_related.return_value = []
+        mock_iface_qs.select_related.return_value.prefetch_related.return_value = []
 
         mock_table = MagicMock()
         mock_table.configure = MagicMock()
@@ -1108,7 +1132,7 @@ class TestBaseInterfaceTableViewGetContextData:
         interface_b.name = "Gi0/1"
 
         mock_ifaces_qs = MagicMock()
-        mock_ifaces_qs.select_related.return_value = [interface_a, interface_b]
+        mock_ifaces_qs.select_related.return_value.prefetch_related.return_value = [interface_a, interface_b]
 
         rows_store = {}
 
@@ -2124,7 +2148,7 @@ class TestBaseInterfaceTableViewMissingLines:
         mock_iface = MagicMock()
         mock_iface.name = "Gi0/0"
         mock_ifaces_qs = MagicMock()
-        mock_ifaces_qs.select_related.return_value = [mock_iface]
+        mock_ifaces_qs.select_related.return_value.prefetch_related.return_value = [mock_iface]
 
         mock_table = MagicMock()
         mock_table.configure = MagicMock()
@@ -2179,7 +2203,7 @@ class TestBaseInterfaceTableViewMissingLines:
         netbox_only_iface.type = "1000base-t"
 
         mock_ifaces_qs = MagicMock()
-        mock_ifaces_qs.select_related.return_value = [netbox_only_iface]
+        mock_ifaces_qs.select_related.return_value.prefetch_related.return_value = [netbox_only_iface]
 
         mock_table = MagicMock()
         mock_table.configure = MagicMock()
@@ -2230,7 +2254,7 @@ class TestBaseInterfaceTableViewMissingLines:
         netbox_only_iface.type = "1000base-t"
 
         mock_ifaces_qs = MagicMock()
-        mock_ifaces_qs.select_related.return_value = [netbox_only_iface]
+        mock_ifaces_qs.select_related.return_value.prefetch_related.return_value = [netbox_only_iface]
 
         mock_table = MagicMock()
         mock_table.configure = MagicMock()
@@ -2313,3 +2337,28 @@ class TestBaseIPAddressTableViewFlagManagementIp:
         data = [{"ip_address": "10.0.0.1"}]
         view._flag_management_ip(data)
         assert data[0].get("is_mgmt_ip") is None
+
+
+class TestSingleCableVerifyViewPermissionGate:
+    """SingleCableVerifyView is a read-only JSON endpoint exposing a device's cable/topology rows; it must require dcim.view_device like the interface/module verify views."""
+
+    def test_checks_permission_before_resolving_device(self):
+        """The object-view gate must run BEFORE get_object_or_404 so an unauthorized caller can't probe arbitrary device IDs (existence via 404) or trigger LibreNMS work. Exercises the REAL require_object_permissions_json (only request.user.has_perm is mocked) — mocking the gate itself would mask a missing NetBoxObjectPermissionMixin base."""
+        import json
+        from unittest.mock import MagicMock, patch
+
+        from netbox_librenms_plugin.views.base.cables_view import SingleCableVerifyView
+
+        view = object.__new__(SingleCableVerifyView)
+        view._librenms_api = MagicMock()
+        view._librenms_api.server_key = "default"
+        request = MagicMock()
+        request.body = json.dumps({"device_id": 999, "local_port_id": "serial:1"}).encode()
+        request.user.has_perm.return_value = False  # unauthorized → real gate returns 403
+        view.request = request  # check_object_permissions reads self.request.user
+
+        with patch("netbox_librenms_plugin.views.base.cables_view.get_object_or_404") as mock_get_obj:
+            response = view.post(request)
+
+        assert response.status_code == 403
+        mock_get_obj.assert_not_called()  # device never resolved → no arbitrary-ID probing

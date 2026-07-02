@@ -2,6 +2,31 @@
 
 from unittest.mock import MagicMock, patch
 
+import pytest
+
+
+@pytest.mark.parametrize(
+    "view_name",
+    ["UpdateDeviceNameView", "UpdateDeviceSerialView", "UpdateDeviceTypeView", "UpdateDevicePlatformView"],
+)
+def test_write_views_fetch_device_info_live_not_cached(view_name):
+    """The device-field write views must fetch LIVE LibreNMS info (use_cache=False) so a stale sync-tab cache snapshot is never persisted into NetBox."""
+    import netbox_librenms_plugin.views.sync.device_fields as df
+
+    view = _make_view(getattr(df, view_name))
+    view._librenms_api.get_librenms_id.return_value = 42
+    view._librenms_api.get_device_info.return_value = (False, None)  # short-circuit right after the call
+    mock_device = MagicMock()
+    mock_device.virtual_chassis = None
+    with (
+        patch("netbox_librenms_plugin.views.sync.device_fields.get_object_or_404", return_value=mock_device),
+        patch("netbox_librenms_plugin.views.sync.device_fields.messages"),
+        patch("netbox_librenms_plugin.views.sync.device_fields.redirect"),
+    ):
+        view.post(_make_request(), pk=1)
+    # Unfixed: called as get_device_info(42) → use_cache defaults True → reads the stale render cache.
+    assert view._librenms_api.get_device_info.call_args.kwargs.get("use_cache") is False
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -1846,6 +1871,40 @@ class TestConvertLegacyLibreNMSIdViewPost:
         mock_migrate.assert_called_once()
         mock_locked.full_clean.assert_called_once()
         mock_locked.save.assert_called_once()
+
+    def test_whitespace_padded_legacy_id_is_convertible_not_dead_end(self):
+        """A padded legacy id (' 42 ') the badge shows via is_legacy_librenms_id must convert, not hit the isdigit() dead-end."""
+        view = self._view()
+        mock_obj = MagicMock()
+        mock_obj.custom_field_data = {"librenms_id": " 42 "}
+        mock_obj.serial = "SN-MATCH"
+        view._librenms_api.get_device_info.return_value = (True, {"serial": "SN-MATCH"})
+
+        DoesNotExist = type("DoesNotExist", (Exception,), {})
+        mock_locked = MagicMock()
+        mock_locked.custom_field_data = {"librenms_id": " 42 "}
+        mock_locked.serial = "SN-MATCH"
+        mock_dev_cls = MagicMock()
+        mock_dev_cls.DoesNotExist = DoesNotExist
+        mock_dev_cls.objects.select_for_update.return_value.get.return_value = mock_locked
+
+        with (
+            patch("netbox_librenms_plugin.views.sync.device_fields.get_object_or_404", return_value=mock_obj),
+            patch("netbox_librenms_plugin.views.sync.device_fields.Device", mock_dev_cls),
+            patch("netbox_librenms_plugin.views.sync.device_fields.find_by_librenms_id", return_value=None),
+            patch(
+                "netbox_librenms_plugin.views.sync.device_fields.migrate_legacy_librenms_id", return_value=True
+            ) as mock_migrate,
+            patch("netbox_librenms_plugin.views.sync.device_fields.transaction"),
+            patch("netbox_librenms_plugin.views.sync.device_fields.messages") as mock_msg,
+            patch("netbox_librenms_plugin.views.sync.device_fields.redirect"),
+        ):
+            view.post(_make_request({"object_type": "device"}), pk=1)
+        # Unfixed: ' 42 '.isdigit() is False → error "not a valid integer" and migrate NOT called.
+        mock_migrate.assert_called_once()
+        assert not any("not a valid integer" in str(c) for c in mock_msg.error.call_args_list)
+        # The serial gate must read live info (use_cache=False), not a stale sync-tab cache snapshot.
+        assert view._librenms_api.get_device_info.call_args.kwargs.get("use_cache") is False
 
     def test_permission_denied(self):
         view = self._view()

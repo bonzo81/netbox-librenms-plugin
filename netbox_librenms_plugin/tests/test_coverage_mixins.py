@@ -13,6 +13,8 @@ Targets:
 
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 
 # =============================================================================
 # LibreNMSAPIMixin.get_context_data
@@ -1045,3 +1047,29 @@ class TestUpdateInterfaceVlanAssignmentBranches:
 
         for key in ("mode_set", "untagged_set", "tagged_set", "missing_vlans"):
             assert key in result
+
+
+class TestRenderServerKeyDegradation:
+    """LibreNMSAPIMixin._render_server_key degrades a misconfigured default to None and is shared across views."""
+
+    @pytest.mark.django_db
+    def test_render_server_key_returns_none_on_broken_default(self):
+        """A misconfigured default must not raise out of a render path; it degrades to None."""
+        from django.test import override_settings
+
+        from netbox_librenms_plugin.views.base.ip_addresses_view import BaseIPAddressTableView
+
+        view = object.__new__(BaseIPAddressTableView)
+        view._librenms_api = None  # live property -> LibreNMSAPI() would raise ValueError
+
+        with override_settings(PLUGINS_CONFIG={"netbox_librenms_plugin": {"servers": {"default": {}}}}):
+            assert view._render_server_key() is None
+
+    def test_render_server_key_is_shared_from_mixin(self):
+        """The IP and cable table views inherit ONE _render_server_key (no per-view duplicate)."""
+        from netbox_librenms_plugin.views.base.cables_view import BaseCableTableView
+        from netbox_librenms_plugin.views.base.ip_addresses_view import BaseIPAddressTableView
+        from netbox_librenms_plugin.views.mixins import LibreNMSAPIMixin
+
+        assert BaseIPAddressTableView._render_server_key is LibreNMSAPIMixin._render_server_key
+        assert BaseCableTableView._render_server_key is LibreNMSAPIMixin._render_server_key

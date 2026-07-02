@@ -115,10 +115,18 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
             librenms_id = self.librenms_api.get_librenms_id(obj)
             if not librenms_id:
                 return None
-            success, info = self.librenms_api.get_device_info(librenms_id)
+            # use_cache=False: this feeds the Primary-IP write decision, so it must read the live
+            # management IP, not a stale snapshot the sync-tab render may have cached.
+            success, info = self.librenms_api.get_device_info(librenms_id, use_cache=False)
             if not success or not isinstance(info, dict):
                 return None
-            return (info.get("ip") or "").strip() or None
+            ip = info.get("ip")
+            # Guard the type explicitly (like _resolve_management_ip in ip_addresses_view) rather
+            # than letting a non-string ip raise AttributeError into the broad except below: a
+            # malformed non-string ip is "no management IP", not an unexpected failure to swallow.
+            if not isinstance(ip, str):
+                return None
+            return ip.strip() or None
         except Exception:  # pragma: no cover - defensive
             return None
 

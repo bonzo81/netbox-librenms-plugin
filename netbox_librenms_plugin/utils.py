@@ -1,16 +1,66 @@
 import logging
 import re
+import threading
 from typing import Optional
 
 from dcim.models import Device
-from django.core.exceptions import ObjectDoesNotExist
-from django.db.models import Q
+from django.core.exceptions import ObjectDoesNotExist, ValidationError
+from django.db.models import Count, Max, Q
 from django.http import HttpRequest
 from netbox.config import get_config
 from netbox.plugins import get_plugin_config
 from utilities.paginator import get_paginate_count as netbox_get_paginate_count
 
 logger = logging.getLogger(__name__)
+
+
+def is_list_of_dicts(value) -> bool:
+    """
+    Return True only when *value* is a list whose every element is a dict.
+
+    Used to validate LibreNMS payloads at the API boundary: a ``success=True`` response can
+    still carry a malformed-but-truthy body (a string, a list of scalars, etc.), and blindly
+    dereferencing it turns a refresh into a 500 instead of the graceful error/fallback path.
+    An empty list is considered valid (a device legitimately with no rows).
+
+    Args:
+        value: The candidate payload to validate.
+
+    Returns:
+        bool: True if *value* is a list of dicts (the empty list included), False otherwise.
+    """
+    return isinstance(value, list) and all(isinstance(item, dict) for item in value)
+
+
+def cache_remaining_ttl(cache, key):
+    """
+    Return the remaining TTL (seconds) for *key*, degrading to ``None`` off Redis.
+
+    django-redis exposes ``cache.ttl(key)``; other backends (Django's ``LocMemCache`` in tests,
+    or any non-Redis deployment) do not, so a bare ``cache.ttl(...)`` raises ``AttributeError``
+    and 500s the cache-expiry render. Route every TTL read through here so the behaviour is
+    uniform across backends and lives in one place instead of drifting per view.
+
+    Args:
+        cache: The Django cache backend instance.
+        key: The cache key to inspect.
+
+    Returns:
+        int | None: The remaining TTL in seconds, ``None`` when the backend can't report it
+            (no ``ttl`` method) or the key has no expiry.
+    """
+    ttl = getattr(cache, "ttl", None)
+    if ttl is None:
+        return None
+    try:
+        return ttl(key)
+    except Exception:
+        # A backend that HAS .ttl (django-redis) can still raise at call time — e.g. a transient
+        # Redis connection error. Guarding only the method's ABSENCE would let that propagate into
+        # the cache-expiry render (modules/cables/IP/VLAN/interfaces _build_context) and 500 the very
+        # page this helper exists to protect. Degrade the cosmetic TTL to "unknown" instead.
+        logger.warning("cache.ttl(%r) failed; treating remaining TTL as unknown", key, exc_info=True)
+        return None
 
 
 _VC_MEMBER_INTERFACE_PATTERN = re.compile(r"^(?P<prefix>[A-Za-z][A-Za-z0-9]*)(?P<member>\d+)(?P<suffix>[/:].+)$")
@@ -62,6 +112,39 @@ def normalize_librenms_port_id(value) -> int | None:
     except (TypeError, ValueError):
         return None
     return int_value if int_value > 0 else None
+
+
+def validate_regex_field(value, field_name):
+    """
+    Compile ``value`` as a regex, raising a field-scoped ValidationError on failure.
+
+    Centralizes the ``re.compile`` / ``re.error`` -> ``ValidationError`` validator that was
+    copied across the plugin's pattern-bearing models (NormalizationRule,
+    CarrierAutoInstallRule, InventoryIgnoreRule, ModuleBayMapping, PortStackLagPattern), so the
+    wording stays consistent and any future hardening lives in one place.
+
+    ReDoS note (low severity, accepted): these patterns are admin-supplied (change permission)
+    and are later evaluated via ``re.search()`` / ``re.match()`` — including
+    ``lag_name_pattern``, run per port on every interface refresh. Python's ``re`` has no
+    per-evaluation timeout, so a catastrophic-backtracking pattern (e.g. ``^(a+)+$``) could
+    block the worker. This is accepted as an admin-only risk bounded by the fields'
+    ``max_length``; a real guard would need an out-of-process or timeout-capable regex engine
+    the plugin doesn't depend on.
+
+    Args:
+        value (str): The regex source to validate.
+        field_name (str): The model field name the error is attached to.
+
+    Returns:
+        re.Pattern: The compiled pattern (callers that need it for further checks reuse it).
+
+    Raises:
+        ValidationError: ``{field_name: "Invalid regex: <detail>"}`` when ``value`` won't compile.
+    """
+    try:
+        return re.compile(value)
+    except re.error as exc:
+        raise ValidationError({field_name: f"Invalid regex: {exc}"}) from exc
 
 
 def get_virtual_chassis_member(device: Device, port_name: str) -> Device:
@@ -208,6 +291,64 @@ def get_module_template_interface_names(device: Device, module) -> list[str]:
             template_names = list(returned)
 
     return template_names
+
+
+def predict_module_interface_rename(device: Device, module, names) -> list[str]:
+    """
+    Return the INR-predicted post-rename names for an explicit list of *names*.
+
+    Same receiver semantics as :func:`get_module_template_interface_names`
+    (``send_robust`` isolates a failing receiver and the last non-None list return
+    wins), but the input is a caller-supplied list of names rather than template
+    instantiations. Used to recognise when a standalone interface is the renamed
+    twin of a module's raw interface (the rename a naming plugin would apply but
+    skipped because the target name was already taken).
+    """
+    from netbox_librenms_plugin.signals import predict_module_interface_names
+
+    predicted = list(names)
+    for _receiver, returned in predict_module_interface_names.send_robust(
+        sender=type(module), device=device, module=module, names=list(names)
+    ):
+        if isinstance(returned, Exception):
+            logger.warning("predict_module_interface_names receiver failed: %s", returned)
+            continue
+        if returned is None:
+            continue
+        # send_robust only isolates a receiver that *raises*; a receiver that successfully returns a
+        # scalar still reaches here. A str/bytes is iterable but list("Gi0/0") would explode it into
+        # characters and mispair the rename, and a non-iterable (e.g. 1) would TypeError-500 the
+        # module sync path. Reject both and keep the previous prediction.
+        if isinstance(returned, (str, bytes)):
+            logger.warning(
+                "predict_module_interface_names receiver returned a scalar string result; "
+                "ignoring it to avoid mispairing a module interface rename"
+            )
+            continue
+        try:
+            returned = list(returned)
+        except TypeError:
+            logger.warning(
+                "predict_module_interface_names receiver returned a non-iterable result; "
+                "ignoring it to avoid mispairing a module interface rename"
+            )
+            continue
+        # Enforce the 1:1, order-preserving contract at the boundary: a receiver that returns a
+        # shorter/longer (or filtered) list would otherwise misalign the caller's
+        # ``zip(raw_ifaces, predicted)`` and fold a raw duplicate into the WRONG adopted interface —
+        # a silent wrong-object write of a LibreNMS binding. Reject a misaligned result and keep the
+        # previous prediction rather than trust it.
+        if len(returned) != len(names):
+            logger.warning(
+                "predict_module_interface_names receiver returned %d names for %d inputs; "
+                "ignoring its misaligned result to avoid mispairing a module interface rename",
+                len(returned),
+                len(names),
+            )
+            continue
+        predicted = returned
+
+    return predicted
 
 
 def detect_vc_normalization_noop(device: Device, module) -> Optional[dict]:
@@ -580,7 +721,7 @@ def get_interface_name_field(request: Optional[HttpRequest] = None) -> str:
     return get_plugin_config("netbox_librenms_plugin", "interface_name_field")
 
 
-def match_librenms_hardware_to_device_type(hardware_name: str) -> dict | None:
+def match_librenms_hardware_to_device_type(hardware_name: str, *, preloaded_rules: dict | None = None) -> dict | None:
     """
     Match LibreNMS hardware string to a NetBox DeviceType.
 
@@ -589,6 +730,9 @@ def match_librenms_hardware_to_device_type(hardware_name: str) -> dict | None:
 
     Args:
         hardware_name (str): Hardware string from LibreNMS API (e.g., 'C9200L-48P-4X')
+        preloaded_rules: Optional dict from :func:`preload_normalization_rules` for the
+            ``device_type`` scope. When matching many devices in a loop (bulk import), pass it
+            so the device_type NormalizationRule set is fetched once instead of per device.
 
     Returns:
         dict | None: Dictionary containing:
@@ -613,28 +757,53 @@ def match_librenms_hardware_to_device_type(hardware_name: str) -> dict | None:
     if not hardware_name or hardware_name == "-":
         return {"matched": False, "device_type": None, "match_type": None}
 
-    # Check DeviceTypeMapping table first (when available)
+    # Normalize the raw LibreNMS hardware string per the documented ``device_type``
+    # NormalizationRule scope before the DeviceTypeMapping lookup (docs/usage_tips/
+    # mapping_rules.md: "normalizes LibreNMS hardware string before DeviceTypeMapping
+    # lookup"). With no device_type rules configured this returns the input unchanged.
+    # .strip() to match how DeviceTypeMapping stores the key: its save() does .strip().lower(), so
+    # an unstripped search_name (e.g. rule output or raw hardware carrying surrounding whitespace)
+    # would never satisfy librenms_hardware__iexact (case-, but not whitespace-, insensitive).
+    raw_name = hardware_name.strip()
+    search_name = apply_normalization_rules(
+        value=hardware_name, scope="device_type", preloaded_rules=preloaded_rules
+    ).strip()
+
+    # Check DeviceTypeMapping table first (when available). The normalized key is the
+    # canonical form; the raw key is a fallback for rows the standard mapping CRUD/CSV
+    # write paths stored un-normalized (their model clean() only does .strip().lower()).
+    # Blank candidates are skipped: librenms_hardware can never be blank, and a rule
+    # chain that empties the string must not query iexact="".
     if _has_device_type_mapping:
-        try:
-            mapping = DeviceTypeMapping.objects.get(librenms_hardware__iexact=hardware_name)
-            return {
-                "matched": True,
-                "device_type": mapping.netbox_device_type,
-                "match_type": "mapping",
-            }
-        except DeviceTypeMapping.DoesNotExist:
-            pass
-        except DeviceTypeMapping.MultipleObjectsReturned:
-            logger.warning(
-                "Multiple DeviceTypeMapping entries match hardware %r — skipping mapping lookup; "
-                "resolve the ambiguity by removing duplicate mappings.",
-                hardware_name,
-            )
-            return None
+        for candidate in dict.fromkeys(name for name in (search_name, raw_name) if name):
+            try:
+                mapping = DeviceTypeMapping.objects.get(librenms_hardware__iexact=candidate)
+                return {
+                    "matched": True,
+                    "device_type": mapping.netbox_device_type,
+                    "match_type": "mapping",
+                }
+            except DeviceTypeMapping.DoesNotExist:
+                continue
+            except DeviceTypeMapping.MultipleObjectsReturned:
+                logger.warning(
+                    "Multiple DeviceTypeMapping entries match hardware %r — skipping mapping lookup; "
+                    "resolve the ambiguity by removing duplicate mappings.",
+                    candidate,
+                )
+                return None
+
+    # The part_number/model exact matches use the RAW string: the documented rule scope is
+    # the DeviceTypeMapping lookup only, and DeviceTypes whose part_number/model literally
+    # equal the LibreNMS hardware string must keep matching after a rule is added. A blank
+    # raw string (whitespace-only hardware) must not run the lookups at all — part_number
+    # defaults to "" so part_number__iexact="" would match an arbitrary unrelated DeviceType.
+    if not raw_name:
+        return {"matched": False, "device_type": None, "match_type": None}
 
     # Try part number exact match
     try:
-        device_type = DeviceType.objects.get(part_number__iexact=hardware_name)
+        device_type = DeviceType.objects.get(part_number__iexact=raw_name)
         return {
             "matched": True,
             "device_type": device_type,
@@ -646,13 +815,13 @@ def match_librenms_hardware_to_device_type(hardware_name: str) -> dict | None:
         logger.warning(
             "Multiple DeviceType entries match part_number %r — cannot auto-select; "
             "resolve the ambiguity by ensuring part numbers are unique across manufacturers.",
-            hardware_name,
+            raw_name,
         )
         return None
 
     # Try exact model match (case-insensitive)
     try:
-        device_type = DeviceType.objects.get(model__iexact=hardware_name)
+        device_type = DeviceType.objects.get(model__iexact=raw_name)
         return {"matched": True, "device_type": device_type, "match_type": "exact"}
     except DeviceType.DoesNotExist:
         pass
@@ -660,7 +829,7 @@ def match_librenms_hardware_to_device_type(hardware_name: str) -> dict | None:
         logger.warning(
             "Multiple DeviceType entries match model %r — cannot auto-select; "
             "resolve the ambiguity by ensuring model names are unique across manufacturers.",
-            hardware_name,
+            raw_name,
         )
         return None
 
@@ -1093,6 +1262,35 @@ def find_by_librenms_id(model, librenms_id, server_key: str = "default"):
     return model.objects.filter(q).first()
 
 
+def is_legacy_librenms_id(value) -> bool:
+    """
+    Return ``True`` when a ``librenms_id`` custom-field value is the legacy bare-integer form.
+
+    Legacy = a bare integer (created before the multi-server JSON refactor) or a string that
+    parses as an integer, i.e. NOT the per-server dict form and not absent. Uses ``int()``
+    coercion (so a whitespace-padded ``" 42 "`` is legacy too), matching
+    :func:`coerce_librenms_id` / :func:`get_librenms_device_id` rather than a stricter
+    ``str.isdigit()`` check that would hide a valid legacy link.
+
+    Args:
+        value: The raw ``custom_field_data["librenms_id"]`` value.
+
+    Returns:
+        bool: ``True`` for a *positive* bare int (non-bool) or a positive int-parseable string;
+            ``False`` for ``None``, ``0``/negative, the dict form, a bool, or a non-numeric string.
+    """
+    if isinstance(value, bool):
+        return False
+    if isinstance(value, int):
+        return value > 0
+    if isinstance(value, str):
+        try:
+            return int(value) > 0
+        except (TypeError, ValueError):
+            return False
+    return False
+
+
 def migrate_legacy_librenms_id(obj, server_key: str = "default") -> bool:
     """
     Migrate a legacy bare-integer ``librenms_id`` custom field to the JSON dict format,
@@ -1117,9 +1315,22 @@ def migrate_legacy_librenms_id(obj, server_key: str = "default") -> bool:
         return False
     if isinstance(cf_value, int):
         int_value = cf_value
-    elif isinstance(cf_value, str) and cf_value.isdigit():
-        int_value = int(cf_value)
+    elif isinstance(cf_value, str):
+        # Coerce with int() (not str.isdigit()) so this writer accepts exactly what the
+        # is_legacy_librenms_id() gate — and coerce_librenms_id / get_librenms_device_id — accept:
+        # a whitespace-padded " 42 " or signed "+42" is legacy everywhere else, so gating the
+        # migration on the stricter isdigit() would offer the Convert-ID button, pass every
+        # precondition, then dead-end here with "could not be converted" (issue #99).
+        try:
+            int_value = int(cf_value)
+        except (TypeError, ValueError):
+            return False
     else:
+        return False
+    if int_value <= 0:
+        # Keep the migration aligned with the positive-ID invariant (is_legacy_librenms_id /
+        # get_librenms_device_id treat <= 0 as no valid ID): never canonicalise 0 or a negative
+        # into the per-server JSON form.
         return False
     obj.custom_field_data["librenms_id"] = {server_key: int_value}
     logger.info(
@@ -1257,7 +1468,71 @@ class _ModuleTypeIndex(dict):
         self.mfr_mappings: dict = mfr_mappings or {}
 
 
+# (version, index) held as a single tuple so a lock-free reader always gets a CONSISTENT pair from
+# one atomic reference read — never a freshly-bumped version paired with a stale index, or vice
+# versa. Rebuilds are serialised by the lock so concurrent renders don't each rebuild.
+_MODULE_TYPES_INDEX_CACHE: tuple = (None, None)
+_MODULE_TYPES_INDEX_LOCK = threading.Lock()
+
+
+def _module_types_index_version():
+    """
+    Return a cheap fingerprint of the module-type index inputs.
+
+    Changes on any create/delete/edit (via ``save()``) of a ModuleType, a module-type
+    InterfaceTemplate, or a ModuleTypeMapping, so the cache below self-invalidates
+    (including across test transactions) with no signal wiring.
+
+    Limitation: a count-preserving bulk ``QuerySet.update()`` bypasses ``save()`` and so does
+    not bump ``last_updated`` (``auto_now``); such an edit leaves the fingerprint unchanged and
+    the cached index stale until the row count changes or the worker restarts. The plugin only
+    ever mutates these models via ``save()``, so this affects external bulk-update tooling only.
+    """
+    from dcim.models import InterfaceTemplate, ModuleType
+
+    from netbox_librenms_plugin.models import ModuleTypeMapping
+
+    def _fp(qs):
+        agg = qs.aggregate(n=Count("pk"), latest=Max("last_updated"))
+        return (agg["n"] or 0, agg["latest"].isoformat() if agg["latest"] else "")
+
+    return (
+        _fp(ModuleType.objects.all()),
+        _fp(InterfaceTemplate.objects.filter(module_type__isnull=False)),
+        _fp(ModuleTypeMapping.objects.all()),
+    )
+
+
 def get_module_types_indexed() -> dict:
+    """
+    Return the module-type index, rebuilt only when its inputs change.
+
+    The underlying build loads every ModuleType (with interface templates) and
+    ModuleTypeMapping — per-render work that dominates the module-sync render once
+    the rule-lookup cost is removed. Cache it keyed on a cheap fingerprint of those
+    tables so repeat renders reuse it.
+
+    Thread-safe: the (version, index) pair is read as one atomic tuple reference on the fast
+    path, and rebuilds happen under a lock so concurrent renders neither rebuild redundantly nor
+    observe a torn version/index swap.
+    """
+    global _MODULE_TYPES_INDEX_CACHE
+
+    version = _module_types_index_version()
+    cached_version, cached_index = _MODULE_TYPES_INDEX_CACHE  # single atomic read of the pair
+    if cached_index is not None and cached_version == version:
+        return cached_index
+
+    with _MODULE_TYPES_INDEX_LOCK:
+        # Re-check inside the lock: another thread may have rebuilt while we waited.
+        cached_version, cached_index = _MODULE_TYPES_INDEX_CACHE
+        if cached_index is None or cached_version != version:
+            cached_index = _build_module_types_index()
+            _MODULE_TYPES_INDEX_CACHE = (version, cached_index)
+        return cached_index
+
+
+def _build_module_types_index() -> dict:
     """
     Return all NetBox module types indexed by model (and part_number), with ModuleTypeMapping applied.
 
