@@ -18,14 +18,21 @@ import netbox_librenms_plugin
 
 TEMPLATE_ROOT = Path(netbox_librenms_plugin.__file__).parent / "templates"
 
-# Solid Bootstrap colour fills that need an explicit paired text colour.
-_SOLID_BG = re.compile(r"\bbg-(?:danger|success|warning|info|primary|secondary|dark|light)\b")
+# Solid colour fills that need an explicit paired text colour. Bootstrap's 8 base contextual
+# colours PLUS the Tabler extended palette this plugin ships (bg-purple etc.): each is a solid
+# fill that renders the badge's own muted text unreadably (this repo pairs bg-purple with
+# text-white for exactly that reason), so a bare one must be flagged just like bg-danger.
+_SOLID_BG = re.compile(
+    r"\bbg-(?:danger|success|warning|info|primary|secondary|dark|light"
+    r"|purple|indigo|pink|teal|cyan|azure|lime|orange|red|blue|yellow|green)\b"
+)
 # Any token that establishes a text colour (text-bg-* pairs both; text-dark/white/... is explicit).
 # Only real colour utilities count: a bare ``[a-z]+`` tail wrongly accepted layout utilities
 # (text-center, text-uppercase, ...), letting an unreadable bare bg-* badge slip through.
 _TEXT_COLOUR = re.compile(
     r"\b(?:"
-    r"text-bg-(?:danger|success|warning|info|primary|secondary|dark|light)"
+    r"text-bg-(?:danger|success|warning|info|primary|secondary|dark|light"
+    r"|purple|indigo|pink|teal|cyan|azure|lime|orange|red|blue|yellow|green)"
     r"|text-(?:dark|white|light|muted|black|body(?:-emphasis|-secondary|-tertiary)?)"
     r")\b"
 )
@@ -72,6 +79,29 @@ def test_text_colour_regex_rejects_layout_utilities():
     assert not _TEXT_COLOUR.search("badge bg-danger text-uppercase")
     assert not _TEXT_COLOUR.search("text-nowrap")
     assert not _TEXT_COLOUR.search("text-truncate")
+
+
+def test_solid_bg_regex_covers_tabler_extended_colours():
+    """Tabler extended solid fills (bg-purple, ...) must be flagged like the base contextual colours."""
+    for colour in (
+        "purple",
+        "indigo",
+        "pink",
+        "teal",
+        "cyan",
+        "azure",
+        "lime",
+        "orange",
+        "red",
+        "blue",
+        "yellow",
+        "green",
+    ):
+        cls = f"badge bg-{colour}"
+        assert _SOLID_BG.search(cls), f"bare bg-{colour} must be recognised as a solid fill needing paired text"
+        assert not _TEXT_COLOUR.search(cls), f"bg-{colour} alone must NOT be treated as carrying a text colour"
+    # The repo's own convention (bg-purple + text-white) still counts as paired → not an offender.
+    assert _SOLID_BG.search("badge bg-purple text-white") and _TEXT_COLOUR.search("badge bg-purple text-white")
 
 
 def test_class_attr_parses_single_quoted_and_multiline_attributes():

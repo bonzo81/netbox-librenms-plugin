@@ -127,14 +127,14 @@ class TestSerialActionBadges:
 class TestExistingLinkStateText:
     """The 'Exists as …' status line must reflect the existing device's LibreNMS link state for both serial- and hostname-matches: a host link, an OOB-only link, or genuinely unlinked."""
 
-    def _render(self, *, match_type, link):
+    def _render(self, *, match_type, link, name="host-link-1"):
         from django.contrib.auth.models import AnonymousUser
         from django.template.loader import render_to_string
         from django.test import RequestFactory
 
         from netbox_librenms_plugin.tests.conftest import make_device
 
-        existing = make_device("host-link-1")
+        existing = make_device(name)
         request = RequestFactory().get("/")
         request.user = AnonymousUser()
         ctx = {
@@ -179,6 +179,13 @@ class TestExistingLinkStateText:
     def test_hostname_match_genuinely_unlinked_still_says_not_linked(self):
         html = self._render(match_type="hostname", link={"host_id": None, "oob_id": None})
         assert "not linked to LibreNMS" in html
+
+    def test_serial_and_hostname_branches_render_identical_link_status_clause(self):
+        """Both branches share one include, so the full host+OOB clause renders identically (no drift)."""
+        link = {"host_id": 91, "oob_id": 7, "oob_type": "idrac"}
+        clause = "currently linked to LibreNMS device #91 (OOB #7, idrac)."
+        assert clause in self._render(match_type="hostname", link=link, name="clause-host")
+        assert clause in self._render(match_type="serial", link=link, name="clause-serial")
 
 
 @pytest.mark.django_db

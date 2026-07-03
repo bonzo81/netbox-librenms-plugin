@@ -43,14 +43,14 @@ def _shared_infra():
     mfr, _ = Manufacturer.objects.get_or_create(name="TestMfr", slug="test-mfr")
     dtype, _ = DeviceType.objects.get_or_create(model="TestDT", slug="test-dt", defaults={"manufacturer": mfr})
     role, _ = DeviceRole.objects.get_or_create(name="TestRole", slug="test-role", defaults={"color": "00ff00"})
-    return site, dtype, role
+    return site, mfr, dtype, role
 
 
 def make_device(name, *, serial="", librenms_cf=None):
     """Create a real Device on the shared infra, optionally seeding its librenms_id CF."""
     from dcim.models import Device
 
-    site, dtype, role = _shared_infra()
+    site, _mfr, dtype, role = _shared_infra()
     dev = Device.objects.create(name=name, device_type=dtype, role=role, site=site, status="active", serial=serial)
     if librenms_cf is not None:
         dev.custom_field_data["librenms_id"] = librenms_cf
@@ -114,10 +114,7 @@ def make_module_type(model, *, manufacturer=None):
     from dcim.models import ModuleType
 
     if manufacturer is None:
-        _, _, _ = _shared_infra()  # ensure shared infra exists
-        from dcim.models import Manufacturer
-
-        manufacturer = Manufacturer.objects.get(slug="test-mfr")
+        _, manufacturer, _, _ = _shared_infra()
     return ModuleType.objects.create(manufacturer=manufacturer, model=model)
 
 
@@ -130,11 +127,10 @@ def make_module_bay(device, name):
 
 def make_module_type_with_bays(model, *, manufacturer=None, bay_names=()):
     """get_or_create a real ModuleType and (when first created) attach ModuleBayTemplates."""
-    from dcim.models import Manufacturer, ModuleBayTemplate, ModuleType
+    from dcim.models import ModuleBayTemplate, ModuleType
 
     if manufacturer is None:
-        _shared_infra()
-        manufacturer = Manufacturer.objects.get(slug="test-mfr")
+        _, manufacturer, _, _ = _shared_infra()
     # Additive: reusing the same model with new bay_names must add the missing templates rather
     # than silently skip them (the create-only guard made tests order-dependent).
     mt, _ = ModuleType.objects.get_or_create(manufacturer=manufacturer, model=model)
@@ -147,11 +143,9 @@ def make_device_with_module_bays(name, bay_names, *, manufacturer=None, serial="
     """Create a real Device on a dedicated DeviceType carrying device-level ModuleBayTemplates."""
     from dcim.models import Device, DeviceType, ModuleBayTemplate
 
-    site, _, role = _shared_infra()
+    site, mfr, _, role = _shared_infra()
     if manufacturer is None:
-        from dcim.models import Manufacturer
-
-        manufacturer = Manufacturer.objects.get(slug="test-mfr")
+        manufacturer = mfr
     slug = f"mbt-dt-{name}".lower().replace(" ", "-")
     dtype = DeviceType.objects.create(manufacturer=manufacturer, model=f"DT-{name}", slug=slug)
     for bn in bay_names:

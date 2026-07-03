@@ -740,7 +740,10 @@ class TestEnrichRemotePort:
         iface = make_interface(member, "Gi1/0/1")
         _seed_lib_id(iface, 20)
 
-        link = {"remote_port": "Gi1/0/1", "remote_port_id": 20}
+        # remote_port keeps the "Gi1/" prefix (so member selection still resolves slot 1) but
+        # differs from iface.name, so the name fallback CANNOT mask a broken librenms_id lookup —
+        # only the id path can reach this interface.
+        link = {"remote_port": "Gi1/0/99", "remote_port_id": 20}
         result = view.enrich_remote_port(link, master)
 
         assert result["netbox_remote_interface_id"] == iface.pk
@@ -765,7 +768,9 @@ class TestEnrichRemotePort:
         iface = make_interface(device, "eth0")
         _seed_lib_id(iface, 15)
 
-        link = {"remote_port": "eth0", "remote_port_id": 15}
+        # remote_port deliberately differs from iface.name so only the librenms_id lookup can
+        # match — the name fallback (filter(name="remote-eth0")) resolves nothing.
+        link = {"remote_port": "remote-eth0", "remote_port_id": 15}
         result = view.enrich_remote_port(link, device)
 
         assert result["netbox_remote_interface_id"] == iface.pk

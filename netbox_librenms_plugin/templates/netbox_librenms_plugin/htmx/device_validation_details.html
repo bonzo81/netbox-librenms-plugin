@@ -449,7 +449,7 @@
           {% csrf_token %}
           <input type="hidden" name="existing_device_id" value="{{ validation.existing_device.pk }}">
           <input type="hidden" name="existing_device_type" value="{{ existing_device_model_name|default:'device' }}">
-          <input type="hidden" name="server_key" value="{{ server_key }}">
+          {% include "netbox_librenms_plugin/inc/_hidden_server_key.html" %}
           <input type="hidden" name="action" value="migrate_librenms_id">
           {% if validation.existing_device.cluster %}
           <input type="hidden" name="cluster_{{ libre_device.device_id }}" value="{{ validation.existing_device.cluster.pk }}">
@@ -485,10 +485,7 @@
         {% endif %}
         <span class="text-muted ms-1">
           — Exists as
-          <a href="{{ existing_device_url }}" target="_blank" rel="noopener noreferrer">{{ validation.existing_device.name }}</a>{% if validation.existing_librenms_link.host_id %},
-          currently linked to LibreNMS device #{{ validation.existing_librenms_link.host_id }}{% if validation.existing_librenms_link.oob_id %} (OOB #{{ validation.existing_librenms_link.oob_id }}{% if validation.existing_librenms_link.oob_type %}, {{ validation.existing_librenms_link.oob_type }}{% endif %}){% endif %}.{% elif validation.existing_librenms_link.oob_id %},
-          currently linked to LibreNMS as OOB #{{ validation.existing_librenms_link.oob_id }}{% if validation.existing_librenms_link.oob_type %} ({{ validation.existing_librenms_link.oob_type }}){% endif %}.{% else %},
-          not linked to LibreNMS.{% endif %}
+          <a href="{{ existing_device_url }}" target="_blank" rel="noopener noreferrer">{{ validation.existing_device.name }}</a>{% include "netbox_librenms_plugin/htmx/_existing_librenms_link_status.html" %}
         </span>
       </div>
       {% if validation.serial_action == 'conflict' %}
@@ -558,10 +555,7 @@
         {% endif %}
         <span class="text-muted ms-1">
           — Exists as
-          <a href="{{ existing_device_url }}" target="_blank" rel="noopener noreferrer">{{ validation.existing_device.name }}</a>{% if validation.existing_librenms_link.host_id %},
-          currently linked to LibreNMS device #{{ validation.existing_librenms_link.host_id }}{% if validation.existing_librenms_link.oob_id %} (OOB #{{ validation.existing_librenms_link.oob_id }}{% if validation.existing_librenms_link.oob_type %}, {{ validation.existing_librenms_link.oob_type }}{% endif %}){% endif %}.{% elif validation.existing_librenms_link.oob_id %},
-          currently linked to LibreNMS as OOB #{{ validation.existing_librenms_link.oob_id }}{% if validation.existing_librenms_link.oob_type %} ({{ validation.existing_librenms_link.oob_type }}){% endif %}.{% else %},
-          not linked to LibreNMS.{% endif %}
+          <a href="{{ existing_device_url }}" target="_blank" rel="noopener noreferrer">{{ validation.existing_device.name }}</a>{% include "netbox_librenms_plugin/htmx/_existing_librenms_link_status.html" %}
         </span>
       </div>
       {% if validation.serial_role_choice_available %}
@@ -621,7 +615,7 @@
             <input type="hidden" name="existing_device_id" value="{{ validation.existing_device.pk }}">
             <input type="hidden" name="existing_device_type" value="{{ existing_device_model_name|default:'device' }}">
             {% comment %}Carry the modal's server scope (mirrors the Add-as-OOB form below).{% endcomment %}
-            <input type="hidden" name="server_key" value="{{ server_key }}">
+            {% include "netbox_librenms_plugin/inc/_hidden_server_key.html" %}
             {% if validation.device_type_mismatch %}
               <div class="form-check mb-2">
                 <input class="form-check-input" type="checkbox" name="force" id="force-promote-{{ libre_device.device_id }}"
@@ -683,7 +677,7 @@
                 hx-swap="none">
             {% csrf_token %}
             <input type="hidden" name="existing_device_id" value="{{ validation.existing_device.pk }}">
-            <input type="hidden" name="server_key" value="{{ server_key }}">
+            {% include "netbox_librenms_plugin/inc/_hidden_server_key.html" %}
             {% include "netbox_librenms_plugin/htmx/_oob_interface_select.html" %}
             <button type="submit" class="btn btn-sm btn-primary">
               <i class="mdi mdi-chip"></i> Add as OOB to {{ validation.existing_device.name }}
@@ -708,7 +702,7 @@
           multi-server link/update runs against that server, not the session/default one -- otherwise
           set_librenms_device_id writes the mapping under the wrong server namespace.
           {% endcomment %}
-          <input type="hidden" name="server_key" value="{{ server_key }}">
+          {% include "netbox_librenms_plugin/inc/_hidden_server_key.html" %}
           {% if validation.device_type_mismatch %}
             <div class="form-check mb-2">
               <input class="form-check-input" type="checkbox" name="force" id="force-serial-{{ libre_device.device_id }}"
@@ -755,7 +749,7 @@
                 hx-swap="none">
             {% csrf_token %}
             <input type="hidden" name="existing_device_id" value="{{ validation.existing_device.pk }}">
-            <input type="hidden" name="server_key" value="{{ server_key }}">
+            {% include "netbox_librenms_plugin/inc/_hidden_server_key.html" %}
             {% include "netbox_librenms_plugin/htmx/_oob_interface_select.html" %}
             <button type="submit" class="btn btn-sm btn-primary">
               <i class="mdi mdi-chip"></i> Add as OOB to {{ validation.existing_device.name }}
