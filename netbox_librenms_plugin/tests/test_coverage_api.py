@@ -862,12 +862,12 @@ class TestGetAvailableServersMultiConfig:
 
     def test_multi_server_config_returns_dict(self):
         api = _make_api()
-        # Entries must carry url + token to be usable/selectable; display_name controls the label.
+        # Both fully configured (url + token) so they pass the usable-config filter and are offered.
         servers_config = {
-            "primary": {"librenms_url": "https://p.example.com", "api_token": "t1", "display_name": "Primary Server"},
+            "primary": {"librenms_url": "https://p.example.com", "api_token": "pt", "display_name": "Primary Server"},
             "secondary": {
                 "librenms_url": "https://s.example.com",
-                "api_token": "t2",
+                "api_token": "st",
                 "display_name": "Secondary Server",
             },
         }
@@ -879,9 +879,9 @@ class TestGetAvailableServersMultiConfig:
 
     def test_multi_server_config_uses_key_when_no_display_name(self):
         api = _make_api()
+        # Usable (url + token) but no display_name → the key is used as the display label.
         servers_config = {
-            # Usable (has url + token) but no display_name → the key is the label.
-            "main": {"librenms_url": "https://m.example.com", "api_token": "t"},
+            "main": {"librenms_url": "https://m.example.com", "api_token": "mt"},
         }
 
         with patch("netbox_librenms_plugin.librenms_api.get_plugin_config") as mock_config:

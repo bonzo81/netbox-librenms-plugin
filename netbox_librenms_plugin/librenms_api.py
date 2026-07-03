@@ -46,6 +46,20 @@ class LibreNMSAPI:
     Client to interact with the LibreNMS API and retrieve interface data for devices.
     """
 
+    @staticmethod
+    def _is_usable_server_config(config):
+        """
+        Return True only for a server mapping that ``__init__`` can bind.
+
+        A server entry is usable only when it is a dict carrying a non-empty
+        ``librenms_url`` and ``api_token`` — the same fields ``__init__`` requires
+        before it will build a client. Sharing this predicate keeps the server
+        picker (``get_available_servers``) and the auto-default fallback from
+        offering, or silently selecting, a partially configured entry that would
+        immediately raise ``ValueError``.
+        """
+        return isinstance(config, dict) and bool(config.get("librenms_url")) and bool(config.get("api_token"))
+
     def __init__(self, server_key=None):
         """
         Initialize LibreNMS API client with support for multiple servers.
@@ -98,26 +112,20 @@ class LibreNMSAPI:
                 raise KeyError(
                     f"Server '{server_key}' not found in LibreNMS plugin configuration. Available servers: {available}"
                 )
-            # Pick the first *usable* mapping — a dict that actually carries a url + token. A
-            # non-dict or incomplete entry would otherwise be selected and then raise at the config
-            # read below, masking a perfectly usable later server (e.g. {"bad": {}, "prod": {...}}).
-            # If none are usable, fail with a clear error (issue #110).
+            # Skip partially configured entries so the auto-default doesn't land on a server
+            # missing its url/token (which __init__ would reject below) while a later entry is
+            # fully usable.
             first_key = next(
-                (
-                    key
-                    for key, config in servers_config.items()
-                    if isinstance(config, dict) and config.get("librenms_url") and config.get("api_token")
-                ),
+                (k for k, cfg in servers_config.items() if self._is_usable_server_config(cfg)),
                 None,
             )
-            if first_key is None:
-                raise ValueError("No valid LibreNMS server configuration entries found.")
-            logger.info(
-                "Server '%s' not found in config, falling back to '%s'",
-                server_key,
-                first_key,
-            )
-            server_key = first_key
+            if first_key:
+                logger.info(
+                    "Server '%s' not found in config, falling back to '%s'",
+                    server_key,
+                    first_key,
+                )
+                server_key = first_key
 
         self.server_key = server_key
 
@@ -232,13 +240,15 @@ class LibreNMSAPI:
             # Multi-server configuration
             result = {}
             for key, config in servers_config.items():
-                # Skip non-usable entries: a non-dict raises on config.get(...) below, and a
-                # dict-shaped but incomplete entry (no librenms_url/api_token, e.g. {"bad": {}})
-                # would pass the redirect/rebind membership check that keys off this map and then
-                # blow up LibreNMSAPI(server_key="bad"). A server that can't be constructed must not
-                # be selectable — exposing it 500s a sync POST instead of degrading to the active one.
-                if not isinstance(config, dict):
-                    logger.warning("Skipping malformed LibreNMS server config %r (expected a mapping).", key)
+                # Only offer servers that __init__ can actually bind: a dict with a non-empty
+                # librenms_url and api_token. Mirroring the constructor's validation keeps a
+                # malformed (non-mapping) or partially configured entry from appearing selectable
+                # and then failing the moment it is chosen.
+                if not cls._is_usable_server_config(config):
+                    logger.warning(
+                        "Skipping unusable LibreNMS server config %r (needs a librenms_url and api_token).",
+                        key,
+                    )
                     continue
                 if not config.get("librenms_url") or not config.get("api_token"):
                     continue

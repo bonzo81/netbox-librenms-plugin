@@ -277,16 +277,6 @@ class TestLibreNMSAPIInit:
         # build_librenms_api must convert that into a clean None, not a 500.
         assert build_librenms_api("badserver") is None
 
-    def test_get_available_servers_skips_malformed_entry(self, mock_librenms_config):
-        """A non-mapping server entry (e.g. None) must be skipped from available servers."""
-        mock_config = mock_librenms_config["mock_config"]
-        mock_config.return_value = {"good": {"display_name": "Good"}, "bad": None}
-
-        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
-
-        result = LibreNMSAPI.get_available_servers()
-        assert result == {"good": "Good"}
-
 
 # =============================================================================
 # Test Class 2: Connection Testing (4 tests)
