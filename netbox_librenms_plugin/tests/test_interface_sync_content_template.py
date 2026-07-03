@@ -127,27 +127,41 @@ class TestInterfaceSyncContentTemplateMigratedMode:
         html = self._render(migrated=None)
         assert "Exclude from Sync:" in html
 
-    def test_migrated_move_button_hidden_for_read_only_users(self):
-        """The migrated 'Move' action is a mutating HTMX POST; without write permission it must not render as a live button (it would only fail at the permission gate) — show muted 'read-only' text instead."""
+    @staticmethod
+    def _patch_move_url_reverse(*, resolve):
+        """Patch ``django.urls.reverse`` so ``interface_move_to_winner`` looks registered
+        (``resolve=True`` → a fake path) or unregistered (``resolve=False`` → ``NoReverseMatch``),
+        while every other viewname resolves for real. The move URL is only registered up-stack, so
+        forcing the state here keeps these guard tests branch-independent. ``django.urls.reverse``
+        is the correct target because ``{% url %}`` re-imports ``reverse`` from ``django.urls`` at
+        render. Returns a ``patch()`` context manager.
+        """
         from unittest.mock import patch
 
+        from django.urls import NoReverseMatch
         from django.urls import reverse as real_reverse
 
+        def _reverse(viewname, *args, **kwargs):
+            if str(viewname).endswith("interface_move_to_winner"):
+                if resolve:
+                    return "/fake/interface-move/1/"
+                raise NoReverseMatch(viewname)
+            return real_reverse(viewname, *args, **kwargs)
+
+        return patch("django.urls.reverse", _reverse)
+
+    def test_migrated_move_button_hidden_for_read_only_users(self):
+        """The migrated 'Move' action is a mutating HTMX POST; without write permission it must not render as a live button (it would only fail at the permission gate) — show muted 'read-only' text instead."""
         from netbox_librenms_plugin.tests.conftest import make_device
 
         winner = make_device("iface-winner-dev")
         iface = {"id": 1, "name": "eth-only", "type": "1000base-t", "enabled": True, "url": "/dcim/x/"}
         marker = {"server_key": "default", "device_id": 1, "at": "now"}
 
-        def _reverse(viewname, *args, **kwargs):
-            # Make the move URL resolvable so this test exercises the write-permission gate itself,
-            # not the branch-dependent absence of the URL (it's only registered up-stack). Then the
-            # negative assertion can actually FAIL if the has_write_permission guard is removed.
-            if str(viewname).endswith("interface_move_to_winner"):
-                return "/fake/interface-move/1/"
-            return real_reverse(viewname, *args, **kwargs)
-
-        with patch("django.urls.reverse", _reverse):
+        # Make the move URL resolvable so this test exercises the write-permission gate itself, not
+        # the branch-dependent absence of the URL (registered only up-stack); the negative assertion
+        # can then actually FAIL if the has_write_permission guard is removed.
+        with self._patch_move_url_reverse(resolve=True):
             ro = self._render(migrated=marker, netbox_only=[iface], winner=winner, has_write=False)
         # Assert on the button's own rendered content, not the URL *name* (which never appears in
         # HTML — the template emits the resolved path). The live Move button carries this confirm text.
@@ -157,27 +171,17 @@ class TestInterfaceSyncContentTemplateMigratedMode:
 
     def test_migrated_move_button_write_perm_degrades_when_url_unregistered(self):
         """With write perm, an unregistered move-to-winner URL must degrade to read-only, not 500."""
-        from unittest.mock import patch
-
-        from django.urls import NoReverseMatch
-        from django.urls import reverse as real_reverse
-
         from netbox_librenms_plugin.tests.conftest import make_device
 
         winner = make_device("iface-winner-wp")
         iface = {"id": 1, "name": "eth-only", "type": "1000base-t", "enabled": True, "url": "/dcim/x/"}
         marker = {"server_key": "default", "device_id": 1, "at": "now"}
 
-        def _reverse(viewname, *args, **kwargs):
-            # Force the forward-declared move URL to look unregistered on ANY branch (it IS registered
-            # up-stack), so the {% url ... as %} degrade path is exercised wherever this test runs.
-            if str(viewname).endswith("interface_move_to_winner"):
-                raise NoReverseMatch(viewname)
-            return real_reverse(viewname, *args, **kwargs)
-
-        # Unfixed (bare {% url %}) this raises NoReverseMatch; the {% url ... as %} guard renders the
+        # Force the forward-declared move URL to look unregistered on ANY branch (it IS registered
+        # up-stack) so the {% url ... as %} degrade path is exercised wherever this runs. Unfixed
+        # (bare {% url %}) this raises NoReverseMatch; the {% url ... as %} guard renders the
         # read-only fallback instead, so the migrated tab never 500s where the URL isn't registered.
-        with patch("django.urls.reverse", _reverse):
+        with self._patch_move_url_reverse(resolve=False):
             html = self._render(migrated=marker, netbox_only=[iface], winner=winner, has_write=True)
         # Assert on the button's rendered content (the confirm text), not the URL name: with the URL
         # unresolved, move_url is '' so the live button must be absent and the read-only span shown.
@@ -190,22 +194,13 @@ class TestInterfaceSyncContentTemplateMigratedMode:
         This proves the negative assertions above key off the button's real rendered content — i.e.
         they would actually fail if the button leaked into a read-only / unregistered render.
         """
-        from unittest.mock import patch
-
-        from django.urls import reverse as real_reverse
-
         from netbox_librenms_plugin.tests.conftest import make_device
 
         winner = make_device("iface-winner-write")
         iface = {"id": 1, "name": "eth-only", "type": "1000base-t", "enabled": True, "url": "/dcim/x/"}
         marker = {"server_key": "default", "device_id": 1, "at": "now"}
 
-        def _reverse(viewname, *args, **kwargs):
-            if str(viewname).endswith("interface_move_to_winner"):
-                return "/fake/interface-move/1/"
-            return real_reverse(viewname, *args, **kwargs)
-
-        with patch("django.urls.reverse", _reverse):
+        with self._patch_move_url_reverse(resolve=True):
             html = self._render(migrated=marker, netbox_only=[iface], winner=winner, has_write=True)
         assert "Move interface '" in html
         assert 'hx-post="/fake/interface-move/1/"' in html
