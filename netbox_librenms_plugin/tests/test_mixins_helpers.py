@@ -7,7 +7,7 @@
 These exercise the real functions against the real Django cache / real plugin config — no mocks.
 """
 
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 from django.core.cache import cache as real_cache
@@ -87,6 +87,45 @@ class TestResolveRequestedServerKey:
     def test_missing_key_falls_back(self):
         view = self._view()
         assert view.resolve_requested_server_key({}) == view._render_server_key()
+
+
+class TestResolvePostedServerKey:
+    """resolve_posted_server_key honours only a configured key, else falls back to the ACTIVE server.
+
+    Unlike resolve_requested_server_key (which degrades to _render_server_key()/None for GET renders),
+    the module install/bind ACTION paths fall back to the active client server so the port-bind still
+    runs — but a forged non-blank key must still be rejected so a binding is never written under an
+    unconfigured namespace.
+    """
+
+    def _view(self, active="active-server"):
+        from netbox_librenms_plugin.views.object_sync.devices import DeviceInterfaceTableView
+
+        view = DeviceInterfaceTableView()
+        view._librenms_api = MagicMock(server_key=active)  # the active-server boundary
+        return view
+
+    def test_configured_key_is_honoured(self):
+        view = self._view()
+        with patch.object(LibreNMSAPI, "get_available_servers", return_value={"prod": "Prod", "default": "Default"}):
+            assert view.resolve_posted_server_key({"server_key": "prod"}) == "prod"
+
+    def test_forged_nonblank_key_falls_back_to_active(self):
+        view = self._view()
+        with patch.object(LibreNMSAPI, "get_available_servers", return_value={"default": "Default"}):
+            # 'evil' names no configured server → must NOT be honoured (would scope a bind under a
+            # bogus namespace); fall back to the active server instead.
+            assert view.resolve_posted_server_key({"server_key": "evil"}) == "active-server"
+
+    def test_blank_key_falls_back_to_active(self):
+        view = self._view()
+        with patch.object(LibreNMSAPI, "get_available_servers", return_value={"default": "Default"}):
+            assert view.resolve_posted_server_key({"server_key": "   "}) == "active-server"
+
+    def test_missing_key_falls_back_to_active(self):
+        view = self._view()
+        with patch.object(LibreNMSAPI, "get_available_servers", return_value={"default": "Default"}):
+            assert view.resolve_posted_server_key({}) == "active-server"
 
 
 class TestGetLiveDeviceInfo:

@@ -1479,6 +1479,22 @@ class TestAdoptMergesRawDuplicateInterface:
     LibreNMS port binding off the raw twin, and delete the now-redundant raw twin.
     """
 
+    @pytest.fixture(autouse=True)
+    def _configure_production_server(self):
+        # These tests post server_key="production"; resolve_posted_server_key now validates the posted
+        # key against the configured servers before honouring it, so "production" must be configured or
+        # it degrades to the active server. Configuring it mirrors a real multi-server deployment.
+        # Patch get_plugin_config (the seam BOTH LibreNMSAPI.__init__ and get_available_servers read),
+        # not just the get_available_servers classmethod: the panel-render path in some of these tests
+        # constructs a real LibreNMSAPI("production"), which __init__ validates against get_plugin_config
+        # — so "production" must be a fully configured server (url+token), else the render KeyErrors.
+        servers = {
+            "default": {"librenms_url": "https://librenms.example.com", "api_token": "test-token"},
+            "production": {"librenms_url": "https://prod.example.com", "api_token": "prod-token"},
+        }
+        with patch("netbox_librenms_plugin.librenms_api.get_plugin_config", return_value=servers):
+            yield
+
     def _build(self):
         from dcim.models import (
             Cable,
@@ -2079,6 +2095,22 @@ class TestPredictModuleInterfaceRenameLengthGuard:
 
 class TestSingleInstallInterfaceBinding:
     """Single-row install should resolve inventory identity and bind interfaces."""
+
+    @pytest.fixture(autouse=True)
+    def _configure_production_server(self):
+        # These tests post server_key="production"; resolve_posted_server_key now validates it against
+        # the configured servers before honouring it, so "production" must be configured or it degrades
+        # to the active server. Configuring it mirrors a real multi-server deployment.
+        # Patch get_plugin_config (the seam BOTH LibreNMSAPI.__init__ and get_available_servers read),
+        # not just the get_available_servers classmethod: the panel-render path in some of these tests
+        # constructs a real LibreNMSAPI("production"), which __init__ validates against get_plugin_config
+        # — so "production" must be a fully configured server (url+token), else the render KeyErrors.
+        servers = {
+            "default": {"librenms_url": "https://librenms.example.com", "api_token": "test-token"},
+            "production": {"librenms_url": "https://prod.example.com", "api_token": "prod-token"},
+        }
+        with patch("netbox_librenms_plugin.librenms_api.get_plugin_config", return_value=servers):
+            yield
 
     def test_resolve_single_install_binding_item_uses_cache_row_by_ent_index(self):
         from netbox_librenms_plugin.views.sync.modules import _resolve_single_install_binding_item

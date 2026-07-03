@@ -388,6 +388,30 @@ class LibreNMSAPIMixin:
             return requested_server_key
         return self._render_server_key()
 
+    def resolve_posted_server_key(self, data):
+        """
+        Resolve a requested server key for an ACTION path, degrading to the ACTIVE server.
+
+        The module install/replace/bind flows scope cache reads AND write LibreNMS custom-field
+        bindings (``custom_field_data["librenms_id"][server_key]``) under this key. A blank fallback
+        alone is not enough: a forged *non-blank* key that names no configured server would otherwise be
+        honoured and address an unconfigured namespace. Only a configured string key is honoured; blank,
+        non-string, or unrecognised falls back to ``self.librenms_api.server_key`` — the active client
+        server — so the port-bind still runs (unlike :meth:`resolve_requested_server_key`, which degrades
+        to ``None`` for cached GET *renders*).
+
+        Args:
+            data: A dict-like request payload (``request.POST`` or ``request.GET``) carrying an optional
+                ``server_key``.
+
+        Returns:
+            str: The validated posted key, or the active-server key.
+        """
+        requested_server_key = (data.get("server_key") or "").strip()
+        if requested_server_key and requested_server_key in LibreNMSAPI.get_available_servers():
+            return requested_server_key
+        return self.librenms_api.server_key
+
     def get_live_device_info(self, librenms_id):
         """
         Fetch LIVE LibreNMS device info for a write path (``use_cache=False``).

@@ -400,6 +400,12 @@ class TestReplaceModuleView:
         with (
             patch("netbox_librenms_plugin.views.sync.modules.get_object_or_404", side_effect=[device, installed]),
             patch.object(view, "require_all_permissions", return_value=None),
+            # "prod" must be a configured server for resolve_posted_server_key to honour the posted key
+            # (else it degrades to the active "default"); mirrors a real multi-server deployment.
+            patch(
+                "netbox_librenms_plugin.librenms_api.LibreNMSAPI.get_available_servers",
+                return_value={"prod": "Prod", "default": "Default"},
+            ),
             patch.object(view, "get_cache_key", return_value="ck") as mock_get_cache_key,
             patch(
                 "netbox_librenms_plugin.views.sync.modules._get_sync_device_for_inventory",
