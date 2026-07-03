@@ -154,6 +154,59 @@ class TestVerifyPostRejectsNonObjectBody:
         assert json.loads(response.content)["message"] == "JSON payload must be an object"
 
 
+@pytest.mark.django_db
+class TestVerifyPostRejectsMalformedVrfId:
+    """A non-numeric vrf_id must 400 before the VRF filter, not 500 via the broad handler.
+
+    The `vrf__id` filter in `_find_existing_ip` is only reached when an IPAddress at the posted address
+    already exists, so the real IP is created first — otherwise the guard is never exercised and the
+    pre-fix code wouldn't 500 either. Only the cache read is stubbed; `_find_existing_ip` runs for real.
+    """
+
+    def _real_device(self):
+        from dcim.models import Device, DeviceRole, DeviceType, Manufacturer, Site
+
+        mfr, _ = Manufacturer.objects.get_or_create(name="VRFSK-Mfr", slug="vrfsk-mfr")
+        dt, _ = DeviceType.objects.get_or_create(manufacturer=mfr, model="VRFSK-DT", slug="vrfsk-dt")
+        role, _ = DeviceRole.objects.get_or_create(name="VRFSK-Role", slug="vrfsk-role")
+        site, _ = Site.objects.get_or_create(name="VRFSK-Site", slug="vrfsk-site")
+        return Device.objects.create(name="vrfsk-dev", device_type=dt, role=role, site=site, status="active")
+
+    def _post(self, vrf_id):
+        from django.contrib.auth import get_user_model
+        from ipam.models import IPAddress
+
+        device = self._real_device()
+        IPAddress.objects.get_or_create(address="10.0.0.1/24")  # make the vrf__id filter reachable
+
+        view = _make_view()
+        request = _make_request(
+            {"ip_address": "10.0.0.1/24", "vrf_id": vrf_id, "device_id": device.pk, "object_type": "device"}
+        )
+        request.user = get_user_model().objects.create_superuser(username=f"vrfsk-{device.pk}", email="", password="x")
+        view.request = request
+
+        with patch("netbox_librenms_plugin.views.base.ip_addresses_view.cache") as mock_cache:
+            mock_cache.get.return_value = {"ip_addresses": []}  # no cache hit → real _find_existing_ip runs
+            return view.post(request)
+
+    def test_non_numeric_vrf_id_returns_400(self):
+        response = self._post("abc")
+        assert response.status_code == 400
+        assert json.loads(response.content)["message"] == "Invalid VRF ID"
+
+    def test_list_vrf_id_returns_400(self):
+        assert self._post([1, 2]).status_code == 400
+
+    def test_boolean_vrf_id_returns_400(self):
+        # bool is an int subclass; a JSON `true` must not silently coerce to vrf__id=1.
+        assert self._post(True).status_code == 400
+
+    def test_numeric_string_vrf_id_is_accepted(self):
+        # A digit string coerces to int and flows through the real filter without 400/500.
+        assert self._post("999999").status_code == 200
+
+
 class TestFindInCacheFailsClosed:
     """SingleIPAddressVerifyView._find_in_cache treats a truthy non-dict entry as a miss, not a crash."""
 

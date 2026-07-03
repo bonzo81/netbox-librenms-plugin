@@ -541,6 +541,17 @@ class SingleIPAddressVerifyView(NetBoxObjectPermissionMixin, LibreNMSPermissionM
 
             ip_address = data.get("ip_address")
             vrf_id = data.get("vrf_id")
+            # Coerce/validate vrf_id before it reaches IPAddress.objects.filter(vrf__id=…) in
+            # _find_existing_ip: a non-numeric (or bool) JSON value would raise ValueError there and the
+            # broad handler below would mask it as an opaque 500. Fail closed with a 400 instead. None
+            # (no VRF) is legitimate and passes through unchanged.
+            if isinstance(vrf_id, bool):
+                return JsonResponse({"status": "error", "message": "Invalid VRF ID"}, status=400)
+            if vrf_id is not None:
+                try:
+                    vrf_id = int(vrf_id)
+                except (TypeError, ValueError):
+                    return JsonResponse({"status": "error", "message": "Invalid VRF ID"}, status=400)
             # Validate the requested server key before using it as a cache namespace: an
             # unconfigured/forged key would otherwise let a caller probe arbitrary server-key cache
             # namespaces via get_cache_key(). Mirror the sync/cable membership check; anything
