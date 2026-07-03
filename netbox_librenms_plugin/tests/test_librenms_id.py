@@ -919,10 +919,37 @@ class TestMergeLibreNMSLinks:
         """A blank/whitespace winner oob id must NOT fail closed (matches the lenient host-id handling) — the merge proceeds without raising."""
         from netbox_librenms_plugin.utils import merge_librenms_links
 
+        # Winner holds a host id and a blank-id oob slot; the donor carries only the SAME host id
+        # (a duplicate mapping, not an orphan) so the blank-oob leniency is exercised without
+        # tripping the "donor host id has nowhere to move" guard that a distinct donor id would.
         winner = self._make_dev("eve-ng-02", {"default": {"id": 42, "oob": {"id": "  ", "type": "ipmi"}}})
-        donor = self._make_dev("idrac-jhw6nc4", {"default": {"id": 99}})
-        # Must not raise; the winner already has an oob slot, so the donor host id is not demoted.
+        donor = self._make_dev("eve-ng-02-dup", {"default": {"id": 42}})
+        # Must not raise; the blank winner oob id is treated leniently as "no id".
         merge_librenms_links(winner, donor, "default")
+
+    def test_distinct_donor_host_id_with_winner_holding_both_slots_fails_closed(self):
+        """A distinct donor host id with the winner holding both its host and oob slots fails closed."""
+        import pytest
+
+        from netbox_librenms_plugin.utils import merge_librenms_links
+
+        winner = self._make_dev("eve-ng-02", {"default": {"id": 100, "oob": {"id": 50, "type": "idrac"}}})
+        donor = self._make_dev("router-spare", {"default": {"id": 200}})
+        with pytest.raises(ValueError, match="already holds both a LibreNMS host id and an OOB link"):
+            merge_librenms_links(winner, donor, "default")
+        # The donor's link must be left untouched (nothing captured, no partial mutation of winner).
+        assert winner.custom_field_data["librenms_id"]["default"] == {"id": 100, "oob": {"id": 50, "type": "idrac"}}
+
+    def test_duplicate_donor_host_id_with_winner_holding_both_slots_is_allowed(self):
+        """A donor host id equal to the winner's is a duplicate mapping, not an orphan, so it is allowed."""
+        from netbox_librenms_plugin.utils import merge_librenms_links
+
+        winner = self._make_dev("eve-ng-02", {"default": {"id": 100, "oob": {"id": 50, "type": "idrac"}}})
+        donor = self._make_dev("eve-ng-02-dup", {"default": {"id": 100}})
+        summary = merge_librenms_links(winner, donor, "default")
+        # Winner is unchanged (same host id, keeps its own oob); nothing was demoted or dropped.
+        assert winner.custom_field_data["librenms_id"]["default"] == {"id": 100, "oob": {"id": 50, "type": "idrac"}}
+        assert summary["donor_id_demoted_to_oob"] is None
 
     def test_donor_oob_id_coerced_to_int_on_inherit(self):
         """A numeric-string donor oob id is normalized to int when inherited."""

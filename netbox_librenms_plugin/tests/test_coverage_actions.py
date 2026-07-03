@@ -6442,6 +6442,105 @@ class TestMergeNetBoxDevicesViewOOBTransfer:
 
 
 @pytest.mark.django_db
+class TestMergeNetBoxDevicesViewFailClosed:
+    """MergeNetBoxDevicesView.post: ValueErrors from merge_librenms_links, the oob_ip transfer, and mark_librenms_migrated must all fail closed with a toast and leave the donor unmigrated — never a 500 or a silent lossy merge."""
+
+    def _make_view(self):
+        from netbox_librenms_plugin.views.imports.actions import MergeNetBoxDevicesView
+
+        view = object.__new__(MergeNetBoxDevicesView)
+        view._librenms_api = _make_api()
+        view.require_write_permission = MagicMock(return_value=None)
+        view.require_object_permissions = MagicMock(return_value=None)
+        return view
+
+    def _post_merge(self, view, winner, donor):
+        from django.http import HttpResponse
+
+        request = _make_request(post={"winner_pk": str(winner.pk), "donor_pk": str(donor.pk)})
+        validation = {"merge_candidates": {"host_named": {"pk": winner.pk}, "oob_named": {"pk": donor.pk}}}
+        view.get_validated_device_with_selections = MagicMock(return_value=({"device_id": 99}, validation, {}))
+        view.render_device_row = MagicMock(return_value=HttpResponse("row"))
+        return view.post(request, device_id=99)
+
+    def test_orphan_host_id_merge_fails_closed_and_leaves_donor_unmigrated(self):
+        """A winner holding both host id + oob and a donor with a distinct host-id-only link fails closed."""
+        winner = make_device(
+            "merge-orphan-winner",
+            librenms_cf={"default": {"id": 100, "oob": {"id": 50, "type": "idrac"}}},
+        )
+        donor = make_device("merge-orphan-donor", librenms_cf={"default": {"id": 200}})
+
+        resp = self._post_merge(self._make_view(), winner, donor)
+
+        assert resp.status_code == 200
+        assert resp["HX-Reswap"] == "none"
+        assert b"Cannot merge" in resp.content
+        # Donor's link is preserved and it was NOT marked migrated (no orphaned LibreNMS host).
+        donor.refresh_from_db()
+        entry = donor.custom_field_data["librenms_id"]["default"]
+        assert entry == {"id": 200}
+        assert "_migrated_to" not in entry
+
+    def test_corrupt_donor_oob_id_with_winner_oob_fails_closed_not_500(self):
+        """A donor oob id merge_librenms_links skipped (winner already has an oob) fails closed at the marker, not a 500."""
+        winner = make_device(
+            "merge-f2-winner",
+            librenms_cf={"default": {"id": 5, "oob": {"id": 9, "type": "idrac"}}},
+        )
+        # Same host id (so the orphan guard doesn't fire) but a corrupt donor oob id. Because the
+        # winner already holds an oob, merge_librenms_links() skips validating the donor oob id —
+        # mark_librenms_migrated() is the one that rejects it, and that call must be guarded too.
+        donor = make_device("merge-f2-donor", librenms_cf={"default": {"id": 5, "oob": {"id": "abc"}}})
+
+        resp = self._post_merge(self._make_view(), winner, donor)
+
+        assert resp.status_code == 200
+        assert resp["HX-Reswap"] == "none"
+        assert b"Cannot merge" in resp.content
+        donor.refresh_from_db()
+        entry = donor.custom_field_data["librenms_id"]["default"]
+        assert entry == {"id": 5, "oob": {"id": "abc"}}
+        assert "_migrated_to" not in entry
+
+    def test_oob_transfer_valueerror_fails_closed_and_rolls_back(self):
+        """A ValueError from the oob_ip transfer (the TOCTOU race the lock guards) fails closed with rollback, not a 500."""
+        import netbox_librenms_plugin.views.imports.actions as actions_mod
+        from netbox_librenms_plugin.tests.conftest import ip_on
+
+        winner = make_device("merge-f5-winner", librenms_cf={"default": {"id": 20}})
+        donor = make_device("merge-f5-donor", librenms_cf={"default": {"id": 10}})
+        oob_ip = ip_on(winner, "192.0.2.11/32", "mgmt0")  # IP on a WINNER interface → transfer path runs
+        donor.oob_ip = oob_ip
+        donor.save()
+
+        # The pre-check (locked_iface.device_id == winner.pk) passes, but set_device_ip_fk re-reads
+        # a now-stale cached assignment and raises — the concurrency race the lock exists to catch.
+        # Patch the exact boundary (the race is not deterministically reproducible single-threaded).
+        real = actions_mod.set_device_ip_fk
+
+        def racy(device, field, ip, *, save=True):
+            if field == "oob_ip" and ip is not None:
+                raise ValueError("set_device_ip_fk: address is not assigned to an interface on that device")
+            return real(device, field, ip, save=save)
+
+        with patch.object(actions_mod, "set_device_ip_fk", racy):
+            resp = self._post_merge(self._make_view(), winner, donor)
+
+        assert resp.status_code == 200
+        assert resp["HX-Reswap"] == "none"
+        assert b"Cannot merge" in resp.content
+        # Rolled back: donor keeps its oob_ip and link, winner never claimed it, no marker stamped.
+        donor.refresh_from_db()
+        winner.refresh_from_db()
+        assert donor.oob_ip_id == oob_ip.pk
+        assert winner.oob_ip_id is None
+        entry = donor.custom_field_data["librenms_id"]["default"]
+        assert entry == {"id": 10}
+        assert "_migrated_to" not in entry
+
+
+@pytest.mark.django_db
 class TestSuggestOOBInterface:
     """_suggest_oob_interface: pre-select an OOB/mgmt-named interface + default new name."""
 

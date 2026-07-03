@@ -2075,6 +2075,23 @@ def merge_librenms_links(winner, donor, server_key: str = "default") -> dict:
             )
         donor_oob_has_valid_id = _donor_oob_id is not None
 
+    # Fail closed when the donor's host id has nowhere to go: the winner already occupies BOTH
+    # its host-id slot (winner_id) AND its oob slot (winner_oob), so neither the inherit-id branch
+    # (needs an empty winner host slot) nor the demote branch (needs an empty winner oob slot) can
+    # place a distinct donor id. Proceeding would silently drop the donor's LibreNMS host link and
+    # orphan that device once the donor is marked migrated — the same data loss every other branch
+    # here fails closed on, and exactly what the merge modal's "Moved to winner" promise forbids.
+    # A donor id EQUAL to the winner's is the same host linkage (a duplicate mapping), not an
+    # orphan, so it is allowed through; a donor that carries its own real oob is inherited by the
+    # branch below when the winner's oob slot is free (winner_oob is None), so this only fires when
+    # the winner's oob is genuinely occupied.
+    if winner_id is not None and donor_id is not None and donor_id != winner_id and winner_oob is not None:
+        raise ValueError(
+            f"Cannot merge: winner '{winner.name}' already holds both a LibreNMS host id and an "
+            f"OOB link, so donor '{donor.name}' host id {donor_id} has nowhere to move. "
+            "Unlink one side first."
+        )
+
     if winner_id is None and donor_id is not None:
         winner_entry["id"] = donor_id
         summary["host_id_from_donor"] = donor_id
