@@ -1171,6 +1171,59 @@ def coerce_librenms_id(value) -> int | None:
     return None
 
 
+def is_valid_ports_payload(payload) -> bool:
+    """
+    Return True only for a well-formed LibreNMS ports payload.
+
+    ``LibreNMSAPI.get_ports`` is an external boundary: a truthy success does not guarantee the
+    expected shape, so every caller that indexes ``payload["ports"]`` or enriches the rows must
+    gate on this and fail closed on a malformed 200 rather than raising on ``.get()`` / iteration.
+
+    Args:
+        payload: The raw value returned for a ports fetch (host, OOB, or a cached snapshot).
+
+    Returns:
+        bool: True when *payload* is a dict whose ``"ports"`` is a list of dict rows.
+    """
+    return (
+        isinstance(payload, dict)
+        and isinstance(payload.get("ports"), list)
+        and all(isinstance(port, dict) for port in payload["ports"])
+    )
+
+
+def resolve_server_mapping_display_id(entry) -> tuple[int | None, bool]:
+    """
+    Resolve the display LibreNMS id for one per-server ``librenms_id`` custom-field entry.
+
+    *entry* is the value stored for a single server key: either a scalar (a legacy bare id) or
+    the migrated dict form ``{"id": N, "oob": {"id": M}}``. The host id wins; when it is
+    absent/invalid the nested OOB controller id is used instead, because an OOB-only linkage is
+    still a real link to that server (the user must be able to see and remove it). All coercion
+    goes through :func:`coerce_librenms_id`, so booleans, non-numeric strings and non-positive
+    ids are rejected uniformly.
+
+    Args:
+        entry: The per-server value from the ``librenms_id`` custom field.
+
+    Returns:
+        tuple[int | None, bool]: ``(display_id, is_oob_only)`` — the coerced id to display (or
+            None when neither a host nor an OOB id is valid), and whether it came from the OOB
+            fallback (host id absent/invalid but ``oob.id`` valid).
+    """
+    if isinstance(entry, dict):
+        host_id = coerce_librenms_id(entry.get("id"))
+        if host_id is not None:
+            return host_id, False
+        oob = entry.get("oob")
+        if isinstance(oob, dict):
+            oob_id = coerce_librenms_id(oob.get("id"))
+            if oob_id is not None:
+                return oob_id, True
+        return None, False
+    return coerce_librenms_id(entry), False
+
+
 def get_librenms_device_id(obj, server_key: str = "default", *, auto_save: bool = True):
     """
     Get the LibreNMS device/port ID for a specific server from the JSON custom field.

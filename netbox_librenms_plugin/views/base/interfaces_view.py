@@ -14,6 +14,7 @@ from netbox_librenms_plugin.utils import (
     get_librenms_sync_device,
     get_virtual_chassis_member,
     is_list_of_dicts,
+    is_valid_ports_payload,
     normalize_librenms_port_id,
 )
 from netbox_librenms_plugin.views.mixins import (
@@ -213,11 +214,7 @@ class BaseInterfaceTableView(VlanAssignmentMixin, LibreNMSAPIMixin, LibreNMSPerm
         # of dict port rows (the OOB branch below guards the same way). The old cache was already
         # deleted, so a malformed 200 must fail closed with a warning rather than 500 on .get()/
         # enrichment below.
-        if not (
-            isinstance(librenms_data, dict)
-            and isinstance(librenms_data.get("ports"), list)
-            and all(isinstance(port, dict) for port in librenms_data["ports"])
-        ):
+        if not is_valid_ports_payload(librenms_data):
             messages.error(request, "Unexpected response from LibreNMS (malformed ports payload).")
             return self._failure_redirect(request, obj, _server_key)
 
@@ -270,12 +267,7 @@ class BaseInterfaceTableView(VlanAssignmentMixin, LibreNMSAPIMixin, LibreNMSPerm
             # Treat a malformed-but-truthy OOB payload the same as oob_success=False so the
             # host-only warning path runs instead of 500-ing on .get()/_enrich below. get_ports
             # is an external boundary: success does not guarantee a dict with a list of dict rows.
-            if (
-                oob_success
-                and isinstance(oob_raw, dict)
-                and isinstance(oob_raw.get("ports"), list)
-                and all(isinstance(port, dict) for port in oob_raw["ports"])
-            ):
+            if oob_success and is_valid_ports_payload(oob_raw):
                 oob_ports = oob_raw.get("ports", [])
                 oob_enriched = self._enrich_ports_with_vlan_data(oob_ports, interface_name_field)
                 for port in oob_enriched:
@@ -461,11 +453,7 @@ class BaseInterfaceTableView(VlanAssignmentMixin, LibreNMSAPIMixin, LibreNMSPerm
         # Fail closed on a stale/corrupt cache entry: the enrichment below assumes a dict with a
         # list of dict ports (same contract post() validates before caching), so a malformed
         # snapshot would 500 the sync tab before the user could refresh. Drop it and render empty.
-        if cached_data is not None and not (
-            isinstance(cached_data, dict)
-            and isinstance(cached_data.get("ports"), list)
-            and all(isinstance(port, dict) for port in cached_data["ports"])
-        ):
+        if cached_data is not None and not is_valid_ports_payload(cached_data):
             if fresh_data is None:
                 cache.delete(self.get_cache_key(cache_device, "ports", server_key))
                 cache.delete(self.get_last_fetched_key(cache_device, "ports", server_key))

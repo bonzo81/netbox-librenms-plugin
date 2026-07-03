@@ -14,6 +14,7 @@ from django.utils import timezone
 from django.utils.html import escape
 from django.views import View
 
+from netbox_librenms_plugin.constants import OOB_BADGE_HTML
 from netbox_librenms_plugin.utils import (
     cache_remaining_ttl,
     build_librenms_id_qs,
@@ -881,7 +882,7 @@ class SingleCableVerifyView(NetBoxObjectPermissionMixin, BaseCableTableView):
                     # the badge and looks like a plain host-port row. Markup mirrors
                     # tables/cables.py render_local_port.
                     oob_badge = (
-                        ' <span class="badge bg-purple text-white ms-1" title="From OOB controller">OOB</span>'
+                        " " + OOB_BADGE_HTML  # leading space: it follows the port name
                         if link_data.get("_source") == "oob"
                         else ""
                     )

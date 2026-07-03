@@ -6,6 +6,7 @@ from django.utils.safestring import mark_safe
 from netbox.tables.columns import ToggleColumn
 from utilities.paginator import EnhancedPaginator
 
+from netbox_librenms_plugin.constants import OOB_BADGE_HTML
 from netbox_librenms_plugin.utils import (
     get_table_paginate_count,
 )
@@ -65,7 +66,7 @@ class LibreNMSCableTable(tables.Table):
         # Static trusted markup — use mark_safe, not format_html (which requires
         # interpolation args and raises TypeError when given a bare string in Django 6+).
         oob_badge = (
-            mark_safe(' <span class="badge bg-purple text-white ms-1" title="From OOB controller">OOB</span>')  # noqa: S308
+            mark_safe(" " + OOB_BADGE_HTML)  # noqa: S308  (leading space: it follows the port name)
             if record.get("_source") == "oob"
             else ""
         )

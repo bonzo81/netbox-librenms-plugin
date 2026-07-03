@@ -17,6 +17,7 @@ from netbox_librenms_plugin.utils import (
     is_legacy_librenms_id,
     match_librenms_hardware_to_device_type,
     resolve_naming_preferences,
+    resolve_server_mapping_display_id,
 )
 from netbox_librenms_plugin.views.mixins import LibreNMSAPIMixin, LibreNMSPermissionMixin
 
@@ -91,6 +92,11 @@ class BaseLibreNMSSyncView(LibreNMSPermissionMixin, LibreNMSAPIMixin, generic.Ob
 
         # Store for use in get_context_data (badge generation needs the same object)
         self._librenms_lookup_device = librenms_lookup_device
+        # Store the unresolved flag so get_context_data's VC-status block can fail closed the
+        # same way this method does. Without it that block would recompute the sync-device
+        # linkage against the default-bound client (the rebind declined) and leak the default
+        # server's mapping onto a page whose header/tabs are failing closed for the gone server.
+        self._server_key_unresolved = unresolved
 
         if unresolved:
             # ?server_key named a server that no longer resolves; the rebind declined and left the
@@ -124,7 +130,14 @@ class BaseLibreNMSSyncView(LibreNMSPermissionMixin, LibreNMSAPIMixin, generic.Ob
             }
         )
 
-        if hasattr(obj, "virtual_chassis") and obj.virtual_chassis:
+        # Skip the VC-status block on an unresolved ?server_key: get() failed closed (librenms_id
+        # None, client left on the default server), so resolving the linkage here against the
+        # default server would leak a mapping for a server the page is otherwise reporting as gone.
+        if (
+            not getattr(self, "_server_key_unresolved", False)
+            and hasattr(obj, "virtual_chassis")
+            and obj.virtual_chassis
+        ):
             # Use helper function to determine the sync device
             librenms_sync_device = get_librenms_sync_device(obj, server_key=self.librenms_api.server_key)
 
@@ -251,32 +264,12 @@ class BaseLibreNMSSyncView(LibreNMSPermissionMixin, LibreNMSAPIMixin, generic.Ob
 
         result = []
         for sk, did in cf_value.items():
-            is_oob_only = False
-            # New dict form {server_key: {"id": N, "oob": {...}}} — use the host id.
-            # An OOB-only entry ({"oob": {...}} with no host "id") is still a real link
-            # to this server: surface it (using the OOB controller's id) so the user can
-            # see and remove it, mirroring set_librenms_oob()'s lenient host-less shape.
-            # A migrated-only entry ({"_migrated_to": ...}) has neither id nor oob and is
-            # skipped.
-            if isinstance(did, dict):
-                # Coerce the host id (rejects blank/zero/invalid), so an entry whose "id" is a
-                # corrupt non-None value (e.g. 0 or "") but whose "oob.id" is valid still falls
-                # back to the real OOB-only mapping instead of being dropped — otherwise the user
-                # can't see/remove it from the server-mappings list.
-                host_id = coerce_librenms_id(did.get("id"))
-                if host_id is None:
-                    oob = did.get("oob")
-                    if isinstance(oob, dict):
-                        host_id = coerce_librenms_id(oob.get("id"))
-                        is_oob_only = host_id is not None
-                did = host_id
-            # Coerce via the single source of truth instead of reimplementing the same
-            # int/digit-string/bool/zero/negative validation inline. The dict branch above already
-            # calls coerce_librenms_id(), and the hand-rolled copy had drifted from it — str.isdigit()
-            # wrongly rejected a whitespace-padded " 42 " (int() strips it, so it resolves fine
-            # everywhere else; cf. the same #99 fix elsewhere). A None result means
-            # bool/None/blank/zero/negative/non-numeric → skip; LibreNMS ids are strictly positive.
-            did = coerce_librenms_id(did)
+            # Resolve the display id (host id, else the nested OOB controller id for an OOB-only
+            # entry) and whether it came from that OOB fallback. Shared with the import-validation
+            # modal (actions.DeviceValidationDetailsView._build_id_server_info) so both agree on
+            # which servers a device is linked to; the bool/str/positive coercion and the OOB
+            # fallback live in one place. A None result (migrated-only / corrupt entry) is skipped.
+            did, is_oob_only = resolve_server_mapping_display_id(did)
             if did is None:
                 continue
             srv_cfg = servers_config.get(sk)

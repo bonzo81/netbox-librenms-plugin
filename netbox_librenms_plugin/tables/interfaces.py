@@ -7,6 +7,7 @@ from netbox.tables.columns import BooleanColumn, ToggleColumn
 from utilities.paginator import EnhancedPaginator
 from utilities.templatetags.helpers import humanize_speed
 
+from netbox_librenms_plugin.constants import OOB_BADGE_HTML
 from netbox_librenms_plugin.models import InterfaceTypeMapping
 from netbox_librenms_plugin.utils import (
     check_vlan_group_matches,
@@ -316,7 +317,7 @@ class LibreNMSInterfaceTable(tables.Table):
         rendered = self._render_field(value, record, self.interface_name_field, "name")
         badges = ""
         if record.get("_source") == "oob":
-            badges += '<span class="badge bg-purple text-white ms-1" title="From OOB controller">OOB</span>'
+            badges += OOB_BADGE_HTML
         if record.get("_dedup_conflict"):
             badges += '<span class="badge bg-warning text-dark ms-1" title="Same MAC seen on both main and OOB">Shared LOM</span>'
         if badges:

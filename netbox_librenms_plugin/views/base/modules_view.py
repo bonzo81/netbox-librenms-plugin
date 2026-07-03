@@ -14,6 +14,7 @@ from netbox_librenms_plugin.utils import (
     get_librenms_oob,
     get_librenms_sync_device,
     get_module_template_interface_names,
+    is_valid_ports_payload,
     normalize_librenms_port_id,
 )
 from netbox_librenms_plugin.views.mixins import (
@@ -401,12 +402,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
         # silently no-op, leaving port-id enrichment incomplete. Treat that as a fetch
         # failure so the snapshot below is NOT cached as complete (and the user is warned),
         # instead of silently serving a degraded module list until TTL/manual refresh.
-        ports_payload_ok = (
-            ports_success
-            and isinstance(ports_data, dict)
-            and isinstance(ports_data.get("ports"), list)
-            and all(isinstance(port, dict) for port in ports_data["ports"])
-        )
+        ports_payload_ok = ports_success and is_valid_ports_payload(ports_data)
         if not ports_payload_ok:
             ports_error = str(ports_data) if ports_data else "unknown error"
             ports_data = {}

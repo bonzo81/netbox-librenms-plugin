@@ -43,6 +43,7 @@ from netbox_librenms_plugin.utils import (
     coerce_librenms_id,
     is_legacy_librenms_id,
     resolve_naming_preferences,
+    resolve_server_mapping_display_id,
     same_host,
     save_user_pref,
     set_device_ip_fk,
@@ -1422,23 +1423,13 @@ class DeviceValidationDetailsView(LibreNMSPermissionMixin, LibreNMSAPIMixin, Dev
             servers_config = {}
         result = []
         for sk, did in cf_value.items():
-            # New dict form {server_key: {"id": N, "oob": {...}}} — display the host id, falling
-            # back to the OOB controller's id for an OOB-only entry ({"oob": {...}} with no usable
-            # host "id"). An OOB-only link is still a real link to this server, so surface it like
-            # the device-sync modal (_build_all_server_mappings) does instead of dropping it and
-            # showing "no link" (which can prompt a duplicate re-import).
-            # coerce_librenms_id centralizes the bool/int/str/positive rules: it rejects booleans,
-            # non-numeric strings, and non-positive ids (LibreNMS ids start at 1), so a 0 /
-            # negative / malformed id can't slip through as a bogus server-mapping row.
-            if isinstance(did, dict):
-                host_id = coerce_librenms_id(did.get("id"))
-                if host_id is None:
-                    oob = did.get("oob")
-                    if isinstance(oob, dict):
-                        host_id = coerce_librenms_id(oob.get("id"))
-                did = host_id
-            else:
-                did = coerce_librenms_id(did)
+            # Resolve the host id, falling back to the OOB controller's id for an OOB-only entry
+            # ({"oob": {...}} with no usable host "id"). An OOB-only link is still a real link to
+            # this server, so surface it like the device-sync modal (_build_all_server_mappings)
+            # does — via the SAME shared helper — instead of dropping it and showing "no link"
+            # (which can prompt a duplicate re-import). The helper centralizes the bool/int/str/
+            # positive coercion, so 0 / negative / malformed ids can't slip through.
+            did, _is_oob_only = resolve_server_mapping_display_id(did)
             if did is None:
                 continue
             srv_cfg = servers_config.get(sk)

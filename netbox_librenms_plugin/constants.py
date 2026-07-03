@@ -14,6 +14,11 @@ LIBRENMS_VLAN_STATE_ACTIVE = 1
 OOB_TYPE_PATTERN = re.compile(r"\b(idrac|ilo|ipmi|bmc|drac|cimc|oob)\d*\b", re.IGNORECASE)
 OOB_TYPES = ("idrac", "ilo", "ipmi", "bmc", "drac", "cimc", "oob")
 
+# Shared "From OOB controller" badge markup (the bare <span>; callers add any leading space).
+# Centralised so a restyle (color/title/text) happens in one place instead of drifting across the
+# cable/module/interface tables and the cable-verify render that each hand-copied it.
+OOB_BADGE_HTML = '<span class="badge bg-purple text-white ms-1" title="From OOB controller">OOB</span>'
+
 
 def normalize_oob_type(os_str: str, hardware_str: str = "") -> str | None:
     """

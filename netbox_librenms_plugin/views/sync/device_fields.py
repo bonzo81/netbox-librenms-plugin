@@ -74,11 +74,14 @@ class UpdateDeviceNameView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin,
             messages.error(request, "Selected LibreNMS server is no longer configured.")
             return _device_sync_redirect(request, pk, server_key)
 
-        # For VC members without their own librenms_id, use the VC sync device
+        # For VC members without their own librenms_id, use the VC sync device. Scope the
+        # resolution to the POST-rebound server_key so a multi-server VC picks the sibling
+        # linked to *this* server, not the server-agnostic "any member with any id" fallback
+        # (which would rename the device from a different server's LibreNMS device).
         librenms_lookup_device = device
         if hasattr(device, "virtual_chassis") and device.virtual_chassis:
             if not device.cf.get("librenms_id"):
-                sync_device = get_librenms_sync_device(device)
+                sync_device = get_librenms_sync_device(device, server_key=server_key)
                 if sync_device:
                     librenms_lookup_device = sync_device
 
