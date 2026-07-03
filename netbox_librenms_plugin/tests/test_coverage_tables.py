@@ -14,6 +14,8 @@ Conventions:
 
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -2729,3 +2731,40 @@ class TestInterfaceTableXSSEscaping:
         rendered = str(table.render_vlans(value=None, record=record))
         assert "<img" not in rendered
         assert "&lt;img" in rendered
+
+
+# ---------------------------------------------------------------------------
+# render_device_selection — XSS escape
+# ---------------------------------------------------------------------------
+@pytest.mark.django_db
+class TestRenderDeviceSelectionEscape:
+    """VCCableTable.render_device_selection must HTML-escape a virtual-chassis member's name."""
+
+    def test_member_name_is_escaped(self):
+        from dcim.models import Device, DeviceRole, DeviceType, Manufacturer, Site, VirtualChassis
+
+        from netbox_librenms_plugin.tables.cables import VCCableTable
+
+        mfr, _ = Manufacturer.objects.get_or_create(name="XssMfr", slug="xssmfr")
+        dt, _ = DeviceType.objects.get_or_create(manufacturer=mfr, model="XssDT", slug="xssdt")
+        role, _ = DeviceRole.objects.get_or_create(name="XssRole", slug="xssrole")
+        site, _ = Site.objects.get_or_create(name="XssSite", slug="xsssite")
+        vc = VirtualChassis.objects.create(name="XssVC")
+        member = Device.objects.create(
+            name='<script>alert("xss")</script>',
+            device_type=dt,
+            role=role,
+            site=site,
+            status="active",
+            virtual_chassis=vc,
+            vc_position=1,
+        )
+
+        # The device IS a VC member, so device.virtual_chassis.members.all() includes it and its
+        # (malicious) name flows into the dropdown options cached in __init__.
+        table = VCCableTable([], device=member)
+        html = str(table.render_device_selection(None, {"local_port": "eth0", "local_port_id": "42"}))
+
+        # The raw <script> tag must NOT appear — it should be escaped.
+        assert "<script>" not in html
+        assert "&lt;script&gt;" in html

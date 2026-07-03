@@ -7,7 +7,6 @@ hierarchies and attribute presence.
 
 import os
 from pathlib import Path
-from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -335,91 +334,6 @@ class TestTemplateSyntax:
         source = template_path.read_text()
         # Compile the template — raises TemplateSyntaxError on bad tags
         self._engine.from_string(source)
-
-
-class TestRenderDeviceSelectionEscape:
-    """VCCableTable.render_device_selection must HTML-escape member.name."""
-
-    def test_member_name_is_escaped(self):
-        from unittest.mock import MagicMock
-
-        from netbox_librenms_plugin.tables.cables import VCCableTable
-
-        device = MagicMock()
-        device.id = 1
-        vc = MagicMock()
-        member = MagicMock()
-        member.id = 1
-        member.name = '<script>alert("xss")</script>'
-        vc.members.all.return_value = [member]
-        device.virtual_chassis = vc
-
-        # The dropdown options render from the member set cached in __init__.
-        table = VCCableTable([], device=device)
-        record = {"local_port": "eth0", "local_port_id": "42"}
-        html = str(table.render_device_selection(None, record))
-
-        assert "<script>" not in html
-        assert "&lt;script&gt;" in html
-
-
-class TestAllServerMappingsDidValidation:
-    """all_server_mappings must skip invalid device IDs in the cf_value dict."""
-
-    def _call(self, obj, active_server_key="default"):
-        from netbox_librenms_plugin.views.base.librenms_sync_view import BaseLibreNMSSyncView
-
-        return BaseLibreNMSSyncView._build_all_server_mappings(obj, active_server_key)
-
-    @patch("netbox_librenms_plugin.views.base.librenms_sync_view.django_settings")
-    def test_skips_boolean_did(self, mock_settings):
-        mock_settings.PLUGINS_CONFIG = {"netbox_librenms_plugin": {"servers": {}}}
-        obj = MagicMock()
-        obj.custom_field_data = {"librenms_id": {"default": True, "prod": 42}}
-        result = self._call(obj)
-        # Only prod=42 should survive
-        assert len(result) == 1
-        assert result[0]["device_id"] == 42
-
-    @patch("netbox_librenms_plugin.views.base.librenms_sync_view.django_settings")
-    def test_skips_none_did(self, mock_settings):
-        mock_settings.PLUGINS_CONFIG = {"netbox_librenms_plugin": {"servers": {}}}
-        obj = MagicMock()
-        obj.custom_field_data = {"librenms_id": {"default": None}}
-        result = self._call(obj)
-        assert result is None  # empty list → returns None
-
-    @patch("netbox_librenms_plugin.views.base.librenms_sync_view.django_settings")
-    def test_coerces_digit_string_did(self, mock_settings):
-        mock_settings.PLUGINS_CONFIG = {"netbox_librenms_plugin": {"servers": {}}}
-        obj = MagicMock()
-        obj.custom_field_data = {"librenms_id": {"prod": "99"}}
-        result = self._call(obj)
-        assert len(result) == 1
-        assert result[0]["device_id"] == 99
-
-    @patch("netbox_librenms_plugin.views.base.librenms_sync_view.django_settings")
-    def test_skips_non_digit_string_did(self, mock_settings):
-        mock_settings.PLUGINS_CONFIG = {"netbox_librenms_plugin": {"servers": {}}}
-        obj = MagicMock()
-        obj.custom_field_data = {"librenms_id": {"default": "bogus"}}
-        result = self._call(obj)
-        assert result is None
-
-    @patch("netbox_librenms_plugin.views.base.librenms_sync_view.django_settings")
-    def test_valid_int_passes_through(self, mock_settings):
-        mock_settings.PLUGINS_CONFIG = {"netbox_librenms_plugin": {"servers": {}}}
-        obj = MagicMock()
-        obj.custom_field_data = {"librenms_id": {"default": 5, "secondary": 10}}
-        result = self._call(obj)
-        assert len(result) == 2
-        ids = {e["device_id"] for e in result}
-        assert ids == {5, 10}
-
-
-# ---------------------------------------------------------------------------
-# render_device_selection — XSS escape
-# ---------------------------------------------------------------------------
 
 
 class TestSingleCableVerifyServerKey:

@@ -2371,3 +2371,105 @@ class TestDeviceFieldsViewWiring:
         from netbox_librenms_plugin.views.sync.device_fields import RemoveServerMappingView
 
         assert "POST" in RemoveServerMappingView.required_object_permissions
+
+
+# ---------------------------------------------------------------------------
+# _normalize_librenms_mapping
+# ---------------------------------------------------------------------------
+class TestNormalizeLibreNMSMapping:
+    """_normalize_librenms_mapping must reject booleans and non-digit strings."""
+
+    def _call(self, value):
+        # Instantiate the view class minimally to access the method
+        from netbox_librenms_plugin.views.sync.device_fields import RemoveServerMappingView
+
+        view = object.__new__(RemoveServerMappingView)
+        return view._normalize_librenms_mapping(value)
+
+    def test_int_becomes_default_dict(self):
+        assert self._call(42) == {"default": 42}
+
+    def test_bool_true_returns_empty(self):
+        assert self._call(True) == {}
+
+    def test_bool_false_returns_empty(self):
+        assert self._call(False) == {}
+
+    def test_digit_string_coerced(self):
+        assert self._call("42") == {"default": 42}
+
+    def test_non_digit_string_returns_empty(self):
+        assert self._call("not-a-number") == {}
+
+    def test_plus_prefix_rejected(self):
+        """'+1' is not strictly digit-only."""
+        assert self._call("+1") == {}
+
+    def test_space_padded_rejected(self):
+        """' 42 ' is not strictly digit-only."""
+        assert self._call(" 42 ") == {}
+
+    def test_dict_passed_through(self):
+        d = {"production": 7}
+        assert self._call(d) is d
+
+    def test_none_returns_empty(self):
+        assert self._call(None) == {}
+
+    def test_list_returns_empty(self):
+        assert self._call([1, 2]) == {}
+
+
+# ---------------------------------------------------------------------------
+# CreateAndAssignPlatformView — full_clean before save
+# ---------------------------------------------------------------------------
+class TestCreatePlatformFullClean:
+    """CreateAndAssignPlatformView must surface a real Platform.full_clean() ValidationError, not 500."""
+
+    @staticmethod
+    def _make_device(name):
+        """Create a minimal real Device (this branch predates the conftest real-DB builders)."""
+        from dcim.models import Device, DeviceRole, DeviceType, Manufacturer, Site
+
+        site, _ = Site.objects.get_or_create(name="PFTestSite", slug="pf-test-site")
+        mfr, _ = Manufacturer.objects.get_or_create(name="PFTestMfr", slug="pf-test-mfr")
+        dtype, _ = DeviceType.objects.get_or_create(model="PFTestDT", slug="pf-test-dt", defaults={"manufacturer": mfr})
+        role, _ = DeviceRole.objects.get_or_create(name="PFTestRole", slug="pf-test-role", defaults={"color": "00ff00"})
+        return Device.objects.create(name=name, device_type=dtype, role=role, site=site, status="active")
+
+    @pytest.mark.django_db
+    def test_real_slug_collision_is_caught_and_reported(self):
+        """A real slug collision (different name, same slugify) is rejected by Platform.full_clean() and reported, not 500'd."""
+        from dcim.models import Platform
+
+        from netbox_librenms_plugin.views.sync.device_fields import CreateAndAssignPlatformView
+
+        device = self._make_device("platform-collision-dev")
+        # An existing platform already owns the slug "test-platform".
+        Platform.objects.create(name="Existing Platform", slug="test-platform")
+
+        view = object.__new__(CreateAndAssignPlatformView)
+        view.require_all_permissions = MagicMock(return_value=None)  # the permission boundary
+        request = MagicMock()
+        request.method = "POST"
+        # A DIFFERENT name that slugifies to the SAME slug: passes the name-exists short-circuit
+        # but trips the real Platform.full_clean() unique-slug validation.
+        request.POST = {"platform_name": "Test Platform"}
+        view.request = request
+
+        with (
+            patch("netbox_librenms_plugin.views.sync.device_fields.messages") as mock_messages,
+            patch("netbox_librenms_plugin.views.sync.device_fields.redirect", return_value="redirected"),
+        ):
+            result = view.post(request, pk=device.pk)
+
+        # The real full_clean() rejected the duplicate slug — no second platform was created...
+        assert Platform.objects.filter(slug="test-platform").count() == 1
+        assert not Platform.objects.filter(name="Test Platform").exists()
+        # ...and the device's platform was left unset (the create rolled back before assignment).
+        device.refresh_from_db()
+        assert device.platform_id is None
+        # The user is shown the caught error, not a 500.
+        assert result == "redirected"
+        mock_messages.error.assert_called_once()
+        assert "could not be created" in mock_messages.error.call_args[0][1]
