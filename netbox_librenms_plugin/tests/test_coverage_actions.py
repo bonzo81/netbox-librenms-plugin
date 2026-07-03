@@ -5536,6 +5536,65 @@ class TestAddAsOOBViewPost:
         assert entry["id"] == 10
         assert entry["oob"] == {"id": 17, "type": "oob"}
 
+    def test_oob_link_written_to_vc_sync_device_not_selected_member(self):
+        """A non-sync VC member's OOB link must be stored on the resolved sync device.
+
+        LibreNMS treats a Virtual Chassis as one logical device: only the sync member
+        (get_librenms_sync_device) carries the host librenms_id, and every reader
+        (interfaces/cables/modules) resolves that member before get_librenms_oob. The
+        OOB candidate, however, is matched by the controller's shared chassis serial /
+        primary IP, so ``existing_device`` can be a *different*, non-sync member.
+
+        Writing the link to that raw member (the pre-fix behaviour) stores it where no
+        reader looks and — since the non-sync member holds no host id — orphans it under
+        no host link. The link (and its guards/lock/save) must target the sync device.
+        """
+        from dcim.models import Device, VirtualChassis
+        from django.http import HttpResponse
+
+        from netbox_librenms_plugin.utils import get_librenms_oob, get_librenms_sync_device
+
+        view = self._make_view()
+        view._librenms_api.server_key = "secondary"
+
+        vc = VirtualChassis.objects.create(name="vc-oob-sync")
+        # Sync member: the ONLY member with a host librenms_id for "secondary" — priority 1 of
+        # get_librenms_sync_device. Position 1 so it also iterates first.
+        sync_member = make_device("vc-oob-sync-a", librenms_cf={"secondary": {"id": 10}})
+        sync_member.virtual_chassis = vc
+        sync_member.vc_position = 1
+        sync_member.save()
+
+        # The user-selected member the modal matched as the OOB candidate: no host librenms_id
+        # of its own, so it is NOT the sync device.
+        selected_member = make_device("vc-oob-sync-b")
+        selected_member.virtual_chassis = vc
+        selected_member.vc_position = 2
+        selected_member.save()
+
+        # Ground truth: resolution really points from the selected member to the sync member.
+        assert get_librenms_sync_device(selected_member, server_key="secondary").pk == sync_member.pk
+
+        request = _make_request(post={"existing_device_id": str(selected_member.pk)})
+        libre_device = {"device_id": 17}  # incoming OOB controller id (distinct from host id 10)
+        # ip=None keeps the OOB-IP sub-flow out of scope; this test pins the linkage target only.
+        validation = {"oob_candidate": {"device": selected_member, "type": "oob", "ip": None}}
+        view.get_validated_device_with_selections = MagicMock(return_value=(libre_device, validation, {}))
+        view.render_device_row = MagicMock(return_value=HttpResponse("row"))
+
+        response = view.post(request, device_id=17)
+
+        assert response.status_code == 200
+        assert "validationRefresh" in response.get("HX-Trigger", "")
+
+        # The link landed on the SYNC member, nested under its existing host id, so readers
+        # (which resolve the sync device) can see it.
+        sync_reloaded = Device.objects.get(pk=sync_member.pk)
+        assert get_librenms_oob(sync_reloaded, server_key="secondary") == {"id": 17, "type": "oob"}
+        assert sync_reloaded.custom_field_data["librenms_id"]["secondary"]["id"] == 10  # host id kept
+        # The selected non-sync member got NO orphan OOB link written to it.
+        assert get_librenms_oob(Device.objects.get(pk=selected_member.pk), server_key="secondary") is None
+
     def test_legacy_id_written_in_race_window_is_rejected_post_lock(self):
         """TOCTOU: the legacy gate must be re-verified on the LOCKED row (mirrors DeviceConflictActionView's post-lock gate).
 
@@ -5588,6 +5647,9 @@ class TestAddAsOOBViewPost:
         existing_device.name = "host-a"
         existing_device.oob_ip_id = 1  # skip the OOB-IP sub-flow; the save-failure path is the target
         existing_device.custom_field_data = {"librenms_id": {"default": {"id": 10}}}
+        # Not a VC member: get_librenms_sync_device() returns it directly, so the locked row is
+        # this device (a bare MagicMock's virtual_chassis is truthy and would misdirect resolution).
+        existing_device.virtual_chassis = None
         locked_device = MagicMock()
         locked_device.pk = 5
         locked_device.name = "host-a"

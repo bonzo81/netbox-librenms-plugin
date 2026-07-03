@@ -41,6 +41,7 @@ from netbox_librenms_plugin.import_validation_helpers import (
 from netbox_librenms_plugin.tables.device_status import DeviceImportTable
 from netbox_librenms_plugin.utils import (
     coerce_librenms_id,
+    get_librenms_sync_device,
     is_legacy_librenms_id,
     resolve_naming_preferences,
     resolve_server_mapping_display_id,
@@ -2459,6 +2460,21 @@ class AddAsOOBView(
         if oob_candidate["device"].pk != existing_device.pk:
             return _htmx_error_response("Device ID mismatch: existing_device_id does not match OOB candidate")
 
+        server_key = self.librenms_api.server_key
+
+        # Resolve the VC sync device up front: LibreNMS treats a Virtual Chassis as one logical
+        # device, so the host librenms_id and OOB link live on the single sync member
+        # (get_librenms_sync_device) — which may differ from the user-selected member the OOB
+        # candidate matched (matched by the controller's shared chassis serial / primary IP).
+        # Every reader (interfaces/cables/modules) resolves the sync device before
+        # get_librenms_oob, so the link — and the lock, guards, IP set, and save around it — must
+        # target the sync device too: writing to a non-sync member stores the OOB where no reader
+        # looks and, since that member holds no host id, orphans it under no host link. For a
+        # non-VC device (or when the selected member IS the sync device) this resolves to the same
+        # row, so the common path is unchanged. The candidate-match check above stays on the
+        # user-selected existing_device (it validates the POST, not the linkage target).
+        sync_device = get_librenms_sync_device(existing_device, server_key=server_key) or existing_device
+
         # coerce_librenms_id centralizes the bool/int/str/positive checks (rejects bools,
         # non-numeric strings, zero/negatives) in one place.
         librenms_id = coerce_librenms_id(libre_device.get("device_id"))
@@ -2467,7 +2483,7 @@ class AddAsOOBView(
 
         # Reject legacy bare-int librenms_id (shared predicate with DeviceConflictActionView and
         # set_librenms_device_id, so the three can't drift on what counts as legacy).
-        if is_legacy_librenms_id(existing_device.custom_field_data.get("librenms_id")):
+        if is_legacy_librenms_id(sync_device.custom_field_data.get("librenms_id")):
             return _htmx_error_response(
                 "Device has a legacy bare-integer librenms_id; use 'Convert mapping' to migrate first."
             )
@@ -2476,11 +2492,10 @@ class AddAsOOBView(
 
         oob_type = oob_candidate.get("type") or ""
         oob_ip_str = oob_candidate.get("ip") or None
-        server_key = self.librenms_api.server_key
 
         with transaction.atomic():
             try:
-                existing_device = Device.objects.select_for_update().get(pk=existing_device.pk)
+                sync_device = Device.objects.select_for_update().get(pk=sync_device.pk)
             except Device.DoesNotExist:
                 return _htmx_error_response("Device no longer exists; it may have been deleted concurrently.")
 
@@ -2490,7 +2505,7 @@ class AddAsOOBView(
             # letting it reach set_librenms_oob would trigger its legacy-promotion branch —
             # silently namespacing the id under this server only and dropping the device's
             # LibreNMS linkage on all others.
-            if is_legacy_librenms_id(existing_device.custom_field_data.get("librenms_id")):
+            if is_legacy_librenms_id(sync_device.custom_field_data.get("librenms_id")):
                 return _htmx_error_response(
                     "Device has a legacy bare-integer librenms_id; use 'Convert mapping' to migrate first."
                 )
@@ -2507,7 +2522,7 @@ class AddAsOOBView(
             # token (so is the stored current_oob["type"]), so this is a like-for-like compare
             # that won't false-trip on an idempotent re-attach; it does catch a concurrent
             # re-detection that changed the controller type.
-            current_oob = get_librenms_oob(existing_device, server_key=server_key)
+            current_oob = get_librenms_oob(sync_device, server_key=server_key)
             if current_oob and (
                 coerce_librenms_id(current_oob.get("id")) != coerce_librenms_id(librenms_id)
                 or (current_oob.get("type") or "") != oob_type
@@ -2518,7 +2533,7 @@ class AddAsOOBView(
             # OOB id; attaching it as OOB would then store it in both the host slot and oob.id
             # — a self host/OOB conflict. Reject that explicitly (find_by_librenms_id below
             # would match self and wave it through).
-            current_host_id = get_librenms_device_id(existing_device, server_key=server_key, auto_save=False)
+            current_host_id = get_librenms_device_id(sync_device, server_key=server_key, auto_save=False)
             if coerce_librenms_id(current_host_id) == coerce_librenms_id(librenms_id):
                 return _htmx_error_response(
                     f"LibreNMS device #{librenms_id} is this device's host link; it can't also be its "
@@ -2538,7 +2553,7 @@ class AddAsOOBView(
                     f"LibreNMS device #{librenms_id} is ambiguous — it matches more than one NetBox "
                     "device. Resolve the duplicate assignment before attaching as OOB."
                 )
-            if oob_conflict is not None and oob_conflict.pk != existing_device.pk:
+            if oob_conflict is not None and oob_conflict.pk != sync_device.pk:
                 return _htmx_error_response(
                     f"LibreNMS device #{librenms_id} is already linked to '{escape(oob_conflict.name)}'; "
                     "refresh and retry."
@@ -2546,7 +2561,7 @@ class AddAsOOBView(
 
             try:
                 set_librenms_oob(
-                    existing_device,
+                    sync_device,
                     librenms_id,
                     server_key,
                     oob_type=oob_type,
@@ -2565,16 +2580,16 @@ class AddAsOOBView(
             # requires oob_ip be assigned to one of the device's interfaces, so
             # the user picks (or creates) the interface to hang the OOB IP on
             # via the OOB-attach form. Linkage (set_librenms_oob) happened above.
-            if oob_ip_str and existing_device.oob_ip_id is None:
+            if oob_ip_str and sync_device.oob_ip_id is None:
                 # The top-level gate only authorizes ("change", Device), but the
                 # IP-set sub-flow can create an Interface, create an IPAddress, or
                 # re-home an existing one. Require the model perms the requested
                 # operation actually needs; if missing, skip the IP-set (the link
                 # still commits) rather than hard-failing — a return here would
                 # roll back the whole transaction, including the linkage.
-                perm_warning = self._missing_oob_ip_permissions(request, oob_ip_str, device=existing_device)
+                perm_warning = self._missing_oob_ip_permissions(request, oob_ip_str, device=sync_device)
                 oob_iface, iface_reason = (
-                    (None, None) if perm_warning else self._resolve_oob_interface(request, existing_device)
+                    (None, None) if perm_warning else self._resolve_oob_interface(request, sync_device)
                 )
                 if perm_warning:
                     deferred_messages.append((messages.WARNING, perm_warning))
@@ -2623,10 +2638,10 @@ class AddAsOOBView(
                         deferred_messages.append((messages.WARNING, msg))
                     else:
                         # Guarded write: set_device_ip_fk() enforces that oob_ip is assigned to
-                        # an interface on existing_device (it is — _attach_oob_ip() just hung it
+                        # an interface on sync_device (it is — _attach_oob_ip() just hung it
                         # on oob_iface) before the batched update_fields save below, which skips
                         # full_clean() and would otherwise accept an off-device address.
-                        update_fields.append(set_device_ip_fk(existing_device, "oob_ip", oob_ip, save=False))
+                        update_fields.append(set_device_ip_fk(sync_device, "oob_ip", oob_ip, save=False))
                         deferred_messages.append(
                             (messages.INFO, f"Set OOB IP {oob_ip_str} on interface {oob_iface.name}.")
                         )
@@ -2635,7 +2650,7 @@ class AddAsOOBView(
                 # clobber an operator-set address — but don't let the user believe the controller's
                 # IP was applied either. Surface that the existing OOB IP was kept when it differs
                 # from the LibreNMS controller's IP (an equal one needs no message; it's correct).
-                existing_oob_host = str(existing_device.oob_ip).split("/")[0]
+                existing_oob_host = str(sync_device.oob_ip).split("/")[0]
                 # Compare version-aware (same_host parses both sides) so an equal address in a
                 # different textual form — expanded vs compressed IPv6, or hex case — isn't reported
                 # as "a different OOB IP". A raw != would warn on 2001:db8::1 vs 2001:0db8:...:0001.
@@ -2649,7 +2664,7 @@ class AddAsOOBView(
                         )
                     )
 
-            if err := _save_device(existing_device, update_fields=update_fields, request=request):
+            if err := _save_device(sync_device, update_fields=update_fields, request=request):
                 # _save_device returns an error response (it doesn't raise), so returning
                 # here would exit the atomic block normally and COMMIT the Interface/IP
                 # rows created above by _resolve_oob_interface()/_attach_oob_ip(). Mark the
@@ -2661,7 +2676,7 @@ class AddAsOOBView(
             "Linked OOB device (LibreNMS ID %d, type %s) to '%s' (server: %s)",
             librenms_id,
             oob_type,
-            existing_device.name,
+            sync_device.name,
             server_key,
         )
 
