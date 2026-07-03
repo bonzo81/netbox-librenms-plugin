@@ -561,3 +561,61 @@ class TestOOBRowsNeverActionable:
         actions = payload["formatted_row"]["actions"]
 
         assert ("Sync Cable" in actions) is expect_sync
+
+
+@pytest.mark.django_db
+class TestSingleCableVerifyServerKeyRouting:
+    """post() must resolve the links cache under the POSTed server_key, else the api's bound key."""
+
+    def _seed(self, view, device, server_key):
+        from django.core.cache import cache
+
+        # A minimal host link keyed under *server_key*; local port matches the interface by name.
+        link = {"local_port": "eth0", "local_port_id": 700, "remote_device": "", "_source": "main"}
+        cache.set(view.get_cache_key(device, "links", server_key), {"links": [link]}, 300)
+
+    def test_post_server_key_selects_that_servers_cache(self):
+        from dcim.models import Interface
+
+        from netbox_librenms_plugin.tests.conftest import make_device
+
+        device = make_device("verify-key-dev")
+        Interface.objects.create(device=device, name="eth0", type="1000base-t")
+        view = _make_view(server_key="default-server")
+        self._seed(view, device, "production")  # links cached ONLY under 'production'
+
+        request = _make_request({"device_id": device.pk, "local_port_id": 700, "server_key": "production"})
+        row = json.loads(view.post(request).content)["formatted_row"]
+
+        # The 'production' cache was read → the port link renders (not the empty Missing-Ports row).
+        assert "eth0" in row["local_port"]
+        assert "/dcim/interfaces/" in row["local_port"]
+
+    def test_absent_server_key_falls_back_to_api_default(self):
+        from dcim.models import Interface
+
+        from netbox_librenms_plugin.tests.conftest import make_device
+
+        device = make_device("verify-fallback-dev")
+        Interface.objects.create(device=device, name="eth0", type="1000base-t")
+        view = _make_view(server_key="fallback-server")
+        self._seed(view, device, "fallback-server")  # cached under the api's bound key
+
+        request = _make_request({"device_id": device.pk, "local_port_id": 700})  # POST omits server_key
+        row = json.loads(view.post(request).content)["formatted_row"]
+
+        assert "eth0" in row["local_port"]  # the fallback (api.server_key) cache key was used
+
+    def test_post_server_key_does_not_read_a_different_servers_cache(self):
+        from netbox_librenms_plugin.tests.conftest import make_device
+
+        device = make_device("verify-miss-dev")
+        view = _make_view(server_key="default-server")
+        self._seed(view, device, "staging")  # cached under 'staging' only
+
+        request = _make_request({"device_id": device.pk, "local_port_id": 700, "server_key": "production"})
+        row = json.loads(view.post(request).content)["formatted_row"]
+
+        # No cross-server bleed: the 'production' lookup misses → the default Missing-Ports row.
+        assert row["local_port"] == ""
+        assert row["cable_status"] == "Missing Ports"

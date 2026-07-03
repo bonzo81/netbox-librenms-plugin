@@ -3,6 +3,8 @@
 from contextlib import contextmanager
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 
 def _make_master_device(serial="MASTER001"):
     """Build a mock master Device for VC creation tests."""
@@ -292,3 +294,89 @@ class TestCreateVirtualChassisServerKeyDomain:
         # Should not have a second prefix like 'librenms-None-'
         assert "librenms-None" not in domain
         assert "99" in domain
+
+
+# ---------------------------------------------------------------------------
+# _load_vc_member_name_pattern — reads the configured pattern (real settings)
+# ---------------------------------------------------------------------------
+@pytest.mark.django_db
+class TestLoadVcMemberNamePattern:
+    """_load_vc_member_name_pattern returns the configured pattern from LibreNMSSettings, else the default."""
+
+    DEFAULT = "-M{position}"
+
+    def _call(self):
+        from netbox_librenms_plugin.import_utils.virtual_chassis import _load_vc_member_name_pattern
+
+        return _load_vc_member_name_pattern()
+
+    def _set_pattern(self, value):
+        from netbox_librenms_plugin.models import LibreNMSSettings
+
+        # LibreNMSSettings.save() pins pk=1 (singleton); reuse that single row.
+        obj, _ = LibreNMSSettings.objects.get_or_create(pk=1)
+        obj.vc_member_name_pattern = value
+        obj.save()
+
+    def test_returns_configured_pattern(self):
+        self._set_pattern("-SW{position}")
+        assert self._call() == "-SW{position}"
+
+    def test_returns_default_for_empty_string(self):
+        self._set_pattern("")
+        assert self._call() == self.DEFAULT
+
+    def test_returns_default_for_whitespace_only(self):
+        self._set_pattern("   ")
+        assert self._call() == self.DEFAULT
+
+    def test_returns_default_when_no_settings(self):
+        from netbox_librenms_plugin.models import LibreNMSSettings
+
+        LibreNMSSettings.objects.all().delete()
+        assert self._call() == self.DEFAULT
+
+    def test_returns_default_on_db_error(self):
+        """The load path swallows an infrastructure failure and falls back to the default."""
+        # Injecting a DB error at the query boundary is the one non-real dependency worth faking.
+        with patch("netbox_librenms_plugin.models.LibreNMSSettings.objects") as mock_objs:
+            mock_objs.order_by.side_effect = RuntimeError("db error")
+            assert self._call() == self.DEFAULT
+
+
+# ---------------------------------------------------------------------------
+# _generate_vc_member_name — pattern handling (pure)
+# ---------------------------------------------------------------------------
+class TestGenerateVcMemberName:
+    """_generate_vc_member_name must respect a caller-supplied pattern and catch format errors."""
+
+    def _call(self, master_name, position, serial=None, pattern=None):
+        from netbox_librenms_plugin.import_utils.virtual_chassis import _generate_vc_member_name
+
+        return _generate_vc_member_name(master_name, position, serial=serial, pattern=pattern)
+
+    def test_explicit_pattern_used(self):
+        """When a pattern is passed it is used directly (no DB query)."""
+        assert self._call("switch01", 2, pattern="-SW{position}") == "switch01-SW2"
+
+    def test_serial_in_pattern(self):
+        assert self._call("switch01", 2, serial="ABC123", pattern=" [{serial}]") == "switch01 [ABC123]"
+
+    def test_none_pattern_loads_from_settings(self):
+        """When pattern is None, _load_vc_member_name_pattern is consulted."""
+        with patch(
+            "netbox_librenms_plugin.import_utils.virtual_chassis._load_vc_member_name_pattern",
+            return_value="-STACK{position}",
+        ):
+            assert self._call("core01", 3, pattern=None) == "core01-STACK3"
+
+    def test_malformed_pattern_falls_back_to_default(self):
+        """An invalid format spec falls back to -M{position}."""
+        assert self._call("switch01", 2, pattern="{position!z}") == "switch01-M2"
+
+    def test_missing_key_falls_back_to_default(self):
+        """An unknown placeholder falls back to -M{position}."""
+        assert self._call("switch01", 2, pattern="-{unknown_key}") == "switch01-M2"
+
+    def test_default_pattern(self):
+        assert self._call("switch01", 2, pattern="-M{position}") == "switch01-M2"

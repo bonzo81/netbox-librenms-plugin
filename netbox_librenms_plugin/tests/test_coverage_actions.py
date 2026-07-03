@@ -5,7 +5,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 from django.test import RequestFactory
 
-from netbox_librenms_plugin.tests.conftest import make_device, make_interface, make_ip, make_vm
+from netbox_librenms_plugin.tests.conftest import make_device, make_interface, make_ip, make_superuser, make_vm
 
 
 def _make_request(post=None, get=None, headers=None, user_is_superuser=False):
@@ -6444,3 +6444,258 @@ class TestOOBInterfaceSelectTemplate:
         # Bound to change AND invoked immediately so initial state is authoritative.
         assert 'addEventListener("change", syncCreateState)' in html
         assert "syncCreateState();" in html
+
+
+# ---------------------------------------------------------------------------
+# AddAsOOBView._attach_oob_ip — foreign-key conflict handling (real DB)
+# ---------------------------------------------------------------------------
+@pytest.mark.django_db
+class TestAttachOobIpForeignKeyConflict:
+    """_attach_oob_ip must not try to re-home an IP that is another device's primary/oob FK."""
+
+    def test_conflict_when_ip_is_another_devices_oob_fk(self):
+        from dcim.models import Interface
+        from django.db import transaction
+        from ipam.models import IPAddress
+
+        from netbox_librenms_plugin.views.imports.actions import AddAsOOBView
+
+        donor = make_device("oob-donor")
+        target = make_device("oob-target")
+        target_iface = Interface.objects.create(device=target, name="mgmt0", type="1000base-t")
+
+        # X is not assigned to ANY interface, yet it IS the donor's oob_ip — a state reachable
+        # because the import path persists oob_ip via save(update_fields=[...]) (no full_clean()).
+        ip = IPAddress.objects.create(address="10.10.0.5/32", status="active")
+        donor.oob_ip = ip
+        donor.save(update_fields=["oob_ip"])
+        ip.refresh_from_db()
+        assert ip.assigned_object is None
+
+        request = RequestFactory().post("/")
+        request.user = make_superuser()
+
+        # select_for_update needs an open transaction (the real caller provides one).
+        with transaction.atomic():
+            result_ip, reason = AddAsOOBView._attach_oob_ip(request, "10.10.0.5", target_iface)
+
+        # Must surface a clean conflict, NOT re-home the IP into a doomed UNIQUE-constraint save.
+        assert result_ip is None
+        assert reason == "conflict"
+        # The donor still owns it; nothing was silently re-homed.
+        donor.refresh_from_db()
+        ip.refresh_from_db()
+        assert donor.oob_ip_id == ip.pk
+        assert ip.assigned_object is None
+
+
+# ---------------------------------------------------------------------------
+# _save_device — update_fields save still honours cross-field consistency (real DB)
+# ---------------------------------------------------------------------------
+@pytest.mark.django_db
+class TestSaveDeviceValidatesPlatformDeviceTypeConsistency:
+    """update_fields saves skip full_clean(), but a device_type/platform write must still honour the platform/manufacturer cross-field rule."""
+
+    def test_update_fields_save_rejects_manufacturer_mismatch(self):
+        from dcim.models import DeviceType, Manufacturer, Platform
+
+        from netbox_librenms_plugin.views.imports.actions import _save_device
+
+        device = make_device("dt-consistency")  # device_type=TestDT, manufacturer=TestMfr
+        mfr_a = Manufacturer.objects.get(slug="test-mfr")
+        mfr_b, _ = Manufacturer.objects.get_or_create(name="OtherMfr", slug="other-mfr")
+        # Platform limited to TestMfr — consistent with the device's current device_type.
+        platform = Platform.objects.create(name="P-testmfr", slug="p-testmfr", manufacturer=mfr_a)
+        device.platform = platform
+        device.save(update_fields=["platform"])
+        # A device_type from a DIFFERENT manufacturer than the platform allows.
+        dt_other = DeviceType.objects.create(model="DT-other", slug="dt-other", manufacturer=mfr_b)
+
+        device.device_type = dt_other
+        resp = _save_device(device, update_fields=["device_type"])
+
+        # Rejected with an error response, NOT silently persisted with a success toast.
+        assert resp is not None
+        device.refresh_from_db()
+        assert device.device_type_id != dt_other.pk
+
+    def test_update_fields_save_allows_consistent_device_type(self):
+        from dcim.models import DeviceType, Manufacturer, Platform
+
+        from netbox_librenms_plugin.views.imports.actions import _save_device
+
+        device = make_device("dt-consistent-ok")
+        mfr_a = Manufacturer.objects.get(slug="test-mfr")
+        platform = Platform.objects.create(name="P-ok", slug="p-ok", manufacturer=mfr_a)
+        device.platform = platform
+        device.save(update_fields=["platform"])
+        # Same-manufacturer device_type — the consistent case must still save cleanly.
+        dt_same = DeviceType.objects.create(model="DT-same", slug="dt-same", manufacturer=mfr_a)
+
+        device.device_type = dt_same
+        resp = _save_device(device, update_fields=["device_type"])
+
+        assert resp is None
+        device.refresh_from_db()
+        assert device.device_type_id == dt_same.pk
+
+
+# ---------------------------------------------------------------------------
+# DeviceValidationDetailsView._build_id_server_info — per-server id validation (real DB)
+# ---------------------------------------------------------------------------
+@pytest.mark.django_db
+class TestBuildIdServerInfoRejectsNonPositiveIds:
+    """Per-server mapping rows must reject 0/negative/malformed host ids (LibreNMS ids start at 1)."""
+
+    def test_zero_negative_and_malformed_host_ids_skipped(self):
+        from netbox_librenms_plugin.views.imports.actions import DeviceValidationDetailsView
+
+        device = make_device("idsrv")
+        device.custom_field_data["librenms_id"] = {
+            "s_zero_int": 0,
+            "s_zero_str": "0",
+            "s_dict_zero": {"id": 0},
+            "s_neg": -5,
+            "s_bool": True,
+            "s_good": 42,
+            "s_good_dict": {"id": 7},
+        }
+        device.save()
+
+        result = DeviceValidationDetailsView._build_id_server_info(device)
+
+        # Only the genuinely-positive host ids survive — no bogus device_id 0 / -5 rows.
+        server_keys = {r["server_key"]: r["device_id"] for r in (result or [])}
+        assert server_keys == {"s_good": 42, "s_good_dict": 7}
+
+    def test_oob_only_entry_is_surfaced_with_controller_id(self):
+        from netbox_librenms_plugin.views.imports.actions import DeviceValidationDetailsView
+
+        device = make_device("idsrv-oob")
+        device.custom_field_data["librenms_id"] = {
+            "host_srv": {"id": 10},
+            "oob_srv": {"oob": {"id": 99}},  # OOB-only link: no host "id"
+        }
+        device.save()
+
+        result = DeviceValidationDetailsView._build_id_server_info(device)
+
+        # The OOB-only link is still a real link — surface it (controller id), mirroring the
+        # device-sync modal, rather than dropping it and risking a duplicate re-import.
+        mapping = {r["server_key"]: r["device_id"] for r in (result or [])}
+        assert mapping == {"host_srv": 10, "oob_srv": 99}
+
+
+# ---------------------------------------------------------------------------
+# _suggest_oob_interface — reuses a caller-materialized interface list (real DB)
+# ---------------------------------------------------------------------------
+@pytest.mark.django_db
+class TestSuggestOobInterfaceReusesMaterializedList:
+    """_suggest_oob_interface must reuse a caller-materialized interface list, not re-query."""
+
+    def test_no_query_when_interfaces_supplied(self):
+        from dcim.models import Interface
+        from django.db import connection
+        from django.test.utils import CaptureQueriesContext
+
+        from netbox_librenms_plugin.views.imports.actions import _suggest_oob_interface
+
+        device = make_device("oob-reuse")
+        Interface.objects.create(device=device, name="idrac0", type="1000base-t")
+        interfaces = list(device.interfaces.all())  # caller already materialized them
+
+        with CaptureQueriesContext(connection) as ctx:
+            iface_id, default_name = _suggest_oob_interface(device, {"type": "idrac"}, interfaces=interfaces)
+
+        assert iface_id is not None  # matched idrac0
+        assert default_name == "idrac0"
+        # The supplied list is reused — no second device.interfaces.all() query.
+        assert len(ctx.captured_queries) == 0
+
+
+# ---------------------------------------------------------------------------
+# AddDeviceTypeMappingView — single upfront [:2] ambiguity fetch (real DB)
+# ---------------------------------------------------------------------------
+@pytest.mark.django_db
+class TestAddDeviceTypeMappingSingleUpfrontQuery:
+    """The upfront ambiguity check must use one [:2] fetch, not a separate count() + first()."""
+
+    def test_no_count_query_on_mapping_upfront_check(self):
+        from django.db import connection
+        from django.test.utils import CaptureQueriesContext
+
+        from netbox_librenms_plugin.models import DeviceTypeMapping
+        from netbox_librenms_plugin.views.imports.actions import AddDeviceTypeMappingView
+
+        dev = make_device("dtm-host")  # supplies a real DeviceType
+        device_type = dev.device_type
+
+        view = object.__new__(AddDeviceTypeMappingView)
+        view._librenms_api = MagicMock(server_key="default")  # blank-key rebind returns "default"
+        request = RequestFactory().post("/", {"device_type_id": str(device_type.pk), "server_key": ""})
+        request.user = make_superuser()
+        view.request = request
+
+        with (
+            patch(
+                "netbox_librenms_plugin.views.imports.actions.fetch_device_with_cache",
+                return_value={"hardware": "WidgetX"},
+            ),
+            patch("netbox_librenms_plugin.views.imports.actions.DeviceValidationDetailsView") as mock_detail,
+            # Skip the post-save modal/row re-render (template URL reversal) — irrelevant to the
+            # upfront query count, which has already run by then.
+            patch.object(view, "get_validated_device_with_selections", return_value=(None, None, None)),
+        ):
+            mock_detail.return_value.get.return_value = MagicMock(content=b"<div></div>")
+            with CaptureQueriesContext(connection) as ctx:
+                view.post(request, device_id=1)
+
+        # The fix collapses the upfront .count() + .first() into a single [:2] fetch (the locked
+        # read already uses [:2]), so NO COUNT() query should touch the mapping table.
+        count_qs = [
+            q["sql"]
+            for q in ctx.captured_queries
+            if "count(" in q["sql"].lower() and "devicetypemapping" in q["sql"].lower()
+        ]
+        assert not count_qs, f"upfront ambiguity check must use [:2], not COUNT(): {count_qs}"
+        # Sanity: the path ran to completion and created the mapping (normalized to lowercase).
+        assert DeviceTypeMapping.objects.filter(librenms_hardware="widgetx").exists()
+
+
+# ---------------------------------------------------------------------------
+# _rebind_or_htmx_error — fail-closed rebind helper for import HTMX endpoints
+# ---------------------------------------------------------------------------
+class TestRebindOrHtmxErrorHelper:
+    """The extracted fail-closed rebind helper used across the import HTMX endpoints."""
+
+    def _view(self):
+        from netbox_librenms_plugin.views.imports.actions import AddDeviceTypeMappingView
+
+        view = object.__new__(AddDeviceTypeMappingView)  # any LibreNMSAPIMixin view
+        view._librenms_api = None
+        return view
+
+    def test_unresolved_server_key_returns_htmx_error_toast(self):
+        from netbox_librenms_plugin.views.imports.actions import _rebind_or_htmx_error
+
+        view = self._view()
+        request = RequestFactory().post("/", {"server_key": "ghost"})
+        with patch("netbox_librenms_plugin.librenms_api.build_librenms_api", return_value=None):
+            resp = _rebind_or_htmx_error(view, request)
+
+        assert resp is not None
+        assert resp.status_code == 200
+        assert resp["HX-Reswap"] == "none"
+        assert b"no longer configured" in resp.content
+
+    def test_resolved_server_key_returns_none_and_binds(self):
+        from netbox_librenms_plugin.views.imports.actions import _rebind_or_htmx_error
+
+        view = self._view()
+        request = RequestFactory().post("/", {"server_key": "prod"})
+        with patch(
+            "netbox_librenms_plugin.librenms_api.build_librenms_api",
+            return_value=MagicMock(server_key="prod"),
+        ):
+            assert _rebind_or_htmx_error(view, request) is None
+        assert view._librenms_api.server_key == "prod"

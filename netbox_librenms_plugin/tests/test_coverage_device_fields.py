@@ -2863,3 +2863,80 @@ class TestUpdateDeviceFieldsServerRebind:
         # The fix: the client is rebound to 'production' (not left on the global 'staging').
         assert view._librenms_api is not None
         assert view._librenms_api.server_key == "production"
+
+
+# ---------------------------------------------------------------------------
+# RemoveServerMappingView._normalize_librenms_mapping — value coercion (pure)
+# ---------------------------------------------------------------------------
+class TestNormalizeLibreNMSMapping:
+    """_normalize_librenms_mapping must reject booleans and non-digit strings."""
+
+    def _call(self, value):
+        from netbox_librenms_plugin.views.sync.device_fields import RemoveServerMappingView
+
+        view = object.__new__(RemoveServerMappingView)
+        return view._normalize_librenms_mapping(value)
+
+    def test_int_becomes_default_dict(self):
+        assert self._call(42) == {"default": 42}
+
+    def test_bool_true_returns_empty(self):
+        assert self._call(True) == {}
+
+    def test_bool_false_returns_empty(self):
+        assert self._call(False) == {}
+
+    def test_digit_string_coerced(self):
+        assert self._call("42") == {"default": 42}
+
+    def test_non_digit_string_returns_empty(self):
+        assert self._call("not-a-number") == {}
+
+    def test_plus_prefix_rejected(self):
+        """'+1' is not strictly digit-only."""
+        assert self._call("+1") == {}
+
+    def test_space_padded_rejected(self):
+        """' 42 ' is not strictly digit-only."""
+        assert self._call(" 42 ") == {}
+
+    def test_dict_passed_through(self):
+        d = {"production": 7}
+        assert self._call(d) is d
+
+    def test_none_returns_empty(self):
+        assert self._call(None) == {}
+
+    def test_list_returns_empty(self):
+        assert self._call([1, 2]) == {}
+
+
+# ---------------------------------------------------------------------------
+# ConvertLegacyLibreNMSIdView._sync_url — fail-closed rebind redirect (real DB)
+# ---------------------------------------------------------------------------
+@pytest.mark.django_db
+class TestSyncUrlUnboundApiDoesNotReconstructDefault:
+    """A post-action redirect after a fail-closed rebind must not rebuild the default client."""
+
+    def test_sync_url_unbound_api_does_not_construct_default(self):
+        from django.test import RequestFactory
+
+        from netbox_librenms_plugin.tests.conftest import make_device, make_superuser
+        from netbox_librenms_plugin.views.sync.device_fields import ConvertLegacyLibreNMSIdView
+
+        dev = make_device("sync-url-dev")
+        view = object.__new__(ConvertLegacyLibreNMSIdView)
+        view._librenms_api = None  # unbound, as left by a fail-closed rebind that returned None
+        request = RequestFactory().post("/", {})  # no server_key in the POST
+        request.user = make_superuser()
+        view.request = request
+
+        # The lazy librenms_api property constructs LibreNMSAPI() (looked up in views.mixins).
+        with patch("netbox_librenms_plugin.views.mixins.LibreNMSAPI") as mock_api:
+            resp = view._sync_url("device", dev.pk)
+
+        # The fail-closed rebind already declined to build a client; _sync_url must NOT re-run that
+        # construction just to guess a redirect server_key (it can mis-scope to a different
+        # configured server). It degrades to a bare redirect instead.
+        mock_api.assert_not_called()
+        assert "server_key=" not in resp.url

@@ -3627,3 +3627,66 @@ class TestSingleCableVerifyViewPermissionGate:
 
         assert response.status_code == 403
         mock_get_obj.assert_not_called()  # device never resolved → no arbitrary-ID probing
+
+
+# ---------------------------------------------------------------------------
+# DeviceCableTableView.get_links_data — coerces the cached librenms_id (real DB)
+# ---------------------------------------------------------------------------
+@pytest.mark.django_db
+class TestCableLinksDataCoercesLibreNMSId:
+    """get_links_data() must coerce whatever get_librenms_id() hands back before fetching links.
+
+    The id-cache path returns its value verbatim (the custom-field/discovery paths already
+    coerce), so a poisoned cache holding ``True`` reaches the cables view as a truthy non-int
+    that ``int(True)`` would silently turn into device id ``1`` — fetching a stranger's links
+    and ports. The view must fail closed on it BEFORE get_device_links()/get_ports(), mirroring
+    the interfaces-POST contract (TestBaseInterfaceTablePostCoercesLibreNMSId).
+    """
+
+    def _real_api(self):
+        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+
+        with patch(
+            "netbox_librenms_plugin.librenms_api.get_plugin_config",
+            return_value={
+                "default": {
+                    "librenms_url": "https://lnms.example.com",
+                    "api_token": "tok",
+                    "cache_timeout": 300,
+                    "verify_ssl": True,
+                }
+            },
+        ):
+            return LibreNMSAPI(server_key="default")
+
+    def test_corrupt_cached_id_fails_closed_before_link_and_port_fetch(self):
+        from django.core.cache import cache as real_cache
+
+        from netbox_librenms_plugin.views.object_sync.devices import DeviceCableTableView
+
+        device = make_device("coerce-cables-host")  # no librenms_id custom field → forces the cache path
+        api = self._real_api()
+        # Poison the device-id cache — the ONE get_librenms_id path that does not coerce.
+        real_cache.set(api._get_cache_key(device), True)
+        try:
+            # The real lookup hands back the uncoerced bool, so this isn't a straw-man mock return.
+            assert api.get_librenms_id(device) is True
+
+            view = object.__new__(DeviceCableTableView)
+            view._librenms_api = api
+            # get_device_links / get_ports are the external HTTP boundary; spy to prove neither is
+            # reached with the poisoned id. int(True) == 1 would otherwise GET /devices/1/links.
+            api.get_device_links = MagicMock(name="get_device_links", return_value=(False, "should-not-be-called"))
+            api.get_ports = MagicMock(name="get_ports", return_value=(False, "should-not-be-called"))
+
+            result = view.get_links_data(device, server_key="default")
+        finally:
+            real_cache.delete(api._get_cache_key(device))
+
+        # Coerced to None → fail closed: the host link/port fetches are skipped entirely (no OOB
+        # mapping on this device, so neither spy fires at all), and the unmapped device resolves
+        # to a fetch failure (None) rather than fetching device 1's data.
+        assert view.librenms_id is None
+        api.get_device_links.assert_not_called()
+        api.get_ports.assert_not_called()
+        assert result is None

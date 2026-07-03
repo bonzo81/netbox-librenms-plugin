@@ -1312,3 +1312,141 @@ class TestDeviceModuleTableView:
             view.get_table([], obj)
 
         assert mock_table.htmx_url == "/dcim/devices/1/librenms-sync/?tab=modules&server_key=prod-server"
+
+
+# ---------------------------------------------------------------------------
+# DeviceIPAddressTableView cached-snapshot handling (real DB + real cache)
+# ---------------------------------------------------------------------------
+@pytest.mark.django_db
+class TestIpCachedSnapshotMgmtIpBackfill:
+    """A pre-upgrade IP snapshot lacking the mgmt_ip key must resolve it on read, not silently skip auto-select."""
+
+    def _view(self, mgmt_ip_resolves_to="10.0.0.9"):
+        from django.test import RequestFactory
+
+        from netbox_librenms_plugin.tests.conftest import make_superuser
+        from netbox_librenms_plugin.views.object_sync.devices import DeviceIPAddressTableView
+
+        view = DeviceIPAddressTableView()
+        # The LibreNMS client is the external boundary — mock it; everything else is real.
+        api = MagicMock(server_key="default", cache_timeout=300)
+        api.get_stored_librenms_id.return_value = 7
+        api.get_device_info.return_value = (True, {"ip": mgmt_ip_resolves_to})
+        view._librenms_api = api
+        request = RequestFactory().get("/")
+        request.user = make_superuser()
+        view.request = request
+        return view, api, request
+
+    def test_missing_mgmt_ip_key_resolves_on_cached_render(self):
+        from django.core.cache import cache as real_cache
+
+        from netbox_librenms_plugin.tests.conftest import make_device
+
+        device = make_device("ip-preupgrade")
+        view, api, request = self._view()
+        key = view.get_cache_key(device, "ip_addresses", "default")
+        # Pre-upgrade snapshot: NO "mgmt_ip" key.
+        real_cache.set(key, {"ip_addresses": [], "ports_by_id": {"7": {}}}, timeout=300)
+        try:
+            view._prepare_context(request, device, "ifName", fetch_fresh=False, server_key="default")
+            # The missing key triggered a one-time live resolve of the management IP.
+            api.get_device_info.assert_called_once_with(7)
+        finally:
+            real_cache.delete(key)
+
+    def test_present_mgmt_ip_key_does_not_resolve(self):
+        from django.core.cache import cache as real_cache
+
+        from netbox_librenms_plugin.tests.conftest import make_device
+
+        device = make_device("ip-postupgrade")
+        view, api, request = self._view()
+        key = view.get_cache_key(device, "ip_addresses", "default")
+        # Complete snapshot: mgmt_ip already stored (even empty "" must be honoured, not re-resolved).
+        real_cache.set(key, {"ip_addresses": [], "mgmt_ip": "", "ports_by_id": {"7": {}}}, timeout=300)
+        try:
+            view._prepare_context(request, device, "ifName", fetch_fresh=False, server_key="default")
+            api.get_device_info.assert_not_called()
+        finally:
+            real_cache.delete(key)
+
+
+@pytest.mark.django_db
+class TestIpCachedSnapshotFailsClosedOnMalformedCache:
+    """A stale/corrupt truthy cache value (list/str/wrong-shaped dict) must fail closed, not 500 the render."""
+
+    def _view(self):
+        from django.test import RequestFactory
+
+        from netbox_librenms_plugin.tests.conftest import make_superuser
+        from netbox_librenms_plugin.views.object_sync.devices import DeviceIPAddressTableView
+
+        view = DeviceIPAddressTableView()
+        # cache_timeout/server_key only; the cached path must NOT reach LibreNMS for a corrupt entry.
+        view._librenms_api = MagicMock(server_key="default", cache_timeout=300)
+        request = RequestFactory().get("/")
+        request.user = make_superuser()
+        view.request = request
+        return view, request
+
+    @pytest.mark.parametrize(
+        "bad_value",
+        [
+            ["junk"],  # a list — .get(...) would AttributeError on the old code
+            "corrupt-string",  # a str — same crash class
+            {"ports_by_id": {"7": {}}},  # dict missing the "ip_addresses" list
+            {"ip_addresses": "not-a-list"},  # dict whose ip_addresses isn't a list
+            # Container is valid but a nested field is corrupt — these reach enrichment on the
+            # old (container-only) check and 500 the tab; the per-row/ports_by_id/mgmt_ip
+            # validation must now fail them closed too.
+            {"ip_addresses": [{"port_id": 7}]},  # row has port_id but no addr pair → KeyError in _create_base_ip_entry
+            # unhashable port_id → TypeError in `port_id not in port_data_cache`
+            {"ip_addresses": [{"port_id": [], "ip_address": "1.1.1.1", "prefix_length": 24}]},
+            {"ip_addresses": [], "ports_by_id": ["bad"]},  # non-mapping ports_by_id → dict(["bad"]) ValueError
+            {"ip_addresses": [], "mgmt_ip": 123},  # non-str mgmt_ip → bad deref/auto-select
+        ],
+    )
+    def test_malformed_cache_returns_none_and_purges_key(self, bad_value):
+        from django.core.cache import cache as real_cache
+
+        from netbox_librenms_plugin.tests.conftest import make_device
+
+        device = make_device("ip-corruptcache")
+        view, request = self._view()
+        key = view.get_cache_key(device, "ip_addresses", "default")
+        real_cache.set(key, bad_value, timeout=300)
+        try:
+            result = view._prepare_context(request, device, "ifName", fetch_fresh=False, server_key="default")
+            # Fail closed: treated as a cache miss (None), never crashing the tab render.
+            assert result is None
+            # The corrupt entry is purged so the next GET doesn't keep serving garbage.
+            assert real_cache.get(key) is None
+        finally:
+            real_cache.delete(key)
+
+
+# ---------------------------------------------------------------------------
+# conftest.make_superuser — idempotent superuser builder
+# ---------------------------------------------------------------------------
+@pytest.mark.django_db
+class TestMakeSuperuserHelperIsIdempotent:
+    """conftest.make_superuser() must reuse/correct a pre-existing inactive 'review-su' row, not trip the unique constraint."""
+
+    def test_reactivates_existing_inactive_review_user(self):
+        from django.contrib.auth import get_user_model
+
+        from netbox_librenms_plugin.tests.conftest import make_superuser
+
+        User = get_user_model()
+        # An earlier test left an inactive review-su; and there is no other active superuser, so the
+        # filter short-circuit misses and the helper reaches the get-or-create path.
+        User.objects.filter(is_superuser=True, is_active=True).delete()
+        User.objects.create(username="review-su", is_superuser=False, is_active=False)
+
+        user = make_superuser()  # bare create() would raise IntegrityError on the duplicate username
+
+        assert user.username == "review-su"
+        assert user.is_superuser and user.is_active
+        # No duplicate row was created.
+        assert User.objects.filter(username="review-su").count() == 1

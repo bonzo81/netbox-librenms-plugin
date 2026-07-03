@@ -198,6 +198,33 @@ def delete_keeping_pk(obj):
     type(obj).objects.filter(pk=obj.pk).delete()
 
 
+def make_superuser(username="review-su"):
+    """Return an ACTUAL active superuser for permission-sensitive view tests.
+
+    ``User.objects.first()`` can hand back a pre-seeded non-superuser (DB-ordering dependent),
+    which would run the test under the wrong principal and cover the wrong branch. This filters
+    explicitly for an active superuser, and otherwise get_or_creates one — reusing and correcting
+    a pre-existing inactive/non-superuser row of the same username rather than tripping the
+    unique-username constraint a bare create() would hit. NetBox's User model has no is_staff
+    field; only is_superuser/is_active gate access here.
+    """
+    from django.contrib.auth import get_user_model
+
+    User = get_user_model()
+    user = User.objects.filter(is_superuser=True, is_active=True).first()
+    if user:
+        return user
+    user, _ = User.objects.get_or_create(
+        username=username,
+        defaults={"is_superuser": True, "is_active": True},
+    )
+    if not user.is_superuser or not user.is_active:
+        user.is_superuser = True
+        user.is_active = True
+        user.save(update_fields=["is_superuser", "is_active"])
+    return user
+
+
 # =============================================================================
 # Configuration Fixtures
 # =============================================================================
