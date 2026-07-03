@@ -32,6 +32,7 @@ from netbox_librenms_plugin.views.mixins import (
     LibreNMSPermissionMixin,
     NetBoxObjectPermissionMixin,
     redirect_with_server_key,
+    resolve_configured_server_key,
 )
 
 logger = logging.getLogger(__name__)
@@ -650,13 +651,11 @@ class CreateAndAssignPlatformView(LibreNMSPermissionMixin, NetBoxObjectPermissio
             HttpResponseRedirect: A redirect to the sync tab, with the validated
                 ``server_key`` query param when one matches a configured server.
         """
-        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
-
         url = reverse("plugins:netbox_librenms_plugin:device_librenms_sync", kwargs={"pk": pk})
         requested = (request.POST.get("server_key") or "").strip() or (fallback_server_key or "").strip()
         # Re-source the matched key from the trusted config rather than echoing the raw request
         # value; the shared helper then gates the redirect on url_has_allowed_host_and_scheme.
-        server_key = next((key for key in LibreNMSAPI.get_available_servers() if key == requested), None)
+        server_key = resolve_configured_server_key(requested)
         return redirect_with_server_key(request, url, server_key)
 
 
@@ -864,8 +863,6 @@ class ConvertLegacyLibreNMSIdView(LibreNMSPermissionMixin, NetBoxObjectPermissio
         return model, get_object_or_404(model, pk=pk)
 
     def _sync_url(self, object_type, pk):
-        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
-
         name = "vm_librenms_sync" if object_type == "vm" else "device_librenms_sync"
         url = reverse(f"plugins:netbox_librenms_plugin:{name}", kwargs={"pk": pk})
         # Propagate the active multi-server server_key so redirects land on the server the user was
@@ -881,9 +878,7 @@ class ConvertLegacyLibreNMSIdView(LibreNMSPermissionMixin, NetBoxObjectPermissio
         # Re-source the matched key from the trusted config rather than echoing the raw request
         # value. A stale/unconfigured POST key (server removed since the page loaded, or tampered)
         # resolves to None here — so it must NOT short-circuit the fallback below.
-        server_key = (
-            next((key for key in LibreNMSAPI.get_available_servers() if key == requested), None) if requested else None
-        )
+        server_key = resolve_configured_server_key(requested)
         if not server_key:
             # POST omitted server_key OR sent an unconfigured one — fall back to the active API
             # server the action ran against so a non-default-server user isn't dropped onto the
@@ -894,11 +889,7 @@ class ConvertLegacyLibreNMSIdView(LibreNMSPermissionMixin, NetBoxObjectPermissio
             # silently resolve to a different first-configured server → wrong tab).
             bound = getattr(self, "_librenms_api", None)
             fallback = (getattr(bound, "server_key", "") or "").strip() if bound is not None else ""
-            server_key = (
-                next((key for key in LibreNMSAPI.get_available_servers() if key == fallback), None)
-                if fallback
-                else None
-            )
+            server_key = resolve_configured_server_key(fallback)
         return redirect_with_server_key(request, url, server_key)
 
     def post(self, request, pk):

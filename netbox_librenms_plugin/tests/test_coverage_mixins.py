@@ -70,31 +70,42 @@ class TestLibreNMSAPIMixinActiveServerKey:
 class TestRenderSyncPartial:
     """render_sync_partial: the chokepoint that injects migrated-context into every partial render."""
 
-    def test_merges_real_migrated_context_into_view_context(self):
-        """A real migrated donor's marker + winner are merged into the partial context (real build_migrated_context, not a stub re-asserting the dict merge)."""
-        from netbox_librenms_plugin.tests.conftest import make_device
+    def test_merges_real_migrated_context_and_write_permission_into_view_context(self):
+        """A real migrated donor's marker + winner + the request user's has_write_permission are merged into the partial context (real build_migrated_context, not a stub re-asserting the dict merge)."""
+        from django.test import RequestFactory
+
+        from netbox_librenms_plugin.tests.conftest import make_device, make_superuser
         from netbox_librenms_plugin.utils import mark_librenms_migrated
-        from netbox_librenms_plugin.views.mixins import LibreNMSAPIMixin
+        from netbox_librenms_plugin.views.mixins import LibreNMSAPIMixin, LibreNMSPermissionMixin
 
         winner = make_device("rsp-winner")
         donor = make_device("rsp-donor")
         mark_librenms_migrated(donor, winner.pk, "prod")  # real _migrated_to marker under "prod"
         donor.save()
 
-        m = object.__new__(LibreNMSAPIMixin)
-        m.partial_template_name = "tmpl.html"
+        # Real sync views combine both mixins (BaseLibreNMSSyncView / BaseIPAddressTableView); build a
+        # matching self so render_sync_partial can resolve has_write_permission from the request user.
+        class _SyncView(LibreNMSPermissionMixin, LibreNMSAPIMixin):
+            partial_template_name = "tmpl.html"
+
+        m = object.__new__(_SyncView)
+        request = RequestFactory().post("/")
+        request.user = make_superuser()
+        m.request = request
         # Only render is stubbed (it needs a full request + template machinery); build_migrated_context
         # resolves the donor's real marker against the real winner row.
         with patch("netbox_librenms_plugin.views.mixins.render") as mock_render:
-            m.render_sync_partial("REQ", donor, "prod", {"vlan_sync": "X"})
+            m.render_sync_partial(request, donor, "prod", {"vlan_sync": "X"})
 
         _req, template, context = mock_render.call_args.args
         assert template == "tmpl.html"
-        # The view's payload AND the real migration flags are present — a partial-render exit routed
-        # through here can never silently drop the migration controls.
+        # The view's payload, the real migration flags, AND has_write_permission are present — a
+        # partial-render exit routed through here can never silently drop the migration controls or
+        # the write-permission flag the "Move to winner" buttons gate on.
         assert context["vlan_sync"] == "X"
         assert context["migrated_to_marker"]["device_id"] == winner.pk
         assert context["migrated_to_winner"].pk == winner.pk
+        assert context["has_write_permission"] is True
 
 
 @pytest.mark.django_db

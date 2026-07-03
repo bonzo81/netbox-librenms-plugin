@@ -128,6 +128,28 @@ def _safe_redirect_response(request):
     return redirect(app_root)
 
 
+def resolve_configured_server_key(server_key):
+    """
+    Return *server_key* iff it matches a currently-configured LibreNMS server, else None.
+
+    Centralises the "re-source the key from trusted config, never echo a raw/stale POST value"
+    allowlist shared by the sync-tab redirect (:func:`device_fields._sync_redirect`) and the
+    non-HTMX fallback URL builder (:func:`migrate._sync_tab_url`), so a stale or tampered
+    ``server_key`` is dropped by the same rule in both places. A blank/None key resolves to None.
+
+    Args:
+        server_key (str | None): The candidate server key (typically a raw POST value).
+
+    Returns:
+        str | None: *server_key* when it names a configured server, otherwise None.
+    """
+    from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+
+    if not server_key:
+        return None
+    return server_key if server_key in LibreNMSAPI.get_available_servers() else None
+
+
 def redirect_with_server_key(request, url, server_key):
     """
     Redirect to *url*, appending a validated ``?server_key`` query param when one is given.
@@ -531,7 +553,14 @@ class LibreNMSAPIMixin:
         """
         from netbox_librenms_plugin.utils import build_migrated_context
 
-        return render(request, self.partial_template_name, {**context, **build_migrated_context(obj, server_key)})
+        # has_write_permission gates the migrated-donor "Move to winner" controls in the shared
+        # inc/_migrate_move_button.html include. Inject it at this chokepoint so EVERY partial
+        # render exit (interface/IP success + error branches) carries it — a caller that omitted it
+        # silently collapsed every move button to the disabled read-only branch on an HTMX
+        # re-render, even for a user with change permission. A caller that sets it explicitly
+        # (modules_view renders directly, not through here) still wins via the context spread.
+        merged = {"has_write_permission": self.has_write_permission(), **context}
+        return render(request, self.partial_template_name, {**merged, **build_migrated_context(obj, server_key)})
 
     def rebind_api_for_server(self, server_key):
         """

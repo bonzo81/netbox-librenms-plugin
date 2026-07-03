@@ -3791,3 +3791,139 @@ class TestIPSyncFetchFailureKeepsMoveCard:
         ip_sync = captured["ctx"]["ip_sync"]
         assert ip_sync["movable_ips"], "Move-IP card context lost on fetch failure"
         assert any(m["address"].startswith("10.0.0.5") for m in ip_sync["movable_ips"])
+
+
+@pytest.mark.django_db
+class TestIPSyncRebindFailureKeepsMoveCard:
+    """On a stale/unconfigured POSTed server_key the IP-sync rebind-failure re-render must still surface movable_ips — the same move card the fetch-failure and success branches keep.
+
+    The card is gated on ip_sync.movable_ips; omitting it (as this branch did) made a migrated
+    donor's "Move IP addresses to <winner>" card vanish whenever the POSTed server_key went stale.
+    """
+
+    def _view(self):
+        from netbox_librenms_plugin.views.object_sync.devices import DeviceIPAddressTableView
+
+        view = object.__new__(DeviceIPAddressTableView)
+        # active_server_key resolves from the cached client; the branch renders against it.
+        view._librenms_api = MagicMock(server_key="default")
+        return view
+
+    def test_rebind_failure_context_includes_movable_ips(self):
+        from django.http import HttpResponse
+        from django.test import RequestFactory
+
+        donor = make_device("ipsync-rebind-donor")
+        # Migrated donor: _migrated_to marker under the "default" sub-block, no live id.
+        donor.custom_field_data["librenms_id"] = {
+            "default": {"_migrated_to": {"device_id": 7, "server_key": "default"}}
+        }
+        donor.save()
+        iface = make_interface(donor, "Gi0/1")
+        make_ip("10.0.0.5/24", assigned_object=iface)
+
+        view = self._view()
+        request = RequestFactory().post("/x/", data={"server_key": "ghost-unconfigured"})
+
+        captured = {}
+
+        def fake_render(req, obj, server_key, ctx):
+            captured["ctx"] = ctx
+            captured["server_key"] = server_key
+            return HttpResponse("x")
+
+        with (
+            patch.object(view, "get_object", return_value=donor),
+            # A stale/unconfigured POSTed key → rebind returns None → the rebind-failure branch runs.
+            patch.object(view, "rebind_api_for_server", return_value=None),
+            patch.object(view, "render_sync_partial", side_effect=fake_render),
+            patch("netbox_librenms_plugin.views.base.ip_addresses_view.messages"),
+        ):
+            view.post(request, pk=donor.pk)
+
+        # The branch renders migrated context + movable_ips against active_server_key ("default"),
+        # not the known-invalid POSTed key (which is not echoed back into ip_sync.server_key).
+        assert captured["server_key"] == "default"
+        ip_sync = captured["ctx"]["ip_sync"]
+        assert ip_sync["server_key"] is None
+        assert ip_sync["movable_ips"], "Move-IP card context lost on rebind failure"
+        assert any(m["address"].startswith("10.0.0.5") for m in ip_sync["movable_ips"])
+
+
+@pytest.mark.django_db
+class TestRenderSyncPartialInjectsWritePermission:
+    """render_sync_partial injects has_write_permission from the request user at the shared chokepoint, so a migrated donor's 'Move to winner' controls render on every HTMX re-render, not just a full page reload.
+
+    Only modules_view (which renders directly) passed the flag; the interface/IP branches route
+    through render_sync_partial and omitted it, silently collapsing every move button to the
+    disabled read-only branch even for a user with change permission.
+    """
+
+    def _ip_view(self, *, superuser):
+        from django.contrib.auth.models import AnonymousUser
+        from django.test import RequestFactory
+
+        from netbox_librenms_plugin.tests.conftest import make_superuser
+        from netbox_librenms_plugin.views.object_sync.devices import DeviceIPAddressTableView
+
+        view = object.__new__(DeviceIPAddressTableView)
+        view._librenms_api = MagicMock(server_key="default")
+        request = RequestFactory().post("/x/")
+        request.user = make_superuser() if superuser else AnonymousUser()
+        view.request = request
+        return view, request
+
+    def _migrated_donor_with_movable_ip(self):
+        from netbox_librenms_plugin.tests.conftest import ip_on
+        from netbox_librenms_plugin.utils import mark_librenms_migrated
+
+        winner = make_device("rsp-perm-winner")
+        donor = make_device("rsp-perm-donor")
+        ip = ip_on(donor, "10.0.0.5/24", "eth0")  # IP on a donor interface → a move-to-winner candidate
+        mark_librenms_migrated(donor, winner.pk, "default")
+        donor.save()
+        return donor, winner, ip
+
+    def _ip_sync_ctx(self, donor, ip):
+        """Build the ip_sync context WITHOUT has_write_permission, exactly as the view branches do."""
+        from django.test import RequestFactory
+        from django_tables2 import RequestConfig
+
+        from netbox_librenms_plugin.tables.ipaddresses import IPAddressTable
+
+        table = IPAddressTable([])
+        RequestConfig(RequestFactory().get("/")).configure(table)
+        return {
+            "ip_sync": {
+                "object": donor,
+                "table": table,
+                "server_key": "default",
+                "set_primary_ip": False,
+                "cache_expiry": None,
+                "movable_ips": [{"id": ip.pk, "address": "10.0.0.5/24", "interface_name": "eth0"}],
+            },
+        }
+
+    def test_write_permitted_user_gets_a_live_move_button(self):
+        from django.urls import reverse
+
+        view, request = self._ip_view(superuser=True)
+        donor, _winner, ip = self._migrated_donor_with_movable_ip()
+        resp = view.render_sync_partial(request, donor, "default", self._ip_sync_ctx(donor, ip))
+        html = resp.content.decode()
+        move_url = reverse("plugins:netbox_librenms_plugin:ipaddress_move_to_winner", kwargs={"pk": ip.pk})
+        # has_write_permission=True (injected by the chokepoint) reached _migrate_move_button.html.
+        assert move_url in html
+        assert "read-only" not in html
+
+    def test_read_only_user_gets_read_only_text_not_a_button(self):
+        from django.urls import reverse
+
+        view, request = self._ip_view(superuser=False)
+        donor, _winner, ip = self._migrated_donor_with_movable_ip()
+        resp = view.render_sync_partial(request, donor, "default", self._ip_sync_ctx(donor, ip))
+        html = resp.content.decode()
+        move_url = reverse("plugins:netbox_librenms_plugin:ipaddress_move_to_winner", kwargs={"pk": ip.pk})
+        # The injected flag reflects the anonymous user → muted text, no live mutating button.
+        assert "read-only" in html
+        assert move_url not in html

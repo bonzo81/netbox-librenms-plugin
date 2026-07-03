@@ -27,6 +27,7 @@ from ipam.models import IPAddress
 from netbox_librenms_plugin.utils import (
     DEVICE_IP_FK_FIELDS,
     DEVICE_IP_FK_LABELS,
+    coerce_librenms_id,
     get_migrated_to_marker,
     set_device_ip_fk,
 )
@@ -35,6 +36,7 @@ from netbox_librenms_plugin.views.mixins import (
     LibreNMSAPIMixin,
     LibreNMSPermissionMixin,
     NetBoxObjectPermissionMixin,
+    resolve_configured_server_key,
     validated_referer,
 )
 
@@ -45,21 +47,17 @@ def _parse_marker_winner_pk(device_id):
     """
     Parse a ``_migrated_to`` marker's ``device_id`` to a positive int pk, or None if invalid.
 
-    bool is rejected (it subclasses int, so ``int(True) == 1`` would misroute a move), and only a
-    real int or a plain digit string is accepted (``int()`` would truncate ``1.9`` / ``Decimal('1.9')``
-    to a valid-looking but wrong pk). A non-positive result is rejected too — it can never be a real
-    Device row. Shared by :func:`_resolve_winner_for_donor` and :func:`_winner_unavailable_reason`
-    so the two can't drift on what counts as a parseable winner id.
+    A marker id from a tampered/legacy source may arrive as a string: accept ONLY a plain digit
+    string (``str.isdecimal()``) so whitespace/sign/decimal forms (``" 5 "``, ``"+5"``, ``"1.9"``)
+    fail closed — deliberately stricter than the raw ``int()`` :func:`~netbox_librenms_plugin.utils.
+    coerce_librenms_id` applies to LibreNMS ids. The int/positive-value coercion itself is delegated
+    to ``coerce_librenms_id`` (bool rejected, positive int only) so that rule lives in one place and
+    can't drift from the rest of the plugin's id handling. Shared by :func:`_resolve_winner_for_donor`
+    and :func:`_winner_unavailable_reason` so the two can't disagree on a parseable winner id.
     """
-    if isinstance(device_id, bool):
+    if isinstance(device_id, str) and not device_id.isdecimal():
         return None
-    if not (isinstance(device_id, int) or (isinstance(device_id, str) and device_id.isdecimal())):
-        return None
-    try:
-        pk = int(device_id)
-    except (TypeError, ValueError):
-        return None
-    return pk if pk > 0 else None
+    return coerce_librenms_id(device_id)
 
 
 def _resolve_winner_for_donor(donor, server_key="default"):
@@ -181,14 +179,12 @@ def _sync_tab_url(device_pk, tab, server_key):
         str: The sync URL with ``tab`` (and a validated ``server_key``) query params.
     """
     url = f"{reverse('plugins:netbox_librenms_plugin:device_librenms_sync', args=[device_pk])}?tab={tab}"
-    if server_key:
-        # Re-source the key from the trusted config rather than reflecting the raw POST value:
-        # only append it when it matches a configured server (a stale/tampered key resolves to
-        # nothing and is dropped). Mirrors device_fields._sync_redirect's allowlist guard.
-        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
-
-        if server_key in LibreNMSAPI.get_available_servers():
-            url += f"&server_key={quote_plus(server_key)}"
+    # Re-source the key from the trusted config rather than reflecting the raw POST value: append it
+    # only when it matches a configured server (a stale/tampered key resolves to None and is dropped).
+    # The allowlist policy is shared with device_fields._sync_redirect via resolve_configured_server_key.
+    configured_key = resolve_configured_server_key(server_key)
+    if configured_key:
+        url += f"&server_key={quote_plus(configured_key)}"
     return url
 
 

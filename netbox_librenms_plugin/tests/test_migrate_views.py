@@ -169,6 +169,21 @@ class TestParseMarkerWinnerPk:
         for bad in (True, False, 1.9, "1.9", "  5 ", 0, -3, "0", None, "x", {}):
             assert _parse_marker_winner_pk(bad) is None, bad
 
+    def test_delegates_positive_int_rule_to_coerce_librenms_id(self):
+        """The int/positive coercion is delegated to coerce_librenms_id; only the marker-specific string strictness is local."""
+        from netbox_librenms_plugin.utils import coerce_librenms_id
+        from netbox_librenms_plugin.views.sync.migrate import _parse_marker_winner_pk
+
+        # For every non-string input the marker parser matches coerce_librenms_id exactly (the shared
+        # bool-reject / positive-int rule) — markers are always stamped as ints in practice.
+        for value in (5, 1, 999999, 0, -3, True, False, None, 1.9):
+            assert _parse_marker_winner_pk(value) == coerce_librenms_id(value), value
+        # A plain digit string agrees; a whitespace-padded one is where the marker parser stays
+        # deliberately stricter than coerce_librenms_id's lenient int() (a tampered marker fails closed).
+        assert _parse_marker_winner_pk("5") == coerce_librenms_id("5") == 5
+        assert _parse_marker_winner_pk("  5 ") is None
+        assert coerce_librenms_id("  5 ") == 5
+
 
 @pytest.mark.django_db
 class TestResolveWinnerForDonor:

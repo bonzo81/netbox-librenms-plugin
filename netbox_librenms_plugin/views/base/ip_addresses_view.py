@@ -570,6 +570,13 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMix
                         # checkbox to ip_sync.set_primary_ip, so omitting it silently unchecks it
                         # on this error re-render.
                         "set_primary_ip": resolve_set_primary_ip(request),
+                        # Keep the "Move IP addresses to <winner>" card on this error re-render too:
+                        # the per-row moves are pure NetBox operations, and the template gates the
+                        # card on ip_sync.movable_ips — omitting it (as the fetch-failure and success
+                        # branches do not) would make a migrated donor's move card vanish just
+                        # because the POSTed server_key was stale. Resolved against active_server_key,
+                        # matching the migrated context rendered on this branch.
+                        "movable_ips": self._movable_ips_for_migration(obj, active_server_key),
                     },
                 },
             )
