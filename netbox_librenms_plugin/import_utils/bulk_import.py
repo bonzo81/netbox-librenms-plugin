@@ -730,13 +730,14 @@ def _refresh_existing_device(validation: dict, libre_device: dict = None, server
                 # Same name resolves in BOTH models: warn and leave unmatched (do NOT block),
                 # exactly like the validator's cross-model hostname branch. A serial/IP match can
                 # still bind below (a stronger identity), mirroring the validator's fall-through.
-                msgs = validation.get("warnings")
-                if isinstance(msgs, list):
-                    msgs.append(
-                        f"Both a VM and Device exist with hostname '{hostname}' in NetBox. Cannot "
-                        "determine which to match. Please set the librenms_id custom field on the "
-                        "correct object."
-                    )
+                # setdefault (not a plain get + isinstance guard) so the warning is surfaced even
+                # when the caller built a minimal validation dict without "warnings", matching the
+                # AmbiguousLibreNMSIdError handler below.
+                validation.setdefault("warnings", []).append(
+                    f"Both a VM and Device exist with hostname '{hostname}' in NetBox. Cannot "
+                    "determine which to match. Please set the librenms_id custom field on the "
+                    "correct object."
+                )
             elif model_match:
                 new_device, match_type = model_match, model_mt
             elif cross_match:

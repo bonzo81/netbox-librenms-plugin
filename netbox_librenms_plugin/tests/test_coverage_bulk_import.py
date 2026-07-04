@@ -2622,6 +2622,33 @@ class TestCrossModelConflictDetection:
         assert validation["can_import"] is False
         assert validation["is_ready"] is False
 
+    @pytest.mark.django_db
+    def test_both_models_match_surfaces_ambiguity_warning(self):
+        """Same hostname resolves in BOTH models: the refresh must surface the ambiguity warning even when the validation dict omits the 'warnings' key."""
+        from netbox_librenms_plugin.import_utils.bulk_import import _refresh_existing_device
+
+        validation = _make_validation(import_as_vm=False)
+        validation["existing_device"] = None
+        validation["resolved_name"] = "sw-both"
+        # _make_validation intentionally omits "warnings" — a minimal caller (or the
+        # _device_validation/_vm_validation test baselines) can build the dict without it, so the
+        # cross-model branch must create the key rather than silently drop the warning.
+        assert "warnings" not in validation
+        libre_device = {"device_id": 55, "hostname": "sw-both", "sysName": "sw-both"}
+
+        # BOTH a Device and a VM own the name → the elif model_match and cross_match branch fires.
+        make_device("sw-both")
+        make_vm("sw-both")
+
+        _refresh_existing_device(validation, libre_device, server_key="default")
+
+        # Cross-model ambiguity: bind NEITHER (leave unmatched) but SURFACE the warning so the user
+        # knows to set librenms_id on the correct object.
+        assert validation["existing_device"] is None
+        assert any("Both a VM and Device exist with hostname 'sw-both'" in w for w in validation.get("warnings", [])), (
+            "cross-model ambiguity warning was silently dropped"
+        )
+
 
 class TestRefreshLibreNMSLinkage:
     """_refresh_librenms_linkage: re-classify a librenms-id match on cache-hit refresh."""
