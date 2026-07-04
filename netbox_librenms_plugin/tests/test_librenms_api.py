@@ -2641,6 +2641,21 @@ class TestResolvePortRelationships:
         warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
         assert any(bad in r.getMessage() for r in warnings)
 
+    def test_non_string_lag_pattern_is_skipped_not_crashed(self, mock_librenms_api, caplog):
+        """A non-string value in the explicit lag_patterns dict is skipped, not crashed: re.compile raises TypeError (not re.error), so unlike the DB-backed path (strings guaranteed) it must be caught too."""
+        import logging
+
+        # None (or any non-string) → re.compile raises TypeError, not re.error. Before the fix this
+        # propagated out of resolve_port_relationships and crashed the whole refresh.
+        with caplog.at_level(logging.WARNING, logger="netbox_librenms_plugin.librenms_api"):
+            result = mock_librenms_api.resolve_port_relationships(
+                NOKIA_PORTS, NOKIA_PORT_STACK[:1], lag_patterns={"junos": None}
+            )
+        # Resolution still completes via structural (ieee8023adLag) detection; the bad value skipped.
+        assert result["lag_members"] == {101: 102}
+        warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+        assert any("None" in r.getMessage() for r in warnings)
+
     def test_ambiguous_shared_name_is_not_indexed_to_either_port(self, mock_librenms_api):
         """A name carried by two different ports indexes neither, so a duplicate label can't hijack the base-name lookup and bind a sub-unit's LAG membership onto the wrong aggregate."""
         ports = [

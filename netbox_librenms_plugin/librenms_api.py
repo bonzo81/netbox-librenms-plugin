@@ -725,9 +725,11 @@ class LibreNMSAPI:
             for pattern_str in lag_patterns.values():
                 try:
                     compiled_patterns.append(_re.compile(pattern_str))
-                except _re.error as exc:
-                    # A configured pattern with a typo'd regex is skipped rather than crashing
-                    # resolution — logged so the user can tell why LAG detection isn't working.
+                except (_re.error, TypeError) as exc:
+                    # A configured pattern with a typo'd regex (re.error) or a non-string value
+                    # (TypeError — the caller-supplied dict isn't guaranteed strings like the
+                    # DB-backed path is) is skipped rather than crashing resolution — logged so the
+                    # user can tell why LAG detection isn't working.
                     logger.warning("Skipping invalid LAG name pattern %r: %s", pattern_str, exc)
 
         from netbox_librenms_plugin.utils import normalize_librenms_port_id
