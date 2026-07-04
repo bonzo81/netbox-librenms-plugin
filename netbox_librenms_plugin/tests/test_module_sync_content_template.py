@@ -12,7 +12,7 @@ import pytest
 
 @pytest.mark.django_db
 class TestModuleSyncContentTemplateMigratedMode:
-    def _render(self, *, migrated, has_write_permission=False):
+    def _render(self, *, migrated, has_write_permission=False, server_key="default"):
         from django.contrib.auth.models import AnonymousUser
         from django.template.loader import render_to_string
         from django.test import RequestFactory
@@ -24,12 +24,12 @@ class TestModuleSyncContentTemplateMigratedMode:
         device = make_device("module-tmpl-dev")
         request = RequestFactory().get("/")
         request.user = AnonymousUser()  # NetBox context processors read request.user
-        table = LibreNMSModuleTable([], device=device, server_key="default")
+        table = LibreNMSModuleTable([], device=device, server_key=server_key)
         RequestConfig(request).configure(table)
         module_sync = {
             "object": device,
             "table": table,
-            "server_key": "default",
+            "server_key": server_key,
             "cache_expiry": None,
         }
         ctx = {
@@ -57,3 +57,22 @@ class TestModuleSyncContentTemplateMigratedMode:
         assert 'id="install-selected-form"' in html
         assert "csrfmiddlewaretoken" in html
         assert 'name="server_key"' in html
+
+    def test_normal_mode_omits_server_key_input_when_absent(self):
+        # Single-server / default-server deployments have no server_key; the hidden input must be
+        # omitted entirely (guarded with {% if %}) rather than emitted as value="", matching the
+        # interface/IP/VLAN sync fragments so a blank key can't be POSTed as an empty string.
+        html = self._render(migrated=None, has_write_permission=True, server_key="")
+        assert 'id="install-selected-form"' in html
+        assert 'name="server_key"' not in html
+
+    def test_migrated_mode_omits_server_key_input_when_absent(self):
+        html = self._render(
+            migrated={"device_id": 1, "at": "now"},
+            has_write_permission=True,
+            server_key="",
+        )
+        # The standalone CSRF token still renders for the verify-module POST, but the server_key
+        # input is omitted when there is no key.
+        assert "csrfmiddlewaretoken" in html
+        assert 'name="server_key"' not in html

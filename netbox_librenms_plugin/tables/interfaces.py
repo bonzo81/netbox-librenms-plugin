@@ -592,7 +592,7 @@ class VCInterfaceTable(LibreNMSInterfaceTable):
         base_id = f"device_selection_{interface_name}_{hash(interface_name)}"
 
         options = [
-            f'<option value="{member.id}"{" selected" if member.id == selected_member_id else ""}>{member.name}</option>'
+            f'<option value="{member.id}"{" selected" if member.id == selected_member_id else ""}>{escape(member.name)}</option>'
             for member in members
         ]
 

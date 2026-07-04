@@ -3243,3 +3243,31 @@ class TestRenderDeviceSelectionEscape:
         # The raw <script> tag must NOT appear — it should be escaped.
         assert "<script>" not in html
         assert "&lt;script&gt;" in html
+
+    def test_interface_table_member_name_is_escaped(self):
+        """The VC interface table dropdown must escape member names just like the cable table."""
+        from dcim.models import VirtualChassis
+
+        from netbox_librenms_plugin.tables.interfaces import VCInterfaceTable
+        from netbox_librenms_plugin.tests.conftest import make_device
+
+        master = make_device("vc-if-master-xss")
+        # create() bypasses full_clean(), so the hostile name persists verbatim; the render is what
+        # must neutralise it. The real ORM member list is iterated by render_device_selection().
+        evil = make_device('<script>alert("xss")</script>')
+        vc = VirtualChassis.objects.create(name="vc-if-xss")
+        for pos, dev in enumerate((master, evil), start=1):
+            dev.virtual_chassis = vc
+            dev.vc_position = pos
+            dev.save()
+
+        table = VCInterfaceTable(data=[], device=master, interface_name_field="ifName")
+        table.device = master
+        # Non-ethernet row → selected member is the device itself (no get_virtual_chassis_member
+        # lookup), so the assertion isolates the option-label escaping.
+        record = {"ifName": "Vlan100", "ifType": "l3ipvlan"}
+        html = str(table.render_device_selection(None, record))
+
+        # The raw <script> tag must NOT appear — it must be escaped, matching the cable table.
+        assert "<script>" not in html
+        assert "&lt;script&gt;" in html
