@@ -102,6 +102,14 @@ def _ports(recording):
     return []
 
 
+# Upper bound on the interface name fed to an untrusted (recording-supplied) LAG regex. Catastrophic
+# backtracking cost scales with the search-input length, so capping it keeps a valid-but-pathological
+# pattern in a community-submitted recording from hanging the `librenms_recordings --validate` command
+# (which runs in CI). Real interface names are well under this; a longer one is anonymized garbage that
+# never needs LAG name-pattern classification.
+_MAX_LAG_NAME_LEN = 256
+
+
 def compute_shape_signature(recording):
     """
     Compute the testing-relevant fingerprint of a recording.
@@ -152,7 +160,10 @@ def compute_shape_signature(recording):
     for pattern_str in (recording.get("lag_patterns") or {}).values():
         try:
             compiled_lag_patterns.append(re.compile(pattern_str))
-        except re.error:
+        except (re.error, TypeError):
+            # recording lag_patterns are untrusted (community-submitted): a typo'd regex (re.error)
+            # or a non-string value (TypeError on re.compile) is skipped, not crashed — mirroring
+            # resolve_port_relationships' explicit-pattern hardening.
             continue
 
     def _lag_names(port):
@@ -161,7 +172,13 @@ def compute_shape_signature(recording):
     def _is_lag_port(port):
         if port.get("ifType") == "ieee8023adLag":
             return True
-        return any(pat.search(name) for pat in compiled_lag_patterns for name in _lag_names(port))
+        # Bound the untrusted name length before applying an untrusted regex — see _MAX_LAG_NAME_LEN.
+        return any(
+            pat.search(name)
+            for pat in compiled_lag_patterns
+            for name in _lag_names(port)
+            if len(name) <= _MAX_LAG_NAME_LEN
+        )
 
     lag_ports = [p for p in ports if _is_lag_port(p)]
     lag_port_names = [name for p in lag_ports for name in _lag_names(p)]

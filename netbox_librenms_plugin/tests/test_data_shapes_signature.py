@@ -88,6 +88,42 @@ def test_signature_lag_present_via_configured_pattern():
     assert sig["lag"]["name_prefix"] == "Po"
 
 
+def test_signature_hardens_untrusted_lag_patterns():
+    """`--validate` ingests community-submitted recordings, so compute_shape_signature must not crash on a non-string lag_patterns value and must bound the name it feeds to an untrusted regex (ReDoS)."""
+    # (1) A non-string pattern raises TypeError (not re.error) on re.compile; it must be skipped,
+    # not crash the command. The only pattern is unusable and the port isn't ieee8023adLag, so no LAG.
+    rec_bad = {
+        "schema_version": 1,
+        "name": "x",
+        "device_id": 1,
+        "lag_patterns": {"ios": None},
+        "responses": {
+            "GET /api/v0/devices/1/ports": {
+                "status": "ok",
+                "ports": [{"port_id": 1, "ifName": "Po1", "ifType": "propVirtual"}],
+            }
+        },
+    }
+    assert compute_shape_signature(rec_bad)["lag"]["present"] is False
+
+    # (2) An interface name longer than the cap is NOT fed to pat.search, bounding catastrophic
+    # backtracking. A pattern that matches its prefix therefore does not classify it as a LAG.
+    long_name = "Po" + "9" * 500
+    rec_long = {
+        "schema_version": 1,
+        "name": "x",
+        "device_id": 1,
+        "lag_patterns": {"ios": r"^Po"},
+        "responses": {
+            "GET /api/v0/devices/1/ports": {
+                "status": "ok",
+                "ports": [{"port_id": 1, "ifName": long_name, "ifType": "propVirtual"}],
+            }
+        },
+    }
+    assert compute_shape_signature(rec_long)["lag"]["present"] is False
+
+
 def test_signature_handles_null_meta():
     """A recording with explicit meta:null must not crash; os falls back to the device row."""
     rec = {
