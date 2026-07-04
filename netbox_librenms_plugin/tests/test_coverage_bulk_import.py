@@ -2648,6 +2648,13 @@ class TestCrossModelConflictDetection:
         assert any("Both a VM and Device exist with hostname 'sw-both'" in w for w in validation.get("warnings", [])), (
             "cross-model ambiguity warning was silently dropped"
         )
+        # Unlike the single-cross-match siblings above (which bind existing_device and force
+        # can_import=False), the both-models-match branch deliberately does NOT block: it warns and
+        # leaves the row importable as a NEW device (the user then sets librenms_id on the correct
+        # object). Pin that so a regression that instead blocks — or one that binds an arbitrary
+        # existing match — is caught.
+        assert validation["can_import"] is True
+        assert validation["is_ready"] is True
 
 
 class TestRefreshLibreNMSLinkage:
