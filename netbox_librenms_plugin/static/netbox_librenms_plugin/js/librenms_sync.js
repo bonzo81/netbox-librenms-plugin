@@ -2395,7 +2395,9 @@ document.addEventListener('htmx:afterSettle', function (event) {
 });
 
 // Event delegation for LAG and parent interface sync buttons.
-// Buttons are rendered inline in the interface table cells (data-col="lag" / "parent")
+// Buttons are rendered inline in the interface table's data-col="parent" cell
+// (render_parent in tables/interfaces.py renders BOTH the LAG-sync and parent-sync
+// buttons there; there is no separate data-col="lag" cell)
 // and carry data attributes: port-id, lag-port-id / parent-port-id, object-type, object-id.
 document.addEventListener('click', function (e) {
     const btn = e.target.closest('.lag-sync-btn, .parent-sync-btn');
