@@ -24,6 +24,7 @@ from ..utils import (
 from .cache import get_cache_metadata_key, get_import_device_cache_key, get_validated_device_cache_key
 from .collisions import detect_bulk_collisions
 from .device_operations import (
+    VALIDATION_ERROR_ISSUE_PREFIX,
     _describe_existing_librenms_link,
     import_single_device,
     resolve_device_by_host_ip,
@@ -143,12 +144,13 @@ def detect_collisions_for_device_ids(
             server_key=api.server_key,
             include_vc_detection=False,
         )
-        if any(str(issue).startswith("Validation error:") for issue in validation.get("issues", [])):
+        if any(str(issue).startswith(VALIDATION_ERROR_ISSUE_PREFIX) for issue in validation.get("issues", [])):
             # validate_device_for_import() caught an exception and returned only a partial result
-            # (its except branch appends a "Validation error: ..." issue). The collision-relevant
+            # (its except branch appends a VALIDATION_ERROR_ISSUE_PREFIX issue). The collision-relevant
             # match fields may be missing, so this id was NOT reliably collision-checked. Fail
             # closed: record it as unresolved rather than collision-check it on incomplete data
-            # (mirrors the get_device_info miss above).
+            # (mirrors the get_device_info miss above). The prefix is a shared constant so this
+            # guard can't silently drift from the producer's wording.
             unresolved_ids.append(device_id)
             continue
         devices.append(
