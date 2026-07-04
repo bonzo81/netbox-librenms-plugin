@@ -35,6 +35,13 @@ from .virtual_chassis import (
 
 logger = logging.getLogger(__name__)
 
+# Prefix on the issue appended by validate_device_for_import()'s catch-all except branch when
+# validation aborts on an exception and returns only a PARTIAL result. Downstream fail-closed
+# guards (e.g. bulk_import.detect_collisions_for_device_ids) key on this to treat the row as
+# not-reliably-checked. Keep it a shared constant so the producer and every consumer can't drift
+# apart — a silent text change would otherwise defeat the fail-closed guarantee.
+VALIDATION_ERROR_ISSUE_PREFIX = "Validation error:"
+
 
 def _detect_oob_type_from_name(name):
     """
@@ -1394,7 +1401,7 @@ def validate_device_for_import(
 
     except Exception as e:
         logger.exception(f"Error validating device for import: {libre_device.get('hostname', 'unknown')}")
-        result["issues"].append(f"Validation error: {str(e)}")
+        result["issues"].append(f"{VALIDATION_ERROR_ISSUE_PREFIX} {str(e)}")
         return result
 
 
