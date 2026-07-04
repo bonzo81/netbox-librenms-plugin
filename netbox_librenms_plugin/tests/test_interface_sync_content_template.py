@@ -142,26 +142,10 @@ class TestInterfaceSyncContentTemplateMigratedMode:
 
     @staticmethod
     def _patch_move_url_reverse(*, resolve):
-        """Patch ``django.urls.reverse`` so ``interface_move_to_winner`` looks registered
-        (``resolve=True`` → a fake path) or unregistered (``resolve=False`` → ``NoReverseMatch``),
-        while every other viewname resolves for real. The move URL is only registered up-stack, so
-        forcing the state here keeps these guard tests branch-independent. ``django.urls.reverse``
-        is the correct target because ``{% url %}`` re-imports ``reverse`` from ``django.urls`` at
-        render. Returns a ``patch()`` context manager.
-        """
-        from unittest.mock import patch
+        """Force ``interface_move_to_winner`` registered/unregistered via the shared helper."""
+        from netbox_librenms_plugin.tests._html_helpers import patch_move_url_reverse
 
-        from django.urls import NoReverseMatch
-        from django.urls import reverse as real_reverse
-
-        def _reverse(viewname, *args, **kwargs):
-            if str(viewname).endswith("interface_move_to_winner"):
-                if resolve:
-                    return "/fake/interface-move/1/"
-                raise NoReverseMatch(viewname)
-            return real_reverse(viewname, *args, **kwargs)
-
-        return patch("django.urls.reverse", _reverse)
+        return patch_move_url_reverse("interface_move_to_winner", resolve=resolve)
 
     def test_migrated_move_button_hidden_for_read_only_users(self):
         """The migrated 'Move' action is a mutating HTMX POST; without write permission it must not render as a live button (it would only fail at the permission gate) — show muted 'read-only' text instead."""
@@ -179,7 +163,7 @@ class TestInterfaceSyncContentTemplateMigratedMode:
         # Assert on the button's own rendered content, not the URL *name* (which never appears in
         # HTML — the template emits the resolved path). The live Move button carries this confirm text.
         assert "Move interface '" not in ro
-        assert "/fake/interface-move/1/" not in ro
+        assert "/fake/interface_move_to_winner/1/" not in ro
         assert "read-only" in ro
 
     def test_migrated_move_button_write_perm_degrades_when_url_unregistered(self):
@@ -216,7 +200,7 @@ class TestInterfaceSyncContentTemplateMigratedMode:
         with self._patch_move_url_reverse(resolve=True):
             html = self._render(migrated=marker, netbox_only=[iface], winner=winner, has_write=True)
         assert "Move interface '" in html
-        assert 'hx-post="/fake/interface-move/1/"' in html
+        assert 'hx-post="/fake/interface_move_to_winner/1/"' in html
         assert "read-only" not in html
 
     def test_move_button_emits_server_key_hx_vals_when_marker_has_key(self):

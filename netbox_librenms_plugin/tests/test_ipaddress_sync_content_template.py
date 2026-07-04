@@ -92,22 +92,13 @@ class TestIpAddressSyncContentTemplateMigratedMode:
         route yields an empty move_url and the read-only fallback instead of a bare {% url %} that
         would NoReverseMatch and 500 the whole IP tab.
         """
-        from unittest.mock import patch
-
-        from django.urls import NoReverseMatch
-        from django.urls import reverse as real_reverse
-
+        from netbox_librenms_plugin.tests._html_helpers import patch_move_url_reverse
         from netbox_librenms_plugin.tests.conftest import make_device
 
         winner = make_device("ip-tmpl-winner-degrade")
         movable = [{"id": 88, "address": "10.0.0.11/24", "interface_name": "eth2"}]
 
-        def _reverse(viewname, *args, **kwargs):
-            if str(viewname).endswith("ipaddress_move_to_winner"):
-                raise NoReverseMatch(viewname)
-            return real_reverse(viewname, *args, **kwargs)
-
-        with patch("django.urls.reverse", _reverse):
+        with patch_move_url_reverse("ipaddress_move_to_winner", resolve=False):
             html = self._render(
                 migrated={"server_key": "default", "device_id": winner.pk, "at": "now"},
                 movable=movable,
