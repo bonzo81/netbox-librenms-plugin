@@ -637,11 +637,10 @@ class LibreNMSAPIMixin:
         # (no cached client + misconfigured default). Read the bound client's key directly
         # instead of going through the lazy ``librenms_api`` property, which would reconstruct
         # ``LibreNMSAPI()`` and can re-raise the very misconfiguration the rebind just avoided.
-        scoped = (
-            resolved
-            if resolved is not None
-            else (requested or getattr(getattr(self, "_librenms_api", None), "server_key", None))
-        )
+        # ``requested`` is necessarily blank on this branch (a non-blank ``requested`` with
+        # ``resolved is None`` already returned above), so the bound client's key is the only
+        # reachable fallback.
+        scoped = resolved if resolved is not None else getattr(getattr(self, "_librenms_api", None), "server_key", None)
         return scoped, False
 
     def get_server_info(self):
