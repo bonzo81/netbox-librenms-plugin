@@ -78,3 +78,37 @@ class TestResolveServerMappingDisplayId:
 
     def test_dict_oob_not_a_dict(self):
         assert resolve_server_mapping_display_id({"id": 0, "oob": 5}) == (None, False)
+
+
+class TestRenderVcMemberOptions:
+    """The shared VC-member <option> builder used by the interface/cable/module tables."""
+
+    class _Member:
+        def __init__(self, pk, name):
+            self.id = pk
+            self.name = name
+
+    def test_marks_the_selected_member(self):
+        from netbox_librenms_plugin.utils import render_vc_member_options
+
+        html = render_vc_member_options([self._Member(1, "sw1"), self._Member(2, "sw2")], 2)
+        assert '<option value="1">sw1</option>' in html
+        assert '<option value="2" selected>sw2</option>' in html
+
+    def test_string_selected_id_matches_int_member_id(self):
+        # The module table's cached selected id can be a string; it must still match.
+        from netbox_librenms_plugin.utils import render_vc_member_options
+
+        html = render_vc_member_options([self._Member(3, "sw3")], "3")
+        assert '<option value="3" selected>sw3</option>' in html
+
+    def test_member_names_are_escaped(self):
+        from django.utils.safestring import SafeString
+
+        from netbox_librenms_plugin.utils import render_vc_member_options
+
+        html = render_vc_member_options([self._Member(1, '<img src=x onerror=alert(1)>"')], None)
+        assert "<img" not in html
+        assert "&lt;img src=x onerror=alert(1)&gt;&quot;" in html
+        # SafeString so format_html() callers embed it without double-escaping.
+        assert isinstance(html, SafeString)

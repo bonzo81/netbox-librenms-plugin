@@ -9,6 +9,8 @@ from django.core.exceptions import ObjectDoesNotExist, ValidationError
 from django.db.models import Count, Max, Q
 from django.http import HttpRequest
 from django.utils.functional import SimpleLazyObject
+from django.utils.html import escape
+from django.utils.safestring import mark_safe
 from netbox.config import get_config
 from netbox.plugins import get_plugin_config
 from utilities.paginator import get_paginate_count as netbox_get_paginate_count
@@ -1193,6 +1195,32 @@ def coerce_librenms_id(value) -> int | None:
         except ValueError:
             return None
     return None
+
+
+def render_vc_member_options(members, selected_id):
+    """
+    Build the ``<option>`` list for a Virtual Chassis member dropdown.
+
+    Shared by the VC interface/cable/module tables' ``render_device_selection`` so the
+    member-name escaping and selected-flag logic cannot drift between per-table copies
+    (the XSS escaping was previously added to each copy separately). Ids are compared as
+    strings because the module table's selected id can arrive as a string from cached
+    row data, while the other tables pass ints — ``str()`` makes both compare correctly.
+
+    Args:
+        members: Iterable of VC member devices (anything with ``.id`` and ``.name``).
+        selected_id: The member id to mark selected (int or numeric string).
+
+    Returns:
+        SafeString: The concatenated ``<option>`` elements, member names escaped.
+    """
+    return mark_safe(  # noqa: S308 — names escaped above; ids are model pks
+        "".join(
+            f'<option value="{member.id}"{" selected" if str(member.id) == str(selected_id) else ""}>'
+            f"{escape(member.name)}</option>"
+            for member in members
+        )
+    )
 
 
 def is_valid_ports_payload(payload) -> bool:
