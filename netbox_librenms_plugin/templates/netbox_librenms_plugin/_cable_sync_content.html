@@ -154,3 +154,13 @@ overwrite of any cable the plugin doesn't solely own.
     {% include 'netbox_librenms_plugin/htmx/cable_overwrite_modal.html' with conflicts=cable_sync.overwrite_conflicts server_key=cable_sync.server_key device_pk=cable_sync.object.pk %}
 </div>
 {% endif %}
+
+{% if cable_sync.close_modal %}
+{% comment %}
+Out-of-band swap: empty and hide the shared #htmx-modal after a modal-driven action completed
+(e.g. the remote-end picker saved its pick) — the main swap already refreshed #cable-sync-content.
+{% endcomment %}
+<div id="htmx-modal-content" hx-swap-oob="innerHTML">
+    <script>if (typeof closeHtmxModal === 'function') { closeHtmxModal(); }</script>
+</div>
+{% endif %}

@@ -47,6 +47,16 @@ class LibreNMSCableTable(tables.Table):
                 Sync Cable
             </button>
         {% endif %}
+        {% if record.picker_url %}
+            <button type="button"
+                    class="btn btn-sm btn-outline-secondary"
+                    title="Pick remote end"
+                    hx-get="{{ record.picker_url }}"
+                    hx-target="#htmx-modal-content"
+                    hx-swap="innerHTML">
+                <i class="mdi mdi-connection"></i>
+            </button>
+        {% endif %}
         """,
         verbose_name="",
         orderable=False,
@@ -83,9 +93,18 @@ class LibreNMSCableTable(tables.Table):
         return format_html("{}{}{}", display_value, oob_badge, serial_badge)
 
     def render_remote_port(self, value, record):
-        """Render remote port name as a link if URL is available."""
+        """Render remote port name as a link if URL is available; flag a manually picked remote."""
+        manual_badge = (
+            mark_safe(  # noqa: S308  (static trusted markup, mirrors the Serial badge idiom)
+                ' <i class="mdi mdi-gesture-tap-button text-muted" title="Remote end picked manually"></i>'
+            )
+            if record.get("manual_remote")
+            else ""
+        )
         if url := record.get("remote_port_url"):
-            return format_html('<a href="{}">{}</a>', url, value)
+            return format_html('<a href="{}">{}</a>{}', url, value, manual_badge)
+        if manual_badge:
+            return format_html("{}{}", value, manual_badge)
         return value
 
     def render_cable_status(self, value, record):

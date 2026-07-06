@@ -1,0 +1,66 @@
+{% comment %}
+Remote-end picker for a cable row. Rendered as the #htmx-modal-content shell (auto-shown by the
+page's htmx:afterSettle handler). Remote matching is name-based and often fails, so the user
+searches for the actual NetBox device, picks a port, and the POST stores the pick on the cached
+row (manual_remote_id) — making it sync-ready without any name luck.
+
+Context: object (page device), row (cached link row or None), server_key, post_url, search_url,
+ports_url, initial_devices (label-matched device prefill, may be empty).
+{% endcomment %}
+<div class="modal-header">
+  <h5 class="modal-title" id="htmx-modal-label">
+    <i class="mdi mdi-connection me-1"></i>Pick remote end{% if row %} — {{ row.local_port }}{% endif %}
+  </h5>
+  <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+</div>
+{% if not row %}
+<div class="modal-body">
+  <div class="alert alert-warning py-2 mb-0">
+    <i class="mdi mdi-alert me-1"></i>Cache has expired. Please refresh the cable data and try again.
+  </div>
+</div>
+<div class="modal-footer">
+  <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Close</button>
+</div>
+{% else %}
+<form hx-post="{{ post_url }}" hx-target="#cable-sync-content" hx-swap="innerHTML"
+      hx-disabled-elt="find button[type=submit]">
+  {% csrf_token %}
+  <input type="hidden" name="port_id" value="{{ row.local_port_id }}">
+  {% if server_key %}<input type="hidden" name="server_key" value="{{ server_key }}">{% endif %}
+  <div class="modal-body">
+    <p class="small text-muted mb-2">
+      LibreNMS reports the remote end as “<strong>{{ row.remote_device|default:"unknown" }}</strong>”{% if row.remote_port %}
+      port “{{ row.remote_port }}”{% endif %}. Name matching is only a hint — pick the actual NetBox endpoint below.
+    </p>
+    <label class="form-label small mb-1" for="remote-picker-search">Remote device</label>
+    <input type="search" name="q" id="remote-picker-search" class="form-control" autocomplete="off"
+           placeholder="Type to search devices…"
+           hx-get="{{ search_url }}" hx-trigger="input changed delay:300ms, search"
+           hx-target="#remote-picker-devices" hx-swap="innerHTML">
+    <div id="remote-picker-devices" class="list-group mt-1">
+      {% if initial_devices %}
+        {% include "netbox_librenms_plugin/htmx/_remote_picker_device_results.html" with devices=initial_devices q="" ports_url=ports_url %}
+      {% endif %}
+    </div>
+    <div id="remote-picker-ports" class="mt-3"></div>
+  </div>
+  <div class="modal-footer">
+    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+    <button type="submit" id="remote-picker-save" class="btn btn-primary" disabled>Use selected port</button>
+  </div>
+</form>
+<script>
+  {# Highlight the picked device (the ports fragment names it too, but the visual anchor helps). #}
+  (function () {
+    var list = document.getElementById('remote-picker-devices');
+    if (!list) return;
+    list.addEventListener('click', function (e) {
+      var btn = e.target.closest('.remote-picker-device');
+      if (!btn) return;
+      list.querySelectorAll('.remote-picker-device.active').forEach(function (b) { b.classList.remove('active'); });
+      btn.classList.add('active');
+    });
+  })();
+</script>
+{% endif %}

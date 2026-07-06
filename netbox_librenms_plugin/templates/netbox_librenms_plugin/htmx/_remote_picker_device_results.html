@@ -1,0 +1,25 @@
+{% comment %}
+Device search results for the remote-end picker. Each hit loads its port list into
+#remote-picker-ports. Context: devices, q, ports_url (base; device_id appended per hit).
+{% endcomment %}
+{% for device in devices %}
+  <button type="button" class="list-group-item list-group-item-action py-1 remote-picker-device"
+          hx-get="{{ ports_url }}&device_id={{ device.pk }}"
+          hx-target="#remote-picker-ports" hx-swap="innerHTML">
+    {{ device.name }}
+    {% if device.site %}<span class="text-muted small ms-1">({{ device.site }})</span>{% endif %}
+  </button>
+{% empty %}
+  {% if q %}
+    <div class="list-group-item text-muted small py-1">No devices match “{{ q }}”.</div>
+  {% endif %}
+{% endfor %}
+<script>
+  {# A new device search invalidates any previously loaded port list + selection. #}
+  (function () {
+    var ports = document.getElementById('remote-picker-ports');
+    var save = document.getElementById('remote-picker-save');
+    if (ports && !ports.querySelector('.remote-picker-active')) { ports.innerHTML = ''; }
+    if (save && ports && !ports.firstChild) { save.disabled = true; }
+  })();
+</script>

@@ -61,7 +61,16 @@ A cabled row is not a dead end — its **Cable Status** compares the existing Ne
 | **Connected via Patch Path** | The endpoints are cabled and the traced path **reaches the LibreNMS target through patch panels** — you remodeled the link in more detail. | No — a remodel is a better model of the same link, not a mismatch. |
 | **Cable Mismatch** | An endpoint is cabled somewhere that does *not* reach the LibreNMS target. | Yes — re-syncing re-points the connection, protected by the overwrite gate below. |
 
-For serial rows the LibreNMS target is the **device** matched from the port label (the exact remote port isn't knowable from a label), so a cable landing on *any* console port of that device counts as matched.
+For serial rows the LibreNMS target is the **device** matched from the port label (the exact remote port isn't knowable from a label), so a cable landing on *any* console port of that device counts as matched. A cable that already carries the `librenms` tag is **trusted over the label**: labels are only hints, and a tagged cable was placed deliberately (possibly via a manual pick), so a wrong-name label never flips it to a mismatch.
+
+## Picking the remote end manually
+
+Remote matching is name-based — the serial label or the LLDP port name — and names simply don't always match. Any row whose local end resolved but whose remote is unresolved, free, or pointing at the wrong place shows a **pick-remote** button (<i class="mdi mdi-connection"></i>) next to its Sync action. It opens a picker where you:
+
+1. **Search for the remote device** by name (the label-matched device is pre-filled when there is one).
+2. **Pick the port** — console ports for serial rows, interfaces otherwise; free ports are listed first, already-cabled ones are marked (and remain overwrite-protected at sync time).
+
+The pick is stored on the cached row (marked with a small hand icon in the Remote Port column) and makes it immediately syncable — the sync creates the cable to *your* pick, with the usual provenance stamp. Picks live as long as the cached snapshot: a full **Refresh Cables** rebuilds the rows from LibreNMS and drops unsynced picks, so sync soon after picking.
 
 ## Overwrite protection
 
