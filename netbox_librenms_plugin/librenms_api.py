@@ -1900,12 +1900,14 @@ class LibreNMSAPI:
                 if not isinstance(all_sensors, list):
                     return False, result.get("message") or "Unexpected response format: missing sensor list"
                 # This is an external boundary: a list payload doesn't guarantee every item is a
-                # dict. Skip non-dict rows so one malformed entry can't raise AttributeError on
-                # s.get() and escape as an unhandled exception instead of the (success, data)
-                # contract.
-                serial_sensors = [
-                    s for s in all_sensors if isinstance(s, dict) and s.get("sensor_type") in serial_types
-                ]
+                # dict. Fail closed on a malformed item instead of filtering it out — silently
+                # dropping rows would make a broken response indistinguishable from "no serial
+                # sensors" and skip serial sync without surfacing the error. Mirrors the
+                # per-item validation in get_device_inventory().
+                if any(not isinstance(s, dict) for s in all_sensors):
+                    logger.warning("Unexpected sensors response for %s: non-dict sensor item", self.server_key)
+                    return False, result.get("message") or "Unexpected response format: invalid sensor item"
+                serial_sensors = [s for s in all_sensors if s.get("sensor_type") in serial_types]
                 return True, serial_sensors
             if isinstance(result, dict):
                 return False, result.get("message") or "Unexpected response format"

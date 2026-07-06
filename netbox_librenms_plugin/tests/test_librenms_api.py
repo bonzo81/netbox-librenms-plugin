@@ -3243,18 +3243,22 @@ class TestGetSerialPortSensors:
         assert success is True
         assert {s["sensor_type"] for s in data} == {"acsSerialPortTable", "ciscoAsyncLine"}
 
-    def test_non_dict_sensor_item_does_not_crash(self, mock_librenms_api, mock_response_factory):
-        """A list payload doesn't guarantee dict items."""
+    def test_non_dict_sensor_item_fails_closed(self, mock_librenms_api, mock_response_factory):
+        """A non-dict item in the sensor list is a malformed response, not a filterable row.
+
+        Silently dropping it would make a broken payload indistinguishable from "no serial
+        sensors" and skip serial sync without surfacing the error — same per-item validation
+        contract as get_device_inventory().
+        """
         import unittest.mock as mock
 
         sensors = ["bad-string", None, self._make_sensor(12, port_num=7)]
         mock_resp = mock_response_factory(status_code=200, json_data={"status": "ok", "sensors": sensors})
         with mock.patch("netbox_librenms_plugin.librenms_api.requests.get", return_value=mock_resp):
-            success, data = mock_librenms_api.get_serial_port_sensors(device_id=12)
+            success, msg = mock_librenms_api.get_serial_port_sensors(device_id=12)
 
-        assert success is True
-        assert len(data) == 1
-        assert data[0]["device_id"] == 12
+        assert success is False
+        assert "invalid sensor item" in msg.lower()
 
     def test_empty_sensor_list_returns_empty(self, mock_librenms_api, mock_response_factory):
         import unittest.mock as mock
