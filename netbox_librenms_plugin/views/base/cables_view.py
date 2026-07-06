@@ -785,8 +785,7 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObject
         Only called when the local ConsoleServerPort is found and has no cable. Tries to
         match the label to a NetBox device by name, then picks the first uncabled
         ConsolePort on that device. If successful, sets ``netbox_remote_interface_id``
-        and ``can_create_cable = True`` so the existing sync action can create the cable
-        in Phase 3.
+        and ``can_create_cable = True`` so the existing sync action can create the cable.
 
         Args:
             link (dict): The serial cable-sync row, mutated in place with the resolved

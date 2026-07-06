@@ -12,7 +12,7 @@ Row shape emitted (all keys match the cables-view link dict):
     local_port        str   - ConsoleServerPort name, e.g. "ttyS7"
     local_port_id     str   - synthetic stable key "serial:<sensor_id>"
     remote_device     str   - Avocent port label (hint only, may be wrong)
-    remote_port       None  - always None at this stage (manual / Phase 3)
+    remote_port       None  - unresolved at map time; filled later by name-match enrichment
     remote_device_id  None  - always None (no LibreNMS device ref for labels)
     is_configured     bool  - True when label was customised from the default
     _source           str   - always "serial"
@@ -24,8 +24,8 @@ Sorting: rows are returned ordered by sensor_index_int (port number).
 
 import re
 
-# Sensor types known to represent ACS-family serial ports.
-# Phase 4 will replace this with a DB-backed per-OS config model.
+# Sensor types known to represent ACS-family serial ports. Hardcoded for now; a DB-backed
+# per-OS config model could replace this set later.
 AVOCENT_SENSOR_TYPES = frozenset({"acsSerialPortTable"})
 
 _INDEX_SUFFIX_RE = re.compile(r"\.(\d+)$")
