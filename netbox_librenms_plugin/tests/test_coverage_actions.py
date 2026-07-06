@@ -6196,6 +6196,32 @@ class TestPromoteToHostViewPost:
         existing_device.refresh_from_db()
         assert existing_device.custom_field_data["librenms_id"]["default"] == {"id": 10}
 
+    def test_failed_oob_attach_after_host_swap_leaves_db_untouched(self):
+        """A ValueError raised AFTER set_librenms_device_id already ran must not commit a partial swap.
+
+        set_librenms_device_id()/set_librenms_oob() mutate custom_field_data in memory only;
+        the transaction's single DB write is _save_device() at the end of the atomic block, so
+        the early error return commits nothing. Pins the no-partial-commit contract of the
+        promote flow (an invalid OOB type is the in-transaction ValueError source).
+        """
+        view = self._make_view()
+        existing_device = make_device("promote-badoob", librenms_cf={"default": {"id": 10}})
+        request = _make_request(post={"existing_device_id": str(existing_device.pk)})
+
+        # No OOB keyword substring (OOB_TYPE_PATTERN) and not the "oob" sentinel, so
+        # set_librenms_oob raises ValueError inside the transaction — after the host swap.
+        promote = {"existing_libre_id": 10, "existing_oob_type": "management-card"}
+        validation = {"promote_to_host": promote, "existing_device": existing_device}
+        view.get_validated_device_with_selections = MagicMock(return_value=({"device_id": 17}, validation, {}))
+        response = view.post(request, device_id=17)
+
+        assert response.status_code == 200
+        assert b"Invalid promotion data" in response.content
+        # The in-memory host swap (10 -> 17) must NOT have been persisted: the row still
+        # holds the original host id and gained no oob sub-object.
+        existing_device.refresh_from_db()
+        assert existing_device.custom_field_data["librenms_id"]["default"] == {"id": 10}
+
     def test_existing_link_already_points_at_incoming_device_returns_error(self):
         """If the existing link already equals the incoming LibreNMS id there is nothing to promote — the view must say so rather than self-demoting the same id into OOB."""
         view = self._make_view()
