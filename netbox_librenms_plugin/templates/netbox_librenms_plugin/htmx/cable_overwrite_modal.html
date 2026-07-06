@@ -30,7 +30,9 @@ Context: conflicts (list of {interface, port_id, trace}), server_key, device_pk.
     <div class="modal-body">
         {# NetBox's .alert is display:flex, so wrap all text in ONE child div (else each inline #}
         {# node becomes its own flex column and the sentence breaks into ragged vertical strips). #}
-        <div class="alert alert-danger py-2 d-flex">
+        {# role="alert": the modal arrives via an OOB swap, so assistive tech only announces #}
+        {# this destructive warning if the banner is a live region. #}
+        <div class="alert alert-danger py-2 d-flex" role="alert">
             <i class="mdi mdi-alert me-2 mt-1"></i>
             <div>
                 <strong>{{ conflicts|length }} selected port{{ conflicts|length|pluralize }}</strong>

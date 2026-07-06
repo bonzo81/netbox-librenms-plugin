@@ -333,6 +333,8 @@ class TestCableOverwriteHtmxModal:
         # afterSettle auto-show handler never sees the modal — the OOB block must ship its own
         # show call (the exact mirror of the close_modal block's closeHtmxModal() script).
         assert "openHtmxModal(" in content
+        # The destructive warning banner announces itself to assistive tech on injection.
+        assert 'class="alert alert-danger py-2 d-flex" role="alert"' in content
         assert 'name="force" value="on"' in content  # the re-submit is pre-armed with force
         assert 'id="cable-force-submit"' in content  # confirm-gated submit button present
         # The modal's re-submit must carry the row's resolved sync device, so a VC member
@@ -360,6 +362,9 @@ class TestCableOverwriteHtmxModal:
         assert "Cache has expired" not in content
         # No conflict left to confirm -> no force modal in the response.
         assert 'id="cable-force-submit"' not in content
+        # The forced submit came FROM the force-confirm modal: the response must ship the
+        # close_modal OOB block, or the modal stays open over the refreshed table.
+        assert "closeHtmxModal(" in content
         assert not Cable.objects.filter(pk=old.pk).exists()  # foreign cable replaced
         csp.refresh_from_db()
         cp_b.refresh_from_db()

@@ -454,6 +454,11 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libre
             context["overwrite_conflicts"] = conflicts
             context["server_key"] = resolved_key
             context["object"] = obj
+        elif request.POST.get("force"):
+            # A force submit comes FROM the force-confirm modal; with every conflict resolved
+            # the main swap only refreshes the table, so ship the close_modal OOB block too —
+            # otherwise the modal stays open over the refreshed content.
+            context["close_modal"] = True
         return view.render_sync_partial(request, obj, resolved_key, {"cable_sync": context})
 
     def display_sync_results(self, request, results):
