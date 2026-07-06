@@ -1,5 +1,5 @@
 """
-Phase 2 tests for serial-port integration in BaseCableTableView.
+Tests for serial-port integration in BaseCableTableView.
 
 Covers:
   - get_links_data() appends serial rows when device has ConsoleServerPorts
@@ -576,7 +576,7 @@ class TestCableTableSerialRendering:
 
 
 # ---------------------------------------------------------------------------
-# Phase 3: enrich_serial_remote
+# enrich_serial_remote
 # ---------------------------------------------------------------------------
 
 
@@ -703,7 +703,7 @@ class TestEnrichSerialRemote:
 
 
 # ---------------------------------------------------------------------------
-# Phase 3: SyncCablesView serial handling
+# SyncCablesView serial handling
 # ---------------------------------------------------------------------------
 
 
@@ -773,17 +773,20 @@ class TestHandleSerialCableCreation:
         result = view.handle_serial_cable_creation(link_data, interface)
         assert result["status"] == "missing_remote"
 
-    def test_existing_cable_on_csp_returns_duplicate(self):
-        """When the real CSP already has a cable, the handler returns duplicate."""
+    def test_existing_untagged_cable_on_csp_returns_conflict(self):
+        """Re-pointing the CSP over an untagged (non-managed) cable defers with a 'conflict', DB untouched."""
+        from dcim.models import Cable
+
         view = self._make_sync_view()
         _, (csp,), _ = make_serial_device("ser-hsc-dup-csp", csp_names=["ttyS7"])
         _, _, (peer_cp,) = make_serial_device("ser-hsc-dup-peer", cp_names=["conX"])
-        cable_together(csp, peer_cp)  # csp is now cabled
+        old = cable_together(csp, peer_cp)  # csp is now cabled (untagged → not ours)
         _, _, (cp,) = make_serial_device("ser-hsc-dup-target", cp_names=["con0"])
 
         link_data = {
             "_source": "serial",
             "local_port": "ttyS7",
+            "local_port_id": "serial:1007",
             "netbox_local_interface_id": csp.pk,
             "netbox_remote_interface_id": cp.pk,
         }
@@ -791,7 +794,10 @@ class TestHandleSerialCableCreation:
 
         result = view.handle_serial_cable_creation(link_data, interface)
 
-        assert result["status"] == "duplicate"
+        assert result["status"] == "conflict"
+        assert result["port_id"] == "serial:1007"
+        assert result["trace"]  # the doomed cable's end-to-end path, for the modal
+        assert Cable.objects.filter(pk=old.pk).exists()  # untouched without force
 
     def test_csp_does_not_exist_returns_missing_remote(self):
         """A netbox_local_interface_id with no ConsoleServerPort returns missing_remote."""
@@ -822,7 +828,7 @@ class TestHandleSerialCableCreation:
         ) as mock_serial:
             result = view.handle_cable_creation(link_data, interface)
 
-        mock_serial.assert_called_once_with(link_data, interface)
+        mock_serial.assert_called_once_with(link_data, interface, force=False)
         assert result["status"] == "valid"
 
     def test_handle_cable_creation_non_serial_does_not_route_to_serial(self):
@@ -847,7 +853,6 @@ class TestHandleSerialCableCreation:
         with (
             patch.object(view, "handle_serial_cable_creation") as mock_serial,
             patch("netbox_librenms_plugin.views.sync.cables.Interface") as MockInterface,
-            patch.object(view, "check_existing_cable", return_value=False),
             patch.object(view, "create_cable", return_value=True),
         ):
             MockInterface.objects.get.return_value = iface
@@ -858,7 +863,7 @@ class TestHandleSerialCableCreation:
 
 
 # ---------------------------------------------------------------------------
-# Phase 3: SingleCableVerifyView must handle serial rows (VC inline verify)
+# SingleCableVerifyView must handle serial rows (VC inline verify)
 # ---------------------------------------------------------------------------
 
 
@@ -1076,3 +1081,278 @@ class TestEnrichLinksDataReusesSyncDevice:
         # re-run get_librenms_sync_device (a second VC-members query + per-member cf scan).
         mock_resolve.assert_not_called()
         assert result == []
+
+
+# ---------------------------------------------------------------------------
+# Regression: "Cache has expired" on a terminal server (host /links 404)
+# ---------------------------------------------------------------------------
+@pytest.mark.django_db
+class TestSerialSyncSurvivesHostLinks404:
+    """End-to-end regression for the 'Cache has expired' bug.
+
+    A console/terminal server has no LLDP neighbours, so LibreNMS's ``/devices/<id>/links``
+    endpoint returns HTTP 404 for it. That 404 used to be miscategorised as a fetch failure,
+    which made ``_prepare_context`` treat the whole refresh as a partial snapshot and DELETE the
+    links cache — even though the (independently fetched) serial rows rendered fine with a Sync
+    button. Every serial cable sync then failed with 'Cache has expired'.
+
+    This drives the real ``get_links_data`` → cache → ``SyncCablesView`` cable-creation flow with
+    only the external LibreNMS HTTP boundary (``requests.get``) stubbed, so the real
+    ``get_device_links`` 404-is-empty handling is exercised end-to-end.
+    """
+
+    def _routed_get(self):
+        import json
+
+        import requests
+
+        def _get(url, *args, **kwargs):
+            resp = requests.models.Response()
+            resp.url = url
+            if url.endswith("/links"):
+                # LibreNMS returns 404 for a device that has no links (a terminal server).
+                resp.status_code = 404
+                resp._content = b'{"status":"error","message":"Device does not have any links"}'
+            elif url.endswith("/resources/sensors"):
+                resp.status_code = 200
+                resp._content = json.dumps(
+                    {
+                        "status": "ok",
+                        "sensors": [
+                            {
+                                "sensor_id": 1007,
+                                "device_id": 13,
+                                "sensor_type": "acsSerialPortTable",
+                                "sensor_index": "acsSerialPortTableStatus.7",
+                                "sensor_descr": "router-z Status",
+                            }
+                        ],
+                    }
+                ).encode()
+            elif url.endswith("/ports"):
+                resp.status_code = 200
+                resp._content = b'{"status": "ok", "ports": []}'
+            else:  # pragma: no cover - defensive default for any unexpected route
+                resp.status_code = 200
+                resp._content = b'{"status": "ok"}'
+            return resp
+
+        return _get
+
+    def _librenms_config_patches(self):
+        cfg = patch("netbox_librenms_plugin.librenms_api.get_plugin_config")
+        settings = patch("netbox_librenms_plugin.models.LibreNMSSettings")
+        get = patch("netbox_librenms_plugin.librenms_api.requests.get", side_effect=self._routed_get())
+        return cfg, settings, get
+
+    def test_serial_rows_cached_and_syncable_when_host_links_404(self):
+        from django.core.cache import cache
+        from dcim.models import Cable, Device
+
+        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+        from netbox_librenms_plugin.views.object_sync.devices import DeviceCableTableView
+        from netbox_librenms_plugin.views.sync.cables import SyncCablesView
+
+        acs, csps, _ = make_serial_device("acs-ts26", csp_names=["ttyS7"])
+        acs.custom_field_data["librenms_id"] = 13
+        acs.save()
+        _router, _, cps = make_serial_device("router-z", cp_names=["console"])
+        csp = csps[0]
+        console_port = cps[0]
+
+        cfg, settings, get = self._librenms_config_patches()
+        with cfg as mock_config, settings as mock_settings, get:
+            mock_config.return_value = {
+                "default": {
+                    "librenms_url": "https://librenms.example.com",
+                    "api_token": "test-token",
+                    "cache_timeout": 300,
+                    "verify_ssl": True,
+                }
+            }
+            mock_settings.objects.filter.return_value.first.return_value = None
+
+            # --- Refresh: real get_links_data hits the real (mocked) 404 on /links ---
+            view = object.__new__(DeviceCableTableView)
+            view.model = Device
+            view.request = _mock_request()
+            view._librenms_api = LibreNMSAPI(server_key="default")
+            # Isolate the cache-write assertion from table rendering (RequestConfig needs a real
+            # request); get_table is orthogonal to the bug under test.
+            with patch.object(view, "get_table"):
+                view._prepare_context(view.request, acs, fetch_fresh=True, server_key="default")
+
+            cache_key = view.get_cache_key(acs, "links", "default")
+            cached = cache.get(cache_key)
+            assert cached is not None, "a host /links 404 must NOT delete the serial cache"
+            serial_rows = [link for link in cached["links"] if link.get("_source") == "serial"]
+            assert len(serial_rows) == 1
+            row = serial_rows[0]
+            assert row["local_port"] == "ttyS7"
+            assert row["netbox_local_interface_id"] == csp.pk
+            assert row["netbox_remote_interface_id"] == console_port.pk
+            assert row["can_create_cable"] is True
+
+            # --- Sync: real SyncCablesView reads that cache and creates the cable ---
+            sync = object.__new__(SyncCablesView)
+            sync.request = view.request
+            sync._librenms_api = LibreNMSAPI(server_key="default")
+            sync._post_server_key = "default"
+
+            cached_links = sync.get_cached_links_data(view.request, acs)
+            assert cached_links, "cache present → validate_prerequisites passes, no 'Cache has expired'"
+            assert sync.validate_prerequisites(cached_links, [{"local_port_id": row["local_port_id"]}]) is True
+
+            result = sync.process_single_interface(
+                {"device_id": acs.id, "local_port_id": row["local_port_id"]}, cached_links
+            )
+            assert result["status"] == "valid"
+
+        # The cable really exists between the ConsoleServerPort and the remote ConsolePort.
+        csp.refresh_from_db()
+        console_port.refresh_from_db()
+        assert csp.cable is not None
+        assert console_port.cable_id == csp.cable_id
+        assert Cable.objects.filter(pk=csp.cable_id).exists()
+
+
+# ---------------------------------------------------------------------------
+# HTMX: making a cable swaps the table partial in place (no full-page reload)
+# ---------------------------------------------------------------------------
+@pytest.mark.django_db
+class TestCableSyncHtmxPartial:
+    """An HTMX cable-sync submit re-renders the ``#cable-sync-content`` partial (HTTP 200) instead
+    of a full-page 302 redirect, so creating a cable no longer reloads the whole device page. A
+    non-HTMX submit still redirects (no-JS fallback). Driven through the real Django request stack
+    (Client) so middleware, permissions, and template rendering are exercised end-to-end.
+    """
+
+    def _seed_and_post(self, *, hx):
+        from django.contrib.auth import get_user_model
+        from django.core.cache import cache
+        from django.test import Client
+        from django.urls import reverse
+
+        from netbox_librenms_plugin.views.sync.cables import SyncCablesView
+
+        acs, csps, _ = make_serial_device("acs-htmx", csp_names=["ttyS3"])
+        _router, _, cps = make_serial_device("router-htmx", cp_names=["console"])
+        csp, cp = csps[0], cps[0]
+
+        # Seed the enriched links cache that "Refresh Cables" would have written (serial rows
+        # re-enrich purely against the DB, so the re-render needs no live LibreNMS call).
+        key_view = object.__new__(SyncCablesView)
+        cache_key = key_view.get_cache_key(acs, "links", "default")
+        link = {
+            "local_port": "ttyS3",
+            "local_port_id": f"serial:{csp.pk}-s",
+            "_source": "serial",
+            "device_id": acs.id,
+            "remote_device": "router-htmx",
+            "netbox_local_interface_id": csp.pk,
+            "netbox_remote_interface_id": cp.pk,
+            "can_create_cable": True,
+            "is_configured": True,
+            "sensor_id": 1,
+            "sensor_index_int": 3,
+        }
+        cache.set(cache_key, {"links": [link]}, timeout=300)
+
+        user = get_user_model().objects.create_superuser("htmx-cable-admin", "htmx@example.com", "pw")
+        client = Client()
+        client.force_login(user)
+
+        url = reverse("plugins:netbox_librenms_plugin:sync_device_cables", args=[acs.pk])
+        extra = {"HTTP_HX_REQUEST": "true"} if hx else {}
+        resp = client.post(url, data={"select": link["local_port_id"], "server_key": "default"}, **extra)
+        return resp, csp
+
+    def test_htmx_submit_returns_partial_and_creates_cable(self):
+        from dcim.models import Cable
+
+        resp, csp = self._seed_and_post(hx=True)
+        assert resp.status_code == 200  # partial swap in place, NOT a 302 redirect
+        assert b"librenms-cable-table" in resp.content  # the cable-table fragment came back
+        csp.refresh_from_db()
+        assert csp.cable_id is not None
+        assert Cable.objects.filter(pk=csp.cable_id).exists()
+
+    def test_non_htmx_submit_redirects_and_creates_cable(self):
+        resp, csp = self._seed_and_post(hx=False)
+        assert resp.status_code == 302  # full-page redirect fallback
+        csp.refresh_from_db()
+        assert csp.cable_id is not None
+
+
+# ---------------------------------------------------------------------------
+# Cable enrichment: created cables carry the librenms tag, color, description, tenant
+# ---------------------------------------------------------------------------
+@pytest.mark.django_db
+class TestCableEnrichment:
+    """``create_cable`` stamps provenance on every cable the sync creates: the ``librenms``
+    tag (so the plugin can later recognise/own its own cables for the planned DCIM remodel),
+    a configured color + description carrying the server key, and the REMOTE device's tenant.
+    Driven end-to-end against real ConsoleServerPort / ConsolePort / Tenant rows through
+    ``handle_serial_cable_creation`` → ``create_cable`` (the write point shared with the
+    non-serial Interface↔Interface path).
+    """
+
+    def _sync_one(self, csp, cp, server_key="production"):
+        from netbox_librenms_plugin.views.sync.cables import SyncCablesView
+
+        sync = object.__new__(SyncCablesView)
+        sync.request = _mock_request()
+        sync._post_server_key = server_key
+        link = {
+            "local_port": csp.name,
+            "_source": "serial",
+            "netbox_local_interface_id": csp.pk,
+            "netbox_remote_interface_id": cp.pk,
+        }
+        return sync.handle_serial_cable_creation(link, {"device_id": csp.device_id})
+
+    def test_created_cable_carries_tag_color_description_and_remote_tenant(self):
+        from dcim.models import Cable
+        from netbox.plugins import get_plugin_config
+        from tenancy.models import Tenant
+
+        tenant = Tenant.objects.create(name="RemoteTenant", slug="remote-tenant")
+        _acs, csps, _ = make_serial_device("acs-enrich", csp_names=["ttyS1"])
+        router, _, cps = make_serial_device("router-enrich", cp_names=["console"])
+        router.tenant = tenant
+        router.save()
+        csp, cp = csps[0], cps[0]
+
+        result = self._sync_one(csp, cp, server_key="production")
+        assert result["status"] == "valid"
+
+        csp.refresh_from_db()
+        cable = Cable.objects.get(pk=csp.cable_id)
+
+        # Provenance tag — lets the plugin recognise cables it created.
+        assert "librenms" in set(cable.tags.values_list("slug", flat=True))
+        # Color + description come from plugin config; description carries the server key.
+        assert cable.color == get_plugin_config("netbox_librenms_plugin", "cable_sync_tag_color")
+        assert "production" in cable.description
+        # Tenant is the REMOTE side's tenant (the target device), not the terminal server's.
+        assert cable.tenant_id == tenant.pk
+
+    def test_tenant_is_remote_side_when_sides_differ(self):
+        """When the two devices are in different tenants, the cable takes the REMOTE tenant."""
+        from dcim.models import Cable
+        from tenancy.models import Tenant
+
+        local_tenant = Tenant.objects.create(name="LocalTenant", slug="local-tenant")
+        remote_tenant = Tenant.objects.create(name="RemoteTenant2", slug="remote-tenant-2")
+        acs, csps, _ = make_serial_device("acs-enrich2", csp_names=["ttyS2"])
+        acs.tenant = local_tenant
+        acs.save()
+        router, _, cps = make_serial_device("router-enrich2", cp_names=["console"])
+        router.tenant = remote_tenant
+        router.save()
+        csp, cp = csps[0], cps[0]
+
+        assert self._sync_one(csp, cp)["status"] == "valid"
+        csp.refresh_from_db()
+        cable = Cable.objects.get(pk=csp.cable_id)
+        assert cable.tenant_id == remote_tenant.pk  # remote side wins, not local

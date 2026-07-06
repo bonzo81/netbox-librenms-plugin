@@ -3,20 +3,24 @@ from urllib.parse import quote_plus
 
 from dcim.models import Cable, ConsolePort, ConsoleServerPort, Device, Interface
 from django.contrib import messages
-from django.contrib.contenttypes.models import ContentType
 from django.core.cache import cache
 from django.db import transaction
-from django.db.models import Q
 from django.shortcuts import redirect
 from django.urls import reverse
 from django.views import View
+from netbox.plugins import get_plugin_config
 
 from netbox_librenms_plugin.sync_cache import (
     SyncTab,
     apply_request_cache_transition,
     schedule_request_cache_mutation,
 )
-from netbox_librenms_plugin.utils import get_librenms_sync_device
+from netbox_librenms_plugin.utils import (
+    classify_cable_action,
+    get_librenms_cable_tag,
+    get_librenms_sync_device,
+    render_cable_trace,
+)
 from netbox_librenms_plugin.views.mixins import (
     CacheMixin,
     LibreNMSAPIMixin,
@@ -82,37 +86,90 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libre
 
     def create_cable(self, local_interface, remote_interface, request):
         """
-        Create a cable between local and remote interfaces.
+        Create an enriched cable between the local and remote terminations.
+
+        Beyond the bare connection, the cable is stamped with provenance so the plugin can later
+        recognise its own cables (and protect a future DCIM-driven remodel from being overwritten):
+        the ``librenms`` tag, a configured color, and a description carrying the acting server key.
+        The tenant follows the REMOTE side (the target device) — when the two devices are in
+        different tenants the remote's wins, never the terminal-server side. Type is left blank
+        because LibreNMS doesn't tell us the physical cable and NetBox has no serial/rollover type.
 
         Returns:
             True on success, False on failure.
         """
         try:
-            Cable.objects.create(
+            server_key = getattr(self, "_post_server_key", None)
+            base_desc = get_plugin_config("netbox_librenms_plugin", "cable_sync_description")
+            description = f"{base_desc} ({server_key})" if server_key else base_desc
+            cable = Cable(
                 a_terminations=[local_interface],
                 b_terminations=[remote_interface],
                 status="connected",
+                color=get_plugin_config("netbox_librenms_plugin", "cable_sync_tag_color"),
+                description=description,
+                tenant=getattr(getattr(remote_interface, "device", None), "tenant", None),
             )
+            cable.save()
+            cable.tags.add(get_librenms_cable_tag())
             return True
         except Exception as exc:  # pragma: no cover - protects UX
             messages.error(request, f"Failed to create cable: {str(exc)}")
             return False
 
-    def check_existing_cable(self, local_interface, remote_interface):
-        """Return True if a cable already exists for either interface."""
-        from dcim.models import Interface as DCIMInterface
+    def _apply_cable_action(self, local_term, remote_term, link_data, display_name, force):
+        """
+        Classify the sync for one resolved termination pair and act on (or defer) it.
 
-        interface_ct = ContentType.objects.get_for_model(DCIMInterface)
-        return Cable.objects.filter(
-            Q(
-                terminations__termination_type=interface_ct,
-                terminations__termination_id=local_interface.pk,
-            )
-            | Q(
-                terminations__termination_type=interface_ct,
-                terminations__termination_id=remote_interface.pk,
-            )
-        ).exists()
+        Delegates the tag-based decision to :func:`classify_cable_action` and then performs the
+        chosen action: create a fresh enriched cable, add the librenms tag to an already-matching
+        cable, overwrite plugin-owned cables outright, or — when a non-owned cable would be
+        destroyed and *force* is not set — return a ``conflict`` result carrying the full trace(s)
+        of what would be deleted, so the caller can raise the force-confirm modal.
+
+        Args:
+            local_term: The near-side termination (ConsoleServerPort / Interface).
+            remote_term: The far-side termination (ConsolePort / Interface).
+            link_data (dict): The cached link row (used for the conflict re-submit ``port_id``).
+            display_name (str): Human label for the local port, echoed in the result.
+            force (bool): When True, a ``needs_force`` conflict is overwritten instead of deferred.
+
+        Returns:
+            dict: A result with ``status`` in ``{valid, overwritten, tagged, duplicate, conflict,
+                invalid}`` plus ``interface``; conflicts also carry ``port_id`` and ``trace``.
+        """
+        decision = classify_cable_action(local_term, remote_term)
+        action = decision["action"]
+
+        if action == "noop":
+            # The desired cable already exists and is already tagged — nothing to do.
+            return {"status": "duplicate", "interface": display_name}
+        if action == "tag_only":
+            # Same connection, just missing our tag: add it (non-destructive, no force needed).
+            decision["cable"].tags.add(get_librenms_cable_tag())
+            return {"status": "tagged", "interface": display_name}
+        if action == "create":
+            if self.create_cable(local_term, remote_term, self.request):
+                return {"status": "valid", "interface": display_name}
+            return {"status": "invalid", "interface": display_name}  # pragma: no cover
+        if action == "safe_overwrite" or (action == "needs_force" and force):
+            # Remove the occupying cable(s) first (NetBox forbids a second cable on a live endpoint).
+            for cable in decision["to_remove"]:
+                cable.delete()
+            if self.create_cable(local_term, remote_term, self.request):
+                return {"status": "overwritten", "interface": display_name}
+            # Create failed AFTER deleting the old cable(s): raise so the per-interface atomic block
+            # (process_interface_sync) rolls the deletes back rather than orphaning the connection.
+            raise RuntimeError(f"cable overwrite failed for {display_name}")  # pragma: no cover
+
+        # needs_force and not force → defer; carry each doomed cable's full end-to-end trace so the
+        # modal can show the user exactly what a forced overwrite would destroy.
+        return {
+            "status": "conflict",
+            "interface": display_name,
+            "port_id": str(link_data.get("local_port_id", "")),
+            "trace": [render_cable_trace(cable) for cable in decision["to_remove"]],
+        }
 
     def validate_prerequisites(self, cached_links, selected_interfaces):
         """Validate that cached data and selections are present before sync."""
@@ -129,7 +186,7 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libre
 
         return True
 
-    def process_single_interface(self, interface, cached_links):
+    def process_single_interface(self, interface, cached_links, force=False):
         """Process cable creation for a single interface from cached link data."""
         port_id = str(interface.get("local_port_id", ""))
         try:
@@ -143,7 +200,7 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libre
                 return {"status": "skipped", "interface": link_data.get("local_port") or port_id}
             # Apply posted device_id (VC member selection) without mutating the cached list.
             link_data = {**link_data, "device_id": interface.get("device_id", link_data.get("device_id"))}
-            return self.handle_cable_creation(link_data, interface)
+            return self.handle_cable_creation(link_data, interface, force=force)
         except StopIteration:
             return {"status": "invalid", "interface": port_id}
 
@@ -170,11 +227,11 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libre
         virtual_chassis = getattr(initial_device, "virtual_chassis", None)
         return bool(virtual_chassis and virtual_chassis.members.filter(pk=selected_device_id).exists())
 
-    def handle_cable_creation(self, link_data, interface):
+    def handle_cable_creation(self, link_data, interface, force=False):
         """Create a cable from link data and return the operation result."""
         # Serial rows use ConsoleServerPort ↔ ConsolePort instead of Interface ↔ Interface.
         if link_data.get("_source") == "serial":
-            return self.handle_serial_cable_creation(link_data, interface)
+            return self.handle_serial_cable_creation(link_data, interface, force=force)
 
         display_name = link_data.get("local_port") or interface.get("local_port_id", "")
         if not self.verify_cable_creation_requirements(link_data):
@@ -217,17 +274,11 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libre
             remote_interface = self.restricted_queryset(Interface, "change").get(
                 pk=link_data["netbox_remote_interface_id"]
             )
+            return self._apply_cable_action(local_interface, remote_interface, link_data, display_name, force)
         except Interface.DoesNotExist:
             return {"status": "missing_remote", "interface": display_name}
 
-        if self.check_existing_cable(local_interface, remote_interface):
-            return {"status": "duplicate", "interface": display_name}
-
-        if self.create_cable(local_interface, remote_interface, self.request):
-            return {"status": "valid", "interface": display_name}
-        return {"status": "invalid", "interface": display_name}  # pragma: no cover
-
-    def handle_serial_cable_creation(self, link_data, interface):
+    def handle_serial_cable_creation(self, link_data, interface, force=False):
         """Create a ConsoleServerPort ↔ ConsolePort cable for a serial row."""
         display_name = link_data.get("local_port") or interface.get("local_port_id", "")
         csp_id = link_data.get("netbox_local_interface_id")
@@ -239,27 +290,27 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libre
         try:
             csp = ConsoleServerPort.objects.get(pk=csp_id)
             cp = ConsolePort.objects.get(pk=cp_id)
-
-            if csp.cable or cp.cable:
-                return {"status": "duplicate", "interface": display_name}
-
-            if self.create_cable(csp, cp, self.request):
-                return {"status": "valid", "interface": display_name}
-            return {"status": "invalid", "interface": display_name}  # pragma: no cover
+            return self._apply_cable_action(csp, cp, link_data, display_name, force)
 
         except (ConsoleServerPort.DoesNotExist, ConsolePort.DoesNotExist):
             return {"status": "missing_remote", "interface": display_name}
 
-    def process_interface_sync(self, selected_interfaces, cached_links):
+    def process_interface_sync(self, selected_interfaces, cached_links, force=False):
         """
         Process cable sync for all selected interfaces and return results.
 
         Each interface is processed in its own atomic block so individual
         failures roll back only that cable without affecting others.
 
+        Force-protected conflicts (a would-be overwrite of a cable the plugin does not solely own,
+        submitted without ``force``) are bucketed under ``conflict`` AND stashed in full, with the
+        re-submit ``port_id`` and the doomed cable's trace, on ``self._pending_conflicts`` so
+        :meth:`_sync_response` can raise the force-confirm modal without changing this return type.
+
         Args:
             selected_interfaces (list[dict]): The selected interface entries to synchronize.
             cached_links (list[dict]): The cached LibreNMS link data.
+            force (bool): Overwrite a cable the plugin does not solely own.
 
         Returns:
             dict[str, list[str]]: The interface names grouped by synchronization result.
@@ -271,13 +322,19 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libre
             "missing_remote": [],
             "rejected_selection": [],
             "skipped": [],
+            "overwritten": [],
+            "tagged": [],
+            "conflict": [],
         }
+        self._pending_conflicts = []
 
         for interface in selected_interfaces:
             try:
                 with transaction.atomic():
-                    result = self.process_single_interface(interface, cached_links)
+                    result = self.process_single_interface(interface, cached_links, force=force)
                 results[result["status"]].append(result.get("interface", ""))
+                if result["status"] == "conflict":
+                    self._pending_conflicts.append(result)
             except Exception:
                 logger.exception("Failed to sync cable for port_id %s", interface.get("local_port_id", ""))
                 results["invalid"].append(interface.get("local_port_id", ""))
@@ -299,6 +356,9 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libre
             )
         self._post_server_key = server_key
         self._initial_device = initial_device
+        # The force-confirm modal re-submits with force=on to authorise overwriting a cable the
+        # plugin does not solely own (foreign/extra/no tag). Unchecked by default → opt-in.
+        force = request.POST.get("force") == "on"
         redirect_url = (
             f"{reverse('plugins:netbox_librenms_plugin:device_librenms_sync', args=[initial_device.pk])}?tab=cables"
             + (f"&server_key={quote_plus(server_key)}" if server_key else "")
@@ -307,20 +367,71 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libre
         selected_interfaces = self.get_selected_interfaces(request, initial_device)
         cached_links = self.get_cached_links_data(request, initial_device)
 
-        if not self.validate_prerequisites(cached_links, selected_interfaces):
+        if self.validate_prerequisites(cached_links, selected_interfaces):
+            results = self.process_interface_sync(selected_interfaces, cached_links, force=force)
+            self.display_sync_results(request, results)
+            if results["valid"] or results.get("overwritten") or results.get("tagged"):
+                schedule_request_cache_mutation(
+                    request,
+                    initial_device,
+                    SyncTab.CABLES,
+                    server_key,
+                )
+
+        response = self._sync_response(request, initial_device, server_key, redirect_url)
+        return apply_request_cache_transition(request, response)
+
+    def _sync_response(self, request, obj, server_key, redirect_url):
+        """
+        Return the post-sync response: an HTMX partial re-render, or a full-page redirect.
+
+        An HTMX submit gets the same ``#cable-sync-content`` partial the "Refresh Cables" action
+        produces, rebuilt from the (now cable-updated) cache so a just-synced row flips to
+        "Cable Found" and drops its Sync button — no full-page reload. The sync flash messages
+        render inline via the partial's ``inc/messages.html`` include, and the page's global
+        ``htmx:afterSwap`` handler re-initialises the table's checkboxes/filters/selects.
+
+        A non-HTMX submit (JS disabled, or a direct POST) still gets the redirect, where Django
+        messages survive to the reloaded tab.
+        """
+        # htmx always sends "HX-Request: true"; match the exact value (mirrors modules.py) so a
+        # non-htmx POST — or a test's mock request whose headers aren't a real dict — falls through
+        # to the redirect rather than the partial re-render.
+        if request.headers.get("HX-Request") != "true":
             return redirect(redirect_url)
 
-        results = self.process_interface_sync(selected_interfaces, cached_links)
-        self.display_sync_results(request, results)
+        # Delegate the table/partial machinery to the cable-table view. Imported locally to avoid
+        # a module-load import cycle (object_sync imports the base cable view stack).
+        from netbox_librenms_plugin.views.object_sync.devices import DeviceCableTableView
 
-        if results["valid"]:
-            schedule_request_cache_mutation(
-                request,
-                initial_device,
-                SyncTab.CABLES,
-                server_key,
+        view = DeviceCableTableView()
+        view.setup(request, pk=obj.pk)
+        # Rebind the delegated view's client to the POST-scoped server so its cache read and
+        # re-enrichment target the same server the sync acted on (mirrors the refresh path).
+        resolved_key = view.rebind_api_for_server(server_key) or server_key
+        context = view._prepare_context(request, obj, fetch_fresh=False, server_key=resolved_key)
+        if context is None:
+            # Cache genuinely gone (e.g. TTL elapsed between refresh and sync): render an empty
+            # table but keep the sync flash messages.
+            context = {"table": None, "object": obj, "cache_expiry": None, "server_key": resolved_key}
+        elif context.get("table") is not None:
+            # _prepare_context derives the table's pagination/sort htmx_url from request.path, which
+            # here is the sync POST endpoint. Repoint it at the cable-table refresh endpoint (a GET
+            # there returns the same fragment) so paging/sorting still works after a sync swap —
+            # matching the URL the "Refresh Cables" action produces.
+            tab_url = reverse("plugins:netbox_librenms_plugin:device_cable_sync", args=[obj.pk])
+            context["table"].htmx_url = f"{tab_url}?tab=cables" + (
+                f"&server_key={quote_plus(resolved_key)}" if resolved_key else ""
             )
-        return apply_request_cache_transition(request, redirect(redirect_url))
+
+        # Overwrite-protected conflicts: surface them for the force-confirm modal, which the partial
+        # injects into the shared #htmx-modal via an out-of-band swap (auto-shown by the page JS).
+        conflicts = getattr(self, "_pending_conflicts", [])
+        if conflicts:
+            context["overwrite_conflicts"] = conflicts
+            context["server_key"] = resolved_key
+            context["object"] = obj
+        return view.render_sync_partial(request, obj, resolved_key, {"cable_sync": context})
 
     def display_sync_results(self, request, results):
         """Display flash messages summarizing the cable sync results."""
@@ -350,6 +461,22 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libre
                 request,
                 "Skipped OOB-controller links (context only, not syncable to the host): "
                 f"{', '.join(results['skipped'])}",
+            )
+        if results.get("tagged"):
+            messages.info(
+                request,
+                f"Tagged existing cable(s) as LibreNMS-managed for: {', '.join(results['tagged'])}",
+            )
+        if results.get("conflict"):
+            messages.warning(
+                request,
+                "Overwrite protection: confirm in the dialog to replace non-managed cable(s) for: "
+                f"{', '.join(results['conflict'])}",
+            )
+        if results.get("overwritten"):
+            messages.success(
+                request,
+                f"Overwrote existing cable for interfaces: {', '.join(results['overwritten'])}",
             )
         if results["valid"]:
             messages.success(

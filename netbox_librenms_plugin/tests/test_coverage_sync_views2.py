@@ -375,12 +375,16 @@ def _cables_view(request, device, links):
 class TestSyncCablesViewDuplicateCable:
     def test_duplicate_cable_shows_warning(self):
         from netbox_librenms_plugin.tests.conftest import cable_together
+        from netbox_librenms_plugin.utils import get_librenms_cable_tag
 
         dev = make_device("cable-dup-local")
         remote = make_device("cable-dup-remote")
         local_iface = make_interface(dev, "Gi0/1")
         remote_iface = make_interface(remote, "Gi0/2")
-        cable_together(local_iface, remote_iface)  # already connected
+        cable = cable_together(local_iface, remote_iface)  # already connected
+        # Plugin-owned, so the desired connection is a true noop; an untagged twin classifies as
+        # tag_only and never reaches the duplicate warning.
+        cable.tags.add(get_librenms_cable_tag())
         req = _make_request(post_data={"select": ["port1"]})
         view = _cables_view(
             req,
@@ -398,6 +402,54 @@ class TestSyncCablesViewDuplicateCable:
         _post(view, req, pk=dev.pk)
 
         assert any("Cable already exists" in t for t in message_texts(req, "warning"))
+
+    def test_conflict_on_foreign_cable_warns_and_does_not_overwrite(self):
+        """A sync that would overwrite a non-managed (foreign-tagged) cable warns the user and leaves it intact."""
+        from django.contrib.messages import get_messages
+        from django.contrib.messages.storage.fallback import FallbackStorage
+        from django.test import RequestFactory
+
+        from dcim.models import Cable
+        from extras.models import Tag
+
+        from netbox_librenms_plugin.tests.conftest import cable_together, make_serial_device
+        from netbox_librenms_plugin.views.sync.cables import SyncCablesView
+
+        acs, csps, _ = make_serial_device("acs-dupwarn", csp_names=["ttyS1"])
+        _r, _, cps = make_serial_device("r-dupwarn", cp_names=["console-A", "console-B"])
+        csp, cp_a, cp_b = csps[0], cps[0], cps[1]
+
+        # csp already terminates a FOREIGN-tagged cable → re-pointing it needs explicit force.
+        old = cable_together(csp, cp_a)
+        old.tags.add(Tag.objects.create(name="foreign-dupwarn", slug="foreign-dupwarn", color="ff0000"))
+
+        view = object.__new__(SyncCablesView)
+        req = RequestFactory().post("/")
+        req.session = {}
+        req._messages = FallbackStorage(req)
+        view.request = req
+        view._post_server_key = "default"
+
+        # Drive the real sync pipeline directly with the cached link row (no shared-cache
+        # dependency): process_interface_sync -> handle_serial_cable_creation -> classify -> conflict.
+        link = {
+            "local_port": "ttyS1",
+            "local_port_id": "serial:x",
+            "_source": "serial",
+            "netbox_local_interface_id": csp.pk,
+            "netbox_remote_interface_id": cp_b.pk,  # re-point target
+        }
+        results = view.process_interface_sync([{"local_port_id": "serial:x", "device_id": acs.id}], [link])
+        view.display_sync_results(req, results)
+
+        # The re-point is deferred as a conflict carrying a trace, the foreign cable is untouched,
+        # and the user is warned via the messages framework.
+        assert results["conflict"] == ["ttyS1"]
+        assert view._pending_conflicts and view._pending_conflicts[0]["trace"]
+        assert Cable.objects.filter(pk=old.pk).exists()
+        csp.refresh_from_db()
+        assert csp.cable_id == old.pk
+        assert any("Overwrite protection" in str(m) for m in get_messages(req))
 
 
 class TestSyncCablesViewMissingRemote:
@@ -665,22 +717,6 @@ class TestSyncCablesViewHelpers:
             result = view.get_cached_links_data(_make_request(), MagicMock())
         assert result == [{"local_port_id": "p"}]
 
-    def test_check_existing_cable(self):
-        from netbox_librenms_plugin.tests.conftest import cable_together
-
-        dev = make_device("cable-check")
-        remote = make_device("cable-check-remote")
-        local = make_interface(dev, "Gi0/1")
-        far = make_interface(remote, "Gi0/2")
-        free = make_interface(remote, "Gi0/3")
-        view = make_view(_sync_cables_view_class())
-
-        assert view.check_existing_cable(local, free) is False
-
-        cable_together(local, far)
-
-        assert view.check_existing_cable(local, free) is True
-
     def test_missing_local_interface_is_invalid_not_missing_remote(self):
         """A stale local interface ID must not be reported as missing remote data."""
         from dcim.models import Interface
@@ -700,12 +736,6 @@ class TestSyncCablesViewHelpers:
         )
 
         assert result == {"status": "invalid", "interface": "Gi0/1"}
-
-
-def _sync_cables_view_class():
-    from netbox_librenms_plugin.views.sync.cables import SyncCablesView
-
-    return SyncCablesView
 
 
 class TestSyncCablesViewProcessInterfaceSyncException:

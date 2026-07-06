@@ -20,6 +20,12 @@ class LibreNMSSyncConfig(PluginConfig):
         "enable_caching": True,
         "verify_ssl": True,
         "interface_name_field": DEFAULT_INTERFACE_NAME_FIELD,
+        # Provenance stamped on every cable the LibreNMS cable sync creates. The tag lets the
+        # plugin recognise/own its own cables (so a later DCIM-driven remodel can be protected
+        # from being overwritten); color + description are cosmetic identifiers. All configurable.
+        "cable_sync_tag": "librenms",
+        "cable_sync_tag_color": "009688",  # NetBox teal, matching the Serial badge
+        "cable_sync_description": "Synced from LibreNMS",
     }
 
     def ready(self):

@@ -495,6 +495,164 @@ def normalize_relationship_maps(relationships) -> tuple[dict, dict, dict]:
     return lag_members, sub_interfaces, bridge_members
 
 
+def get_librenms_cable_tag():
+    """
+    Return (creating on first use) the Tag stamped on cables the LibreNMS cable sync creates.
+
+    The tag name and color come from plugin config (``cable_sync_tag`` / ``cable_sync_tag_color``).
+    Its purpose is provenance: it marks a cable as plugin-owned so the overwrite-protection can tell
+    "our" cables apart from ones a user or another integration created. Mirrors the
+    ``get_or_create(..., defaults=...)`` idiom used to bootstrap the ``librenms_id`` custom field.
+
+    Returns:
+        extras.models.Tag: The (existing or newly created) provenance tag.
+    """
+    from django.utils.text import slugify
+    from extras.models import Tag
+
+    name = get_plugin_config("netbox_librenms_plugin", "cable_sync_tag")
+    color = get_plugin_config("netbox_librenms_plugin", "cable_sync_tag_color")
+    tag, _ = Tag.objects.get_or_create(
+        name=name,
+        defaults={"slug": slugify(name), "color": color},
+    )
+    return tag
+
+
+def _librenms_cable_tag_slug() -> str:
+    """Return the slug of the configured LibreNMS cable-provenance tag (no DB write)."""
+    from django.utils.text import slugify
+
+    return slugify(get_plugin_config("netbox_librenms_plugin", "cable_sync_tag"))
+
+
+def _cable_tag_slugs(cable) -> set:
+    """Return the set of tag slugs currently on *cable*."""
+    return set(cable.tags.values_list("slug", flat=True))
+
+
+def cable_has_librenms_tag(cable) -> bool:
+    """Return True when *cable* carries the librenms provenance tag (possibly among others)."""
+    return _librenms_cable_tag_slug() in _cable_tag_slugs(cable)
+
+
+def cable_is_librenms_owned(cable) -> bool:
+    """
+    Return True when *cable*'s tags are EXACTLY ``{librenms}`` — i.e. the plugin owns it outright.
+
+    Only such a cable may be silently overwritten by a re-sync. Any additional tag (or no tags at
+    all) means someone/something else has a stake in the cable — e.g. a later DCIM-driven remodel —
+    so an overwrite must be explicitly force-confirmed.
+    """
+    return _cable_tag_slugs(cable) == {_librenms_cable_tag_slug()}
+
+
+def classify_cable_action(local_term, remote_term) -> dict:
+    """
+    Decide what syncing a cable between *local_term* and *remote_term* should do.
+
+    The gate protects cables the plugin does not solely own: only a cable tagged with exactly
+    ``{librenms}`` may be replaced silently. The returned ``action`` is one of:
+
+    - ``"create"``          -- neither endpoint is cabled; make a fresh (enriched) cable.
+    - ``"noop"``            -- the desired cable already exists and already carries the librenms
+      tag; nothing to do.
+    - ``"tag_only"``        -- the desired cable already exists but is untagged; add the librenms
+      tag (non-destructive, always allowed without force).
+    - ``"safe_overwrite"``  -- a *different* cable occupies an endpoint, but every cable that would
+      have to be removed is plugin-owned (``{librenms}`` only); replace freely.
+    - ``"needs_force"``     -- a cable that is NOT plugin-owned (foreign tag, ``librenms`` + another
+      tag, or untagged) would have to be removed; require explicit force.
+
+    A cable "already connecting" the two ends means both terminate the SAME single NetBox cable; a
+    multi-segment remodel (through patch panels) does NOT — its first segment lands on a panel port,
+    so it correctly falls into the re-point branch and is protected.
+
+    Args:
+        local_term: The near-side termination (ConsoleServerPort / Interface).
+        remote_term: The far-side termination (ConsolePort / Interface).
+
+    Returns:
+        dict: ``{"action": str, "to_remove": [Cable, ...], "cable": Cable | None}`` where
+            ``to_remove`` lists the cables an overwrite would delete and ``cable`` is the existing
+            desired-connection cable (for the noop / tag_only cases), else ``None``.
+    """
+    local_cable = local_term.cable
+    remote_cable = remote_term.cable
+
+    if local_cable is None and remote_cable is None:
+        return {"action": "create", "to_remove": [], "cable": None}
+
+    # The exact desired connection already exists: both ends terminate the SAME single cable.
+    if local_cable is not None and local_cable == remote_cable:
+        if cable_has_librenms_tag(local_cable):
+            return {"action": "noop", "to_remove": [], "cable": local_cable}
+        return {"action": "tag_only", "to_remove": [], "cable": local_cable}
+
+    # A different cable occupies at least one endpoint -> a re-point. Every occupying cable must be
+    # removed first (NetBox forbids a second cable on an already-terminated endpoint).
+    to_remove = []
+    for cable in (local_cable, remote_cable):
+        if cable is not None and cable not in to_remove:
+            to_remove.append(cable)
+    if all(cable_is_librenms_owned(cable) for cable in to_remove):
+        return {"action": "safe_overwrite", "to_remove": to_remove, "cable": None}
+    return {"action": "needs_force", "to_remove": to_remove, "cable": None}
+
+
+def _termination_label(terminations) -> str:
+    """Render a trace node's terminations as ``Device: Port`` (comma-joined), or a dash if empty."""
+    labels = []
+    for term in terminations or []:
+        device = getattr(term, "device", None)
+        device_name = getattr(device, "name", None)
+        labels.append(f"{device_name}: {term}" if device_name else str(term))
+    return ", ".join(labels) if labels else "—"
+
+
+def _cable_label(segment_cable) -> Optional[str]:
+    """Render a trace segment's cable (or list of cables) as ``#pk``; None for a passthrough gap."""
+    if segment_cable is None:
+        return None
+    if isinstance(segment_cable, (list, tuple)):
+        joined = ", ".join(f"#{c.pk}" for c in segment_cable if c is not None)
+        return joined or None
+    return f"#{segment_cable.pk}"
+
+
+def render_cable_trace(cable) -> list:
+    """
+    Return *cable*'s full end-to-end physical path as an ordered list of hop dicts.
+
+    Uses NetBox's ``termination.trace()`` (which follows patch-panel front/rear pass-throughs all
+    the way to the end device) starting from one of the cable's A terminations. Intended for the
+    overwrite-confirm modal, so the user sees every segment a forced overwrite would destroy — not
+    just the one physical cable.
+
+    Args:
+        cable: The NetBox ``Cable`` whose end-to-end path is rendered.
+
+    Returns:
+        list[dict]: One ``{"near": str, "cable": str | None, "far": str}`` entry per traced
+            segment, in order from the A end outward (labels read ``Device: Port``). Empty when the
+            cable has no A termination.
+    """
+    a_terminations = cable.a_terminations
+    if not a_terminations:
+        return []
+    origin = a_terminations[0]
+    hops = []
+    for near, segment_cable, far in origin.trace():
+        hops.append(
+            {
+                "near": _termination_label(near),
+                "cable": _cable_label(segment_cable),
+                "far": _termination_label(far),
+            }
+        )
+    return hops
+
+
 def get_virtual_chassis_member(
     device: Device,
     port_name: str,

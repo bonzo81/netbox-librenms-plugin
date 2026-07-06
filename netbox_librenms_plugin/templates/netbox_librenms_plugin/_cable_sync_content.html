@@ -20,8 +20,14 @@
     <input type="hidden" name="csrfmiddlewaretoken" value="{{ csrf_token }}">
     {% if cable_sync.server_key %}<input type="hidden" name="server_key" value="{{ cable_sync.server_key }}">{% endif %}
 {% else %}
-<form method="post" action="{% url 'plugins:netbox_librenms_plugin:sync_device_cables' cable_sync.object.pk %}">
-    {# The sync POST's own inputs (token + selected_port) live inside the <form> branch only. #}
+<form method="post" action="{% url 'plugins:netbox_librenms_plugin:sync_device_cables' cable_sync.object.pk %}"
+      hx-post="{% url 'plugins:netbox_librenms_plugin:sync_device_cables' cable_sync.object.pk %}"
+      hx-target="#cable-sync-content" hx-swap="innerHTML" hx-indicator="#sync-spinner">
+    {% comment %}
+    Cable sync submits over HTMX and swaps the #cable-sync-content partial in place (no full-page
+    reload); the method/action stay as a no-JS fallback. Both the "Sync Selected Cables" button and
+    the per-row "Sync Cable" buttons submit this form, so both go through HTMX.
+    {% endcomment %}
     {% csrf_token %}
     {% if cable_sync.server_key %}<input type="hidden" name="server_key" value="{{ cable_sync.server_key }}">{% endif %}
     <input type="hidden" id="selected_port" name="select" value="">
@@ -136,3 +142,15 @@
         </div>
     </div>
 </div>
+
+{% if cable_sync.overwrite_conflicts %}
+{% comment %}
+Out-of-band swap: pop the shared #htmx-modal with the force-confirm dialog. The main swap already
+refreshed #cable-sync-content with the non-conflicting results; this OOB block replaces the modal
+content (auto-shown by librenms_sync.js's htmx:afterSettle handler) so the user can confirm the
+overwrite of any cable the plugin doesn't solely own.
+{% endcomment %}
+<div id="htmx-modal-content" hx-swap-oob="innerHTML">
+    {% include 'netbox_librenms_plugin/htmx/cable_overwrite_modal.html' with conflicts=cable_sync.overwrite_conflicts server_key=cable_sync.server_key device_pk=cable_sync.object.pk %}
+</div>
+{% endif %}

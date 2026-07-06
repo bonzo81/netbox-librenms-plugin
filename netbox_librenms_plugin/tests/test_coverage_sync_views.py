@@ -273,8 +273,8 @@ class TestSyncCablesViewHandleCableCreation:
         assert result["status"] == "missing_remote"
 
     @pytest.mark.django_db
-    def test_existing_cable_returns_duplicate(self):
-        """Two already-cabled real interfaces → check_existing_cable True → duplicate."""
+    def test_existing_desired_cable_untagged_gets_tagged(self):
+        """The exact desired cable already exists but is untagged → add the librenms tag (non-destructive) → 'tagged'."""
         from netbox_librenms_plugin.tests.conftest import cable_together, make_device, make_interface
         from netbox_librenms_plugin.views.sync.cables import SyncCablesView
 
@@ -282,7 +282,7 @@ class TestSyncCablesViewHandleCableCreation:
         dev = make_device("cable-sync-dup")
         local = make_interface(dev, "eth0")
         remote = make_interface(dev, "eth1")
-        cable_together(local, remote)  # real existing cable
+        cable = cable_together(local, remote)  # real existing cable, untagged
 
         link_data = {
             "local_port": "eth0",
@@ -292,7 +292,9 @@ class TestSyncCablesViewHandleCableCreation:
         }
         interface = {"local_port_id": "42"}
         result = view.handle_cable_creation(link_data, interface)
-        assert result["status"] == "duplicate"
+        assert result["status"] == "tagged"
+        cable.refresh_from_db()
+        assert "librenms" in set(cable.tags.values_list("slug", flat=True))
 
     @pytest.mark.django_db
     def test_creates_cable_returns_valid(self):
