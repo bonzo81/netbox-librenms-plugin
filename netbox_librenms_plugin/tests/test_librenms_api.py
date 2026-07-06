@@ -1355,6 +1355,48 @@ class TestLibreNMSAPIPortsAndInventory:
         assert len(links_dict["links"]) == 1
 
     @patch("netbox_librenms_plugin.librenms_api.requests.get")
+    def test_get_device_links_404_is_empty_not_failure(self, mock_get, mock_librenms_config):
+        """A 404 from /links is LibreNMS's 'device has no links' — a successful empty result, NOT a fetch failure.
+
+        A terminal/console server has no LLDP neighbours, so this endpoint always 404s for it.
+        Treating that as a failure poisons the whole cable snapshot (the partial-fetch guard deletes
+        the cache), which breaks serial cable sync for exactly the devices the feature targets.
+        """
+        import requests as _requests
+
+        resp = _requests.models.Response()
+        resp.status_code = 404
+        resp._content = b'{"status":"error","message":"Device does not have any links"}'
+        resp.url = "https://example/api/v0/devices/13/links"
+        mock_get.return_value = resp
+
+        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+
+        api = LibreNMSAPI(server_key="default")
+        success, data = api.get_device_links(device_id=13)
+
+        assert success is True
+        assert data == {"status": "ok", "links": []}
+
+    @patch("netbox_librenms_plugin.librenms_api.requests.get")
+    def test_get_device_links_non_404_http_error_still_fails(self, mock_get, mock_librenms_config):
+        """A genuine server error (500) must still surface as a failure — only a 404 means 'no links'."""
+        import requests as _requests
+
+        resp = _requests.models.Response()
+        resp.status_code = 500
+        resp._content = b'{"status":"error","message":"boom"}'
+        resp.url = "https://example/api/v0/devices/13/links"
+        mock_get.return_value = resp
+
+        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+
+        api = LibreNMSAPI(server_key="default")
+        success, data = api.get_device_links(device_id=13)
+
+        assert success is False
+
+    @patch("netbox_librenms_plugin.librenms_api.requests.get")
     def test_get_device_ips_success(self, mock_get, mock_librenms_config):
         """Verify retrieving device IP addresses."""
         mock_get.return_value.status_code = 200
