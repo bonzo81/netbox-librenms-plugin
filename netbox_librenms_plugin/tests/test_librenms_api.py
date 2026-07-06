@@ -3218,6 +3218,31 @@ class TestGetSerialPortSensors:
         assert all(s["device_id"] == 12 for s in data)
         assert all(s["sensor_type"] == "acsSerialPortTable" for s in data)
 
+    def test_cisco_async_line_survives_type_filter(self, mock_librenms_api, mock_response_factory):
+        """Cisco async-line sensors pass the serial type filter alongside Avocent, others are dropped."""
+        import unittest.mock as mock
+
+        cisco = {
+            "sensor_id": 2002,
+            "device_id": 12,
+            "sensor_type": "ciscoAsyncLine",
+            "sensor_index": "tsLineActive.2",
+            "sensor_descr": "peer Status",
+            "sensor_current": 0,
+            "group": "Serial Ports",
+        }
+        sensors = [
+            self._make_sensor(12, port_num=7),  # acsSerialPortTable
+            cisco,
+            self._make_sensor(12, sensor_type="tempSensor", port_num=5),  # unrelated -> excluded
+        ]
+        mock_resp = mock_response_factory(status_code=200, json_data={"status": "ok", "sensors": sensors})
+        with mock.patch("netbox_librenms_plugin.librenms_api.requests.get", return_value=mock_resp):
+            success, data = mock_librenms_api.get_serial_port_sensors(device_id=12)
+
+        assert success is True
+        assert {s["sensor_type"] for s in data} == {"acsSerialPortTable", "ciscoAsyncLine"}
+
     def test_non_dict_sensor_item_does_not_crash(self, mock_librenms_api, mock_response_factory):
         """A list payload doesn't guarantee dict items."""
         import unittest.mock as mock

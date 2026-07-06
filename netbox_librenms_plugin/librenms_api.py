@@ -1870,7 +1870,11 @@ class LibreNMSAPI:
         Returns:
             tuple: (success: bool, data: list of serial sensor dicts or error string)
         """
-        from netbox_librenms_plugin.serial_utils import AVOCENT_SENSOR_TYPES
+        from netbox_librenms_plugin.serial_utils import get_serial_sensor_type_patterns
+
+        # Recognized serial sensor types are the keys of the {type: name pattern} map; the fetch
+        # filter only needs membership, so ``in`` against the dict keys is sufficient here.
+        serial_types = get_serial_sensor_type_patterns()
 
         try:
             response = requests.get(
@@ -1900,7 +1904,7 @@ class LibreNMSAPI:
                 # s.get() and escape as an unhandled exception instead of the (success, data)
                 # contract.
                 serial_sensors = [
-                    s for s in all_sensors if isinstance(s, dict) and s.get("sensor_type") in AVOCENT_SENSOR_TYPES
+                    s for s in all_sensors if isinstance(s, dict) and s.get("sensor_type") in serial_types
                 ]
                 return True, serial_sensors
             if isinstance(result, dict):

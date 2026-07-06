@@ -26,6 +26,14 @@ class LibreNMSSyncConfig(PluginConfig):
         "cable_sync_tag": "librenms",
         "cable_sync_tag_color": "009688",  # NetBox teal, matching the Serial badge
         "cable_sync_description": "Synced from LibreNMS",
+        # LibreNMS sensor_type -> local ConsoleServerPort name pattern ({N} = port number) for
+        # sensors surfaced as serial console ports on the Cables tab. Avocent ACS and Cisco IOS
+        # async lines share the same mapper but name their ports differently; add a vendor entry
+        # here to surface (and name) its serial lines without a code change.
+        "serial_sensor_types": {
+            "acsSerialPortTable": "ttyS{N}",
+            "ciscoAsyncLine": "Line {N}",
+        },
     }
 
     def ready(self):

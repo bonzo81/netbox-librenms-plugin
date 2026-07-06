@@ -222,6 +222,8 @@ class TestMapSensorsToSerialLinks:
         assert [r["sensor_index_int"] for r in links] == [7, 11, 33, 49]
 
     def test_custom_port_name_pattern(self):
+        # Per-type naming is set via the sensor_types map; it takes precedence over the fallback
+        # port_name_pattern (so the configured map, not the default, wins for a known type).
         from netbox_librenms_plugin.serial_utils import map_sensors_to_serial_links
 
         sensors = [
@@ -235,7 +237,7 @@ class TestMapSensorsToSerialLinks:
                 "group": "Serial Ports",
             }
         ]
-        links = map_sensors_to_serial_links(sensors, port_name_pattern="serial{N}")
+        links = map_sensors_to_serial_links(sensors, sensor_types={"acsSerialPortTable": "serial{N}"})
         assert links[0]["local_port"] == "serial3"
 
     def test_empty_input(self):
@@ -292,6 +294,103 @@ class TestMapSensorsMalformedRows:
         bad["sensor_index"] = 5  # malformed: int, not "….N" string → unparseable, skipped
         links = map_sensors_to_serial_links([bad, self._valid(port=11, sid=7011)])
         assert [r["sensor_id"] for r in links] == [7011]
+
+
+class TestConfigurableSensorTypes:
+    """Recognized serial sensor_types AND their local port-name patterns are configurable.
+
+    ``serial_sensor_types`` maps each LibreNMS ``sensor_type`` to the local ConsoleServerPort name
+    pattern for that vendor, so Avocent lines become ``ttyS{N}`` and Cisco IOS async lines become
+    ``Line {N}`` from one setting. Both ship recognized; a new vendor is one config entry. Cisco
+    ``ciscoAsyncLine`` sensors (once shaped like Avocent: sensor_class=state, group "Serial Ports",
+    ``"<peer> Status"`` descr) flow through the identical mapper — only the type and naming differ.
+    """
+
+    def _cisco_line(self, sid=13650, port=2, descr="test_location Status"):
+        # Real device-52 (Catalyst 8300) shape: tsLineActive.<line> index, "<peer> Status" descr.
+        return {
+            "sensor_id": sid,
+            "device_id": 52,
+            "sensor_type": "ciscoAsyncLine",
+            "sensor_index": f"tsLineActive.{port}",
+            "sensor_descr": descr,
+            "sensor_current": 0,
+            "group": "Serial Ports",
+        }
+
+    def _acs_line(self, sid=1975, port=11, descr="host Status"):
+        return {
+            "sensor_id": sid,
+            "device_id": 12,
+            "sensor_type": "acsSerialPortTable",
+            "sensor_index": f"acsSerialPortTableStatus.{port}",
+            "sensor_descr": descr,
+            "sensor_current": 2,
+            "group": "Serial Ports",
+        }
+
+    def test_cisco_async_line_uses_its_configured_port_name_pattern(self):
+        """A ciscoAsyncLine maps to a serial row named by the Cisco pattern (Line {N}), not ttyS."""
+        from netbox_librenms_plugin.serial_utils import map_sensors_to_serial_links
+
+        links = map_sensors_to_serial_links([self._cisco_line(port=2)])
+        assert len(links) == 1
+        row = links[0]
+        assert row["local_port"] == "Line 2"
+        assert row["remote_device"] == "test_location"  # "<peer> Status" -> peer label, same as Avocent
+        assert row["is_configured"] is True
+        assert row["sensor_index_int"] == 2
+        assert row["_source"] == "serial"
+
+    def test_each_type_gets_its_own_pattern(self):
+        """Avocent and Cisco rows in one payload each use their vendor's configured name pattern."""
+        from netbox_librenms_plugin.serial_utils import map_sensors_to_serial_links
+
+        links = map_sensors_to_serial_links([self._acs_line(port=11), self._cisco_line(port=2)])
+        by_id = {r["sensor_id"]: r["local_port"] for r in links}
+        assert by_id[1975] == "ttyS11"  # Avocent
+        assert by_id[13650] == "Line 2"  # Cisco
+
+    def test_explicit_map_override_filters_and_names(self):
+        """An explicit {type: pattern} map overrides both the recognized set and the naming."""
+        from netbox_librenms_plugin.serial_utils import map_sensors_to_serial_links
+
+        links = map_sensors_to_serial_links(
+            [self._acs_line(port=11), self._cisco_line(port=2)],
+            sensor_types={"acsSerialPortTable": "console{N}"},
+        )
+        assert [(r["sensor_id"], r["local_port"]) for r in links] == [(1975, "console11")]
+
+    def test_explicit_set_override_uses_fallback_pattern(self):
+        """A bare set of types (no patterns) filters and names via the fallback port_name_pattern."""
+        from netbox_librenms_plugin.serial_utils import map_sensors_to_serial_links
+
+        links = map_sensors_to_serial_links(
+            [self._acs_line(port=11), self._cisco_line(port=2)],
+            sensor_types=frozenset({"acsSerialPortTable"}),
+        )
+        assert [(r["sensor_id"], r["local_port"]) for r in links] == [(1975, "ttyS11")]
+
+    def test_get_patterns_default_includes_avocent_and_cisco(self):
+        from netbox_librenms_plugin.serial_utils import get_serial_sensor_type_patterns
+
+        patterns = get_serial_sensor_type_patterns()
+        assert patterns["acsSerialPortTable"] == "ttyS{N}"
+        assert patterns["ciscoAsyncLine"] == "Line {N}"
+
+    def test_get_patterns_respects_config_map(self, settings):
+        """A configured {type: pattern} map narrows the recognized set and sets naming."""
+        from netbox_librenms_plugin.serial_utils import get_serial_sensor_type_patterns
+
+        settings.PLUGINS_CONFIG = {"netbox_librenms_plugin": {"serial_sensor_types": {"acsSerialPortTable": "p{N}"}}}
+        assert get_serial_sensor_type_patterns() == {"acsSerialPortTable": "p{N}"}
+
+    def test_get_patterns_tolerates_bare_list_config(self, settings):
+        """A bare list of types (no patterns) falls back to the default port-name pattern."""
+        from netbox_librenms_plugin.serial_utils import get_serial_sensor_type_patterns
+
+        settings.PLUGINS_CONFIG = {"netbox_librenms_plugin": {"serial_sensor_types": ["ciscoAsyncLine"]}}
+        assert get_serial_sensor_type_patterns() == {"ciscoAsyncLine": "ttyS{N}"}
 
 
 class TestMapSensorsWithFixture:

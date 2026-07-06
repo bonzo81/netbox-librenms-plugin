@@ -24,11 +24,44 @@ Sorting: rows are returned ordered by sensor_index_int (port number).
 
 import re
 
-# Sensor types known to represent ACS-family serial ports. Hardcoded for now; a DB-backed
-# per-OS config model could replace this set later.
-AVOCENT_SENSOR_TYPES = frozenset({"acsSerialPortTable"})
+from netbox.plugins import get_plugin_config
+
+# Default local ConsoleServerPort name pattern (``{N}`` -> port number) for a serial sensor type
+# with no explicit pattern configured.
+DEFAULT_SERIAL_PORT_NAME_PATTERN = "ttyS{N}"
+
+# LibreNMS ``sensor_type`` -> local ConsoleServerPort name pattern, shipped as the default for the
+# ``serial_sensor_types`` plugin setting. Avocent ACS (acsSerialPortTable) and Cisco IOS async
+# lines (ciscoAsyncLine) both expose sensor_class=state / group "Serial Ports" / "<peer> Status"
+# descriptions, so they share one mapper — only the sensor_type and the local naming differ.
+# Operators add further vendor types (with their own naming) via the setting, not this module.
+DEFAULT_SERIAL_SENSOR_TYPE_PATTERNS = {
+    "acsSerialPortTable": "ttyS{N}",
+    "ciscoAsyncLine": "Line {N}",
+}
 
 _INDEX_SUFFIX_RE = re.compile(r"\.(\d+)$")
+
+
+def get_serial_sensor_type_patterns() -> dict:
+    """
+    Return the configured ``{sensor_type: local port-name pattern}`` map for serial sensors.
+
+    Reads the ``serial_sensor_types`` plugin setting so an operator can surface a new vendor's
+    serial lines and name them without a code change. Accepts either a map (``type -> pattern``)
+    or a bare list of types (each defaulted to :data:`DEFAULT_SERIAL_PORT_NAME_PATTERN`); falls
+    back to :data:`DEFAULT_SERIAL_SENSOR_TYPE_PATTERNS` when the setting is unset or empty.
+
+    Returns:
+        dict: sensor_type -> local ConsoleServerPort name pattern.
+    """
+    configured = get_plugin_config("netbox_librenms_plugin", "serial_sensor_types")
+    if not configured:
+        return dict(DEFAULT_SERIAL_SENSOR_TYPE_PATTERNS)
+    if isinstance(configured, dict):
+        return dict(configured)
+    # A bare list/iterable of sensor types (no per-type naming): use the fallback pattern.
+    return {sensor_type: DEFAULT_SERIAL_PORT_NAME_PATTERN for sensor_type in configured}
 
 
 def parse_port_number(sensor_index: str | None) -> int | None:
@@ -77,25 +110,31 @@ def strip_status_suffix(descr: str) -> str:
 
 def map_sensors_to_serial_links(
     sensors: list[dict],
-    port_name_pattern: str = "ttyS{N}",
+    port_name_pattern: str = DEFAULT_SERIAL_PORT_NAME_PATTERN,
     device_id=None,
+    sensor_types=None,
 ) -> list[dict]:
     """
     Convert a list of LibreNMS sensor records to serial cable-sync link rows.
 
-    Only records whose ``sensor_type`` is in :data:`AVOCENT_SENSOR_TYPES` are
-    processed; all others are silently skipped.  Rows with an unparseable
-    ``sensor_index`` are also skipped.
+    Only records whose ``sensor_type`` is recognized by ``sensor_types`` (default: the configured
+    :func:`get_serial_sensor_type_patterns`) are processed; all others are silently skipped.  Each
+    row's local port is named by that type's configured pattern (or ``port_name_pattern`` when
+    ``sensor_types`` is a bare set carrying no patterns).  Rows with an unparseable ``sensor_index``
+    are also skipped.
 
     Args:
         sensors: Raw sensor dicts as returned by
             ``LibreNMSAPI.get_serial_port_sensors()``.
-        port_name_pattern: Template for the local ConsoleServerPort name.
-            ``{N}`` is replaced with the port number.  Default ``"ttyS{N}"``.
+        port_name_pattern: Fallback template for the local ConsoleServerPort name when a type has
+            no configured pattern.  ``{N}`` is replaced with the port number.  Default ``"ttyS{N}"``.
         device_id: NetBox device id for the host these serial ports belong to.
             Included in each row so the row is self-sufficient for
             ``LibreNMSCableTable.Meta.row_attrs`` (which reads ``record["device_id"]``)
             even before ``enrich_links_data`` runs, avoiding a render-time KeyError.
+        sensor_types: Recognized serial sensor types — either a ``{type: name pattern}`` map or a
+            bare set/iterable of types (named via ``port_name_pattern``). Defaults to the
+            plugin-configured map (:func:`get_serial_sensor_type_patterns`).
 
     Returns:
         List of link-row dicts sorted by port number (ascending).
@@ -106,6 +145,11 @@ def map_sensors_to_serial_links(
     if not isinstance(sensors, list):
         return []
 
+    if sensor_types is None:
+        sensor_types = get_serial_sensor_type_patterns()
+    # A map carries per-type naming; a bare set/iterable carries none (fall back per row).
+    type_patterns = sensor_types if isinstance(sensor_types, dict) else {}
+
     links = []
 
     for sensor in sensors:
@@ -114,7 +158,8 @@ def map_sensors_to_serial_links(
         # and coerce a non-string sensor_descr before stripping its suffix.
         if not isinstance(sensor, dict):
             continue
-        if sensor.get("sensor_type") not in AVOCENT_SENSOR_TYPES:
+        sensor_type = sensor.get("sensor_type")
+        if sensor_type not in sensor_types:
             continue
 
         sensor_id = sensor.get("sensor_id")
@@ -125,7 +170,8 @@ def map_sensors_to_serial_links(
         if port_num is None:
             continue
 
-        local_port = port_name_pattern.replace("{N}", str(port_num))
+        pattern = type_patterns.get(sensor_type) or port_name_pattern
+        local_port = pattern.replace("{N}", str(port_num))
         raw_descr = sensor.get("sensor_descr")
         label = strip_status_suffix(raw_descr if isinstance(raw_descr, str) else "")
 
