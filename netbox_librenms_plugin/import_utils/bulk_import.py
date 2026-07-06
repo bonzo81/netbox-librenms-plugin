@@ -886,6 +886,19 @@ def _refresh_existing_device(validation: dict, libre_device: dict = None, server
             validation["issues"].append(message)
     except Exception as e:
         logger.error(f"Failed to check for newly imported device: {e}")
+        # Fail closed: this recheck exists to catch duplicates that appeared after the cache
+        # was built, so a transient failure (e.g. a DB error mid-lookup) must not leave a
+        # previously-cached "importable" row importable — that would let a duplicate import
+        # slip through exactly when the duplicate check couldn't run. Matches the fail-closed
+        # behaviour of every other failure branch in this function.
+        validation["can_import"] = False
+        validation["is_ready"] = False
+        message = "Duplicate re-check failed (transient lookup error); import blocked. Refresh to retry."
+        # Append to issues (not just a warning) — a later recalculate_validation_status()
+        # recomputes can_import from the issues list, so anything weaker would be silently
+        # re-enabled. Dedup so repeated refreshes don't stack the same message.
+        if message not in validation.setdefault("issues", []):
+            validation["issues"].append(message)
 
 
 def _empty_return(return_cache_status: bool):

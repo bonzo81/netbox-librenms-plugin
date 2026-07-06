@@ -1377,14 +1377,21 @@ class TestRefreshExistingDevice:
         args = mock_logger.error.call_args.args
         assert any("99" in str(arg) for arg in args)
 
-    def test_exception_during_new_device_lookup_logs_error(self):
-        """An exception in the newly-imported-device check is caught and logged (forced)."""
+    def test_exception_during_new_device_lookup_logs_error_and_fails_closed(self):
+        """An exception in the newly-imported-device re-check is logged and blocks the import (forced)."""
         from unittest.mock import patch
 
         from netbox_librenms_plugin.import_utils.bulk_import import _refresh_existing_device
 
         libre_device = {"device_id": 44, "hostname": "sw03", "sysName": "sw03"}
-        validation = {"existing_device": None, "import_as_vm": False, "resolved_name": None}
+        # Cache-time state said "importable" — the failed recheck must revoke that.
+        validation = {
+            "existing_device": None,
+            "import_as_vm": False,
+            "resolved_name": None,
+            "can_import": True,
+            "is_ready": True,
+        }
 
         with (
             patch(
@@ -1396,6 +1403,10 @@ class TestRefreshExistingDevice:
             _refresh_existing_device(validation, libre_device=libre_device, server_key="default")
 
         mock_logger.error.assert_called()
+        assert validation["can_import"] is False
+        assert validation["is_ready"] is False
+        # Surfaced to the user as a blocking issue, not silently greyed out.
+        assert any("re-check failed" in issue for issue in validation.get("issues", []))
 
 
 # ===========================================================================
