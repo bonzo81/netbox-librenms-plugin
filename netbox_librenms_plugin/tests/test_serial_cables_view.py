@@ -537,6 +537,16 @@ class TestCableTableSerialRendering:
         assert "Serial" in html
         assert "OOB" not in html
 
+    def test_manual_pick_icon_shown(self):
+        """A manually picked remote renders the hand icon next to the port name."""
+        table = self._make_table()
+        record = {"manual_remote": True, "remote_port_url": None}
+        html = str(table.render_remote_port("console", record))
+        assert "gesture-tap-button" in html
+        assert "console" in html
+        plain = str(table.render_remote_port("console", {"remote_port_url": None}))
+        assert "gesture-tap-button" not in plain
+
     def test_oob_badge_shown(self):
         table = self._make_table()
         record = {"_source": "oob", "local_port_url": None}
@@ -1050,6 +1060,30 @@ class TestSerialRemoteCollisionDedup:
             view.enrich_serial_remote(link2, claimed_cp_ids=claimed)
         assert link1["netbox_remote_interface_id"] != link2["netbox_remote_interface_id"]
         assert {link1["netbox_remote_interface_id"], link2["netbox_remote_interface_id"]} == {cp_a.pk, cp_b.pk}
+
+    def test_manual_pick_reserves_port_against_auto_match(self):
+        """A manual pick claims its ConsolePort in the shared dedup set: a sibling auto-matched row in the same enrich pass must pick a DIFFERENT free port (else a batch sync silently overwrites the manually picked cable)."""
+        view = _make_view()
+        local, (csp1, csp2), _ = make_serial_device("acs-manual-claim", csp_names=["ttyS1", "ttyS2"])
+        remote, _, (cp_a, cp_b) = make_serial_device("router-manual-claim", cp_names=["con-a", "con-b"])
+
+        manual_row = {
+            "_source": "serial",
+            "local_port": "ttyS1",
+            "remote_device": "no-label-match",
+            "device_id": local.id,
+            "manual_remote_id": cp_a.pk,  # the user's explicit pick: con-a
+        }
+        auto_row = {
+            "_source": "serial",
+            "local_port": "ttyS2",
+            "remote_device": remote.name,  # label-matches the same device
+            "device_id": local.id,
+        }
+        view.enrich_links_data([manual_row, auto_row], local)
+
+        assert manual_row["netbox_remote_interface_id"] == cp_a.pk
+        assert auto_row["netbox_remote_interface_id"] == cp_b.pk  # NOT the manually claimed con-a
 
     def test_enrich_links_data_dedups_remote_cp_across_serial_rows(self):
         view = _make_view()

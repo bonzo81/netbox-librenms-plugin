@@ -622,7 +622,7 @@ def cable_far_terminations(cable, near_termination) -> list:
     return a_terminations
 
 
-def cable_path_reaches(termination, remote_termination=None, remote_device=None) -> bool:
+def cable_path_reaches(termination, remote_termination=None, remote_device=None, path=None) -> bool:
     """
     Return True when *termination*'s traced cable path ends at the given remote.
 
@@ -635,11 +635,13 @@ def cable_path_reaches(termination, remote_termination=None, remote_device=None)
         remote_termination: Match when the path ends at exactly this termination.
         remote_device: Match when the path ends at ANY port on this device — the serial case,
             where the LibreNMS label only identifies the device, not the port.
+        path: An already-computed ``termination.trace()`` result to reuse (avoids re-tracing).
 
     Returns:
         bool: True when the traced path's far end matches either criterion.
     """
-    path = termination.trace()
+    if path is None:
+        path = termination.trace()
     if not path:
         return False
     for far_termination in path[-1][2] or []:

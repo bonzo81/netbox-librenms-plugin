@@ -886,6 +886,12 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObject
         if manual_pk := link.get("manual_remote_id"):
             manual_cp = ConsolePort.objects.filter(pk=manual_pk).select_related("device").first()
             if manual_cp is not None:
+                # Reserve the pick in the shared dedup set: a sibling auto-matched row in this
+                # pass must not be offered the same free port — batch-syncing both would let the
+                # auto row silently overwrite the just-created manually picked cable (its own
+                # link carries no manual_remote_id, so the force gate would not fire for it).
+                if claimed_cp_ids is not None:
+                    claimed_cp_ids.add(manual_cp.pk)
                 self._apply_serial_remote_target(link, csp, manual_cp, manual=True)
                 return
 
@@ -961,22 +967,26 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObject
             link["remote_port_url"] = reverse("dcim:consoleport", args=[far_cp.pk])
             link["can_create_cable"] = not cable_has_librenms_tag(csp.cable)
             return True
-        if cable_path_reaches(csp, remote_device=device):
+        # Trace once and reuse it for both the reach check and the far-end display — trace()
+        # walks the full cable path in the DB, so the reach+display branches would otherwise
+        # pay for it twice per cabled row.
+        path = csp.trace()
+        if cable_path_reaches(csp, remote_device=device, path=path):
             # Show the END of the traced path (the real console), not the panel port the
             # first segment lands on.
             link["cable_status"] = "Connected via Patch Path"
-            self._display_serial_cable_far_end(link, csp)
+            self._display_serial_cable_far_end(link, csp, path=path)
             return True
         if cable_has_librenms_tag(csp.cable):
             # Trust rule: a plugin-tagged cable was placed deliberately; the wrong-name label
             # must not flip it to a mismatch offering a silent re-point. Display where it
             # really goes (overriding the label-device link the caller set).
-            self._display_serial_cable_far_end(link, csp)
+            self._display_serial_cable_far_end(link, csp, path=path)
             return True
         link["cable_status"] = "Cable Mismatch"
         return False
 
-    def _display_serial_cable_far_end(self, link, csp):
+    def _display_serial_cable_far_end(self, link, csp, path=None):
         """
         Fill *link*'s remote display fields from where the CSP's cable path actually ends.
 
@@ -989,15 +999,20 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObject
         Args:
             link (dict): The serial cable-sync row, mutated in place.
             csp: The row's resolved (and cabled) local ConsoleServerPort.
+            path: An already-computed ``csp.trace()`` result to reuse (avoids re-tracing).
         """
-        path = csp.trace()
+        if path is None:
+            path = csp.trace()
         far = (path[-1][2] if path else None) or cable_far_terminations(csp.cable, csp)
         termination = far[0] if far else None
         if termination is None:
             return
         device = getattr(termination, "device", None)
         if device is not None:
-            link["remote_device"] = device.name
+            # DISPLAY-ONLY key: never overwrite the raw ``remote_device`` label — it survives
+            # the cache strip, so a leaked far-end name would resolve as a "label" on the next
+            # cached re-render and flip the row's status (fresh vs cached renders disagreeing).
+            link["remote_device_display"] = device.name
             link["remote_device_url"] = reverse("dcim:device", args=[device.pk])
             link["netbox_remote_device_id"] = device.pk
         link["remote_port_name"] = getattr(termination, "name", str(termination))
@@ -1021,9 +1036,10 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObject
             manual (bool): Mark the row as manually picked (rendered as a hint in the table).
         """
         link["netbox_remote_device_id"] = target_cp.device_id
-        # Show the picked device's real name — the LibreNMS label mismatching is exactly why
-        # the user picked by hand, so rendering the dead label linked elsewhere would mislead.
-        link["remote_device"] = target_cp.device.name
+        # Show the picked device's real name (display-only key: the raw ``remote_device`` label
+        # survives the cache strip and must stay pristine for re-enrichment) — the LibreNMS
+        # label mismatching is exactly why the user picked by hand.
+        link["remote_device_display"] = target_cp.device.name
         link["remote_device_url"] = reverse("dcim:device", args=[target_cp.device_id])
         link["netbox_remote_interface_id"] = target_cp.pk
         link["remote_port_name"] = target_cp.name
@@ -1436,7 +1452,7 @@ class SingleCableVerifyView(BaseCableTableView):
         else:
             local_html = f"{safe_local}{serial_badge}"
 
-        safe_remote_device = escape(link_data.get("remote_device", ""))
+        safe_remote_device = escape(link_data.get("remote_device_display") or link_data.get("remote_device", ""))
         if link_data.get("remote_device_url"):
             remote_device_html = f'<a href="{link_data["remote_device_url"]}">{safe_remote_device}</a>'
         elif link_data.get("_source") == "serial" and not link_data.get("is_configured"):
@@ -1790,7 +1806,11 @@ class CableRemotePickerView(BaseCableTableView):
             )
 
         if action == "ports":
-            target = get_object_or_404(Device, pk=request.GET.get("device_id"))
+            try:
+                target_pk = int(request.GET.get("device_id", ""))
+            except (TypeError, ValueError):
+                return HttpResponse("Select a device.", status=400)
+            target = get_object_or_404(Device, pk=target_pk)
             serial = source == "serial"
             ports = target.consoleports.all() if serial else target.interfaces.all()
             return render(

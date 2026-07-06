@@ -23,7 +23,9 @@ Context: conflicts (list of {interface, port_id, trace}), server_key, device_pk.
     {% if server_key %}<input type="hidden" name="server_key" value="{{ server_key }}">{% endif %}
     {# Re-submit with force ON, only for the conflicting ports the user is being asked to confirm. #}
     <input type="hidden" name="force" value="on">
-    {% for conflict in conflicts %}<input type="hidden" name="select" value="{{ conflict.port_id }}">{% endfor %}
+    {% for conflict in conflicts %}<input type="hidden" name="select" value="{{ conflict.port_id }}">
+    {# Re-target the exact sync device the user confirmed (VC member overrides must survive). #}
+    {% if conflict.device_id %}<input type="hidden" name="device_selection_{{ conflict.port_id }}" value="{{ conflict.device_id }}">{% endif %}{% endfor %}
 
     <div class="modal-body">
         {# NetBox's .alert is display:flex, so wrap all text in ONE child div (else each inline #}

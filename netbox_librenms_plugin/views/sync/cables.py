@@ -136,7 +136,8 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libre
 
         Returns:
             dict: A result with ``status`` in ``{valid, overwritten, tagged, duplicate, conflict,
-                invalid}`` plus ``interface``; conflicts also carry ``port_id`` and ``trace``.
+                denied, invalid}`` plus ``interface``; conflicts also carry ``port_id`` and
+                ``trace`` (and are stamped with the resolved ``device_id`` by the caller).
         """
         decision = classify_cable_action(local_term, remote_term)
         action = decision["action"]
@@ -160,6 +161,12 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libre
                 return {"status": "valid", "interface": display_name}
             return {"status": "invalid", "interface": display_name}  # pragma: no cover
         if action == "safe_overwrite" or (action == "needs_force" and force):
+            # Overwriting DELETES the occupying cable(s), but the view's blanket POST gate only
+            # covers add/change Cable. Require the delete perm precisely on the destructive
+            # branch, so create-only syncs keep working for add/change users.
+            user = getattr(self.request, "user", None)
+            if user is None or not user.has_perm("dcim.delete_cable"):
+                return {"status": "denied", "interface": display_name}
             # Remove the occupying cable(s) first (NetBox forbids a second cable on a live endpoint).
             for cable in decision["to_remove"]:
                 cable.delete()
@@ -332,6 +339,7 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libre
             "overwritten": [],
             "tagged": [],
             "conflict": [],
+            "denied": [],
         }
         self._pending_conflicts = []
 
@@ -341,6 +349,10 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libre
                     result = self.process_single_interface(interface, cached_links, force=force)
                 results[result["status"]].append(result.get("interface", ""))
                 if result["status"] == "conflict":
+                    # Carry the row's RESOLVED sync device so the force re-submit re-targets the
+                    # exact interface the user confirmed — without it, a VC member override
+                    # (device_selection_<port_id>) would silently revert to the page device.
+                    result["device_id"] = interface.get("device_id")
                     self._pending_conflicts.append(result)
             except Exception:
                 logger.exception("Failed to sync cable for port_id %s", interface.get("local_port_id", ""))
@@ -457,6 +469,12 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libre
                 request,
                 "Selected device is not part of this cable-sync page for interfaces: "
                 f"{', '.join(results['rejected_selection'])}",
+            )
+        if results.get("denied"):
+            messages.error(
+                request,
+                "You do not have permission to delete the existing cable(s) for: "
+                f"{', '.join(results['denied'])} (dcim.delete_cable required to overwrite).",
             )
         if results["duplicate"]:
             messages.warning(

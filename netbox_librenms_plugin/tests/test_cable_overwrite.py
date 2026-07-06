@@ -329,8 +329,15 @@ class TestCableOverwriteHtmxModal:
         assert "Cache has expired" not in content
         # The partial carries the force-confirm modal via an out-of-band swap into the shared shell.
         assert 'id="htmx-modal-content" hx-swap-oob="innerHTML"' in content
+        # htmx 2.x fires no afterSettle targeting an innerHTML OOB swap's target, so the page's
+        # afterSettle auto-show handler never sees the modal — the OOB block must ship its own
+        # show call (the exact mirror of the close_modal block's closeHtmxModal() script).
+        assert "openHtmxModal(" in content
         assert 'name="force" value="on"' in content  # the re-submit is pre-armed with force
         assert 'id="cable-force-submit"' in content  # confirm-gated submit button present
+        # The modal's re-submit must carry the row's resolved sync device, so a VC member
+        # override can't silently revert to the page device on the forced re-submit.
+        assert f'name="device_selection_{link["local_port_id"]}"' in content
         # And the DB is untouched: the foreign cable survives, still terminating the CSP.
         assert Cable.objects.filter(pk=old.pk).exists()
         csp.refresh_from_db()
@@ -358,3 +365,72 @@ class TestCableOverwriteHtmxModal:
         cp_b.refresh_from_db()
         assert csp.cable_id is not None
         assert csp.cable_id == cp_b.cable_id
+
+
+# ---------------------------------------------------------------------------
+# Overwrite requires the delete permission
+# ---------------------------------------------------------------------------
+@pytest.mark.django_db
+class TestOverwriteRequiresDeletePermission:
+    """The sync view's blanket gate covers add/change Cable, but the overwrite paths DELETE
+    existing cables — that must additionally require dcim.delete_cable, checked precisely on
+    the destructive branch so create-only syncs keep working for add/change users.
+    """
+
+    def _sync_view_with_real_user(self, *actions):
+        """Build a sync view whose request user holds a REAL NetBox ObjectPermission for Cable
+        with the given actions — NetBox's ObjectPermissionBackend ignores Django's
+        user_permissions m2m, so has_perm() only honors ObjectPermission assignments."""
+        from core.models import ObjectType
+        from dcim.models import Cable
+        from django.contrib.auth import get_user_model
+
+        from netbox_librenms_plugin.views.sync.cables import SyncCablesView
+        from users.models import ObjectPermission
+
+        user = get_user_model().objects.create_user(f"perm-user-{'-'.join(actions) or 'none'}")
+        if actions:
+            op = ObjectPermission.objects.create(name=f"cable-{'-'.join(actions)}", actions=list(actions))
+            op.object_types.add(ObjectType.objects.get_for_model(Cable))
+            op.users.add(user)
+        user = get_user_model().objects.get(pk=user.pk)  # reload to reset the perm cache
+
+        sync = object.__new__(SyncCablesView)
+        sync.request = _mock_request()
+        sync.request.user = user
+        sync._post_server_key = "default"
+        return sync
+
+    def test_overwrite_without_delete_perm_is_denied_and_cable_survives(self):
+        from dcim.models import Cable
+
+        from netbox_librenms_plugin.utils import get_librenms_cable_tag
+
+        acs, (csp,), _ = make_serial_device("permdel", csp_names=["ttyS1"])
+        _r, _, (cp_a, cp_b) = make_serial_device("permdel-r", cp_names=["console-A", "console-B"])
+        old = cable_together(csp, cp_a)
+        old.tags.add(get_librenms_cable_tag())  # plugin-owned: would be silently overwritten
+
+        sync = self._sync_view_with_real_user("add", "change")  # no delete
+        result = sync.handle_serial_cable_creation(_serial_link(csp, cp_b), {"device_id": acs.id})
+
+        assert result["status"] == "denied"
+        assert Cable.objects.filter(pk=old.pk).exists()  # nothing deleted
+        csp.refresh_from_db()
+        assert csp.cable_id == old.pk
+
+    def test_overwrite_with_delete_perm_proceeds(self):
+        from dcim.models import Cable
+
+        from netbox_librenms_plugin.utils import get_librenms_cable_tag
+
+        acs, (csp,), _ = make_serial_device("permdel2", csp_names=["ttyS1"])
+        _r, _, (cp_a, cp_b) = make_serial_device("permdel2-r", cp_names=["console-A", "console-B"])
+        old = cable_together(csp, cp_a)
+        old.tags.add(get_librenms_cable_tag())
+
+        sync = self._sync_view_with_real_user("add", "change", "delete")
+        result = sync.handle_serial_cable_creation(_serial_link(csp, cp_b), {"device_id": acs.id})
+
+        assert result["status"] == "overwritten"
+        assert not Cable.objects.filter(pk=old.pk).exists()

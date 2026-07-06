@@ -147,11 +147,14 @@
 {% comment %}
 Out-of-band swap: pop the shared #htmx-modal with the force-confirm dialog. The main swap already
 refreshed #cable-sync-content with the non-conflicting results; this OOB block replaces the modal
-content (auto-shown by librenms_sync.js's htmx:afterSettle handler) so the user can confirm the
-overwrite of any cable the plugin doesn't solely own.
+content and must ALSO ship its own show call: htmx 2.x fires no afterSettle targeting an
+innerHTML OOB swap's target, so the page's afterSettle auto-show handler (which opens the picker
+modal on normal swaps into #htmx-modal-content) never fires for OOB-delivered content — without
+the script the dialog arrives silently hidden. Mirrors the close_modal block below.
 {% endcomment %}
 <div id="htmx-modal-content" hx-swap-oob="innerHTML">
     {% include 'netbox_librenms_plugin/htmx/cable_overwrite_modal.html' with conflicts=cable_sync.overwrite_conflicts server_key=cable_sync.server_key device_pk=cable_sync.object.pk %}
+    <script>if (typeof openHtmxModal === 'function') { openHtmxModal(); }</script>
 </div>
 {% endif %}
 

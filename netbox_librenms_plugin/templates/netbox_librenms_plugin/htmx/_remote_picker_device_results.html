@@ -17,11 +17,13 @@ Device search results for the remote-end picker. Each hit loads its port list in
   {% endif %}
 {% endfor %}
 <script>
-  {# A new device search invalidates any previously loaded port list + selection. #}
+  {# A new device search invalidates any previously loaded port list + selection — #}
+  {# unconditionally, or a stale port (and enabled Save) from the PREVIOUS device would #}
+  {# silently submit while the user is looking at fresh search results. #}
   (function () {
     var ports = document.getElementById('remote-picker-ports');
     var save = document.getElementById('remote-picker-save');
-    if (ports && !ports.querySelector('.remote-picker-active')) { ports.innerHTML = ''; }
-    if (save && ports && !ports.firstChild) { save.disabled = true; }
+    if (ports) { ports.innerHTML = ''; }
+    if (save) { save.disabled = true; }
   })();
 </script>

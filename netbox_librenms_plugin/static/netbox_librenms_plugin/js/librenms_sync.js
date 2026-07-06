@@ -3537,6 +3537,17 @@ function initializeVCReportButtons() {
     });
 }
 
+/**
+ * Show the shared #htmx-modal. Global companion to closeHtmxModal() for inline scripts
+ * shipped inside OOB-swapped modal content: htmx 2.x fires no afterSettle targeting an
+ * innerHTML OOB swap's target, so the page's afterSettle auto-show handler never sees
+ * OOB-delivered modal content — the OOB block calls this directly instead.
+ */
+function openHtmxModal() {
+    updateHtmxModalLabel();
+    showModal(document.getElementById('htmx-modal'));
+}
+
 function closeHtmxModal() {
     // Abort any in-flight VC report fetch
     if (typeof _activeVCReportController !== 'undefined' && _activeVCReportController) {

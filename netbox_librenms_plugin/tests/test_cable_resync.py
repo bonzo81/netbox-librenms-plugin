@@ -331,7 +331,8 @@ class TestCabledSerialRowFarEndDisplay:
         link = self._enrich(acs, self._row(csp, "name-that-matches-nothing", acs))
 
         assert link["cable_status"] == "Cable Found"
-        assert link["remote_device"] == "farend-ser-actual"  # reality, not the dead label
+        assert link["remote_device_display"] == "farend-ser-actual"  # reality, not the dead label
+        assert link["remote_device"] == "name-that-matches-nothing"  # raw label preserved for re-enrich
         assert link["remote_device_url"]
         assert link["remote_port_name"] == "console"
         assert link["remote_port_url"]
@@ -349,9 +350,33 @@ class TestCabledSerialRowFarEndDisplay:
         link = self._enrich(acs, self._row(csp, "farend-trust-label", acs))
 
         assert link["cable_status"] == "Cable Found"
-        assert link["remote_device"] == "farend-trust-actual"
+        assert link["remote_device_display"] == "farend-trust-actual"
         assert link["remote_port_name"] == "console"
         assert link["can_create_cable"] is False
+
+    def test_far_end_display_does_not_leak_into_the_cached_label(self):
+        """Enrichment must be idempotent across the cache round-trip: the far-end DISPLAY name
+        must not overwrite the raw LibreNMS label, or a fresh refresh and a cached re-render
+        disagree forever (label dead -> "Cable Found"; leaked far-end name resolves -> the same
+        row flips to "Connected via Patch Path" on the next render)."""
+        from netbox_librenms_plugin.views.base.cables_view import _RAW_LINK_KEYS
+
+        acs, (csp,), _ = make_serial_device("leak-ser", csp_names=["ttyS1"])
+        _panel_dev, fp, rp = _panel("leak-ser-pp")
+        _end, _, (cp,) = make_serial_device("leak-ser-end", cp_names=["console"])
+        cable_together(csp, fp)
+        cable_together(rp, cp)
+
+        fresh = self._enrich(acs, self._row(csp, "name-that-matches-nothing", acs))
+        assert fresh["cable_status"] == "Cable Found"  # dead label: no sync target
+        assert fresh["remote_device"] == "name-that-matches-nothing"  # RAW label untouched
+        assert fresh["remote_device_display"] == "leak-ser-end"  # display shows reality
+
+        # Cache round-trip (what a browser F5 does): strip to raw keys, re-enrich.
+        stripped = {k: v for k, v in fresh.items() if k in _RAW_LINK_KEYS}
+        again = self._enrich(acs, stripped)
+        assert again["cable_status"] == "Cable Found"  # same status as the fresh render
+        assert again["remote_device"] == "name-that-matches-nothing"
 
     def test_patch_path_row_shows_path_end_not_panel(self):
         """A Connected-via-Patch-Path row shows the END of the traced path (the real console),

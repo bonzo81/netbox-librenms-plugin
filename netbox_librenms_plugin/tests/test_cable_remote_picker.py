@@ -297,6 +297,44 @@ class TestRemotePickerEndpoint:
         assert resp.status_code == 200
         assert "source=serial" in resp.content.decode()
 
+    def test_ports_action_rejects_malformed_device_id(self):
+        """A hand-crafted non-numeric device_id gets a 400, not a 500."""
+        client = self._client("badid")
+        _acs, _csp, link, url = self._seed_serial("badid")
+
+        resp = client.get(
+            url,
+            {"port_id": link["local_port_id"], "server_key": "default", "action": "ports", "device_id": "abc"},
+        )
+
+        assert resp.status_code == 400
+
+    def test_ports_action_splits_free_and_cabled_ports(self):
+        """The port list separates free ports from cabled ones (which stay pickable but marked)."""
+        client = self._client("split")
+        _acs, _csp, link, url = self._seed_serial("split")
+        remote, _, (free_cp, cabled_cp) = make_serial_device("picker-split-target", cp_names=["con-free", "con-used"])
+        _peer, (peer_csp,), _ = make_serial_device("picker-split-peer", csp_names=["s0"])
+        cable_together(cabled_cp, peer_csp)
+
+        resp = client.get(
+            url,
+            {
+                "port_id": link["local_port_id"],
+                "server_key": "default",
+                "action": "ports",
+                "device_id": remote.pk,
+                "source": "serial",
+            },
+        )
+
+        assert resp.status_code == 200
+        content = resp.content.decode()
+        assert 'label="Available"' in content
+        assert "con-free" in content
+        assert 'label="Already cabled (overwrite-protected)"' in content
+        assert "con-used — cabled" in content
+
     def test_post_stores_manual_pick_in_cached_row(self):
         from django.core.cache import cache
 
@@ -323,8 +361,11 @@ class TestRemotePickerEndpoint:
         assert row["manual_remote_id"] == cp.pk
         assert row["netbox_remote_interface_id"] == cp.pk  # sync-ready without a re-enrich
         assert row["can_create_cable"] is True
-        # The response re-renders the cable partial with the resolved remote shown.
-        assert "console" in resp.content.decode()
+        content = resp.content.decode()
+        # The response re-renders the cable partial with the resolved remote shown...
+        assert "console" in content
+        # ...and closes the picker modal via the OOB block.
+        assert "closeHtmxModal" in content
 
     def test_post_rejects_port_of_wrong_type(self):
         """Picking an Interface for a serial row is rejected and the cache is untouched."""
@@ -400,6 +441,42 @@ def _patch_local_port_resolution(view, interface):
         return None
 
     return patch.object(view, "enrich_local_port", side_effect=fake_local)
+
+
+# ---------------------------------------------------------------------------
+# Serial verify-row escaping
+# ---------------------------------------------------------------------------
+@pytest.mark.django_db
+class TestSerialVerifyRowEscaping:
+    """A hostile LibreNMS-sourced serial label must come back escaped from the verify-row
+    renderer (the interface path has TestXSSEscaping; this pins the serial sibling)."""
+
+    def test_hostile_label_is_escaped(self):
+        import json
+
+        from django.core.cache import cache
+
+        from netbox_librenms_plugin.tests.test_serial_cables_view import _make_request_json
+        from netbox_librenms_plugin.views.base.cables_view import SingleCableVerifyView
+
+        acs, (csp,), _ = make_serial_device("xss-ser", csp_names=["ttyS1"])
+        hostile = '<script>alert("xss")</script>'
+        link = _serial_row(csp, hostile, acs)
+        link["local_port_id"] = f"serial:{csp.pk}-s"
+
+        from unittest.mock import MagicMock
+
+        view = object.__new__(SingleCableVerifyView)
+        view._librenms_api = MagicMock(server_key="default")
+        cache.set(view.get_cache_key(acs, "links", "default"), {"links": [link]}, timeout=300)
+
+        request = _make_request_json(
+            {"device_id": acs.id, "local_port_id": link["local_port_id"], "server_key": "default"}
+        )
+        row = json.loads(view.post(request).content)["formatted_row"]
+
+        assert "<script>" not in row["remote_device"]
+        assert "&lt;script&gt;" in row["remote_device"]
 
 
 # ---------------------------------------------------------------------------
