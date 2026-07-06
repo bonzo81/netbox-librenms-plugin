@@ -677,7 +677,11 @@ class LibreNMSAPIMixin:
                     "is_legacy": True,
                     "server_key": "default",
                 }
-        except (KeyError, AttributeError, ImportError):
+        except (KeyError, AttributeError, ImportError, ValueError):
+            # ValueError: reading self.librenms_api with no client bound reconstructs
+            # LibreNMSAPI(), which raises on a misconfigured default. That happens on the
+            # degraded render paths (stale ?server_key + broken default), where the header
+            # must show the configuration error rather than 500 the page.
             return {
                 "display_name": "Unknown Server",
                 "url": "Configuration error",

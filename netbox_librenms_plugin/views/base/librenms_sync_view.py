@@ -213,8 +213,12 @@ class BaseLibreNMSSyncView(LibreNMSPermissionMixin, LibreNMSAPIMixin, generic.Ob
                 # Active server key, so the create-platform modal (included without `only`, hence
                 # inheriting this context) forwards it as a hidden field — otherwise
                 # CreateAndAssignPlatformView redirects back to the default-server tab, dropping
-                # the non-default server context the user was acting on.
-                "server_key": self.librenms_api.server_key,
+                # the non-default server context the user was acting on. Use the resolved render
+                # key, NOT the lazy librenms_api property: on the stale-?server_key path with a
+                # misconfigured default no client is bound, so the property would reconstruct
+                # LibreNMSAPI() and 500 the degraded render; the render key also keeps the page's
+                # forms scoped to the requested (gone) server so they fail closed server-side.
+                "server_key": self._render_server_key or self.active_server_key,
                 "v1v2form": AddToLIbreSNMPV1V2(prefix="v1v2"),
                 "v3form": AddToLIbreSNMPV3(prefix="v3"),
                 "librenms_device_id": self.librenms_id,
@@ -226,7 +230,10 @@ class BaseLibreNMSSyncView(LibreNMSPermissionMixin, LibreNMSAPIMixin, generic.Ob
                 "platform_info": platform_info,
                 "vc_inventory_serials": librenms_info["librenms_device_details"].get("vc_inventory_serials", []),
                 "manufacturers": manufacturers,
-                "all_server_mappings": self._build_all_server_mappings(_lookup_device, self.librenms_api.server_key),
+                # Same safe accessor as "server_key" above — only the is_active highlight needs it.
+                "all_server_mappings": self._build_all_server_mappings(
+                    _lookup_device, self._render_server_key or self.active_server_key
+                ),
                 "librenms_id_is_legacy": librenms_id_is_legacy,
                 "librenms_id_serial_confirmed": librenms_id_serial_confirmed,
                 # Lookup device may differ from object (e.g. VC master vs member).
