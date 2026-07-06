@@ -75,7 +75,9 @@ class LibreNMSCableTable(tables.Table):
         """Render the remote device (preferring the derived display name) as a link if available."""
         # remote_device_display carries the cable's real far end / a manual pick's device name;
         # the raw remote_device (LibreNMS label) stays pristine in the cache for re-enrichment.
-        display = record.get("remote_device_display") or value
+        # Normalize None to "" like render_local_port — an unconfigured serial row with no
+        # remote device name would otherwise render the literal "None" through format_html.
+        display = record.get("remote_device_display") or value or ""
         if url := record.get("remote_device_url"):
             return format_html('<a href="{}">{}</a>', url, display)
         # Serial rows: dim unconfigured ports (label was never customised)

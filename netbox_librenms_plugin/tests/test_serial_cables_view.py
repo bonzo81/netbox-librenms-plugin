@@ -576,6 +576,18 @@ class TestCableTableSerialRendering:
         assert "text-muted" not in html
         assert "fst-italic" not in html
 
+    def test_unconfigured_serial_port_with_no_remote_name_renders_empty_not_none(self):
+        """A serial row with no remote device name must not render the literal 'None'.
+
+        render_local_port already normalizes (value or "") for the same reason; the
+        dimmed serial-row branch passes the display value into format_html, which would
+        stringify a None into visible "None" text in the UI.
+        """
+        table = self._make_table()
+        record = {"_source": "serial", "is_configured": False, "remote_device_url": None}
+        html = str(table.render_remote_device(None, record))
+        assert "None" not in html
+
     def test_serial_with_url_renders_link_and_badge(self):
         """When CSP URL is set, renders linked port name with Serial badge."""
         table = self._make_table()
