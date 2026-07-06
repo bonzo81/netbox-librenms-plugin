@@ -2,7 +2,7 @@ import logging
 import re
 from urllib.parse import quote_plus
 
-from dcim.models import ConsoleServerPort, Device, Interface
+from dcim.models import ConsolePort, ConsoleServerPort, Device, Interface
 from django.contrib import messages
 from django.core.cache import cache
 from django.core.exceptions import MultipleObjectsReturned
@@ -18,6 +18,9 @@ from netbox_librenms_plugin.tables.cables import SERIAL_BADGE_HTML
 from netbox_librenms_plugin.utils import (
     cache_remaining_ttl,
     build_librenms_id_qs,
+    cable_far_terminations,
+    cable_has_librenms_tag,
+    cable_path_reaches,
     coerce_librenms_id,
     get_interface_name_field,
     get_librenms_oob,
@@ -712,33 +715,77 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObject
         return link
 
     def check_cable_status(self, link):
-        """Check cable status and add cable URL if cable exists in NetBox."""
+        """
+        Check cable status against the LibreNMS-desired connection and set the sync affordance.
+
+        States (``cable_status`` / ``can_create_cable``):
+
+        - ``"No Cable"`` / True — neither end cabled; sync creates the cable.
+        - ``"Cable Found"`` / untagged-only — the desired connection is already cabled directly.
+          When the cable lacks the librenms tag a sync merely adopts it (``tag_only`` in
+          :func:`~netbox_librenms_plugin.utils.classify_cable_action`); when already tagged
+          there is nothing to do.
+        - ``"Connected via Patch Path"`` / False — both ends cabled and the traced path reaches
+          the LibreNMS target through patch panels: a remodel is a better model of the same
+          link, so no re-sync is offered.
+        - ``"Cable Mismatch"`` / True — cabled somewhere that does NOT reach the target; a
+          re-sync is offered and the classify gate decides (silent overwrite only for a
+          plugin-owned cable, force-confirm modal otherwise).
+        """
         local_interface_id = link.get("netbox_local_interface_id")
         remote_interface_id = link.get("netbox_remote_interface_id")
 
-        # Default state
+        # Default state. OOB-controller rows are context-only (shared-LOM detection) and are
+        # skipped by SyncCablesView.process_single_interface, so they must never offer a Sync
+        # Cable action in ANY state: an OOB row whose shared-name local port resolves to a host
+        # interface would otherwise present a dead button (in both the table render and the
+        # verify response, which both gate the action on can_create_cable).
         link["can_create_cable"] = False
+        actionable = link.get("_source") != "oob"
 
         if local_interface_id and remote_interface_id:
             local_interface = Interface.objects.get(pk=local_interface_id)
             remote_interface = Interface.objects.get(pk=remote_interface_id)
-            existing_cable = local_interface.cable or remote_interface.cable
+            local_cable = local_interface.cable
+            remote_cable = remote_interface.cable
 
-            if existing_cable:
+            if local_cable is None and remote_cable is None:
+                link["cable_status"] = "No Cable"
+                link["can_create_cable"] = actionable
+            elif local_cable is not None and local_cable == remote_cable:
+                # The desired connection is already cabled directly. Offer a sync only while
+                # the cable is untagged — it then just adopts (tags) the cable, never recreates.
                 link.update(
                     {
                         "cable_status": "Cable Found",
-                        "cable_url": reverse("dcim:cable", args=[existing_cable.pk]),
+                        "cable_url": reverse("dcim:cable", args=[local_cable.pk]),
+                    }
+                )
+                link["can_create_cable"] = actionable and not cable_has_librenms_tag(local_cable)
+            elif (
+                local_cable is not None
+                and remote_cable is not None
+                and cable_path_reaches(local_interface, remote_termination=remote_interface)
+            ):
+                # A remodeled multi-segment path (through patch panels) that still reaches the
+                # LibreNMS target: the link is correct, just modeled in more detail.
+                link.update(
+                    {
+                        "cable_status": "Connected via Patch Path",
+                        "cable_url": reverse("dcim:cable", args=[local_cable.pk]),
                     }
                 )
             else:
-                link["cable_status"] = "No Cable"
-                # OOB-controller rows are context-only (shared-LOM detection) and are skipped by
-                # SyncCablesView.process_single_interface, so they must never offer a Sync Cable
-                # action: an OOB row whose shared-name local port resolves to a host interface
-                # would otherwise present a dead button (in both the table render and the verify
-                # response, which both gate the action on can_create_cable).
-                link["can_create_cable"] = link.get("_source") != "oob"
+                # Cabled somewhere that does not reach the LibreNMS target: offer a re-sync,
+                # gated by classify_cable_action (silent only for plugin-owned cables).
+                occupying_cable = local_cable or remote_cable
+                link.update(
+                    {
+                        "cable_status": "Cable Mismatch",
+                        "cable_url": reverse("dcim:cable", args=[occupying_cable.pk]),
+                    }
+                )
+                link["can_create_cable"] = actionable
         else:
             link["cable_status"] = (
                 "Both Interfaces Not Found in Netbox"
@@ -778,14 +825,23 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObject
             link["cable_status"] = "No Cable"
         return link
 
-    def enrich_serial_remote(self, link, claimed_cp_ids=None):
+    def enrich_serial_remote(self, link, claimed_cp_ids=None, csp=None):
         """
         Resolve the remote ConsolePort for a serial row using the Avocent label.
 
-        Only called when the local ConsoleServerPort is found and has no cable. Tries to
-        match the label to a NetBox device by name, then picks the first uncabled
-        ConsolePort on that device. If successful, sets ``netbox_remote_interface_id``
-        and ``can_create_cable = True`` so the existing sync action can create the cable.
+        Called whenever the local ConsoleServerPort is found. Matches the label to a NetBox
+        device by name, then resolves against the CSP's cable state:
+
+        - CSP un-cabled: pick the first uncabled ConsolePort on the label device and set
+          ``can_create_cable = True`` so the sync action can create the cable.
+        - CSP cabled directly to a ConsolePort ON the label device: the desired connection
+          already exists — resolve the remote to THAT port (never a fresh free one) and offer
+          a sync only while the cable is untagged (it then just adopts/tags the cable).
+        - CSP cabled and the traced path reaches the label device through patch panels: a
+          remodel of the same link — mark ``"Connected via Patch Path"``, no action.
+        - CSP cabled somewhere that does not reach the label device: ``"Cable Mismatch"`` —
+          pick a free ConsolePort as the re-point target; the sync's classify gate protects
+          any cable the plugin does not solely own.
 
         Args:
             link (dict): The serial cable-sync row, mutated in place with the resolved
@@ -795,6 +851,8 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObject
                 rows resolving to the same remote device don't both target the same uncabled
                 ConsolePort — which would create one cable and then misreport the second as a
                 "duplicate" while a genuinely free port stays uncabled.
+            csp: The ConsoleServerPort already loaded for this row (reused when it matches the
+                resolved id, saving a re-fetch by pk).
 
         Returns:
             None
@@ -810,6 +868,35 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObject
 
         link["remote_device_url"] = reverse("dcim:device", args=[device.pk])
         link["netbox_remote_device_id"] = device.pk
+
+        csp_id = link.get("netbox_local_interface_id")
+        if csp is None or csp.pk != csp_id:
+            try:
+                csp = ConsoleServerPort.objects.get(pk=csp_id)
+            except ConsoleServerPort.DoesNotExist:
+                return
+
+        if csp.cable is not None:
+            # Already cabled: adopted-match / remodeled-path / mismatch (see docstring).
+            far_cp = next(
+                (
+                    termination
+                    for termination in cable_far_terminations(csp.cable, csp)
+                    if isinstance(termination, ConsolePort) and termination.device_id == device.pk
+                ),
+                None,
+            )
+            if far_cp is not None:
+                link["netbox_remote_interface_id"] = far_cp.pk
+                link["remote_port_name"] = far_cp.name
+                link["remote_port_url"] = reverse("dcim:consoleport", args=[far_cp.pk])
+                link["can_create_cable"] = not cable_has_librenms_tag(csp.cable)
+                return
+            if cable_path_reaches(csp, remote_device=device):
+                link["cable_status"] = "Connected via Patch Path"
+                return
+            link["cable_status"] = "Cable Mismatch"
+            # Fall through to the free-port pick: the re-sync re-points at the label device.
 
         if claimed_cp_ids is None:
             claimed_cp_ids = set()
@@ -873,9 +960,10 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObject
                 # on a VC-member page that would default the per-row member dropdown (and the
                 # sync target) to the wrong member. Reuse the CSP enrich_local_port just loaded.
                 self.check_serial_cable_status(link, csp=csp)
-                # If CSP is found and has no cable, try to match remote device + ConsolePort.
-                if link.get("netbox_local_interface_id") and link.get("cable_status") == "No Cable":
-                    self.enrich_serial_remote(link, claimed_cp_ids=claimed_remote_cp_ids)
+                # If CSP is found, resolve the remote against the label — for cabled rows too,
+                # so the row can offer adopt (matched untagged) or re-sync (mismatch) actions.
+                if link.get("netbox_local_interface_id"):
+                    self.enrich_serial_remote(link, claimed_cp_ids=claimed_remote_cp_ids, csp=csp)
                 continue
 
             link["device_id"] = obj.id
@@ -1160,8 +1248,9 @@ class SingleCableVerifyView(BaseCableTableView):
         """
         csp = self.enrich_local_port(link_data, selected_device, server_key=server_key)
         self.check_serial_cable_status(link_data, csp=csp)
-        if link_data.get("netbox_local_interface_id") and link_data.get("cable_status") == "No Cable":
-            self.enrich_serial_remote(link_data)
+        # Mirror enrich_links_data: resolve the remote for cabled rows too (adopt / mismatch).
+        if link_data.get("netbox_local_interface_id"):
+            self.enrich_serial_remote(link_data, csp=csp)
 
         # Shared constant so the verify-row badge can't drift from the table render.
         serial_badge = SERIAL_BADGE_HTML

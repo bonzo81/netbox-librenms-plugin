@@ -847,7 +847,7 @@ class TestBaseCableTableViewCheckCableStatus:
 
     @pytest.mark.django_db
     def test_cable_found_sets_cable_url(self):
-        """A real cable between the two interfaces → cable_status='Cable Found' + cable_url."""
+        """A real cable between the two interfaces → cable_status='Cable Found' + cable_url; untagged, so a sync is offered (it adopts/tags, never recreates)."""
         from netbox_librenms_plugin.tests.conftest import cable_together
 
         view = self._make_view()
@@ -861,7 +861,7 @@ class TestBaseCableTableViewCheckCableStatus:
 
         assert result["cable_status"] == "Cable Found"
         assert result["cable_url"].endswith(f"/dcim/cables/{cable.pk}/")
-        assert result["can_create_cable"] is False
+        assert result["can_create_cable"] is True  # untagged matched cable: sync adopts it
 
     @pytest.mark.django_db
     def test_no_cable_sets_can_create_cable(self):

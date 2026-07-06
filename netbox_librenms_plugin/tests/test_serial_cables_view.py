@@ -588,13 +588,14 @@ class TestEnrichSerialRemote:
         """When the label matches a device with an uncabled ConsolePort, sets can_create_cable + the remote port (real Device/ConsolePort)."""
         view = _make_view()
         device, _, (cp,) = make_serial_device("prod-router-uncabled", cp_names=["con0"])
+        _local, (local_csp,), _ = make_serial_device("acs-uncabled-local", csp_names=["ttyS7"])
 
         link = {
             "local_port": "ttyS7",
             "local_port_id": "serial:1007",
             "_source": "serial",
             "remote_device": device.name,
-            "netbox_local_interface_id": 99,
+            "netbox_local_interface_id": local_csp.pk,
             "cable_status": "No Cable",
         }
 
@@ -637,10 +638,12 @@ class TestEnrichSerialRemote:
         view = _make_view()
         device, _, (cp,) = make_serial_device("prod-router-allcabled", cp_names=["con0"])
         _, (peer_csp,), _ = make_serial_device("peer-allcabled", csp_names=["s0"])
+        _local, (local_csp,), _ = make_serial_device("acs-allcabled-local", csp_names=["ttyS7"])
         cable_together(cp, peer_csp)  # the device's only ConsolePort is now cabled
 
         link = {
             "remote_device": device.name,
+            "netbox_local_interface_id": local_csp.pk,
             "cable_status": "No Cable",
         }
 
@@ -656,12 +659,13 @@ class TestEnrichSerialRemote:
         view = _make_view()
         # Create CPs out of alphabetical order to prove ordering isn't insertion order.
         router, _, cps = make_serial_device("router-det", cp_names=["con-z", "con-a", "con-m"])
+        _local, (local_csp,), _ = make_serial_device("acs-det-local", csp_names=["ttyS7"])
 
         link = {
             "local_port": "ttyS7",
             "_source": "serial",
             "remote_device": "router-det",
-            "netbox_local_interface_id": 99,
+            "netbox_local_interface_id": local_csp.pk,
             "cable_status": "No Cable",
         }
 
@@ -686,20 +690,22 @@ class TestEnrichSerialRemote:
         assert link["can_create_cable"] is True
 
     @pytest.mark.django_db
-    def test_enrich_links_data_skips_remote_when_cable_found(self):
-        """A serial row whose CSP already has a cable does NOT get a remote resolution / Sync action (real DB)."""
+    def test_enrich_links_data_resolves_remote_for_cabled_rows(self):
+        """A serial row whose CSP already has a cable STILL attempts remote resolution — cabled rows need it to offer adopt (matched untagged) / re-sync (mismatch) actions; an unresolvable label leaves the row inactionable (real DB)."""
         view = _make_view()
         local, (csp,), _ = make_serial_device("acs-cabled", csp_names=["ttyS3"])
         _, _, (peer_cp,) = make_serial_device("peer-cabled", cp_names=["con0"])
         cable_together(csp, peer_cp)  # the CSP now has a cable
         link = {"local_port": "ttyS3", "_source": "serial", "remote_device": "irrelevant", "device_id": local.id}
 
-        with patch.object(view, "get_device_by_id_or_name") as mock_lookup:
+        with patch.object(view, "get_device_by_id_or_name", return_value=(None, False, None)) as mock_lookup:
             view.enrich_links_data([link], local)
 
+        mock_lookup.assert_called_once()  # cabled rows now go through enrich_serial_remote
+        # Label didn't resolve: cabled but no LibreNMS target to compare against — no action.
         assert link["cable_status"] == "Cable Found"
         assert "netbox_remote_interface_id" not in link
-        mock_lookup.assert_not_called()  # enrich_serial_remote (which performs the lookup) was skipped
+        assert link["can_create_cable"] is False
 
 
 # ---------------------------------------------------------------------------
@@ -926,19 +932,26 @@ class TestSingleCableVerifySerial:
         assert "No Cable" in row["cable_status"]
         assert "Sync Cable" in row["actions"]
 
-    def test_serial_row_with_existing_cable_offers_no_sync(self):
+    def _verify_cabled_row(self, name, *, tag_cable):
+        """Verify a serial row whose CSP is already cabled to its label device; optionally librenms-tagged."""
+        import json as _json
+
         from django.core.cache import cache
 
-        acs, csps, _ = make_serial_device("acs-verify2", csp_names=["ttyS9"])
-        router, _, cps = make_serial_device("router-y", cp_names=["console"])
+        acs, csps, _ = make_serial_device(f"acs-{name}", csp_names=["ttyS9"])
+        router, _, cps = make_serial_device(f"router-{name}", cp_names=["console"])
         csp = csps[0]
-        cable_together(csp, cps[0])  # already cabled
+        cable = cable_together(csp, cps[0])  # already cabled to the label-matched device
+        if tag_cable:
+            from netbox_librenms_plugin.utils import get_librenms_cable_tag
+
+            cable.tags.add(get_librenms_cable_tag())
 
         link = {
             "local_port": "ttyS9",
             "local_port_id": f"serial:{csp.pk}-sensor",
             "_source": "serial",
-            "remote_device": "router-y",
+            "remote_device": f"router-{name}",
             "remote_port": None,
             "remote_device_id": None,
             "device_id": acs.id,
@@ -953,9 +966,17 @@ class TestSingleCableVerifySerial:
         request = _make_request_json(
             {"device_id": acs.id, "local_port_id": link["local_port_id"], "server_key": "default"}
         )
-        import json as _json
+        return _json.loads(view.post(request).content)["formatted_row"]
 
-        row = _json.loads(view.post(request).content)["formatted_row"]
+    def test_serial_row_with_matched_untagged_cable_offers_adopt(self):
+        """A CSP cabled directly to its label device with an UNTAGGED cable offers Sync — adopting (tagging) the cable, never recreating it."""
+        row = self._verify_cabled_row("verify2", tag_cable=False)
+        assert "Cable Found" in row["cable_status"]
+        assert "Sync Cable" in row["actions"]
+
+    def test_serial_row_with_matched_tagged_cable_offers_no_sync(self):
+        """A CSP cabled directly to its label device with the librenms tag already applied has nothing to do — no Sync action."""
+        row = self._verify_cabled_row("verify3", tag_cable=True)
         assert "Cable Found" in row["cable_status"]
         assert "Sync Cable" not in row["actions"]
 
@@ -1010,16 +1031,17 @@ class TestSerialRemoteCollisionDedup:
     def test_enrich_serial_remote_excludes_claimed_ports(self):
         view = _make_view()
         remote, _, (cp_a, cp_b) = make_serial_device("router-collide", cp_names=["con-a", "con-b"])
+        _local, (csp1, csp2), _ = make_serial_device("acs-collide-local", csp_names=["ttyS1", "ttyS2"])
         link1 = {
             "_source": "serial",
             "remote_device": remote.name,
-            "netbox_local_interface_id": 1,
+            "netbox_local_interface_id": csp1.pk,
             "cable_status": "No Cable",
         }
         link2 = {
             "_source": "serial",
             "remote_device": remote.name,
-            "netbox_local_interface_id": 2,
+            "netbox_local_interface_id": csp2.pk,
             "cable_status": "No Cable",
         }
         claimed = set()

@@ -600,6 +600,56 @@ def classify_cable_action(local_term, remote_term) -> dict:
     return {"action": "needs_force", "to_remove": to_remove, "cable": None}
 
 
+def cable_far_terminations(cable, near_termination) -> list:
+    """
+    Return the terminations on the opposite side of *cable* from *near_termination*.
+
+    The direct far end of one physical cable — NOT the traced path end (see
+    :func:`cable_path_reaches` for that). Used to tell whether an existing cable already lands
+    on the LibreNMS-desired endpoint.
+
+    Args:
+        cable: The NetBox ``Cable`` to inspect.
+        near_termination: The termination whose opposite side is wanted.
+
+    Returns:
+        list: The other side's terminations (``b_terminations`` when *near_termination* is on
+            the A side, else ``a_terminations``).
+    """
+    a_terminations = list(cable.a_terminations)
+    if near_termination in a_terminations:
+        return list(cable.b_terminations)
+    return a_terminations
+
+
+def cable_path_reaches(termination, remote_termination=None, remote_device=None) -> bool:
+    """
+    Return True when *termination*'s traced cable path ends at the given remote.
+
+    Follows patch-panel front/rear pass-throughs via ``termination.trace()``, so a remodeled
+    multi-segment path still counts as "reaching" its end device — the basis for treating a
+    remodel as a better model of the same link rather than a mismatch to re-sync.
+
+    Args:
+        termination: The near-side termination (Interface / ConsoleServerPort) to trace from.
+        remote_termination: Match when the path ends at exactly this termination.
+        remote_device: Match when the path ends at ANY port on this device — the serial case,
+            where the LibreNMS label only identifies the device, not the port.
+
+    Returns:
+        bool: True when the traced path's far end matches either criterion.
+    """
+    path = termination.trace()
+    if not path:
+        return False
+    for far_termination in path[-1][2] or []:
+        if remote_termination is not None and far_termination == remote_termination:
+            return True
+        if remote_device is not None and getattr(far_termination, "device_id", None) == remote_device.pk:
+            return True
+    return False
+
+
 def _termination_label(terminations) -> str:
     """Render a trace node's terminations as ``Device: Port`` (comma-joined), or a dash if empty."""
     labels = []
