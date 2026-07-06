@@ -183,6 +183,10 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libre
             "interface": display_name,
             "port_id": str(link_data.get("local_port_id", "")),
             "trace": [render_cable_trace(cable) for cable in decision["to_remove"]],
+            # Only the endpoint-attached segment(s) are ever deleted — patch-panel trunks and
+            # other mid-path segments carry other circuits and always stay. The modal uses these
+            # labels to mark precisely which trace hops die.
+            "removed_cables": [f"#{cable.pk}" for cable in decision["to_remove"]],
         }
 
     def validate_prerequisites(self, cached_links, selected_interfaces):

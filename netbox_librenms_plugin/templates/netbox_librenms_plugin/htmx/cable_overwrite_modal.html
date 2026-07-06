@@ -37,9 +37,10 @@ Context: conflicts (list of {interface, port_id, trace}), server_key, device_pk.
                 already terminate{{ conflicts|length|pluralize:"s," }} an existing cable — one this
                 plugin does not solely own (a different tag, an extra tag, or no tag at all), or one
                 being re-pointed by a manually picked remote. Forcing the sync will
-                <strong>delete the full path{{ conflicts|length|pluralize }}
-                shown below</strong> — including any patch-panel segments — and replace
-                {{ conflicts|length|pluralize:"it,them" }} with a single LibreNMS-managed cable.
+                <strong>delete only the highlighted segment{{ conflicts|length|pluralize }}</strong>
+                directly attached to the endpoints — patch-panel trunks and the rest of the
+                path{{ conflicts|length|pluralize }} shown below stay in place — and connect the
+                port{{ conflicts|length|pluralize }} with a single LibreNMS-managed cable.
             </div>
         </div>
 
@@ -51,7 +52,7 @@ Context: conflicts (list of {interface, port_id, trace}), server_key, device_pk.
                 {% for hop in trace %}
                 <li>
                     {{ hop.near }}
-                    {% if hop.cable %}<span class="text-danger">──[{{ hop.cable }}]──</span>{% else %}<span class="text-muted">════</span>{% endif %}
+                    {% if hop.cable %}{% if hop.cable in conflict.removed_cables %}<span class="text-danger">──[{{ hop.cable }}]──</span> <span class="badge bg-danger text-white">deleted</span>{% else %}<span class="text-body">──[{{ hop.cable }}]──</span> <span class="text-muted small">(stays)</span>{% endif %}{% else %}<span class="text-muted">════</span>{% endif %}
                     {{ hop.far }}
                 </li>
                 {% empty %}
@@ -66,7 +67,7 @@ Context: conflicts (list of {interface, port_id, trace}), server_key, device_pk.
             <input class="form-check-input" type="checkbox" id="cable-force-confirm"
                    onchange="document.getElementById('cable-force-submit').disabled = !this.checked">
             <label class="form-check-label fw-semibold text-danger" for="cable-force-confirm">
-                I understand this will permanently delete the cable path{{ conflicts|length|pluralize }} above.
+                I understand this will permanently delete the highlighted cable segment{{ conflicts|length|pluralize }} above.
             </label>
         </div>
     </div>

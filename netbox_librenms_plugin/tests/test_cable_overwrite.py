@@ -368,6 +368,100 @@ class TestCableOverwriteHtmxModal:
 
 
 # ---------------------------------------------------------------------------
+# Overwrite scope: only endpoint segments die; trunks and mid-path stay
+# ---------------------------------------------------------------------------
+@pytest.mark.django_db
+class TestOverwritePreservesMidPathSegments:
+    """A forced re-point must delete ONLY the cable segment(s) directly attached to the two
+    endpoints. Patch-panel trunks (rear-to-rear inter-rack cables) and every other mid-path
+    segment carry OTHER circuits and are permanent infrastructure — they must survive, and
+    the warning modal must say precisely which segment dies and that the rest stays.
+    """
+
+    def _panel_path(self, name):
+        """csp --c1-- FrontPort | RearPort --c2 (trunk-ish)-- ConsolePort@end."""
+        from dcim.models import FrontPort, PortMapping, RearPort
+
+        acs, (csp,), _ = make_serial_device(f"acs-{name}", csp_names=["ttyS1"])
+        panel = make_device(f"panel-{name}")
+        rp = RearPort.objects.create(device=panel, name="R1", type="8p8c", positions=1)
+        fp = FrontPort.objects.create(device=panel, name="F1", type="8p8c", positions=1)
+        PortMapping.objects.create(
+            device=panel, front_port=fp, rear_port=rp, front_port_position=1, rear_port_position=1
+        )
+        end, _, (cp,) = make_serial_device(f"end-{name}", cp_names=["console"])
+        c1 = cable_together(csp, fp)
+        c2 = cable_together(rp, cp)
+        return acs, csp, c1, c2
+
+    def test_force_repoint_deletes_only_the_endpoint_segment(self):
+        from dcim.models import Cable
+
+        acs, csp, c1, c2 = self._panel_path("midkeep")
+        _t, _, (target_cp,) = make_serial_device("midkeep-target", cp_names=["console"])
+
+        link = _serial_link(csp, target_cp)
+        result = _sync_view().handle_serial_cable_creation(link, {"device_id": acs.id}, force=True)
+
+        assert result["status"] == "overwritten"
+        assert not Cable.objects.filter(pk=c1.pk).exists()  # endpoint segment gone
+        assert Cable.objects.filter(pk=c2.pk).exists()  # the trunk-side segment SURVIVES
+        csp.refresh_from_db()
+        target_cp.refresh_from_db()
+        assert csp.cable_id == target_cp.cable_id
+
+    def test_conflict_names_exactly_the_segments_to_remove(self):
+        acs, csp, c1, c2 = self._panel_path("midname")
+        _t, _, (target_cp,) = make_serial_device("midname-target", cp_names=["console"])
+
+        result = _sync_view().handle_serial_cable_creation(_serial_link(csp, target_cp), {"device_id": acs.id})
+
+        assert result["status"] == "conflict"
+        assert result["removed_cables"] == [f"#{c1.pk}"]  # only the endpoint segment, never c2
+
+    def test_modal_marks_deleted_segment_and_keeps_the_rest(self):
+        """E2E: the warning modal highlights the doomed endpoint segment and labels the rest of
+        the path as staying — it must NOT claim panel segments get deleted."""
+        from django.contrib.auth import get_user_model
+        from django.core.cache import cache
+        from django.test import Client
+        from django.urls import reverse
+
+        from netbox_librenms_plugin.views.sync.cables import SyncCablesView
+
+        acs, csp, c1, c2 = self._panel_path("midmodal")
+        _t, _, (target_cp,) = make_serial_device("midmodal-target", cp_names=["console"])
+
+        link = _serial_link(csp, target_cp)
+        link["local_port"] = "ttyS1"
+        link["_source"] = "serial"
+        link["device_id"] = acs.id
+        key_view = object.__new__(SyncCablesView)
+        cache.set(key_view.get_cache_key(acs, "links", "default"), {"links": [link]}, timeout=300)
+
+        user = get_user_model().objects.create_superuser("midmodal-admin", "midmodal@example.com", "pw")
+        client = Client()
+        client.force_login(user)
+        resp = client.post(
+            reverse("plugins:netbox_librenms_plugin:sync_device_cables", args=[acs.pk]),
+            data={"select": link["local_port_id"], "server_key": "default"},
+            HTTP_HX_REQUEST="true",
+        )
+
+        assert resp.status_code == 200
+        content = resp.content.decode()
+        assert 'id="cable-force-submit"' in content
+        # The doomed endpoint segment is explicitly marked deleted...
+        assert content.count(">deleted<") == 1
+        assert f"#{c1.pk}" in content
+        # ...the rest of the path is explicitly marked as staying...
+        assert "stays" in content
+        assert f"#{c2.pk}" in content
+        # ...and the old scary claim about deleting panel segments is gone.
+        assert "including any" not in content
+
+
+# ---------------------------------------------------------------------------
 # Overwrite requires the delete permission
 # ---------------------------------------------------------------------------
 @pytest.mark.django_db
