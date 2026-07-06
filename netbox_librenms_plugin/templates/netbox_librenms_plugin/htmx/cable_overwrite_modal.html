@@ -32,8 +32,9 @@ Context: conflicts (list of {interface, port_id, trace}), server_key, device_pk.
             <i class="mdi mdi-alert me-2 mt-1"></i>
             <div>
                 <strong>{{ conflicts|length }} selected port{{ conflicts|length|pluralize }}</strong>
-                already terminate{{ conflicts|length|pluralize:"s," }} a cable that this plugin does not solely
-                own (a different tag, an extra tag, or no tag at all). Forcing the sync will
+                already terminate{{ conflicts|length|pluralize:"s," }} an existing cable — one this
+                plugin does not solely own (a different tag, an extra tag, or no tag at all), or one
+                being re-pointed by a manually picked remote. Forcing the sync will
                 <strong>delete the full path{{ conflicts|length|pluralize }}
                 shown below</strong> — including any patch-panel segments — and replace
                 {{ conflicts|length|pluralize:"it,them" }} with a single LibreNMS-managed cable.

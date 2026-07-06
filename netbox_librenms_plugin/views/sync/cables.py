@@ -141,6 +141,13 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libre
         decision = classify_cable_action(local_term, remote_term)
         action = decision["action"]
 
+        # A manually picked remote (CableRemotePickerView) re-pointing over an EXISTING cable
+        # always confirms through the warning modal — even a plugin-owned one. The silent
+        # safe-overwrite is reserved for LibreNMS-driven re-points (refresh data moved); a
+        # human-initiated change of a live cable gets the full trace and the force checkbox.
+        if action == "safe_overwrite" and link_data.get("manual_remote_id"):
+            action = "needs_force"
+
         if action == "noop":
             # The desired cable already exists and is already tagged — nothing to do.
             return {"status": "duplicate", "interface": display_name}

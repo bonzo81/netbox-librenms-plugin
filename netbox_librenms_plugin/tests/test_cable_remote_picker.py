@@ -400,3 +400,225 @@ def _patch_local_port_resolution(view, interface):
         return None
 
     return patch.object(view, "enrich_local_port", side_effect=fake_local)
+
+
+# ---------------------------------------------------------------------------
+# Re-pointing an EXISTING cable via the picker (always modal-confirmed)
+# ---------------------------------------------------------------------------
+@pytest.mark.django_db
+class TestManualRepointOfExistingCable:
+    """Cabled rows offer the picker too, and a manual re-point ALWAYS confirms through the
+    warning modal — even over a plugin-owned cable. The silent safe-overwrite is reserved for
+    LibreNMS-driven re-points (refresh data moved); a human-initiated change of a live cable
+    gets the full-trace warning and the force checkbox.
+    """
+
+    def test_tagged_cabled_row_offers_the_picker(self):
+        """A satisfied (tagged Cable Found) row still offers the pick-remote action so the cable can be changed."""
+        acs, (csp,), _ = make_serial_device("repoint-aff", csp_names=["ttyS1"])
+        _r, _, (cp,) = make_serial_device("repoint-aff-r", cp_names=["console"])
+        cable = cable_together(csp, cp)
+        cable.tags.add(_librenms_tag())
+
+        link = _make_view().enrich_links_data([_serial_row(csp, "repoint-aff-r", acs)], acs, server_key="default")[0]
+
+        assert link["can_create_cable"] is False  # nothing to sync as-is
+        assert link.get("picker_url")  # ...but the cable can be re-pointed
+
+    def test_patch_path_row_offers_the_picker(self):
+        """A Connected-via-Patch-Path row offers the picker (re-pointing replaces the whole path, modal-confirmed)."""
+        from dcim.models import FrontPort, PortMapping, RearPort
+
+        acs, (csp,), _ = make_serial_device("repoint-path", csp_names=["ttyS1"])
+        panel = make_device("repoint-path-pp")
+        rp = RearPort.objects.create(device=panel, name="R1", type="8p8c", positions=1)
+        fp = FrontPort.objects.create(device=panel, name="F1", type="8p8c", positions=1)
+        PortMapping.objects.create(
+            device=panel, front_port=fp, rear_port=rp, front_port_position=1, rear_port_position=1
+        )
+        end, _, (cp,) = make_serial_device("repoint-path-end", cp_names=["console"])
+        cable_together(csp, fp)
+        cable_together(rp, cp)
+
+        link = _make_view().enrich_links_data([_serial_row(csp, "repoint-path-end", acs)], acs, server_key="default")[0]
+
+        assert link["cable_status"] == "Connected via Patch Path"
+        assert link.get("picker_url")
+
+    def test_manual_repoint_over_owned_cable_requires_force(self):
+        """Without force, a manual re-point of a plugin-owned cable defers to the modal (DB untouched)."""
+        from dcim.models import Cable
+
+        from netbox_librenms_plugin.tests.test_cable_overwrite import _serial_link, _sync_view
+
+        acs, (csp,), _ = make_serial_device("repoint-own", csp_names=["ttyS1"])
+        _r, _, (cp_a, cp_b) = make_serial_device("repoint-own-r", cp_names=["console-A", "console-B"])
+        old = cable_together(csp, cp_a)
+        old.tags.add(_librenms_tag())  # plugin-owned: LibreNMS-driven re-point would be silent
+
+        link = _serial_link(csp, cp_b)
+        link["manual_remote_id"] = cp_b.pk  # ...but this re-point is a human decision
+
+        result = _sync_view().handle_serial_cable_creation(link, {"device_id": acs.id})
+
+        assert result["status"] == "conflict"
+        assert result.get("trace")  # the modal shows what would be destroyed
+        assert Cable.objects.filter(pk=old.pk).exists()
+        csp.refresh_from_db()
+        assert csp.cable_id == old.pk
+
+    def test_manual_repoint_with_force_replaces_owned_cable(self):
+        """With force confirmed, the manual re-point deletes the old cable and lands on the pick."""
+        from dcim.models import Cable
+
+        from netbox_librenms_plugin.tests.test_cable_overwrite import _serial_link, _sync_view
+
+        acs, (csp,), _ = make_serial_device("repoint-force", csp_names=["ttyS1"])
+        _r, _, (cp_a, cp_b) = make_serial_device("repoint-force-r", cp_names=["console-A", "console-B"])
+        old = cable_together(csp, cp_a)
+        old.tags.add(_librenms_tag())
+
+        link = _serial_link(csp, cp_b)
+        link["manual_remote_id"] = cp_b.pk
+
+        result = _sync_view().handle_serial_cable_creation(link, {"device_id": acs.id}, force=True)
+
+        assert result["status"] == "overwritten"
+        assert not Cable.objects.filter(pk=old.pk).exists()
+        csp.refresh_from_db()
+        cp_b.refresh_from_db()
+        assert csp.cable_id == cp_b.cable_id
+
+    def test_librenms_driven_repoint_of_owned_cable_stays_silent(self):
+        """No manual pick on the row -> the original safe-overwrite semantics are untouched."""
+        from netbox_librenms_plugin.tests.test_cable_overwrite import _serial_link, _sync_view
+
+        acs, (csp,), _ = make_serial_device("repoint-auto", csp_names=["ttyS1"])
+        _r, _, (cp_a, cp_b) = make_serial_device("repoint-auto-r", cp_names=["console-A", "console-B"])
+        old = cable_together(csp, cp_a)
+        old.tags.add(_librenms_tag())
+
+        result = _sync_view().handle_serial_cable_creation(_serial_link(csp, cp_b), {"device_id": acs.id})
+
+        assert result["status"] == "overwritten"  # silent, as designed for data-driven re-points
+
+    def test_pick_then_sync_pops_modal_then_force_replaces(self):
+        """Full e2e: pick a new remote on a tagged-cabled row -> sync warns via the modal -> force replaces."""
+        from dcim.models import Cable
+        from django.urls import reverse
+
+        client = self._client_e2e("repoint-e2e")
+        acs, csp, old, link, picker_url = self._seed_cabled("repoint-e2e")
+        _t, _, (new_cp,) = make_serial_device("repoint-e2e-target", cp_names=["console"])
+
+        pick = client.post(
+            picker_url,
+            data={"port_id": link["local_port_id"], "server_key": "default", "remote_interface_id": new_cp.pk},
+            HTTP_HX_REQUEST="true",
+        )
+        assert pick.status_code == 200
+
+        sync_url = reverse("plugins:netbox_librenms_plugin:sync_device_cables", args=[acs.pk])
+        resp = client.post(
+            sync_url, data={"select": link["local_port_id"], "server_key": "default"}, HTTP_HX_REQUEST="true"
+        )
+        assert resp.status_code == 200
+        content = resp.content.decode()
+        assert 'id="cable-force-submit"' in content  # the warning modal
+        # ...including the doomed cable's trace (the plan's core requirement for the modal).
+        assert f"#{old.pk}" in content  # the cable segment label
+        assert "console" in content  # the old far-end port appears in the hops
+        assert Cable.objects.filter(pk=old.pk).exists()  # nothing destroyed yet
+
+        forced = client.post(
+            sync_url,
+            data={"select": link["local_port_id"], "server_key": "default", "force": "on"},
+            HTTP_HX_REQUEST="true",
+        )
+        assert forced.status_code == 200
+        assert not Cable.objects.filter(pk=old.pk).exists()
+        csp.refresh_from_db()
+        new_cp.refresh_from_db()
+        assert csp.cable_id == new_cp.cable_id  # re-pointed to the pick
+
+    def test_pick_post_refetches_when_cache_expired(self):
+        """A pick that lands after the snapshot expired re-fetches from LibreNMS instead of erroring."""
+        from unittest.mock import patch
+
+        from django.core.cache import cache
+
+        from netbox_librenms_plugin.views.sync.cables import SyncCablesView
+
+        client = self._client_e2e("expiry-post")
+        acs, csp, _old, link, picker_url = self._seed_cabled("expiry-post")
+        _t, _, (new_cp,) = make_serial_device("expiry-post-target", cp_names=["console"])
+
+        raw_row = dict(link)  # what a fresh LibreNMS fetch would rebuild
+        cache.clear()  # the snapshot expired between render and pick
+
+        with patch(
+            "netbox_librenms_plugin.views.object_sync.devices.DeviceCableTableView.get_links_data",
+            return_value=[raw_row],
+        ):
+            resp = client.post(
+                picker_url,
+                data={"port_id": link["local_port_id"], "server_key": "default", "remote_interface_id": new_cp.pk},
+                HTTP_HX_REQUEST="true",
+            )
+
+        assert resp.status_code == 200
+        key_view = object.__new__(SyncCablesView)
+        cached = cache.get(key_view.get_cache_key(acs, "links", "default"))
+        row = next(r for r in cached["links"] if r["local_port_id"] == link["local_port_id"])
+        assert row["manual_remote_id"] == new_cp.pk  # the pick survived the expiry
+
+    def test_pick_modal_get_refetches_when_cache_expired(self):
+        """Opening the picker after the snapshot expired re-fetches instead of a dead-end warning."""
+        from unittest.mock import patch
+
+        from django.core.cache import cache
+
+        client = self._client_e2e("expiry-get")
+        _acs, _csp, _old, link, picker_url = self._seed_cabled("expiry-get")
+
+        raw_row = dict(link)
+        cache.clear()
+
+        with patch(
+            "netbox_librenms_plugin.views.object_sync.devices.DeviceCableTableView.get_links_data",
+            return_value=[raw_row],
+        ):
+            resp = client.get(picker_url, {"port_id": link["local_port_id"], "server_key": "default"})
+
+        assert resp.status_code == 200
+        content = resp.content.decode()
+        assert 'name="q"' in content  # the real picker, not the cache-expired warning
+        assert "Cache has expired" not in content
+
+    def _client_e2e(self, name):
+        from django.contrib.auth import get_user_model
+        from django.test import Client
+
+        user = get_user_model().objects.create_superuser(f"repoint-{name}", f"{name}@example.com", "pw")
+        client = Client()
+        client.force_login(user)
+        return client
+
+    def _seed_cabled(self, name):
+        """Seed a cache row for a CSP already cabled (tagged) to its label device."""
+        from django.core.cache import cache
+        from django.urls import reverse
+
+        from netbox_librenms_plugin.views.sync.cables import SyncCablesView
+
+        acs, (csp,), _ = make_serial_device(f"acs-{name}", csp_names=["ttyS8"])
+        _r, _, (cp,) = make_serial_device(f"router-{name}", cp_names=["console"])
+        old = cable_together(csp, cp)
+        old.tags.add(_librenms_tag())
+
+        link = _serial_row(csp, f"router-{name}", acs)
+        link["local_port_id"] = f"serial:{csp.pk}-s"
+        key_view = object.__new__(SyncCablesView)
+        cache.set(key_view.get_cache_key(acs, "links", "default"), {"links": [link]}, timeout=300)
+        picker_url = reverse("plugins:netbox_librenms_plugin:cable_remote_picker", args=[acs.pk])
+        return acs, csp, old, link, picker_url

@@ -38,7 +38,10 @@ ports_url, initial_devices (label-matched device prefill, may be empty).
            placeholder="Type to search devices…"
            hx-get="{{ search_url }}" hx-trigger="input changed delay:300ms, search"
            hx-target="#remote-picker-devices" hx-swap="innerHTML">
-    <div id="remote-picker-devices" class="list-group mt-1">
+    {# Not a .list-group: Bootstrap rounds only its first/last children, so a highlighted #}
+    {# middle item would sit square between rounded neighbours. Independent rounded items #}
+    {# (flex + gap) keep the active highlight uniform wherever it lands. #}
+    <div id="remote-picker-devices" class="mt-1 d-flex flex-column gap-1">
       {% if initial_devices %}
         {% include "netbox_librenms_plugin/htmx/_remote_picker_device_results.html" with devices=initial_devices q="" ports_url=ports_url %}
       {% endif %}

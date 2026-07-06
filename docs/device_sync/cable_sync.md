@@ -72,6 +72,10 @@ Remote matching is name-based — the serial label or the LLDP port name — and
 
 The pick is stored on the cached row (marked with a small hand icon in the Remote Port column) and makes it immediately syncable — the sync creates the cable to *your* pick, with the usual provenance stamp. Picks live as long as the cached snapshot: a full **Refresh Cables** rebuilds the rows from LibreNMS and drops unsynced picks, so sync soon after picking.
 
+### Changing an existing cable
+
+The picker is also available on rows that are **already cabled** (including tagged "Cable Found" and "Connected via Patch Path" rows) — picking a different remote re-points the connection. A manual re-point that would remove an existing cable **always** stops at the warning modal first, showing the full path that would be deleted — even when the cable is plugin-owned. (The silent overwrite of plugin-owned cables applies only to LibreNMS-driven re-points, where the refresh data itself moved.)
+
 ## Overwrite protection
 
 Re-running the sync never silently destroys a cable the plugin does not solely own. A cable counts as **plugin-owned** only when its tags are *exactly* `{librenms}` — a foreign tag, an extra tag, or no tags at all mean someone else has a stake in it.

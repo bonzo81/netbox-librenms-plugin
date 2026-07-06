@@ -227,20 +227,6 @@ _RAW_LINK_KEYS = frozenset(
     }
 )
 
-# Row states where manually picking the remote end makes sense (see
-# BaseCableTableView._set_remote_picker_affordance): the local end resolved but the remote is
-# unresolved, free, or pointing at the wrong place. Satisfied states (tagged "Cable Found",
-# "Connected via Patch Path") are deliberately absent.
-_PICKABLE_CABLE_STATUSES = frozenset(
-    {
-        "No Cable",
-        "Cable Mismatch",
-        "Console Port Not Found in NetBox",
-        "Remote Interface Not Found in Netbox",
-        "Device Not Found in NetBox",
-    }
-)
-
 
 class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjectPermissionMixin, CacheMixin, View):
     """Base view for synchronizing cable information from LibreNMS."""
@@ -905,40 +891,26 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObject
 
         label = link.get("remote_device")
         if not label:
+            # Cabled but no hint at all: still show where the cable really goes.
+            if csp.cable is not None:
+                self._display_serial_cable_far_end(link, csp)
             return
 
         device, found, _ = self.get_device_by_id_or_name(None, label)
         if not found:
+            # A dead label must not leave a cabled row's remote columns empty — the cable
+            # knows its far end; show (and link) reality. Display only, no sync target.
+            if csp.cable is not None:
+                self._display_serial_cable_far_end(link, csp)
             return
 
         link["remote_device_url"] = reverse("dcim:device", args=[device.pk])
         link["netbox_remote_device_id"] = device.pk
 
-        if csp.cable is not None:
-            # Already cabled: adopted-match / remodeled-path / trusted-tag / mismatch.
-            far_cp = next(
-                (
-                    termination
-                    for termination in cable_far_terminations(csp.cable, csp)
-                    if isinstance(termination, ConsolePort) and termination.device_id == device.pk
-                ),
-                None,
-            )
-            if far_cp is not None:
-                link["netbox_remote_interface_id"] = far_cp.pk
-                link["remote_port_name"] = far_cp.name
-                link["remote_port_url"] = reverse("dcim:consoleport", args=[far_cp.pk])
-                link["can_create_cable"] = not cable_has_librenms_tag(csp.cable)
-                return
-            if cable_path_reaches(csp, remote_device=device):
-                link["cable_status"] = "Connected via Patch Path"
-                return
-            if cable_has_librenms_tag(csp.cable):
-                # Trust rule: a plugin-tagged cable was placed deliberately; the wrong-name
-                # label must not flip it to a mismatch offering a silent re-point.
-                return
-            link["cable_status"] = "Cable Mismatch"
-            # Fall through to the free-port pick: the re-sync re-points at the label device.
+        # A cabled row resolves against its cable state; only a mismatch falls through to the
+        # free-port pick below (the re-sync re-points at the label device).
+        if csp.cable is not None and self._resolve_cabled_serial_row(link, csp, device):
+            return
 
         if claimed_cp_ids is None:
             claimed_cp_ids = set()
@@ -957,6 +929,81 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObject
         else:
             link["cable_status"] = "Console Port Not Found in NetBox"
 
+    def _resolve_cabled_serial_row(self, link, csp, device) -> bool:
+        """
+        Resolve a cabled serial row against the label-matched *device*.
+
+        Adopted match (cable lands on a ConsolePort of the label device), remodeled path
+        (traced path reaches the device through patch panels), and trusted tag (a plugin-tagged
+        cable is deliberate — a wrong-name label must not offer a silent re-point) all fully
+        resolve the row. A mismatch does not: the caller falls through to the free-port pick
+        that re-points at the label device.
+
+        Args:
+            link (dict): The serial cable-sync row, mutated in place.
+            csp: The row's resolved (and cabled) local ConsoleServerPort.
+            device: The label-matched NetBox device.
+
+        Returns:
+            bool: True when the row is fully resolved; False to fall through (mismatch).
+        """
+        far_cp = next(
+            (
+                termination
+                for termination in cable_far_terminations(csp.cable, csp)
+                if isinstance(termination, ConsolePort) and termination.device_id == device.pk
+            ),
+            None,
+        )
+        if far_cp is not None:
+            link["netbox_remote_interface_id"] = far_cp.pk
+            link["remote_port_name"] = far_cp.name
+            link["remote_port_url"] = reverse("dcim:consoleport", args=[far_cp.pk])
+            link["can_create_cable"] = not cable_has_librenms_tag(csp.cable)
+            return True
+        if cable_path_reaches(csp, remote_device=device):
+            # Show the END of the traced path (the real console), not the panel port the
+            # first segment lands on.
+            link["cable_status"] = "Connected via Patch Path"
+            self._display_serial_cable_far_end(link, csp)
+            return True
+        if cable_has_librenms_tag(csp.cable):
+            # Trust rule: a plugin-tagged cable was placed deliberately; the wrong-name label
+            # must not flip it to a mismatch offering a silent re-point. Display where it
+            # really goes (overriding the label-device link the caller set).
+            self._display_serial_cable_far_end(link, csp)
+            return True
+        link["cable_status"] = "Cable Mismatch"
+        return False
+
+    def _display_serial_cable_far_end(self, link, csp):
+        """
+        Fill *link*'s remote display fields from where the CSP's cable path actually ends.
+
+        Used when a cabled serial row has no resolvable sync target (dead label, trusted tag,
+        remodeled path): the row must still show — and link — the real far-end device and
+        port instead of dead columns. Follows patch-panel pass-throughs, so a remodeled path
+        displays the end console rather than the panel port the first segment lands on.
+        Display only: ``netbox_remote_interface_id`` is NOT set (there is nothing to sync at).
+
+        Args:
+            link (dict): The serial cable-sync row, mutated in place.
+            csp: The row's resolved (and cabled) local ConsoleServerPort.
+        """
+        path = csp.trace()
+        far = (path[-1][2] if path else None) or cable_far_terminations(csp.cable, csp)
+        termination = far[0] if far else None
+        if termination is None:
+            return
+        device = getattr(termination, "device", None)
+        if device is not None:
+            link["remote_device"] = device.name
+            link["remote_device_url"] = reverse("dcim:device", args=[device.pk])
+            link["netbox_remote_device_id"] = device.pk
+        link["remote_port_name"] = getattr(termination, "name", str(termination))
+        if hasattr(termination, "get_absolute_url"):
+            link["remote_port_url"] = termination.get_absolute_url()
+
     def _apply_serial_remote_target(self, link, csp, target_cp, manual=False):
         """
         Resolve *link*'s remote to *target_cp* and derive status/affordance from the cable state.
@@ -974,6 +1021,9 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObject
             manual (bool): Mark the row as manually picked (rendered as a hint in the table).
         """
         link["netbox_remote_device_id"] = target_cp.device_id
+        # Show the picked device's real name — the LibreNMS label mismatching is exactly why
+        # the user picked by hand, so rendering the dead label linked elsewhere would mislead.
+        link["remote_device"] = target_cp.device.name
         link["remote_device_url"] = reverse("dcim:device", args=[target_cp.device_id])
         link["netbox_remote_interface_id"] = target_cp.pk
         link["remote_port_name"] = target_cp.name
@@ -997,13 +1047,14 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObject
 
     def _set_remote_picker_affordance(self, link, obj, server_key):
         """
-        Attach a ``picker_url`` to rows where manually picking the remote end makes sense.
+        Attach a ``picker_url`` to every row where manually picking the remote end is possible.
 
         Remote matching is name-based (serial label / LLDP port name) and often fails, so any
-        row whose local end resolved and whose state still needs (or allows) a different remote
-        gets the pick-remote action: unresolved-remote states, "No Cable", "Cable Mismatch",
-        and an adoptable "Cable Found". Satisfied states (tagged Cable Found, Connected via
-        Patch Path) and context-only OOB rows get none.
+        row with a resolved local end gets the pick-remote action — including satisfied rows
+        (tagged "Cable Found", "Connected via Patch Path"), where the pick RE-POINTS the
+        existing cable: a manual re-point always goes through the force-confirm modal at sync
+        time, so offering it here is safe. Only context-only OOB rows (never syncable) and
+        rows without a local end are excluded.
 
         Args:
             link (dict): The enriched cable row, mutated in place.
@@ -1011,10 +1062,6 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObject
             server_key: The active LibreNMS server key, carried in the picker URL.
         """
         if link.get("_source") == "oob" or not link.get("netbox_local_interface_id"):
-            return
-        status = link.get("cable_status")
-        pickable = status in _PICKABLE_CABLE_STATUSES or (status == "Cable Found" and link.get("can_create_cable"))
-        if not pickable:
             return
         url = reverse("plugins:netbox_librenms_plugin:cable_remote_picker", args=[obj.pk])
         query = f"port_id={quote_plus(str(link.get('local_port_id', '')))}"
@@ -1686,6 +1733,27 @@ class CableRemotePickerView(BaseCableTableView):
             None,
         )
 
+    def _refetch_snapshot(self, request, obj, server_key):
+        """
+        Rebuild the links snapshot fresh from LibreNMS after a cache expiry.
+
+        A pick typically lands moments after a render, but the snapshot TTL (or a dev-server
+        cache flush) can lapse in between — erroring out just to make the user click "Refresh
+        Cables" first is needless friction, so do exactly what that button does and retry.
+
+        Returns:
+            tuple: The refreshed ``(cache_key, cached_payload)`` — payload None when the
+                LibreNMS fetch itself failed.
+        """
+        from netbox_librenms_plugin.views.object_sync.devices import DeviceCableTableView
+
+        view = DeviceCableTableView()
+        view.setup(request, pk=obj.pk)
+        resolved_key = view.rebind_api_for_server(server_key) or server_key
+        # Caches the fresh snapshot on success (same write "Refresh Cables" performs).
+        view._prepare_context(request, obj, fetch_fresh=True, server_key=resolved_key)
+        return self._cache_state(obj, resolved_key)
+
     def get(self, request, pk):
         """Serve the picker modal or one of its search/ports HTMX fragments."""
         obj = get_object_or_404(Device, pk=pk)
@@ -1694,6 +1762,11 @@ class CableRemotePickerView(BaseCableTableView):
         action = request.GET.get("action")
         _cache_key, cached = self._cache_state(obj, server_key)
         row = self._find_row(cached, port_id)
+        # Only the modal render needs the row (fragments carry `source` in their URLs): on a
+        # miss, rebuild the snapshot instead of dead-ending on a cache-expired warning.
+        if row is None and not action:
+            _cache_key, cached = self._refetch_snapshot(request, obj, server_key)
+            row = self._find_row(cached, port_id)
 
         base_url = reverse("plugins:netbox_librenms_plugin:cable_remote_picker", args=[obj.pk])
         # Carry the row's _source in the fragment URLs so port-type selection does not depend on
@@ -1763,6 +1836,12 @@ class CableRemotePickerView(BaseCableTableView):
         port_id = request.POST.get("port_id", "")
         cache_key, cached = self._cache_state(obj, server_key)
         row = self._find_row(cached, port_id)
+        if row is None:
+            # Snapshot expired between render and pick: rebuild it fresh (what "Refresh
+            # Cables" does) and retry before giving up — the port_id is sensor-stable, so
+            # the row reappears unless LibreNMS itself dropped it.
+            cache_key, cached = self._refetch_snapshot(request, obj, server_key)
+            row = self._find_row(cached, port_id)
         if row is None:
             return HttpResponse("Cache has expired. Please refresh the cable data and pick again.", status=400)
 

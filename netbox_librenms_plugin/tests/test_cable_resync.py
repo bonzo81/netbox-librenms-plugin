@@ -295,3 +295,75 @@ class TestCableAdoptHtmx:
         assert "librenms" in set(csp.cable.tags.values_list("slug", flat=True))  # adopted
         # The re-rendered row now shows the tagged state: Cable Found with no Sync button.
         assert "Cable Found" in content
+
+
+# ---------------------------------------------------------------------------
+# Cabled rows display the cable's ACTUAL far end
+# ---------------------------------------------------------------------------
+@pytest.mark.django_db
+class TestCabledSerialRowFarEndDisplay:
+    """A cabled serial row must show where the cable REALLY goes — the far-end device and
+    port, linked — even when the LibreNMS label resolves to nothing (or to something else).
+    The cable itself knows its far end; an unresolvable name hint must not leave the Remote
+    Device / Remote Port columns dead.
+    """
+
+    def _enrich(self, obj, row):
+        return _make_view().enrich_links_data([row], obj, server_key="default")[0]
+
+    def _row(self, csp, label, obj):
+        return {
+            "_source": "serial",
+            "device_id": obj.id,
+            "local_port": csp.name,
+            "local_port_id": f"serial:{csp.pk}",
+            "sensor_id": csp.pk,
+            "sensor_index_int": 1,
+            "is_configured": True,
+            "remote_device": label,
+        }
+
+    def test_unresolvable_label_shows_actual_far_end(self):
+        acs, (csp,), _ = make_serial_device("farend-ser", csp_names=["ttyS1"])
+        actual, _, (cp,) = make_serial_device("farend-ser-actual", cp_names=["console"])
+        cable_together(csp, cp)
+
+        link = self._enrich(acs, self._row(csp, "name-that-matches-nothing", acs))
+
+        assert link["cable_status"] == "Cable Found"
+        assert link["remote_device"] == "farend-ser-actual"  # reality, not the dead label
+        assert link["remote_device_url"]
+        assert link["remote_port_name"] == "console"
+        assert link["remote_port_url"]
+        assert link["can_create_cable"] is False  # display only — no sync target from a dead label
+
+    def test_tagged_trusted_cable_shows_actual_far_end_not_label_device(self):
+        """The trust rule keeps the row inactionable, but the display must show where the
+        tagged cable REALLY goes — not the wrong-name label device."""
+        acs, (csp,), _ = make_serial_device("farend-trust", csp_names=["ttyS1"])
+        actual, _, (cp,) = make_serial_device("farend-trust-actual", cp_names=["console"])
+        _label_dev, _, _ = make_serial_device("farend-trust-label", cp_names=["console"])
+        cable = cable_together(csp, cp)
+        cable.tags.add(_librenms_tag())
+
+        link = self._enrich(acs, self._row(csp, "farend-trust-label", acs))
+
+        assert link["cable_status"] == "Cable Found"
+        assert link["remote_device"] == "farend-trust-actual"
+        assert link["remote_port_name"] == "console"
+        assert link["can_create_cable"] is False
+
+    def test_patch_path_row_shows_path_end_not_panel(self):
+        """A Connected-via-Patch-Path row shows the END of the traced path (the real console),
+        not the panel port the first cable segment lands on."""
+        acs, (csp,), _ = make_serial_device("farend-path", csp_names=["ttyS1"])
+        _panel_dev, fp, rp = _panel("farend-path-pp")
+        end, _, (cp,) = make_serial_device("farend-path-end", cp_names=["console"])
+        cable_together(csp, fp)
+        cable_together(rp, cp)
+
+        link = self._enrich(acs, self._row(csp, "farend-path-end", acs))
+
+        assert link["cable_status"] == "Connected via Patch Path"
+        assert link["remote_port_name"] == "console"  # the path end, not "F1"
+        assert link["remote_port_url"]
