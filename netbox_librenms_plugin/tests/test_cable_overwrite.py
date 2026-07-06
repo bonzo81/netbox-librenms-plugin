@@ -263,3 +263,91 @@ class TestSerialCableOverwriteBehaviour:
         assert "librenms" in set(cable.tags.values_list("slug", flat=True))
         csp.refresh_from_db()
         assert csp.cable_id == cable.pk  # same cable, not recreated
+
+
+# ---------------------------------------------------------------------------
+# HTMX force-confirm modal delivery (end-to-end through the real request stack)
+# ---------------------------------------------------------------------------
+@pytest.mark.django_db
+class TestCableOverwriteHtmxModal:
+    """A conflicted HTMX sync returns the force-confirm modal out-of-band and leaves the DB
+    untouched; re-submitting with ``force=on`` replaces the foreign cable. Driven through the
+    real Django request stack (Client) so routing, permissions, the cache read, template
+    rendering, and the OOB-swap markup are all exercised end-to-end.
+    """
+
+    def _seed(self, name):
+        from django.contrib.auth import get_user_model
+        from django.core.cache import cache
+        from django.test import Client
+        from django.urls import reverse
+
+        from netbox_librenms_plugin.views.sync.cables import SyncCablesView
+
+        acs, csps, _ = make_serial_device(f"acs-{name}", csp_names=["ttyS5"])
+        _r, _, cps = make_serial_device(f"router-{name}", cp_names=["console-A", "console-B"])
+        csp, cp_a, cp_b = csps[0], cps[0], cps[1]
+
+        # A foreign-tagged cable occupies the CSP -> the sync to console-B must conflict.
+        old = cable_together(csp, cp_a)
+        old.tags.add(_make_tag(f"dcim-modeled-{name}"))
+
+        # Seed the enriched links cache that "Refresh Cables" would have written, targeting
+        # console-B (a re-point over the foreign cable).
+        link = {
+            "local_port": "ttyS5",
+            "local_port_id": f"serial:{csp.pk}-s",
+            "_source": "serial",
+            "device_id": acs.id,
+            "remote_device": f"router-{name}",
+            "netbox_local_interface_id": csp.pk,
+            "netbox_remote_interface_id": cp_b.pk,
+            "can_create_cable": True,
+            "is_configured": True,
+            "sensor_id": 1,
+            "sensor_index_int": 5,
+        }
+        key_view = object.__new__(SyncCablesView)
+        cache.set(key_view.get_cache_key(acs, "links", "default"), {"links": [link]}, timeout=300)
+
+        user = get_user_model().objects.create_superuser(f"modal-admin-{name}", f"{name}@example.com", "pw")
+        client = Client()
+        client.force_login(user)
+        url = reverse("plugins:netbox_librenms_plugin:sync_device_cables", args=[acs.pk])
+        return client, url, link, old, csp, cp_b
+
+    def test_conflict_returns_oob_modal_and_leaves_db_untouched(self):
+        from dcim.models import Cable
+
+        client, url, link, old, csp, _cp_b = self._seed("conf")
+        resp = client.post(url, data={"select": link["local_port_id"], "server_key": "default"}, HTTP_HX_REQUEST="true")
+
+        assert resp.status_code == 200
+        content = resp.content.decode()
+        # The partial carries the force-confirm modal via an out-of-band swap into the shared shell.
+        assert 'id="htmx-modal-content" hx-swap-oob="innerHTML"' in content
+        assert 'name="force" value="on"' in content  # the re-submit is pre-armed with force
+        assert 'id="cable-force-submit"' in content  # confirm-gated submit button present
+        # And the DB is untouched: the foreign cable survives, still terminating the CSP.
+        assert Cable.objects.filter(pk=old.pk).exists()
+        csp.refresh_from_db()
+        assert csp.cable_id == old.pk
+
+    def test_force_resubmit_replaces_foreign_cable(self):
+        from dcim.models import Cable
+
+        client, url, link, old, csp, cp_b = self._seed("force")
+        resp = client.post(
+            url,
+            data={"select": link["local_port_id"], "server_key": "default", "force": "on"},
+            HTTP_HX_REQUEST="true",
+        )
+
+        assert resp.status_code == 200
+        # No conflict left to confirm -> no force modal in the response.
+        assert 'id="cable-force-submit"' not in resp.content.decode()
+        assert not Cable.objects.filter(pk=old.pk).exists()  # foreign cable replaced
+        csp.refresh_from_db()
+        cp_b.refresh_from_db()
+        assert csp.cable_id is not None
+        assert csp.cable_id == cp_b.cable_id

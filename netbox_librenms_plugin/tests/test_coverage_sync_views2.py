@@ -306,6 +306,53 @@ class TestSyncCablesViewSuccessPath:
         assert Cable.objects.count() == 0
         assert any("Gi0/1" in text for text in message_texts(request, "error"))
 
+    def test_interface_cable_gets_provenance_enrichment(self):
+        """The non-serial Interface↔Interface path stamps the same provenance as the serial path: the librenms tag, the configured color, a description carrying the server key, and the REMOTE device's tenant."""
+        from dcim.models import Cable
+        from tenancy.models import Tenant
+
+        from netbox_librenms_plugin.views.sync.cables import SyncCablesView
+
+        view = object.__new__(SyncCablesView)
+        view.require_all_permissions = MagicMock(return_value=None)
+        view.get_cache_key = MagicMock(return_value="key")
+        view._post_server_key = "default"
+
+        dev_local = make_device("cable-enrich-local")
+        local = make_interface(dev_local, "Gi0/1")
+        dev_remote = make_device("cable-enrich-remote")
+        dev_remote.tenant = Tenant.objects.create(name="Enrich Tenant", slug="enrich-tenant")
+        dev_remote.save()
+        remote = make_interface(dev_remote, "Gi0/2")
+
+        view.request = _make_request(post_data={"select": ["port1"], "device_selection_port1": str(dev_local.pk)})
+        link_data = {
+            "local_port_id": "port1",
+            "local_port": "Gi0/1",
+            "netbox_local_interface_id": local.pk,
+            "netbox_remote_interface_id": remote.pk,
+        }
+
+        with (
+            patch("netbox_librenms_plugin.views.sync.cables.get_object_or_404", return_value=dev_local),
+            patch("netbox_librenms_plugin.views.sync.cables.cache") as mock_cache,
+            patch("netbox_librenms_plugin.views.sync.cables.messages"),
+            patch("netbox_librenms_plugin.views.sync.cables.redirect"),
+            patch("netbox_librenms_plugin.views.sync.cables.reverse", return_value="/sync/"),
+            patch.object(
+                type(view), "librenms_api", new_callable=lambda: property(lambda s: MagicMock(server_key="default"))
+            ),
+        ):
+            mock_cache.get.return_value = {"links": [link_data]}
+            view.post(view.request, pk=dev_local.pk)
+
+        local.refresh_from_db()
+        cable = Cable.objects.get(pk=local.cable_id)
+        assert "librenms" in set(cable.tags.values_list("slug", flat=True))
+        assert cable.color == "009688"
+        assert cable.description == "Synced from LibreNMS (default)"
+        assert cable.tenant == dev_remote.tenant  # remote side's tenant wins
+
 
 class TestSyncCablesViewSkipsOOBRows:
     def test_oob_sourced_link_is_never_cabled(self):
