@@ -324,6 +324,9 @@ class TestCableOverwriteHtmxModal:
 
         assert resp.status_code == 200
         content = resp.content.decode()
+        # Name the failure mode: a vanished cache row makes the sync a silent no-op (200, no
+        # modal, DB untouched) — indistinguishable from a gate bug without this assert.
+        assert "Cache has expired" not in content
         # The partial carries the force-confirm modal via an out-of-band swap into the shared shell.
         assert 'id="htmx-modal-content" hx-swap-oob="innerHTML"' in content
         assert 'name="force" value="on"' in content  # the re-submit is pre-armed with force
@@ -344,8 +347,12 @@ class TestCableOverwriteHtmxModal:
         )
 
         assert resp.status_code == 200
+        content = resp.content.decode()
+        # Name the failure mode: a vanished cache row makes the sync a silent no-op (200, no
+        # modal, DB untouched) — indistinguishable from a gate bug without this assert.
+        assert "Cache has expired" not in content
         # No conflict left to confirm -> no force modal in the response.
-        assert 'id="cable-force-submit"' not in resp.content.decode()
+        assert 'id="cable-force-submit"' not in content
         assert not Cable.objects.filter(pk=old.pk).exists()  # foreign cable replaced
         csp.refresh_from_db()
         cp_b.refresh_from_db()
