@@ -515,3 +515,81 @@ class TestPromoteModalAccessibility:
         # The modal references its heading, and the heading actually carries that id.
         assert 'aria-labelledby="promote-modal-label-12"' in html
         assert 'id="promote-modal-label-12"' in html
+
+
+@pytest.mark.django_db
+class TestMergePromoteFormsShareServerKeyInclude:
+    """The merge and promote POST forms carry server_key via the shared include.
+
+    Every other action form in this template routes the hidden input through
+    inc/_hidden_server_key.html, which renders NOTHING when the context has no
+    server_key. The merge/promote forms were the last two with a raw
+    <input value="{{ server_key }}">, which posts server_key="" on a keyless
+    render instead of omitting the field like their sibling forms.
+    """
+
+    def _render(self, server_key, pane):
+        from django.contrib.auth.models import AnonymousUser
+        from django.template.loader import render_to_string
+        from django.test import RequestFactory
+
+        from netbox_librenms_plugin.tests.conftest import make_device
+
+        existing = make_device(f"srvkey-{pane}-winner")
+        donor = make_device(f"srvkey-{pane}-donor")
+        request = RequestFactory().get("/")
+        request.user = AnonymousUser()
+        validation = {
+            "existing_device": existing,
+            "existing_match_type": "serial",
+            "warnings": [],
+        }
+        if pane == "merge":
+            validation["serial_action"] = "merge_netbox_devices"
+            validation["merge_candidates"] = {
+                "host_named": {"pk": existing.pk, "name": existing.name},
+                "oob_named": {"pk": donor.pk, "name": donor.name},
+            }
+        else:
+            validation["serial_action"] = "promote_to_host"
+            validation["promote_to_host"] = {"existing_libre_id": 88, "existing_oob_type": "idrac"}
+        ctx = {
+            "validation": validation,
+            "libre_device": {"device_id": 12, "sysName": "srvkey-forms", "hostname": "srvkey-forms"},
+            "existing_device_model_name": "device",
+            "existing_device_url": existing.get_absolute_url(),
+            "sync_info": {},
+            "existing_id_servers": [],
+            "use_sysname": True,
+            "strip_domain": False,
+        }
+        if server_key is not None:
+            ctx["server_key"] = server_key
+        return render_to_string("netbox_librenms_plugin/htmx/device_validation_details.html", ctx, request=request)
+
+    @staticmethod
+    def _form_containing(html, url_marker):
+        import re
+
+        for match in re.finditer(r"<form\b.*?</form>", html, flags=re.DOTALL):
+            if url_marker in match.group(0):
+                return match.group(0)
+        raise AssertionError(f"no rendered <form> posts to {url_marker}")
+
+    @pytest.mark.parametrize(
+        ("pane", "marker"),
+        [("merge", "merge-netbox-devices"), ("promote", "promote-to-host")],
+    )
+    def test_form_carries_the_scoped_server_key(self, pane, marker):
+        html = self._render(server_key="tab-scope-key", pane=pane)
+        form = self._form_containing(html, marker)
+        assert 'name="server_key" value="tab-scope-key"' in form
+
+    @pytest.mark.parametrize(
+        ("pane", "marker"),
+        [("merge", "merge-netbox-devices"), ("promote", "promote-to-host")],
+    )
+    def test_keyless_render_omits_the_input_instead_of_posting_blank(self, pane, marker):
+        html = self._render(server_key=None, pane=pane)
+        form = self._form_containing(html, marker)
+        assert 'name="server_key"' not in form

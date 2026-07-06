@@ -433,7 +433,7 @@
         hx-swap="none"
         hx-include="#use-sysname-toggle, #strip-domain-toggle">
         {% csrf_token %}
-        <input type="hidden" name="server_key" value="{{ server_key }}">
+        {% include "netbox_librenms_plugin/inc/_hidden_server_key.html" %}
         {# Default to the host-named winner's donor (oob) so a JS failure still posts a valid donor. #}
         <input type="hidden" name="donor_pk" id="merge-donor-{{ libre_device.device_id }}"
                value="{{ validation.merge_candidates.oob_named.pk }}">
@@ -816,7 +816,7 @@
                       hx-include="#use-sysname-toggle, #strip-domain-toggle">
                   {% csrf_token %}
                   <input type="hidden" name="existing_device_id" value="{{ validation.existing_device.pk }}">
-                  <input type="hidden" name="server_key" value="{{ server_key }}">
+                  {% include "netbox_librenms_plugin/inc/_hidden_server_key.html" %}
 
                   <div class="modal-header py-2">
                     <h5 class="modal-title" id="promote-modal-label-{{ libre_device.device_id }}">Promote to host of {{ validation.existing_device.name }}</h5>
