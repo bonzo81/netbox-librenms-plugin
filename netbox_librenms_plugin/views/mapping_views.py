@@ -14,6 +14,7 @@ from netbox_librenms_plugin.filters import (
     NormalizationRuleFilterSet,
     PlatformMappingFilterSet,
     PortStackLagPatternFilterSet,
+    SerialSensorTypePatternFilterSet,
 )
 from netbox_librenms_plugin.forms import (
     CarrierAutoInstallRuleFilterForm,
@@ -46,6 +47,9 @@ from netbox_librenms_plugin.forms import (
     PortStackLagPatternFilterForm,
     PortStackLagPatternForm,
     PortStackLagPatternImportForm,
+    SerialSensorTypePatternFilterForm,
+    SerialSensorTypePatternForm,
+    SerialSensorTypePatternImportForm,
 )
 from netbox_librenms_plugin.models import (
     CarrierAutoInstallRule,
@@ -58,6 +62,7 @@ from netbox_librenms_plugin.models import (
     NormalizationRule,
     PlatformMapping,
     PortStackLagPattern,
+    SerialSensorTypePattern,
 )
 from netbox_librenms_plugin.tables.mappings import (
     CarrierAutoInstallRuleTable,
@@ -70,6 +75,7 @@ from netbox_librenms_plugin.tables.mappings import (
     NormalizationRuleTable,
     PlatformMappingTable,
     PortStackLagPatternTable,
+    SerialSensorTypePatternTable,
 )
 from netbox_librenms_plugin.views.mixins import (
     LibreNMSGenericPermissionMixin,
@@ -765,3 +771,64 @@ class PortStackLagPatternChangeLogView(LibreNMSGenericPermissionMixin, generic.O
 
 class PortStackLagPatternBulkExportYAMLView(BulkExportYAMLView):
     queryset = PortStackLagPattern.objects.all()
+
+
+class SerialSensorTypePatternListView(LibreNMSPermissionMixin, generic.ObjectListView):
+    """Provides a view for listing all SerialSensorTypePattern objects."""
+
+    queryset = SerialSensorTypePattern.objects.all()
+    table = SerialSensorTypePatternTable
+    filterset = SerialSensorTypePatternFilterSet
+    filterset_form = SerialSensorTypePatternFilterForm
+    template_name = "netbox_librenms_plugin/serialsensortypepattern_list.html"
+
+
+class SerialSensorTypePatternCreateView(LibreNMSWritePermissionMixin, generic.ObjectEditView):
+    """Provides a view for creating a new SerialSensorTypePattern object."""
+
+    queryset = SerialSensorTypePattern.objects.all()
+    form = SerialSensorTypePatternForm
+
+
+@register_model_view(SerialSensorTypePattern, "bulk_import", path="import", detail=False)
+class SerialSensorTypePatternBulkImportView(LibreNMSWritePermissionMixin, generic.BulkImportView):
+    """Provides a view for bulk importing SerialSensorTypePattern objects from CSV/JSON/YAML."""
+
+    queryset = SerialSensorTypePattern.objects.all()
+    model_form = SerialSensorTypePatternImportForm
+
+
+class SerialSensorTypePatternView(LibreNMSPermissionMixin, generic.ObjectView):
+    """Provides a view for displaying a SerialSensorTypePattern object."""
+
+    queryset = SerialSensorTypePattern.objects.all()
+
+
+class SerialSensorTypePatternEditView(LibreNMSWritePermissionMixin, generic.ObjectEditView):
+    """Provides a view for editing a SerialSensorTypePattern object."""
+
+    queryset = SerialSensorTypePattern.objects.all()
+    form = SerialSensorTypePatternForm
+
+
+class SerialSensorTypePatternDeleteView(LibreNMSWritePermissionMixin, generic.ObjectDeleteView):
+    """Provides a view for deleting a SerialSensorTypePattern object."""
+
+    queryset = SerialSensorTypePattern.objects.all()
+
+
+class SerialSensorTypePatternBulkDeleteView(LibreNMSWritePermissionMixin, generic.BulkDeleteView):
+    """Provides a view for bulk deleting SerialSensorTypePattern objects."""
+
+    queryset = SerialSensorTypePattern.objects.all()
+    table = SerialSensorTypePatternTable
+
+
+class SerialSensorTypePatternChangeLogView(LibreNMSPermissionMixin, generic.ObjectChangeLogView):
+    """Provides a view for displaying the changelog of a SerialSensorTypePattern object."""
+
+    queryset = SerialSensorTypePattern.objects.all()
+
+
+class SerialSensorTypePatternBulkExportYAMLView(BulkExportYAMLView):
+    queryset = SerialSensorTypePattern.objects.all()

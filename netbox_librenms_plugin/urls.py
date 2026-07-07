@@ -11,6 +11,7 @@ from .models import (
     NormalizationRule,
     PlatformMapping,
     PortStackLagPattern,
+    SerialSensorTypePattern,
 )
 from .utils import slashless_route_aliases
 from .views import (
@@ -141,6 +142,15 @@ from .views import (
     PortStackLagPatternListView,
     PortStackLagPatternView,
     PromoteToHostView,
+    SerialSensorTypePatternBulkDeleteView,
+    SerialSensorTypePatternBulkExportYAMLView,
+    SerialSensorTypePatternBulkImportView,
+    SerialSensorTypePatternChangeLogView,
+    SerialSensorTypePatternCreateView,
+    SerialSensorTypePatternDeleteView,
+    SerialSensorTypePatternEditView,
+    SerialSensorTypePatternListView,
+    SerialSensorTypePatternView,
     RemoveServerMappingView,
     ReplaceModuleView,
     SaveUserPrefView,
@@ -1047,6 +1057,53 @@ urlpatterns = [
         PortStackLagPatternChangeLogView.as_view(),
         name="portstacklagpattern_changelog",
         kwargs={"model": PortStackLagPattern},
+    ),
+    # SerialSensorTypePattern
+    path(
+        "serial-sensor-types/",
+        SerialSensorTypePatternListView.as_view(),
+        name="serialsensortypepattern_list",
+    ),
+    path(
+        "serial-sensor-types/<int:pk>/",
+        SerialSensorTypePatternView.as_view(),
+        name="serialsensortypepattern_detail",
+    ),
+    path(
+        "serial-sensor-types/add/",
+        SerialSensorTypePatternCreateView.as_view(),
+        name="serialsensortypepattern_add",
+    ),
+    path(
+        "serial-sensor-types/import/",
+        SerialSensorTypePatternBulkImportView.as_view(),
+        name="serialsensortypepattern_bulk_import",
+    ),
+    path(
+        "serial-sensor-types/<int:pk>/edit/",
+        SerialSensorTypePatternEditView.as_view(),
+        name="serialsensortypepattern_edit",
+    ),
+    path(
+        "serial-sensor-types/<int:pk>/delete/",
+        SerialSensorTypePatternDeleteView.as_view(),
+        name="serialsensortypepattern_delete",
+    ),
+    path(
+        "serial-sensor-types/delete/",
+        SerialSensorTypePatternBulkDeleteView.as_view(),
+        name="serialsensortypepattern_bulk_delete",
+    ),
+    path(
+        "serial-sensor-types/export-yaml/",
+        SerialSensorTypePatternBulkExportYAMLView.as_view(),
+        name="serialsensortypepattern_bulk_export_yaml",
+    ),
+    path(
+        "serial-sensor-types/<int:pk>/changelog/",
+        SerialSensorTypePatternChangeLogView.as_view(),
+        name="serialsensortypepattern_changelog",
+        kwargs={"model": SerialSensorTypePattern},
     ),
     path("api/", include("netbox_librenms_plugin.api.urls")),
 ]

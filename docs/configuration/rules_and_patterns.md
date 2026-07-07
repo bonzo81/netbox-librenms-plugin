@@ -117,6 +117,26 @@ Patterns are scoped by `librenms_os`, which is matched case-insensitively. The L
   description: "Recognize Nokia LAGs and skip SAP rows"
 ```
 
+## Serial Sensor Types
+
+Console servers expose their serial lines as LibreNMS **state sensors**, not interface-table rows. A Serial Sensor Type entry makes one vendor's `sensor_type` recognized by the Cables tab's serial console-port sync and names the matching local ConsoleServerPorts (`{N}` = the sensor's port number).
+
+Ships pre-seeded with Avocent ACS (`acsSerialPortTable` → `ttyS{N}`) and Cisco IOS async lines (`ciscoAsyncLine` → `Line {N}`). Matching is exact, including case; deleting a row stops recognizing that vendor (there is no hidden fallback). See [Cable Sync](../device_sync/cable_sync.md) for the full serial-ports flow.
+
+**Fields:**
+- `sensor_type` — the LibreNMS sensor_type, matched exactly (case-sensitive), case-insensitively unique
+- `port_name_pattern` — local ConsoleServerPort name template; must contain `{N}`
+
+**YAML format:**
+
+```yaml
+- sensor_type: acsSerialPortTable
+  port_name_pattern: "ttyS{N}"
+  description: "Avocent ACS serial lines"
+```
+
+---
+
 ## Importing and Exporting Rules
 
 All Rules & Patterns tabs support NetBox's standard CSV, JSON, and YAML bulk import. Select **Import** on the relevant list and provide records using that rule type's field names.

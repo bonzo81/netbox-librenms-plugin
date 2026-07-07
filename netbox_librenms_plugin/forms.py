@@ -46,6 +46,7 @@ from .models import (
     NormalizationRule,
     PlatformMapping,
     PortStackLagPattern,
+    SerialSensorTypePattern,
 )
 
 logger = logging.getLogger(__name__)
@@ -1046,6 +1047,36 @@ class LocationMappingFilterForm(NetBoxModelFilterSetForm):
     )
 
     model = LocationMapping
+
+
+class SerialSensorTypePatternForm(NetBoxModelForm):
+    """Form for creating and editing SerialSensorTypePattern objects."""
+
+    class Meta:
+        """Meta options."""
+
+        model = SerialSensorTypePattern
+        fields = ["sensor_type", "port_name_pattern", "description"]
+
+
+class SerialSensorTypePatternImportForm(NetBoxModelImportForm):
+    """Form for bulk importing SerialSensorTypePattern objects from CSV/JSON/YAML."""
+
+    class Meta:
+        """Meta options."""
+
+        model = SerialSensorTypePattern
+        fields = ["sensor_type", "port_name_pattern", "description"]
+
+
+class SerialSensorTypePatternFilterForm(NetBoxModelFilterSetForm):
+    """Form for filtering SerialSensorTypePattern objects."""
+
+    sensor_type = forms.CharField(required=False, label="Sensor Type")
+    port_name_pattern = forms.CharField(required=False, label="Port Name Pattern")
+    description = forms.CharField(required=False, label="Description")
+
+    model = SerialSensorTypePattern
 
 
 class BaseSNMPForm(forms.Form):

@@ -14,29 +14,16 @@ Console servers (e.g. Avocent ACS, Cisco IOS async lines) don't expose their ser
 
 ### Configuring recognized sensor types
 
-Which sensor types are treated as serial ports — and how the local ports are named — is controlled by the plugin-level `serial_sensor_types` setting: a map of LibreNMS `sensor_type` to a local port-name pattern, where `{N}` is replaced by the port number (the trailing integer of the sensor index, e.g. `tsLineActive.2` → `2`).
+Which sensor types are treated as serial ports — and how the local ports are named — is managed under **Plugins > LibreNMS > Rules & Patterns**, on the **Serial Sensor Types** tab. Each entry maps a LibreNMS `sensor_type` to a local port-name pattern, where `{N}` is replaced by the port number (the trailing integer of the sensor index, e.g. `tsLineActive.2` → `2`).
 
-```python
-PLUGINS_CONFIG = {
-    'netbox_librenms_plugin': {
-        'servers': {
-            # ... per-server settings ...
-        },
-        # Plugin-level: applies to all servers. This is the default value.
-        'serial_sensor_types': {
-            'acsSerialPortTable': 'ttyS{N}',   # Avocent ACS
-            'ciscoAsyncLine': 'Line {N}',      # Cisco IOS async lines
-        },
-    }
-}
-```
+Two vendors ship pre-seeded:
 
-To surface another vendor's serial lines, add its `sensor_type` with the naming pattern you use for the device's ConsoleServerPorts — no code change needed.
+| Sensor type | Port name pattern | Vendor |
+|---|---|---|
+| `acsSerialPortTable` | `ttyS{N}` | Avocent ACS |
+| `ciscoAsyncLine` | `Line {N}` | Cisco IOS async lines |
 
-!!! note "Overriding replaces the defaults"
-    When you set `serial_sensor_types` yourself, your value **replaces** the built-in map (defaults apply only while the key is absent). Include the `acsSerialPortTable` / `ciscoAsyncLine` entries in your override if you still want them recognized.
-
-A bare list of sensor types (e.g. `['acsSerialPortTable']`) is also accepted; every type in it then uses the fallback pattern `ttyS{N}`.
+To surface another vendor's serial lines, add a row with its `sensor_type` (matching is exact, including case) and the naming pattern you use for the device's ConsoleServerPorts — no code change or restart needed. Deleting a row stops that vendor's sensors from being recognized; there is no hidden fallback that resurrects the defaults. Entries support bulk YAML import/export and per-object change logging like the other rules.
 
 ## Cable provenance
 

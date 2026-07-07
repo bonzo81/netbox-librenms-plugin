@@ -1414,3 +1414,81 @@ class PortStackLagPattern(FullCleanOnSaveMixin, NetBoxModel):
 
     def __str__(self):
         return f"{self.librenms_os} -> {self.lag_name_pattern}"
+
+
+class SerialSensorTypePattern(FullCleanOnSaveMixin, NetBoxModel):
+    """
+    Maps a LibreNMS ``sensor_type`` to the local ConsoleServerPort name pattern for serial rows.
+
+    Console servers expose their serial lines as state sensors (not ifTable rows); a row here
+    makes a vendor's ``sensor_type`` recognized by the Cables tab's serial mapper and names the
+    matching local ports (``{N}`` = the sensor's port number). Ships seeded with Avocent ACS
+    (``acsSerialPortTable`` -> ``ttyS{N}``) and Cisco IOS async lines (``ciscoAsyncLine`` ->
+    ``Line {N}``). Deleting a row disables that vendor — there is no code-level fallback map.
+    """
+
+    sensor_type = models.CharField(
+        max_length=100,
+        help_text=(
+            "LibreNMS sensor_type identifying a vendor's serial-port state sensors "
+            "(e.g. 'acsSerialPortTable', 'ciscoAsyncLine'). Matching is exact, including case."
+        ),
+    )
+    port_name_pattern = models.CharField(
+        max_length=100,
+        default="ttyS{N}",
+        help_text=(
+            "Local ConsoleServerPort name template; {N} is replaced by the sensor's port number. Example: ttyS{N}"
+        ),
+    )
+    description = models.TextField(blank=True)
+
+    def clean(self):
+        """Validate sensor_type is non-blank (case preserved) and the pattern carries {N}."""
+        super().clean()
+        sensor_type = (self.sensor_type or "").strip()
+        if not sensor_type:
+            raise ValidationError({"sensor_type": "sensor_type must not be blank."})
+        # Do NOT lowercase: recognition compares against LibreNMS payload values exactly
+        # (map_sensors_to_serial_links keys its type map by the raw sensor_type string).
+        self.sensor_type = sensor_type
+        pattern = (self.port_name_pattern or "").strip()
+        if "{N}" not in pattern:
+            raise ValidationError(
+                {
+                    "port_name_pattern": (
+                        "Pattern must contain the {N} port-number placeholder — without it "
+                        "every port on the device would get the same name."
+                    )
+                }
+            )
+        self.port_name_pattern = pattern
+
+    def get_absolute_url(self):
+        """Return URL for this pattern's detail page."""
+        return reverse("plugins:netbox_librenms_plugin:serialsensortypepattern_detail", args=[self.pk])
+
+    def to_yaml(self):
+        data = {
+            "sensor_type": self.sensor_type,
+            "port_name_pattern": self.port_name_pattern,
+            "description": self.description,
+        }
+        return yaml.dump(data, sort_keys=False)
+
+    class Meta:
+        """Meta options for SerialSensorTypePattern."""
+
+        ordering = ["sensor_type"]
+        verbose_name = "Serial Sensor Type"
+        verbose_name_plural = "Serial Sensor Types"
+        constraints = [
+            # Case-insensitive uniqueness even though matching is exact-case: a case-variant of
+            # an existing type could never match real payloads alongside it, so the near-dupe is
+            # almost certainly a typo — refuse it at the DB level instead of silently keeping a
+            # row that can never fire.
+            models.UniqueConstraint(Lower("sensor_type"), name="unique_serialsensortypepattern_sensor_type_ci"),
+        ]
+
+    def __str__(self):
+        return f"{self.sensor_type} -> {self.port_name_pattern}"

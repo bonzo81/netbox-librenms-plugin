@@ -123,6 +123,15 @@ from .mapping_views import (  # noqa: F401
     PortStackLagPatternEditView,
     PortStackLagPatternListView,
     PortStackLagPatternView,
+    SerialSensorTypePatternBulkDeleteView,
+    SerialSensorTypePatternBulkExportYAMLView,
+    SerialSensorTypePatternBulkImportView,
+    SerialSensorTypePatternChangeLogView,
+    SerialSensorTypePatternCreateView,
+    SerialSensorTypePatternDeleteView,
+    SerialSensorTypePatternEditView,
+    SerialSensorTypePatternListView,
+    SerialSensorTypePatternView,
 )
 from .object_sync import (  # noqa: F401
     DeviceCableTableView,

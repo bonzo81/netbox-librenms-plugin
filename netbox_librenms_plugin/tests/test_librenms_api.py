@@ -3177,6 +3177,7 @@ class TestResolvePortRelationships:
         assert result["lag_members"] == {201: 204}
 
 
+@pytest.mark.django_db  # _fetch_serial_port_sensors reads the SerialSensorTypePattern rows
 class TestGetSerialPortSensors:
     """Cover response-shape branches in get_serial_port_sensors()."""
 

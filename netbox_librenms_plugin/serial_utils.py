@@ -24,50 +24,29 @@ Sorting: rows are returned ordered by sensor_index_int (port number).
 
 import re
 
-from netbox.plugins import get_plugin_config
-
 # Default local ConsoleServerPort name pattern (``{N}`` -> port number) for a serial sensor type
-# with no explicit pattern configured.
+# with no explicit pattern configured (a caller passing ``sensor_types`` as a bare set).
 DEFAULT_SERIAL_PORT_NAME_PATTERN = "ttyS{N}"
-
-# LibreNMS ``sensor_type`` -> local ConsoleServerPort name pattern, shipped as the default for the
-# ``serial_sensor_types`` plugin setting. Avocent ACS (acsSerialPortTable) and Cisco IOS async
-# lines (ciscoAsyncLine) both expose sensor_class=state / group "Serial Ports" / "<peer> Status"
-# descriptions, so they share one mapper — only the sensor_type and the local naming differ.
-# Operators add further vendor types (with their own naming) via the setting, not this module.
-DEFAULT_SERIAL_SENSOR_TYPE_PATTERNS = {
-    "acsSerialPortTable": "ttyS{N}",
-    "ciscoAsyncLine": "Line {N}",
-}
 
 _INDEX_SUFFIX_RE = re.compile(r"\.(\d+)$")
 
 
 def get_serial_sensor_type_patterns() -> dict:
     """
-    Return the configured ``{sensor_type: local port-name pattern}`` map for serial sensors.
+    Return the recognized ``{sensor_type: local port-name pattern}`` map for serial sensors.
 
-    Reads the ``serial_sensor_types`` plugin setting so an operator can surface a new vendor's
-    serial lines and name them without a code change. Accepts a map (``type -> pattern``), a
-    bare list of types, or a single type as a bare string (non-map forms default each type to
-    :data:`DEFAULT_SERIAL_PORT_NAME_PATTERN`); falls back to
-    :data:`DEFAULT_SERIAL_SENSOR_TYPE_PATTERNS` when the setting is unset or empty.
+    Reads the ``SerialSensorTypePattern`` table (migration-seeded with Avocent ACS and Cisco
+    IOS async lines) so an operator can surface a new vendor's serial lines — or disable a
+    shipped one by deleting its row — without a code change. An empty table therefore means
+    "recognize nothing": there is deliberately no code-level fallback map that would resurrect
+    a deleted vendor.
 
     Returns:
         dict: sensor_type -> local ConsoleServerPort name pattern.
     """
-    configured = get_plugin_config("netbox_librenms_plugin", "serial_sensor_types")
-    if not configured:
-        return dict(DEFAULT_SERIAL_SENSOR_TYPE_PATTERNS)
-    if isinstance(configured, dict):
-        return dict(configured)
-    if isinstance(configured, str):
-        # A single type as a bare string (forgot the list wrapper) would otherwise be iterated
-        # character-by-character below, yielding a per-letter map that matches no real
-        # sensor_type — serial sync would silently return zero rows.
-        return {configured: DEFAULT_SERIAL_PORT_NAME_PATTERN}
-    # A bare list/iterable of sensor types (no per-type naming): use the fallback pattern.
-    return {sensor_type: DEFAULT_SERIAL_PORT_NAME_PATTERN for sensor_type in configured}
+    from netbox_librenms_plugin.models import SerialSensorTypePattern
+
+    return {row.sensor_type: row.port_name_pattern for row in SerialSensorTypePattern.objects.all()}
 
 
 def parse_port_number(sensor_index: str | None) -> int | None:
@@ -140,7 +119,7 @@ def map_sensors_to_serial_links(
             even before ``enrich_links_data`` runs, avoiding a render-time KeyError.
         sensor_types: Recognized serial sensor types — either a ``{type: name pattern}`` map or a
             bare set/iterable of types (named via ``port_name_pattern``). Defaults to the
-            plugin-configured map (:func:`get_serial_sensor_type_patterns`).
+            ``SerialSensorTypePattern`` table's map (:func:`get_serial_sensor_type_patterns`).
 
     Returns:
         List of link-row dicts sorted by port number (ascending).

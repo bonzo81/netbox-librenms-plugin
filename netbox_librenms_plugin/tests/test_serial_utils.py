@@ -1,4 +1,4 @@
-"""Tests for serial_utils.py — pure mapper, no Django DB required."""
+"""Tests for serial_utils.py — mostly a pure mapper; the recognized-type map is DB-backed."""
 
 import json
 import os
@@ -61,6 +61,7 @@ class TestStripStatusSuffix:
         assert strip_status_suffix("") == ""
 
 
+@pytest.mark.django_db  # the default sensor-type map is read from SerialSensorTypePattern rows
 class TestMapSensorsToSerialLinks:
     def test_basic_row_shape(self):
         from netbox_librenms_plugin.serial_utils import map_sensors_to_serial_links
@@ -246,6 +247,7 @@ class TestMapSensorsToSerialLinks:
         assert map_sensors_to_serial_links([]) == []
 
 
+@pytest.mark.django_db  # the default sensor-type map is read from SerialSensorTypePattern rows
 class TestMapSensorsMalformedRows:
     """A single malformed LibreNMS sensor row must not crash mapping and drop ALL serial rows."""
 
@@ -296,14 +298,16 @@ class TestMapSensorsMalformedRows:
         assert [r["sensor_id"] for r in links] == [7011]
 
 
+@pytest.mark.django_db
 class TestConfigurableSensorTypes:
     """Recognized serial sensor_types AND their local port-name patterns are configurable.
 
-    ``serial_sensor_types`` maps each LibreNMS ``sensor_type`` to the local ConsoleServerPort name
-    pattern for that vendor, so Avocent lines become ``ttyS{N}`` and Cisco IOS async lines become
-    ``Line {N}`` from one setting. Both ship recognized; a new vendor is one config entry. Cisco
-    ``ciscoAsyncLine`` sensors (once shaped like Avocent: sensor_class=state, group "Serial Ports",
-    ``"<peer> Status"`` descr) flow through the identical mapper — only the type and naming differ.
+    ``SerialSensorTypePattern`` rows map each LibreNMS ``sensor_type`` to the local
+    ConsoleServerPort name pattern for that vendor, so Avocent lines become ``ttyS{N}`` and Cisco
+    IOS async lines become ``Line {N}``. Both ship seeded by migration; a new vendor is one row.
+    Cisco ``ciscoAsyncLine`` sensors (once shaped like Avocent: sensor_class=state, group
+    "Serial Ports", ``"<peer> Status"`` descr) flow through the identical mapper — only the type
+    and naming differ.
     """
 
     def _cisco_line(self, sid=13650, port=2, descr="test_location Status"):
@@ -378,32 +382,82 @@ class TestConfigurableSensorTypes:
         assert patterns["acsSerialPortTable"] == "ttyS{N}"
         assert patterns["ciscoAsyncLine"] == "Line {N}"
 
-    def test_get_patterns_respects_config_map(self, settings):
-        """A configured {type: pattern} map narrows the recognized set and sets naming."""
+    def test_get_patterns_reads_added_rows(self):
+        """A new vendor is one row: its type is recognized and named by its own pattern."""
+        from netbox_librenms_plugin.models import SerialSensorTypePattern
         from netbox_librenms_plugin.serial_utils import get_serial_sensor_type_patterns
 
-        settings.PLUGINS_CONFIG = {"netbox_librenms_plugin": {"serial_sensor_types": {"acsSerialPortTable": "p{N}"}}}
-        assert get_serial_sensor_type_patterns() == {"acsSerialPortTable": "p{N}"}
+        SerialSensorTypePattern.objects.create(sensor_type="fooSerialTable", port_name_pattern="foo{N}")
 
-    def test_get_patterns_tolerates_bare_list_config(self, settings):
-        """A bare list of types (no patterns) falls back to the default port-name pattern."""
-        from netbox_librenms_plugin.serial_utils import get_serial_sensor_type_patterns
+        patterns = get_serial_sensor_type_patterns()
+        assert patterns["fooSerialTable"] == "foo{N}"
+        # The seeded vendors stay recognized alongside the new one.
+        assert patterns["acsSerialPortTable"] == "ttyS{N}"
 
-        settings.PLUGINS_CONFIG = {"netbox_librenms_plugin": {"serial_sensor_types": ["ciscoAsyncLine"]}}
-        assert get_serial_sensor_type_patterns() == {"ciscoAsyncLine": "ttyS{N}"}
+    def test_deleting_all_rows_disables_recognition(self):
+        """No code-level fallback resurrects the defaults: an emptied table means OFF.
 
-    def test_get_patterns_tolerates_bare_string_config(self, settings):
-        """A single type as a bare string is ONE type, not an iterable of characters.
-
-        Without the guard, ``"ciscoAsyncLine"`` iterates letter-by-letter into a per-character
-        map that matches no real sensor_type — serial sync silently returns zero rows.
+        Deleting a seeded row is the operator's way to disable a vendor; deleting them all
+        must disable serial sensor recognition entirely, not silently re-enable the shipped
+        defaults.
         """
-        from netbox_librenms_plugin.serial_utils import get_serial_sensor_type_patterns
+        from netbox_librenms_plugin.models import SerialSensorTypePattern
+        from netbox_librenms_plugin.serial_utils import get_serial_sensor_type_patterns, map_sensors_to_serial_links
 
-        settings.PLUGINS_CONFIG = {"netbox_librenms_plugin": {"serial_sensor_types": "ciscoAsyncLine"}}
-        assert get_serial_sensor_type_patterns() == {"ciscoAsyncLine": "ttyS{N}"}
+        SerialSensorTypePattern.objects.all().delete()
+
+        assert get_serial_sensor_type_patterns() == {}
+        assert map_sensors_to_serial_links([self._acs_line(port=11)]) == []
 
 
+@pytest.mark.django_db
+class TestSerialSensorTypePatternModel:
+    """SerialSensorTypePattern validation and seeding (replaces the old plugin setting)."""
+
+    def _make(self, **kwargs):
+        from netbox_librenms_plugin.models import SerialSensorTypePattern
+
+        defaults = {"sensor_type": "someSerialTable", "port_name_pattern": "tty{N}"}
+        defaults.update(kwargs)
+        return SerialSensorTypePattern(**defaults)
+
+    def test_migration_seeds_avocent_and_cisco(self):
+        from netbox_librenms_plugin.models import SerialSensorTypePattern
+
+        by_type = {p.sensor_type: p.port_name_pattern for p in SerialSensorTypePattern.objects.all()}
+        assert by_type["acsSerialPortTable"] == "ttyS{N}"
+        assert by_type["ciscoAsyncLine"] == "Line {N}"
+
+    def test_blank_sensor_type_rejected(self):
+        from django.core.exceptions import ValidationError
+
+        with pytest.raises(ValidationError, match="sensor_type"):
+            self._make(sensor_type="   ").save()
+
+    def test_pattern_without_port_number_placeholder_rejected(self):
+        """A pattern missing {N} would name every port on the device identically."""
+        from django.core.exceptions import ValidationError
+
+        with pytest.raises(ValidationError, match="{N}"):
+            self._make(port_name_pattern="ttyS7").save()
+
+    def test_sensor_type_case_is_preserved(self):
+        """Recognition matches LibreNMS payload values exactly — clean() must NOT lowercase."""
+        row = self._make(sensor_type="  fooSerialTable  ")
+        row.save()
+        assert row.sensor_type == "fooSerialTable"
+
+    def test_case_insensitive_duplicate_rejected(self):
+        """A case-variant of an existing sensor_type is refused outright."""
+        # 'ACSSERIALPORTTABLE' next to the seeded 'acsSerialPortTable' would be a trap: matching
+        # is exact-case, so only one of the two can ever match real payloads.
+        from django.core.exceptions import ValidationError
+
+        with pytest.raises(ValidationError):
+            self._make(sensor_type="ACSSERIALPORTTABLE").save()
+
+
+@pytest.mark.django_db  # the default sensor-type map is read from SerialSensorTypePattern rows
 class TestMapSensorsWithFixture:
     """Integration-style tests using the captured device-12 (ACS6048) fixture."""
 
