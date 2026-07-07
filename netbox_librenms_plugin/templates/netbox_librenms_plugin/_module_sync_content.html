@@ -24,7 +24,7 @@
     hx-post="{% url 'plugins:netbox_librenms_plugin:install_selected' pk=module_sync.object.pk %}"
     hx-target="#module-sync-content" hx-swap="innerHTML" hx-disabled-elt="find button">
     {% csrf_token %}
-    {% if module_sync.server_key %}<input type="hidden" name="server_key" value="{{ module_sync.server_key }}">{% endif %}
+    {% include "netbox_librenms_plugin/inc/_hidden_server_key.html" with server_key=module_sync.server_key %}
     <div class="noprint mb-3">
         <button type="submit" class="btn btn-primary" id="install-selected-btn">
             <span class="lnms-btn-idle"><i class="mdi mdi-package-down"></i> Install Selected</span>
@@ -40,7 +40,7 @@ Emit them as standalone hidden inputs so the verify fetch keeps working — mirr
 interface/IP/VLAN fragments.
 {% endcomment %}
 <input type="hidden" name="csrfmiddlewaretoken" value="{{ csrf_token }}">
-{% if module_sync.server_key %}<input type="hidden" name="server_key" value="{{ module_sync.server_key }}">{% endif %}
+{% include "netbox_librenms_plugin/inc/_hidden_server_key.html" with server_key=module_sync.server_key %}
 {% endif %}
 <div class="card">
     {% include 'netbox_librenms_plugin/inc/paginator.html' with table=module_sync.table %}

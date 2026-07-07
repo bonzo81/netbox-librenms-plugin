@@ -748,16 +748,7 @@
           </div>
         </div>
         <div class="mb-3">
-          <form hx-post="{% url 'plugins:netbox_librenms_plugin:device_add_as_oob' device_id=libre_device.device_id %}"
-                hx-swap="none">
-            {% csrf_token %}
-            <input type="hidden" name="existing_device_id" value="{{ validation.existing_device.pk }}">
-            {% include "netbox_librenms_plugin/inc/_hidden_server_key.html" %}
-            {% include "netbox_librenms_plugin/htmx/_oob_interface_select.html" %}
-            <button type="submit" class="btn btn-sm btn-primary">
-              <i class="mdi mdi-chip"></i> Add as OOB to {{ validation.existing_device.name }}
-            </button>
-          </form>
+          {% include "netbox_librenms_plugin/htmx/_add_as_oob_form.html" %}
         </div>
       </div>
       {% endif %}
@@ -1036,16 +1027,7 @@
           {% if validation.oob_candidate.ip %}— {{ validation.oob_candidate.ip }}{% endif %}).
         </div>
         <div class="mb-3">
-          <form hx-post="{% url 'plugins:netbox_librenms_plugin:device_add_as_oob' device_id=libre_device.device_id %}"
-                hx-swap="none">
-            {% csrf_token %}
-            <input type="hidden" name="existing_device_id" value="{{ validation.existing_device.pk }}">
-            {% include "netbox_librenms_plugin/inc/_hidden_server_key.html" %}
-            {% include "netbox_librenms_plugin/htmx/_oob_interface_select.html" %}
-            <button type="submit" class="btn btn-sm btn-primary">
-              <i class="mdi mdi-chip"></i> Add as OOB to {{ validation.existing_device.name }}
-            </button>
-          </form>
+          {% include "netbox_librenms_plugin/htmx/_add_as_oob_form.html" %}
         </div>
       {% else %}
       <div class="alert alert-warning py-2 mb-3 d-flex flex-wrap align-items-center gap-1">

@@ -322,6 +322,53 @@ class TestSerialMatchFormServerKey:
 
 
 @pytest.mark.django_db
+class TestAddAsOOBFormPanes:
+    """Both OOB-candidate panes (serial match and primary_ip match) must render the shared Add-as-OOB form."""
+
+    def _render(self, *, match_type, serial_action):
+        from django.contrib.auth.models import AnonymousUser
+        from django.template.loader import render_to_string
+        from django.test import RequestFactory
+
+        from netbox_librenms_plugin.tests.conftest import make_device
+
+        existing = make_device(f"oob-pane-{match_type}")
+        request = RequestFactory().get("/")
+        request.user = AnonymousUser()
+        ctx = {
+            "validation": {
+                "existing_device": existing,
+                "existing_match_type": match_type,
+                "serial_action": serial_action,
+                "oob_candidate": {"type": "idrac", "ip": "10.9.9.9"},
+                "device_type_mismatch": False,
+                "warnings": [],
+            },
+            "libre_device": {"device_id": 7, "sysName": "oob-pane", "hostname": "oob-pane", "ip": "10.9.9.9"},
+            "server_key": "prod",
+            "existing_device_model_name": "device",
+            "existing_device_url": existing.get_absolute_url(),
+            "sync_info": {},
+            "existing_id_servers": [],
+            "use_sysname": True,
+            "strip_domain": False,
+        }
+        return render_to_string("netbox_librenms_plugin/htmx/device_validation_details.html", ctx, request=request)
+
+    def test_serial_match_pane_renders_add_as_oob_form(self):
+        html = self._render(match_type="serial", serial_action="oob_candidate")
+        assert "device-import/add-as-oob/7/" in html
+        assert "Add as OOB to" in html
+        assert 'name="server_key" value="prod"' in html
+
+    def test_primary_ip_match_pane_renders_add_as_oob_form(self):
+        html = self._render(match_type="primary_ip", serial_action="oob_candidate")
+        assert "device-import/add-as-oob/7/" in html
+        assert "Add as OOB to" in html
+        assert 'name="server_key" value="prod"' in html
+
+
+@pytest.mark.django_db
 class TestPromoteToHostFallbackPane:
     """A promote_to_host-classified row must render an ACTIONABLE Host pane on this branch.
 
