@@ -26,6 +26,7 @@ RULE_LIST_ROUTES = [
     "inventoryignorerule_list",
     "normalizationrule_list",
     "carrierautoinstallrule_list",
+    "portstacklagpattern_list",
 ]
 
 
