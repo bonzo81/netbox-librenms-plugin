@@ -48,9 +48,10 @@ def get_serial_sensor_type_patterns() -> dict:
     Return the configured ``{sensor_type: local port-name pattern}`` map for serial sensors.
 
     Reads the ``serial_sensor_types`` plugin setting so an operator can surface a new vendor's
-    serial lines and name them without a code change. Accepts either a map (``type -> pattern``)
-    or a bare list of types (each defaulted to :data:`DEFAULT_SERIAL_PORT_NAME_PATTERN`); falls
-    back to :data:`DEFAULT_SERIAL_SENSOR_TYPE_PATTERNS` when the setting is unset or empty.
+    serial lines and name them without a code change. Accepts a map (``type -> pattern``), a
+    bare list of types, or a single type as a bare string (non-map forms default each type to
+    :data:`DEFAULT_SERIAL_PORT_NAME_PATTERN`); falls back to
+    :data:`DEFAULT_SERIAL_SENSOR_TYPE_PATTERNS` when the setting is unset or empty.
 
     Returns:
         dict: sensor_type -> local ConsoleServerPort name pattern.
@@ -60,6 +61,11 @@ def get_serial_sensor_type_patterns() -> dict:
         return dict(DEFAULT_SERIAL_SENSOR_TYPE_PATTERNS)
     if isinstance(configured, dict):
         return dict(configured)
+    if isinstance(configured, str):
+        # A single type as a bare string (forgot the list wrapper) would otherwise be iterated
+        # character-by-character below, yielding a per-letter map that matches no real
+        # sensor_type — serial sync would silently return zero rows.
+        return {configured: DEFAULT_SERIAL_PORT_NAME_PATTERN}
     # A bare list/iterable of sensor types (no per-type naming): use the fallback pattern.
     return {sensor_type: DEFAULT_SERIAL_PORT_NAME_PATTERN for sensor_type in configured}
 

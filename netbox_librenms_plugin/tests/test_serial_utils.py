@@ -392,6 +392,17 @@ class TestConfigurableSensorTypes:
         settings.PLUGINS_CONFIG = {"netbox_librenms_plugin": {"serial_sensor_types": ["ciscoAsyncLine"]}}
         assert get_serial_sensor_type_patterns() == {"ciscoAsyncLine": "ttyS{N}"}
 
+    def test_get_patterns_tolerates_bare_string_config(self, settings):
+        """A single type as a bare string is ONE type, not an iterable of characters.
+
+        Without the guard, ``"ciscoAsyncLine"`` iterates letter-by-letter into a per-character
+        map that matches no real sensor_type — serial sync silently returns zero rows.
+        """
+        from netbox_librenms_plugin.serial_utils import get_serial_sensor_type_patterns
+
+        settings.PLUGINS_CONFIG = {"netbox_librenms_plugin": {"serial_sensor_types": "ciscoAsyncLine"}}
+        assert get_serial_sensor_type_patterns() == {"ciscoAsyncLine": "ttyS{N}"}
+
 
 class TestMapSensorsWithFixture:
     """Integration-style tests using the captured device-12 (ACS6048) fixture."""
