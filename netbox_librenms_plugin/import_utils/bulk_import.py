@@ -9,6 +9,7 @@ from django.core.cache import cache
 from ..import_validation_helpers import (
     apply_cluster_to_validation,
     apply_role_to_validation,
+    clear_match_derived_action_fields,
     recalculate_validation_status,
     remove_validation_issue,
 )
@@ -446,25 +447,13 @@ def _clear_existing_match_derived_fields(validation: dict) -> None:
     Returns:
         None
     """
-    validation["serial_action"] = None
-    validation["oob_candidate"] = None
-    validation["serial_confirmed"] = False
-    validation["serial_duplicate"] = False
-    validation["serial_role_choice_available"] = False
-    # Name-sync / migration / device-type state is also derived from the (now dropped) match;
+    clear_match_derived_action_fields(validation)
+    # Migration / device-type state is also derived from the (now dropped) match;
     # leaving it set would render a migrate/name-sync action for the old object. The fresh
-    # lookup below re-derives these only on a re-match, so reset them here.
+    # lookup below re-derives these only on a re-match, so reset them here (they are
+    # refresh-specific, so they stay out of the shared helper).
     validation["librenms_id_needs_migration"] = False
-    validation["name_matches"] = False
-    validation["name_sync_available"] = False
-    validation["suggested_name"] = None
     validation["device_type_mismatch"] = False
-    # promote_to_host follows the "absent otherwise" contract (see apply_oob_detection_result).
-    validation.pop("promote_to_host", None)
-    # merge_candidates, by contrast, is always present (validate_device_for_import's
-    # baseline and apply_oob_detection_result both keep it set, defaulting to None),
-    # so reset it rather than removing the key.
-    validation["merge_candidates"] = None
 
 
 def _reassert_new_import_blockers(validation: dict) -> None:

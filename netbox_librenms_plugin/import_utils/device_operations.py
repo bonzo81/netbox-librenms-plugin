@@ -25,7 +25,11 @@ from ..utils import (
     set_librenms_device_id,
 )
 from ..constants import normalize_oob_type
-from ..import_validation_helpers import apply_merge_candidates, apply_oob_detection_result
+from ..import_validation_helpers import (
+    apply_merge_candidates,
+    apply_oob_detection_result,
+    clear_match_derived_action_fields,
+)
 from .cache import get_import_device_cache_key
 from .virtual_chassis import (
     _generate_vc_member_name,
@@ -955,20 +959,12 @@ def validate_device_for_import(
                     # wrong device. Only existing_match_type carries the ambiguity forward.
                     result["existing_device"] = None
                     result["existing_librenms_link"] = None
-                    result["name_matches"] = False
-                    result["name_sync_available"] = False
-                    result["suggested_name"] = None
-                    result["serial_confirmed"] = False
-                    result["serial_duplicate"] = False
+                    clear_match_derived_action_fields(result)
                     # Demote the match_type off "hostname"/"serial" so neither the device_status
                     # table (has_actions) nor device_validation_details.html renders a "Link to
                     # LibreNMS" action — otherwise the arbitrary row could be linked to the wrong
                     # NetBox device. Mirrors the "ambiguous_librenms_id" terminal-state pattern.
                     result["existing_match_type"] = "ambiguous_hostname_or_serial"
-                    result["serial_action"] = None
-                    result["oob_candidate"] = None
-                    result.pop("promote_to_host", None)
-                    result["serial_role_choice_available"] = False
                     result["can_import"] = False
                     result["is_ready"] = False
                     # Both wordings keep the "hostname/serial" substring the refresh-path

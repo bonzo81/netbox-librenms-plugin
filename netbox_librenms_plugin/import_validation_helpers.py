@@ -233,6 +233,32 @@ def apply_merge_candidates(
     result["warnings"] = [warning]
 
 
+def clear_match_derived_action_fields(validation: dict) -> None:
+    """
+    Reset the action/name fields derived from a hostname/serial match.
+
+    Shared by ``device_operations``' terminal-ambiguity teardown and
+    ``bulk_import._clear_existing_match_derived_fields`` so the two clearing
+    paths can't drift on the common field set. Context-specific state
+    (match-type demotion, linkage, migration/device-type flags) stays with
+    the callers.
+
+    ``promote_to_host`` follows the "absent otherwise" contract (see
+    :func:`apply_oob_detection_result`) and is popped; ``merge_candidates``
+    is always present, defaulting to ``None``, and is reset in place.
+    """
+    validation["serial_action"] = None
+    validation["oob_candidate"] = None
+    validation["serial_confirmed"] = False
+    validation["serial_duplicate"] = False
+    validation["serial_role_choice_available"] = False
+    validation["name_matches"] = False
+    validation["name_sync_available"] = False
+    validation["suggested_name"] = None
+    validation.pop("promote_to_host", None)
+    validation["merge_candidates"] = None
+
+
 def recalculate_validation_status(validation: dict, is_vm: bool = False) -> None:
     """
     Recalculate can_import and is_ready flags based on current validation state.
