@@ -232,6 +232,14 @@ def capture_device_recording(api, device_id, *, name=None, description="", meta=
         pattern_qs = pattern_qs.filter(librenms_os__iexact=os_filter) if os_filter else pattern_qs.none()
     lag_patterns = {row.librenms_os: row.lag_name_pattern for row in pattern_qs}
 
+    # 9. Serial sensor recognition map. Same fidelity argument as lag_patterns: recognition
+    #    lives in the SerialSensorTypePattern table, so a recording captured under a custom map
+    #    could not reproduce its serial rows on a host with different (or no) rows. Replay
+    #    feeds this through the sensor_types injection points (get_serial_port_sensors /
+    #    map_sensors_to_serial_links). Global, not OS-scoped — sensor types identify vendor
+    #    sensor tables, not the captured device's OS.
+    from netbox_librenms_plugin.serial_utils import get_serial_sensor_type_patterns
+
     return {
         "schema_version": SCHEMA_VERSION,
         "name": name or f"device-{device_id}",
@@ -239,5 +247,6 @@ def capture_device_recording(api, device_id, *, name=None, description="", meta=
         "meta": meta_out,
         "device_id": device_id,
         "lag_patterns": lag_patterns,
+        "serial_type_patterns": get_serial_sensor_type_patterns(),
         "responses": responses,
     }

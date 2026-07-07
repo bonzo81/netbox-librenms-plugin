@@ -10,6 +10,10 @@
     }
   },
   "device_id": 12,
+  "serial_type_patterns": {
+    "acsSerialPortTable": "ttyS{N}",
+    "ciscoAsyncLine": "Line {N}"
+  },
   "responses": {
     "GET /api/v0/devices/12": {
       "status": "ok",

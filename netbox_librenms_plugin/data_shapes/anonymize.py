@@ -477,6 +477,11 @@ def anonymize_recording(recording, *, salt=""):
     lag_patterns = recording.get("lag_patterns")
     if isinstance(lag_patterns, dict):
         out["lag_patterns"] = {(pseudonymize_os(k) if k else k): v for k, v in lag_patterns.items()}
+    # serial_type_patterns passes through VERBATIM (via the dict copy above) — deliberately,
+    # unlike lag_patterns: its keys are vendor sensor-table identifiers (acsSerialPortTable),
+    # not OS names, and replay feeds them back through the sensor_types injection points where
+    # matching is exact — pseudonymized keys would recognize nothing. Values are {N}-templates
+    # for local port names, not PII.
     out["name"] = f"{meta.get('os') or 'device'}-shape-{_hash(recording.get('name', ''), salt)}"
     out["description"] = "Anonymized LibreNMS data-shape capture."
     return out

@@ -360,12 +360,18 @@ def _assert_transceivers(api, device_id, expected):
     assert len(transceivers) == expected["count"]
 
 
-def _assert_serial_ports(api, device_id, expected):
+def _assert_serial_ports(api, device_id, expected, sensor_types):
+    """Replay serial rows with the recording's OWN snapshot map (serial_type_patterns).
+
+    Recognition lives in the SerialSensorTypePattern table, so replaying against the live
+    table would tie a checked-in recording's outcome to local DB state; the embedded map
+    keeps the outcome self-sufficient (and this test DB-independent).
+    """
     from netbox_librenms_plugin.serial_utils import map_sensors_to_serial_links
 
-    ok, sensors = api.get_serial_port_sensors(device_id)
+    ok, sensors = api.get_serial_port_sensors(device_id, sensor_types=sensor_types)
     assert ok, sensors
-    rows = map_sensors_to_serial_links(sensors, device_id=device_id)
+    rows = map_sensors_to_serial_links(sensors, device_id=device_id, sensor_types=sensor_types)
     assert len(rows) == expected["count"]
     if "configured" in expected:
         assert sum(1 for r in rows if r["is_configured"]) == expected["configured"]
@@ -397,7 +403,7 @@ def test_recording_outcomes(recording, recording_server):
         _assert_transceivers(api, device_id, expected["transceivers"])
 
     if "serial_ports" in expected:
-        _assert_serial_ports(api, device_id, expected["serial_ports"])
+        _assert_serial_ports(api, device_id, expected["serial_ports"], recording["serial_type_patterns"])
 
     if "oob" in expected:
         _assert_oob(api, recording, expected["oob"])

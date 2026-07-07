@@ -637,6 +637,19 @@ def test_version_pseudonymized_to_fw_hash():
     assert find_pii(a1) == []
 
 
+def test_serial_type_patterns_pass_through_anonymization_verbatim():
+    """The serial recognition map survives anonymize untouched (keys AND values, salt or not)."""
+    # Unlike lag_patterns (whose OS-name keys are pseudonymized), these keys are vendor
+    # sensor-table identifiers that replay feeds back through the exact-match sensor_types
+    # injection points — a pseudonymized key would recognize nothing.
+    rec = _ports()
+    rec["serial_type_patterns"] = {"acsSerialPortTable": "ttyS{N}", "fooSerialTable": "foo{N}"}
+
+    anon = anonymize_recording(rec, salt="contributor-x")
+
+    assert anon["serial_type_patterns"] == {"acsSerialPortTable": "ttyS{N}", "fooSerialTable": "foo{N}"}
+
+
 def test_os_pseudonymized_to_stable_unsalted_token():
     """Every OS (even common ones) becomes a stable os-<hash>; meta.os and the name follow, salt-independent."""
     rec = _ports()
@@ -763,6 +776,7 @@ def test_transceiver_serial_pseudonymized_model_and_optics_preserved():
     assert find_pii(anonymize_recording(rec)) == []
 
 
+@pytest.mark.django_db  # map_sensors_to_serial_links reads the SerialSensorTypePattern rows
 def test_serial_sensor_label_anonymized_preserving_is_configured():
     """sensor_descr hostnames are pseudonymized but generic port labels stay, so is_configured is unchanged."""
     sensors = [

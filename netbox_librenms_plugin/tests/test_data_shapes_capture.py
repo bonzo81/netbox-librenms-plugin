@@ -200,6 +200,56 @@ def test_capture_serial_sensors_roundtrip_outcome(recording_server):
     assert {row["is_configured"] for row in replay_links} == {True, False}
 
 
+def test_capture_embeds_serial_type_patterns(recording_server):
+    """The recording snapshots the serial recognition map, like lag_patterns.
+
+    Recognition lives in the SerialSensorTypePattern table, so without the snapshot a
+    recording captured under a custom map cannot reproduce its serial rows on a host with
+    different (or no) rows.
+    """
+    from netbox_librenms_plugin.models import SerialSensorTypePattern
+    from netbox_librenms_plugin.serial_utils import get_serial_sensor_type_patterns
+
+    SerialSensorTypePattern.objects.create(sensor_type="captestSerialTable", port_name_pattern="cap{N}")
+    _server, api = recording_server(_transceiver_serial_seed())
+
+    captured = capture_device_recording(api, 2000)
+
+    assert captured["serial_type_patterns"] == get_serial_sensor_type_patterns()
+    assert captured["serial_type_patterns"]["captestSerialTable"] == "cap{N}"
+
+
+def test_serial_roundtrip_survives_empty_pattern_table(recording_server):
+    """Replay with the recording's own map reproduces the source rows on a bare host.
+
+    The replay host's SerialSensorTypePattern table may be empty or different from the
+    capture host's; passing recording["serial_type_patterns"] through the API's
+    sensor_types injection point (and the mapper's) must make the recording
+    self-sufficient.
+    """
+    from netbox_librenms_plugin.models import SerialSensorTypePattern
+
+    seed = _transceiver_serial_seed()
+    _server, api = recording_server(seed)
+    source_ok, source_sensors = api.get_serial_port_sensors(2000)
+    assert source_ok
+    source_links = map_sensors_to_serial_links(source_sensors, device_id=2000)
+    assert source_links  # non-vacuous: there must be rows to reproduce
+
+    captured = capture_device_recording(api, 2000)
+
+    SerialSensorTypePattern.objects.all().delete()  # the bare replay host
+
+    _server2, api2 = recording_server(captured, server_key="replay")
+    replay_ok, replay_sensors = api2.get_serial_port_sensors(2000, sensor_types=captured["serial_type_patterns"])
+    assert replay_ok
+    replay_links = map_sensors_to_serial_links(
+        replay_sensors, device_id=2000, sensor_types=captured["serial_type_patterns"]
+    )
+
+    assert replay_links == source_links
+
+
 def test_capture_skips_sensors_route_when_device_has_none(recording_server):
     """A device with no serial sensors must NOT add the instance-wide /resources/sensors route."""
     seed = _transceiver_serial_seed()
