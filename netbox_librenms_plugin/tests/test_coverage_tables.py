@@ -1259,6 +1259,16 @@ class TestInterfaceFormatting:
 
         assert table.page.paginator.per_page == 1
 
+    def test_null_port_id_row_attr_stays_empty(self):
+        table = _interface_table(make_device("row-attr-empty-port-id"))
+
+        assert table.row_attrs["data-port-id"](_port(port_id=None)) == ""
+
+    def test_real_port_id_row_attr_is_preserved(self):
+        table = _interface_table(make_device("row-attr-real-port-id"))
+
+        assert table.row_attrs["data-port-id"](_port(port_id=42)) == "42"
+
 
 @pytest.mark.django_db
 class TestVirtualChassisInterfaceTable:

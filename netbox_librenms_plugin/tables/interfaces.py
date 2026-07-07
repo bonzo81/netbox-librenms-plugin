@@ -105,7 +105,7 @@ class LibreNMSInterfaceTable(tables.Table):
                 "data-enabled": lambda record: (
                     str(record.get("ifAdminStatus")).lower() if record.get("ifAdminStatus") is not None else ""
                 ),
-                "data-port-id": lambda record: str(record.get("port_id", "")),
+                "data-port-id": lambda record: str(record.get("port_id") or ""),
                 "data-member-of-lag": lambda record: str(record.get("librenms_lag_port_id") or ""),
                 "data-lag-name": lambda record: str(record.get("librenms_lag_name") or ""),
                 "data-parent-port-id": lambda record: str(record.get("librenms_parent_port_id") or ""),
@@ -677,7 +677,7 @@ class LibreNMSInterfaceTable(tables.Table):
             and target_resolvable
             and not self.migrated_to_marker
         ):
-            port_id = record.get("port_id", "")
+            port_id = record.get("port_id") or ""
             # Resolve the owning member the same way the VC member dropdown does, so the button's
             # data-object-id and the dropdown agree (the JS posts the dropdown value, so a
             # disagreement would 404). See _resolve_row_member_id.
