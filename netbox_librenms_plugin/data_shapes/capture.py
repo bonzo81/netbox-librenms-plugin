@@ -219,13 +219,17 @@ def capture_device_recording(api, device_id, *, name=None, description="", meta=
     #    resolve_port_relationships(lag_patterns=recording["lag_patterns"]) both read this key —
     #    without it a LAG detected only via a configured PortStackLagPattern regex (ifType not
     #    ieee8023adLag) fingerprints as lag.present=False and the fixture can never reproduce the
-    #    pattern-based behavior it was captured for. Scoped to the captured OS when known,
-    #    mirroring production's per-OS pattern load; all patterns when the OS is unknown.
+    #    pattern-based behavior it was captured for. Mirrors compiled_patterns_for_os exactly:
+    #    None (payload carried no OS at all) embeds every stored pattern (legacy unscoped);
+    #    a present-but-blank/non-string OS embeds NONE — production matches nothing for such a
+    #    device, and signature.py compiles the recorded patterns unscoped, so embedding them all
+    #    would fingerprint pattern-LAG behavior production never applies.
     from netbox_librenms_plugin.models import PortStackLagPattern
 
     pattern_qs = PortStackLagPattern.objects.all()
-    if device_os:
-        pattern_qs = pattern_qs.filter(librenms_os__iexact=device_os)
+    if device_os is not None:
+        os_filter = device_os.strip() if isinstance(device_os, str) else ""
+        pattern_qs = pattern_qs.filter(librenms_os__iexact=os_filter) if os_filter else pattern_qs.none()
     lag_patterns = {row.librenms_os: row.lag_name_pattern for row in pattern_qs}
 
     return {

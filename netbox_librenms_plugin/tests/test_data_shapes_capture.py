@@ -487,3 +487,49 @@ def test_capture_snapshots_os_scoped_lag_patterns():
 
     # Scoped to the captured OS: the other platform's pattern is not embedded.
     assert recording["lag_patterns"] == {"captest-os": r"^Po\d+$"}
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("blank_os", ["", "   "])
+def test_capture_blank_os_embeds_no_lag_patterns(blank_os):
+    """A present-but-blank OS embeds NO patterns, mirroring compiled_patterns_for_os.
+
+    Production's ``compiled_patterns_for_os("")`` deliberately matches nothing, while
+    ``signature.py`` compiles every recorded pattern unscoped — so embedding all stored
+    patterns for a blank-OS device would fingerprint/replay pattern-LAG behavior that
+    production never applies to that device.
+    """
+    from netbox_librenms_plugin.models import PortStackLagPattern
+
+    PortStackLagPattern.objects.create(librenms_os="captest-blank", lag_name_pattern=r"^Po\d+$")
+    api = _StubApi(
+        {
+            "devices/78": (200, {"status": "ok", "devices": [{"device_id": 78, "os": blank_os}]}),
+            "devices/78/ports": (200, {"status": "ok", "ports": []}),
+            "devices/78/port_stack": (200, {"status": "ok", "mappings": []}),
+        }
+    )
+
+    recording = capture_device_recording(api, 78)
+
+    assert recording["lag_patterns"] == {}
+
+
+@pytest.mark.django_db
+def test_capture_no_os_at_all_keeps_legacy_unscoped_lag_patterns():
+    """No ``os`` key in the device payload (device_os=None): the legacy embed-everything path stays, matching compiled_patterns_for_os(None)."""
+    from netbox_librenms_plugin.models import PortStackLagPattern
+
+    PortStackLagPattern.objects.create(librenms_os="captest-noneos", lag_name_pattern=r"^Po\d+$")
+    api = _StubApi(
+        {
+            "devices/79": (200, {"status": "ok", "devices": [{"device_id": 79}]}),
+            "devices/79/ports": (200, {"status": "ok", "ports": []}),
+            "devices/79/port_stack": (200, {"status": "ok", "mappings": []}),
+        }
+    )
+
+    recording = capture_device_recording(api, 79)
+
+    # `in`, not `==`: default patterns for real OSes may already be seeded by other tests.
+    assert "captest-noneos" in recording["lag_patterns"]
