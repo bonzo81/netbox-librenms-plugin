@@ -72,3 +72,31 @@ class TestCableSyncContentTemplateMigratedMode:
 
         assert 'href="/dcim/interfaces/1/"' in html
         assert ">None<" not in html
+
+    def _remote_port_table(self):
+        from netbox_librenms_plugin.tables.cables import LibreNMSCableTable
+        from netbox_librenms_plugin.tests.conftest import make_device
+
+        return LibreNMSCableTable([], device=make_device("cable-render-remote-dev"))
+
+    def test_render_remote_port_link_branch_normalizes_missing_name(self):
+        """A linked remote port with no name renders empty link text, not the literal 'None'."""
+        html = self._remote_port_table().render_remote_port(
+            value=None, record={"remote_port_url": "/dcim/console-ports/1/"}
+        )
+
+        assert 'href="/dcim/console-ports/1/"' in html
+        assert ">None<" not in html
+
+    def test_render_remote_port_manual_badge_branch_normalizes_missing_name(self):
+        """A manually picked remote with no port name renders only the badge, not 'None' + badge."""
+        html = self._remote_port_table().render_remote_port(value=None, record={"manual_remote": True})
+
+        assert "mdi-gesture-tap-button" in html
+        assert "None" not in html
+
+    def test_render_remote_port_bare_branch_normalizes_missing_name(self):
+        """No URL, no badge, no name: the cell renders empty, not the literal 'None'."""
+        html = self._remote_port_table().render_remote_port(value=None, record={})
+
+        assert html == ""
