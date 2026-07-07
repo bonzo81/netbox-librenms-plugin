@@ -6,7 +6,12 @@ from typing import List
 
 from django.core.cache import cache
 
-from ..import_validation_helpers import apply_role_to_validation, recalculate_validation_status, remove_validation_issue
+from ..import_validation_helpers import (
+    apply_cluster_to_validation,
+    apply_role_to_validation,
+    recalculate_validation_status,
+    remove_validation_issue,
+)
 from ..librenms_api import LibreNMSAPI
 from ..utils import (
     AmbiguousLibreNMSIdError,
@@ -852,6 +857,16 @@ def _refresh_existing_device(validation: dict, libre_device: dict = None, server
                     "found": False,
                     "role": None,
                     "available_roles": validation.get("device_role", {}).get("available_roles", []),
+                }
+            elif hasattr(new_device, "cluster") and new_device.cluster:
+                # VM match: mirror the device-role display above — show the matched
+                # VM's actual cluster rather than leaving the cached selection stale.
+                apply_cluster_to_validation(validation, new_device.cluster)
+            else:
+                validation["cluster"] = {
+                    "found": False,
+                    "cluster": None,
+                    "available_clusters": validation.get("cluster", {}).get("available_clusters", []),
                 }
             recalculate_validation_status(validation, is_vm=actual_is_vm)
             # Re-assert non-importable: recalculate sets can_import from issues list,
