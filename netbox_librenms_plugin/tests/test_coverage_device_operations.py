@@ -1059,6 +1059,30 @@ class TestValidateDeviceForImportEdgeCases:
         assert any("resolve the duplicate" in i for i in result["issues"])
         assert result["existing_match_type"] == "ambiguous_hostname_or_serial"
 
+    def test_duplicate_vm_hostname_fails_closed(self):
+        """Two same-named VMs (NetBox VM names are unique only per cluster) must fail closed as ambiguous, not bind .first()."""
+        from netbox_librenms_plugin.tests.conftest import make_cluster, make_vm
+
+        make_vm("dup-vm-host", cluster=make_cluster("cl-dupvm-a"))
+        make_vm("dup-vm-host", cluster=make_cluster("cl-dupvm-b"))
+
+        libre_device = {
+            "device_id": 998,
+            "hostname": "dup-vm-host",
+            "sysName": "dup-vm-host",
+            "serial": "-",
+            "hardware": "Model-X",
+            "os": "linux",
+        }
+        result = self._validate(libre_device)
+
+        # Fail closed exactly like the device-side duplicate guard: the arbitrary .first() VM
+        # must be dropped and the row blocked, not linked/imported against a random cluster's VM.
+        assert result["can_import"] is False
+        assert result["existing_device"] is None
+        assert result["existing_match_type"] == "ambiguous_hostname_or_serial"
+        assert any("resolve the duplicate" in i for i in result["issues"])
+
     def test_duplicate_hostname_with_primary_ip_match_stays_terminal(self):
         """A duplicate-hostname row whose management IP resolves to a SINGLE device must stay
         terminal.

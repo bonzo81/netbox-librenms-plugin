@@ -919,11 +919,14 @@ def validate_device_for_import(
             # for the matched type, so share the result instead of issuing it twice per device.
             _match_type = result.get("existing_match_type")
             _serial_now = normalize_serial(libre_device.get("serial"))
-            _dup_eligible = (
-                not import_as_vm and result.get("existing_device") is not None and _match_type in ("hostname", "serial")
-            )
+            _dup_eligible = result.get("existing_device") is not None and _match_type in ("hostname", "serial")
+            # VM matches are just as vulnerable: NetBox only enforces VM-name uniqueness per
+            # cluster, so the VM hostname match above binds .first() among cross-cluster
+            # duplicates. Pick the peer model by the side that actually matched (a VM match
+            # forced import_as_vm=True above; the serial path is device-only).
+            _PeerModel = VirtualMachine if import_as_vm else Device
             _hostname_peers = (
-                list(Device.objects.filter(name__iexact=hostname)[:2])
+                list(_PeerModel.objects.filter(name__iexact=hostname)[:2])
                 if _dup_eligible and _match_type == "hostname" and hostname
                 else []
             )
@@ -968,8 +971,11 @@ def validate_device_for_import(
                     result["serial_role_choice_available"] = False
                     result["can_import"] = False
                     result["is_ready"] = False
+                    # Both wordings keep the "hostname/serial" substring the refresh-path
+                    # blocker cleanup keys on (_AMBIGUOUS_SERIAL_IP_MARKERS in bulk_import).
+                    _dup_kind = "virtual machines" if import_as_vm else "devices"
                     _dup_msg = (
-                        "Multiple NetBox devices share this device's hostname/serial; resolve the "
+                        f"Multiple NetBox {_dup_kind} share this device's hostname/serial; resolve the "
                         "duplicate before importing or linking."
                     )
                     if _dup_msg not in result.setdefault("issues", []):
