@@ -2251,7 +2251,7 @@ class TestSingleInstallInterfaceBinding:
         assert response is not None
 
     def test_update_module_interface_view_skips_adoption_on_bind_conflict(self):
-        """A hard bind conflict must NOT trigger template adoption — we don't mutate past an unresolved problem (e.g."""
+        """A hard bind conflict must NOT trigger template adoption — we don't mutate past an unresolved problem (e.g. an interface bound to another module)."""
         from netbox_librenms_plugin.views.sync.modules import UpdateModuleInterfaceView
 
         view = object.__new__(UpdateModuleInterfaceView)

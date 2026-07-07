@@ -373,7 +373,7 @@ class TestMergeTransceiverDataPortIdentity:
         assert mock_enrich.call_args.kwargs.get("ports_data") == ports_payload
 
     def test_post_treats_non_list_inventory_as_fetch_failure(self):
-        """get_device_inventory is an external boundary: a success flag with a non-list payload (e.g."""
+        """get_device_inventory is an external boundary: a success flag with a non-list payload (e.g. an error dict) is treated as a fetch failure."""
         view = _make_view()
         view.model = MagicMock()
         obj = MagicMock()
@@ -429,7 +429,7 @@ class TestMergeTransceiverDataPortIdentity:
         assert result == "rendered"
 
     def test_post_treats_non_dict_inventory_entry_as_fetch_failure(self):
-        """A list payload that carries non-dict entries (e.g."""
+        """A list payload that carries non-dict entries (e.g. None) is treated as a fetch failure."""
         view = _make_view()
         view.model = MagicMock()
         obj = MagicMock()
@@ -644,7 +644,7 @@ class TestMergeTransceiverDataPortIdentity:
         assert "777" not in warn_msg and "999" not in warn_msg and "OOB id" not in warn_msg
 
     def test_post_treats_non_dict_oob_inventory_entry_as_fetch_failure(self):
-        """The OOB inventory merge offsets indices and sets item["_source"] on every entry, so a success flag with non-dict elements (e.g."""
+        """The OOB inventory merge offsets indices and sets item["_source"] on every entry, so a success flag with non-dict elements (e.g. None) is treated as a fetch failure."""
         view = _make_view()
         view.model = MagicMock()
         obj = MagicMock()

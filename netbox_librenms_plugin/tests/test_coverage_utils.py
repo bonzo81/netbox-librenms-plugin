@@ -135,7 +135,7 @@ class TestGetLibreNMSSyncDeviceServerKey:
         assert result is member_with_id
 
     def test_float_id_is_rejected_not_int_truncated(self):
-        """A float id (e.g."""
+        """A float id (e.g. 1.0) is rejected as invalid, not truncated to an int."""
         from netbox_librenms_plugin.utils import get_librenms_sync_device
 
         device = MagicMock()

@@ -7136,7 +7136,7 @@ class TestOOBInterfaceSelectTemplate:
         assert 'getElementById("oob-iface-7")' in html
 
     def test_initializes_create_state_on_load(self):
-        """The script must sync the "new name" input once on load (not only on change), so the input matches the rendered selection even if it differs from the server-side display logic (e.g."""
+        """The script must sync the "new name" input once on load (not only on change), so the input matches the rendered selection even if it differs from the server-side display logic (e.g. a browser-restored form value)."""
         html = self._render()
         assert "function syncCreateState()" in html
         # Bound to change AND invoked immediately so initial state is authoritative.

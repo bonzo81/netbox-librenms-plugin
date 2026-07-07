@@ -188,7 +188,7 @@ class TestLibreNMSAPIMixinRebindApiForServer:
         assert m._librenms_api is new_api  # rebound
 
     def test_returns_resolved_key_not_raw_post_value(self):
-        """build_librenms_api may normalize the posted key (e.g."""
+        """build_librenms_api may normalize the posted key (e.g. resolve an alias); the mixin must return the resolved key, not the raw POST value."""
         m = self._mixin("default")
         resolved_api = MagicMock(server_key="primary")
         with patch("netbox_librenms_plugin.librenms_api.build_librenms_api", return_value=resolved_api):

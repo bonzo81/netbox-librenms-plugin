@@ -1355,8 +1355,11 @@ class TestIpCachedSnapshotMgmtIpBackfill:
         real_cache.set(key, {"ip_addresses": [], "ports_by_id": {"7": {}}}, timeout=300)
         try:
             view._prepare_context(request, device, "ifName", fetch_fresh=False, server_key="default")
-            # The missing key triggered a one-time live resolve of the management IP.
+            # The missing key triggered a one-time live resolve of the management IP...
             api.get_device_info.assert_called_once_with(7)
+            # ...and the resolved VALUE was backfilled into the re-cached snapshot, so
+            # subsequent cached renders read it without another live call.
+            assert real_cache.get(key)["mgmt_ip"] == "10.0.0.9"
         finally:
             real_cache.delete(key)
 

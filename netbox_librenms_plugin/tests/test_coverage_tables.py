@@ -1518,7 +1518,7 @@ class TestDeviceImportTableRenderActions:
         assert "paired host: LibreNMS #" not in result
 
     def test_existing_librenms_link_non_dict_does_not_crash_render(self):
-        """A malformed ``existing_librenms_link`` that isn't a dict (e.g."""
+        """A malformed ``existing_librenms_link`` that isn't a dict (e.g. a legacy bare int) must not crash the actions render."""
         from dcim.models import Device
         from virtualization.models import VirtualMachine
 

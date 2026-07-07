@@ -359,7 +359,7 @@ class TestBaseCableTableViewGetLinksData:
         assert result is not None
 
     def test_get_links_data_malformed_port_rows_skipped(self):
-        """Non-dict rows in the ports payload (e.g."""
+        """Non-dict rows in the ports payload (e.g. strings or None) are skipped, not .get()'d."""
         view = self._make_view()
 
         links_data = {"links": [{"local_port_id": 10, "remote_hostname": "sw", "remote_port": "Gi0/1"}]}
@@ -764,7 +764,7 @@ class TestBaseCableTableViewEnrichLocalPort:
         assert link["local_port_url"].endswith(f"/dcim/interfaces/{iface.pk}/")
 
     def test_name_fallback_matches_alternate_interface_name_field(self):
-        """Issue #88: when the NetBox interface name matches the *non-selected* LibreNMS field (e.g."""
+        """Issue #88: when the NetBox interface name matches the *non-selected* LibreNMS field (e.g. ifDescr while ifName is selected), the name fallback still resolves it."""
         view = self._make_view()
         obj = make_device("cable-dev-altname")
         iface = make_interface(obj, "GigabitEthernet0/1")  # named from ifDescr, no librenms_id
@@ -3646,7 +3646,7 @@ class TestBaseIPAddressTableViewFlagManagementIp:
         assert view._resolve_management_ip() == ""
 
     def test_resolve_blank_when_mgmt_ip_not_a_string(self):
-        """A malformed-but-dict-shaped payload (e.g."""
+        """A malformed-but-dict-shaped payload (e.g. a non-string ip value) resolves to an empty string."""
         view = self._make_view()
         view._librenms_api.get_device_info.return_value = (True, {"ip": 123})
         assert view._resolve_management_ip() == ""
