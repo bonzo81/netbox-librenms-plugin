@@ -110,7 +110,7 @@ Each server configuration supports the following options:
 
 The `_preferred_server` key is reserved for object metadata. Do not use it as a configured server key. `LibreNMSSyncConfig` rejects a configuration that uses this key during plugin startup.
 
-Plugin-level options sit beside the `servers` block and apply to all servers. The [Cable Sync Guide](cable_sync.md) describes options such as the cable provenance tag and the serial console sensor types.
+Plugin-level options sit beside the `servers` block and apply to all servers. The [Cable Sync Guide](cable_sync.md) describes options such as the cable provenance tag. Serial console sensor types are not a plugin setting. Manage them as database rows under the Rules & Patterns tables.
 
 ## Migration from Single to Multi-Server
 
