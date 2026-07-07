@@ -17,7 +17,14 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 # Shared real-DB builders (see tests/conftest.py).
-from netbox_librenms_plugin.tests.conftest import ip_on, make_device, make_interface, make_ip, make_vm
+from netbox_librenms_plugin.tests.conftest import (
+    cable_together,
+    ip_on,
+    make_device,
+    make_interface,
+    make_ip,
+    make_vm,
+)
 
 
 # ── helper: get_migrated_to_marker ────────────────────────────────────────
@@ -478,6 +485,101 @@ class TestMoveInterfaceToWinnerView:
         member.refresh_from_db()
         assert member.device_id == donor.pk  # not moved
         assert member.lag_id == donor_lag.pk  # relationship untouched
+
+    def test_moving_lag_master_carries_donor_side_members(self):
+        """Moving a LAG interface must carry its donor-side members, not orphan them behind a cross-device lag FK NetBox forbids creating."""
+        view = self._setup_view()
+        donor = make_device("mi-lagcasc-donor")
+        winner = make_device("mi-lagcasc-winner")
+        self._mark(donor, winner)
+        lag = make_interface(donor, "Po1", iface_type="lag")
+        member = make_interface(donor, "Eth0")
+        member.lag = lag
+        member.save()
+        req = _hx_request({"server_key": "default"})
+
+        resp = view.post(req, pk=lag.pk)
+
+        assert resp.status_code == 200
+        lag.refresh_from_db()
+        member.refresh_from_db()
+        assert lag.device_id == winner.pk
+        # The member followed in the same transaction — it never persists as a donor-side
+        # interface whose lag lives on another device (a state only its NEXT save would reject).
+        assert member.device_id == winner.pk
+        assert member.lag_id == lag.pk
+
+    def test_moving_parent_carries_child_and_bridged_interfaces(self):
+        """Moving a parent/bridge target interface carries its donor-side children and bridged peers too."""
+        view = self._setup_view()
+        donor = make_device("mi-parcasc-donor")
+        winner = make_device("mi-parcasc-winner")
+        self._mark(donor, winner)
+        parent = make_interface(donor, "eth0")
+        child = make_interface(donor, "eth0.100", iface_type="virtual")
+        child.parent = parent
+        child.save()
+        bridged = make_interface(donor, "eth7")
+        bridged.bridge = parent
+        bridged.save()
+        req = _hx_request({"server_key": "default"})
+
+        resp = view.post(req, pk=parent.pk)
+
+        assert resp.status_code == 200
+        parent.refresh_from_db()
+        child.refresh_from_db()
+        bridged.refresh_from_db()
+        assert parent.device_id == winner.pk
+        assert child.device_id == winner.pk and child.parent_id == parent.pk
+        assert bridged.device_id == winner.pk and bridged.bridge_id == parent.pk
+
+    def test_moving_lag_master_with_colliding_member_name_rolls_back_family(self):
+        """A winner-side name collision on ANY family member 409s and rolls back the whole family move."""
+        view = self._setup_view()
+        donor = make_device("mi-lagcoll-donor")
+        winner = make_device("mi-lagcoll-winner")
+        self._mark(donor, winner)
+        lag = make_interface(donor, "Po1", iface_type="lag")
+        member = make_interface(donor, "Eth0")
+        member.lag = lag
+        member.save()
+        make_interface(winner, "Eth0")  # collides with the member, not the master
+        req = _hx_request({"server_key": "default"})
+
+        resp = view.post(req, pk=lag.pk)
+
+        assert resp.status_code == 200
+        assert b"django-messages" in resp.content
+        assert resp.headers.get("HX-Reswap") == "none"
+        assert resp.headers.get("HX-Refresh") is None
+        lag.refresh_from_db()
+        member.refresh_from_db()
+        # Nothing moved: the master must not land on the winner while its member stays behind.
+        assert lag.device_id == donor.pk
+        assert member.device_id == donor.pk and member.lag_id == lag.pk
+
+    def test_moved_interface_cable_termination_cache_points_at_winner(self):
+        """The cable's denormalized CableTermination._device must follow the move — the winner's cable lists filter on it (NetBox #9788 class)."""
+        from dcim.models import CableTermination
+
+        view = self._setup_view()
+        donor = make_device("mi-ctcache-donor")
+        winner = make_device("mi-ctcache-winner")
+        peer = make_device("mi-ctcache-peer")
+        self._mark(donor, winner)
+        iface = make_interface(donor, "Eth0")
+        peer_iface = make_interface(peer, "Eth0")
+        cable_together(iface, peer_iface)
+        req = _hx_request({"server_key": "default"})
+
+        resp = view.post(req, pk=iface.pk)
+
+        assert resp.status_code == 200
+        iface.refresh_from_db()
+        assert iface.device_id == winner.pk
+        ct = CableTermination.objects.get(termination_type__model="interface", termination_id=iface.pk)
+        assert ct._device_id == winner.pk
 
     def test_save_integrity_error_rejected_with_409(self):
         """A winner-side create that trips the (device,name) unique constraint at save() — after every in-transaction check passes — is caught and surfaced as a 409 toast, and the whole move rolls back."""

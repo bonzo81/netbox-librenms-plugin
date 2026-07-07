@@ -14,10 +14,12 @@ appropriate NetBox model permission on the object being moved.
 import logging
 from urllib.parse import quote_plus
 
-from dcim.models import Device, Interface
+from dcim.models import CableTermination, Device, Interface
 from django.contrib import messages
+from django.contrib.contenttypes.models import ContentType
 from django.core.exceptions import ValidationError
 from django.db import IntegrityError, transaction
+from django.db.models import Q
 from django.http import HttpResponse
 from django.shortcuts import get_object_or_404, redirect
 from django.urls import get_script_prefix, reverse
@@ -420,17 +422,64 @@ class _BaseMoveToWinnerView(LibreNMSAPIMixin, LibreNMSPermissionMixin, NetBoxObj
         return donor, winner, None
 
 
+def _refresh_cable_termination_caches(interface):
+    """
+    Re-save the interface's cable terminations after a device move.
+
+    ``CableTermination`` denormalizes ``_device``/``_rack``/``_location``/``_site``
+    for cable-list filtering, and recomputes them only inside its own ``save()``
+    (``cache_related_objects()``) — nothing tracks an Interface changing device
+    (the same upstream gap as netbox#9788 for device site moves). Without this,
+    the moved interface's cables keep filtering under the DONOR's cable lists.
+    """
+    ct_type = ContentType.objects.get_for_model(Interface)
+    for termination in CableTermination.objects.filter(termination_type=ct_type, termination_id=interface.pk):
+        termination.save()
+
+
+def _donor_side_dependents(interface, donor):
+    """
+    Collect (and lock) donor interfaces that reference *interface* transitively.
+
+    Interfaces left on the donor whose ``lag``/``parent``/``bridge`` points at a
+    moved row would persist as cross-device relationships NetBox itself refuses
+    to create — surfacing only as a validation error on their NEXT save. The
+    move therefore carries the whole family. BFS order (level by level) so a
+    parent is always moved before its own dependents ``full_clean()``.
+    """
+    dependents = []
+    seen = {interface.pk}
+    frontier = [interface]
+    while frontier:
+        layer = list(
+            Interface.objects.select_for_update()
+            .filter(device=donor)
+            .filter(Q(lag__in=frontier) | Q(parent__in=frontier) | Q(bridge__in=frontier))
+            .exclude(pk__in=seen)
+            .order_by("pk")
+        )
+        seen.update(dep.pk for dep in layer)
+        dependents.extend(layer)
+        frontier = layer
+    return dependents
+
+
 class MoveInterfaceToWinnerView(_BaseMoveToWinnerView):
     """
     Reassign ``Interface.device`` from donor to winner.
 
-    Cables, IP-address attachments, MAC objects, and VLAN tag config all
-    point at the Interface row by FK, so they follow the move
-    automatically.
+    IP-address attachments, MAC objects, and VLAN tag config all point at
+    the Interface row by FK, so they follow the move automatically; cable
+    terminations follow by FK too, but their denormalized device/rack/
+    location/site cache columns are explicitly refreshed (see
+    :func:`_refresh_cable_termination_caches`). Donor-side interfaces whose
+    ``lag``/``parent``/``bridge`` points at the moved row are carried along
+    in the same transaction so no cross-device relationship is ever left
+    behind.
 
     Fails (toast + 409) when the winner already has an interface with the
-    same name — the user must rename or delete the colliding interface
-    on the winner first.
+    same name as the moved row or any carried dependent — the user must
+    rename or delete the colliding interface on the winner first.
     """
 
     # Requires change Device too: on success the move calls
@@ -490,6 +539,23 @@ class MoveInterfaceToWinnerView(_BaseMoveToWinnerView):
                     "Rename or remove the existing interface first.",
                     status=409,
                 )
+            # Carry the moved row's donor-side family (lag members, children, bridged
+            # peers) in the same transaction. Pre-check ALL their names on the winner
+            # before anything is saved, so the family either moves whole or not at all.
+            dependents = _donor_side_dependents(interface, donor)
+            colliding = sorted(
+                Interface.objects.filter(device=winner, name__in=[dep.name for dep in dependents]).values_list(
+                    "name", flat=True
+                )
+            )
+            if colliding:
+                return self._fail(
+                    request,
+                    f"Winner device '{winner.name}' already has interface(s) named "
+                    f"{', '.join(colliding)}. They are attached to '{interface.name}' and must move "
+                    "with it — rename or remove the colliding interface(s) first.",
+                    status=409,
+                )
             # Move via full_clean()+save(), not a bare .update(): a plain column update
             # bypasses Interface.clean(), which is exactly what guards against the moved
             # interface keeping a parent/lag/bridge that still lives on the donor (a
@@ -545,6 +611,38 @@ class MoveInterfaceToWinnerView(_BaseMoveToWinnerView):
                     status=409,
                 )
 
+            # Carry the donor-side family collected (and locked) above. BFS order
+            # guarantees each dependent's lag/parent/bridge target has already moved,
+            # so full_clean()'s cross-device checks pass for real.
+            for dep in dependents:
+                dep.device = winner
+                dep._original_device = winner.pk  # same ComponentModel re-seed as above
+                try:
+                    dep.full_clean()
+                    dep.save()
+                except (ValidationError, IntegrityError) as exc:
+                    # The master already saved in this transaction; a plain return would
+                    # COMMIT the half-moved family, so roll the whole move back explicitly
+                    # (IntegrityError poisons the transaction anyway; ValidationError doesn't).
+                    transaction.set_rollback(True)
+                    logger.warning(
+                        "Family move failed for attached interface pk=%s (master pk=%s): %s",
+                        dep.pk,
+                        interface.pk,
+                        exc,
+                    )
+                    return self._fail(
+                        request,
+                        f"Cannot move attached interface '{dep.name}' with '{interface.name}'; "
+                        "the whole move was rolled back.",
+                        status=409,
+                    )
+
+            # Refresh the denormalized cable-list cache columns for every moved row.
+            _refresh_cable_termination_caches(interface)
+            for dep in dependents:
+                _refresh_cable_termination_caches(dep)
+
             # The moved interface may carry an address the donor still points at via
             # primary_ip4/primary_ip6/oob_ip; reconcile those device FKs so the donor isn't
             # left referencing an address now on a winner-owned interface.
@@ -558,6 +656,11 @@ class MoveInterfaceToWinnerView(_BaseMoveToWinnerView):
                 return self._fail(request, f"Cannot reconcile donor IP assignments: {exc}", status=409)
 
         message = f"Moved interface '{interface.name}' to {winner.name}."
+        if dependents:
+            message = (
+                f"Moved interface '{interface.name}' and {len(dependents)} attached "
+                f"interface(s) ({', '.join(dep.name for dep in dependents)}) to {winner.name}."
+            )
         if notes:
             message += " " + "; ".join(notes) + "."
         return _hx_response(request, message, fallback_url=self._fallback_url)
