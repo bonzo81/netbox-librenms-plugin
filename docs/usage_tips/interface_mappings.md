@@ -29,7 +29,7 @@ Example:
 
 #### Creating a New Mapping:
 
-![](../img/interface_mappings/addmapping.png){ width="50" }
+![Add Mapping button on the Interface Mappings page](../img/interface_mappings/addmapping.png){ width="50" }
 
 * Click the green `+` or `Add` button either from the menu or on the Interface Mappings page
 * Enter LibreNMS interface type. _You can copy this from plugin's device interface sync page_
@@ -110,7 +110,7 @@ The plugin supports NetBox's standard bulk import feature for interface mappings
 
 #### Editing Existing Mappings:
 
-![](../img/interface_mappings/editmapping.png){ width="50" }
+![Edit button on an interface mapping row](../img/interface_mappings/editmapping.png){ width="50" }
 
 * On the Mappings page, Locate the desired mapping in the list
 * Click the `edit` (pencil icon) button
@@ -119,7 +119,7 @@ The plugin supports NetBox's standard bulk import feature for interface mappings
 
 #### Deleting Mappings:
 
-![](../img/interface_mappings/deletemapping.png){ width="150" }
+![Delete confirmation for an interface mapping](../img/interface_mappings/deletemapping.png){ width="150" }
 
 * Find the mapping you wish to remove
 * Select the `Delete` button from the drop down
