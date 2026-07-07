@@ -1,6 +1,6 @@
-from netbox.plugins import PluginMenu, PluginMenuButton, PluginMenuItem
+from netbox.plugins import PluginMenu, PluginMenuItem
 
-from netbox_librenms_plugin.constants import PERM_CHANGE_PLUGIN, PERM_VIEW_PLUGIN
+from netbox_librenms_plugin.constants import PERM_VIEW_PLUGIN
 
 menu = PluginMenu(
     label="LibreNMS",
@@ -36,160 +36,28 @@ menu = PluginMenu(
                 ),
             ),
         ),
+        # One sidebar entry per group: the individual object lists cross-link through the
+        # switcher tabs rendered on each list page (inc/_mapping_tabs.html and
+        # inc/_rules_patterns_tabs.html), and every list page carries its own native
+        # add/import controls — so per-model menu items (and their buttons) would only
+        # duplicate what the pages already offer while crowding the sidebar.
         (
             "Mappings",
             (
                 PluginMenuItem(
                     link="plugins:netbox_librenms_plugin:interfacetypemapping_list",
-                    link_text="Interface Mappings",
+                    link_text="Mappings",
                     permissions=[PERM_VIEW_PLUGIN],
-                    buttons=(
-                        PluginMenuButton(
-                            link="plugins:netbox_librenms_plugin:interfacetypemapping_add",
-                            title="Add",
-                            icon_class="mdi mdi-plus-thick",
-                            permissions=[PERM_CHANGE_PLUGIN],
-                        ),
-                        PluginMenuButton(
-                            link="plugins:netbox_librenms_plugin:interfacetypemapping_bulk_import",
-                            title="Import",
-                            icon_class="mdi mdi-upload",
-                            permissions=[PERM_CHANGE_PLUGIN],
-                        ),
-                    ),
                 ),
-                PluginMenuItem(
-                    link="plugins:netbox_librenms_plugin:devicetypemapping_list",
-                    link_text="Device Type Mappings",
-                    permissions=[PERM_VIEW_PLUGIN],
-                    buttons=(
-                        PluginMenuButton(
-                            link="plugins:netbox_librenms_plugin:devicetypemapping_add",
-                            title="Add",
-                            icon_class="mdi mdi-plus-thick",
-                            permissions=[PERM_CHANGE_PLUGIN],
-                        ),
-                        PluginMenuButton(
-                            link="plugins:netbox_librenms_plugin:devicetypemapping_bulk_import",
-                            title="Import",
-                            icon_class="mdi mdi-upload",
-                            permissions=[PERM_CHANGE_PLUGIN],
-                        ),
-                    ),
-                ),
-                PluginMenuItem(
-                    link="plugins:netbox_librenms_plugin:moduletypemapping_list",
-                    link_text="Module Type Mappings",
-                    permissions=[PERM_VIEW_PLUGIN],
-                    buttons=(
-                        PluginMenuButton(
-                            link="plugins:netbox_librenms_plugin:moduletypemapping_add",
-                            title="Add",
-                            icon_class="mdi mdi-plus-thick",
-                            permissions=[PERM_CHANGE_PLUGIN],
-                        ),
-                        PluginMenuButton(
-                            link="plugins:netbox_librenms_plugin:moduletypemapping_bulk_import",
-                            title="Import",
-                            icon_class="mdi mdi-upload",
-                            permissions=[PERM_CHANGE_PLUGIN],
-                        ),
-                    ),
-                ),
-                PluginMenuItem(
-                    link="plugins:netbox_librenms_plugin:modulebaymapping_list",
-                    link_text="Module Bay Mappings",
-                    permissions=[PERM_VIEW_PLUGIN],
-                    buttons=(
-                        PluginMenuButton(
-                            link="plugins:netbox_librenms_plugin:modulebaymapping_add",
-                            title="Add",
-                            icon_class="mdi mdi-plus-thick",
-                            permissions=[PERM_CHANGE_PLUGIN],
-                        ),
-                        PluginMenuButton(
-                            link="plugins:netbox_librenms_plugin:modulebaymapping_bulk_import",
-                            title="Import",
-                            icon_class="mdi mdi-upload",
-                            permissions=[PERM_CHANGE_PLUGIN],
-                        ),
-                    ),
-                ),
-                PluginMenuItem(
-                    link="plugins:netbox_librenms_plugin:platformmapping_list",
-                    link_text="Platform Mappings",
-                    permissions=[PERM_VIEW_PLUGIN],
-                    buttons=(
-                        PluginMenuButton(
-                            link="plugins:netbox_librenms_plugin:platformmapping_add",
-                            title="Add",
-                            icon_class="mdi mdi-plus-thick",
-                            permissions=[PERM_CHANGE_PLUGIN],
-                        ),
-                        PluginMenuButton(
-                            link="plugins:netbox_librenms_plugin:platformmapping_bulk_import",
-                            title="Import",
-                            icon_class="mdi mdi-upload",
-                            permissions=[PERM_CHANGE_PLUGIN],
-                        ),
-                    ),
-                ),
+            ),
+        ),
+        (
+            "Rules & Patterns",
+            (
                 PluginMenuItem(
                     link="plugins:netbox_librenms_plugin:inventoryignorerule_list",
-                    link_text="Inventory Ignore Rules",
+                    link_text="Rules & Patterns",
                     permissions=[PERM_VIEW_PLUGIN],
-                    buttons=(
-                        PluginMenuButton(
-                            link="plugins:netbox_librenms_plugin:inventoryignorerule_add",
-                            title="Add",
-                            icon_class="mdi mdi-plus-thick",
-                            permissions=[PERM_CHANGE_PLUGIN],
-                        ),
-                        PluginMenuButton(
-                            link="plugins:netbox_librenms_plugin:inventoryignorerule_bulk_import",
-                            title="Import",
-                            icon_class="mdi mdi-upload",
-                            permissions=[PERM_CHANGE_PLUGIN],
-                        ),
-                    ),
-                ),
-                PluginMenuItem(
-                    link="plugins:netbox_librenms_plugin:normalizationrule_list",
-                    link_text="Normalization Rules",
-                    permissions=[PERM_VIEW_PLUGIN],
-                    buttons=(
-                        PluginMenuButton(
-                            link="plugins:netbox_librenms_plugin:normalizationrule_add",
-                            title="Add",
-                            icon_class="mdi mdi-plus-thick",
-                            permissions=[PERM_CHANGE_PLUGIN],
-                        ),
-                        PluginMenuButton(
-                            link="plugins:netbox_librenms_plugin:normalizationrule_bulk_import",
-                            title="Import",
-                            icon_class="mdi mdi-upload",
-                            permissions=[PERM_CHANGE_PLUGIN],
-                        ),
-                    ),
-                ),
-                PluginMenuItem(
-                    link="plugins:netbox_librenms_plugin:carrierautoinstallrule_list",
-                    link_text="Carrier Auto-Install Rules",
-                    permissions=[PERM_VIEW_PLUGIN],
-                    buttons=(
-                        PluginMenuButton(
-                            link="plugins:netbox_librenms_plugin:carrierautoinstallrule_add",
-                            title="Add",
-                            icon_class="mdi mdi-plus-thick",
-                            permissions=[PERM_CHANGE_PLUGIN],
-                        ),
-                        PluginMenuButton(
-                            link="plugins:netbox_librenms_plugin:carrierautoinstallrule_bulk_import",
-                            title="Import",
-                            icon_class="mdi mdi-upload",
-                            permissions=[PERM_CHANGE_PLUGIN],
-                        ),
-                    ),
                 ),
             ),
         ),

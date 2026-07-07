@@ -1,0 +1,19 @@
+{% comment %}
+Switcher across the sync rule/pattern object lists (the sidebar has ONE
+"Rules & Patterns" entry). Same contract as _mapping_tabs.html: plain page links
+above the native Results/Filters tabs, one <a> per line for the tests' verbatim
+`class="nav-link active" href="..."` match. A branch that introduces a new rule or
+pattern model adds its tab here (and to RULE_LIST_ROUTES in the navigation tests)
+in the same commit that adds the model.
+{% endcomment %}
+<ul class="nav nav-pills mb-3">
+    <li class="nav-item">
+        <a class="nav-link{% if rules_tab_active == "inventoryignorerule" %} active{% endif %}" href="{% url 'plugins:netbox_librenms_plugin:inventoryignorerule_list' %}">Inventory Ignore Rules</a>
+    </li>
+    <li class="nav-item">
+        <a class="nav-link{% if rules_tab_active == "normalizationrule" %} active{% endif %}" href="{% url 'plugins:netbox_librenms_plugin:normalizationrule_list' %}">Normalization Rules</a>
+    </li>
+    <li class="nav-item">
+        <a class="nav-link{% if rules_tab_active == "carrierautoinstallrule" %} active{% endif %}" href="{% url 'plugins:netbox_librenms_plugin:carrierautoinstallrule_list' %}">Carrier Auto-Install Rules</a>
+    </li>
+</ul>
