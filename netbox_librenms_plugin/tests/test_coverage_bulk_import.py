@@ -822,6 +822,10 @@ class TestRefreshExistingDevice:
             "site": {"found": True},
             "device_type": {"found": True},
             "device_role": {"found": False, "role": None, "available_roles": []},
+            # Real validate_device_for_import output carries cluster regardless of
+            # import_as_vm; a cross-model match flips is_vm and recalculate then
+            # bracket-reads cluster["found"], so the fixture must carry it too.
+            "cluster": {"found": False, "cluster": None, "available_clusters": []},
         }
         base.update(overrides)
         return base
@@ -1019,7 +1023,10 @@ class TestRefreshExistingDevice:
         assert validation["oob_candidate"] is None
         assert validation["serial_role_choice_available"] is False
         assert "promote_to_host" not in validation
-        assert "merge_candidates" not in validation
+        # merge_candidates follows the baseline's always-present contract
+        # (validate_device_for_import and apply_oob_detection_result both keep the
+        # key set, defaulting to None) — clearing must reset it, not remove it.
+        assert validation["merge_candidates"] is None
 
     def test_deleted_vm_match_clears_stale_cluster_selection(self):
         """A dropped cached VM match must reset the stale cluster selection (preserving available_clusters), mirroring the device_role reset on the device path — otherwise the match-derived cluster.found=True survives and recalculate keeps the row "ready" even though a new VM import requires a fresh cluster."""

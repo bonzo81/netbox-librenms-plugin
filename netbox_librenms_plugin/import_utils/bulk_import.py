@@ -461,7 +461,10 @@ def _clear_existing_match_derived_fields(validation: dict) -> None:
     validation["device_type_mismatch"] = False
     # promote_to_host follows the "absent otherwise" contract (see apply_oob_detection_result).
     validation.pop("promote_to_host", None)
-    validation.pop("merge_candidates", None)
+    # merge_candidates, by contrast, is always present (validate_device_for_import's
+    # baseline and apply_oob_detection_result both keep it set, defaulting to None),
+    # so reset it rather than removing the key.
+    validation["merge_candidates"] = None
 
 
 def _reassert_new_import_blockers(validation: dict) -> None:
