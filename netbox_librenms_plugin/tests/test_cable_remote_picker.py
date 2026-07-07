@@ -18,7 +18,13 @@ All tests run against real Device / ConsoleServerPort / ConsolePort / Interface 
 
 import pytest
 
-from netbox_librenms_plugin.tests.conftest import cable_together, make_device, make_interface, make_serial_device
+from netbox_librenms_plugin.tests.conftest import (
+    cable_together,
+    make_device,
+    make_interface,
+    make_patch_panel,
+    make_serial_device,
+)
 from netbox_librenms_plugin.tests.test_serial_cables_view import _make_view
 
 
@@ -504,15 +510,8 @@ class TestManualRepointOfExistingCable:
 
     def test_patch_path_row_offers_the_picker(self):
         """A Connected-via-Patch-Path row offers the picker (re-pointing replaces the whole path, modal-confirmed)."""
-        from dcim.models import FrontPort, PortMapping, RearPort
-
         acs, (csp,), _ = make_serial_device("repoint-path", csp_names=["ttyS1"])
-        panel = make_device("repoint-path-pp")
-        rp = RearPort.objects.create(device=panel, name="R1", type="8p8c", positions=1)
-        fp = FrontPort.objects.create(device=panel, name="F1", type="8p8c", positions=1)
-        PortMapping.objects.create(
-            device=panel, front_port=fp, rear_port=rp, front_port_position=1, rear_port_position=1
-        )
+        _panel_dev, fp, rp = make_patch_panel("repoint-path-pp")
         end, _, (cp,) = make_serial_device("repoint-path-end", cp_names=["console"])
         cable_together(csp, fp)
         cable_together(rp, cp)

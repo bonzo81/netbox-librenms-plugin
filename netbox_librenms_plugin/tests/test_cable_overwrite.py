@@ -18,7 +18,7 @@ allowed silently.
 
 import pytest
 
-from netbox_librenms_plugin.tests.conftest import cable_together, make_device, make_serial_device
+from netbox_librenms_plugin.tests.conftest import cable_together, make_patch_panel, make_serial_device
 from netbox_librenms_plugin.tests.test_serial_cables_view import _mock_request
 
 
@@ -152,25 +152,13 @@ class TestClassifyCableAction:
 class TestRenderCableTrace:
     """The full end-to-end path of a cable, spanning patch-panel front/rear pass-throughs."""
 
-    def _panel(self, name):
-        # This NetBox models front/rear pass-through via a PortMapping table (not a rear_port FK).
-        from dcim.models import FrontPort, PortMapping, RearPort
-
-        panel = make_device(name)
-        rp = RearPort.objects.create(device=panel, name="R1", type="8p8c", positions=1)
-        fp = FrontPort.objects.create(device=panel, name="F1", type="8p8c", positions=1)
-        PortMapping.objects.create(
-            device=panel, front_port=fp, rear_port=rp, front_port_position=1, rear_port_position=1
-        )
-        return panel, fp, rp
-
     def test_trace_through_patch_panel_reaches_end_device(self):
         from dcim.models import Cable
 
         from netbox_librenms_plugin.utils import render_cable_trace
 
         _acs, csps, _ = make_serial_device("acs-trace", csp_names=["ttyS1"])
-        _panel, fp, rp = self._panel("panel-trace")
+        _panel_dev, fp, rp = make_patch_panel("panel-trace")
         _end, _, cps = make_serial_device("end-trace", cp_names=["console"])
 
         first = cable_together(csps[0], fp)  # ttyS1 -- F1
@@ -385,15 +373,8 @@ class TestOverwritePreservesMidPathSegments:
 
     def _panel_path(self, name):
         """csp --c1-- FrontPort | RearPort --c2 (trunk-ish)-- ConsolePort@end."""
-        from dcim.models import FrontPort, PortMapping, RearPort
-
         acs, (csp,), _ = make_serial_device(f"acs-{name}", csp_names=["ttyS1"])
-        panel = make_device(f"panel-{name}")
-        rp = RearPort.objects.create(device=panel, name="R1", type="8p8c", positions=1)
-        fp = FrontPort.objects.create(device=panel, name="F1", type="8p8c", positions=1)
-        PortMapping.objects.create(
-            device=panel, front_port=fp, rear_port=rp, front_port_position=1, rear_port_position=1
-        )
+        _panel_dev, fp, rp = make_patch_panel(f"panel-{name}")
         end, _, (cp,) = make_serial_device(f"end-{name}", cp_names=["console"])
         c1 = cable_together(csp, fp)
         c2 = cable_together(rp, cp)

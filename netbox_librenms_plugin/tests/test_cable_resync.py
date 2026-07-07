@@ -19,19 +19,14 @@ ConsoleServerPort / ConsolePort / FrontPort / RearPort / Cable / Tag rows:
 
 import pytest
 
-from netbox_librenms_plugin.tests.conftest import cable_together, make_device, make_interface, make_serial_device
+from netbox_librenms_plugin.tests.conftest import (
+    cable_together,
+    make_device,
+    make_interface,
+    make_patch_panel as _panel,  # 1-position patch panel; front/rear pass-through via PortMapping
+    make_serial_device,
+)
 from netbox_librenms_plugin.tests.test_serial_cables_view import _make_view
-
-
-def _panel(name):
-    """Build a 1-position patch panel; front/rear pass-through via PortMapping."""
-    from dcim.models import FrontPort, PortMapping, RearPort
-
-    panel = make_device(name)
-    rp = RearPort.objects.create(device=panel, name="R1", type="8p8c", positions=1)
-    fp = FrontPort.objects.create(device=panel, name="F1", type="8p8c", positions=1)
-    PortMapping.objects.create(device=panel, front_port=fp, rear_port=rp, front_port_position=1, rear_port_position=1)
-    return panel, fp, rp
 
 
 def _serial_row(csp, label, obj):

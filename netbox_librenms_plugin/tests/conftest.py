@@ -359,6 +359,22 @@ def cable_together(term_a, term_b):
     return cable
 
 
+def make_patch_panel(name):
+    """Create a 1-position patch panel: (panel, front_port, rear_port).
+
+    This NetBox models front/rear pass-through via a PortMapping table (not a
+    rear_port FK on FrontPort), so a panel takes three objects — shared here so
+    the cable trace/overwrite/re-sync/picker tests can't drift on that wiring.
+    """
+    from dcim.models import FrontPort, PortMapping, RearPort
+
+    panel = make_device(name)
+    rp = RearPort.objects.create(device=panel, name="R1", type="8p8c", positions=1)
+    fp = FrontPort.objects.create(device=panel, name="F1", type="8p8c", positions=1)
+    PortMapping.objects.create(device=panel, front_port=fp, rear_port=rp, front_port_position=1, rear_port_position=1)
+    return panel, fp, rp
+
+
 def make_interface(device, name, *, iface_type="other"):
     """Create a real Interface on *device*."""
     from dcim.models import Interface
