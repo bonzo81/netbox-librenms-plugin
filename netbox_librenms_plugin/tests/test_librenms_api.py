@@ -3219,6 +3219,36 @@ class TestGetSerialPortSensors:
         assert all(s["device_id"] == 12 for s in data)
         assert all(s["sensor_type"] == "acsSerialPortTable" for s in data)
 
+    def test_explicit_sensor_types_map_bypasses_db_and_shared_cache(self, mock_librenms_api, mock_response_factory):
+        """A caller-supplied map filters without the DB rows and must not seed the shared cache.
+
+        This is the data-shapes replay injection point: a recording is replayed with the map
+        that was CAPTURED alongside it, on a host whose SerialSensorTypePattern table may be
+        empty or different — and the custom-map result must not poison the per-server cache
+        that live readers share.
+        """
+        import unittest.mock as mock
+
+        from netbox_librenms_plugin.models import SerialSensorTypePattern
+
+        SerialSensorTypePattern.objects.all().delete()  # a replay host may have no rows at all
+
+        sensors = [self._make_sensor(12, port_num=7)]
+        mock_resp = mock_response_factory(status_code=200, json_data={"status": "ok", "sensors": sensors})
+        with mock.patch("netbox_librenms_plugin.librenms_api.requests.get", return_value=mock_resp):
+            success, data = mock_librenms_api.get_serial_port_sensors(
+                device_id=12, sensor_types={"acsSerialPortTable": "ttyS{N}"}
+            )
+            assert success is True
+            assert len(data) == 1
+
+            # The DB-map path sees no rows -> filters everything out. This both pins the
+            # override as the thing that filtered above AND proves the override call did not
+            # write the shared per-server cache (a poisoned cache would return the row here).
+            success2, data2 = mock_librenms_api.get_serial_port_sensors(device_id=12)
+            assert success2 is True
+            assert data2 == []
+
     def test_cisco_async_line_survives_type_filter(self, mock_librenms_api, mock_response_factory):
         """Cisco async-line sensors pass the serial type filter alongside Avocent, others are dropped."""
         import unittest.mock as mock

@@ -1794,7 +1794,9 @@ class LibreNMSAPI:
         except (requests.exceptions.RequestException, ValueError) as e:
             return False, f"Error connecting to LibreNMS: {str(e)}"
 
-    def get_serial_port_sensors(self, device_id: int, use_cache: bool = True) -> tuple[bool, list | str]:
+    def get_serial_port_sensors(
+        self, device_id: int, use_cache: bool = True, sensor_types: dict | None = None
+    ) -> tuple[bool, list | str]:
         """
         Return serial-port sensor records for a single device from LibreNMS.
 
@@ -1820,10 +1822,23 @@ class LibreNMSAPI:
 
         Args:
             device_id: LibreNMS device ID.
+            use_cache: False forces a fresh instance-wide pull (user-initiated Refresh).
+            sensor_types: Optional explicit recognition map overriding the
+                ``SerialSensorTypePattern`` table — the data-shapes replay injection point (a
+                recording is replayed with the map captured alongside it, on a host whose table
+                may be empty or different). An explicit map bypasses the shared per-server cache
+                in BOTH directions: cached entries were filtered with the live map, and writing
+                custom-map results back would poison later live readers.
 
         Returns:
             tuple: (success: bool, data: list of sensor dicts or error string)
         """
+        if sensor_types is not None:
+            success, all_serial_sensors = self._fetch_serial_port_sensors(sensor_types=sensor_types)
+            if not success:
+                return False, all_serial_sensors
+            return True, [s for s in all_serial_sensors if str(s.get("device_id")) == str(device_id)]
+
         cache_key = f"librenms_serial_sensors_{self.server_key}"
         all_serial_sensors = None
         # use_cache=False forces a fresh pull (a user-initiated Cables "Refresh" wants current
@@ -1860,12 +1875,16 @@ class LibreNMSAPI:
         device_sensors = [s for s in all_serial_sensors if str(s.get("device_id")) == str(device_id)]
         return True, device_sensors
 
-    def _fetch_serial_port_sensors(self) -> tuple[bool, list | str]:
+    def _fetch_serial_port_sensors(self, sensor_types: dict | None = None) -> tuple[bool, list | str]:
         """
         Fetch the instance-wide sensor table and return only serial-port sensors.
 
-        Returns the Avocent serial-typed subset across ALL devices (the public
+        Returns the serial-typed subset across ALL devices (the public
         :meth:`get_serial_port_sensors` filters that by device and handles caching).
+
+        Args:
+            sensor_types: Optional explicit recognition map; defaults to the
+                ``SerialSensorTypePattern`` table's map.
 
         Returns:
             tuple: (success: bool, data: list of serial sensor dicts or error string)
@@ -1874,7 +1893,7 @@ class LibreNMSAPI:
 
         # Recognized serial sensor types are the keys of the {type: name pattern} map; the fetch
         # filter only needs membership, so ``in`` against the dict keys is sufficient here.
-        serial_types = get_serial_sensor_type_patterns()
+        serial_types = sensor_types if sensor_types is not None else get_serial_sensor_type_patterns()
 
         try:
             response = requests.get(
