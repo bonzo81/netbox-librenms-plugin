@@ -23,7 +23,7 @@ from netbox_librenms_plugin.tests.conftest import (
     cable_together,
     make_device,
     make_interface,
-    make_patch_panel as _panel,  # 1-position patch panel; front/rear pass-through via PortMapping
+    make_patch_panel as _panel,  # 1-position patch panel; version-gated front/rear wiring
     make_serial_device,
 )
 from netbox_librenms_plugin.tests.test_serial_cables_view import _make_view

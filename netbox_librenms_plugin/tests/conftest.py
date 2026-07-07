@@ -362,16 +362,24 @@ def cable_together(term_a, term_b):
 def make_patch_panel(name):
     """Create a 1-position patch panel: (panel, front_port, rear_port).
 
-    This NetBox models front/rear pass-through via a PortMapping table (not a
-    rear_port FK on FrontPort), so a panel takes three objects — shared here so
-    the cable trace/overwrite/re-sync/picker tests can't drift on that wiring.
+    NetBox 4.5+ models front/rear pass-through via a PortMapping table, while the
+    plugin's declared floor (4.2) still uses a rear_port FK on FrontPort — so the
+    wiring is version-gated on the model's presence. Shared here so the cable
+    trace/overwrite/re-sync/picker tests can't drift on that wiring.
     """
-    from dcim.models import FrontPort, PortMapping, RearPort
+    from dcim.models import FrontPort, RearPort
 
     panel = make_device(name)
     rp = RearPort.objects.create(device=panel, name="R1", type="8p8c", positions=1)
-    fp = FrontPort.objects.create(device=panel, name="F1", type="8p8c", positions=1)
-    PortMapping.objects.create(device=panel, front_port=fp, rear_port=rp, front_port_position=1, rear_port_position=1)
+    try:
+        from dcim.models import PortMapping
+    except ImportError:  # NetBox < 4.5: FrontPort carries the rear-port FK directly
+        fp = FrontPort.objects.create(device=panel, name="F1", type="8p8c", rear_port=rp, rear_port_position=1)
+    else:
+        fp = FrontPort.objects.create(device=panel, name="F1", type="8p8c", positions=1)
+        PortMapping.objects.create(
+            device=panel, front_port=fp, rear_port=rp, front_port_position=1, rear_port_position=1
+        )
     return panel, fp, rp
 
 
