@@ -100,3 +100,27 @@ class TestCableSyncContentTemplateMigratedMode:
         html = self._remote_port_table().render_remote_port(value=None, record={})
 
         assert html == ""
+
+    def test_picker_button_carries_accessible_name(self):
+        """The icon-only picker button has an aria-label (title alone isn't reliably announced)."""
+        from django.test import RequestFactory
+        from django_tables2 import RequestConfig
+
+        from netbox_librenms_plugin.tables.cables import LibreNMSCableTable
+        from netbox_librenms_plugin.tests.conftest import make_device
+
+        device = make_device("cable-picker-a11y-dev")
+        row = {
+            "local_port_id": "serial:1",
+            "local_port": "ttyS1",
+            "device_id": device.id,
+            "picker_url": "/plugins/librenms_plugin/picker/1/",
+        }
+        table = LibreNMSCableTable([row], device=device)
+        request = RequestFactory().get("/")
+        RequestConfig(request).configure(table)
+
+        html = table.as_html(request)
+
+        assert 'hx-get="/plugins/librenms_plugin/picker/1/"' in html
+        assert 'aria-label="Pick remote end"' in html

@@ -51,6 +51,7 @@ class LibreNMSCableTable(tables.Table):
             <button type="button"
                     class="btn btn-sm btn-outline-secondary"
                     title="Pick remote end"
+                    aria-label="Pick remote end"
                     hx-get="{{ record.picker_url }}"
                     hx-target="#htmx-modal-content"
                     hx-swap="innerHTML">
