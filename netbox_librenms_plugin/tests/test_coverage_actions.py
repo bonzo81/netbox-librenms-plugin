@@ -6467,6 +6467,89 @@ class TestMergeNetBoxDevicesViewOOBTransfer:
         assert "_migrated_to" not in entry
 
 
+def _two_member_vc(name, *, m1_cf=None, m2_cf=None):
+    """Create a real 2-member VirtualChassis (positions 1, 2). m1 becomes the sync device when it is the member holding the ``librenms_id``."""
+    from dcim.models import VirtualChassis
+
+    vc = VirtualChassis.objects.create(name=name)
+    m1 = make_device(f"{name}-m1", librenms_cf=m1_cf)
+    m1.virtual_chassis = vc
+    m1.vc_position = 1
+    m1.save()
+    m2 = make_device(f"{name}-m2", librenms_cf=m2_cf)
+    m2.virtual_chassis = vc
+    m2.vc_position = 2
+    m2.save()
+    return vc, m1, m2
+
+
+@pytest.mark.django_db
+class TestMergeNetBoxDevicesViewVCSyncDevice:
+    """MergeNetBoxDevicesView.post: when a merge candidate is a Virtual Chassis member, the LibreNMS link (host id / OOB) and the ``_migrated_to`` marker must be merged on the VC's sync device (``get_librenms_sync_device``), not the raw selected member. Writing to a non-sync member either split-brains a VC that already has a linked member, or leaves the donor's real link (on its sync sibling) uncleared."""
+
+    def _make_view(self):
+        from netbox_librenms_plugin.views.imports.actions import MergeNetBoxDevicesView
+
+        view = object.__new__(MergeNetBoxDevicesView)
+        view._librenms_api = _make_api()
+        view.require_write_permission = MagicMock(return_value=None)
+        view.require_object_permissions = MagicMock(return_value=None)
+        return view
+
+    def _run_merge(self, *, winner, donor):
+        from django.http import HttpResponse
+
+        view = self._make_view()
+        request = _make_request(post={"winner_pk": str(winner.pk), "donor_pk": str(donor.pk)})
+        validation = {"merge_candidates": {"host_named": {"pk": winner.pk}, "oob_named": {"pk": donor.pk}}}
+        view.get_validated_device_with_selections = MagicMock(return_value=({"device_id": 99}, validation, {}))
+        view.render_device_row = MagicMock(return_value=HttpResponse("row"))
+        resp = view.post(request, device_id=99)
+        assert resp.status_code == 200
+        return resp
+
+    @staticmethod
+    def _entry(device):
+        device.refresh_from_db()
+        return (device.custom_field_data.get("librenms_id") or {}).get("default") or {}
+
+    def test_winner_is_non_sync_vc_member_link_lands_on_sync_device(self):
+        """Winner is a non-sync VC member whose sync sibling already holds a host id; the donor's id must merge onto the sync sibling (into its OOB half) and NEVER onto the raw winner member — otherwise two members of one chassis hold ``librenms_id`` (split brain)."""
+        _vc, m1, m2 = _two_member_vc("mrg-vc-win", m1_cf={"default": {"id": 30}}, m2_cf=None)
+        donor = make_device("mrg-vc-win-donor", librenms_cf={"default": {"id": 40}})
+
+        self._run_merge(winner=m2, donor=donor)
+
+        # The raw non-sync winner member must stay clean — no host id planted on it.
+        assert "id" not in self._entry(m2), "non-sync VC member must not receive the merged host id (split brain)"
+        # The VC's sync device keeps its own id and absorbs the donor's id into its OOB slot.
+        m1_entry = self._entry(m1)
+        assert m1_entry.get("id") == 30
+        assert (m1_entry.get("oob") or {}).get("id") == 40, "donor id should merge onto the sync device's OOB slot"
+        # Donor cleared + marked migrated toward the sync device (the real link holder).
+        donor_entry = self._entry(donor)
+        assert "id" not in donor_entry
+        assert donor_entry.get("_migrated_to", {}).get("device_id") == m1.pk
+
+    def test_donor_is_non_sync_vc_member_clears_link_on_sync_device(self):
+        """Donor is a non-sync VC member; its real link lives on the sync sibling. The merge must read + clear that sibling's link (and mark IT migrated), not the empty selected member — otherwise the source VC stays linked to LibreNMS."""
+        _vc, m1, m2 = _two_member_vc("mrg-vc-don", m1_cf={"default": {"id": 30}}, m2_cf=None)
+        winner = make_device("mrg-vc-don-winner", librenms_cf={"default": {"id": 50}})
+
+        self._run_merge(winner=winner, donor=m2)
+
+        # The donor VC's sync sibling holds the real link: it must be absorbed and cleared + marked.
+        m1_entry = self._entry(m1)
+        assert "id" not in m1_entry, "the donor VC's sync device must be cleared, not left linked to LibreNMS"
+        assert m1_entry.get("_migrated_to", {}).get("device_id") == winner.pk
+        # Winner absorbed the sync sibling's id into its OOB slot (winner already had a host id).
+        winner_entry = self._entry(winner)
+        assert winner_entry.get("id") == 50
+        assert (winner_entry.get("oob") or {}).get("id") == 30
+        # The raw selected member (m2) never held a link; nothing is planted on it.
+        assert "id" not in self._entry(m2)
+
+
 @pytest.mark.django_db
 class TestMergeNetBoxDevicesViewFailClosed:
     """MergeNetBoxDevicesView.post: ValueErrors from merge_librenms_links, the oob_ip transfer, and mark_librenms_migrated must all fail closed with a toast and leave the donor unmigrated — never a 500 or a silent lossy merge."""

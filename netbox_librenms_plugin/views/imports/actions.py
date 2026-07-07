@@ -3352,16 +3352,41 @@ class MergeNetBoxDevicesView(
 
         server_key = self.librenms_api.server_key
 
+        # LibreNMS treats a Virtual Chassis as one logical device, so the host/OOB link lives on the
+        # single sync member (get_librenms_sync_device) — which may differ from the winner/donor the
+        # user selected when a candidate matched a NON-sync VC member by serial/hostname. Merge the
+        # link state on the sync devices: writing it to a non-sync member would either split-brain a
+        # VC that already has a linked member, or leave the donor's real link (on its sync sibling)
+        # uncleared where every reader still resolves and finds it. For non-VC devices these resolve
+        # back to the same rows, so the common path is unchanged. Resolved unlocked then locked below
+        # (mirrors AddAsOOBView). The oob_ip transfer and the candidate-match check deliberately stay
+        # on the user-selected winner/donor: oob_ip is a per-device FK on those rows, not a VC link.
+        winner_sync = get_librenms_sync_device(winner, server_key=server_key) or winner
+        donor_sync = get_librenms_sync_device(donor, server_key=server_key) or donor
+        if winner_sync.pk == donor_sync.pk:
+            # Both candidates belong to the same virtual chassis (one sync device); merging its
+            # LibreNMS link into itself would read and write the same CF entry. Fail closed.
+            return _htmx_error_response(
+                "Winner and donor resolve to the same LibreNMS sync device "
+                "(they are members of the same virtual chassis); there is nothing to merge."
+            )
+
         with transaction.atomic():
-            # Lock both rows in deterministic pk order to avoid deadlocks.
-            locked = list(Device.objects.select_for_update().filter(pk__in=[winner_pk, donor_pk]).order_by("pk"))
-            if len(locked) != 2:
+            # Lock every distinct row we read or write, in deterministic pk order to avoid deadlocks:
+            # the selected winner/donor (oob_ip transfer + permission-gated saves) and their VC sync
+            # devices (LibreNMS link merge + migration marker). Deduped, so a non-VC merge locks the
+            # same two rows as before.
+            lock_pks = sorted({winner.pk, donor.pk, winner_sync.pk, donor_sync.pk})
+            locked = list(Device.objects.select_for_update().filter(pk__in=lock_pks).order_by("pk"))
+            if len(locked) != len(lock_pks):
                 return _htmx_error_response(
                     "One of the devices no longer exists; it may have been deleted concurrently."
                 )
             locked_by_pk = {d.pk: d for d in locked}
-            winner = locked_by_pk[winner_pk]
-            donor = locked_by_pk[donor_pk]
+            winner = locked_by_pk[winner.pk]
+            donor = locked_by_pk[donor.pk]
+            winner_sync = locked_by_pk[winner_sync.pk]
+            donor_sync = locked_by_pk[donor_sync.pk]
 
             # merge_librenms_links(), set_device_ip_fk() and mark_librenms_migrated() all raise
             # ValueError on corrupt link shapes or an ownership violation. Guard the whole group,
@@ -3369,7 +3394,7 @@ class MergeNetBoxDevicesView(
             # a ValueError from the oob transfer or the migration marker must fail closed with a
             # toast exactly like a merge_librenms_links() rejection — never bubble up as a 500.
             try:
-                summary = merge_librenms_links(winner, donor, server_key=server_key)
+                summary = merge_librenms_links(winner_sync, donor_sync, server_key=server_key)
 
                 # Transfer OOB IP relationship if winner has none and donor has one — but
                 # only when the underlying IP already sits on a winner-owned interface.
@@ -3403,8 +3428,10 @@ class MergeNetBoxDevicesView(
                             set_device_ip_fk(donor, "oob_ip", None, save=False)
                             oob_ip_transferred = True
 
-                # Clear donor's active link and stamp migration marker.
-                mark_librenms_migrated(donor, winner.pk, server_key=server_key)
+                # Clear the donor sync device's active link and stamp the migration marker there —
+                # the marker is a sibling key of id/oob in the same librenms_id entry, so it must
+                # live wherever the link it supersedes lives (the sync device), not the raw member.
+                mark_librenms_migrated(donor_sync, winner_sync.pk, server_key=server_key)
             except ValueError as exc:
                 # Nothing was persisted yet, but locks were taken under this atomic block — roll
                 # back defensively before returning the fail-closed toast.
@@ -3417,16 +3444,40 @@ class MergeNetBoxDevicesView(
             # undesirable when the rows hold pre-existing inconsistencies
             # (e.g. ``face`` set without ``rack``) that are unrelated to
             # this merge.  See issue surfaced during eve-ng-02 merge.
-            update_fields = ["custom_field_data"]
+            # Persist only the fields we actually touched, per row. The LibreNMS link merge +
+            # migration marker land on the sync devices (custom_field_data); the oob_ip transfer
+            # lands on the selected winner/donor. When a selected device IS its own sync device
+            # (the non-VC common case) these collapse onto one row, saved once with both fields —
+            # never twice with different update_fields, which would drop one change.
+            fields_by_pk = {}
+
+            def _touch(dev, field):
+                fields_by_pk.setdefault(dev.pk, set()).add(field)
+
+            _touch(winner_sync, "custom_field_data")
+            _touch(donor_sync, "custom_field_data")
             if oob_ip_transferred:
-                update_fields.append("oob_ip")
+                _touch(winner, "oob_ip")
+                _touch(donor, "oob_ip")
+
+            # The donor side must release the OneToOne ``oob_ip`` (set to None) before the winner
+            # side claims it, or two devices momentarily point at the same IP and violate the unique
+            # constraint on ``Device.oob_ip``. The sync devices only carry custom_field_data (no
+            # unique field), so their order is free; save the donor group first and the selected
+            # winner last. A sync device can't cross-coincide with the other side's selected row
+            # (guaranteed by the winner_sync != donor_sync guard above), so grouping is unambiguous.
+            donor_extra = [donor_sync] if donor_sync.pk != donor.pk else []
+            winner_extra = [winner_sync] if winner_sync.pk != winner.pk else []
+            save_order = [donor, *donor_extra, *winner_extra, winner]
+            saved = set()
             try:
-                # Persist the donor first. When an oob_ip is being transferred, the donor
-                # must release the OneToOne ``oob_ip`` (set to None) before the winner can
-                # claim it — saving the winner first would momentarily point two devices at
-                # the same IP and violate the unique constraint on ``Device.oob_ip``.
-                donor.save(update_fields=update_fields)
-                winner.save(update_fields=update_fields)
+                for dev in save_order:
+                    if dev.pk in saved:
+                        continue
+                    saved.add(dev.pk)
+                    fields = fields_by_pk.get(dev.pk)
+                    if fields:
+                        dev.save(update_fields=sorted(fields))
             except Exception:  # pragma: no cover - defensive
                 logger.exception(
                     "MergeNetBoxDevicesView: failed to persist merge winner=%s donor=%s",
