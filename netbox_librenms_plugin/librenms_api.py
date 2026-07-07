@@ -646,6 +646,15 @@ class LibreNMSAPI:
                        is None), only that OS's pattern is loaded so a vendor-specific regex
                        can't misclassify an interface on another platform. When None, all
                        stored patterns are loaded (legacy, unscoped behaviour).
+            interface_name_field: Interface-name field selected for this device
+                                  ('ifName' or 'ifDescr'). Names are scanned across this
+                                  field first, then ifName and ifDescr as fallbacks, so an
+                                  ifDescr-mode device still resolves its LAG and sub-interface
+                                  relationships.
+            compiled_lag_patterns: Optional list of pre-compiled name-pattern regexes. When
+                                   provided, the PortStackLagPattern DB read and per-call
+                                   compile are skipped and this list is used directly, taking
+                                   priority over lag_patterns/device_os.
 
         Returns:
             dict with keys (port_ids are canonical normalized positive ints, so every
