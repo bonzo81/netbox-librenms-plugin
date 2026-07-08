@@ -3045,3 +3045,36 @@ class TestDetectCollisionsForDeviceIds:
             )
         assert unresolved == [9102]
         assert collisions == []  # only one validatable row → no collision
+
+    def test_fetched_row_is_written_back_into_shared_cache(self):
+        """A cache-miss fetch is persisted into the caller's cache dict so the downstream import reuses it instead of re-fetching the same LibreNMS device."""
+        from types import SimpleNamespace
+
+        from netbox_librenms_plugin.import_utils.bulk_import import detect_collisions_for_device_ids
+
+        make_device("writeback-a-host")
+        make_device("writeback-b-host")
+        calls = []
+
+        def _get_device_info(did):
+            calls.append(did)
+            name = {8101: "writeback-a-host", 8102: "writeback-b-host"}[did]
+            return True, {"device_id": did, "sysName": name, "hostname": name}
+
+        api = SimpleNamespace(server_key="default", get_device_info=_get_device_info)
+        shared_cache = {}  # empty → both ids miss, must be fetched AND written back
+
+        detect_collisions_for_device_ids(
+            [8101, 8102], api, libre_devices_cache=shared_cache, sync_options={"use_sysname": True}
+        )
+        # Each id fetched once and persisted into the SAME dict object the caller passed.
+        assert sorted(calls) == [8101, 8102]
+        assert shared_cache[8101]["hostname"] == "writeback-a-host"
+        assert shared_cache[8102]["hostname"] == "writeback-b-host"
+
+        # A downstream consumer reusing that warmed cache adds ZERO further LibreNMS calls.
+        calls.clear()
+        detect_collisions_for_device_ids(
+            [8101, 8102], api, libre_devices_cache=shared_cache, sync_options={"use_sysname": True}
+        )
+        assert calls == [], "second pass must hit the warmed cache, not re-fetch"

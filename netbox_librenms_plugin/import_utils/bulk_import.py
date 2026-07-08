@@ -120,7 +120,10 @@ def detect_collisions_for_device_ids(
     """
     use_sysname = (sync_options or {}).get("use_sysname", True)
     strip_domain = (sync_options or {}).get("strip_domain", False)
-    cache = libre_devices_cache or {}
+    # Reuse the caller's dict object (mutate it in place) rather than `or {}`, which would swap in a
+    # throwaway dict when the caller passes an empty one — the write-back below must be visible to
+    # the caller so the downstream import reuses it.
+    cache = libre_devices_cache if libre_devices_cache is not None else {}
     devices = []
     unresolved_ids = []
     for device_id in device_ids:
@@ -132,6 +135,11 @@ def detect_collisions_for_device_ids(
                 # caller blocks it instead of importing it unchecked (fail closed).
                 unresolved_ids.append(device_id)
                 continue
+            # Persist the freshly fetched row into the shared cache so the downstream import
+            # (bulk_import_devices_shared / bulk_import_vms) reuses it instead of re-fetching the
+            # same device from LibreNMS. Without this, the collision pre-check doubles the API
+            # round-trips for any id the caller didn't already pre-populate.
+            cache[device_id] = libre_device
         validation = validate_device_for_import(
             # DB-only collision pre-check: don't hand the validator an API client (it would let
             # API-backed validation paths run even with the cache supplied + include_vc_detection
