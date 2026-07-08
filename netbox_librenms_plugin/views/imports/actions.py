@@ -3358,25 +3358,22 @@ class MergeNetBoxDevicesView(
         # link state on the sync devices: writing it to a non-sync member would either split-brain a
         # VC that already has a linked member, or leave the donor's real link (on its sync sibling)
         # uncleared where every reader still resolves and finds it. For non-VC devices these resolve
-        # back to the same rows, so the common path is unchanged. Resolved unlocked then locked below
-        # (mirrors AddAsOOBView). The oob_ip transfer and the candidate-match check deliberately stay
-        # on the user-selected winner/donor: oob_ip is a per-device FK on those rows, not a VC link.
-        winner_sync = get_librenms_sync_device(winner, server_key=server_key) or winner
-        donor_sync = get_librenms_sync_device(donor, server_key=server_key) or donor
-        if winner_sync.pk == donor_sync.pk:
-            # Both candidates belong to the same virtual chassis (one sync device); merging its
-            # LibreNMS link into itself would read and write the same CF entry. Fail closed.
-            return _htmx_error_response(
-                "Winner and donor resolve to the same LibreNMS sync device "
-                "(they are members of the same virtual chassis); there is nothing to merge."
-            )
-
+        # back to the same rows, so the common path is unchanged. The oob_ip transfer and the
+        # candidate-match check deliberately stay on the user-selected winner/donor: oob_ip is a
+        # per-device FK on those rows, not a VC link.
         with transaction.atomic():
-            # Lock every distinct row we read or write, in deterministic pk order to avoid deadlocks:
-            # the selected winner/donor (oob_ip transfer + permission-gated saves) and their VC sync
-            # devices (LibreNMS link merge + migration marker). Deduped, so a non-VC merge locks the
-            # same two rows as before.
-            lock_pks = sorted({winner.pk, donor.pk, winner_sync.pk, donor_sync.pk})
+            # Lock the selected winner/donor AND every current member of their virtual chassis, in
+            # deterministic pk order to avoid deadlocks, BEFORE resolving the sync device:
+            # get_librenms_sync_device scans every VC member's librenms_id custom field, so resolving
+            # it from unlocked rows would let a concurrent VC edit (a member joining/leaving, or the
+            # id moving between members) shift the sync member to a row we never locked — splitting
+            # the link across the VC. Non-VC merges add no members, so they lock the same two rows.
+            lock_pks = {winner.pk, donor.pk}
+            for candidate in (winner, donor):
+                vc = getattr(candidate, "virtual_chassis", None)
+                if vc:
+                    lock_pks.update(vc.members.values_list("pk", flat=True))
+            lock_pks = sorted(lock_pks)
             locked = list(Device.objects.select_for_update().filter(pk__in=lock_pks).order_by("pk"))
             if len(locked) != len(lock_pks):
                 return _htmx_error_response(
@@ -3385,8 +3382,24 @@ class MergeNetBoxDevicesView(
             locked_by_pk = {d.pk: d for d in locked}
             winner = locked_by_pk[winner.pk]
             donor = locked_by_pk[donor.pk]
+
+            # Resolve the sync devices from the now-locked, current state.
+            winner_sync = get_librenms_sync_device(winner, server_key=server_key) or winner
+            donor_sync = get_librenms_sync_device(donor, server_key=server_key) or donor
+            # Fail closed if a concurrent VC change added a member after we snapshotted lock_pks and
+            # the resolved sync device wasn't among the locked rows — never write the link to an
+            # unlocked row; the operator can retry.
+            if winner_sync.pk not in locked_by_pk or donor_sync.pk not in locked_by_pk:
+                return _htmx_error_response("Virtual chassis membership changed during the merge; please retry.")
             winner_sync = locked_by_pk[winner_sync.pk]
             donor_sync = locked_by_pk[donor_sync.pk]
+            if winner_sync.pk == donor_sync.pk:
+                # Both candidates belong to the same virtual chassis (one sync device); merging its
+                # LibreNMS link into itself would read and write the same CF entry. Fail closed.
+                return _htmx_error_response(
+                    "Winner and donor resolve to the same LibreNMS sync device "
+                    "(they are members of the same virtual chassis); there is nothing to merge."
+                )
 
             # merge_librenms_links(), set_device_ip_fk() and mark_librenms_migrated() all raise
             # ValueError on corrupt link shapes or an ownership violation. Guard the whole group,

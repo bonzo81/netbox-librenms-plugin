@@ -6549,6 +6549,38 @@ class TestMergeNetBoxDevicesViewVCSyncDevice:
         # The raw selected member (m2) never held a link; nothing is planted on it.
         assert "id" not in self._entry(m2)
 
+    def test_merge_locks_every_vc_member_before_resolving_the_sync_device(self):
+        """The merge must lock every VC member (incl. bystanders) before resolving the sync device."""
+        import re
+
+        from django.db import connection
+        from django.test.utils import CaptureQueriesContext
+
+        vc, m1, m2 = _two_member_vc("mrg-vc-lock", m1_cf={"default": {"id": 30}}, m2_cf=None)
+        # A bystander member: not the selected winner (m2) and not the sync device (m1).
+        m3 = make_device("mrg-vc-lock-m3", librenms_cf=None)
+        m3.virtual_chassis = vc
+        m3.vc_position = 3
+        m3.save()
+        donor = make_device("mrg-vc-lock-donor", librenms_cf={"default": {"id": 40}})
+
+        with CaptureQueriesContext(connection) as ctx:
+            self._run_merge(winner=m2, donor=donor)
+
+        locked_pks = set()
+        for q in ctx.captured_queries:
+            sql = q["sql"]
+            if "dcim_device" in sql and "FOR UPDATE" in sql:
+                match = re.search(r"IN \(([\d, ]+)\)", sql)
+                if match:
+                    locked_pks.update(int(p) for p in match.group(1).split(","))
+        # The whole chassis (m1 sync + m2 winner + m3 bystander) plus the donor must be locked. m3
+        # missing means the sync device was resolved from unlocked rows — the bug this guards.
+        assert {m1.pk, m2.pk, m3.pk, donor.pk} <= locked_pks, (
+            f"expected every VC member locked before sync-device resolution; locked={locked_pks}, "
+            f"bystander m3={m3.pk} missing"
+        )
+
 
 @pytest.mark.django_db
 class TestMergeNetBoxDevicesViewFailClosed:
