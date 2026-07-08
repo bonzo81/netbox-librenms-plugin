@@ -35,7 +35,7 @@ Every cable the sync creates is stamped so the plugin can recognize its own cabl
 | `cable_sync_tag_color` | `009688` | Color of the auto-created tag and of the cables themselves. |
 | `cable_sync_description` | `Synced from LibreNMS` | Cable description; the acting server key is appended, e.g. `Synced from LibreNMS (production)`. |
 
-These are plugin-level settings (set beside `servers`, like `serial_sensor_types`). The cable's **tenant** follows the remote device's tenant; the cable **type** is left blank (LibreNMS doesn't report the physical cable, and NetBox has no serial/rollover type).
+These are plugin-level settings (set beside `servers`). The cable's **tenant** follows the remote device's tenant; the cable **type** is left blank (LibreNMS doesn't report the physical cable, and NetBox has no serial/rollover type). Serial console sensor types are no longer a plugin setting — they are managed as database rows under the Rules & Patterns tables.
 
 ## Re-syncing already-cabled ports
 
