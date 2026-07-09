@@ -926,9 +926,13 @@ def validate_device_for_import(
             _dup_eligible = result.get("existing_device") is not None and _match_type in ("hostname", "serial")
             # VM matches are just as vulnerable: NetBox only enforces VM-name uniqueness per
             # cluster, so the VM hostname match above binds .first() among cross-cluster
-            # duplicates. Pick the peer model by the side that actually matched (a VM match
-            # forced import_as_vm=True above; the serial path is device-only).
-            _PeerModel = VirtualMachine if import_as_vm else Device
+            # duplicates. Pick the peer model from the object that ACTUALLY matched, not from
+            # import_as_vm: the hostname fallback can bind a Device even when the caller requested
+            # a VM import (import_as_vm=True passed by vm_operations), so keying on import_as_vm
+            # would query the wrong table and miss same-name duplicates on the matched side. The
+            # serial path is device-only.
+            _matched_is_vm = isinstance(result.get("existing_device"), VirtualMachine)
+            _PeerModel = VirtualMachine if _matched_is_vm else Device
             _hostname_peers = (
                 list(_PeerModel.objects.filter(name__iexact=hostname)[:2])
                 if _dup_eligible and _match_type == "hostname" and hostname
@@ -969,7 +973,7 @@ def validate_device_for_import(
                     result["is_ready"] = False
                     # Both wordings keep the "hostname/serial" substring the refresh-path
                     # blocker cleanup keys on (_AMBIGUOUS_SERIAL_IP_MARKERS in bulk_import).
-                    _dup_kind = "virtual machines" if import_as_vm else "devices"
+                    _dup_kind = "virtual machines" if _matched_is_vm else "devices"
                     _dup_msg = (
                         f"Multiple NetBox {_dup_kind} share this device's hostname/serial; resolve the "
                         "duplicate before importing or linking."
