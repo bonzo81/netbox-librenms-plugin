@@ -188,6 +188,7 @@ class ImportDevicesJob(JobRunner):
             bulk_import_devices_shared,
             detect_collisions_for_device_ids,
         )
+        from netbox_librenms_plugin.import_utils.bulk_import import _is_job_cancelled
         from netbox_librenms_plugin.librenms_api import LibreNMSAPI
 
         total_count = len(device_ids) + len(vm_imports)
@@ -221,7 +222,14 @@ class ImportDevicesJob(JobRunner):
             # colliding batch either. A single row can never collide, so skip the extra pass.
             collisions, unresolved = (
                 detect_collisions_for_device_ids(
-                    collision_check_ids, api, libre_devices_cache=libre_devices_cache, sync_options=sync_options
+                    collision_check_ids,
+                    api,
+                    libre_devices_cache=libre_devices_cache,
+                    sync_options=sync_options,
+                    # Job context so a cancellation stops the scan itself — without it, a large
+                    # cache-miss batch keeps issuing LibreNMS calls until the whole pre-check
+                    # finishes and only the import loops below would honor the cancel.
+                    job=self,
                 )
                 if len(collision_check_ids) >= 2
                 else ([], [])
@@ -230,11 +238,19 @@ class ImportDevicesJob(JobRunner):
                 # Fail closed: these ids couldn't be fetched to collision-check, so don't import
                 # the batch unchecked (a transient get_device_info miss could otherwise let a
                 # colliding row through on retry). Block the whole batch like the collision path.
+                # A cancelled pre-check lands here too (its unscanned remainder is returned as
+                # unresolved) — report that as the cancellation it is, not as a fetch failure.
                 ids = ", ".join(str(d) for d in unresolved)
-                msg = (
-                    f"Import blocked: could not fetch LibreNMS device info for {len(unresolved)} "
-                    f"row(s) (id(s): {ids}) to verify collisions; retry the import."
-                )
+                if _is_job_cancelled(self):
+                    msg = (
+                        f"Import cancelled during the collision pre-check; {len(unresolved)} "
+                        f"row(s) (id(s): {ids}) were not checked and nothing was imported."
+                    )
+                else:
+                    msg = (
+                        f"Import blocked: could not fetch LibreNMS device info for {len(unresolved)} "
+                        f"row(s) (id(s): {ids}) to verify collisions; retry the import."
+                    )
                 self.logger.error(msg)
                 device_result["failed"] = [{"device_id": device_id, "error": msg} for device_id in device_ids]
                 batch_blocked_msg = msg

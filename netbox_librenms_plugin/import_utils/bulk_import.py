@@ -88,7 +88,7 @@ def _is_job_cancelled(job) -> bool:
 
 
 def detect_collisions_for_device_ids(
-    device_ids, api, libre_devices_cache=None, sync_options=None
+    device_ids, api, libre_devices_cache=None, sync_options=None, job=None
 ) -> tuple[list[dict], list]:
     """
     Detect same-NetBox-device collisions for a batch of LibreNMS device ids.
@@ -109,14 +109,18 @@ def detect_collisions_for_device_ids(
             ``get_device_info`` is called only for ids missing from the cache).
         libre_devices_cache: Optional ``{device_id: libre_device}`` pre-fetched data.
         sync_options: Optional sync options (``use_sysname`` / ``strip_domain``).
+        job: Optional background-job context. When set, cancellation is polled the same
+            way the import loops poll it (first id, then every 5th); a cancelled job stops
+            the scan instead of finishing a large cache-miss batch's API calls.
 
     Returns:
         tuple[list[dict], list]: ``(collisions, unresolved_ids)`` — the collision groups from
             :func:`detect_bulk_collisions` (empty when the batch is clean), and the device ids
             that could NOT be validated (``get_device_info`` failed and they weren't in the
-            cache). Those ids were not collision-checked, so the caller must fail closed on them
-            rather than import them unchecked — a transient miss could otherwise slip a colliding
-            row through on a retry.
+            cache), plus — on a mid-scan cancellation — every id not yet scanned. Those ids
+            were not collision-checked, so the caller must fail closed on them rather than
+            import them unchecked — a transient miss could otherwise slip a colliding row
+            through on a retry.
     """
     use_sysname = (sync_options or {}).get("use_sysname", True)
     strip_domain = (sync_options or {}).get("strip_domain", False)
@@ -126,7 +130,18 @@ def detect_collisions_for_device_ids(
     cache = libre_devices_cache if libre_devices_cache is not None else {}
     devices = []
     unresolved_ids = []
-    for device_id in device_ids:
+    device_ids = list(device_ids)
+    for idx, device_id in enumerate(device_ids, start=1):
+        # Same cancellation cadence as the import loops below (first id, then every 5th):
+        # a large batch with many cache misses is one LibreNMS call per id, so a cancelled
+        # job must not sit through the whole scan. The unscanned remainder goes to
+        # unresolved_ids — those ids were NOT collision-checked, and the caller's existing
+        # unresolved gate already fails closed on them, so nothing imports unchecked.
+        if job and (idx == 1 or idx % 5 == 0) and _is_job_cancelled(job):
+            if getattr(job, "logger", None):
+                job.logger.warning(f"Collision pre-check stopped by cancellation at id {idx} of {len(device_ids)}")
+            unresolved_ids.extend(device_ids[idx - 1 :])
+            break
         libre_device = cache.get(device_id)
         if libre_device is None:
             success, libre_device = api.get_device_info(device_id)

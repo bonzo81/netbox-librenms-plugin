@@ -509,6 +509,34 @@ class TestImportDevicesJob:
         assert job.job.data["failed_count"] == 2
         assert job.job.data["success_count"] == 0
 
+    @patch("netbox_librenms_plugin.import_utils.bulk_import_vms")
+    @patch("netbox_librenms_plugin.import_utils.bulk_import_devices_shared")
+    @patch("netbox_librenms_plugin.librenms_api.LibreNMSAPI")
+    def test_run_cancelled_during_precheck_blocks_batch_with_cancel_message(
+        self, mock_api_class, mock_bulk_devices, mock_bulk_vms
+    ):
+        """A job cancelled during the collision pre-check stops scanning immediately, imports nothing, and reports the block as a cancellation — not as the fetch-failure message the genuine unresolved path uses."""
+        from netbox_librenms_plugin.import_utils import bulk_import as bulk_import_module
+        from netbox_librenms_plugin.jobs import ImportDevicesJob
+
+        mock_api_class.return_value = MagicMock(server_key="default")
+        job = create_mock_job_runner(ImportDevicesJob, job_pk=802)
+
+        # _is_job_cancelled reads RQ/Redis job state — patch that one external boundary; the
+        # pre-check loop and the jobs.py message branch both read it through this module attr.
+        with patch.object(bulk_import_module, "_is_job_cancelled", return_value=True):
+            job.run(device_ids=[1, 2], vm_imports={10: {"cluster_id": 1}}, server_key="default")
+
+        mock_bulk_devices.assert_not_called()
+        mock_bulk_vms.assert_not_called()
+        # Cancelled at the first poll → the scan issued ZERO LibreNMS calls.
+        mock_api_class.return_value.get_device_info.assert_not_called()
+        errors = job.job.data["errors"]
+        assert errors, "blocked rows must surface as errors"
+        assert all("cancelled during the collision pre-check" in e["error"] for e in errors)
+        assert job.job.data["failed_count"] == 3  # 2 device rows + 1 VM row fail closed
+        assert job.job.data["success_count"] == 0
+
     # device + VM = 2 ids → the batch-wide collision pre-check runs over both; configure the api.
     @pytest.mark.django_db
     @patch("netbox_librenms_plugin.import_utils.bulk_import_vms")

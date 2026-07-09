@@ -2976,6 +2976,25 @@ class TestDetectCollisionsForDeviceIds:
         assert collisions[0]["nb_model_name"] == "device"
         assert {r["device_id"] for r in collisions[0]["librenms_rows"]} == {8001, 8002}
 
+    def test_two_rows_resolving_to_one_vm_collide(self):
+        """Two LibreNMS rows whose real validation resolves to one existing VirtualMachine → a collision keyed to the VM model, proving the pre-check gate covers the VM half of a batch (validation flips import_as_vm on the existing-VM match)."""
+        from netbox_librenms_plugin.import_utils.bulk_import import detect_collisions_for_device_ids
+        from netbox_librenms_plugin.tests.conftest import make_vm
+
+        vm = make_vm("collide-batch-vm")
+        cache = {
+            8005: {"device_id": 8005, "sysName": "collide-batch-vm", "hostname": "collide-batch-vm"},
+            8006: {"device_id": 8006, "sysName": "collide-batch-vm", "hostname": "collide-batch-vm"},
+        }
+        collisions, unresolved = detect_collisions_for_device_ids(
+            [8005, 8006], self._api(), libre_devices_cache=cache, sync_options={"use_sysname": True}
+        )
+        assert unresolved == []
+        assert len(collisions) == 1
+        assert collisions[0]["nb_device_pk"] == vm.pk
+        assert collisions[0]["nb_model_name"] == "virtualmachine"
+        assert {r["device_id"] for r in collisions[0]["librenms_rows"]} == {8005, 8006}
+
     def test_distinct_devices_do_not_collide(self):
         """Rows resolving to different NetBox devices → no collision."""
         from netbox_librenms_plugin.import_utils.bulk_import import detect_collisions_for_device_ids
@@ -3045,6 +3064,61 @@ class TestDetectCollisionsForDeviceIds:
             )
         assert unresolved == [9102]
         assert collisions == []  # only one validatable row → no collision
+
+    def test_cancelled_job_stops_scan_before_any_fetch(self):
+        """A job already cancelled when the scan starts issues ZERO LibreNMS calls; every id is returned unresolved so the caller's existing gate fails the batch closed instead of importing it unchecked."""
+        from types import SimpleNamespace
+
+        from netbox_librenms_plugin.import_utils import bulk_import as bulk_import_module
+        from netbox_librenms_plugin.import_utils.bulk_import import detect_collisions_for_device_ids
+
+        calls = []
+
+        def _get_device_info(did):
+            calls.append(did)
+            return True, {"device_id": did, "sysName": f"host-{did}", "hostname": f"host-{did}"}
+
+        api = SimpleNamespace(server_key="default", get_device_info=_get_device_info)
+        # _is_job_cancelled reads RQ/Redis job state — the one true external boundary here.
+        with patch.object(bulk_import_module, "_is_job_cancelled", return_value=True):
+            collisions, unresolved = detect_collisions_for_device_ids(
+                [8201, 8202, 8203],
+                api,
+                libre_devices_cache={},
+                sync_options={"use_sysname": True},
+                job=SimpleNamespace(logger=None),
+            )
+        assert calls == [], "cancelled scan must not keep calling LibreNMS"
+        assert unresolved == [8201, 8202, 8203]
+        assert collisions == []
+
+    def test_mid_scan_cancellation_marks_remainder_unresolved(self):
+        """Cancellation arriving mid-scan stops at the next poll (every 5th id); already-scanned ids stay checked and every unscanned id is returned unresolved, so a partial scan can never pass for a clean full one."""
+        from types import SimpleNamespace
+
+        from netbox_librenms_plugin.import_utils import bulk_import as bulk_import_module
+        from netbox_librenms_plugin.import_utils.bulk_import import detect_collisions_for_device_ids
+
+        ids = [8301, 8302, 8303, 8304, 8305, 8306, 8307]
+        calls = []
+
+        def _get_device_info(did):
+            calls.append(did)
+            return True, {"device_id": did, "sysName": f"host-{did}", "hostname": f"host-{did}"}
+
+        api = SimpleNamespace(server_key="default", get_device_info=_get_device_info)
+        # Not cancelled at the idx==1 poll, cancelled by the idx==5 poll → ids 5..7 unscanned.
+        with patch.object(bulk_import_module, "_is_job_cancelled", side_effect=[False, True]):
+            collisions, unresolved = detect_collisions_for_device_ids(
+                ids,
+                api,
+                libre_devices_cache={},
+                sync_options={"use_sysname": True},
+                job=SimpleNamespace(logger=None),
+            )
+        assert calls == [8301, 8302, 8303, 8304], "scan must stop at the cancellation poll"
+        assert unresolved == [8305, 8306, 8307]
+        assert collisions == []
 
     def test_fetched_row_is_written_back_into_shared_cache(self):
         """A cache-miss fetch is persisted into the caller's cache dict so the downstream import reuses it instead of re-fetching the same LibreNMS device."""
