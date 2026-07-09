@@ -55,18 +55,31 @@ class TestPortStackLagPattern:
         assert model.objects.filter(librenms_os="zzdup").count() == 1
 
     def test_db_enforces_case_insensitive_unique_when_full_clean_bypassed(self):
-        """The functional unique on Lower(librenms_os) rejects a case-variant duplicate at the DB level even via bulk_create (which skips full_clean/clean), so a path that bypasses the lowercasing can't insert 'IOS' alongside 'ios'."""
+        """The functional unique on Lower(Trim(librenms_os)) rejects a case-variant duplicate at the DB level even via bulk_create (which skips full_clean/clean), so a path that bypasses the lowercasing can't insert 'IOS' alongside 'ios'."""
         from django.db import IntegrityError, transaction
 
         model = self._model()
         model.objects.create(librenms_os="zzci", lag_name_pattern=r"^Po\d+$")  # clean() lowercases -> "zzci"
         with pytest.raises(IntegrityError):
             # bulk_create skips full_clean, so "ZZCI" reaches the DB un-lowercased; the functional
-            # unique on Lower(librenms_os) must still reject it. atomic() so the aborted DB state
-            # rolls back to a savepoint and the test transaction stays usable.
+            # unique on Lower(Trim(librenms_os)) must still reject it. atomic() so the aborted DB
+            # state rolls back to a savepoint and the test transaction stays usable.
             with transaction.atomic():
                 model.objects.bulk_create([model(librenms_os="ZZCI", lag_name_pattern=r"^X\d+$")])
         assert model.objects.filter(librenms_os="zzci").count() == 1
+
+    def test_db_enforces_whitespace_variant_unique_when_full_clean_bypassed(self):
+        """The constraint must treat ' ZZWSC ' and 'zzwsc' as the SAME key: clean() canonicalizes with .strip().lower(), so the DB enforces Lower(Trim(...)) — a Lower()-only unique would let a full_clean-bypassing insert park a padded duplicate behind the app's normalization."""
+        from django.db import IntegrityError, transaction
+
+        model = self._model()
+        model.objects.create(librenms_os="zzwsc", lag_name_pattern=r"^Po\d+$")
+        with pytest.raises(IntegrityError):
+            # bulk_create skips full_clean, so the padded case-variant reaches the DB verbatim;
+            # only Trim in the constraint expression can catch it.
+            with transaction.atomic():
+                model.objects.bulk_create([model(librenms_os=" ZZWSC ", lag_name_pattern=r"^Y\d+$")])
+        assert model.objects.filter(librenms_os="zzwsc").count() == 1
 
 
 @pytest.mark.django_db
@@ -182,6 +195,15 @@ class TestMigration0012Preflight:
         mig = importlib.import_module("netbox_librenms_plugin.migrations.0012_portstacklagpattern_ci_unique")
         return mig.normalize_librenms_os_case
 
+    @staticmethod
+    def _schema_editor():
+        """A schema_editor stand-in carrying the REAL test connection, as migrate would pass one — the preflight reads schema_editor.connection.alias to pin its ORM traffic to the migration's database."""
+        from types import SimpleNamespace
+
+        from django.db import connection
+
+        return SimpleNamespace(connection=connection)
+
     def test_preflight_lowercases_mixed_case_rows(self):
         """A mixed-case librenms_os an old full_clean-bypassing path left behind is canonicalized to lowercase."""
         from django.apps import apps as django_apps
@@ -192,7 +214,7 @@ class TestMigration0012Preflight:
         # own, so the CI constraint permits it). The preflight must then canonicalize it. Use a
         # distinctive OS name so it can't collide with a migration-seeded default pattern.
         PortStackLagPattern.objects.bulk_create([PortStackLagPattern(librenms_os="ZZOSX", lag_name_pattern=r"^zz\d+$")])
-        self._preflight()(django_apps, None)
+        self._preflight()(django_apps, self._schema_editor())
         assert PortStackLagPattern.objects.filter(librenms_os="zzosx").exists()
         assert not PortStackLagPattern.objects.filter(librenms_os="ZZOSX").exists()
 
@@ -218,7 +240,7 @@ class TestMigration0012Preflight:
             ]
         )
         with pytest.raises(RuntimeError, match="iosdup"):
-            self._preflight()(django_apps, None)
+            self._preflight()(django_apps, self._schema_editor())
 
     def test_preflight_strips_surrounding_whitespace(self):
         """A whitespace-padded librenms_os a bypassing path left behind is canonicalized to .strip().lower() (matching clean()), not left with surrounding spaces behind the Lower()-only constraint."""
@@ -246,10 +268,58 @@ class TestMigration0012Preflight:
         pk = PortStackLagPattern.objects.get(lag_name_pattern=r"^zw\d+$").pk
         # Sanity: the padded value really landed in the row (bulk_create did not canonicalize it).
         assert PortStackLagPattern.objects.get(pk=pk).librenms_os == " ZZWS "
-        self._preflight()(historical_apps, None)
+        self._preflight()(historical_apps, self._schema_editor())
         # Exact canonical value, not a DB filter: trailing/leading-space equality is collation-fuzzy
         # and would let " zzws " match "zzws".
         assert PortStackLagPattern.objects.get(pk=pk).librenms_os == "zzws"
+
+    def test_preflight_pins_orm_traffic_to_the_migration_alias_not_the_router(self):
+        """Multi-DB safety (matching sibling migrations 0011/0013): the preflight's OWN queryset iteration and save must be pinned to schema_editor.connection.alias via .using()/save(using=...). Unpinned ORM calls consult the database router, so `migrate --database=other` would normalize rows on the router's choice instead of the migration's target database — detected here by recording router consultations whose call stack passes through the migration module. Consults from INSIDE Model.full_clean are excluded: 0011 serialized FullCleanOnSaveMixin into the historical model's bases, so even a fully pinned save() runs full_clean, whose validate_unique/validate_constraints ask the router with instance hints and correctly fall back to the pinned instance._state.db — Django offers no using hook there, and the migration cannot avoid it."""
+        import traceback
+
+        from django.db import connection
+        from django.db.migrations.executor import MigrationExecutor
+        from django.test import override_settings
+
+        from netbox_librenms_plugin.models import PortStackLagPattern
+
+        historical_apps = (
+            MigrationExecutor(connection)
+            .loader.project_state(("netbox_librenms_plugin", "0011_portstacklagpattern"))
+            .apps
+        )
+
+        # A mixed-case row so the rewrite loop performs a real save (write path exercised too).
+        PortStackLagPattern.objects.bulk_create([PortStackLagPattern(librenms_os="ZZRTR", lag_name_pattern=r"^zr\d+$")])
+
+        unpinned = []
+
+        class _RecordingRouter:
+            """Records unpinned routing questions coming from the migration's own code."""
+
+            @staticmethod
+            def _record(kind, model):
+                if model._meta.model_name != "portstacklagpattern":
+                    return
+                frames = traceback.extract_stack()
+                in_migration = any("0012_portstacklagpattern_ci_unique" in f.filename for f in frames)
+                from_full_clean = any(f.name == "full_clean" for f in frames)
+                if in_migration and not from_full_clean:
+                    unpinned.append(kind)
+
+            def db_for_read(self, model, **hints):
+                self._record("read", model)
+                return None
+
+            def db_for_write(self, model, **hints):
+                self._record("write", model)
+                return None
+
+        with override_settings(DATABASE_ROUTERS=[_RecordingRouter()]):
+            self._preflight()(historical_apps, self._schema_editor())
+
+        assert unpinned == [], f"preflight consulted the router ({unpinned}) instead of pinning the migration alias"
+        assert PortStackLagPattern.objects.filter(librenms_os="zzrtr").exists()
 
     def test_preflight_blocks_whitespace_and_case_variant_duplicates(self):
         """Rows differing only by surrounding whitespace/case (' WSDUP ' vs 'wsdup') are the same pattern to clean(); the preflight must flag them as a collision via .strip().lower() — a Lower()-only check misses the whitespace variant and would leave a semantic duplicate behind the constraint."""
@@ -270,7 +340,7 @@ class TestMigration0012Preflight:
             ]
         )
         with pytest.raises(RuntimeError, match="wsdup"):
-            self._preflight()(django_apps, None)
+            self._preflight()(django_apps, self._schema_editor())
 
 
 @pytest.mark.django_db
