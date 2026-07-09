@@ -224,12 +224,6 @@ PLUGINS_CONFIG = {
         'cable_sync_tag': 'librenms',                    # Provenance tag stamped on created cables
         'cable_sync_tag_color': '009688',                # Tag + cable color
         'cable_sync_description': 'Synced from LibreNMS',
-        # LibreNMS sensor_type -> ConsoleServerPort name pattern ({N} = port number) for
-        # console-server serial ports surfaced on the Cables tab:
-        'serial_sensor_types': {
-            'acsSerialPortTable': 'ttyS{N}',   # Avocent ACS
-            'ciscoAsyncLine': 'Line {N}',      # Cisco IOS async lines
-        },
     }
 }
 ```
