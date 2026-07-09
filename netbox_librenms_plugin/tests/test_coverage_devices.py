@@ -636,6 +636,78 @@ class TestSingleInterfaceVerifyView:
         finally:
             cache.delete(cache_key)
 
+    @pytest.mark.django_db
+    def test_verify_repaint_resolves_the_selected_vc_members_librenms_id(self):
+        """Through a REAL virtual chassis: the repaint badge must reflect the SELECTED member's interface (owner-pinned resolution), while the cache key normalizes to the VC sync device. A decoy same-named interface on the sync master carries a DIFFERENT stored librenms_id, so any regression that resolves against the sync device instead of the member renders the orange mismatch, not the green match asserted here."""
+        import json
+
+        from django.core.cache import cache
+        from django.test import RequestFactory
+
+        from netbox_librenms_plugin.tests.conftest import make_device, make_interface, make_virtual_chassis
+        from netbox_librenms_plugin.utils import set_librenms_device_id
+
+        master = make_device("verify-vc-master")
+        member = make_device("verify-vc-member")
+        make_virtual_chassis("verify-vc", master, member)
+        # Device-level librenms_id makes the MASTER the VC sync device (priority 1 in
+        # get_librenms_sync_device), so the ports cache lives under the master's key.
+        set_librenms_device_id(master, 4242, "default")  # in-memory CF mutation...
+        master.save()  # ...must be persisted for the sync-device lookup to see it
+
+        # Decoy on the sync master: same display name, DIFFERENT stored port id. Resolving
+        # against the master would match this row and paint the mismatch badge.
+        decoy = make_interface(master, "Gi0/1")
+        set_librenms_device_id(decoy, 99, "default")
+        decoy.save()
+
+        iface = make_interface(member, "Gi0/1")
+        set_librenms_device_id(iface, 42, "default")
+        iface.save()
+
+        port_data = {
+            "ifDescr": "Gi0/1",
+            "ifName": "Gi0/1",
+            "port_id": 42,
+            "ifSpeed": 1000,
+            "ifType": "ethernetCsmacd",
+            "ifAlias": "",
+            "ifPhysAddress": "",
+            "ifMtu": 1500,
+            "ifAdminStatus": "up",
+            "_source": "host",
+        }
+
+        view = self._make_view()
+        # Cache under the SYNC device (master) — the view normalizes the selected member to it.
+        cache_key = view.get_cache_key(master, "ports", "default")
+        cache.set(cache_key, {"ports": [port_data]})
+        try:
+            request = RequestFactory().post(
+                "/plugins/librenms_plugin/verify-interface/",
+                data=json.dumps(
+                    {
+                        "device_id": member.pk,
+                        "interface_name": "Gi0/1",
+                        "interface_name_field": "ifName",
+                        "port_id": 42,
+                        "server_key": "default",
+                    }
+                ),
+                content_type="application/json",
+            )
+            response = view.post(request)
+
+            assert response.status_code == 200
+            formatted = json.loads(response.content)["formatted_row"]
+            assert "librenms_id" in formatted, "verify repaint payload dropped the librenms_id cell"
+            # Green = matched the MEMBER's stored id (42). The master's decoy stores 99, so a
+            # sync-device-resolved badge would be the orange mismatch instead.
+            assert "text-success" in formatted["librenms_id"]
+            assert "text-warning" not in formatted["librenms_id"]
+        finally:
+            cache.delete(cache_key)
+
 
 class TestSingleModuleVerifyView:
     """Tests for SingleModuleVerifyView."""
