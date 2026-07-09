@@ -175,6 +175,22 @@ def test_find_pii_flags_residual_pii_in_unexpected_field():
     assert not any(f["kind"] == "email" for f in find_pii(anon))
 
 
+def test_find_pii_flags_ip_and_fqdn_in_sysdescr():
+    """Residual IP/FQDN in a scrubbed-free-text sysDescr is a real leak: it must NOT be IP-exempt."""
+    rec = {
+        "name": "r",
+        "responses": {
+            "GET /api/v0/devices/1": {
+                "status": "ok",
+                "devices": [{"device_id": 1, "sysDescr": "Cisco IOS at 10.4.5.6, mgmt router.corp.example.net"}],
+            }
+        },
+    }
+    kinds = {(f["kind"], f["value"]) for f in find_pii(rec)}
+    assert ("ipv4", "10.4.5.6") in kinds
+    assert ("fqdn", "router.corp.example.net") in kinds
+
+
 def test_find_pii_does_not_echo_secret_value_after_redaction():
     """A secret-keyed value that also looks like PII must be redacted once, never re-reported with the raw secret echoed."""
     rec = _ports()

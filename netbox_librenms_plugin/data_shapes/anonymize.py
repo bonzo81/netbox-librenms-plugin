@@ -203,14 +203,13 @@ _EMAIL_RE = re.compile(r"\b[\w.+-]+@[\w-]+\.[\w.-]+\b")
 # Free-text FQDN safety-net (dotted labels + an alphabetic TLD). Anonymized hostnames are
 # single-label ("device-xxxx") and versions/OIDs lack an alpha TLD, so they don't match.
 _FQDN_RE = re.compile(r"\b(?:[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z]{2,}\b")
-# find_pii: keys whose values are identifiers (firmware/model/descr) that can look like a
+# find_pii: keys whose values are identifiers (firmware/model/version) that can look like a
 # dotted IP (e.g. version "3.9.0.4") but are NOT addresses — exempt them from IP/FQDN flagging.
 _IP_EXEMPT_KEYS = frozenset(
     {
         "version",
         "hardware",
         "features",
-        "sysDescr",
         "model",
         "entPhysicalModelName",
         # entPhysicalDescr is NOT exempt: it's broad free-text preserved verbatim (logic-bearing),
