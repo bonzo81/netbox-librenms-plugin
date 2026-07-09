@@ -21,6 +21,6 @@ adds the model.
         <a class="nav-link{% if rules_tab_active == "portstacklagpattern" %} active{% endif %}" href="{% url 'plugins:netbox_librenms_plugin:portstacklagpattern_list' %}"{% if rules_tab_active == "portstacklagpattern" %} aria-current="page"{% endif %}>Port Stack Patterns</a>
     </li>
     <li class="nav-item">
-        <a class="nav-link{% if rules_tab_active == "serialsensortypepattern" %} active{% endif %}" href="{% url 'plugins:netbox_librenms_plugin:serialsensortypepattern_list' %}">Serial Sensor Types</a>
+        <a class="nav-link{% if rules_tab_active == "serialsensortypepattern" %} active{% endif %}" href="{% url 'plugins:netbox_librenms_plugin:serialsensortypepattern_list' %}"{% if rules_tab_active == "serialsensortypepattern" %} aria-current="page"{% endif %}>Serial Sensor Types</a>
     </li>
 </ul>
