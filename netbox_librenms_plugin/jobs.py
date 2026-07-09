@@ -233,7 +233,7 @@ class ImportDevicesJob(JobRunner):
                 ids = ", ".join(str(d) for d in unresolved)
                 msg = (
                     f"Import blocked: could not fetch LibreNMS device info for {len(unresolved)} "
-                    f"device(s) (id(s): {ids}) to verify collisions; retry the import."
+                    f"row(s) (id(s): {ids}) to verify collisions; retry the import."
                 )
                 self.logger.error(msg)
                 device_result["failed"] = [{"device_id": device_id, "error": msg} for device_id in device_ids]

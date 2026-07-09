@@ -827,6 +827,11 @@ class TestImportDevicesJob:
         # Both device ids AND the VM id are failed closed with the same block reason.
         assert {e["device_id"] for e in errors} == {1, 2, 10}
         assert all("Import blocked" in e["error"] for e in errors)
+        # Object-neutral wording: the unresolved ids come from collision_check_ids, which includes
+        # vm_imports, so the block message must not mislabel a VM row as a "device(s)" — mirror the
+        # collision branch's object-neutral copy.
+        assert all("device(s)" not in e["error"] for e in errors)
+        assert any("row(s)" in e["error"] for e in errors)
         assert job.job.data["failed_count"] == 3
         assert job.job.data["success_count"] == 0
         assert job.job.data["completed"] is True
