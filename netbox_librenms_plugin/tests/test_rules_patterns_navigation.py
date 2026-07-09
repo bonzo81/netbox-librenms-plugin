@@ -68,7 +68,11 @@ class TestListPageSwitchers:
             assert reverse(f"plugins:netbox_librenms_plugin:{other}") in html, (
                 f"{route} page is missing the switcher link to {other}"
             )
-        assert f'class="nav-link active" href="{url}"' in html
+        # The current page's pill carries BOTH the visual active class and the
+        # aria-current="page" announcement (Bootstrap nav-pills a11y guidance) — and
+        # only it does: a second aria-current would misannounce a sibling as current.
+        assert f'class="nav-link active" href="{url}" aria-current="page"' in html
+        assert html.count('aria-current="page"') == 1
 
     @pytest.mark.parametrize("route", RULE_LIST_ROUTES)
     def test_rule_pages_cross_link_all_rule_lists(self, route, client):
@@ -77,4 +81,6 @@ class TestListPageSwitchers:
             assert reverse(f"plugins:netbox_librenms_plugin:{other}") in html, (
                 f"{route} page is missing the switcher link to {other}"
             )
-        assert f'class="nav-link active" href="{url}"' in html
+        # Same contract as the mapping switcher: exactly one active pill, announced.
+        assert f'class="nav-link active" href="{url}" aria-current="page"' in html
+        assert html.count('aria-current="page"') == 1
