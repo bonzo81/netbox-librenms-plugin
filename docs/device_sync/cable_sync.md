@@ -44,11 +44,11 @@ A cabled row is not a dead end — its **Cable Status** compares the existing Ne
 | Cable Status | Meaning | Sync action offered |
 |---|---|---|
 | **No Cable** | Both endpoints free. | Yes — creates the cable. |
-| **Cable Found** | The LibreNMS-reported connection is already cabled directly. | Only while the cable is **untagged**: syncing *adopts* it (adds the `librenms` tag; the cable is never recreated). Once tagged, there is nothing to do. |
+| **Cable Found** | The LibreNMS-reported connection is already cabled directly. | Only while the cable is **untagged**: syncing *adopts* it (adds the configured provenance tag; the cable is never recreated). Once tagged, there is nothing to do. |
 | **Connected via Patch Path** | The endpoints are cabled and the traced path **reaches the LibreNMS target through patch panels** — you remodeled the link in more detail. | No — a remodel is a better model of the same link, not a mismatch. |
 | **Cable Mismatch** | An endpoint is cabled somewhere that does *not* reach the LibreNMS target. | Yes — re-syncing re-points the connection, protected by the overwrite gate below. |
 
-For serial rows the LibreNMS target is the **device** matched from the port label (the exact remote port isn't knowable from a label), so a cable landing on *any* console port of that device counts as matched. A cable that already carries the `librenms` tag is **trusted over the label**: labels are only hints, and a tagged cable was placed deliberately (possibly via a manual pick), so a wrong-name label never flips it to a mismatch.
+For serial rows the LibreNMS target is the **device** matched from the port label (the exact remote port isn't knowable from a label), so a cable landing on *any* console port of that device counts as matched. A cable that already carries the configured provenance tag is **trusted over the label**: labels are only hints, and a tagged cable was placed deliberately (possibly via a manual pick), so a wrong-name label never flips it to a mismatch.
 
 ## Picking the remote end manually
 
@@ -65,13 +65,13 @@ The picker is also available on rows that are **already cabled** (including tagg
 
 ## Overwrite protection
 
-Re-running the sync never silently destroys a cable the plugin does not solely own. A cable counts as **plugin-owned** only when its tags are *exactly* `{librenms}` — a foreign tag, an extra tag, or no tags at all mean someone else has a stake in it.
+Re-running the sync never silently destroys a cable the plugin does not solely own. A cable counts as **plugin-owned** only when its tags are *exactly* the configured provenance tag (default `librenms`) and nothing else — a foreign tag, an extra tag, or no tags at all mean someone else has a stake in it.
 
 | Situation on sync | Action |
 |---|---|
 | Neither endpoint cabled | Create a fresh cable. |
 | The desired cable already exists and carries the tag | Nothing to do. |
-| The desired cable already exists but is untagged | The `librenms` tag is added (non-destructive, no confirmation needed). |
+| The desired cable already exists but is untagged | The configured provenance tag is added (non-destructive, no confirmation needed). |
 | A *different* cable occupies an endpoint and every such cable is plugin-owned | Replaced silently. |
 | A *different* cable occupies an endpoint and any such cable is **not** plugin-owned | **Force confirmation required.** |
 
