@@ -4138,3 +4138,52 @@ class TestVCInterfaceRenderMemberResolutionNotPerPort:
         q_small = render(2)
         q_large = render(8)
         assert q_large == q_small, f"query count scaled with ports: {q_small} -> {q_large} (per-port N+1)"
+
+
+@pytest.mark.django_db
+class TestEnrichPortLagParentNameFallback:
+    """_enrich_port_with_lag_parent's name fallback must honour the user-selected name field.
+
+    The displayed LAG/parent name comes from port.get(interface_name_field) and
+    _has_lag_signals already scans {ifName, ifDescr, interface_name_field}; the
+    match fallback (no stored librenms_id on either side) compared ifName/ifDescr
+    only, so an ifAlias-driven deployment misreported a genuine match as mismatch.
+    """
+
+    def test_lag_match_via_interface_name_field_alias(self):
+        from netbox_librenms_plugin.views.base.interfaces_view import BaseInterfaceTableView
+
+        dev = make_device("lag-alias-host")
+        agg = make_interface(dev, "CUSTOMER-UPLINK-A", iface_type="lag")  # named from ifAlias
+        member = make_interface(dev, "Gi0/1")
+        member.lag = agg
+        member.save()
+
+        agg_port = {"port_id": 10, "ifName": "Po1", "ifDescr": "Port-channel1", "ifAlias": "CUSTOMER-UPLINK-A"}
+        port = {"port_id": 1, "netbox_interface": member}
+
+        BaseInterfaceTableView._enrich_port_with_lag_parent(
+            port, {1: 10}, {}, {10: agg_port}, interface_name_field="ifAlias"
+        )
+
+        assert port["librenms_lag_name"] == "CUSTOMER-UPLINK-A"
+        assert port["lag_sync_status"] == "match"
+
+    def test_parent_match_via_interface_name_field_alias(self):
+        from netbox_librenms_plugin.views.base.interfaces_view import BaseInterfaceTableView
+
+        dev = make_device("parent-alias-host")
+        parent = make_interface(dev, "CORE-TRUNK-B")  # named from ifAlias
+        child = make_interface(dev, "Gi0/2.100")
+        child.parent = parent
+        child.save()
+
+        parent_port = {"port_id": 20, "ifName": "Gi0/2", "ifDescr": "GigabitEthernet0/2", "ifAlias": "CORE-TRUNK-B"}
+        port = {"port_id": 2, "netbox_interface": child}
+
+        BaseInterfaceTableView._enrich_port_with_lag_parent(
+            port, {}, {2: 20}, {20: parent_port}, interface_name_field="ifAlias"
+        )
+
+        assert port["librenms_parent_name"] == "CORE-TRUNK-B"
+        assert port["parent_sync_status"] == "match"

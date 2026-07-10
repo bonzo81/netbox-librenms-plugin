@@ -1014,9 +1014,17 @@ class BaseInterfaceTableView(
             target = normalize_librenms_port_id(lnms_port_dict.get("port_id"))
             if stored_id is not None and target is not None:
                 return stored_id == target
-            # Fallback: name match — try both name fields to be field-agnostic
+            # Fallback: name match — field-agnostic, INCLUDING the user-selected name field.
+            # The displayed LAG/parent name above renders port.get(interface_name_field) and
+            # _has_lag_signals scans it too, so on an ifAlias-driven device (NetBox names
+            # synced from the selected field) an ifName/ifDescr-only compare would misreport
+            # a genuine match as mismatch/missing_nb whenever no stored librenms_id exists.
             nb_name = nb_rel_iface.name
-            return nb_name == lnms_port_dict.get("ifName") or nb_name == lnms_port_dict.get("ifDescr")
+            return nb_name in (
+                lnms_port_dict.get("ifName"),
+                lnms_port_dict.get("ifDescr"),
+                lnms_port_dict.get(interface_name_field),
+            )
 
         # --- LAG ---
         lnms_lag_port_id = normalize_librenms_port_id(port_id_to_lag.get(port_id)) if port_id else None
