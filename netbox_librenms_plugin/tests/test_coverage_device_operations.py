@@ -640,6 +640,59 @@ class TestValidateDeviceForImport:
         assert "is_ready" in result
         assert result["existing_device"] is None
 
+    def test_validation_result_key_contract(self):
+        """Pin the result-dict key set to the documented Returns schema.
+
+        validate_device_for_import is a cross-module contract (bulk_import.py, actions.py and
+        jobs.py all read these fields). Extend this set and the docstring's Returns block
+        together — a key added to one without the other is exactly the drift this guards.
+        (promote_to_host is deliberately absent: it's conditional, present only when host
+        promotion is available.)
+        """
+        libre_device = {
+            "device_id": 2,
+            "hostname": "contract-host",
+            "sysName": "contract-host",
+            "hardware": "-",
+            "serial": "-",
+            "os": "-",
+            "location": "-",
+            "type": "network",
+        }
+        result = self._validate(libre_device)
+
+        assert set(result.keys()) == {
+            "is_ready",
+            "can_import",
+            "import_as_vm",
+            "resolved_name",
+            "existing_device",
+            "existing_match_type",
+            "ambiguous_librenms_id",
+            "serial_action",
+            "serial_confirmed",
+            "serial_duplicate",
+            "serial_role_choice_available",
+            "librenms_id_needs_migration",
+            "oob_candidate",
+            "existing_librenms_link",
+            "merge_candidates",
+            "name_matches",
+            "name_sync_available",
+            "suggested_name",
+            "device_type_mismatch",
+            "naming_criteria",
+            "virtual_chassis",
+            "issues",
+            "warnings",
+            "site",
+            "device_type",
+            "device_role",
+            "cluster",
+            "platform",
+            "rack",
+        }
+
     def test_vm_import_uses_correct_model(self):
         """import_as_vm=True matches a VirtualMachine by hostname (uses the VM model, not Device)."""
         from netbox_librenms_plugin.tests.conftest import make_vm

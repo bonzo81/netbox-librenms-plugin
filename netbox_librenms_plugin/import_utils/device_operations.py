@@ -507,12 +507,36 @@ def validate_device_for_import(
         strip_domain: If True, strip domain suffix from device name
 
     Returns:
-        dict: Validation result with structure:
+        dict: Validation result with structure (the key set is pinned by
+        ``test_validation_result_key_contract``; extend both together):
             {
                 'is_ready': bool,  # Can import without user intervention
                 'can_import': bool,  # Can import (possibly after configuration)
-                'import_as_vm': bool,  # Whether importing as VM
+                'import_as_vm': bool,  # Whether importing as VM (may be flipped True by a VM hostname match)
+                'resolved_name': str or None,  # Final device name after applying naming preferences
                 'existing_device': Device or VirtualMachine or None,
+                'existing_match_type': str or None,  # How it matched: 'librenms_id', 'librenms_oob',
+                    # 'hostname', 'serial', 'primary_ip', or the terminal blockers
+                    # 'ambiguous_librenms_id' / 'ambiguous_hostname_or_serial'
+                'ambiguous_librenms_id': bool,  # librenms_id matches >1 NetBox object (import blocked)
+                'existing_librenms_link': dict or None,  # {host_id, oob_id, oob_type} current linkage
+                    # of the matched object (devices; VMs get a host_id-only variant)
+                'serial_action': str or None,  # None, 'link', 'conflict', 'update_serial',
+                    # 'hostname_differs', 'oob_candidate', 'promote_to_host', 'merge_netbox_devices'
+                'serial_confirmed': bool,  # librenms_id match and serial matches
+                'serial_duplicate': bool,  # Incoming serial already on a different device
+                'serial_role_choice_available': bool,  # Both oob_candidate and promote_to_host valid
+                'oob_candidate': dict or None,  # {device, type, version, ip} when detected (devices only)
+                # 'promote_to_host': dict — CONDITIONAL, present only when host promotion is available
+                'merge_candidates': dict or None,  # {host_named: {...}, oob_named: {...}} when two
+                    # NetBox devices look like the same physical box (devices only)
+                'librenms_id_needs_migration': bool,  # Existing object carries a legacy bare-int id
+                'name_matches': bool,  # Existing object's name matches the resolved name
+                'name_sync_available': bool,  # Existing object's name differs (sync offered)
+                'suggested_name': str or None,  # Name to suggest when name_sync_available
+                'device_type_mismatch': bool,  # Existing device's type differs from LibreNMS (devices only)
+                'naming_criteria': dict or None,  # How resolved_name was derived (use_sysname/strip_domain)
+                'virtual_chassis': dict,  # VC detection state, empty_virtual_chassis_data() shape
                 'issues': List[str],  # Blocking issues
                 'warnings': List[str],  # Non-blocking warnings
                 'site': {  # Only for devices
@@ -541,6 +565,11 @@ def validate_device_for_import(
                     'found': bool,
                     'platform': Platform or None,
                     'match_type': str  # 'exact' or None
+                },
+                'rack': {  # Only for devices
+                    'found': bool,
+                    'rack': Rack or None,
+                    'available_racks': List[Rack]
                 }
             }
 
