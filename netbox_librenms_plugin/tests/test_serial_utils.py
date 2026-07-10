@@ -375,6 +375,20 @@ class TestConfigurableSensorTypes:
         )
         assert [(r["sensor_id"], r["local_port"]) for r in links] == [(1975, "ttyS11")]
 
+    def test_generator_sensor_types_not_consumed_by_membership_checks(self):
+        """A bare ITERABLE of types is materialized once — a generator must recognize every row.
+
+        Pre-fix the first row's membership check consumed the generator, so every subsequent
+        row of the same type was silently dropped.
+        """
+        from netbox_librenms_plugin.serial_utils import map_sensors_to_serial_links
+
+        links = map_sensors_to_serial_links(
+            [self._acs_line(sid=1975, port=11), self._acs_line(sid=1976, port=12)],
+            sensor_types=(t for t in ["acsSerialPortTable"]),
+        )
+        assert [r["local_port"] for r in links] == ["ttyS11", "ttyS12"]
+
     def test_get_patterns_default_includes_avocent_and_cisco(self):
         from netbox_librenms_plugin.serial_utils import get_serial_sensor_type_patterns
 

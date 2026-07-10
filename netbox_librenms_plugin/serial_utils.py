@@ -133,7 +133,14 @@ def map_sensors_to_serial_links(
     if sensor_types is None:
         sensor_types = get_serial_sensor_type_patterns()
     # A map carries per-type naming; a bare set/iterable carries none (fall back per row).
-    type_patterns = sensor_types if isinstance(sensor_types, dict) else {}
+    # Materialize a non-mapping iterable ONCE: the per-row membership check below would
+    # consume a generator on the first row and silently drop every later same-type row.
+    if isinstance(sensor_types, dict):
+        type_patterns = sensor_types
+        recognized_types = sensor_types
+    else:
+        type_patterns = {}
+        recognized_types = frozenset(sensor_types)
 
     links = []
 
@@ -144,7 +151,7 @@ def map_sensors_to_serial_links(
         if not isinstance(sensor, dict):
             continue
         sensor_type = sensor.get("sensor_type")
-        if sensor_type not in sensor_types:
+        if sensor_type not in recognized_types:
             continue
 
         sensor_id = sensor.get("sensor_id")
