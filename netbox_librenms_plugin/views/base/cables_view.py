@@ -1446,13 +1446,15 @@ class SingleCableVerifyView(BaseCableTableView):
 
         # Shared constant so the verify-row badge can't drift from the table render.
         serial_badge = SERIAL_BADGE_HTML
-        safe_local = escape(link_data.get("local_port", ""))
+        # `or ""` (not a .get default): a present-but-None value would reach escape(), and
+        # escape(None) renders the literal "None" — the table renderers normalize the same way.
+        safe_local = escape(link_data.get("local_port") or "")
         if link_data.get("local_port_url"):
             local_html = f'<a href="{link_data["local_port_url"]}">{safe_local}</a>{serial_badge}'
         else:
             local_html = f"{safe_local}{serial_badge}"
 
-        safe_remote_device = escape(link_data.get("remote_device_display") or link_data.get("remote_device", ""))
+        safe_remote_device = escape(link_data.get("remote_device_display") or link_data.get("remote_device") or "")
         if link_data.get("remote_device_url"):
             remote_device_html = f'<a href="{link_data["remote_device_url"]}">{safe_remote_device}</a>'
         elif link_data.get("_source") == "serial" and not link_data.get("is_configured"):
@@ -1496,6 +1498,7 @@ class SingleCableVerifyView(BaseCableTableView):
         if picker_url := link_data.get("picker_url"):
             actions += f"""
                 <button type="button" class="btn btn-sm btn-outline-secondary" title="Pick remote end"
+                        aria-label="Pick remote end"
                         hx-get="{escape(picker_url)}" hx-target="#htmx-modal-content" hx-swap="innerHTML">
                     <i class="mdi mdi-connection"></i>
                 </button>

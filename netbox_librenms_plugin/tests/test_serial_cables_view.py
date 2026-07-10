@@ -1133,6 +1133,56 @@ class TestSerialVerifyRowDimming:
         row = view._format_serial_verify_row(view.request, dev, link, local_port_id="serial:1001", server_key="default")
         assert "text-muted fst-italic" in row["remote_device"]  # dimmed, matching LibreNMSCableTable
 
+    def test_none_values_render_empty_not_literal_none(self):
+        """Present-but-None local_port/remote_device render '' — escape(None) is the string 'None'.
+
+        The table renderers (render_local_port/render_remote_port/render_remote_device) all
+        normalize `value or ""` with dedicated tests; this verify-row sibling must match.
+        """
+        from netbox_librenms_plugin.views.base.cables_view import SingleCableVerifyView
+
+        view = object.__new__(SingleCableVerifyView)
+        view.request = _mock_request()
+        view._librenms_api = MagicMock()
+        view._librenms_api.server_key = "default"
+        dev, (csp,), _ = make_serial_device("acs-verify-none", csp_names=["ttyS1"])
+        link = {
+            "_source": "serial",
+            "local_port": None,
+            "remote_device": None,
+            "remote_device_display": None,
+            "is_configured": False,
+        }
+        row = view._format_serial_verify_row(view.request, dev, link, local_port_id="serial:1001", server_key="default")
+        assert "None" not in row["local_port"]
+        assert "None" not in row["remote_device"]
+
+    def test_verify_row_picker_button_carries_accessible_name(self):
+        """The verify-row's icon-only picker button has an aria-label, mirroring the table render.
+
+        test_picker_button_carries_accessible_name pins the table version; this parallel
+        rendering path was built to mirror it and must carry the same accessible name.
+        """
+        from netbox_librenms_plugin.views.base.cables_view import SingleCableVerifyView
+
+        view = object.__new__(SingleCableVerifyView)
+        view.request = _mock_request()
+        view._librenms_api = MagicMock()
+        view._librenms_api.server_key = "default"
+        dev, (csp,), _ = make_serial_device("acs-verify-a11y", csp_names=["ttyS1"])
+        # Resolved local end (real CSP name match) → _set_remote_picker_affordance attaches a
+        # real picker_url and the actions cell renders the pick-remote button.
+        link = {
+            "_source": "serial",
+            "local_port": "ttyS1",
+            "local_port_id": "serial:1001",
+            "remote_device": "somewhere",
+            "is_configured": False,
+        }
+        row = view._format_serial_verify_row(view.request, dev, link, local_port_id="serial:1001", server_key="default")
+        assert 'title="Pick remote end"' in row["actions"]
+        assert 'aria-label="Pick remote end"' in row["actions"]
+
 
 class TestEnrichLinksDataReusesSyncDevice:
     """enrich_links_data must reuse the sync_device _prepare_context already resolved."""
