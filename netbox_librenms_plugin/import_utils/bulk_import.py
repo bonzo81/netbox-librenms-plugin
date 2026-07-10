@@ -54,6 +54,12 @@ _AMBIGUOUS_SERIAL_IP_MARKERS = (
     "serial or management IP",
     "hostname/serial",
 )
+# Stable fragment of the cross-model (VM + Device share the name) warning. Shared by the
+# writer (the both-models name branch in _refresh_existing_device, wording-matched to
+# validate_device_for_import's hostname branch) and the pre-lookup cleaner, so a refresh
+# neither stacks a duplicate copy on a persisting collision nor leaves a stale warning
+# behind once the collision is resolved.
+_CROSS_MODEL_HOSTNAME_MARKER = "Both a VM and Device exist with hostname"
 
 
 def _is_job_cancelled(job) -> bool:
@@ -653,6 +659,14 @@ def _refresh_existing_device(validation: dict, libre_device: dict = None, server
                         for m in msgs
                         if not (isinstance(m, str) and any(marker in m for marker in _AMBIGUOUS_SERIAL_IP_MARKERS))
                     ]
+
+        # Same for the cross-model (VM + Device) name warning: the both-models branch below
+        # re-adds it while the collision persists, so stripping it here both prevents a
+        # duplicate copy per refresh and drops the stale warning once the collision is
+        # resolved. Unconditional (no match_type gate) — this warning never binds a match.
+        msgs = validation.get("warnings")
+        if isinstance(msgs, list):
+            validation["warnings"] = [m for m in msgs if not (isinstance(m, str) and _CROSS_MODEL_HOSTNAME_MARKER in m)]
 
         new_device = None
         match_type = None

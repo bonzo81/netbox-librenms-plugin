@@ -5503,6 +5503,63 @@ class TestRefreshExistingDeviceCrossModelIdWins:
         assert validation["existing_device"] != device
         assert any("Both a VM and Device exist with hostname" in w for w in validation.get("warnings", []))
 
+    def test_cross_model_warning_not_duplicated_across_refreshes(self):
+        """The cached validation dict is refreshed in place: the cross-model warning must not stack up.
+
+        Mirrors the stale ambiguous-id / hostname-serial blocker cleanup at the top of
+        _refresh_existing_device — pre-fix every refresh appended another copy.
+        """
+        from netbox_librenms_plugin.import_utils.bulk_import import _refresh_existing_device
+        from netbox_librenms_plugin.tests.conftest import make_device, make_vm
+
+        make_device("stack-warn-host")
+        make_vm("stack-warn-host")
+        libre_device = {"device_id": 4243, "hostname": "stack-warn-host", "sysName": "stack-warn-host"}
+        validation = {
+            "existing_device": None,
+            "existing_vm": None,
+            "import_as_vm": False,
+            "is_ready": False,
+            "can_import": False,
+            "issues": [],
+            "warnings": [],
+        }
+
+        _refresh_existing_device(validation, libre_device=libre_device, server_key="default")
+        _refresh_existing_device(validation, libre_device=libre_device, server_key="default")
+
+        cross_model = [w for w in validation["warnings"] if "Both a VM and Device exist with hostname" in w]
+        assert len(cross_model) == 1
+
+    def test_cross_model_warning_cleared_once_collision_resolved(self):
+        """Resolving the VM/Device name collision must drop the cached warning on the next refresh."""
+        from netbox_librenms_plugin.import_utils.bulk_import import _refresh_existing_device
+        from netbox_librenms_plugin.tests.conftest import make_device, make_vm
+
+        device = make_device("resolved-warn-host")
+        vm = make_vm("resolved-warn-host")
+        libre_device = {"device_id": 4244, "hostname": "resolved-warn-host", "sysName": "resolved-warn-host"}
+        validation = {
+            "existing_device": None,
+            "existing_vm": None,
+            "import_as_vm": False,
+            "is_ready": False,
+            "can_import": False,
+            "issues": [],
+            "warnings": [],
+        }
+
+        _refresh_existing_device(validation, libre_device=libre_device, server_key="default")
+        assert any("Both a VM and Device exist with hostname" in w for w in validation["warnings"])
+
+        vm.delete()
+        _refresh_existing_device(validation, libre_device=libre_device, server_key="default")
+
+        # The collision is gone: the stale warning must not survive the refresh, and the
+        # remaining Device binds by name as usual.
+        assert not any("Both a VM and Device exist with hostname" in w for w in validation["warnings"])
+        assert validation["existing_device"] == device
+
     def test_serial_fallback_ambiguity_fails_closed(self):
         """When the serial fallback resolves more than one NetBox device, the refresh re-check must fail closed (ambiguous match + can_import False), not bind to an arbitrary duplicate."""
         from netbox_librenms_plugin.import_utils.bulk_import import _refresh_existing_device
