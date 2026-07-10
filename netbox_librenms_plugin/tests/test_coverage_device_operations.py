@@ -1028,6 +1028,90 @@ class TestValidateDeviceForImportEdgeCases:
         # The object-typed wording must follow the MATCHED side (devices), not import_as_vm (VMs).
         assert any("Multiple NetBox devices share" in i for i in result["issues"])
 
+    def test_cross_model_hostname_with_duplicate_devices_fails_closed(self):
+        """Two Devices + one VM share the hostname: the same-model duplicate must stay terminal.
+
+        The cross-model branch binds neither object, so the Stage-1 duplicate guard (keyed on a
+        bound existing_device) never sees the two Devices — pre-fix the row sailed through as a
+        new import, i.e. ADDING a VM relaxed the protection the 2-Devices-no-VM case gets.
+        """
+        from netbox_librenms_plugin.tests.conftest import make_device, make_vm
+
+        from dcim.models import DeviceRole, DeviceType, Manufacturer, Site
+
+        dev_a = make_device("dup-both-host")
+        # Second same-named Device needs a different site (names are unique per site).
+        site_b, _ = Site.objects.get_or_create(name="Site-xmodel-b", slug="site-xmodel-b")
+        mfr, _ = Manufacturer.objects.get_or_create(name="TestMfr", slug="test-mfr")
+        dt, _ = DeviceType.objects.get_or_create(model="TestDT", slug="test-dt", defaults={"manufacturer": mfr})
+        role, _ = DeviceRole.objects.get_or_create(name="TestRole", slug="test-role", defaults={"color": "00ff00"})
+        type(dev_a).objects.create(name="dup-both-host", device_type=dt, role=role, site=site_b, status="active")
+        make_vm("dup-both-host")
+
+        libre_device = {
+            "device_id": 996,
+            "hostname": "dup-both-host",
+            "sysName": "dup-both-host",
+            "serial": "-",
+            "hardware": "-",
+            "os": "-",
+        }
+        result = self._validate(libre_device)
+
+        assert result["can_import"] is False
+        assert result["is_ready"] is False
+        assert result["existing_device"] is None
+        assert result["existing_match_type"] == "ambiguous_hostname_or_serial"
+        # Wording keeps the "hostname/serial" substring the refresh-path blocker cleanup keys on.
+        assert any("Multiple NetBox devices share" in i for i in result["issues"])
+        # The cross-model warning still explains the VM/Device split.
+        assert any("Both a VM and Device exist with hostname" in w for w in result["warnings"])
+
+    def test_cross_model_hostname_with_duplicate_vms_fails_closed(self):
+        """One Device + two VMs (cross-cluster same name): terminal ambiguity, VM-typed wording."""
+        from netbox_librenms_plugin.tests.conftest import make_cluster, make_device, make_vm
+
+        make_device("dup-both-vms")
+        make_vm("dup-both-vms")
+        make_vm("dup-both-vms", cluster=make_cluster("xmodel-cluster-2"))
+
+        libre_device = {
+            "device_id": 995,
+            "hostname": "dup-both-vms",
+            "sysName": "dup-both-vms",
+            "serial": "-",
+            "hardware": "-",
+            "os": "-",
+        }
+        result = self._validate(libre_device)
+
+        assert result["can_import"] is False
+        assert result["existing_device"] is None
+        assert result["existing_match_type"] == "ambiguous_hostname_or_serial"
+        assert any("Multiple NetBox virtual machines share" in i for i in result["issues"])
+
+    def test_cross_model_hostname_single_each_still_proceeds_as_new(self):
+        """Exactly one Device + one VM: the deliberate warn-and-proceed-as-new contract is unchanged."""
+        from netbox_librenms_plugin.tests.conftest import make_device, make_vm
+
+        make_device("single-both-host")
+        make_vm("single-both-host")
+
+        libre_device = {
+            "device_id": 994,
+            "hostname": "single-both-host",
+            "sysName": "single-both-host",
+            "serial": "-",
+            "hardware": "-",
+            "os": "-",
+        }
+        result = self._validate(libre_device)
+
+        assert result["existing_device"] is None
+        assert result["existing_match_type"] != "ambiguous_hostname_or_serial"
+        assert not any("resolve the duplicate" in i for i in result["issues"])
+        assert any("Both a VM and Device exist with hostname" in w for w in result["warnings"])
+
     def test_oob_ip_match_without_os_token_still_oob_candidate(self):
         """An incoming IP equal to device.oob_ip is still an OOB candidate when no os token classifies a type."""
         from netbox_librenms_plugin.tests.conftest import make_device, make_ip

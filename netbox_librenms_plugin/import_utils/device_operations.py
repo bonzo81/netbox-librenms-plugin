@@ -800,6 +800,28 @@ def validate_device_for_import(
                     f"Both a VM and Device exist with hostname '{hostname}' in NetBox. "
                     f"Cannot determine which to match. Please set the librenms_id custom field on the correct object."
                 )
+                # Fail closed when EITHER side ALSO has same-model duplicates. Nothing binds in
+                # this branch, so the Stage-1 duplicate guard below (keyed on a bound
+                # existing_device) never sees them — without this, two Devices plus one VM on a
+                # hostname would sail through as a new import, i.e. the VM's presence would
+                # RELAX the terminal protection the 2-Devices-no-VM case gets. Mirrors that
+                # guard's terminal state (message keeps the "hostname/serial" substring the
+                # refresh-path blocker cleanup keys on), including its early return: a
+                # hostname-bound duplicate never falls through to serial/IP re-binding either.
+                _device_peers = list(Device.objects.filter(name__iexact=hostname)[:2])
+                _vm_peers = list(VirtualMachine.objects.filter(name__iexact=hostname)[:2])
+                if len(_device_peers) > 1 or len(_vm_peers) > 1:
+                    _dup_kind = "devices" if len(_device_peers) > 1 else "virtual machines"
+                    _dup_msg = (
+                        f"Multiple NetBox {_dup_kind} share this device's hostname/serial; resolve the "
+                        "duplicate before importing or linking."
+                    )
+                    if _dup_msg not in result.setdefault("issues", []):
+                        result["issues"].append(_dup_msg)
+                    result["existing_match_type"] = "ambiguous_hostname_or_serial"
+                    result["can_import"] = False
+                    result["is_ready"] = False
+                    return result
                 # Don't set existing_device, don't block import - let user proceed as new
                 # This allows them to import and then resolve the conflict manually
             elif existing_vm:
