@@ -5,7 +5,7 @@ from dcim.models import Device, Interface, MACAddress
 from django.contrib import messages
 from django.core.cache import cache
 from django.core.exceptions import ValidationError
-from django.db import transaction
+from django.db import IntegrityError, transaction
 from django.http import Http404, JsonResponse
 from django.shortcuts import redirect
 from django.urls import reverse
@@ -279,74 +279,90 @@ class SyncInterfacesView(
         # interfaces are included.
         iface_index = _build_interface_index(obj, server_key)
 
-        with transaction.atomic():
-            for port_id in selected_port_ids:
-                if port_id not in port_by_id:
-                    continue
+        try:
+            with transaction.atomic():
+                for port_id in selected_port_ids:
+                    if port_id not in port_by_id:
+                        continue
 
-                # Pin both ends of the relationship to the owner this row was synced onto (the
-                # per-row device_selection target, or the VM). The VC-wide port_id search can
-                # otherwise resolve a child/parent uniquely onto a *different* member that carries
-                # the same stale librenms_id, persisting lag/parent on the wrong interface.
-                row_name = port_by_id[port_id].get(interface_name_field)
-                target_device = self._resolve_row_target_device(obj, row_name)
-                if target_device is None:
-                    continue
-                expected_owner = _interface_owner_for_object(target_device)
+                    # Pin both ends of the relationship to the owner this row was synced onto (the
+                    # per-row device_selection target, or the VM). The VC-wide port_id search can
+                    # otherwise resolve a child/parent uniquely onto a *different* member that carries
+                    # the same stale librenms_id, persisting lag/parent on the wrong interface.
+                    row_name = port_by_id[port_id].get(interface_name_field)
+                    target_device = self._resolve_row_target_device(obj, row_name)
+                    if target_device is None:
+                        continue
+                    expected_owner = _interface_owner_for_object(target_device)
 
-                # LAG membership: this interface is a member of a LAG aggregate. Both ends are
-                # resolved/validated/persisted by the shared helpers below (same flow as the
-                # parent pass), differing only in the Interface-only source guard and the
-                # aggregate type=lag promotion.
-                raw_lag = lag_members.get(normalize_librenms_port_id(port_id))
-                if raw_lag is not None:
-                    member_iface, agg_iface = self._resolve_relationship_ends(
-                        obj,
-                        port_id,
-                        raw_lag,
-                        port_by_id,
-                        iface_index,
-                        server_key,
-                        expected_owner,
-                        interface_name_field,
-                        "LAG",
-                        require_interface_source=True,  # VMInterface has no lag field
-                    )
-                    if member_iface and member_iface.lag_id != agg_iface.pk:
-                        if not _interfaces_same_owner(member_iface, agg_iface):
-                            logger.warning(
-                                "Bulk sync: skipping cross-member LAG link %s -> %s (different devices)",
-                                member_iface.name,
-                                agg_iface.name,
-                            )
-                        else:
-                            self._apply_relationship_edge(
-                                member_iface, "lag", agg_iface, self._prepare_bulk_lag_aggregate, "LAG"
-                            )
+                    # LAG membership: this interface is a member of a LAG aggregate. Both ends are
+                    # resolved/validated/persisted by the shared helpers below (same flow as the
+                    # parent pass), differing only in the Interface-only source guard and the
+                    # aggregate type=lag promotion.
+                    raw_lag = lag_members.get(normalize_librenms_port_id(port_id))
+                    if raw_lag is not None:
+                        member_iface, agg_iface = self._resolve_relationship_ends(
+                            obj,
+                            port_id,
+                            raw_lag,
+                            port_by_id,
+                            iface_index,
+                            server_key,
+                            expected_owner,
+                            interface_name_field,
+                            "LAG",
+                            require_interface_source=True,  # VMInterface has no lag field
+                        )
+                        if member_iface and member_iface.lag_id != agg_iface.pk:
+                            if not _interfaces_same_owner(member_iface, agg_iface):
+                                logger.warning(
+                                    "Bulk sync: skipping cross-member LAG link %s -> %s (different devices)",
+                                    member_iface.name,
+                                    agg_iface.name,
+                                )
+                            else:
+                                self._apply_relationship_edge(
+                                    member_iface, "lag", agg_iface, self._prepare_bulk_lag_aggregate, "LAG"
+                                )
 
-                # Sub-interface parent: this interface is a child of a parent interface.
-                raw_parent = sub_interfaces.get(normalize_librenms_port_id(port_id))
-                if raw_parent is not None:
-                    child_iface, parent_iface = self._resolve_relationship_ends(
-                        obj,
-                        port_id,
-                        raw_parent,
-                        port_by_id,
-                        iface_index,
-                        server_key,
-                        expected_owner,
-                        interface_name_field,
-                        "parent",
-                    )
-                    if child_iface and child_iface.parent_id != parent_iface.pk:
-                        if not _interfaces_same_owner(child_iface, parent_iface):
-                            logger.warning(
-                                "Bulk sync: skipping cross-member parent link %s -> %s (different devices)",
-                                child_iface.name,
-                                parent_iface.name,
-                            )
-                        else:
-                            self._apply_relationship_edge(child_iface, "parent", parent_iface, None, "parent")
+                    # Sub-interface parent: this interface is a child of a parent interface.
+                    raw_parent = sub_interfaces.get(normalize_librenms_port_id(port_id))
+                    if raw_parent is not None:
+                        child_iface, parent_iface = self._resolve_relationship_ends(
+                            obj,
+                            port_id,
+                            raw_parent,
+                            port_by_id,
+                            iface_index,
+                            server_key,
+                            expected_owner,
+                            interface_name_field,
+                            "parent",
+                        )
+                        if child_iface and child_iface.parent_id != parent_iface.pk:
+                            if not _interfaces_same_owner(child_iface, parent_iface):
+                                logger.warning(
+                                    "Bulk sync: skipping cross-member parent link %s -> %s (different devices)",
+                                    child_iface.name,
+                                    parent_iface.name,
+                                )
+                            else:
+                                self._apply_relationship_edge(child_iface, "parent", parent_iface, None, "parent")
+        except IntegrityError:
+            # Django's Postgres FK constraints are INITIALLY DEFERRED: a related row
+            # deleted mid-batch surfaces only at this block's COMMIT — after every
+            # per-row guard has already passed — so it cannot be caught per edge. The
+            # relationship pass rolls back as a unit (the interface sync itself already
+            # committed); fail soft with a retry hint instead of 500ing the sync POST.
+            logger.warning(
+                "Bulk sync: LAG/parent relationship pass rolled back by a concurrent DB conflict",
+                exc_info=True,
+            )
+            messages.warning(
+                self.request,
+                "Interfaces synced, but LAG/parent relationships hit a concurrent change and were "
+                "not applied. Re-run the sync.",
+            )
 
     @staticmethod
     def _prepare_bulk_lag_aggregate(agg_iface):
@@ -419,7 +435,13 @@ class SyncInterfacesView(
         ``(persist, restore)``); the parent pass passes None.
         """
         try:
-            _apply_interface_relationship(source_iface, relation_field, related_iface, prepare_related)
+            # Own savepoint: an IntegrityError from the persist poisons the enclosing batch
+            # transaction ("current transaction is aborted" on every later row) unless the
+            # failed statements are rolled back to a savepoint first — same reasoning as the
+            # move-to-winner flow in migrate.py. It also keeps the pair atomic: a related-side
+            # persist (LAG type bump) can't outlive a failed source save.
+            with transaction.atomic():
+                _apply_interface_relationship(source_iface, relation_field, related_iface, prepare_related)
         except ValidationError as exc:
             logger.warning(
                 "Bulk sync: skipping invalid %s link %s -> %s: %s",
@@ -427,6 +449,18 @@ class SyncInterfacesView(
                 source_iface.name,
                 related_iface.name,
                 _validation_error_detail(exc),
+            )
+            return
+        except IntegrityError as exc:
+            # Concurrent DB conflict (e.g. the related interface deleted between full_clean's
+            # existence check and the FK write): skip this row and keep the batch alive,
+            # mirroring migrate.py's MoveInterfaceToWinnerView handling.
+            logger.warning(
+                "Bulk sync: skipping %s link %s -> %s due to a concurrent DB conflict: %s",
+                log_kind,
+                source_iface.name,
+                related_iface.name,
+                exc,
             )
             return
         logger.info("Bulk sync: set %s.%s = %s", source_iface.name, relation_field, related_iface.name)

@@ -1913,3 +1913,96 @@ class TestPromoteLagAggregateShared:
         agg = make_interface(make_device("lag-noop"), "ae0", iface_type="lag")
         assert SyncInterfacesView._prepare_bulk_lag_aggregate(agg) is None
         assert object.__new__(SyncInterfaceLagView)._prepare_related(agg) is None
+
+
+@pytest.mark.django_db
+class TestBulkRelationshipConcurrentConflict:
+    """Concurrent DB conflicts in the bulk LAG/parent pass must not 500 the sync POST.
+
+    Real failure mode: the related interface is deleted in the window between full_clean()
+    (which DOES verify the FK row exists, raising ValidationError when it's already gone) and
+    the FK write. full_clean is no-opped to open that window deterministically (same seam as
+    TestInterfaceLinkValidationErrorNoStackTrace). Two layers:
+
+    - statement-time IntegrityError (unique/check/immediate FK): caught per edge, under the
+      edge's own savepoint — a bare catch would leave the batch transaction poisoned
+      ("current transaction is aborted") for every later row, per the migrate.py precedent.
+      Tested against REAL SQL via SET CONSTRAINTS ALL IMMEDIATE.
+    - commit-time IntegrityError: Django's Postgres FK constraints are INITIALLY DEFERRED,
+      so a stale-FK write only explodes at the batch atomic's COMMIT, after every per-row
+      guard has passed — caught at the batch level and surfaced as a warning toast. A real
+      deferred COMMIT can't fire inside the test's wrapping transaction (and transaction=True
+      would flush migration-seeded rows for the rest of the suite), so that layer's wiring is
+      verified by injecting the error at the edge seam.
+    """
+
+    def test_statement_time_conflict_skips_row_and_batch_continues(self):
+        from dcim.models import Interface
+        from django.db import connection, transaction
+
+        from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
+
+        device = make_device("edge-integrity-host")
+        member = make_interface(device, "Gi0/1")
+        agg = make_interface(device, "Po9", iface_type="lag")
+        # Concurrent delete: the DB row vanishes while the in-memory object (already resolved
+        # into the batch's interface index) keeps its pk.
+        Interface.objects.filter(pk=agg.pk).delete()
+
+        view = object.__new__(SyncInterfacesView)
+        with patch.object(Interface, "full_clean", lambda self: None):  # validate/write TOCTOU window
+            with transaction.atomic():  # mirror the bulk pass's enclosing batch transaction
+                # Check FKs per statement (as some deployments/constraints do) so the violation
+                # raises AT the write — the savepoint path, not the deferred commit-time path.
+                with connection.cursor() as cur:
+                    cur.execute("SET CONSTRAINTS ALL IMMEDIATE")
+                view._apply_relationship_edge(member, "lag", agg, None, "LAG")
+                # Later rows keep processing in the SAME transaction: this INSERT raises
+                # "current transaction is aborted" if the IntegrityError poisoned it.
+                follow_up = make_interface(device, "Gi0/2")
+
+        member.refresh_from_db()
+        assert member.lag_id is None  # the conflicting row was skipped, nothing half-persisted
+        follow_up.refresh_from_db()  # the batch's later work persisted fine
+
+    def test_commit_time_conflict_warns_instead_of_500(self):
+        from django.contrib.messages.storage.fallback import FallbackStorage
+        from django.db import IntegrityError
+        from django.test import RequestFactory
+
+        from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
+
+        device = make_device("batch-integrity-host")
+        member = make_interface(device, "Gi0/1")
+        member.custom_field_data["librenms_id"] = {"default": 1}
+        member.save()
+        agg = make_interface(device, "Po9", iface_type="lag")
+        agg.custom_field_data["librenms_id"] = {"default": 10}
+        agg.save()
+
+        view = object.__new__(SyncInterfacesView)
+        view.interface_name_field = "ifName"
+        request = RequestFactory().post("/", data={})
+        request.session = {}
+        request._messages = FallbackStorage(request)
+        view.request = request
+
+        ports_data = [
+            {"port_id": 1, "ifName": "Gi0/1"},
+            {"port_id": 10, "ifName": "Po9"},
+        ]
+        relationships = {"lag_members": {1: 10}, "sub_interfaces": {}}
+
+        def deferred_commit_violation(view_self, source, field, related, prep, kind):
+            # Stands in for the deferred FK check firing at the batch atomic's COMMIT —
+            # past the per-row savepoint handler, so only the batch-level catch can see it.
+            raise IntegrityError('insert or update on table "dcim_interface" violates foreign key constraint')
+
+        with patch.object(SyncInterfacesView, "_apply_relationship_edge", deferred_commit_violation):
+            # Pre-fix this propagated out of the view as a 500.
+            view._sync_lag_and_parent_relationships(device, ["Gi0/1"], ports_data, relationships, "default")
+
+        member.refresh_from_db()
+        assert member.lag_id is None  # the relationship pass rolled back as a unit
+        queued = [str(m) for m in request._messages._queued_messages]
+        assert any("concurrent change" in m for m in queued)
