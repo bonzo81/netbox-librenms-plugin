@@ -1082,9 +1082,12 @@ class BulkImportDevicesView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
             # import them unchecked (mirrors ImportDevicesJob). A transient get_device_info miss
             # could otherwise let a colliding row through on retry.
             ids = ", ".join(str(d) for d in unresolved)
+            # Object-neutral wording (row(s), not device(s)): parsed_ids includes VM rows via
+            # vm_device_ids=vm_imports, so a VM-only batch must not be mislabelled — matches
+            # the deliberately neutral copy in ImportDevicesJob.
             msg = (
                 f"Bulk import blocked: could not fetch LibreNMS device info for {len(unresolved)} "
-                f"selected device(s) (id(s): {ids}) to verify collisions. Retry the import."
+                f"selected row(s) (id(s): {ids}) to verify collisions. Retry the import."
             )
             if is_htmx:
                 # 200, like the collision step: HTMX skips the swap on non-2xx.
@@ -1106,7 +1109,7 @@ class BulkImportDevicesView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
             messages.error(
                 request,
                 "Bulk import blocked: two or more selected LibreNMS devices resolve to the same "
-                "NetBox device. Resolve each colliding device individually, or deselect the duplicates.",
+                "NetBox object. Resolve each colliding object individually, or deselect the duplicates.",
             )
             return redirect("plugins:netbox_librenms_plugin:librenms_import")
 

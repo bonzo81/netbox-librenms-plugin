@@ -5729,8 +5729,52 @@ class TestBulkImportDevicesViewCollisionGate:
             response = view.post(request)
 
         assert response.status_code == 200
-        assert "could not fetch LibreNMS device info" in response.content.decode()
+        html = response.content.decode()
+        assert "could not fetch LibreNMS device info" in html
+        # Object-neutral copy: the batch can contain VM rows, so the block message says
+        # "row(s)", never "device(s)" — matching ImportDevicesJob's wording.
+        assert "selected row(s)" in html
+        assert "selected device(s)" not in html
         mock_import.assert_not_called()
+
+    def test_colliding_batch_non_htmx_message_is_object_neutral(self):
+        """The non-HTMX collision block toast says "NetBox object", not "NetBox device".
+
+        The gate covers VM rows too (vm_device_ids=vm_imports), so a VM-only batch must not
+        be mislabelled — mirrors the deliberately neutral wording in ImportDevicesJob.
+        """
+        view = self._make_view()
+        # No HX-Request header → the messages.error + redirect branch.
+        request = _make_request(post={"select": ["1", "2"]})
+        request.POST.getlist = MagicMock(return_value=["1", "2"])
+        request.user = AnonymousUser()
+
+        make_device("gate-collide-plain")
+        libre = {
+            1: {"device_id": 1, "sysName": "gate-collide-plain", "hostname": "gate-collide-plain"},
+            2: {"device_id": 2, "sysName": "gate-collide-plain", "hostname": "gate-collide-plain"},
+        }
+        with (
+            patch.object(view, "require_write_permission", return_value=None),
+            patch(
+                "netbox_librenms_plugin.views.imports.actions.resolve_naming_preferences", return_value=(True, False)
+            ),
+            patch(
+                "netbox_librenms_plugin.views.imports.actions.fetch_device_with_cache",
+                side_effect=lambda did, _api: libre.get(did),
+            ),
+            patch("netbox_librenms_plugin.views.imports.actions.bulk_import_devices") as mock_import,
+            patch("netbox_librenms_plugin.views.imports.actions.messages") as mock_messages,
+            patch("netbox_librenms_plugin.views.imports.actions.redirect", return_value=MagicMock(status_code=302)),
+        ):
+            view.post(request)
+
+        mock_import.assert_not_called()
+        mock_messages.error.assert_called_once()
+        toast = mock_messages.error.call_args[0][1]
+        assert "NetBox object" in toast
+        assert "NetBox device" not in toast
+        assert "colliding device" not in toast
 
 
 # ---------------------------------------------------------------------------
