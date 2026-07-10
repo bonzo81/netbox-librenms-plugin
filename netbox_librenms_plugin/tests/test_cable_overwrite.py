@@ -16,6 +16,8 @@ modal. A purely additive change (just adding the librenms tag, terminations unch
 allowed silently.
 """
 
+from unittest.mock import patch
+
 import pytest
 
 from netbox_librenms_plugin.tests.conftest import cable_together, make_patch_panel, make_serial_device
@@ -205,6 +207,28 @@ class TestSerialCableOverwriteBehaviour:
         csp.refresh_from_db()
         cp_b.refresh_from_db()
         assert csp.cable_id is not None and csp.cable_id == cp_b.cable_id  # now csp -> console-B
+
+    def test_tagging_failure_rolls_back_the_cable(self):
+        """A provenance-tagging failure must not commit an untagged cable while reporting failure.
+
+        An untagged cable isn't recognized as plugin-owned by classify_cable_action, so a
+        half-persisted create both contradicts the error toast and turns the user's retry
+        into a force-confirm conflict against their own cable. The tag lookup is patched in
+        the sync.cables namespace only, so classify_cable_action (utils) still runs real.
+        """
+        from dcim.models import Cable
+
+        acs, csp, cp_a, _cp_b = self._setup("tagfail")
+        sync = _sync_view()
+
+        with patch(
+            "netbox_librenms_plugin.views.sync.cables.get_librenms_cable_tag",
+            side_effect=RuntimeError("tag backend down"),
+        ):
+            result = sync.handle_serial_cable_creation(_serial_link(csp, cp_a), {"device_id": acs.id})
+
+        assert result["status"] == "invalid"
+        assert Cable.objects.count() == 0  # the cable and its failed tag stamp roll back together
 
     def test_conflict_on_foreign_cable_without_force_leaves_db_untouched(self):
         from dcim.models import Cable

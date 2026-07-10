@@ -99,20 +99,26 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libre
             True on success, False on failure.
         """
         try:
-            server_key = getattr(self, "_post_server_key", None)
-            sync_settings = get_cable_sync_settings()
-            base_desc = sync_settings.cable_sync_description
-            description = f"{base_desc} ({server_key})" if server_key else base_desc
-            cable = Cable(
-                a_terminations=[local_interface],
-                b_terminations=[remote_interface],
-                status="connected",
-                color=sync_settings.cable_sync_tag_color,
-                description=description,
-                tenant=getattr(getattr(remote_interface, "device", None), "tenant", None),
-            )
-            cable.save()
-            cable.tags.add(get_librenms_cable_tag())
+            # Cable + provenance stamp succeed or fail together: a tags.add failure after
+            # cable.save() would otherwise commit an untagged cable while the UI reports
+            # failure — and an untagged cable isn't recognized as plugin-owned, so the
+            # user's retry hits a force-confirm conflict against their own cable. The
+            # savepoint also protects the overwrite path's per-interface atomic block.
+            with transaction.atomic():
+                server_key = getattr(self, "_post_server_key", None)
+                sync_settings = get_cable_sync_settings()
+                base_desc = sync_settings.cable_sync_description
+                description = f"{base_desc} ({server_key})" if server_key else base_desc
+                cable = Cable(
+                    a_terminations=[local_interface],
+                    b_terminations=[remote_interface],
+                    status="connected",
+                    color=sync_settings.cable_sync_tag_color,
+                    description=description,
+                    tenant=getattr(getattr(remote_interface, "device", None), "tenant", None),
+                )
+                cable.save()
+                cable.tags.add(get_librenms_cable_tag())
             return True
         except Exception as exc:  # pragma: no cover - protects UX
             messages.error(request, f"Failed to create cable: {str(exc)}")
