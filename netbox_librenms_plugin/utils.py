@@ -15,6 +15,8 @@ from netbox.config import get_config
 from netbox.plugins import get_plugin_config
 from utilities.paginator import get_paginate_count as netbox_get_paginate_count
 
+from netbox_librenms_plugin.constants import OOB_BADGE_HTML
+
 logger = logging.getLogger(__name__)
 
 
@@ -1221,6 +1223,29 @@ def render_vc_member_options(members, selected_id):
             for member in members
         )
     )
+
+
+def oob_badge_html(record, leading_space=False):
+    """
+    Return the OOB-source badge for a row merged from the linked OOB controller.
+
+    Shared by the interface/module/cable tables and the cable-verify formatter so the
+    ``_source == "oob"`` check and the badge markup cannot drift between per-site copies
+    (each previously carried its own conditional).
+
+    Args:
+        record: A row dict from the merged host+OOB data.
+        leading_space: Prepend a space when the badge follows inline text (the cable
+            port-name column).
+
+    Returns:
+        SafeString: The badge markup, or ``""`` when the row is not OOB-sourced.
+    """
+    if record.get("_source") != "oob":
+        return ""
+    # Static trusted markup — mark_safe, not format_html (which requires interpolation
+    # args and raises TypeError when given a bare string).
+    return mark_safe((" " if leading_space else "") + OOB_BADGE_HTML)  # noqa: S308
 
 
 def is_valid_ports_payload(payload) -> bool:

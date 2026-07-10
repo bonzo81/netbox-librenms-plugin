@@ -7,8 +7,7 @@ from django.utils.html import format_html, mark_safe
 from netbox.tables.columns import ToggleColumn
 from utilities.paginator import EnhancedPaginator
 
-from netbox_librenms_plugin.constants import OOB_BADGE_HTML
-from netbox_librenms_plugin.utils import get_table_paginate_count, render_vc_member_options
+from netbox_librenms_plugin.utils import get_table_paginate_count, oob_badge_html, render_vc_member_options
 
 
 class LibreNMSModuleTable(tables.Table):
@@ -182,13 +181,7 @@ class LibreNMSModuleTable(tables.Table):
             rendered_name = display_name
 
         depth = record.get("depth", 0)
-        # Static trusted markup — use mark_safe, not format_html (which requires
-        # interpolation args and raises TypeError when given a bare string).
-        oob_badge = (
-            mark_safe(OOB_BADGE_HTML)  # noqa: S308
-            if record.get("_source") == "oob"
-            else ""
-        )
+        oob_badge = oob_badge_html(record)
         if depth == 0:
             return format_html("{}{}", rendered_name, oob_badge)
         # Build visual tree prefix based on nesting depth

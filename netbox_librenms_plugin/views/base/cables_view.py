@@ -14,7 +14,6 @@ from django.utils import timezone
 from django.utils.html import escape
 from django.views import View
 
-from netbox_librenms_plugin.constants import OOB_BADGE_HTML
 from netbox_librenms_plugin.utils import (
     cache_remaining_ttl,
     build_librenms_id_qs,
@@ -23,6 +22,7 @@ from netbox_librenms_plugin.utils import (
     get_librenms_oob,
     get_librenms_sync_device,
     get_virtual_chassis_member,
+    oob_badge_html,
 )
 from netbox_librenms_plugin.views.mixins import (
     CacheMixin,
@@ -879,13 +879,9 @@ class SingleCableVerifyView(NetBoxObjectPermissionMixin, BaseCableTableView):
                     # The verify response returns formatted_row HTML directly (it does not pass
                     # through LibreNMSCableTable.render_local_port), so re-apply the OOB badge
                     # here to match the initial render — otherwise a verified OOB cable row loses
-                    # the badge and looks like a plain host-port row. Markup mirrors
-                    # tables/cables.py render_local_port.
-                    oob_badge = (
-                        " " + OOB_BADGE_HTML  # leading space: it follows the port name
-                        if link_data.get("_source") == "oob"
-                        else ""
-                    )
+                    # the badge and looks like a plain host-port row. Same helper as the table
+                    # render, so the two can't drift.
+                    oob_badge = oob_badge_html(link_data, leading_space=True)
 
                     # Re-enrich remote side from current NetBox state
                     remote_hostname = link_data.get("remote_device", "")

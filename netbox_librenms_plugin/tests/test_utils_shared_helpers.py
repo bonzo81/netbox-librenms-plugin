@@ -112,3 +112,35 @@ class TestRenderVcMemberOptions:
         assert "&lt;img src=x onerror=alert(1)&gt;&quot;" in html
         # SafeString so format_html() callers embed it without double-escaping.
         assert isinstance(html, SafeString)
+
+
+class TestOobBadgeHtml:
+    """The shared OOB-source badge used by the interface/module/cable tables and cable verify."""
+
+    def test_oob_row_gets_the_badge(self):
+        from django.utils.safestring import SafeString
+
+        from netbox_librenms_plugin.constants import OOB_BADGE_HTML
+        from netbox_librenms_plugin.utils import oob_badge_html
+
+        html = oob_badge_html({"_source": "oob"})
+        assert html == OOB_BADGE_HTML
+        # SafeString so format_html() callers embed the trusted markup un-escaped.
+        assert isinstance(html, SafeString)
+
+    def test_leading_space_prefixes_the_badge(self):
+        from django.utils.safestring import SafeString
+
+        from netbox_librenms_plugin.constants import OOB_BADGE_HTML
+        from netbox_librenms_plugin.utils import oob_badge_html
+
+        html = oob_badge_html({"_source": "oob"}, leading_space=True)
+        assert html == " " + OOB_BADGE_HTML
+        assert isinstance(html, SafeString)
+
+    @pytest.mark.parametrize("record", [{}, {"_source": "main"}, {"_source": None}, {"_source": "OOB"}])
+    def test_non_oob_rows_get_no_badge(self, record):
+        from netbox_librenms_plugin.utils import oob_badge_html
+
+        assert oob_badge_html(record) == ""
+        assert oob_badge_html(record, leading_space=True) == ""
