@@ -5022,6 +5022,82 @@ class TestGetContextDataOOBCacheFingerprint:
         mock_cache.delete.assert_called_once_with("test_cache_key")
         assert ctx["table"] is None
 
+    def test_invalidates_when_main_id_poisoned_bool(self):
+        """A poisoned True custom-field id must not pass the fingerprint (True == 1 in Python).
+
+        post() coerces and fails closed on this exact state; the GET compare must mirror it
+        instead of serving the id-1 snapshot for a linkage post() would refuse.
+        """
+        from unittest.mock import MagicMock, patch
+
+        view = _make_view()
+        obj = MagicMock(pk=1)
+        view._get_sync_device = MagicMock(return_value=obj)
+        view._librenms_api.get_librenms_id = MagicMock(return_value=True)
+        view._build_context = MagicMock()
+        cached = {"inventory": [{"x": 1}], "librenms_id": 1, "oob_librenms_id": None}
+        with (
+            patch("netbox_librenms_plugin.views.base.modules_view.cache") as mock_cache,
+            patch("netbox_librenms_plugin.views.base.modules_view.get_librenms_oob", return_value=None),
+        ):
+            mock_cache.get.return_value = cached
+            ctx = view.get_context_data(MagicMock(GET={}), obj)
+
+        mock_cache.delete.assert_called_once_with("test_cache_key")
+        assert ctx["table"] is None
+        view._build_context.assert_not_called()
+
+    def test_keeps_cache_when_main_id_stored_as_string(self):
+        """A string-backed custom-field id ("10") must fingerprint-match the cached int 10.
+
+        Same normalization the OOB side already does — without it every GET wrongly treats
+        the snapshot as stale and the module table renders empty until a manual refresh.
+        """
+        from unittest.mock import MagicMock, patch
+
+        view = _make_view()
+        obj = MagicMock(pk=1)
+        view._get_sync_device = MagicMock(return_value=obj)
+        view._librenms_api.get_librenms_id = MagicMock(return_value="10")
+        view._build_context = MagicMock(return_value={"built": True})
+        cached = {"inventory": [{"x": 1}], "librenms_id": 10, "oob_librenms_id": None}
+        request = MagicMock(GET={})
+        with (
+            patch("netbox_librenms_plugin.views.base.modules_view.cache") as mock_cache,
+            patch("netbox_librenms_plugin.views.base.modules_view.get_librenms_oob", return_value=None),
+        ):
+            mock_cache.get.return_value = cached
+            ctx = view.get_context_data(request, obj)
+
+        assert ctx == {"built": True}
+        mock_cache.delete.assert_not_called()
+
+    def test_invalidates_when_oob_link_corrupt(self):
+        """A linked-but-corrupt OOB id must invalidate, not collapse to the no-OOB fingerprint.
+
+        post() takes the partial-outcome path (never caches) for this state; the GET compare
+        must not quietly serve a prior no-OOB snapshot while the device nominally has an OOB
+        controller linked.
+        """
+        from unittest.mock import MagicMock, patch
+
+        view = _make_view()
+        obj = MagicMock(pk=1)
+        view._get_sync_device = MagicMock(return_value=obj)
+        view._librenms_api.get_librenms_id = MagicMock(return_value=10)
+        view._build_context = MagicMock()
+        cached = {"inventory": [{"x": 1}], "librenms_id": 10, "oob_librenms_id": None}
+        with (
+            patch("netbox_librenms_plugin.views.base.modules_view.cache") as mock_cache,
+            patch("netbox_librenms_plugin.views.base.modules_view.get_librenms_oob", return_value={"id": "garbage"}),
+        ):
+            mock_cache.get.return_value = cached
+            ctx = view.get_context_data(MagicMock(GET={}), obj)
+
+        mock_cache.delete.assert_called_once_with("test_cache_key")
+        assert ctx["table"] is None
+        view._build_context.assert_not_called()
+
     def test_keeps_cache_when_oob_unchanged(self):
         from unittest.mock import MagicMock, patch
 

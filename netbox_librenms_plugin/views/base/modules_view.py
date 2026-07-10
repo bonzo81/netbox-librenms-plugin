@@ -581,8 +581,12 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
             return {"table": None, "object": obj, "cache_expiry": None, "server_key": scoped_server}
         # Validate that the cached inventory was built for the same LibreNMS device.
         # If the object has been remapped to a different device, discard stale inventory.
-        current_librenms_id = self.librenms_api.get_librenms_id(sync_device)
-        if cached_payload.get("librenms_id") != current_librenms_id:
+        # Coerce like post() does: a raw compare both accepts a poisoned bool (True == 1 in
+        # Python, serving a snapshot post() would fail closed on) and rejects a string-backed
+        # id ("10" != 10, emptying the table until a manual refresh). None (unlinked or
+        # uncoercible) never matches — post() can't cache without a valid id.
+        current_librenms_id = coerce_librenms_id(self.librenms_api.get_librenms_id(sync_device))
+        if current_librenms_id is None or cached_payload.get("librenms_id") != current_librenms_id:
             cache.delete(cache_key)
             return {"table": None, "object": obj, "cache_expiry": None, "server_key": scoped_server}
         # Same for the linked OOB controller: a re-link (or unlink) to a different
@@ -594,6 +598,12 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
         # stale on every GET and the module table renders empty until a manual refresh. The write
         # side (post()) now caches the coerced value, so this matches it.
         current_oob_id = coerce_librenms_id(current_oob.get("id")) if isinstance(current_oob, dict) else None
+        # A linked-but-corrupt OOB id must not collapse to the no-OOB fingerprint: post()
+        # takes the partial-outcome path (never caches) for this state, so the GET compare
+        # can't quietly serve a prior no-OOB snapshot while an OOB controller is linked.
+        if current_oob and current_oob_id is None:
+            cache.delete(cache_key)
+            return {"table": None, "object": obj, "cache_expiry": None, "server_key": scoped_server}
         if cached_payload.get("oob_librenms_id") != current_oob_id:
             cache.delete(cache_key)
             return {"table": None, "object": obj, "cache_expiry": None, "server_key": scoped_server}
