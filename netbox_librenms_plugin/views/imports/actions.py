@@ -1735,7 +1735,15 @@ class DeviceConflictActionView(
                     # constraint would block those valid workflows. Instead, we rely on this
                     # in-transaction row-lock check to guard concurrent sync of the SAME serial,
                     # and flag conflicts via a 409 response for the user to resolve manually.
-                    conflict_device = Device.objects.filter(serial=incoming_serial).exclude(pk=locked_device.pk).first()
+                    # Lock the conflicting row too (like the link/update/update_serial checks):
+                    # a concurrent action re-pointing that row's serial then serializes against
+                    # this check instead of racing it.
+                    conflict_device = (
+                        Device.objects.select_for_update()
+                        .filter(serial=incoming_serial)
+                        .exclude(pk=locked_device.pk)
+                        .first()
+                    )
                     if conflict_device:
                         logger.warning(
                             f"Serial sync blocked: '{incoming_serial}' already assigned to "

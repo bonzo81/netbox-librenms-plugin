@@ -3714,7 +3714,8 @@ class TestSyncSerialMorePaths:
         )
         with stack:
             MockDevice.objects.select_for_update.return_value.get.return_value = locked_device
-            MockDevice.objects.filter.return_value.exclude.return_value.first.return_value = conflict_device
+            # The conflict lookup runs under select_for_update() too (row lock on the conflicting device).
+            MockDevice.objects.select_for_update.return_value.filter.return_value.exclude.return_value.first.return_value = conflict_device
             response = view.post(request, device_id=42)
 
         assert response.status_code == 200
@@ -3742,11 +3743,82 @@ class TestSyncSerialMorePaths:
         )
         with stack:
             MockDevice.objects.select_for_update.return_value.get.return_value = locked_device
-            MockDevice.objects.filter.return_value.exclude.return_value.first.return_value = None
+            # The conflict lookup runs under select_for_update() too (row lock on the conflicting device).
+            MockDevice.objects.select_for_update.return_value.filter.return_value.exclude.return_value.first.return_value = None
             with patch("netbox_librenms_plugin.views.imports.actions._save_device", return_value=err):
                 response = view.post(request, device_id=42)
 
         assert response.status_code == 400
+
+
+class TestSyncSerialConflictRowLock:
+    """Real-DB check that the sync_serial conflict lookup locks the conflicting row.
+
+    The link/update/update_serial actions all select_for_update() the conflicting-serial
+    row; sync_serial's guard must do the same so a concurrent action re-pointing that
+    row's serial serializes against this check instead of racing it.
+    """
+
+    @pytest.mark.django_db
+    def test_sync_serial_conflict_lookup_runs_under_row_lock(self):
+        from dcim.models import Device, DeviceRole, DeviceType, Manufacturer, Site
+        from django.contrib.auth import get_user_model
+        from django.db import connection
+        from django.test import RequestFactory
+        from django.test.utils import CaptureQueriesContext
+
+        from netbox_librenms_plugin.views.imports.actions import DeviceConflictActionView
+
+        site = Site.objects.create(name="site-serial-lock", slug="site-serial-lock")
+        manufacturer = Manufacturer.objects.create(name="mf-serial-lock", slug="mf-serial-lock")
+        device_type = DeviceType.objects.create(
+            manufacturer=manufacturer, model="dt-serial-lock", slug="dt-serial-lock"
+        )
+        role = DeviceRole.objects.create(name="role-serial-lock", slug="role-serial-lock")
+        target = Device.objects.create(
+            name="serial-lock-target", site=site, device_type=device_type, role=role, serial=""
+        )
+        conflict = Device.objects.create(
+            name="serial-lock-conflict", site=site, device_type=device_type, role=role, serial="SN-LOCK-CONF"
+        )
+
+        user = get_user_model().objects.create_user(username="serial-lock-admin", is_superuser=True)
+        request = RequestFactory().post("/", data={"action": "sync_serial", "existing_device_id": str(target.pk)})
+        request.user = user
+
+        view = DeviceConflictActionView()
+        view.request = request
+        libre_device = {"device_id": 42, "hostname": "serial-lock-target", "serial": "SN-LOCK-CONF"}
+        validation = {"existing_device": target, "device_type_mismatch": False}
+
+        with (
+            patch.object(
+                DeviceConflictActionView,
+                "get_validated_device_with_selections",
+                return_value=(libre_device, validation, {}),
+            ),
+            CaptureQueriesContext(connection) as ctx,
+        ):
+            response = view.post(request, device_id=42)
+
+        assert response.status_code == 200
+        assert b"Serial conflict" in response.content
+        target.refresh_from_db()
+        assert target.serial == ""
+
+        conflict_lookups = [
+            q["sql"]
+            for q in ctx.captured_queries
+            if "dcim_device" in q["sql"] and "SN-LOCK-CONF" in q["sql"] and q["sql"].lstrip().startswith("SELECT")
+        ]
+        assert conflict_lookups, "conflicting-serial lookup was not captured"
+        assert all("FOR UPDATE" in sql for sql in conflict_lookups), (
+            "sync_serial conflict lookup must lock the conflicting row "
+            f"(unlocked queries: {[s for s in conflict_lookups if 'FOR UPDATE' not in s]})"
+        )
+        # The pre-check must not have been broken by the lock: the conflicting row still owns the serial.
+        conflict.refresh_from_db()
+        assert conflict.serial == "SN-LOCK-CONF"
 
 
 class TestMigrateLibreNMSIdTransactionPaths:
