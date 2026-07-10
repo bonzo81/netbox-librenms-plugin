@@ -1208,10 +1208,14 @@ class TestSerialSyncSurvivesHostLinks404:
         return _get
 
     def _librenms_config_patches(self):
+        # Only the true external boundaries are stubbed: the plugin server config and the
+        # LibreNMS HTTP transport. LibreNMSSettings stays REAL — the empty table already
+        # yields None for the api's server lookup, and the cable-sync provenance reads
+        # (get_cable_sync_settings) must see the real model, not a MagicMock whose
+        # fabricated color would fail Cable validation.
         cfg = patch("netbox_librenms_plugin.librenms_api.get_plugin_config")
-        settings = patch("netbox_librenms_plugin.models.LibreNMSSettings")
         get = patch("netbox_librenms_plugin.librenms_api.requests.get", side_effect=self._routed_get())
-        return cfg, settings, get
+        return cfg, get
 
     def test_serial_rows_cached_and_syncable_when_host_links_404(self):
         from django.core.cache import cache
@@ -1228,8 +1232,8 @@ class TestSerialSyncSurvivesHostLinks404:
         csp = csps[0]
         console_port = cps[0]
 
-        cfg, settings, get = self._librenms_config_patches()
-        with cfg as mock_config, settings as mock_settings, get:
+        cfg, get = self._librenms_config_patches()
+        with cfg as mock_config, get:
             mock_config.return_value = {
                 "default": {
                     "librenms_url": "https://librenms.example.com",
@@ -1238,7 +1242,6 @@ class TestSerialSyncSurvivesHostLinks404:
                     "verify_ssl": True,
                 }
             }
-            mock_settings.objects.filter.return_value.first.return_value = None
 
             # --- Refresh: real get_links_data hits the real (mocked) 404 on /links ---
             view = object.__new__(DeviceCableTableView)
@@ -1381,8 +1384,9 @@ class TestCableEnrichment:
 
     def test_created_cable_carries_tag_color_description_and_remote_tenant(self):
         from dcim.models import Cable
-        from netbox.plugins import get_plugin_config
         from tenancy.models import Tenant
+
+        from netbox_librenms_plugin.models import LibreNMSSettings
 
         tenant = Tenant.objects.create(name="RemoteTenant", slug="remote-tenant")
         _acs, csps, _ = make_serial_device("acs-enrich", csp_names=["ttyS1"])
@@ -1399,11 +1403,42 @@ class TestCableEnrichment:
 
         # Provenance tag — lets the plugin recognise cables it created.
         assert "librenms" in set(cable.tags.values_list("slug", flat=True))
-        # Color + description come from plugin config; description carries the server key.
-        assert cable.color == get_plugin_config("netbox_librenms_plugin", "cable_sync_tag_color")
+        # Color + description come from the settings singleton (untouched here → field
+        # defaults); description carries the server key.
+        settings_row, _ = LibreNMSSettings.objects.get_or_create()
+        assert cable.color == settings_row.cable_sync_tag_color
         assert "production" in cable.description
         # Tenant is the REMOTE side's tenant (the target device), not the terminal server's.
         assert cable.tenant_id == tenant.pk
+
+    def test_enrichment_settings_come_from_the_settings_row(self):
+        """The provenance stamp is DB/UI-driven: custom values saved on the LibreNMSSettings singleton (what the Settings page writes) must land on the created cable and its auto-created tag — the shipped defaults must NOT win once an operator changed them."""
+        from dcim.models import Cable
+        from extras.models import Tag
+
+        from netbox_librenms_plugin.models import LibreNMSSettings
+
+        settings_row, _ = LibreNMSSettings.objects.get_or_create()
+        settings_row.cable_sync_tag = "custom-prov"
+        settings_row.cable_sync_tag_color = "ff5722"
+        settings_row.cable_sync_description = "Stamped by custom sync"
+        settings_row.save()
+
+        _acs, csps, _ = make_serial_device("acs-enrich3", csp_names=["ttyS3"])
+        _router, _, cps = make_serial_device("router-enrich3", cp_names=["console"])
+        csp, cp = csps[0], cps[0]
+
+        result = self._sync_one(csp, cp, server_key="production")
+        assert result["status"] == "valid"
+
+        csp.refresh_from_db()
+        cable = Cable.objects.get(pk=csp.cable_id)
+        # The custom tag was auto-created with the custom color and stamped on the cable.
+        assert "custom-prov" in set(cable.tags.values_list("slug", flat=True))
+        assert Tag.objects.get(slug="custom-prov").color == "ff5722"
+        # Cable color + description follow the row; description still carries the server key.
+        assert cable.color == "ff5722"
+        assert cable.description == "Stamped by custom sync (production)"
 
     def test_tenant_is_remote_side_when_sides_differ(self):
         """When the two devices are in different tenants, the cable takes the REMOTE tenant."""

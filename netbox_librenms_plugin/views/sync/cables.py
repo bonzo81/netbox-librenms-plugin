@@ -8,7 +8,6 @@ from django.db import transaction
 from django.shortcuts import redirect
 from django.urls import reverse
 from django.views import View
-from netbox.plugins import get_plugin_config
 
 from netbox_librenms_plugin.sync_cache import (
     SyncTab,
@@ -17,6 +16,7 @@ from netbox_librenms_plugin.sync_cache import (
 )
 from netbox_librenms_plugin.utils import (
     classify_cable_action,
+    get_cable_sync_settings,
     get_librenms_cable_tag,
     get_librenms_sync_device,
     render_cable_trace,
@@ -100,13 +100,14 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libre
         """
         try:
             server_key = getattr(self, "_post_server_key", None)
-            base_desc = get_plugin_config("netbox_librenms_plugin", "cable_sync_description")
+            sync_settings = get_cable_sync_settings()
+            base_desc = sync_settings.cable_sync_description
             description = f"{base_desc} ({server_key})" if server_key else base_desc
             cable = Cable(
                 a_terminations=[local_interface],
                 b_terminations=[remote_interface],
                 status="connected",
-                color=get_plugin_config("netbox_librenms_plugin", "cable_sync_tag_color"),
+                color=sync_settings.cable_sync_tag_color,
                 description=description,
                 tenant=getattr(getattr(remote_interface, "device", None), "tenant", None),
             )

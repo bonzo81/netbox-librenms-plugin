@@ -215,20 +215,7 @@ PLUGINS_CONFIG = {
 }
 ```
 
-Optional plugin-level settings for the cable sync (apply to all servers; in a multi-server setup they sit beside the `servers` block — defaults shown):
-
-```python
-PLUGINS_CONFIG = {
-    'netbox_librenms_plugin': {
-        # ... servers / connection settings ...
-        'cable_sync_tag': 'librenms',                    # Provenance tag stamped on created cables
-        'cable_sync_tag_color': '009688',                # Tag + cable color
-        'cable_sync_description': 'Synced from LibreNMS',
-    }
-}
-```
-
-See the [Cable Sync Guide](docs/usage_tips/cable_sync.md) for details.
+The cable-sync provenance settings (tag name, tag/cable color, cable description) are managed in the UI — plugin **Settings → Cable Sync** — not in `PLUGINS_CONFIG`, so they can be changed without a NetBox restart. See the [Cable Sync Guide](docs/usage_tips/cable_sync.md) for details.
 
 ### 3. Apply Database Migrations
 

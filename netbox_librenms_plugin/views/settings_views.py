@@ -6,7 +6,7 @@ from django.shortcuts import redirect, render
 from django.utils.html import escape
 from django.views import View
 
-from netbox_librenms_plugin.forms import ImportSettingsForm, ServerConfigForm
+from netbox_librenms_plugin.forms import CableSyncSettingsForm, ImportSettingsForm, ServerConfigForm
 from netbox_librenms_plugin.librenms_api import LibreNMSAPI
 from netbox_librenms_plugin.models import LibreNMSSettings
 from netbox_librenms_plugin.utils import save_user_pref
@@ -28,9 +28,10 @@ class LibreNMSSettingsView(LibreNMSPermissionMixin, View):
         # Get or create the settings object
         settings, created = LibreNMSSettings.objects.get_or_create()
 
-        # Instantiate both forms
+        # Instantiate all three forms
         server_form = ServerConfigForm(instance=settings)
         import_form = ImportSettingsForm(instance=settings)
+        cable_sync_form = CableSyncSettingsForm(instance=settings)
 
         return render(
             request,
@@ -38,6 +39,7 @@ class LibreNMSSettingsView(LibreNMSPermissionMixin, View):
             {
                 "server_form": server_form,
                 "import_form": import_form,
+                "cable_sync_form": cable_sync_form,
                 "object": settings,
             },
         )
@@ -58,6 +60,7 @@ class LibreNMSSettingsView(LibreNMSPermissionMixin, View):
             # Process server configuration form
             server_form = ServerConfigForm(request.POST, instance=settings)
             import_form = ImportSettingsForm(instance=settings)  # Unbound form for display
+            cable_sync_form = CableSyncSettingsForm(instance=settings)  # Unbound form for display
 
             if server_form.is_valid():
                 server_form.save()
@@ -70,6 +73,7 @@ class LibreNMSSettingsView(LibreNMSPermissionMixin, View):
         elif form_type == "import_settings":
             # Process import settings form
             server_form = ServerConfigForm(instance=settings)  # Unbound form for display
+            cable_sync_form = CableSyncSettingsForm(instance=settings)  # Unbound form for display
             import_form = ImportSettingsForm(request.POST, instance=settings)
 
             if import_form.is_valid():
@@ -104,18 +108,33 @@ class LibreNMSSettingsView(LibreNMSPermissionMixin, View):
                 )
                 return redirect("plugins:netbox_librenms_plugin:settings")
 
+        elif form_type == "cable_sync_settings":
+            # Process cable-sync provenance settings form
+            server_form = ServerConfigForm(instance=settings)  # Unbound form for display
+            import_form = ImportSettingsForm(instance=settings)  # Unbound form for display
+            cable_sync_form = CableSyncSettingsForm(request.POST, instance=settings)
+
+            if cable_sync_form.is_valid():
+                cable_sync_form.save()
+                messages.success(
+                    request,
+                    "Cable sync settings updated successfully.",
+                )
+                return redirect("plugins:netbox_librenms_plugin:settings")
+
         else:
             # Unknown form_type - shouldn't happen, but handle gracefully
             messages.error(request, "Invalid form submission.")
             return redirect("plugins:netbox_librenms_plugin:settings")
 
-        # If we get here, validation failed - render both forms
+        # If we get here, validation failed - render all forms
         return render(
             request,
             self.template_name,
             {
                 "server_form": server_form,
                 "import_form": import_form,
+                "cable_sync_form": cable_sync_form,
                 "object": settings,
                 "active_tab": form_type,  # Pass which tab should be active
             },

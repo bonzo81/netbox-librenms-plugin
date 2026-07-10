@@ -31,11 +31,11 @@ Every cable the sync creates is stamped so the plugin can recognize its own cabl
 
 | Setting | Default | Purpose |
 |---|---|---|
-| `cable_sync_tag` | `librenms` | Tag added to every created cable (auto-created on first use). This is the ownership marker used by overwrite protection. |
-| `cable_sync_tag_color` | `009688` | Color of the auto-created tag and of the cables themselves. |
-| `cable_sync_description` | `Synced from LibreNMS` | Cable description; the acting server key is appended, e.g. `Synced from LibreNMS (production)`. |
+| Provenance tag | `librenms` | Tag added to every created cable (auto-created on first use). This is the ownership marker used by overwrite protection. |
+| Tag / cable color | `009688` | Color of the auto-created tag and of the cables themselves. |
+| Cable description | `Synced from LibreNMS` | Cable description; the acting server key is appended, e.g. `Synced from LibreNMS (production)`. |
 
-These are plugin-level settings (set beside `servers`). The cable's **tenant** follows the remote device's tenant; the cable **type** is left blank (LibreNMS doesn't report the physical cable, and NetBox has no serial/rollover type). Serial console sensor types are no longer a plugin setting — they are managed as database rows under the Rules & Patterns tables.
+These are managed in the UI on the plugin **Settings → Cable Sync** tab (no `PLUGINS_CONFIG` entry, no NetBox restart to change them). Changes apply to cables created from then on — existing cables keep the stamp they were created with, and renaming the tag means future cables get the new tag while previously stamped cables keep the old one. The cable's **tenant** follows the remote device's tenant; the cable **type** is left blank (LibreNMS doesn't report the physical cable, and NetBox has no serial/rollover type). Serial console sensor types are likewise DB-managed — rows under the Rules & Patterns tables.
 
 ## Re-syncing already-cabled ports
 

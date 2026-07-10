@@ -13,6 +13,7 @@ from django.db.models import Q
 from django.db.models.functions import Lower
 from django.urls import reverse
 from netbox.models import NetBoxModel
+from utilities.fields import ColorField
 
 from netbox_librenms_plugin.utils import get_object_site_id, validate_regex_field
 
@@ -118,6 +119,26 @@ class LibreNMSSettings(models.Model):
     remember_interface_name_per_platform = models.BooleanField(
         default=False,
         help_text="Remember each user's ifName or ifDescr choice separately for each device platform",
+    )
+
+    # Cable-sync provenance knobs. DB/UI-managed (Settings page) rather than PLUGINS_CONFIG:
+    # they are cosmetic operator preferences, not bootstrap/connection settings, and this way
+    # changing them needs no NetBox restart — same split as the SerialSensorTypePattern rows.
+    cable_sync_tag = models.CharField(
+        max_length=100,
+        default="librenms",
+        help_text="Provenance tag stamped on cables the cable sync creates (the overwrite-protection ownership marker)",
+    )
+
+    cable_sync_tag_color = ColorField(
+        default="009688",
+        help_text="Color of the auto-created provenance tag and of the cables themselves",
+    )
+
+    cable_sync_description = models.CharField(
+        max_length=200,
+        default="Synced from LibreNMS",
+        help_text="Cable description; the acting server key is appended, e.g. 'Synced from LibreNMS (production)'",
     )
 
     def save(self, *args, **kwargs):

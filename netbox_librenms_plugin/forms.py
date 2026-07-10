@@ -360,6 +360,26 @@ class ImportSettingsForm(NetBoxModelForm):
         return cleaned_data
 
 
+class CableSyncSettingsForm(NetBoxModelForm):
+    """
+    Form for the cable-sync provenance settings (tag name, tag/cable color, description).
+
+    DB/UI-managed rather than PLUGINS_CONFIG so changing them needs no NetBox restart; the
+    color field renders NetBox's standard color picker via the model ColorField's widget.
+    """
+
+    class Meta:
+        model = LibreNMSSettings
+        fields = [
+            "cable_sync_tag",
+            "cable_sync_tag_color",
+            "cable_sync_description",
+        ]
+        # No custom clean needed: forms.CharField strips by default, so a whitespace-only tag
+        # name collapses to "" and the built-in required validation rejects it — a blank tag
+        # (which would slugify to "" and break the provenance get_or_create) can't be saved.
+
+
 # Keep for backward compatibility if needed elsewhere
 class LibreNMSSettingsForm(ServerConfigForm):
     """

@@ -20,15 +20,10 @@ class LibreNMSSyncConfig(PluginConfig):
         "enable_caching": True,
         "verify_ssl": True,
         "interface_name_field": DEFAULT_INTERFACE_NAME_FIELD,
-        # Provenance stamped on every cable the LibreNMS cable sync creates. The tag lets the
-        # plugin recognise/own its own cables (so a later DCIM-driven remodel can be protected
-        # from being overwritten); color + description are cosmetic identifiers. All configurable.
-        "cable_sync_tag": "librenms",
-        "cable_sync_tag_color": "009688",  # NetBox teal, matching the Serial badge
-        "cable_sync_description": "Synced from LibreNMS",
-        # Serial sensor recognition (LibreNMS sensor_type -> local port-name pattern) is DB-backed:
-        # the SerialSensorTypePattern table under Rules & Patterns, migration-seeded with Avocent
-        # ACS and Cisco IOS async lines — not a plugin setting.
+        # Cable-sync provenance (tag name/color, cable description) and serial sensor
+        # recognition (LibreNMS sensor_type -> local port-name pattern) are DB-backed, not
+        # plugin settings: the Settings → Cable Sync tab (LibreNMSSettings fields with the
+        # shipped defaults) and the SerialSensorTypePattern table under Rules & Patterns.
     }
 
     def ready(self):

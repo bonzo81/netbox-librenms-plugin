@@ -495,11 +495,25 @@ def normalize_relationship_maps(relationships) -> tuple[dict, dict, dict]:
     return lag_members, sub_interfaces, bridge_members
 
 
+def get_cable_sync_settings():
+    """
+    Return the settings row driving the cable-sync provenance stamp (tag name/color, description).
+
+    These are DB/UI-managed (plugin Settings → Cable Sync), not PLUGINS_CONFIG — operator
+    preferences changeable without a NetBox restart, same split as the SerialSensorTypePattern
+    rows. Falls back to an UNSAVED instance (pure field defaults) when no row exists yet, so
+    read paths never write.
+    """
+    from netbox_librenms_plugin.models import LibreNMSSettings
+
+    return LibreNMSSettings.objects.first() or LibreNMSSettings()
+
+
 def get_librenms_cable_tag():
     """
     Return (creating on first use) the Tag stamped on cables the LibreNMS cable sync creates.
 
-    The tag name and color come from plugin config (``cable_sync_tag`` / ``cable_sync_tag_color``).
+    The tag name and color come from the settings row (see :func:`get_cable_sync_settings`).
     Its purpose is provenance: it marks a cable as plugin-owned so the overwrite-protection can tell
     "our" cables apart from ones a user or another integration created. Mirrors the
     ``get_or_create(..., defaults=...)`` idiom used to bootstrap the ``librenms_id`` custom field.
@@ -510,11 +524,11 @@ def get_librenms_cable_tag():
     from django.utils.text import slugify
     from extras.models import Tag
 
-    name = get_plugin_config("netbox_librenms_plugin", "cable_sync_tag")
-    color = get_plugin_config("netbox_librenms_plugin", "cable_sync_tag_color")
+    sync_settings = get_cable_sync_settings()
+    name = sync_settings.cable_sync_tag
     tag, _ = Tag.objects.get_or_create(
         name=name,
-        defaults={"slug": slugify(name), "color": color},
+        defaults={"slug": slugify(name), "color": sync_settings.cable_sync_tag_color},
     )
     return tag
 
@@ -523,7 +537,7 @@ def _librenms_cable_tag_slug() -> str:
     """Return the slug of the configured LibreNMS cable-provenance tag (no DB write)."""
     from django.utils.text import slugify
 
-    return slugify(get_plugin_config("netbox_librenms_plugin", "cable_sync_tag"))
+    return slugify(get_cable_sync_settings().cable_sync_tag)
 
 
 def _cable_tag_slugs(cable) -> set:
