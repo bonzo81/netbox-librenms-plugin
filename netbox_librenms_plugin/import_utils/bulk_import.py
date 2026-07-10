@@ -88,7 +88,7 @@ def _is_job_cancelled(job) -> bool:
 
 
 def detect_collisions_for_device_ids(
-    device_ids, api, libre_devices_cache=None, sync_options=None, job=None
+    device_ids, api, libre_devices_cache=None, sync_options=None, job=None, vm_device_ids=None
 ) -> tuple[list[dict], list]:
     """
     Detect same-NetBox-device collisions for a batch of LibreNMS device ids.
@@ -112,6 +112,11 @@ def detect_collisions_for_device_ids(
         job: Optional background-job context. When set, cancellation is polled the same
             way the import loops poll it (first id, then every 5th); a cancelled job stops
             the scan instead of finishing a large cache-miss batch's API calls.
+        vm_device_ids: Optional collection of the batch's VM-selected LibreNMS ids. Each row
+            is validated in its ACTUAL import mode: a VM row validated as a Device would run
+            the Device-only serial/IP matching that ``bulk_import_vms`` intentionally skips,
+            and could fabricate a collision (blocking a valid batch) against a Device it
+            will never touch.
 
     Returns:
         tuple[list[dict], list]: ``(collisions, unresolved_ids)`` — the collision groups from
@@ -128,6 +133,7 @@ def detect_collisions_for_device_ids(
     # throwaway dict when the caller passes an empty one — the write-back below must be visible to
     # the caller so the downstream import reuses it.
     cache = libre_devices_cache if libre_devices_cache is not None else {}
+    vm_id_set = set(vm_device_ids or ())
     devices = []
     unresolved_ids = []
     device_ids = list(device_ids)
@@ -162,6 +168,10 @@ def detect_collisions_for_device_ids(
             # used for VC/chassis enrichment, all of which is guarded on `api` being truthy.
             libre_device,
             api=None,
+            # Validate in the row's ACTUAL import mode: VM rows skip the Device-only
+            # serial/IP matching exactly like bulk_import_vms will, so a coincidental
+            # serial can't fabricate a collision against a Device the row never touches.
+            import_as_vm=device_id in vm_id_set,
             use_sysname=use_sysname,
             strip_domain=strip_domain,
             server_key=api.server_key,

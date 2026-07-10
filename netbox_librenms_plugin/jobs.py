@@ -230,6 +230,10 @@ class ImportDevicesJob(JobRunner):
                     # cache-miss batch keeps issuing LibreNMS calls until the whole pre-check
                     # finishes and only the import loops below would honor the cancel.
                     job=self,
+                    # Each row validates in its actual import mode: a VM row checked in Device
+                    # mode would run the serial/IP matching bulk_import_vms skips and could
+                    # fabricate a collision that blocks a valid batch.
+                    vm_device_ids=vm_imports,
                 )
                 if len(collision_check_ids) >= 2
                 else ([], [])

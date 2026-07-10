@@ -1065,7 +1065,14 @@ class BulkImportDevicesView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
         # on one NetBox device), so skip the extra validation pass for the common single-row case.
         collisions, unresolved = (
             detect_collisions_for_device_ids(
-                parsed_ids, self.librenms_api, libre_devices_cache=libre_devices_cache, sync_options=sync_options
+                parsed_ids,
+                self.librenms_api,
+                libre_devices_cache=libre_devices_cache,
+                sync_options=sync_options,
+                # Each row validates in its actual import mode: a VM row checked in Device mode
+                # would run the serial/IP matching bulk_import_vms skips and could fabricate a
+                # collision that blocks a valid batch.
+                vm_device_ids=vm_imports,
             )
             if len(parsed_ids) >= 2
             else ([], [])

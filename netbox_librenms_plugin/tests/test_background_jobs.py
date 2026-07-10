@@ -864,6 +864,53 @@ class TestImportDevicesJob:
         assert job.job.data["success_count"] == 0
         assert job.job.data["completed"] is True
 
+    @pytest.mark.django_db
+    @patch("netbox_librenms_plugin.import_utils.bulk_import_vms")
+    @patch("netbox_librenms_plugin.import_utils.bulk_import_devices_shared")
+    @patch("netbox_librenms_plugin.librenms_api.LibreNMSAPI")
+    def test_vm_row_is_collision_checked_in_vm_mode_not_device_mode(
+        self, mock_api_class, mock_bulk_devices, mock_bulk_vms
+    ):
+        """End-to-end through the job's REAL collision gate: a VM row whose serial happens to equal an existing Device's serial must not be Device-serial-matched onto it — that would fabricate a collision with the device row legitimately targeting that Device and block a valid batch that the real VM import (which skips serial matching) would import fine."""
+        from netbox_librenms_plugin.jobs import ImportDevicesJob
+        from netbox_librenms_plugin.tests.conftest import make_device
+
+        make_device("job-phantom-host", serial="ZZSER-JOB-PHANTOM")
+
+        mock_api = MagicMock()
+        mock_api.server_key = "default"
+
+        def _get_device_info(did):
+            if did == 1:  # device import row → hostname-matches the existing device (fine alone)
+                return (
+                    True,
+                    {"device_id": 1, "hostname": "job-phantom-host", "sysName": "job-phantom-host", "serial": ""},
+                )
+            # VM import row → hostname matches nothing; serial equals the Device's.
+            return (
+                True,
+                {
+                    "device_id": did,
+                    "hostname": "job-vm-unique",
+                    "sysName": "job-vm-unique",
+                    "serial": "ZZSER-JOB-PHANTOM",
+                },
+            )
+
+        mock_api.get_device_info.side_effect = _get_device_info
+        mock_api_class.return_value = mock_api
+        mock_bulk_devices.return_value = {"success": [], "failed": [], "skipped": [], "virtual_chassis_created": 0}
+        mock_bulk_vms.return_value = {"success": [], "failed": [], "skipped": []}
+
+        job = create_mock_job_runner(ImportDevicesJob, job_pk=811)
+        job.run(device_ids=[1], vm_imports={10: {"cluster_id": 1}}, server_key="default")
+
+        # No fabricated collision → the clean batch imports BOTH halves.
+        mock_bulk_devices.assert_called_once()
+        mock_bulk_vms.assert_called_once()
+        assert job.job.data["errors"] == []
+        assert job.job.data["failed_count"] == 0
+
     @patch("netbox_librenms_plugin.import_utils.detect_collisions_for_device_ids")
     @patch("netbox_librenms_plugin.import_utils.bulk_import_vms")
     @patch("netbox_librenms_plugin.import_utils.bulk_import_devices_shared")

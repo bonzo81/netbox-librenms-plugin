@@ -2987,13 +2987,47 @@ class TestDetectCollisionsForDeviceIds:
             8006: {"device_id": 8006, "sysName": "collide-batch-vm", "hostname": "collide-batch-vm"},
         }
         collisions, unresolved = detect_collisions_for_device_ids(
-            [8005, 8006], self._api(), libre_devices_cache=cache, sync_options={"use_sysname": True}
+            [8005, 8006],
+            self._api(),
+            libre_devices_cache=cache,
+            sync_options={"use_sysname": True},
+            # Mirror the real callers: VM-selected ids are passed so each row validates in
+            # its actual import mode (the hostname→existing-VM match works either way, but
+            # the wiring under test is the per-row mode the view/job now supply).
+            vm_device_ids={8005, 8006},
         )
         assert unresolved == []
         assert len(collisions) == 1
         assert collisions[0]["nb_device_pk"] == vm.pk
         assert collisions[0]["nb_model_name"] == "virtualmachine"
         assert {r["device_id"] for r in collisions[0]["librenms_rows"]} == {8005, 8006}
+
+    def test_vm_row_serial_match_does_not_fabricate_a_collision(self):
+        """A VM-selected row must be validated in VM mode: Device-only serial matching (which bulk_import_vms intentionally skips) would otherwise resolve the VM row onto a Device another row targets and block a perfectly valid batch."""
+        from netbox_librenms_plugin.import_utils.bulk_import import detect_collisions_for_device_ids
+
+        nb = make_device("phantom-host", serial="ZZSER-PHANTOM")
+        cache = {
+            # Device row: hostname-matches the existing device — legitimate single-row target.
+            8401: {"device_id": 8401, "sysName": "phantom-host", "hostname": "phantom-host", "serial": ""},
+            # VM row: hostname matches nothing, but its serial equals the device's. Device-mode
+            # validation would serial-match it onto nb; the real VM import never would.
+            8402: {
+                "device_id": 8402,
+                "sysName": "vm-unrelated",
+                "hostname": "vm-unrelated",
+                "serial": "ZZSER-PHANTOM",
+            },
+        }
+        collisions, unresolved = detect_collisions_for_device_ids(
+            [8401, 8402],
+            self._api(),
+            libre_devices_cache=cache,
+            sync_options={"use_sysname": True},
+            vm_device_ids={8402},
+        )
+        assert unresolved == []
+        assert collisions == [], f"VM-mode row must not serial-match onto Device pk={nb.pk}"
 
     def test_distinct_devices_do_not_collide(self):
         """Rows resolving to different NetBox devices → no collision."""
