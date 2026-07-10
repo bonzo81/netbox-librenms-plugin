@@ -187,6 +187,7 @@ class ImportDevicesJob(JobRunner):
         from netbox_librenms_plugin.import_utils import (
             bulk_import_devices_shared,
             detect_collisions_for_device_ids,
+            require_permissions,
         )
         from netbox_librenms_plugin.import_utils.bulk_import import _is_job_cancelled
         from netbox_librenms_plugin.librenms_api import LibreNMSAPI
@@ -196,6 +197,22 @@ class ImportDevicesJob(JobRunner):
         self.logger.info(f"Device imports: {len(device_ids)}, VM imports: {len(vm_imports)}")
         if server_key:
             self.logger.info(f"Using LibreNMS server: {server_key}")
+
+        # Authorize BEFORE the collision pre-check: the scan below queries LibreNMS and
+        # surfaces collision details (NetBox pks) in the job output, while the
+        # require_permissions calls inside bulk_import_devices_shared / bulk_import_vms
+        # only run after it. The job executes outside any view's permission gate, so a
+        # submitter whose import rights were revoked after enqueueing must be rejected
+        # here, with the same standalone helper and perm sets the import paths enforce.
+        required_permissions = set()
+        if device_ids:
+            # Mirrors bulk_import_devices_shared: any device row may be flagged
+            # import_as_vm during validation, and VC master/member updates need change.
+            required_permissions.update({"dcim.add_device", "dcim.change_device", "virtualization.add_virtualmachine"})
+        if vm_imports:
+            required_permissions.add("virtualization.add_virtualmachine")
+        if required_permissions:
+            require_permissions(self.job.user, sorted(required_permissions), "import devices and VMs")
 
         # Initialize API client
         api = LibreNMSAPI(server_key=server_key)

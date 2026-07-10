@@ -977,6 +977,106 @@ class TestImportDevicesJob:
         call_kwargs = mock_bulk_devices.call_args[1]
         assert call_kwargs.get("server_key") == "resolved-default"
 
+    @staticmethod
+    def _real_user(username, *vm_or_device_perms):
+        """Create a real NetBox user, granting perms the NetBox way (ObjectPermission).
+
+        NetBox's only enforcement backend is ObjectPermissionBackend, so Django's
+        ``user_permissions`` would not make ``has_perm`` pass — the gate must be
+        exercised through real ObjectPermission rows, not a mocked ``has_perm``.
+        """
+        from core.models import ObjectType
+        from django.contrib.auth import get_user_model
+        from users.models import ObjectPermission
+
+        user = get_user_model().objects.create_user(username=username)
+        for app_label, model, action in vm_or_device_perms:
+            perm = ObjectPermission.objects.create(name=f"{username}-{app_label}.{action}_{model}", actions=[action])
+            perm.object_types.add(ObjectType.objects.get_by_natural_key(app_label, model))
+            perm.users.add(user)
+        # Refetch: the permission backend caches per instance on first has_perm call.
+        return get_user_model().objects.get(pk=user.pk)
+
+    @pytest.mark.django_db
+    @patch("netbox_librenms_plugin.import_utils.bulk_import_vms")
+    @patch("netbox_librenms_plugin.import_utils.bulk_import_devices_shared")
+    @patch("netbox_librenms_plugin.librenms_api.LibreNMSAPI")
+    def test_run_unauthorized_user_is_blocked_before_any_librenms_call(
+        self, mock_api_class, mock_bulk_devices, mock_bulk_vms
+    ):
+        """A submitter without import permissions is rejected BEFORE the collision pre-check — no API client, no LibreNMS queries, no collision details computed (the per-path checks inside the import helpers only run after the scan)."""
+        from django.core.exceptions import PermissionDenied
+
+        from netbox_librenms_plugin.jobs import ImportDevicesJob
+
+        # Even if the gate were bypassed, keep the pre-check viable so the failure mode
+        # on unfixed code is "scan ran + import mocks reached", not an unpacking error.
+        mock_api_class.return_value = MagicMock(server_key="default")
+        mock_api_class.return_value.get_device_info.side_effect = lambda did: (
+            True,
+            {"device_id": did, "hostname": f"authgate-{did}", "sysName": f"authgate-{did}"},
+        )
+
+        job = create_mock_job_runner(ImportDevicesJob, job_pk=803)
+        job.job.user = self._real_user("import-noperms")
+
+        with pytest.raises(PermissionDenied):
+            job.run(device_ids=[1, 2], vm_imports={}, server_key="default")
+
+        mock_api_class.assert_not_called()
+        mock_api_class.return_value.get_device_info.assert_not_called()
+        mock_bulk_devices.assert_not_called()
+        mock_bulk_vms.assert_not_called()
+
+    @pytest.mark.django_db
+    @patch("netbox_librenms_plugin.import_utils.bulk_import_vms")
+    @patch("netbox_librenms_plugin.import_utils.bulk_import_devices_shared")
+    @patch("netbox_librenms_plugin.librenms_api.LibreNMSAPI")
+    def test_run_device_batch_rejected_with_only_the_vm_permission(
+        self, mock_api_class, mock_bulk_devices, mock_bulk_vms
+    ):
+        """A device batch needs the Device perm set (add/change device + add VM, mirroring bulk_import_devices_shared) — the VM permission alone must not open the pre-check."""
+        from django.core.exceptions import PermissionDenied
+
+        from netbox_librenms_plugin.jobs import ImportDevicesJob
+
+        mock_api_class.return_value = MagicMock(server_key="default")
+
+        job = create_mock_job_runner(ImportDevicesJob, job_pk=804)
+        job.job.user = self._real_user("import-vm-perm-only", ("virtualization", "virtualmachine", "add"))
+
+        with pytest.raises(PermissionDenied):
+            job.run(device_ids=[1, 2], vm_imports={}, server_key="default")
+
+        mock_api_class.assert_not_called()
+        mock_bulk_devices.assert_not_called()
+
+    @pytest.mark.django_db
+    @patch("netbox_librenms_plugin.import_utils.bulk_import_vms")
+    @patch("netbox_librenms_plugin.import_utils.bulk_import_devices_shared")
+    @patch("netbox_librenms_plugin.librenms_api.LibreNMSAPI")
+    def test_run_vm_only_batch_passes_with_only_the_vm_permission(
+        self, mock_api_class, mock_bulk_devices, mock_bulk_vms
+    ):
+        """The gate scopes to the batch: a VM-only submission requires only virtualization.add_virtualmachine, so that single grant reaches the pre-check and the VM import."""
+        from netbox_librenms_plugin.jobs import ImportDevicesJob
+
+        mock_api_class.return_value = MagicMock(server_key="default")
+        mock_api_class.return_value.get_device_info.side_effect = lambda did: (
+            True,
+            {"device_id": did, "hostname": f"vmgate-{did}", "sysName": f"vmgate-{did}"},
+        )
+        mock_bulk_vms.return_value = {"success": [], "failed": [], "skipped": []}
+
+        job = create_mock_job_runner(ImportDevicesJob, job_pk=805)
+        job.job.user = self._real_user("import-vm-only", ("virtualization", "virtualmachine", "add"))
+
+        job.run(device_ids=[], vm_imports={10: {"cluster_id": 1}, 11: {"cluster_id": 1}}, server_key="default")
+
+        # The gate let the batch through: the pre-check scanned it and the VM import ran.
+        mock_bulk_vms.assert_called_once()
+        mock_bulk_devices.assert_not_called()
+
 
 class TestLoadJobResults:
     """Test loading results from completed background jobs."""
