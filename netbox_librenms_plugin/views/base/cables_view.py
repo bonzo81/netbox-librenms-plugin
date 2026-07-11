@@ -907,21 +907,31 @@ class SingleCableVerifyView(NetBoxObjectPermissionMixin, BaseCableTableView):
                     _sk = server_key
                     interface = None
                     lookup_device = selected_device
-                    if local_port and hasattr(selected_device, "virtual_chassis") and selected_device.virtual_chassis:
-                        chassis_member = get_virtual_chassis_member(selected_device, local_port)
-                        if chassis_member:
-                            lookup_device = chassis_member
-                    if local_port_id:
-                        interface = lookup_device.interfaces.filter(_librenms_id_q(_sk, local_port_id)).first()
+                    # Merged OOB-controller rows are context-only: their local port lives on the
+                    # CONTROLLER, so a shared name (or colliding stored librenms_id) must not bind
+                    # a HOST interface here — mirrors enrich_local_port's guard on the initial
+                    # render. Left unresolved, the row takes the labelled, badge-carrying
+                    # unresolved branch below instead of linking the wrong interface.
+                    if link_data.get("_source") != "oob":
+                        if (
+                            local_port
+                            and hasattr(selected_device, "virtual_chassis")
+                            and selected_device.virtual_chassis
+                        ):
+                            chassis_member = get_virtual_chassis_member(selected_device, local_port)
+                            if chassis_member:
+                                lookup_device = chassis_member
+                        if local_port_id:
+                            interface = lookup_device.interfaces.filter(_librenms_id_q(_sk, local_port_id)).first()
 
-                    # If not found by librenms_id, try the displayed name or the alternate
-                    # LibreNMS field (issue #88) — mirror enrich_local_port's dual-name fallback
-                    # so verify resolves a row whose NetBox interface is named from the field the
-                    # user isn't currently displaying (ifName vs ifDescr).
-                    if not interface:
-                        name_candidates = [n for n in (local_port, link_data.get("local_port_alt")) if n]
-                        if name_candidates:
-                            interface = lookup_device.interfaces.filter(name__in=name_candidates).first()
+                        # If not found by librenms_id, try the displayed name or the alternate
+                        # LibreNMS field (issue #88) — mirror enrich_local_port's dual-name fallback
+                        # so verify resolves a row whose NetBox interface is named from the field the
+                        # user isn't currently displaying (ifName vs ifDescr).
+                        if not interface:
+                            name_candidates = [n for n in (local_port, link_data.get("local_port_alt")) if n]
+                            if name_candidates:
+                                interface = lookup_device.interfaces.filter(name__in=name_candidates).first()
 
                     if interface:
                         link_data["netbox_local_interface_id"] = interface.pk

@@ -582,6 +582,32 @@ class TestOOBRowsNeverActionable:
 
         assert ("Sync Cable" in actions) is expect_sync
 
+    def test_oob_row_never_links_a_host_interface(self):
+        """Verify must not resolve an OOB row's local end against the HOST device.
+
+        The controller-managed port lives on the OOB device; a shared name (or colliding
+        stored librenms_id) would render a clickable HOST-interface link on it — mirrors
+        the enrich_local_port guard on the initial table render.
+        """
+        from django.core.cache import cache
+
+        from dcim.models import Interface
+        from netbox_librenms_plugin.tests.conftest import make_device
+
+        local_dev = make_device("verify-oob-collide")
+        Interface.objects.create(device=local_dev, name="eth0", type="1000base-t")  # host iface, same name
+
+        view = _make_view()
+        link = {"local_port": "eth0", "local_port_id": 700, "remote_device": "", "_source": "oob"}
+        cache.set(view.get_cache_key(local_dev, "links", "default"), {"links": [link]}, 300)
+
+        request = _make_request({"device_id": local_dev.pk, "local_port_id": 700, "server_key": "default"})
+        row = json.loads(view.post(request).content)["formatted_row"]
+
+        assert "/dcim/interfaces/" not in row["local_port"]  # no host-interface link
+        assert "eth0" in row["local_port"]  # the label (with its OOB badge) still renders
+        assert "OOB" in row["local_port"]  # the badge marks the row as controller-sourced
+
 
 @pytest.mark.django_db
 class TestSingleCableVerifyServerKeyRouting:
