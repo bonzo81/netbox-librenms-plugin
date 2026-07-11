@@ -38,20 +38,34 @@ def test_no_multiline_single_hash_comments():
 
 def _guard_precedes_all(src, needle):
     """Assert every occurrence of *needle* sits inside an open `{% if not migrated_to_marker %}` block."""
-    # Walk the template tag-by-tag, maintaining a stack of currently-open {% if %} conditions, and
-    # require "not migrated_to_marker" to be somewhere in that stack at each needle occurrence.
-    # A depth-unaware rfind() would latch onto the INNERMOST {% if %} and miss an OUTER migrated
-    # guard whenever the needle is nested inside another conditional (false "unguarded" report).
+    # Walk the template tag-by-tag, maintaining a stack of currently-ACTIVE branch conditions,
+    # and require "not migrated_to_marker" to be somewhere in that stack at each needle
+    # occurrence. A depth-unaware rfind() would latch onto the INNERMOST {% if %} and miss an
+    # OUTER migrated guard whenever the needle is nested inside another conditional (false
+    # "unguarded" report). {% elif %}/{% else %} REPLACE their level's condition rather than
+    # popping/pushing: content after them renders when the original `if` condition is false,
+    # so the spent condition must stop counting as protection there.
     import re
 
-    tag_re = re.compile(r"{%-?\s*(if)\s+(.*?)\s*-?%}|{%-?\s*(endif)\s*-?%}")
+    tag_re = re.compile(
+        r"{%-?\s*if\s+(?P<if>.*?)\s*-?%}"
+        r"|{%-?\s*elif\s+(?P<elif>.*?)\s*-?%}"
+        r"|{%-?\s*(?P<else>else)\s*-?%}"
+        r"|{%-?\s*(?P<endif>endif)\s*-?%}"
+    )
     occurrences = [m.start() for m in re.finditer(re.escape(needle), src)]
     assert occurrences, f"{needle!r} not found"
     for pos in occurrences:
         stack = []
         for m in tag_re.finditer(src, 0, pos):
-            if m.group(1):  # {% if <cond> %}
-                stack.append(m.group(2))
+            if m.group("if") is not None:
+                stack.append(m.group("if"))
+            elif m.group("elif") is not None:
+                assert stack, f"{{% elif %}} outside any {{% if %}} before {needle!r}"
+                stack[-1] = m.group("elif")
+            elif m.group("else") is not None:
+                assert stack, f"{{% else %}} outside any {{% if %}} before {needle!r}"
+                stack[-1] = "<else>"
             else:  # {% endif %}
                 assert stack, f"unbalanced {{% endif %}} before {needle!r}"
                 stack.pop()
@@ -86,3 +100,26 @@ def test_guard_scan_is_block_depth_aware():
     unguarded = "{% if not migrated_to_marker %}ok{% endif %}{% if other %}NEEDLE{% endif %}"
     with pytest.raises(AssertionError):
         _guard_precedes_all(unguarded, "NEEDLE")
+
+
+def test_guard_scan_tracks_else_and_elif_branches():
+    """A needle in the {% else %}/{% elif %} branch of the migrated guard renders exactly when the marker IS set, so the scanner must stop counting the spent `if` condition as protection once the branch switches."""
+    import pytest
+
+    # The else branch renders in migrated mode — a bulk control moved there must FAIL the guard.
+    in_else = "{% if not migrated_to_marker %}ok{% else %}NEEDLE{% endif %}"
+    with pytest.raises(AssertionError):
+        _guard_precedes_all(in_else, "NEEDLE")
+
+    # Same for an elif branch: its own condition replaces the guard, it doesn't inherit it.
+    in_elif = "{% if not migrated_to_marker %}ok{% elif other %}NEEDLE{% endif %}"
+    with pytest.raises(AssertionError):
+        _guard_precedes_all(in_elif, "NEEDLE")
+
+    # The guard may also ARRIVE via elif — then the needle genuinely is protected.
+    guarded_by_elif = "{% if other %}x{% elif not migrated_to_marker %}NEEDLE{% endif %}"
+    assert _guard_precedes_all(guarded_by_elif, "NEEDLE")
+
+    # And the if-branch of a guard that HAS an else stays recognised as guarded.
+    if_branch = "{% if not migrated_to_marker %}NEEDLE{% else %}x{% endif %}"
+    assert _guard_precedes_all(if_branch, "NEEDLE")
