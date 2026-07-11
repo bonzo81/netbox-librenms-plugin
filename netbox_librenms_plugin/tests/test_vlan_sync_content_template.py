@@ -8,6 +8,8 @@ CSRF + server_key hidden inputs must be emitted in migrated mode too, or those J
 null token (TypeError/403) / the wrong server. Only the form-submit ``action`` input is form-only.
 """
 
+import re
+
 import pytest
 
 
@@ -54,8 +56,9 @@ class TestVlanSyncContentTemplateMigratedMode:
         # The live POST form must be gone in migrated mode (a donor must not POST a sync).
         assert "<form" not in html
         # ...but CSRF + server_key must remain so the JS verify-vlan-group fetch targets the
-        # right server with a usable token.
-        assert "csrfmiddlewaretoken" in html
+        # right server with a USABLE token — an empty value would still POST X-CSRFToken: ''
+        # and 403, so pin a non-empty value, not mere input presence.
+        assert re.search(r'name="csrfmiddlewaretoken" value="[^"]+"', html)
         assert 'name="server_key"' in html
         assert 'value="prod"' in html
         # The form-submit action input is form-only and must NOT render in migrated mode.
@@ -64,6 +67,6 @@ class TestVlanSyncContentTemplateMigratedMode:
     def test_normal_mode_emits_form_with_csrf_server_key_and_action(self):
         html = self._render(migrated=None)
         assert "<form" in html
-        assert "csrfmiddlewaretoken" in html
+        assert re.search(r'name="csrfmiddlewaretoken" value="[^"]+"', html)
         assert 'name="server_key"' in html
         assert 'value="create_vlans"' in html
