@@ -462,6 +462,45 @@ def _clear_existing_match_derived_fields(validation: dict) -> None:
     validation["device_type_mismatch"] = False
 
 
+def _reset_device_role(validation: dict) -> None:
+    """
+    Reset the row's role selection to "not found", preserving available_roles.
+
+    One shape shared by every refresh branch that drops a device match (deleted device,
+    vanished link, late cross-model rebind), so the copies can't drift on a future edit.
+
+    Args:
+        validation (dict): The import-row validation dict, mutated in place.
+
+    Returns:
+        None
+    """
+    validation["device_role"] = {
+        "found": False,
+        "role": None,
+        "available_roles": validation.get("device_role", {}).get("available_roles", []),
+    }
+
+
+def _reset_cluster(validation: dict) -> None:
+    """
+    Reset the row's cluster selection to "not found", preserving available_clusters.
+
+    The VM twin of :func:`_reset_device_role` — VM rows are gated on cluster, not role.
+
+    Args:
+        validation (dict): The import-row validation dict, mutated in place.
+
+    Returns:
+        None
+    """
+    validation["cluster"] = {
+        "found": False,
+        "cluster": None,
+        "available_clusters": validation.get("cluster", {}).get("available_clusters", []),
+    }
+
+
 def _reassert_new_import_blockers(validation: dict) -> None:
     """
     Re-add the create-time role/cluster blocker for unmatched rows.
@@ -532,21 +571,13 @@ def _refresh_existing_device(validation: dict, libre_device: dict = None, server
                     validation["existing_librenms_link"] = None
                     _clear_existing_match_derived_fields(validation)
                     if not validation.get("import_as_vm"):
-                        validation["device_role"] = {
-                            "found": False,
-                            "role": None,
-                            "available_roles": validation.get("device_role", {}).get("available_roles", []),
-                        }
+                        _reset_device_role(validation)
                     else:
                         # VM rows are gated on cluster, not role: a dropped match must also clear
                         # the stale cluster selection (preserving available_clusters), or
                         # _reassert_new_import_blockers() sees found/cluster still set and lets
                         # the row re-enter the new-import path without a fresh cluster choice.
-                        validation["cluster"] = {
-                            "found": False,
-                            "cluster": None,
-                            "available_clusters": validation.get("cluster", {}).get("available_clusters", []),
-                        }
+                        _reset_cluster(validation)
                     # Fail-closed: this branch drops the vanished-link match and recomputes
                     # readiness, then falls through to the fresh lookup that would normally re-add
                     # the create-time role/cluster blocker. But the fresh lookup early-returns when
@@ -558,11 +589,7 @@ def _refresh_existing_device(validation: dict, libre_device: dict = None, server
                     if hasattr(refreshed, "role") and refreshed.role:
                         apply_role_to_validation(validation, refreshed.role, is_vm=bool(validation.get("import_as_vm")))
                     elif not validation.get("import_as_vm"):
-                        validation["device_role"] = {
-                            "found": False,
-                            "role": None,
-                            "available_roles": validation.get("device_role", {}).get("available_roles", []),
-                        }
+                        _reset_device_role(validation)
                         remove_validation_issue(validation, "role")
                     recalculate_validation_status(validation, is_vm=bool(validation.get("import_as_vm")))
                     # Re-assert non-importable state: recalculate bases can_import on
@@ -584,20 +611,12 @@ def _refresh_existing_device(validation: dict, libre_device: dict = None, server
                 # Guard: VMs don't use device_role for readiness, so preserve any
                 # user-selected role rather than silently dropping it.
                 if not validation.get("import_as_vm"):
-                    validation["device_role"] = {
-                        "found": False,
-                        "role": None,
-                        "available_roles": validation.get("device_role", {}).get("available_roles", []),
-                    }
+                    _reset_device_role(validation)
                 else:
                     # Mirror the stale-match branch: a deleted cached VM match must drop the
                     # stale cluster selection (keeping available_clusters) so the row returns to
                     # the same create-time state as a brand-new VM import row.
-                    validation["cluster"] = {
-                        "found": False,
-                        "cluster": None,
-                        "available_clusters": validation.get("cluster", {}).get("available_clusters", []),
-                    }
+                    _reset_cluster(validation)
                 # Same fail-closed reasoning as the vanished-link branch above: re-assert the
                 # create-time blocker before recompute so a deleted-match row can't stay importable
                 # if the fresh lookup early-returns (libre_device None) or its except swallows.
@@ -860,21 +879,13 @@ def _refresh_existing_device(validation: dict, libre_device: dict = None, server
             if not actual_is_vm and hasattr(new_device, "role") and new_device.role:
                 apply_role_to_validation(validation, new_device.role, is_vm=False)
             elif not actual_is_vm:
-                validation["device_role"] = {
-                    "found": False,
-                    "role": None,
-                    "available_roles": validation.get("device_role", {}).get("available_roles", []),
-                }
+                _reset_device_role(validation)
             elif hasattr(new_device, "cluster") and new_device.cluster:
                 # VM match: mirror the device-role display above — show the matched
                 # VM's actual cluster rather than leaving the cached selection stale.
                 apply_cluster_to_validation(validation, new_device.cluster)
             else:
-                validation["cluster"] = {
-                    "found": False,
-                    "cluster": None,
-                    "available_clusters": validation.get("cluster", {}).get("available_clusters", []),
-                }
+                _reset_cluster(validation)
             recalculate_validation_status(validation, is_vm=actual_is_vm)
             # Re-assert non-importable: recalculate sets can_import from issues list,
             # but a late-found existing match must never be import-ready.
