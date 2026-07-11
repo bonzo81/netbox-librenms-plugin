@@ -95,7 +95,7 @@ class Migration(migrations.Migration):
         migrations.AddConstraint(
             model_name="serialsensortypepattern",
             constraint=models.UniqueConstraint(
-                django.db.models.functions.text.Lower("sensor_type"),
+                django.db.models.functions.text.Lower(django.db.models.functions.text.Trim("sensor_type")),
                 name="unique_serialsensortypepattern_sensor_type_ci",
             ),
         ),

@@ -1507,8 +1507,10 @@ class SerialSensorTypePattern(FullCleanOnSaveMixin, NetBoxModel):
             # Case-insensitive uniqueness even though matching is exact-case: a case-variant of
             # an existing type could never match real payloads alongside it, so the near-dupe is
             # almost certainly a typo — refuse it at the DB level instead of silently keeping a
-            # row that can never fire.
-            models.UniqueConstraint(Lower("sensor_type"), name="unique_serialsensortypepattern_sensor_type_ci"),
+            # row that can never fire. Trim like PortStackLagPattern's 0012 constraint: clean()
+            # strips whitespace, but a clean-bypassing write (queryset.update, bulk_create)
+            # could otherwise park a padded near-dupe next to the real row.
+            models.UniqueConstraint(Lower(Trim("sensor_type")), name="unique_serialsensortypepattern_sensor_type_ci"),
         ]
 
     def __str__(self):

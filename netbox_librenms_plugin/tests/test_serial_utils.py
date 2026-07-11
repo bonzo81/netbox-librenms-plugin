@@ -470,6 +470,20 @@ class TestSerialSensorTypePatternModel:
         with pytest.raises(ValidationError):
             self._make(sensor_type="ACSSERIALPORTTABLE").save()
 
+    def test_whitespace_padded_duplicate_rejected_by_constraint(self):
+        """The DB-level uniqueness canonicalizes whitespace too (Lower(Trim), like 0012).
+
+        clean() strips padding, but a clean-bypassing write (queryset.update, bulk_create,
+        loaddata) could otherwise park " acsSerialPortTable " next to the seeded row — a
+        near-dupe that can never match real payloads. validate_constraints() builds its
+        check from the Meta constraint expressions, so this pins the canonical form.
+        """
+        from django.core.exceptions import ValidationError
+
+        padded = self._make(sensor_type=" acsSerialPortTable ")
+        with pytest.raises(ValidationError):
+            padded.validate_constraints()
+
 
 @pytest.mark.django_db  # the default sensor-type map is read from SerialSensorTypePattern rows
 class TestMapSensorsWithFixture:
