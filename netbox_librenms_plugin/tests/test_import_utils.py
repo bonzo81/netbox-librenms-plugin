@@ -5560,6 +5560,66 @@ class TestRefreshExistingDeviceCrossModelIdWins:
         assert not any("Both a VM and Device exist with hostname" in w for w in validation["warnings"])
         assert validation["existing_device"] == device
 
+    def test_vm_fresh_match_populates_cluster_display(self):
+        """A late-found VM match must show the matched VM's actual cluster, mirroring the
+        device path's role display — device_validation_details.html renders
+        validation.cluster.cluster for existing VM rows."""
+        from netbox_librenms_plugin.import_utils.bulk_import import _refresh_existing_device
+        from netbox_librenms_plugin.tests.conftest import make_cluster, make_vm
+
+        cluster = make_cluster("fresh-vm-cluster")
+        vm = make_vm("fresh-vm-clustered", cluster=cluster)
+        validation = {
+            "existing_device": None,
+            "existing_vm": None,
+            "import_as_vm": True,  # Model=VirtualMachine
+            "is_ready": False,
+            "can_import": False,
+            "issues": [],
+            "warnings": [],
+            "cluster": {"found": False, "cluster": None, "available_clusters": []},
+        }
+
+        _refresh_existing_device(
+            validation, libre_device={"device_id": 4245, "hostname": "fresh-vm-clustered"}, server_key="default"
+        )
+
+        assert validation["existing_device"] == vm
+        assert validation["cluster"]["found"] is True
+        assert validation["cluster"]["cluster"] == cluster
+        # Existing-match gating stays force-blocked either way.
+        assert validation["can_import"] is False
+        assert validation["is_ready"] is False
+
+    def test_vm_fresh_match_without_cluster_resets_stale_display(self):
+        """A matched clusterless VM must drop a stale cached cluster selection (keeping
+        available_clusters), not keep rendering the old choice."""
+        from virtualization.models import VirtualMachine
+
+        from netbox_librenms_plugin.import_utils.bulk_import import _refresh_existing_device
+
+        vm = VirtualMachine.objects.create(name="fresh-vm-clusterless")
+        stale = object()
+        validation = {
+            "existing_device": None,
+            "existing_vm": None,
+            "import_as_vm": True,
+            "is_ready": False,
+            "can_import": False,
+            "issues": [],
+            "warnings": [],
+            "cluster": {"found": True, "cluster": stale, "available_clusters": ["keep-me"]},
+        }
+
+        _refresh_existing_device(
+            validation, libre_device={"device_id": 4246, "hostname": "fresh-vm-clusterless"}, server_key="default"
+        )
+
+        assert validation["existing_device"] == vm
+        assert validation["cluster"]["found"] is False
+        assert validation["cluster"]["cluster"] is None
+        assert validation["cluster"]["available_clusters"] == ["keep-me"]
+
     def test_serial_fallback_ambiguity_fails_closed(self):
         """When the serial fallback resolves more than one NetBox device, the refresh re-check must fail closed (ambiguous match + can_import False), not bind to an arbitrary duplicate."""
         from netbox_librenms_plugin.import_utils.bulk_import import _refresh_existing_device
