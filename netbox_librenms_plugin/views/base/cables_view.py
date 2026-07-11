@@ -454,6 +454,13 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin, 
 
     def enrich_local_port(self, link, obj, server_key=None):
         """Add local port URL if interface exists in NetBox"""
+        # Merged OOB-controller rows are context-only: their local port lives on the
+        # CONTROLLER, not the host, so a shared name (or colliding stored librenms_id)
+        # must not bind a host interface — that would render a wrong local_port_url and
+        # cable state. Sync and the actions column already refuse OOB rows; leave the
+        # local end unresolved here too.
+        if link.get("_source") == "oob":
+            return
         if local_port := link.get("local_port"):
             interface = None
             local_port_id = link.get("local_port_id")

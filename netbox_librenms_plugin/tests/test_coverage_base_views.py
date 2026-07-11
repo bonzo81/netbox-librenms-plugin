@@ -736,6 +736,23 @@ class TestBaseCableTableViewEnrichLocalPort:
         view.enrich_local_port(link, obj)
         assert "local_port_url" not in link
 
+    def test_oob_row_never_binds_a_host_interface(self):
+        """A merged OOB LLDP row (context-only) must not resolve against the HOST device.
+
+        Its local port lives on the OOB CONTROLLER; a shared name (or colliding stored
+        librenms_id) would otherwise bind a host interface and render a wrong
+        local_port_url + cable state — even though sync and actions already refuse OOB rows.
+        """
+        view = self._make_view()
+        obj = make_device("cable-dev-oob-collide")
+        make_interface(obj, "eth0")  # host interface sharing the OOB controller's port name
+
+        link = {"local_port": "eth0", "_source": "oob"}
+        view.enrich_local_port(link, obj)
+
+        assert "local_port_url" not in link
+        assert "netbox_local_interface_id" not in link
+
     def test_interface_found_by_librenms_id_adds_url(self):
         """The librenms_id match wins even when the local_port name differs from the iface name."""
         view = self._make_view()
