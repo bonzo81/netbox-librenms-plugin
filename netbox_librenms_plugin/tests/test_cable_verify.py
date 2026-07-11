@@ -716,3 +716,43 @@ class TestEnrichRemotePortEmptyPort:
         result = view.enrich_remote_port(link, remote, server_key="default")
 
         assert result is link
+
+
+@pytest.mark.django_db
+class TestResolveLocalInterfaceCore:
+    """The shared id→dual-name resolution core used by BOTH enrich_local_port and the verify
+    re-resolution (extracted so the issue-#88 name fallback / precedence can't drift between
+    the two copies again)."""
+
+    def _dev(self, name):
+        from netbox_librenms_plugin.tests.conftest import make_device, make_interface
+
+        device = make_device(name)
+        return device, make_interface(device, "eth-by-name")
+
+    def test_librenms_id_beats_name(self):
+        from dcim.models import Interface
+
+        from netbox_librenms_plugin.views.base.cables_view import _resolve_local_interface
+
+        device, by_name = self._dev("core-id-wins")
+        by_id = Interface.objects.create(device=device, name="other-name", type="1000base-t")
+        by_id.custom_field_data["librenms_id"] = {"default": 4242}
+        by_id.save()
+
+        got = _resolve_local_interface(device, "default", 4242, ["eth-by-name"])
+        assert got == by_id  # the stable id match wins over the name candidate
+
+    def test_name_fallback_covers_all_candidates(self):
+        from netbox_librenms_plugin.views.base.cables_view import _resolve_local_interface
+
+        device, by_name = self._dev("core-name-fb")
+        # No id match anywhere: the ALTERNATE candidate (issue #88) must still resolve.
+        got = _resolve_local_interface(device, "default", 9999, ["displayed-name", "eth-by-name"])
+        assert got == by_name
+
+    def test_empty_inputs_resolve_nothing(self):
+        from netbox_librenms_plugin.views.base.cables_view import _resolve_local_interface
+
+        device, _ = self._dev("core-empty")
+        assert _resolve_local_interface(device, "default", None, []) is None

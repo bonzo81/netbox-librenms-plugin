@@ -112,6 +112,35 @@ def _extract_cached_links(cached, cache_key=None):
     return links
 
 
+def _resolve_local_interface(device, server_key, local_port_id, name_candidates):
+    """
+    Resolve a link row's local Interface on *device*: stable librenms_id first, then name.
+
+    The id-beats-name precedence and the dual ifName/ifDescr candidate fallback (issue #88)
+    are the drift-prone core shared by ``enrich_local_port`` and ``SingleCableVerifyView``'s
+    re-resolution — one implementation so a fix in one path can't miss the other again (the
+    issue #88 fallback and the OOB skip were each patched in both copies separately before
+    this was extracted). VC-member selection and the OOB skip stay at the call sites: the two
+    paths deliberately differ there (the initial render leaves a VC row unresolved when the
+    member lookup fails; verify falls back to the selected device).
+
+    Args:
+        device: The NetBox device (or VC member) whose interfaces are searched.
+        server_key (str): LibreNMS server key scoping the librenms_id match.
+        local_port_id: The LibreNMS port_id; falsy skips the id match.
+        name_candidates (list): Interface names for the fallback; empty skips the name match.
+
+    Returns:
+        Interface | None: The resolved interface, or None when neither match hits.
+    """
+    interface = None
+    if local_port_id:
+        interface = device.interfaces.filter(_librenms_id_q(server_key, local_port_id)).first()
+    if not interface and name_candidates:
+        interface = device.interfaces.filter(name__in=name_candidates).first()
+    return interface
+
+
 # The raw (un-enriched) link fields a cached/replayed link is stripped down to before
 # re-enrichment — derived fields (netbox_*_id, *_url, cable_status, …) are dropped so stale
 # IDs/URLs can't cause DoesNotExist after the underlying NetBox objects are deleted. Defined
@@ -480,21 +509,9 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin, 
                 chassis_member = get_virtual_chassis_member(obj, local_port)
 
                 if chassis_member:
-                    # First try to find interface by librenms_id
-                    if local_port_id:
-                        interface = chassis_member.interfaces.filter(_librenms_id_q(server_key, local_port_id)).first()
-
-                    # Only if librenms_id match fails, try matching by name
-                    if not interface:
-                        interface = chassis_member.interfaces.filter(name__in=name_candidates).first()
+                    interface = _resolve_local_interface(chassis_member, server_key, local_port_id, name_candidates)
             else:
-                # First try to find interface by librenms_id
-                if local_port_id:
-                    interface = obj.interfaces.filter(_librenms_id_q(server_key, local_port_id)).first()
-
-                # Only if librenms_id match fails, try matching by name
-                if not interface:
-                    interface = obj.interfaces.filter(name__in=name_candidates).first()
+                interface = _resolve_local_interface(obj, server_key, local_port_id, name_candidates)
 
             if interface:
                 link["local_port_url"] = reverse("dcim:interface", args=[interface.pk])
@@ -903,8 +920,7 @@ class SingleCableVerifyView(NetBoxObjectPermissionMixin, BaseCableTableView):
                     local_port = link_data.get("local_port") or ""
                     formatted_row["local_port"] = local_port
 
-                    # First try to find interface by librenms_id (handle VC members)
-                    _sk = server_key
+                    # Resolve the local interface (handle VC members)
                     interface = None
                     lookup_device = selected_device
                     # Merged OOB-controller rows are context-only: their local port lives on the
@@ -921,17 +937,10 @@ class SingleCableVerifyView(NetBoxObjectPermissionMixin, BaseCableTableView):
                             chassis_member = get_virtual_chassis_member(selected_device, local_port)
                             if chassis_member:
                                 lookup_device = chassis_member
-                        if local_port_id:
-                            interface = lookup_device.interfaces.filter(_librenms_id_q(_sk, local_port_id)).first()
-
-                        # If not found by librenms_id, try the displayed name or the alternate
-                        # LibreNMS field (issue #88) — mirror enrich_local_port's dual-name fallback
-                        # so verify resolves a row whose NetBox interface is named from the field the
-                        # user isn't currently displaying (ifName vs ifDescr).
-                        if not interface:
-                            name_candidates = [n for n in (local_port, link_data.get("local_port_alt")) if n]
-                            if name_candidates:
-                                interface = lookup_device.interfaces.filter(name__in=name_candidates).first()
+                        # Shared id→dual-name resolution core (issue #88 fallback included), so
+                        # this path can't drift from enrich_local_port's again.
+                        name_candidates = [n for n in (local_port, link_data.get("local_port_alt")) if n]
+                        interface = _resolve_local_interface(lookup_device, server_key, local_port_id, name_candidates)
 
                     if interface:
                         link_data["netbox_local_interface_id"] = interface.pk
