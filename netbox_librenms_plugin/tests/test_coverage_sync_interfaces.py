@@ -1847,6 +1847,52 @@ class TestSyncInterfaceLagViewRealDB:
         iface.refresh_from_db()
         assert iface.lag_id is None
 
+    def test_concurrent_conflict_returns_409_not_500(self):
+        """A DB conflict in the persist returns a JSON 409, mirroring the bulk pass.
+
+        Pre-fix the IntegrityError propagated out of post() as an unhandled 500 to the
+        fetch() caller. The related interface is deleted inside the _prepare_related hook —
+        after resolution, before the FK write — with full_clean no-opped to open the
+        validate/write TOCTOU window; SET CONSTRAINTS ALL IMMEDIATE makes the REAL FK
+        violation fire at the write (the deferred commit-time form surfaces at the atomic's
+        exit and is caught by the same wrapper).
+        """
+        import json
+
+        from dcim.models import Interface
+        from django.db import connection
+
+        from netbox_librenms_plugin.tests.conftest import make_device
+
+        device = make_device("lag-host-conflict")
+        member = self._iface(device, "Gi0/1", 40)
+        agg = self._iface(device, "Po9", 41)
+
+        view = self._make_view()
+
+        def racing_prepare(related_iface):
+            # The concurrent delete lands after both ends resolved, right before the write.
+            Interface.objects.filter(pk=related_iface.pk).delete()
+            return None
+
+        view._prepare_related = racing_prepare
+        req = _make_request({"port_id": "40", "lag_port_id": "41", "server_key": "default"})
+
+        with connection.cursor() as cur:
+            cur.execute("SET CONSTRAINTS ALL IMMEDIATE")
+        with patch.object(Interface, "full_clean", lambda self: None):
+            resp = view.post(req, object_type="device", object_id=device.pk)
+
+        assert resp.status_code == 409
+        body = json.loads(resp.content)
+        assert "concurrent change" in body["error"]
+        member.refresh_from_db()
+        assert member.lag_id is None  # nothing half-persisted
+        # The simulated concurrent delete ran INSIDE the endpoint's atomic (in production it's a
+        # separate committed transaction), so the rollback restored it — proving the endpoint's
+        # whole write unit rolled back rather than committing any partial state.
+        assert Interface.objects.filter(pk=agg.pk).exists()
+
     def test_cross_member_aggregate_rejected(self):
         """The aggregate port_id resolving onto a *different* VC member must not link across devices — the expected_owner pin (obj = the posted member) rejects it at resolution."""
         import json

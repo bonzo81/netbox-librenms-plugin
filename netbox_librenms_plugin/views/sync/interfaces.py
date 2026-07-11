@@ -1305,37 +1305,63 @@ class _BaseRelationshipSyncView(LibreNMSPermissionMixin, NetBoxObjectPermissionM
                 status=409,
             )
 
-        with transaction.atomic():
-            # Validate before persisting: a crafted POST with port_id == related_port_id
-            # resolves source == related and passes the same-owner check, so full_clean() is
-            # what rejects the resulting self-relationship. The shared helper sets the FK, runs
-            # _prepare_related (e.g. the aggregate's type=lag, persisted only on success), and
-            # saves with update_fields.
-            try:
-                _apply_interface_relationship(source_iface, self.relation_field, related_iface, self._prepare_related)
-            except ValidationError as exc:
-                # Log the validation detail server-side and return a fixed message — don't echo
-                # exception text to the client (CodeQL py/stack-trace-exposure). The
-                # cross-device case is already rejected above, so this is the self-relationship
-                # / NetBox-constraint case.
-                logger.warning(
-                    "%s link validation failed (%s -> %s): %s",
-                    self.relation_label,
-                    source_iface.name,
-                    related_iface.name,
-                    _validation_error_detail(exc),
-                )
-                return JsonResponse(
-                    {
-                        "error": (
-                            f"Cannot link {source_iface.name} to {self.relation_label} {related_iface.name}: "
-                            f"invalid {self.relation_label} relationship "
-                            f"(an interface cannot be its own {self.relation_label})."
-                        )
-                    },
-                    status=409,
-                )
-            logger.info("Set %s.%s = %s", source_iface.name, self.relation_field, related_iface.name)
+        # The IntegrityError wrapper sits OUTSIDE the atomic: a concurrent conflict (e.g. the
+        # related interface deleted in the validate/write TOCTOU window) raises either at the
+        # failed statement — propagating out of the atomic after rollback — or, for Django's
+        # INITIALLY DEFERRED Postgres FKs, only at the atomic's COMMIT. Both land here and
+        # become a JSON 409 instead of an unhandled 500 to the fetch() caller, mirroring the
+        # bulk pass (_apply_relationship_edge).
+        try:
+            with transaction.atomic():
+                # Validate before persisting: a crafted POST with port_id == related_port_id
+                # resolves source == related and passes the same-owner check, so full_clean() is
+                # what rejects the resulting self-relationship. The shared helper sets the FK, runs
+                # _prepare_related (e.g. the aggregate's type=lag, persisted only on success), and
+                # saves with update_fields.
+                try:
+                    _apply_interface_relationship(
+                        source_iface, self.relation_field, related_iface, self._prepare_related
+                    )
+                except ValidationError as exc:
+                    # Log the validation detail server-side and return a fixed message — don't echo
+                    # exception text to the client (CodeQL py/stack-trace-exposure). The
+                    # cross-device case is already rejected above, so this is the self-relationship
+                    # / NetBox-constraint case.
+                    logger.warning(
+                        "%s link validation failed (%s -> %s): %s",
+                        self.relation_label,
+                        source_iface.name,
+                        related_iface.name,
+                        _validation_error_detail(exc),
+                    )
+                    return JsonResponse(
+                        {
+                            "error": (
+                                f"Cannot link {source_iface.name} to {self.relation_label} {related_iface.name}: "
+                                f"invalid {self.relation_label} relationship "
+                                f"(an interface cannot be its own {self.relation_label})."
+                            )
+                        },
+                        status=409,
+                    )
+                logger.info("Set %s.%s = %s", source_iface.name, self.relation_field, related_iface.name)
+        except IntegrityError as exc:
+            logger.warning(
+                "%s link hit a concurrent DB conflict (%s -> %s): %s",
+                self.relation_label,
+                source_iface.name,
+                related_iface.name,
+                exc,
+            )
+            return JsonResponse(
+                {
+                    "error": (
+                        f"Cannot link {source_iface.name} to {self.relation_label} {related_iface.name}: "
+                        "a concurrent change interrupted the update. Refresh and retry."
+                    )
+                },
+                status=409,
+            )
 
         return JsonResponse(
             {
