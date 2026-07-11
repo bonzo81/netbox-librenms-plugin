@@ -20,33 +20,14 @@ import pytest
 
 from netbox_librenms_plugin.tests.conftest import (
     cable_together,
+    librenms_cable_tag as _librenms_tag,
     make_device,
     make_interface,
     make_patch_panel,
     make_serial_device,
+    make_serial_row as _serial_row,
 )
 from netbox_librenms_plugin.tests.test_serial_cables_view import _make_view
-
-
-def _serial_row(csp, label, obj, **extra):
-    row = {
-        "_source": "serial",
-        "device_id": obj.id,
-        "local_port": csp.name,
-        "local_port_id": f"serial:{csp.pk}",
-        "sensor_id": csp.pk,
-        "sensor_index_int": 1,
-        "is_configured": True,
-        "remote_device": label,
-    }
-    row.update(extra)
-    return row
-
-
-def _librenms_tag():
-    from netbox_librenms_plugin.utils import get_librenms_cable_tag
-
-    return get_librenms_cable_tag()
 
 
 # ---------------------------------------------------------------------------

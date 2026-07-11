@@ -338,6 +338,33 @@ def make_serial_device(name, *, csp_names=(), cp_names=()):
     return dev, csps, cps
 
 
+def make_serial_row(csp, label, obj, **extra):
+    """A serial cable row as it comes out of the cache strip (raw keys only), plus overrides.
+
+    One canonical builder for the serial-row shape shared by the picker/resync/verify test
+    files, so a change to the row contract is made once instead of kept in sync by hand.
+    """
+    row = {
+        "_source": "serial",
+        "device_id": obj.id,
+        "local_port": csp.name,
+        "local_port_id": f"serial:{csp.pk}",
+        "sensor_id": csp.pk,
+        "sensor_index_int": 1,
+        "is_configured": True,
+        "remote_device": label,
+    }
+    row.update(extra)
+    return row
+
+
+def librenms_cable_tag():
+    """The plugin's provenance cable tag (created on first use)."""
+    from netbox_librenms_plugin.utils import get_librenms_cable_tag
+
+    return get_librenms_cable_tag()
+
+
 def make_virtual_chassis(name, *devices):
     """Create a VirtualChassis and enroll *devices* as members (vc_position by order)."""
     from dcim.models import VirtualChassis
