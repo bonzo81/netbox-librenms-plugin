@@ -438,7 +438,14 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libre
         view.setup(request, pk=obj.pk)
         # Rebind the delegated view's client to the POST-scoped server so its cache read and
         # re-enrichment target the same server the sync acted on (mirrors the refresh path).
-        resolved_key = view.rebind_api_for_server(server_key) or server_key
+        resolved_key = view.rebind_api_for_server(server_key)
+        if resolved_key is None:
+            # The POSTed key names no configured server (stale tab / forged form). Reusing it
+            # would namespace the cache read AND render_sync_partial's migrated-donor context
+            # under the bogus key; fall back to the delegated view's active client key instead,
+            # exactly like DeviceCableTableView.post handles the same rebind failure (and like
+            # that path, don't touch the lazy librenms_api property — it can raise here).
+            resolved_key = view.active_server_key
         context = view._prepare_context(request, obj, fetch_fresh=False, server_key=resolved_key)
         if context is None:
             # Cache genuinely gone (e.g. TTL elapsed between refresh and sync): render an empty

@@ -1509,3 +1509,37 @@ class TestCableEnrichment:
         csp.refresh_from_db()
         cable = Cable.objects.get(pk=csp.cable_id)
         assert cable.tenant_id == remote_tenant.pk  # remote side wins, not local
+
+
+@pytest.mark.django_db
+class TestSyncResponseStaleServerKeyFallback:
+    """_sync_response must not namespace the partial under a POSTed key that failed to rebind."""
+
+    def test_unconfigured_post_key_falls_back_to_active_server_key(self):
+        """rebind_api_for_server(stale) returns None; `or server_key` reused the very key that
+        failed, so render_sync_partial (and its migrated-donor context) was namespaced under
+        the bogus key. The delegated cable-table view's own POST handler already falls back to
+        active_server_key for this exact state — mirror it."""
+        from django.http import HttpResponse
+
+        from netbox_librenms_plugin.tests.conftest import make_device
+        from netbox_librenms_plugin.views.object_sync.devices import DeviceCableTableView
+        from netbox_librenms_plugin.views.sync.cables import SyncCablesView
+
+        dev = make_device("sync-resp-stale-key")
+        sync = object.__new__(SyncCablesView)
+        request = _mock_request()
+        request.headers = {"HX-Request": "true"}
+
+        captured = {}
+
+        def fake_render(view_self, req, obj, server_key, ctx):
+            captured["server_key"] = server_key
+            return HttpResponse("ok")
+
+        # "no-such-server" names no configured server, so the REAL rebind returns None.
+        with patch.object(DeviceCableTableView, "render_sync_partial", fake_render):
+            sync._sync_response(request, dev, "no-such-server", "/redirect")
+
+        assert captured["server_key"] != "no-such-server"
+        assert captured["server_key"] == "default"  # active_server_key fallback (no bound client)
