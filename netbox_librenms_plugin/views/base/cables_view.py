@@ -1768,7 +1768,13 @@ class CableRemotePickerView(BaseCableTableView):
 
         view = DeviceCableTableView()
         view.setup(request, pk=obj.pk)
-        resolved_key = view.rebind_api_for_server(server_key) or server_key
+        resolved_key = view.rebind_api_for_server(server_key)
+        if resolved_key is None:
+            # The key names no configured server (stale tab / forged form): reusing it would
+            # cache the fresh snapshot under the bogus namespace, invisible to every real
+            # render. Fall back to the delegated view's active client key instead, exactly
+            # like SyncCablesView._sync_response handles the same rebind failure.
+            resolved_key = view.active_server_key
         # Caches the fresh snapshot on success (same write "Refresh Cables" performs).
         view._prepare_context(request, obj, fetch_fresh=True, server_key=resolved_key)
         return self._cache_state(obj, resolved_key)
@@ -1900,7 +1906,12 @@ class CableRemotePickerView(BaseCableTableView):
 
         view = DeviceCableTableView()
         view.setup(request, pk=obj.pk)
-        resolved_key = view.rebind_api_for_server(server_key) or server_key
+        resolved_key = view.rebind_api_for_server(server_key)
+        if resolved_key is None:
+            # Same rebind-failure fallback as _refetch_snapshot: never scope the closing
+            # re-render under an unconfigured key, or the just-stored pick renders (and the
+            # table caches) in a namespace no other view reads.
+            resolved_key = view.active_server_key
         context = view._prepare_context(request, obj, fetch_fresh=False, server_key=resolved_key)
         if context is None:
             context = {"table": None, "object": obj, "cache_expiry": None, "server_key": resolved_key}

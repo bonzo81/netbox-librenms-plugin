@@ -629,6 +629,36 @@ class TestManualRepointOfExistingCable:
         row = next(r for r in cached["links"] if r["local_port_id"] == link["local_port_id"])
         assert row["manual_remote_id"] == new_cp.pk  # the pick survived the expiry
 
+    def test_pick_with_unconfigured_server_key_lands_in_active_scope(self):
+        """A pick posted under a stale/forged server_key must not cache or render under that namespace: the failed rebind falls back to the active client's key (mirrors SyncCablesView._sync_response), so the refreshed snapshot and the stored pick land in the real server's scope."""
+        from unittest.mock import patch
+
+        from django.core.cache import cache
+
+        from netbox_librenms_plugin.views.sync.cables import SyncCablesView
+
+        client = self._client_e2e("ghost-key")
+        acs, _csp, _old, link, picker_url = self._seed_cabled("ghost-key")
+        _t, _, (new_cp,) = make_serial_device("ghost-key-target", cp_names=["console"])
+
+        raw_row = dict(link)
+        with patch(
+            "netbox_librenms_plugin.views.object_sync.devices.DeviceCableTableView.get_links_data",
+            return_value=[raw_row],
+        ):
+            resp = client.post(
+                picker_url,
+                data={"port_id": link["local_port_id"], "server_key": "ghost", "remote_interface_id": new_cp.pk},
+                HTTP_HX_REQUEST="true",
+            )
+
+        assert resp.status_code == 200
+        key_view = object.__new__(SyncCablesView)
+        assert cache.get(key_view.get_cache_key(acs, "links", "ghost")) is None  # forged namespace stays empty
+        cached = cache.get(key_view.get_cache_key(acs, "links", "default"))
+        row = next(r for r in cached["links"] if r["local_port_id"] == link["local_port_id"])
+        assert row["manual_remote_id"] == new_cp.pk  # the pick landed in the active server's scope
+
     def test_pick_modal_get_refetches_when_cache_expired(self):
         """Opening the picker after the snapshot expired re-fetches instead of a dead-end warning."""
         from unittest.mock import patch
