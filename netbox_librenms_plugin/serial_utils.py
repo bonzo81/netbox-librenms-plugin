@@ -11,6 +11,7 @@ enrichment and sync pipeline can reuse them with minimal branching.
 Row shape emitted (all keys match the cables-view link dict):
     local_port        str   - ConsoleServerPort name, e.g. "ttyS7"
     local_port_id     str   - synthetic stable key "serial:<sensor_id>"
+    device_id         int|None - NetBox device id for the host these ports belong to
     remote_device     str   - Avocent port label (hint only, may be wrong)
     remote_port       None  - unresolved at map time; filled later by name-match enrichment
     remote_device_id  None  - always None (no LibreNMS device ref for labels)

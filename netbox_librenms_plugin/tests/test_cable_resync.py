@@ -289,16 +289,7 @@ class TestCabledSerialRowFarEndDisplay:
         return _make_view().enrich_links_data([row], obj, server_key="default")[0]
 
     def _row(self, csp, label, obj):
-        return {
-            "_source": "serial",
-            "device_id": obj.id,
-            "local_port": csp.name,
-            "local_port_id": f"serial:{csp.pk}",
-            "sensor_id": csp.pk,
-            "sensor_index_int": 1,
-            "is_configured": True,
-            "remote_device": label,
-        }
+        return _serial_row(csp, label, obj)
 
     def test_unresolvable_label_shows_actual_far_end(self):
         acs, (csp,), _ = make_serial_device("farend-ser", csp_names=["ttyS1"])
