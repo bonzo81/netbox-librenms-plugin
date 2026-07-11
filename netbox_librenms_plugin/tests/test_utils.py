@@ -1575,3 +1575,25 @@ class TestSetDeviceIpFkFamily:
         set_device_ip_fk(device, "oob_ip", v6)
         device.refresh_from_db()
         assert device.oob_ip_id == v6.pk
+
+
+@pytest.mark.django_db
+class TestGetVirtualChassisMemberNoneName:
+    """A LibreNMS port row can lack the selected name field entirely (port.get(...) -> None)."""
+
+    def test_none_port_name_returns_device_instead_of_typeerror(self):
+        """A None port name falls back to the viewed device instead of raising TypeError (was a 500)."""
+        from dcim.models import Device, DeviceRole, DeviceType, Manufacturer, Site, VirtualChassis
+
+        from netbox_librenms_plugin.utils import get_virtual_chassis_member
+
+        site = Site.objects.create(name="vc-none-site", slug="vc-none-site")
+        mfr = Manufacturer.objects.create(name="vc-none-mfr", slug="vc-none-mfr")
+        dtype = DeviceType.objects.create(manufacturer=mfr, model="vc-none-dt", slug="vc-none-dt")
+        role = DeviceRole.objects.create(name="vc-none-role", slug="vc-none-role")
+        dev = Device.objects.create(name="vc-none-dev", site=site, device_type=dtype, role=role)
+        vc = VirtualChassis.objects.create(name="vc-none", master=dev)
+        Device.objects.filter(pk=dev.pk).update(virtual_chassis=vc, vc_position=1)
+        dev.refresh_from_db()
+
+        assert get_virtual_chassis_member(dev, None) is dev

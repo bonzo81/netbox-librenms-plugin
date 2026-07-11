@@ -162,6 +162,13 @@ def get_virtual_chassis_member(device: Device, port_name: str) -> Device:
     if not hasattr(device, "virtual_chassis") or not device.virtual_chassis:
         return device
 
+    # A port row can lack the selected name field entirely (port.get(...) -> None) — or carry a
+    # non-string value from a malformed payload. re.match() raises TypeError on those, which the
+    # except tuple below deliberately doesn't cover (it must not mask real bugs), so guard here
+    # and fall back to the viewed device like any other unmatchable name.
+    if not isinstance(port_name, str):
+        return device
+
     try:
         match = re.match(r"^[A-Za-z]+(\d+)", port_name)
         if not match:
