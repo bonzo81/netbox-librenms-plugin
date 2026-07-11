@@ -989,6 +989,50 @@ class TestReconcileDonorDeviceIpFks:
         assert donor.primary_ip4_id == ip.pk
         assert notes == []
 
+    def test_transfer_survives_interface_moving_onto_winner_mid_check(self):
+        """A move ONTO the winner landing between the GFK read and the interface lock must not spuriously reject the transfer.
+
+        ip.assigned_object is read (and cached by the GenericForeignKey) before the owning
+        interface is locked; set_device_ip_fk re-reads that cache, so pre-fix the stale
+        pre-move snapshot (device_id != winner.pk) raised ValueError and rolled back an
+        otherwise-valid move — even though the locked-row gate had already validated the
+        CURRENT owner. The race is reproduced by patching the GFK descriptor to serve the
+        pre-move snapshot until the code refreshes it (the setter stores the override), the
+        same freshen-after-lock pattern TransferDeviceIPView already uses.
+        """
+        from dcim.models import Interface
+        from django.db import transaction
+        from ipam.models import IPAddress
+
+        from netbox_librenms_plugin.views.sync.migrate import _reconcile_donor_device_ip_fks
+
+        winner, donor, _ = self._make_devices()
+        ip = ip_on(donor, "10.10.0.3/24", "eth0")  # address starts on a DONOR-owned interface
+        donor.primary_ip4 = ip
+        donor.save()
+
+        stale = Interface.objects.get(pk=ip.assigned_object_id)  # pre-move snapshot (device_id == donor.pk)
+        # The concurrent transaction moves the interface (with its address) onto the winner.
+        Interface.objects.filter(pk=stale.pk).update(device=winner)
+
+        def _gfk_get(self):
+            return self.__dict__.get("_ao_override", stale)
+
+        def _gfk_set(self, value):
+            self.__dict__["_ao_override"] = value
+
+        with (
+            patch.object(IPAddress, "assigned_object", property(_gfk_get, _gfk_set)),
+            transaction.atomic(),
+        ):
+            notes = _reconcile_donor_device_ip_fks(donor, winner)
+
+        winner.refresh_from_db()
+        donor.refresh_from_db()
+        assert winner.primary_ip4_id == ip.pk  # the valid transfer went through
+        assert donor.primary_ip4_id is None
+        assert any("transferred" in n for n in notes)
+
 
 @pytest.mark.django_db
 class TestSetDeviceIpFk:

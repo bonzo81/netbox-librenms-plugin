@@ -296,6 +296,14 @@ def _reconcile_donor_device_ip_fks(donor, winner):
         locked_iface = Interface.objects.select_for_update().filter(pk=assigned.pk).first()
         if locked_iface is None or locked_iface.device_id != winner.pk:
             continue
+        # Refresh the cached GenericForeignKey on `ip` to the freshly locked interface:
+        # set_device_ip_fk()'s internal ownership check re-reads ip.assigned_object, and the
+        # GFK cache still holds the pre-lock snapshot (the FK id fields never changed, so
+        # Django won't re-query). A move ONTO the winner landing between the read above and
+        # the lock would otherwise pass the locked-row gate here and then be spuriously
+        # rejected against the stale device_id — the freshen-after-lock pattern
+        # TransferDeviceIPView already uses.
+        ip.assigned_object = locked_iface
         if getattr(winner, f"{field}_id", None) is None:
             # device.primary_ip4/6 / oob_ip are UNIQUE per address, so the donor must release the
             # FK *before* the winner claims it — saving the winner first while the donor still
