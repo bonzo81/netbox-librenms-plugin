@@ -220,3 +220,22 @@ def test_inventory_seed_survives_duplicate_operator_rules():
     assert (
         NormalizationRule.objects.filter(scope="serial", match_pattern=module.SERIAL_RULE["match_pattern"]).count() == 2
     )
+
+
+def test_migration_0013_serial_sensor_field_help_text_matches_model():
+    """Same drift guard for SerialSensorTypePattern: migration 0013's fields must carry the model's help_text, else makemigrations tracks a phantom AlterField."""
+    from netbox_librenms_plugin.models import SerialSensorTypePattern
+
+    mod = importlib.import_module("netbox_librenms_plugin.migrations.0013_serialsensortypepattern")
+    create_op = next(
+        op
+        for op in mod.Migration.operations
+        if op.__class__.__name__ == "CreateModel" and op.name == "SerialSensorTypePattern"
+    )
+    migration_fields = dict(create_op.fields)
+
+    for field_name in ("sensor_type", "port_name_pattern"):
+        model_help = SerialSensorTypePattern._meta.get_field(field_name).help_text
+        assert migration_fields[field_name].help_text == model_help, (
+            f"{field_name}: migration help_text drifted from the model"
+        )
