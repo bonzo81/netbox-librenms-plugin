@@ -483,8 +483,12 @@ def test_anonymized_recording_still_detects_vc(recording_server):
     assert result is not None
     assert result["member_count"] == 3
     assert [m["position"] for m in result["members"]] == [1, 2, 3]
-    # The master is still identified by the (now pseudonymized) device serial matching a member.
-    assert any(m["serial"] == result["members"][0]["serial"] for m in result["members"])
+    # The master is still identified by the (now pseudonymized) device serial matching a member:
+    # compare member serials against the anonymized DEVICE endpoint's serial — comparing against
+    # members[0] is a tautology (members[0] always equals itself), which would stay green even if
+    # anonymization broke the device-serial ↔ member-serial correlation.
+    device_serial = anon["responses"]["GET /api/v0/devices/1000"]["devices"][0]["serial"]
+    assert any(m["serial"] == device_serial for m in result["members"])
 
 
 # ── ifName / ifDescr pattern-aware anonymization ──────────────────────────────
