@@ -126,9 +126,12 @@ def compute_shape_signature(recording):
     device_id = recording.get("device_id")
     dev_body = _body(recording, lambda k: k == f"GET /api/v0/devices/{device_id}")
     # `recording.get("meta", {})` returns None when "meta" is present-but-null (the default only
-    # applies when the key is absent), so guard with `or {}` before .get — a community recording can
-    # carry "meta": null (the schema doesn't validate meta) and must not crash --validate/--list.
-    os_name = (recording.get("meta") or {}).get("os")
+    # applies when the key is absent), and `or {}` still passes a truthy NON-dict through — the
+    # schema doesn't validate meta, so a community recording can carry "meta": null or
+    # "meta": "garbage" and neither must crash --validate/--list. Normalize to a dict once.
+    meta = recording.get("meta")
+    meta = meta if isinstance(meta, dict) else {}
+    os_name = meta.get("os")
     if os_name is None and isinstance(dev_body, dict):
         devices = dev_body.get("devices")
         if isinstance(devices, list) and devices and isinstance(devices[0], dict):
@@ -157,7 +160,11 @@ def compute_shape_signature(recording):
     # a real LAG into a non-LAG novelty bucket.
     ports = _ports(recording)
     compiled_lag_patterns = []
-    for pattern_str in (recording.get("lag_patterns") or {}).values():
+    # Same normalize-before-access as meta above: a truthy non-dict lag_patterns (e.g. a list)
+    # has no .values() and must degrade to "no patterns", not crash --validate.
+    lag_patterns = recording.get("lag_patterns")
+    lag_patterns = lag_patterns if isinstance(lag_patterns, dict) else {}
+    for pattern_str in lag_patterns.values():
         try:
             compiled_lag_patterns.append(re.compile(pattern_str))
         except (re.error, TypeError):
@@ -209,7 +216,7 @@ def compute_shape_signature(recording):
     # the authoritative signal. Without it an OOB and a non-OOB capture of the same host OS share an
     # identical signature and collapse into one novelty bucket — the capture modal would report an
     # OOB topology as already known when only the plain-host shape exists.
-    oob_present = (recording.get("meta") or {}).get("oob_id") is not None
+    oob_present = meta.get("oob_id") is not None  # meta normalized to a dict at the top
 
     return {
         "os": os_name,

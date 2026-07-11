@@ -140,6 +140,30 @@ def test_signature_handles_null_meta():
     assert sig["os"] == "ios"
 
 
+def test_signature_handles_non_dict_meta_and_lag_patterns():
+    """A truthy NON-dict meta/lag_patterns must degrade like null, not crash --validate.
+
+    recording_schema_errors doesn't constrain either key, so a community-submitted
+    `meta: "bad"` or `lag_patterns: []` reaches compute_shape_signature; `or {}` only
+    covers the falsy shapes.
+    """
+    rec = {
+        "schema_version": 1,
+        "name": "x",
+        "device_id": 1,
+        "meta": "bad",  # truthy non-dict: `or {}` does not normalize it
+        "lag_patterns": ["^Po"],  # a list has no .values()
+        "responses": {
+            "GET /api/v0/devices/1": {"status": "ok", "devices": [{"device_id": 1, "os": "ios"}]},
+            "GET /api/v0/devices/1/ports": {"status": "ok", "ports": [{"port_id": 1, "ifName": "Gi0/1"}]},
+        },
+    }
+    sig = compute_shape_signature(rec)  # must not raise AttributeError
+    assert sig["os"] == "ios"  # falls back to the device row, like meta:null
+    assert sig["lag"]["present"] is False  # unusable lag_patterns = no pattern classification
+    assert sig["oob"] is False  # meta.oob_id unreadable → no OOB axis
+
+
 def test_signature_reads_host_ports_not_oob_controller_ports():
     """With a host and an OOB-controller /ports route, the signature fingerprints the host's ports (anchored on device_id), not whichever route comes first in dict order."""
     rec = {
