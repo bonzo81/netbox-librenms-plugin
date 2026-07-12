@@ -415,9 +415,20 @@ document.addEventListener('change', function (e) {
 
     let changed = false;
 
+    // A checkbox that is now unchecked is no longer an auto-kept selection; drop the marker so a
+    // later manual re-check is treated as intentional (and not auto-undone with its children).
+    if (!checkbox.checked && checkbox.dataset.autoSelected) {
+        delete checkbox.dataset.autoSelected;
+    }
+
     // --- LAG: check/uncheck all members ---
+    // Skipped for synthetic parent-UNWIND events (see the uncheck path below): the unwind
+    // only retracts an auto-selected parent, and letting that dispatched event cascade
+    // through here would uncheck ALL of the parent LAG's member rows — including members
+    // the user checked manually (this block carries no data-auto-selected gate), silently
+    // dropping them from the sync POST.
     const portId = row.dataset.portId;
-    if (autoSelectEnabled && portId) {
+    if (autoSelectEnabled && portId && !(e.detail && e.detail.lnmsParentUnwind)) {
         const memberRows = document.querySelectorAll('tr[data-member-of-lag="' + portId + '"]');
         memberRows.forEach(function (memberRow) {
             const memberCheckbox = memberRow.querySelector('input[name="select"]');
@@ -442,6 +453,9 @@ document.addEventListener('change', function (e) {
             const parentCheckbox = parentRow.querySelector('input[name="select"]');
             if (parentCheckbox && !parentCheckbox.checked) {
                 parentCheckbox.checked = true;
+                // Mark as auto-selected so the uncheck path below can undo it when the last child
+                // is cleared — without clobbering a parent the user checked themselves.
+                parentCheckbox.dataset.autoSelected = 'true';
                 // Propagate up a nested parent chain and inject the parent's own select_port_id.
                 parentCheckbox.dispatchEvent(new Event('change', { bubbles: true }));
                 changed = true;
@@ -482,23 +496,45 @@ document.addEventListener('change', function (e) {
         }
     }
 
-    // --- Sub-interface: remove cross-page hidden input when unchecking ---
-    // Only drop the injected parent input when NO other still-checked child on this
-    // page references the same cross-page parent — otherwise unchecking one sibling
-    // would strip the auto-included parent the remaining siblings still need.
+    // --- Sub-interface: undo parent auto-selection when the last child is unchecked ---
+    // Only act once NO other still-checked child on this page references the same parent —
+    // otherwise unchecking one sibling would drop the parent the remaining siblings still need.
     if (parentPortId && !checkbox.checked) {
-        const form = checkbox.closest('form');
-        if (form) {
-            const siblingStillChecked = Array.prototype.some.call(
-                document.querySelectorAll('tr[data-parent-port-id="' + parentPortId + '"] input[name="select"]'),
-                function (cb) { return cb !== checkbox && cb.checked; }
-            );
-            if (!siblingStillChecked) {
+        const siblingStillChecked = Array.prototype.some.call(
+            document.querySelectorAll('tr[data-parent-port-id="' + parentPortId + '"] input[name="select"]'),
+            function (cb) { return cb !== checkbox && cb.checked; }
+        );
+        if (!siblingStillChecked) {
+            // Cross-page parent: drop the injected hidden select_port_id input.
+            const form = checkbox.closest('form');
+            if (form) {
                 const hidden = form.querySelector('#auto-parent-' + parentPortId);
                 if (hidden) hidden.remove();
                 // Drop the paired cross-page device override too.
                 const devOverride = form.querySelector('#auto-parent-dev-' + parentPortId);
                 if (devOverride) devOverride.remove();
+            }
+            // Same-page parent: uncheck it ONLY if we auto-selected it (data-auto-selected) — a
+            // parent the user checked themselves carries no marker and is preserved. Gated on the
+            // toggle like the auto-SELECT above: with #autoSelectLagMembers off the user has taken
+            // manual control, so a leftover marker from when the toggle was on must not let this
+            // uncheck a parent they are deliberately keeping (only the hidden-input cleanup above
+            // stays always-run). Dispatch so a nested grandparent chain unwinds too — as a
+            // CustomEvent flagged lnmsParentUnwind so the LAG member propagation ignores it (it
+            // would otherwise uncheck manually-selected member rows of an aggregate parent).
+            if (autoSelectEnabled) {
+                const parentRow = document.querySelector('tr[data-port-id="' + parentPortId + '"]');
+                if (parentRow) {
+                    const parentCheckbox = parentRow.querySelector('input[name="select"]');
+                    if (parentCheckbox && parentCheckbox.checked && parentCheckbox.dataset.autoSelected) {
+                        delete parentCheckbox.dataset.autoSelected;
+                        parentCheckbox.checked = false;
+                        parentCheckbox.dispatchEvent(
+                            new CustomEvent('change', { bubbles: true, detail: { lnmsParentUnwind: true } })
+                        );
+                        changed = true;
+                    }
+                }
             }
         }
     }
