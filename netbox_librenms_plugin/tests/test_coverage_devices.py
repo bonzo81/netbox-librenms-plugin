@@ -397,6 +397,33 @@ class TestSingleInterfaceVerifyView:
         assert isinstance(response, JsonResponse)
         assert response.status_code == 404
 
+    def test_returns_404_when_cached_data_malformed(self):
+        """A truthy but malformed cache value (non-dict) is treated as a miss (404), not a 500 — reading .get() on it would raise AttributeError."""
+        import json
+
+        from django.http import JsonResponse
+
+        view = self._make_view()
+        request = MagicMock()
+        request.body = json.dumps({"device_id": 1, "interface_name": "eth0"}).encode()
+
+        mock_device = MagicMock()
+        mock_device.virtual_chassis = None
+
+        with patch("netbox_librenms_plugin.views.object_sync.devices.get_object_or_404", return_value=mock_device):
+            with patch(
+                "netbox_librenms_plugin.views.object_sync.devices.get_librenms_sync_device", return_value=mock_device
+            ):
+                with patch("netbox_librenms_plugin.views.object_sync.devices.cache") as mock_cache:
+                    # A truthy non-dict snapshot: the old `if cached_data:` guard would enter and
+                    # raise on `cached_data.get("ports", [])`.
+                    mock_cache.get.return_value = ["not", "a", "dict"]
+                    with patch.object(view, "get_cache_key", return_value="test_key"):
+                        response = view.post(request)
+
+        assert isinstance(response, JsonResponse)
+        assert response.status_code == 404
+
     @pytest.mark.django_db
     def test_returns_404_when_interface_not_in_cache(self):
         """Returns 404 when the requested interface isn't among the real cached ports."""

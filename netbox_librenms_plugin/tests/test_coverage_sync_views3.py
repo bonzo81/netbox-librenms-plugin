@@ -232,7 +232,10 @@ class TestSyncInterfacesPost:
         v.get_object = MagicMock(return_value=obj)
         v.get_selected_interfaces = MagicMock(return_value=["eth0"])
         v.get_cached_ports_data = MagicMock(return_value=[{"ifName": "eth0"}])
-        v.sync_selected_interfaces = MagicMock()
+        # The real sync_selected_interfaces increments _synced_count per synced port; the
+        # success banner is now gated on that count. Mirror the effect (one port synced) so
+        # this stand-in doesn't leave the counter at post()'s reset value and suppress the banner.
+        v.sync_selected_interfaces = MagicMock(side_effect=lambda *a, **k: setattr(v, "_synced_count", 1))
         req = MagicMock()
         req.POST.get = lambda k, *a: "default" if k == "server_key" else None
         req.POST.getlist = lambda k: []

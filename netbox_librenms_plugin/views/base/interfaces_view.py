@@ -423,8 +423,11 @@ class BaseInterfaceTableView(
                 else:
                     # The (OS-scoped) signal says this device has LAG/sub-interface relationships,
                     # so a failed fetch means the LAG/Parent column is silently incomplete. Warn
-                    # (mirrors the OOB-incomplete handling) instead of dropping it without a trace.
+                    # (mirrors the OOB-incomplete handling) instead of dropping it without a trace,
+                    # AND tag the snapshot so every later cached render surfaces the same warning —
+                    # the transient Django message only reaches the user on this one refresh.
                     logger.warning("port_stack fetch failed for device %s: %s", self.librenms_id, ps_data)
+                    librenms_data["relationship_data_incomplete"] = True
                     messages.warning(
                         request,
                         "Interfaces refreshed, but LAG/sub-interface relationship data could not be "

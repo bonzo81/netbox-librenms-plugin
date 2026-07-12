@@ -813,9 +813,12 @@ class LibreNMSAPI:
                 continue
             high_id = entry.get("high_port_id")
             low_id = entry.get("low_port_id")
-            # 0 is the ifStack sentinel for "no port" (stack top/bottom), so a falsy id is
-            # intentionally skipped here rather than looked up.
-            if not high_id or not low_id:
+            # 0 (int OR string) is the ifStack sentinel for "no port" (stack top/bottom).
+            # normalize_librenms_port_id treats 0/negative/non-numeric as invalid whether the API
+            # returned the id as an int or a string, so the sentinel skip stays consistent with the
+            # str/int type tolerance of by_id (deliberately keyed by str(port_id)) below — a bare
+            # ``not low_id`` would let a truthy string "0" fall through to the by_id lookup.
+            if normalize_librenms_port_id(high_id) is None or normalize_librenms_port_id(low_id) is None:
                 continue
 
             high_port = by_id.get(str(high_id))

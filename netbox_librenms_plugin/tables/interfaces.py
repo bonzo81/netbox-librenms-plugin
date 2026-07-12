@@ -432,9 +432,10 @@ class LibreNMSInterfaceTable(tables.Table):
         Render the combined Parent / LAG relationship column.
 
         Shows LAG membership (if any) and parent interface (if any) stacked vertically,
-        each prefixed with a small muted label so the type is clear. The sync buttons
-        keep their existing CSS classes (lag-sync-btn / parent-sync-btn) so the JS
-        handler still works without changes.
+        each rendered as a single compact badge combining the relationship type, LibreNMS
+        name, and status icon (see ``_render_relationship_column``). The sync buttons keep
+        their existing CSS classes (lag-sync-btn / parent-sync-btn) so the JS handler still
+        works without changes.
 
         Args:
             value: The cell value (unused; the row drives rendering).

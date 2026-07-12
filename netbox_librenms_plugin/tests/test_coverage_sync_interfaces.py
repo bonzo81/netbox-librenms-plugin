@@ -45,6 +45,11 @@ def _denied_response():
     return resp
 
 
+def _bump_synced(view):
+    """Simulate the real sync_interface: bump the post()-level synced counter for a resolved port."""
+    view._synced_count += 1
+
+
 # ===========================================================================
 # SyncInterfacesView.get_required_permissions_for_object_type
 # ===========================================================================
@@ -622,7 +627,9 @@ class TestSyncInterfacesViewPost:
             patch("netbox_librenms_plugin.views.sync.interfaces.redirect") as mock_redirect,
             patch("netbox_librenms_plugin.views.sync.interfaces.reverse", return_value="/sync/"),
             patch("netbox_librenms_plugin.views.sync.interfaces.transaction"),
-            patch.object(view, "sync_interface"),
+            # The real sync_interface increments _synced_count past its resolve guard; simulate that
+            # at the mock seam so post()'s count-based success banner fires.
+            patch.object(view, "sync_interface", side_effect=lambda *a, **k: _bump_synced(view)),
             patch.object(type(view), "get_vlan_groups_for_device", return_value=[]),
             patch.object(view.__class__, "get_cache_key", return_value="k"),
             patch.object(view.__class__, "_build_vlan_lookup_maps", return_value={}),
@@ -658,7 +665,7 @@ class TestSyncInterfacesViewPost:
             patch("netbox_librenms_plugin.views.sync.interfaces.redirect") as mock_redirect,
             patch("netbox_librenms_plugin.views.sync.interfaces.reverse", return_value="/sync/"),
             patch("netbox_librenms_plugin.views.sync.interfaces.transaction"),
-            patch.object(view, "sync_interface"),
+            patch.object(view, "sync_interface", side_effect=lambda *a, **k: _bump_synced(view)),
             patch.object(type(view), "get_vlan_groups_for_device", return_value=[]),
             patch.object(view.__class__, "get_cache_key", return_value="k"),
             patch.object(view.__class__, "_build_vlan_lookup_maps", return_value={}),
@@ -685,6 +692,10 @@ class TestSyncInterfacesViewPost:
 
         def _record_skips(*args, **kwargs):
             view._skipped_conflicts.extend(skip_names)
+            # Simulate the real sync_interface: each selected port that ISN'T skipped increments
+            # the synced counter (post()'s success banner keys on that count, not on a
+            # skip-vs-selected size comparison).
+            view._synced_count += max(0, len(selected) - len(skip_names))
 
         with (
             patch(
@@ -738,6 +749,47 @@ class TestSyncInterfacesViewPost:
 
         mock_msgs.warning.assert_called_once()
         mock_msgs.success.assert_called_once()
+
+    def test_success_banner_shown_when_a_colliding_name_syncs_despite_a_skip(self):
+        """A single selected display name can match MULTIPLE ports (ifName/ifDescr collision). If one colliding port is skipped and another synced, len(_skipped_conflicts) can equal len(selected) yet something WAS synced — the count-based banner must still fire (a size comparison would suppress it)."""
+        from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
+
+        view = object.__new__(SyncInterfacesView)
+        view.require_all_permissions = MagicMock(return_value=None)
+        view.get_required_permissions_for_object_type = MagicMock(return_value=[])
+        mock_api = MagicMock(server_key="default")
+        mock_device = MagicMock(pk=1)
+        # ONE selected name resolving to two ports: one is conflict-skipped, the other syncs.
+        ports = [{"ifName": "eth0", "port_id": 1}, {"ifName": "eth0", "port_id": 2}]
+        req = _make_request(post_data={"select": ["eth0"], "server_key": "default"})
+
+        def _one_skip_one_sync(*args, **kwargs):
+            view._skipped_conflicts.append("eth0")  # first colliding port fails
+            view._synced_count += 1  # second colliding port syncs
+
+        with (
+            patch("netbox_librenms_plugin.views.sync.interfaces.get_object_or_404", return_value=mock_device),
+            patch("netbox_librenms_plugin.views.sync.interfaces.get_interface_name_field", return_value="ifName"),
+            patch("netbox_librenms_plugin.views.sync.interfaces.cache") as mock_cache,
+            patch("netbox_librenms_plugin.views.sync.interfaces.messages") as mock_msgs,
+            patch("netbox_librenms_plugin.views.sync.interfaces.redirect"),
+            patch("netbox_librenms_plugin.views.sync.interfaces.reverse", return_value="/sync/"),
+            patch("netbox_librenms_plugin.views.sync.interfaces.transaction"),
+            patch.object(view, "sync_selected_interfaces", side_effect=_one_skip_one_sync),
+            patch.object(view, "_sync_lag_and_parent_relationships"),
+            patch.object(view, "_get_cached_relationships", return_value={}),
+            patch.object(type(view), "get_vlan_groups_for_device", return_value=[]),
+            patch.object(view.__class__, "get_cache_key", return_value="k"),
+            patch.object(view.__class__, "_build_vlan_lookup_maps", return_value={}),
+            patch.object(type(view), "librenms_api", new_callable=lambda: property(lambda s: mock_api)),
+        ):
+            mock_cache.get.return_value = {"ports": ports}
+            view.post(req, "device", 1)
+
+        # len(_skipped_conflicts) == len(selected_interfaces) == 1, but _synced_count == 1, so the
+        # old size comparison would suppress the banner while the count-based check shows it.
+        mock_msgs.success.assert_called_once()
+        mock_msgs.warning.assert_called_once()
 
 
 class TestSyncInterfacesViewServerKeyAndRedirect:

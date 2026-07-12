@@ -27,6 +27,7 @@ from netbox_librenms_plugin.utils import (
     get_tagged_vlan_css_class,
     get_untagged_vlan_css_class,
     get_vlan_sync_css_class,
+    is_valid_ports_payload,
     normalize_librenms_port_id,
 )
 
@@ -181,7 +182,10 @@ class SingleInterfaceVerifyView(
         # "Interface data not found" 404 below, not AttributeError-500 on .get("ports").
         cached_data = extract_cached_ports(cache.get(ports_cache_key), ports_cache_key)
 
-        if cached_data:
+        # Validate the shape before reading it: a truthy but malformed cache value (non-dict, or a
+        # dict without a list "ports") would otherwise raise on .get(...). Treat it as a cache miss
+        # and fall through to the controlled "not found" response, matching the base table view.
+        if is_valid_ports_payload(cached_data):
             ports = cached_data.get("ports", [])
             # Prefer the stable port_id the client posts (data-port-id on the row): display
             # names can collide (an OOB controller can reuse a host interface name), so a

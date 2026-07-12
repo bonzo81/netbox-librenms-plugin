@@ -123,6 +123,7 @@ class SyncInterfacesView(
         # interface on a *different* device (see _resolve_device/vm_interface). Surfaced
         # below so the skip isn't silent — otherwise the user only sees it in the logs.
         self._skipped_conflicts = []
+        self._synced_count = 0
         self.sync_selected_interfaces(obj, selected_interfaces, ports_data, exclude_columns, interface_name_field)
 
         # After all interfaces are created/updated, set LAG and parent relationships
@@ -135,10 +136,13 @@ class SyncInterfacesView(
                 request,
                 f"{len(self._skipped_conflicts)} interface(s) skipped: {skipped}.",
             )
-        # Only claim success when at least one selected interface was actually synced. When the
-        # conflict-skip logic skipped ALL selected interfaces, nothing was written, so pairing the
-        # skip warning with a green "synced successfully" banner is contradictory and misleading.
-        if len(self._skipped_conflicts) < len(selected_interfaces):
+        # Only claim success when at least one interface was actually synced. Track an explicit
+        # synced count rather than comparing skip-vs-selected sizes: a single selected display name
+        # can match MULTIPLE LibreNMS ports (ifName/ifDescr collisions matched by name membership in
+        # sync_selected_interfaces), so if one colliding port fails and another succeeds
+        # len(_skipped_conflicts) can reach len(selected_interfaces) even though something WAS
+        # synced — which would wrongly suppress the banner.
+        if self._synced_count > 0:
             messages.success(request, "Selected interfaces synced successfully.")
         return redirect(redirect_url)
 
@@ -620,6 +624,12 @@ class SyncInterfacesView(
             # may be exercised directly (without post() initialising the list).
             self._record_skipped_conflict(interface_name, "port already mapped elsewhere or ambiguous")
             return
+
+        # An interface resolved and is being synced — count it explicitly (defensive getattr:
+        # sync_interface may be exercised directly without post() initialising the counter). The
+        # count, not a skip-vs-selected size comparison, drives the success banner in post().
+        if getattr(self, "_synced_count", None) is not None:
+            self._synced_count += 1
 
         netbox_type = None
         if isinstance(obj, Device):

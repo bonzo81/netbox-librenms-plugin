@@ -327,6 +327,10 @@ function initializeTableCheckboxes(tableId) {
         toggleAll.addEventListener('change', function () {
             liveCheckboxes().forEach(checkbox => {
                 checkbox.checked = toggleAll.checked;
+                // Explicitly (de)selecting every box: clear any data-auto-selected marker a child
+                // set on a parent before this loop reached it, so unchecking the last child can't
+                // later auto-deselect a parent the user included via select-all.
+                delete checkbox.dataset.autoSelected;
                 // Fire a bubbling change so the auto-select handler (cross-page parent /
                 // LAG member inclusion) runs for select-all too, not just single clicks.
                 // That handler is idempotent, so a double fire is harmless.
@@ -354,6 +358,9 @@ function initializeTableCheckboxes(tableId) {
                 if (start !== -1 && end !== -1) {
                     current.slice(Math.min(start, end), Math.max(start, end) + 1).forEach(cb => {
                         cb.checked = anchor.checked;
+                        // Explicit range selection: clear a stale data-auto-selected marker so a later
+                        // last-child uncheck can't auto-deselect a parent the user shift-selected.
+                        delete cb.dataset.autoSelected;
                         // Fire change so shift-range selection runs the same auto-select logic
                         // (cross-page parent / LAG member inclusion) as single clicks / select-all.
                         cb.dispatchEvent(new Event('change', { bubbles: true }));
@@ -1544,6 +1551,10 @@ function initializeCheckboxListeners() {
         toggleAll.addEventListener('change', function () {
             liveCheckboxes().forEach(checkbox => {
                 checkbox.checked = toggleAll.checked;
+                // Explicit select-all: clear a stale data-auto-selected marker so a later
+                // last-child uncheck can't auto-deselect an explicitly included parent
+                // (see initializeTableCheckboxes).
+                delete checkbox.dataset.autoSelected;
                 // Route select-all through the auto-select handler (cross-page parent /
                 // LAG member inclusion); idempotent, so a double fire is harmless.
                 checkbox.dispatchEvent(new Event('change', { bubbles: true }));

@@ -21,3 +21,17 @@ def test_migration_0011_field_help_text_matches_model():
         assert migration_fields[field_name].help_text == model_help, (
             f"{field_name}: migration help_text drifted from the model"
         )
+
+
+def test_migration_0012_librenms_os_help_text_matches_model():
+    """Migration 0012 re-declares librenms_os via AlterField, so 0012 (not 0011's CreateModel) is the authoritative migration state makemigrations compares librenms_os against — its help_text must match the model too."""
+    from netbox_librenms_plugin.models import PortStackLagPattern
+
+    mod = importlib.import_module("netbox_librenms_plugin.migrations.0012_portstacklagpattern_ci_unique")
+    alter_op = next(
+        op
+        for op in mod.Migration.operations
+        if op.__class__.__name__ == "AlterField" and op.model_name == "portstacklagpattern" and op.name == "librenms_os"
+    )
+    model_help = PortStackLagPattern._meta.get_field("librenms_os").help_text
+    assert alter_op.field.help_text == model_help, "0012 AlterField librenms_os help_text drifted from the model"

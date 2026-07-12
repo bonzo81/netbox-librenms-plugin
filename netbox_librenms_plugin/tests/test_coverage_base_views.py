@@ -1789,6 +1789,43 @@ class TestBaseInterfaceTableViewPost:
         # The OOB-fetch failure is surfaced to the user.
         mock_messages.warning.assert_called()
 
+    def test_post_port_stack_fetch_failure_tags_relationship_incomplete(self):
+        """When the LAG-signalled port_stack fetch fails, the cached snapshot is tagged relationship_data_incomplete so every later render persistently warns the Parent / LAG column may be incomplete."""
+        view = self._make_view()
+        obj = _mock_obj()
+        request = _mock_request()
+
+        view._librenms_api.get_librenms_id.return_value = 42
+        # Host ports OK (single fetch — no OOB link below).
+        view._librenms_api.get_ports.return_value = (True, {"ports": [{"port_id": 1, "ifName": "Gi0/0"}]})
+        view._librenms_api.get_device_info.return_value = (False, None)  # device_os stays None
+        view._librenms_api.get_port_stack.return_value = (False, "boom")  # the relationship fetch fails
+
+        with (
+            patch.object(view, "get_object", return_value=obj),
+            patch.object(view, "get_redirect_url", return_value="/device/1/"),
+            patch.object(view, "_enrich_ports_with_vlan_data", side_effect=lambda ports, field: ports),
+            patch.object(view, "_has_lag_signals", return_value=True),  # force the port_stack fetch
+            patch.object(view, "get_context_data", return_value={}),
+            patch.object(view, "get_cache_key", return_value="cache-key"),
+            patch.object(view, "get_last_fetched_key", return_value="last-key"),
+            patch("netbox_librenms_plugin.models.PortStackLagPattern.compiled_patterns_for_os", return_value=[]),
+            patch("netbox_librenms_plugin.views.base.interfaces_view.get_interface_name_field", return_value="ifName"),
+            patch("netbox_librenms_plugin.views.base.interfaces_view.get_librenms_sync_device", return_value=obj),
+            patch("netbox_librenms_plugin.views.base.interfaces_view.get_librenms_oob", return_value=None),
+            patch("netbox_librenms_plugin.views.base.interfaces_view.messages"),
+            patch("netbox_librenms_plugin.views.mixins.render") as mock_render,
+            patch("netbox_librenms_plugin.views.base.interfaces_view.cache") as mock_cache,
+            patch("netbox_librenms_plugin.views.base.interfaces_view.timezone"),
+        ):
+            mock_render.return_value = MagicMock()
+            view.post(request, pk=1)
+
+        ports_set_calls = [c for c in mock_cache.set.call_args_list if c.args and c.args[0] == "cache-key"]
+        assert len(ports_set_calls) == 1
+        cached_snapshot = ports_set_calls[0].args[1]
+        assert cached_snapshot["relationship_data_incomplete"] is True
+
     def test_post_oob_malformed_but_successful_payload_treated_as_incomplete(self):
         """get_ports is an external boundary: oob_success=True does not guarantee a dict with a list of dict rows."""
         view = self._make_view()
@@ -4132,12 +4169,17 @@ class TestVCInterfaceRenderMemberResolutionNotPerPort:
                 view.get_context_data(request, obj, "ifName", server_key="default", sync_device=obj)
             return len(ctx.captured_queries)
 
-        # Warm process-level caches (ContentType etc.) first so the two measured renders differ ONLY
-        # by port count, not by cold-cache one-time queries on the first call.
-        render(3)
-        q_small = render(2)
-        q_large = render(8)
-        assert q_large == q_small, f"query count scaled with ports: {q_small} -> {q_large} (per-port N+1)"
+        try:
+            # Warm process-level caches (ContentType etc.) first so the two measured renders differ
+            # ONLY by port count, not by cold-cache one-time queries on the first call.
+            render(3)
+            q_small = render(2)
+            q_large = render(8)
+            assert q_large == q_small, f"query count scaled with ports: {q_small} -> {q_large} (per-port N+1)"
+        finally:
+            # Django's cache isn't wrapped in the test's DB-transaction rollback, so delete the
+            # entry (like the sibling cache-based tests) to avoid leaking it into later runs.
+            dj_cache.delete(cache_key)
 
 
 @pytest.mark.django_db
