@@ -1938,6 +1938,12 @@ class LibreNMSAPI:
                 if any(not isinstance(s, dict) for s in all_sensors):
                     logger.warning("Unexpected sensors response for %s: non-dict sensor item", self.server_key)
                     return False, result.get("message") or "Unexpected response format: invalid sensor item"
+                # sensor_type must be a scalar string before the membership test below: a JSON
+                # array/object value would raise an uncaught TypeError on `in serial_types` (an
+                # unhashable type) and break serial refresh instead of returning the failure tuple.
+                if any(not isinstance(s.get("sensor_type"), str) for s in all_sensors):
+                    logger.warning("Unexpected sensors response for %s: invalid sensor_type", self.server_key)
+                    return False, result.get("message") or "Unexpected response format: invalid sensor_type"
                 serial_sensors = [s for s in all_sensors if s.get("sensor_type") in serial_types]
                 return True, serial_sensors
             if isinstance(result, dict):

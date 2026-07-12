@@ -3291,6 +3291,24 @@ class TestGetSerialPortSensors:
         assert success is False
         assert "invalid sensor item" in msg.lower()
 
+    def test_non_string_sensor_type_fails_closed(self, mock_librenms_api, mock_response_factory):
+        """A non-string sensor_type (e.g. a JSON array) must fail closed, not raise TypeError.
+
+        `sensor_type in serial_types` with an unhashable value would raise an uncaught TypeError and
+        break serial refresh; the response is malformed, so return the normal failure tuple instead.
+        """
+        import unittest.mock as mock
+
+        bad = self._make_sensor(12, port_num=8)
+        bad["sensor_type"] = ["acsSerialPortTable"]  # unhashable → TypeError on `in serial_types`
+        sensors = [self._make_sensor(12, port_num=7), bad]
+        mock_resp = mock_response_factory(status_code=200, json_data={"status": "ok", "sensors": sensors})
+        with mock.patch("netbox_librenms_plugin.librenms_api.requests.get", return_value=mock_resp):
+            success, msg = mock_librenms_api.get_serial_port_sensors(device_id=12)
+
+        assert success is False
+        assert "invalid sensor_type" in msg.lower()
+
     def test_empty_sensor_list_returns_empty(self, mock_librenms_api, mock_response_factory):
         import unittest.mock as mock
 
