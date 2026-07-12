@@ -345,7 +345,9 @@ def _assert_port_relationships(api, device_id, recording, expected):
         port_stack,
         # Pass patterns explicitly (default {}) so resolution never touches the DB.
         lag_patterns=recording.get("lag_patterns", {}),
-        device_os=recording.get("meta", {}).get("os"),
+        # `(meta or {})` not `meta, {}`: an explicit "meta": null (a shape recording_schema_errors()
+        # doesn't reject) returns None, and the chained .get("os") would then AttributeError.
+        device_os=(recording.get("meta") or {}).get("os"),
     )
 
     # port_stack and ports are independent payloads whose ids may differ in type,
@@ -382,11 +384,27 @@ def _assert_serial_ports(api, device_id, expected, sensor_types):
 
 def _assert_oob(api, recording, expected):
     """The linked OOB controller's ports are recorded and replayable (the interfaces view merges them)."""
-    oob_id = recording.get("meta", {}).get("oob_id")
+    # `(meta or {})` not `meta, {}`: an explicit "meta": null returns None and .get would crash.
+    oob_id = (recording.get("meta") or {}).get("oob_id")
     assert oob_id is not None, f"{recording['name']} declares oob outcome but no meta.oob_id"
     ok, oob_data = api.get_ports(oob_id)
     assert ok, oob_data
     assert len(oob_data["ports"]) == expected["controller_ports"]
+
+
+def test_assert_port_relationships_tolerates_explicit_null_meta():
+    """An explicit meta: null recording must normalize to {} in the replay assert, not AttributeError."""
+    from types import SimpleNamespace
+
+    api = SimpleNamespace(
+        get_ports=lambda device_id: (True, {"ports": []}),
+        get_port_stack=lambda device_id: (True, []),
+        resolve_port_relationships=lambda ports, stack, lag_patterns, device_os: {},
+    )
+    # "meta": null is a shape recording_schema_errors() accepts; os is optional. The helper must
+    # read (meta or {}).get("os") — reading meta.get directly would AttributeError on None.
+    recording = {"name": "null-meta", "meta": None, "lag_patterns": {}}
+    _assert_port_relationships(api, 1, recording, expected={})
 
 
 @pytest.mark.parametrize("recording", _RECORDINGS, ids=_ids)
