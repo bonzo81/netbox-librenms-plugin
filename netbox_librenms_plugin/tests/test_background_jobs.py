@@ -824,43 +824,43 @@ class TestImportDevicesJob:
     @patch("netbox_librenms_plugin.import_utils.bulk_import_vms")
     @patch("netbox_librenms_plugin.import_utils.bulk_import_devices_shared")
     @patch("netbox_librenms_plugin.librenms_api.LibreNMSAPI")
-    def test_unresolved_block_skips_vm_import(self, mock_api_class, mock_bulk_devices, mock_bulk_vms):
-        """An unresolved id blocks the batch and the same submission's VMs are NOT imported."""
+    def test_unresolved_row_is_skipped_not_batch_blocked(self, mock_api_class, mock_bulk_devices, mock_bulk_vms):
+        """An unresolved id is SKIPPED (not imported) while the rest of the batch — devices AND VMs — imports. A transient fetch miss on one row must not drop the whole submission (the old whole-batch block)."""
         from netbox_librenms_plugin.jobs import ImportDevicesJob
 
         mock_api = MagicMock()
         mock_api.server_key = "default"
 
-        # Real collision gate against the DB: id 1 resolves and validates cleanly (matches no
-        # existing NetBox device), id 2 is a get_device_info miss → unresolved → batch blocked.
+        # Real collision gate against the DB: ids 1 and 10 resolve + validate cleanly (match no
+        # existing NetBox device); id 2 is a get_device_info miss → unresolved → skipped, not a block.
         def _get_device_info(did):
             if did == 2:
                 return (False, None)
-            return (True, {"device_id": did, "hostname": f"job-block-dev-{did}", "sysName": f"job-block-dev-{did}"})
+            return (True, {"device_id": did, "hostname": f"job-skip-dev-{did}", "sysName": f"job-skip-dev-{did}"})
 
         mock_api.get_device_info.side_effect = _get_device_info
         mock_api_class.return_value = mock_api
-        # Valid payloads so the UNFIXED code (which falls through to the VM import) completes and
-        # the assert_not_called below is the clean red signal, not an incidental crash.
         mock_bulk_devices.return_value = {"success": [], "failed": [], "skipped": [], "virtual_chassis_created": 0}
         mock_bulk_vms.return_value = {"success": [], "failed": [], "skipped": []}
 
         job = create_mock_job_runner(ImportDevicesJob, job_pk=810)
         job.run(device_ids=[1, 2], vm_imports={10: {"cluster_id": 1}}, server_key="default")
 
-        # Blocked batch → neither devices nor VMs are imported.
-        mock_bulk_devices.assert_not_called()
-        mock_bulk_vms.assert_not_called()
+        # The fetchable rows import; only the unresolved id 2 is dropped. The importer is called
+        # with just the importable device id, and the VM section still runs.
+        mock_bulk_devices.assert_called_once()
+        assert mock_bulk_devices.call_args.kwargs["device_ids"] == [1]
+        mock_bulk_vms.assert_called_once()
+        assert mock_bulk_vms.call_args.args[0] == {10: {"cluster_id": 1}}
+
         errors = job.job.data["errors"]
-        # Both device ids AND the VM id are failed closed with the same block reason.
-        assert {e["device_id"] for e in errors} == {1, 2, 10}
-        assert all("Import blocked" in e["error"] for e in errors)
-        # Object-neutral wording: the unresolved ids come from collision_check_ids, which includes
-        # vm_imports, so the block message must not mislabel a VM row as a "device(s)" — mirror the
-        # collision branch's object-neutral copy.
+        # Only the unresolved row is reported (as a skip) — not the whole batch.
+        assert {e["device_id"] for e in errors} == {2}
+        assert all("Skipped" in e["error"] and "verify collisions" in e["error"] for e in errors)
+        # Object-neutral wording: "row(s)", never "device(s)".
         assert all("device(s)" not in e["error"] for e in errors)
         assert any("row(s)" in e["error"] for e in errors)
-        assert job.job.data["failed_count"] == 3
+        assert job.job.data["failed_count"] == 1
         assert job.job.data["success_count"] == 0
         assert job.job.data["completed"] is True
 
@@ -937,7 +937,8 @@ class TestImportDevicesJob:
         mock_bulk_vms.assert_not_called()
         errors = job.job.data["errors"]
         assert {e["device_id"] for e in errors} == {1, 2, 10}
-        assert all("Import blocked" in e["error"] for e in errors)
+        # Shared block wording (classify_bulk_precheck), identical to the sync view.
+        assert all("Bulk import blocked" in e["error"] for e in errors)
         # The gate spans device + VM ids (vm_imports here), so the block message must be
         # object-neutral — a VM collision must not be mislabelled a "NetBox device" collision.
         assert all("NetBox object collision" in e["error"] for e in errors)

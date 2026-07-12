@@ -25,6 +25,7 @@ from netbox_librenms_plugin.import_utils import (
     _determine_device_name,
     bulk_import_devices,
     bulk_import_vms,
+    classify_bulk_precheck,
     detect_bulk_collisions,
     detect_collisions_for_device_ids,
     fetch_device_with_cache,
@@ -1057,62 +1058,6 @@ class BulkImportDevicesView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
             if cached_device
         }
 
-        # Re-run the same-NetBox-device collision check the confirm modal performs. The confirm
-        # preview is advisory only — a re-submitted stale confirm form, a scripted POST, or the
-        # "run as background job" path reaches this view directly. Block a colliding batch here
-        # (and again in ImportDevicesJob) so it can't be imported by bypassing the preview.
-        # A single selected device can never collide (collisions need two distinct LibreNMS ids
-        # on one NetBox device), so skip the extra validation pass for the common single-row case.
-        collisions, unresolved = (
-            detect_collisions_for_device_ids(
-                parsed_ids,
-                self.librenms_api,
-                libre_devices_cache=libre_devices_cache,
-                sync_options=sync_options,
-                # Each row validates in its actual import mode: a VM row checked in Device mode
-                # would run the serial/IP matching bulk_import_vms skips and could fabricate a
-                # collision that blocks a valid batch.
-                vm_device_ids=vm_imports,
-            )
-            if len(parsed_ids) >= 2
-            else ([], [])
-        )
-        if unresolved:
-            # Fail closed: these ids couldn't be fetched to collision-check, so block rather than
-            # import them unchecked (mirrors ImportDevicesJob). A transient get_device_info miss
-            # could otherwise let a colliding row through on retry.
-            ids = ", ".join(str(d) for d in unresolved)
-            # Object-neutral wording (row(s), not device(s)): parsed_ids includes VM rows via
-            # vm_device_ids=vm_imports, so a VM-only batch must not be mislabelled — matches
-            # the deliberately neutral copy in ImportDevicesJob.
-            msg = (
-                f"Bulk import blocked: could not fetch LibreNMS device info for {len(unresolved)} "
-                f"selected row(s) (id(s): {ids}) to verify collisions. Retry the import."
-            )
-            if is_htmx:
-                # 200, like the collision step: HTMX skips the swap on non-2xx.
-                return render(
-                    request,
-                    "netbox_librenms_plugin/htmx/bulk_import_collision.html",
-                    {"error_message": msg},
-                )
-            messages.error(request, msg)
-            return redirect("plugins:netbox_librenms_plugin:librenms_import")
-        if collisions:
-            if is_htmx:
-                # 200, like the confirm step: HTMX skips the swap on non-2xx.
-                return render(
-                    request,
-                    "netbox_librenms_plugin/htmx/bulk_import_collision.html",
-                    {"collisions": collisions},
-                )
-            messages.error(
-                request,
-                "Bulk import blocked: two or more selected LibreNMS devices resolve to the same "
-                "NetBox object. Resolve each colliding object individually, or deselect the duplicates.",
-            )
-            return redirect("plugins:netbox_librenms_plugin:librenms_import")
-
         # Check if we should use background job for import
         total_import_count = len(parsed_ids)
 
@@ -1186,6 +1131,48 @@ class BulkImportDevicesView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
                         request,
                         f"Background job requested but no workers available. Importing {total_import_count} devices synchronously...",
                     )
+
+        # Re-run the same-NetBox-device collision check the confirm modal performs. The confirm
+        # preview is advisory only — a re-submitted stale confirm form or a scripted POST reaches
+        # this view directly — so block a colliding batch here too. This runs on the SYNCHRONOUS
+        # path only: it sits AFTER the background-job dispatch above, so a batch that enqueued a job
+        # doesn't pay this validation cost synchronously (ImportDevicesJob re-runs the same check).
+        # A single selected device can never collide (collisions need two distinct LibreNMS ids on
+        # one NetBox object), so skip the extra validation pass for the common single-row case.
+        precheck_skip_msg = None
+        if len(parsed_ids) >= 2:
+            collisions, unresolved = detect_collisions_for_device_ids(
+                parsed_ids,
+                self.librenms_api,
+                libre_devices_cache=libre_devices_cache,
+                sync_options=sync_options,
+                # Each row validates in its actual import mode: a VM row checked in Device mode
+                # would run the serial/IP matching bulk_import_vms skips and could fabricate a
+                # collision that blocks a valid batch.
+                vm_device_ids=vm_imports,
+            )
+            outcome = classify_bulk_precheck(collisions, unresolved, device_ids_to_import, vm_imports)
+            if outcome.blocked:
+                # Genuine collision (two rows → one NetBox object): block the whole batch, exactly
+                # as the confirm modal does. Same shared wording ImportDevicesJob logs.
+                if is_htmx:
+                    # 200, like the confirm step: HTMX skips the swap on non-2xx.
+                    return render(
+                        request,
+                        "netbox_librenms_plugin/htmx/bulk_import_collision.html",
+                        {"collisions": outcome.collisions},
+                    )
+                messages.error(request, outcome.block_message)
+                return redirect("plugins:netbox_librenms_plugin:librenms_import")
+            if outcome.skipped_ids:
+                # Skip ONLY the rows that couldn't be fetched/validated to collision-check them
+                # (import the rest) rather than blocking the whole batch — a transient fetch miss on
+                # one row no longer drops the entire import. Those rows are not imported (importing
+                # an un-collision-checked row could bypass this guard); the skip is surfaced below.
+                device_ids_to_import = outcome.importable_device_ids
+                vm_imports = outcome.importable_vm_imports
+                vm_ids_to_import = list(vm_imports.keys())
+                precheck_skip_msg = outcome.skip_message
 
         # Synchronous import execution (reuses libre_devices_cache built above).
         # Import devices and VMs separately
@@ -1274,6 +1261,12 @@ class BulkImportDevicesView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
             if not is_htmx:
                 messages.warning(request, _msg)
             htmx_toasts.append(("text-bg-warning", "mdi-alert", "Warning", _msg))
+        # Rows the collision pre-check couldn't fetch/validate were skipped (not imported) rather
+        # than blocking the whole batch; surface that so the user knows which rows to retry.
+        if precheck_skip_msg:
+            if not is_htmx:
+                messages.warning(request, precheck_skip_msg)
+            htmx_toasts.append(("text-bg-warning", "mdi-alert", "Warning", precheck_skip_msg))
 
         if request.headers.get("HX-Request"):
             # Return updated rows for all imported devices using HTMX OOB swaps

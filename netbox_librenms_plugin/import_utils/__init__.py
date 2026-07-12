@@ -15,8 +15,10 @@ The F401 suppressions prevent linters from flagging them as unused.
 """
 
 from .bulk_import import (  # noqa: F401
+    BulkPrecheckOutcome,
     bulk_import_devices,
     bulk_import_devices_shared,
+    classify_bulk_precheck,
     detect_collisions_for_device_ids,
     process_device_filters,
 )

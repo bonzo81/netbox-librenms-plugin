@@ -2,6 +2,7 @@
 
 import pytest
 
+from netbox_librenms_plugin.import_utils.bulk_import import classify_bulk_precheck
 from netbox_librenms_plugin.import_utils.collisions import detect_bulk_collisions
 
 
@@ -426,3 +427,43 @@ def test_non_string_merge_model_name_is_normalized():
     assert groups[0]["nb_device_pk"] == 88
     assert groups[0]["nb_model_name"] == "device"
     assert {r["device_id"] for r in groups[0]["librenms_rows"]} == {400, 401}
+
+
+# --- classify_bulk_precheck: shared block/skip decision for the non-modal import paths ---
+
+
+def test_classify_clean_batch_imports_everything():
+    """No collisions and no unresolved rows → nothing blocked or skipped; the whole batch is importable."""
+    outcome = classify_bulk_precheck([], [], device_ids=[1, 2], vm_imports={3: {"cluster_id": 9}})
+    assert outcome.blocked is False
+    assert outcome.block_message == ""
+    assert outcome.skipped_ids == []
+    assert outcome.skip_message == ""
+    assert outcome.importable_device_ids == [1, 2]
+    assert outcome.importable_vm_imports == {3: {"cluster_id": 9}}
+
+
+def test_classify_unresolved_rows_are_skipped_not_blocked():
+    """Unresolved rows are excluded from the importable sets (device AND VM) and surfaced via skip_message — NOT a whole-batch block."""
+    outcome = classify_bulk_precheck([], [2, 3], device_ids=[1, 2], vm_imports={3: {"cluster_id": 9}, 4: {}})
+    assert outcome.blocked is False
+    assert outcome.skipped_ids == [2, 3]
+    # id 2 (a device) and id 3 (a VM) drop out; the rest import.
+    assert outcome.importable_device_ids == [1]
+    assert outcome.importable_vm_imports == {4: {}}
+    # Object-neutral wording naming the skipped ids, never "device(s)".
+    assert "Skipped 2 selected row(s)" in outcome.skip_message
+    assert "id(s): 2, 3" in outcome.skip_message
+    assert "verify collisions" in outcome.skip_message
+    assert "device(s)" not in outcome.skip_message
+
+
+def test_classify_collisions_block_whole_batch():
+    """A genuine collision blocks the whole batch: blocked=True, block_message names the NetBox object pk(s)."""
+    outcome = classify_bulk_precheck([{"nb_device_pk": 7}], [], device_ids=[1, 2], vm_imports={})
+    assert outcome.blocked is True
+    assert "Bulk import blocked" in outcome.block_message
+    assert "1 NetBox object collision" in outcome.block_message
+    assert "pk(s): 7" in outcome.block_message
+    # Object-neutral: never mislabel a VM collision as a "NetBox device".
+    assert "NetBox device collision" not in outcome.block_message

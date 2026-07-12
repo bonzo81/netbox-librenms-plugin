@@ -5704,10 +5704,10 @@ class TestBulkImportDevicesViewCollisionGate:
         # Gate cleared (distinct devices) → the importer ran.
         mock_import.assert_called_once()
 
-    def test_unfetchable_id_blocks_import(self):
-        """A selected id whose LibreNMS info can't be fetched (not cached + get_device_info fails) blocks the import (fail closed) — the importer is never reached."""
+    def test_unfetchable_id_is_skipped_rest_imports(self):
+        """A selected id whose LibreNMS info can't be fetched (not cached + get_device_info fails) is SKIPPED, not a whole-batch block: the fetchable rows still import and the skipped row is surfaced. Restores the per-device resilience the old fail-closed block removed."""
         view = self._make_view()
-        # id 2 isn't cached and its info fetch fails → it can't be collision-checked.
+        # id 2 isn't cached and its info fetch fails → it can't be collision-checked → skipped.
         view._librenms_api.get_device_info = MagicMock(return_value=(False, None))
         request = _make_request(post={"select": ["1", "2"]}, headers={"HX-Request": "true"})
         request.POST.getlist = MagicMock(return_value=["1", "2"])
@@ -5715,6 +5715,7 @@ class TestBulkImportDevicesViewCollisionGate:
 
         make_device("gate-unresolved-host")
         libre = {1: {"device_id": 1, "sysName": "gate-unresolved-host", "hostname": "gate-unresolved-host"}}
+        import_result = {"success": [], "failed": [], "skipped": [], "virtual_chassis_created": 0}
         with (
             patch.object(view, "require_write_permission", return_value=None),
             patch(
@@ -5722,20 +5723,62 @@ class TestBulkImportDevicesViewCollisionGate:
             ),
             patch(
                 "netbox_librenms_plugin.views.imports.actions.fetch_device_with_cache",
-                side_effect=lambda did, _api: libre.get(did),
+                side_effect=lambda did, _api, **_kw: libre.get(did),
             ),
-            patch("netbox_librenms_plugin.views.imports.actions.bulk_import_devices") as mock_import,
+            patch(
+                "netbox_librenms_plugin.views.imports.actions.bulk_import_devices", return_value=import_result
+            ) as mock_import,
         ):
             response = view.post(request)
 
+        # The fetchable id 1 imports; only the unresolved id 2 is dropped (not a whole-batch block).
         assert response.status_code == 200
+        mock_import.assert_called_once()
+        assert mock_import.call_args.kwargs["device_ids"] == [1]
         html = response.content.decode()
-        assert "could not fetch LibreNMS device info" in html
-        # Object-neutral copy: the batch can contain VM rows, so the block message says
-        # "row(s)", never "device(s)" — matching ImportDevicesJob's wording.
+        # The skipped row is surfaced, object-neutral ("row(s)", never "device(s)").
+        assert "Skipped" in html
+        assert "verify collisions" in html
         assert "selected row(s)" in html
         assert "selected device(s)" not in html
-        mock_import.assert_not_called()
+
+    def test_background_batch_defers_collision_precheck_to_job(self):
+        """A batch routed to a background job must NOT run the collision pre-check synchronously — it's deferred to ImportDevicesJob (which re-runs it), so the request doesn't pay the validation cost. The job is enqueued and the sync detector is never called."""
+        view = self._make_view()
+        request = _make_request(
+            post={"select": ["1", "2"], "use_background_job": "on"},
+            headers={"HX-Request": "true"},
+            user_is_superuser=True,
+        )
+        request.POST.getlist = MagicMock(return_value=["1", "2"])
+
+        libre = {
+            1: {"device_id": 1, "sysName": "bg-a", "hostname": "bg-a"},
+            2: {"device_id": 2, "sysName": "bg-b", "hostname": "bg-b"},
+        }
+        with (
+            patch.object(view, "require_write_permission", return_value=None),
+            patch(
+                "netbox_librenms_plugin.views.imports.actions.resolve_naming_preferences", return_value=(True, False)
+            ),
+            patch(
+                "netbox_librenms_plugin.views.imports.actions.fetch_device_with_cache",
+                side_effect=lambda did, _api, **_kw: libre.get(did),
+            ),
+            patch("utilities.rqworker.get_workers_for_queue", return_value=1),
+            patch(
+                "netbox_librenms_plugin.jobs.ImportDevicesJob.enqueue",
+                return_value=MagicMock(pk=4242, job_id="job-4242"),
+            ) as mock_enqueue,
+            patch("netbox_librenms_plugin.views.imports.actions.detect_collisions_for_device_ids") as mock_detect,
+            patch("netbox_librenms_plugin.views.imports.actions.messages"),
+        ):
+            response = view.post(request)
+
+        # The job is enqueued and the synchronous collision pre-check is skipped entirely (deferred).
+        mock_enqueue.assert_called_once()
+        mock_detect.assert_not_called()
+        assert response.status_code == 200
 
     def test_colliding_batch_non_htmx_message_is_object_neutral(self):
         """The non-HTMX collision block toast says "NetBox object", not "NetBox device".

@@ -2,6 +2,7 @@
 
 import hashlib
 import logging
+from dataclasses import dataclass
 from typing import List
 
 from django.core.cache import cache
@@ -194,6 +195,93 @@ def detect_collisions_for_device_ids(
             }
         )
     return detect_bulk_collisions(devices), unresolved_ids
+
+
+@dataclass
+class BulkPrecheckOutcome:
+    """
+    Shared decision derived from a :func:`detect_collisions_for_device_ids` result.
+
+    Consumed by BOTH non-modal import callers — the synchronous ``BulkImportDevicesView`` and the
+    async ``ImportDevicesJob`` — so their block/skip semantics and user-facing wording can't drift
+    (they previously re-implemented the branching inline, and the copy had already diverged:
+    "Import blocked" vs "Bulk import blocked").
+
+    Semantics:
+        * ``blocked`` (genuine collisions): two LibreNMS rows resolve to the same NetBox object,
+          which can't be auto-resolved — the WHOLE batch is blocked and nothing imports.
+        * ``skipped_ids`` (unresolved rows): a row whose LibreNMS info couldn't be fetched/validated
+          to collision-check it. These are SKIPPED, not a whole-batch block — a transient miss on
+          one row no longer drops the entire import — but they are NOT imported either (importing an
+          un-collision-checked row could bypass the collision guard). The rest import normally.
+
+    Attributes:
+        blocked: True when genuine collisions exist → import nothing.
+        collisions: The collision groups (for the HTMX modal / job log).
+        block_message: Shared collision-block copy (``""`` when not blocked).
+        skipped_ids: Unresolved ids to skip (import the rest).
+        skip_message: Shared copy naming the skipped rows (``""`` when none).
+        importable_device_ids: ``device_ids`` minus ``skipped_ids``.
+        importable_vm_imports: ``vm_imports`` minus ``skipped_ids``.
+    """
+
+    blocked: bool
+    collisions: list
+    block_message: str
+    skipped_ids: list
+    skip_message: str
+    importable_device_ids: list
+    importable_vm_imports: dict
+
+
+def classify_bulk_precheck(collisions, unresolved, device_ids, vm_imports) -> BulkPrecheckOutcome:
+    """
+    Turn a ``(collisions, unresolved)`` pre-check result into the shared import decision.
+
+    See :class:`BulkPrecheckOutcome` for the block-vs-skip semantics. Genuine collisions block the
+    whole batch; unresolved rows are excluded from the importable sets and surfaced via
+    ``skip_message`` while the rest import. Both callers apply this identically.
+
+    Args:
+        collisions: Collision groups from :func:`detect_bulk_collisions`.
+        unresolved: Ids that couldn't be collision-checked (fetch/validation miss).
+        device_ids: The batch's device-import ids.
+        vm_imports: The batch's VM imports mapping (``{device_id: manual_mappings}``).
+
+    Returns:
+        BulkPrecheckOutcome: The shared block/skip decision.
+    """
+    unresolved_set = set(unresolved)
+    importable_device_ids = [d for d in device_ids if d not in unresolved_set]
+    importable_vm_imports = {d: v for d, v in vm_imports.items() if d not in unresolved_set}
+
+    skip_message = ""
+    if unresolved:
+        ids = ", ".join(str(d) for d in unresolved)
+        skip_message = (
+            f"Skipped {len(unresolved)} selected row(s) (id(s): {ids}): their LibreNMS device info "
+            f"couldn't be fetched to verify collisions, so they were not imported. The remaining "
+            f"rows were imported; retry those rows individually."
+        )
+
+    block_message = ""
+    if collisions:
+        pks = ", ".join(str(group["nb_device_pk"]) for group in collisions)
+        block_message = (
+            f"Bulk import blocked: {len(collisions)} NetBox object collision(s) in this batch "
+            f"(pk(s): {pks}). Two or more selected LibreNMS devices resolve to the same NetBox "
+            f"object; resolve each individually, or deselect the duplicates."
+        )
+
+    return BulkPrecheckOutcome(
+        blocked=bool(collisions),
+        collisions=collisions,
+        block_message=block_message,
+        skipped_ids=list(unresolved),
+        skip_message=skip_message,
+        importable_device_ids=importable_device_ids,
+        importable_vm_imports=importable_vm_imports,
+    )
 
 
 def bulk_import_devices_shared(
