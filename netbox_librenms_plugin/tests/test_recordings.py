@@ -302,9 +302,12 @@ def test_load_manifest_returns_empty_on_unreadable_file():
 @pytest.mark.parametrize("recording", _RECORDINGS, ids=_ids)
 def test_recording_has_required_schema(recording):
     """Every recording declares the keys the replay harness depends on."""
+    # Reject booleans the same way recording_schema_errors() does: bool is a subclass of int, so
+    # `== 1` / `isinstance(..., int)` alone would let True/False pass this contract check.
+    assert isinstance(recording.get("schema_version"), int) and not isinstance(recording.get("schema_version"), bool)
     assert recording.get("schema_version") == 1
     assert recording.get("name")
-    assert isinstance(recording.get("device_id"), int)
+    assert isinstance(recording.get("device_id"), int) and not isinstance(recording.get("device_id"), bool)
     assert isinstance(recording.get("responses"), dict) and recording["responses"]
     assert isinstance(recording.get("expected"), dict) and recording["expected"], (
         f"{recording.get('name')} has no expected outcomes to assert"
