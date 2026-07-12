@@ -930,6 +930,37 @@ class TestRefreshExistingDevice:
         )
         assert validation["can_import"] is False
 
+    def test_cross_model_warning_cleared_when_serial_uniquely_binds_device(self):
+        """A unique serial match binding the Device clears the earlier cross-model hostname warning."""
+        from netbox_librenms_plugin.import_utils.bulk_import import _refresh_existing_device
+
+        # Same name on BOTH models → the name fallback flags a cross-model hostname collision and
+        # leaves the row unmatched. The Device additionally carries a unique serial.
+        dev = make_device("crossclr-sw", serial="CRXCLR-SERIAL-1")
+        make_vm("crossclr-sw")
+
+        validation = self._device_validation(resolved_name="crossclr-sw")
+        # device_id 77777 matches no librenms_id CF → the name fallback runs, warns, then the
+        # serial fallback uniquely resolves the Device.
+        libre_device = {
+            "device_id": 77777,
+            "hostname": "crossclr-sw",
+            "sysName": "crossclr-sw",
+            "serial": "CRXCLR-SERIAL-1",
+        }
+
+        _refresh_existing_device(validation, libre_device=libre_device, server_key="default")
+
+        # The stronger serial match wins and binds the Device...
+        assert validation["existing_device"].pk == dev.pk
+        assert validation["existing_match_type"] == "serial"
+        # ...and the stale cross-model "cannot determine which to match" warning is gone.
+        assert not any("Both a VM and Device exist with hostname" in w for w in validation.get("warnings", [])), (
+            "a unique serial match must clear the earlier cross-model hostname warning"
+        )
+        assert validation["can_import"] is False
+        assert validation["is_ready"] is False
+
     def test_ambiguous_hostname_refresh_shows_only_duplicate_blocker(self):
         """An ambiguous multi-device hostname match is terminal: the row shows only the duplicate-resolution blocker, not a stale create-time role blocker."""
         from dcim.models import Device, Site

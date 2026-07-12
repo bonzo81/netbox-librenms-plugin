@@ -861,6 +861,15 @@ def _refresh_existing_device(validation: dict, libre_device: dict = None, server
                 return
 
         if new_device:
+            # A stronger identity (serial / management IP) uniquely bound this row after the
+            # name fallback flagged a cross-model (VM + Device) hostname collision. That warning
+            # said "cannot determine which to match" — now moot, since new_device IS the match.
+            # Drop it so the resolved row doesn't keep showing a stale "ambiguous" warning.
+            msgs = validation.get("warnings")
+            if isinstance(msgs, list):
+                validation["warnings"] = [
+                    m for m in msgs if not (isinstance(m, str) and _CROSS_MODEL_HOSTNAME_MARKER in m)
+                ]
             validation["existing_device"] = new_device
             validation["existing_match_type"] = match_type
             # Re-derive linkage so a librenms_id match is correctly shown as the
