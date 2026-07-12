@@ -1957,6 +1957,30 @@ class TestSyncInterfaceLagViewRealDB:
         assert member.lag_id == agg.pk
         assert agg.type == "lag"
 
+    def test_builds_interface_index_once_per_post(self):
+        """post() builds the VC-wide interface index once and shares it across both resolutions."""
+        import netbox_librenms_plugin.views.sync.interfaces as sync_mod
+        from netbox_librenms_plugin.tests.conftest import make_device
+
+        device = make_device("lag-host-idx")
+        self._iface(device, "Gi0/1", 50)
+        self._iface(device, "Po1", 60)
+
+        real_build = sync_mod._build_interface_index
+        calls = []
+
+        def counting_build(obj, server_key):
+            calls.append(obj)
+            return real_build(obj, server_key)
+
+        view = self._make_view()
+        req = _make_request({"port_id": "50", "lag_port_id": "60", "server_key": "default"})
+        with patch.object(sync_mod, "_build_interface_index", side_effect=counting_build):
+            resp = view.post(req, object_type="device", object_id=device.pk)
+
+        assert resp.status_code == 200
+        assert len(calls) == 1  # built once and shared; pre-fix each resolve rebuilt it (2)
+
     def test_self_lag_rejected_by_real_full_clean(self):
         import json
 

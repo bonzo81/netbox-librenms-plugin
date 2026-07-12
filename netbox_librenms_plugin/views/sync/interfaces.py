@@ -1330,12 +1330,18 @@ class _BaseRelationshipSyncView(LibreNMSPermissionMixin, NetBoxObjectPermissionM
         # obj is the VC member the JS posted (vcMemberSelect), so both ends must belong to it —
         # pin the owner so a stale librenms_id can't resolve onto another member.
         expected_owner = _interface_owner_for_object(obj)
-        source_iface, err = _resolve_interface_by_port_id(obj, port_id, server_key, expected_owner=expected_owner)
+        # Build the interface index ONCE and share it across both resolutions below — otherwise
+        # each _resolve_interface_by_port_id call rebuilds it internally (a VC-wide interface scan
+        # re-reading every librenms_id custom field), doubling the DB work per click for no benefit.
+        iface_index = _build_interface_index(obj, server_key)
+        source_iface, err = _resolve_interface_by_port_id(
+            obj, port_id, server_key, expected_owner=expected_owner, index=iface_index
+        )
         if err:
             return JsonResponse({"error": f"{self.source_label} interface: {err}"}, status=404)
 
         related_iface, err = _resolve_interface_by_port_id(
-            obj, related_port_id, server_key, name_hint=related_name, expected_owner=expected_owner
+            obj, related_port_id, server_key, name_hint=related_name, expected_owner=expected_owner, index=iface_index
         )
         if err:
             return JsonResponse({"error": f"{self.related_label} interface: {err}"}, status=404)
