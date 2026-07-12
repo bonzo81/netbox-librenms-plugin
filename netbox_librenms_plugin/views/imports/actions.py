@@ -92,7 +92,14 @@ def _attach_messages_oob(response, request):
     except Exception:  # pragma: no cover - defensive: don't break HTMX response on render error
         logger.debug("Failed to render inc/messages.html for OOB toast attach", exc_info=True)
         return response
-    response.content = response.content + rendered.encode("utf-8")
+    # Compose the two trusted HTML fragments (existing response bytes + the rendered
+    # inc/messages.html) through format_html()/mark_safe() — the repo's CodeQL-safe HTML
+    # envelope — rather than concatenating raw bytes.
+    response.content = format_html(
+        "{}{}",
+        mark_safe(response.content.decode(response.charset)),
+        mark_safe(rendered),
+    ).encode(response.charset)
     return response
 
 

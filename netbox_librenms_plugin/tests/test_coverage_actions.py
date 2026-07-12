@@ -783,6 +783,9 @@ class TestAttachMessagesOob:
         mock_render.assert_called_once()
         assert b'<div id="django-messages"' in result.content
         assert result.content.startswith(b"<tr>row html</tr>")
+        # The CodeQL-safe format_html() composition produces exactly the concatenation of the
+        # original response bytes and the rendered (trusted) fragment — no escaping of either.
+        assert result.content == b"<tr>row html</tr>" + b'<div id="django-messages" hx-swap-oob="true"></div>'
 
     def test_skips_oob_swap_when_no_messages_queued(self):
         """No pending messages → don't append an empty OOB container that would wipe toasts already visible from an earlier action."""
