@@ -18,6 +18,7 @@ from netbox_librenms_plugin.utils import (
     is_list_of_dicts,
     is_valid_ports_payload,
     normalize_librenms_port_id,
+    normalize_relationship_maps,
 )
 from netbox_librenms_plugin.views.mixins import (
     CacheMixin,
@@ -171,17 +172,13 @@ class BaseInterfaceTableView(
         Build the normalized LAG/sub-interface maps and host-scoped port index from a cached snapshot.
 
         Returns ``(lag_members, sub_interfaces, by_port_id)``. Shared by get_context_data
-        and SingleInterfaceVerifyView so the corruption guard, the key normalization, and
-        the host-scoping live in exactly one place instead of being re-derived per call site.
+        and SingleInterfaceVerifyView. The corruption guard + key normalization for the
+        relationship maps live in :func:`normalize_relationship_maps` (also used by the bulk
+        sync writer, so the two can't drift); this method adds the host-scoped ``by_port_id``.
 
-        Fail-soft against a corrupt / partial-write / format-migrated cache: a None or
-        non-dict ``port_stack_relationships`` (or a present-but-None nested ``lag_members`` /
-        ``sub_interfaces``) collapses to ``{}`` — the ``.get(key, {})`` default only fills a
-        *missing* key, so a present-but-None value would otherwise AttributeError on
-        ``.items()``. Keys are normalized via ``normalize_librenms_port_id`` so the int-keyed
-        lookups in ``_enrich_port_with_lag_parent`` never miss a stringified cache key, and
-        ``by_port_id`` is scoped to host (``_source != "oob"``) rows so an OOB controller
-        reusing a host port_id can't attach the wrong aggregate/parent during enrichment.
+        ``by_port_id`` is scoped to host (``_source != "oob"``) rows so an OOB controller reusing
+        a host port_id can't attach the wrong aggregate/parent during enrichment, and each
+        port_id is normalized once via ``normalize_librenms_port_id``.
 
         Args:
             cached_data (dict): The cached LibreNMS snapshot (ports + port_stack_relationships).
@@ -189,22 +186,14 @@ class BaseInterfaceTableView(
         Returns:
             tuple: ``(lag_members, sub_interfaces, by_port_id)`` — all normalized-int keyed.
         """
-        relationships = cached_data.get("port_stack_relationships") or {}
-        if not isinstance(relationships, dict):
-            relationships = {}
-        lag_members_raw = relationships.get("lag_members") or {}
-        if not isinstance(lag_members_raw, dict):
-            lag_members_raw = {}
-        sub_interfaces_raw = relationships.get("sub_interfaces") or {}
-        if not isinstance(sub_interfaces_raw, dict):
-            sub_interfaces_raw = {}
-        lag_members = {normalize_librenms_port_id(k): v for k, v in lag_members_raw.items()}
-        sub_interfaces = {normalize_librenms_port_id(k): v for k, v in sub_interfaces_raw.items()}
-        by_port_id = {
-            normalize_librenms_port_id(p.get("port_id")): p
-            for p in cached_data.get("ports", [])
-            if normalize_librenms_port_id(p.get("port_id")) is not None and p.get("_source") != "oob"
-        }
+        lag_members, sub_interfaces = normalize_relationship_maps(cached_data.get("port_stack_relationships"))
+        by_port_id = {}
+        for p in cached_data.get("ports", []):
+            if p.get("_source") == "oob":
+                continue
+            pid = normalize_librenms_port_id(p.get("port_id"))
+            if pid is not None:
+                by_port_id[pid] = p
         return lag_members, sub_interfaces, by_port_id
 
     def post(self, request, pk):

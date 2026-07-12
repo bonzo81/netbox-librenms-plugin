@@ -21,6 +21,7 @@ from netbox_librenms_plugin.utils import (
     get_librenms_device_id,
     get_librenms_sync_device,
     normalize_librenms_port_id,
+    normalize_relationship_maps,
     set_librenms_device_id,
 )
 from netbox_librenms_plugin.views.mixins import (
@@ -233,24 +234,16 @@ class SyncInterfacesView(
         if not relationships:
             return
 
-        # Normalize the relationship-map keys once at load (mirror get_context_data /
-        # SingleInterfaceVerifyView). resolve_port_relationships emits normalized int keys, but
-        # a JSON cache round-trip stringifies dict keys, so the cached map can arrive str- or
-        # int-keyed. Re-normalizing here lets every lookup below use a single
-        # normalize_librenms_port_id(port_id) call instead of a hand-rolled get(str)/get(int)
-        # fallback that silently skips a write whenever one form is missing.
-        # Coerce a present-but-non-dict value (e.g. a list from a corrupt / partial-write /
-        # format-migrated cache) to {} — mirror the hardened reader _build_relationship_maps so
-        # the bulk sync POST fails soft (skips relationship enrichment) instead of raising
-        # AttributeError on .items().
-        lag_members_raw = relationships.get("lag_members")
-        if not isinstance(lag_members_raw, dict):
-            lag_members_raw = {}
-        sub_interfaces_raw = relationships.get("sub_interfaces")
-        if not isinstance(sub_interfaces_raw, dict):
-            sub_interfaces_raw = {}
-        lag_members = {normalize_librenms_port_id(k): v for k, v in lag_members_raw.items()}
-        sub_interfaces = {normalize_librenms_port_id(k): v for k, v in sub_interfaces_raw.items()}
+        # Normalize the relationship-map keys once at load through the shared helper (the same one
+        # get_context_data / SingleInterfaceVerifyView use via _build_relationship_maps), so the
+        # bulk path can't drift on the corruption guard or key normalization. resolve_port_relationships
+        # emits normalized int keys, but a JSON cache round-trip stringifies dict keys, so the cached
+        # map can arrive str- or int-keyed; re-normalizing lets every lookup below use a single
+        # normalize_librenms_port_id(port_id) call. The helper also coerces a non-dict relationships
+        # (e.g. a list from a corrupt / partial-write cache) to {} — the local `if not relationships`
+        # guard above only catches a falsy value, so a truthy non-dict would otherwise AttributeError
+        # on .get()/.items() here.
+        lag_members, sub_interfaces = normalize_relationship_maps(relationships)
         if not lag_members and not sub_interfaces:
             return
 

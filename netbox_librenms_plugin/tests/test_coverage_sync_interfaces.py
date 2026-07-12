@@ -1443,6 +1443,24 @@ class TestSyncLagAndParentRelationships:
         member.refresh_from_db()
         assert member.lag_id == agg.pk
 
+    def test_non_dict_relationships_fails_soft_not_attributeerror(self, db):
+        """
+        A truthy but non-dict ``relationships`` (a list from a corrupt / partial-write cache) must
+        fail soft. The local ``if not relationships`` guard only catches FALSY values, so the
+        unfixed bulk path called ``relationships.get(...)`` on the list and raised AttributeError;
+        the shared ``normalize_relationship_maps`` coerces it to ``{}`` so the sync is skipped.
+        """
+        device = self._make_device()
+        member = self._iface(device, "Gi0/2", 11)
+        ports_data = [{"ifName": "Gi0/2", "port_id": 11}]
+
+        view = self._make_view(name_field="ifName", selected_port_ids={"11"})
+        # Must NOT raise AttributeError on the non-dict relationships.
+        view._sync_lag_and_parent_relationships(device, [], ports_data, ["garbage"], "default")
+
+        member.refresh_from_db()
+        assert member.lag_id is None  # nothing persisted from the corrupt map
+
     def test_invalid_lag_link_rejected_by_full_clean_is_skipped(self, db):
         """A relationship that fails Interface.full_clean() (a self-LAG from stale/crafted port_stack data) must be skipped, not persisted."""
         device = self._make_device()

@@ -154,6 +154,34 @@ def validate_regex_field(value, field_name):
         raise ValidationError({field_name: f"Invalid regex: {exc}"}) from exc
 
 
+def normalize_relationship_maps(relationships) -> tuple[dict, dict]:
+    """
+    Normalize a cached ``port_stack_relationships`` mapping into int-keyed relationship maps.
+
+    Returns ``(lag_members, sub_interfaces)``. The single home for the corruption guard + key
+    normalization shared by the interface-table readers
+    (:meth:`BaseInterfaceTableView._build_relationship_maps`) and the bulk sync writer
+    (:meth:`SyncInterfacesView._sync_lag_and_parent_relationships`), so the two can't drift.
+
+    Fails soft against a corrupt / partial-write / format-migrated cache: a None or non-dict
+    ``relationships`` (e.g. a list) — or a present-but-None / non-dict nested ``lag_members`` /
+    ``sub_interfaces`` — collapses to ``{}`` so ``.items()`` never raises ``AttributeError``. Keys
+    are normalized via :func:`normalize_librenms_port_id` so the int-keyed lookups never miss a
+    stringified (JSON-round-tripped) cache key.
+    """
+    if not isinstance(relationships, dict):
+        relationships = {}
+    lag_members_raw = relationships.get("lag_members")
+    if not isinstance(lag_members_raw, dict):
+        lag_members_raw = {}
+    sub_interfaces_raw = relationships.get("sub_interfaces")
+    if not isinstance(sub_interfaces_raw, dict):
+        sub_interfaces_raw = {}
+    lag_members = {normalize_librenms_port_id(k): v for k, v in lag_members_raw.items()}
+    sub_interfaces = {normalize_librenms_port_id(k): v for k, v in sub_interfaces_raw.items()}
+    return lag_members, sub_interfaces
+
+
 def get_virtual_chassis_member(
     device: Device,
     port_name: str,

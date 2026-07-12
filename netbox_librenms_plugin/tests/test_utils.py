@@ -397,6 +397,23 @@ class TestConversionHelpers:
         assert normalize_librenms_port_id("abc") is None
         assert normalize_librenms_port_id(1.5) is None
 
+    def test_normalize_relationship_maps_normalizes_and_guards(self):
+        from netbox_librenms_plugin.utils import normalize_relationship_maps
+
+        # JSON-round-tripped string keys are normalized to int; both maps returned.
+        lag, sub = normalize_relationship_maps({"lag_members": {"10": 100}, "sub_interfaces": {"5": 7}})
+        assert lag == {10: 100}
+        assert sub == {5: 7}
+
+    def test_normalize_relationship_maps_coerces_corrupt_shapes_to_empty(self):
+        from netbox_librenms_plugin.utils import normalize_relationship_maps
+
+        # A non-dict relationships (corrupt / partial-write cache) must not raise.
+        assert normalize_relationship_maps(["garbage"]) == ({}, {})
+        assert normalize_relationship_maps(None) == ({}, {})
+        # Present-but-non-dict nested maps collapse to {} instead of AttributeError on .items().
+        assert normalize_relationship_maps({"lag_members": None, "sub_interfaces": [1, 2]}) == ({}, {})
+
 
 # =============================================================================
 # TestVirtualChassisHelpers - 4 tests
