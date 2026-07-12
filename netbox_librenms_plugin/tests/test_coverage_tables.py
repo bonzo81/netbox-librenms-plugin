@@ -1977,6 +1977,8 @@ class TestRelationshipBadgeCompactLayout:
         assert 'data-lag-port-id="42"' in html
         # The tooltip spells out that the click overwrites NetBox with the LibreNMS value.
         assert 'title="Update LAG to match LibreNMS"' in html
+        # Icon-only button also carries an accessible name (title alone is not a reliable one).
+        assert 'aria-label="Update LAG to match LibreNMS"' in html
 
     def test_missing_lnms_renders_badge_only_no_button(self):
         """missing_lnms (NetBox has the relationship, LibreNMS doesn't) has no LibreNMS port_id to sync TO, so the lnms_port_id guard keeps the button off — only the status pill renders."""
@@ -3151,6 +3153,28 @@ class TestVCInterfaceTable:
 
         # device_selection column should be shown for VC devices
         assert "device_selection" in table.columns
+
+    def test_render_device_selection_reuses_single_member_query(self):
+        """The member dropdown reuses one per-render VC member prefetch — no N+1 members query per row."""
+        from netbox_librenms_plugin.tables.interfaces import VCInterfaceTable
+
+        member1 = MagicMock(vc_position=1, id=101, name="m1")
+        member2 = MagicMock(vc_position=2, id=102, name="m2")
+        mock_device = MagicMock(id=101)
+        mock_device.virtual_chassis = MagicMock()
+        mock_device.virtual_chassis.members.all.return_value = [member1, member2]
+
+        with patch("netbox_librenms_plugin.tables.interfaces.get_interface_name_field", return_value="ifName"):
+            table = VCInterfaceTable(data=[], device=mock_device, interface_name_field="ifName")
+
+        # Render the dropdown for several rows AND resolve owners: the chassis member list must be
+        # fetched exactly once (shared cached_property), not re-queried per row. Before the fix
+        # render_device_selection issued its own members.all() every call (an N+1).
+        table.render_device_selection(None, {"ifName": "Gi0/0"})
+        table.render_device_selection(None, {"ifName": "Gi0/1"})
+        _ = table._vc_members_by_position
+
+        assert mock_device.virtual_chassis.members.all.call_count == 1
 
     def test_render_device_selection_ethernet_uses_vc_member(self):
         from netbox_librenms_plugin.tables.interfaces import VCInterfaceTable

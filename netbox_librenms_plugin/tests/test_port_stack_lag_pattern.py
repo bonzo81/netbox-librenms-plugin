@@ -244,21 +244,25 @@ class TestMigration0012Preflight:
 
     def test_preflight_strips_surrounding_whitespace(self):
         """A whitespace-padded librenms_os a bypassing path left behind is canonicalized to .strip().lower() (matching clean()), not left with surrounding spaces behind the Lower()-only constraint."""
+        from unittest.mock import patch
+
         from django.db import connection
         from django.db.migrations.executor import MigrationExecutor
 
         from netbox_librenms_plugin.models import PortStackLagPattern
 
         # Invoke the preflight with the HISTORICAL model as the migration actually sees it (state at
-        # 0011, before 0012). Its save() has no FullCleanOnSaveMixin/clean(), so — unlike the real
-        # model, whose save() would silently strip regardless of the migration code — the migration's
-        # OWN normalization is what persists. That is the only way this test can tell a Lower()-only
-        # rewrite (leaves " zzws ") apart from the fix's .strip().lower() (writes "zzws").
+        # 0011, before 0012). 0011 serialized FullCleanOnSaveMixin into the historical model's bases,
+        # so its save() still runs full_clean() — we stub full_clean below during the preflight so a
+        # future clean() gaining a strip can't mask a Lower()-only migration bug. With it stubbed the
+        # migration's OWN normalization is the only thing that writes the value, so this is the only
+        # way the test can tell a Lower()-only rewrite (leaves " zzws ") from .strip().lower() ("zzws").
         historical_apps = (
             MigrationExecutor(connection)
             .loader.project_state(("netbox_librenms_plugin", "0011_portstacklagpattern"))
             .apps
         )
+        historical_model = historical_apps.get_model("netbox_librenms_plugin", "portstacklagpattern")
 
         # bulk_create skips clean(): " ZZWS " reaches the row verbatim (Lower() of it is unique, so
         # the CI constraint permits it). The preflight must strip+lower it, not just lower it.
@@ -268,7 +272,10 @@ class TestMigration0012Preflight:
         pk = PortStackLagPattern.objects.get(lag_name_pattern=r"^zw\d+$").pk
         # Sanity: the padded value really landed in the row (bulk_create did not canonicalize it).
         assert PortStackLagPattern.objects.get(pk=pk).librenms_os == " ZZWS "
-        self._preflight()(historical_apps, self._schema_editor())
+        # Stub the historical model's full_clean so ONLY the migration's rewrite can normalize the
+        # row — otherwise a save-time strip could pass this test even if the migration itself is wrong.
+        with patch.object(historical_model, "full_clean", lambda self, *a, **k: None):
+            self._preflight()(historical_apps, self._schema_editor())
         # Exact canonical value, not a DB filter: trailing/leading-space equality is collation-fuzzy
         # and would let " zzws " match "zzws".
         assert PortStackLagPattern.objects.get(pk=pk).librenms_os == "zzws"

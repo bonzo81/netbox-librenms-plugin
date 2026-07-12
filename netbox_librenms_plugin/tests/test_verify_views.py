@@ -340,6 +340,67 @@ class TestSingleInterfaceVerifyView:
             assert lag_members == {}
             assert sub_interfaces == {}
 
+    @patch("netbox_librenms_plugin.views.object_sync.devices.BaseInterfaceTableView")
+    @patch("netbox_librenms_plugin.views.object_sync.devices.LibreNMSInterfaceTable")
+    @patch("netbox_librenms_plugin.views.object_sync.devices.get_object_or_404")
+    @patch("netbox_librenms_plugin.views.object_sync.devices.cache")
+    def test_verify_missed_port_id_does_not_repaint_same_named_row(
+        self, mock_cache, mock_get_obj, mock_table_cls, mock_base
+    ):
+        """A supplied port_id is authoritative: if it misses, do NOT fall back to a same-named row."""
+        device = MagicMock()
+        device.virtual_chassis = None
+        device.interfaces.filter.return_value.first.return_value = None
+        mock_get_obj.return_value = device
+        mock_table_cls.return_value.format_interface_data.return_value = {"ok": True}
+        # Cache holds a port NAMED "Et1" (port_id 99). The client posts a DIFFERENT stable id (777)
+        # matching no cached port. Name-fallback would wrongly repaint the port_id-99 row.
+        mock_cache.get.return_value = {"ports": [{"port_id": 99, "ifName": "Et1", "_source": "host"}]}
+
+        view = self._make_view()
+        view.require_object_permissions_json = MagicMock(return_value=None)
+        view.get_cache_key = MagicMock(return_value="ck")
+        request = _make_request(
+            {"device_id": 5, "interface_name": "Et1", "interface_name_field": "ifName", "port_id": 777}
+        )
+        response = view.post(request)
+
+        # The authoritative-but-missed id yields "not found", never a wrong-row repaint.
+        assert response.status_code == 404
+        mock_table_cls.return_value.format_interface_data.assert_not_called()
+
+    @patch("netbox_librenms_plugin.views.sync.interfaces._resolve_interface_by_port_id")
+    @patch("netbox_librenms_plugin.views.object_sync.devices.BaseInterfaceTableView")
+    @patch("netbox_librenms_plugin.views.object_sync.devices.LibreNMSInterfaceTable")
+    @patch("netbox_librenms_plugin.views.object_sync.devices.get_object_or_404")
+    @patch("netbox_librenms_plugin.views.object_sync.devices.cache")
+    def test_verify_name_hint_derived_from_matched_row(
+        self, mock_cache, mock_get_obj, mock_table_cls, mock_base, mock_resolve
+    ):
+        """The interface name fallback is taken from the port_id-matched cached row, not the posted display name."""
+        device = MagicMock()
+        device.virtual_chassis = None
+        device.interfaces.filter.return_value.first.return_value = None
+        mock_get_obj.return_value = device
+        mock_table_cls.return_value.format_interface_data.return_value = {"ok": True}
+        mock_resolve.return_value = (None, None)
+        # Run the REAL shared prep so the 3-tuple unpack in the view succeeds.
+        mock_base._build_relationship_maps.side_effect = _RealBase._build_relationship_maps
+        # The port_id-10 row's real name is "Et1"; the client posts a STALE display name.
+        mock_cache.get.return_value = {"ports": [{"port_id": 10, "ifName": "Et1", "_source": "host"}]}
+
+        view = self._make_view()
+        view.require_object_permissions_json = MagicMock(return_value=None)
+        view.get_cache_key = MagicMock(return_value="ck")
+        request = _make_request(
+            {"device_id": 5, "interface_name": "stale-display-name", "interface_name_field": "ifName", "port_id": 10}
+        )
+        response = view.post(request)
+
+        assert response.status_code == 200
+        # name_hint is the matched row's own name ("Et1"), NOT the posted "stale-display-name".
+        assert mock_resolve.call_args.kwargs["name_hint"] == "Et1"
+
 
 # ---------------------------------------------------------------------------
 # SingleIPAddressVerifyView — object-permission gate (real DB, real has_perm)

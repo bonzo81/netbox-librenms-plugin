@@ -2183,6 +2183,21 @@ class TestGetPortStack:
         assert success is False
         assert data == "stale poll"
 
+    def test_non_string_status_fails_not_empty(self, mock_librenms_api):
+        """A non-string status like `false` is malformed and must fail, not be accepted as (True, [])."""
+        from unittest.mock import MagicMock, patch
+
+        fake_response = MagicMock()
+        # {"status": false, "mappings": []} — only an absent status or "ok" is a genuine answer;
+        # accepting this would silently suppress LAG/sub-interface relationship updates.
+        fake_response.json.return_value = {"status": False, "mappings": []}
+        fake_response.raise_for_status = MagicMock()
+        with patch("netbox_librenms_plugin.librenms_api.requests.get", return_value=fake_response):
+            success, data = mock_librenms_api.get_port_stack(5)
+
+        assert success is False
+        assert "LibreNMS reported an error fetching port stack" in data
+
     def test_returns_error_on_invalid_json(self, mock_librenms_api):
         """A non-JSON body (response.json() raises ValueError) must surface as (False, error) instead of letting the exception escape."""
         from unittest.mock import MagicMock, patch

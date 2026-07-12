@@ -580,7 +580,10 @@ class LibreNMSAPI:
             # and treating that as "no relationships" would mask a real API failure and silently
             # skip valid LAG/sub-interface sync. A genuine answer has no status (or "ok").
             status = data.get("status")
-            if isinstance(status, str) and status.lower() != "ok":
+            if status is not None and (not isinstance(status, str) or status.lower() != "ok"):
+                # Only an absent status or a case-insensitive "ok" string is a genuine answer.
+                # A non-string status (e.g. {"status": false, "mappings": []}) is malformed and
+                # must fail the call, not be accepted as an empty "no relationships" result.
                 message = data.get("message") or "LibreNMS reported an error fetching port stack"
                 logger.warning("port_stack error status for device %s: %r", device_id, data)
                 return False, str(message)

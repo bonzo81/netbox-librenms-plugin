@@ -396,12 +396,16 @@ class BaseInterfaceTableView(
             # OS-scoped before paying for the port_stack fetch. A port name matching only
             # another platform's LAG regex is a false positive (resolve_port_relationships is
             # OS-scoped too, so it would resolve nothing), so skip the fetch entirely rather than
-            # fetch it and render an empty Parent/LAG column. Best-effort: on a failed/odd
-            # device-info fetch device_os stays None and the re-check falls back to all patterns.
-            device_os = None
+            # fetch it and render an empty Parent/LAG column. Fail closed: on a failed/odd
+            # device-info fetch device_os stays "" — compiled_patterns_for_os("") returns NO
+            # patterns (an unknown OS must not re-globalize every vendor's regex and infer a wrong
+            # LAG), so the signal re-check finds nothing and the port_stack fetch is skipped.
+            device_os = ""
             info_success, device_info = self.librenms_api.get_device_info(self.librenms_id)
             if info_success and isinstance(device_info, dict):
-                device_os = device_info.get("os")
+                raw_device_os = device_info.get("os")
+                if isinstance(raw_device_os, str):
+                    device_os = raw_device_os
             # Load + compile the OS-scoped patterns ONCE and share them with both the scoped signal
             # re-check and resolve_port_relationships, instead of each re-querying + re-compiling.
             from netbox_librenms_plugin.models import PortStackLagPattern

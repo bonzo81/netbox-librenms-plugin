@@ -194,6 +194,10 @@ class SingleInterfaceVerifyView(
             posted_port_id = normalize_librenms_port_id(data.get("port_id"))
             port_data = None
             if posted_port_id is not None:
+                # A supplied stable port_id is authoritative: match ONLY by it. If it misses (the
+                # cached snapshot changed), do NOT fall back to name matching — a display name can
+                # be reused by another/OOB port and repaint the wrong row. A miss leaves port_data
+                # None so the row is simply not re-rendered.
                 port_data = next(
                     (
                         p
@@ -202,7 +206,7 @@ class SingleInterfaceVerifyView(
                     ),
                     None,
                 )
-            if port_data is None:
+            else:
                 port_data = next(
                     (p for p in ports if p.get(interface_name_field) == interface_name and p.get("_source") != "oob"),
                     None,
@@ -245,7 +249,10 @@ class SingleInterfaceVerifyView(
                     selected_device,
                     str(port_data.get("port_id") or ""),
                     server_key,
-                    name_hint=interface_name or "",
+                    # Derive the name fallback from the MATCHED cached row, not the posted display
+                    # name — when the row was matched by a stable port_id, its own name is
+                    # authoritative (the posted name could differ / belong to a reused name).
+                    name_hint=port_data.get(interface_name_field) or "",
                     expected_owner=_interface_owner_for_object(selected_device),
                 )
                 port_data["netbox_interface"] = nb_iface

@@ -484,6 +484,26 @@ class LibreNMSInterfaceTable(tables.Table):
         return mark_safe("".join(str(p) for p in parts))
 
     @cached_property
+    def _vc_members(self):
+        """
+        Prefetch the chassis member Devices once per table render.
+
+        Both :meth:`_vc_members_by_position` (per-row owner resolution) and
+        :meth:`VCInterfaceTable.render_device_selection` (the per-row member dropdown) need the
+        member list; resolving it here keeps ``members.all()`` to a single query per render
+        instead of one per row (an N+1 on a large chassis table).
+        """
+        device = self.device
+        if device is None or not getattr(device, "virtual_chassis", None):
+            return []
+        try:
+            return list(device.virtual_chassis.members.all())
+        except (TypeError, AttributeError):
+            # A non-iterable / attribute-less stand-in device (unit tests) — callers fall back to
+            # their per-call query path (get_virtual_chassis_member) when this is empty.
+            return []
+
+    @cached_property
     def _vc_members_by_position(self):
         """
         Prefetch ``{vc_position: member Device}`` once per table render.
@@ -493,19 +513,7 @@ class LibreNMSInterfaceTable(tables.Table):
         ``members.get(vc_position=...)`` query per unresolved row — quadratic query load on a
         large chassis table. Resolving from this map keeps it O(1) per row (one prefetch total).
         """
-        device = self.device
-        if device is None or not getattr(device, "virtual_chassis", None):
-            return {}
-        try:
-            return {
-                member.vc_position: member
-                for member in device.virtual_chassis.members.all()
-                if member.vc_position is not None
-            }
-        except (TypeError, AttributeError):
-            # A non-iterable / attribute-less stand-in device (unit tests) — fall back to the
-            # per-call query path inside get_virtual_chassis_member.
-            return {}
+        return {member.vc_position: member for member in self._vc_members if member.vc_position is not None}
 
     def _resolve_row_member_id(self, record):
         """
@@ -624,7 +632,7 @@ class LibreNMSInterfaceTable(tables.Table):
                 'data-port-id="{}" {}="{}" '
                 'data-related-name="{}" '
                 'data-object-type="{}" data-object-id="{}" '
-                'title="{}">'
+                'title="{}" aria-label="{}">'
                 '<i class="mdi mdi-sync"></i></button>',
                 btn_class,
                 port_id,
@@ -633,6 +641,7 @@ class LibreNMSInterfaceTable(tables.Table):
                 lnms_name or "",
                 object_type,
                 object_id,
+                sync_title,
                 sync_title,
             )
             # text-nowrap keeps the pill + sync button on one line (no mid-line wrap); lh-sm keeps
@@ -836,7 +845,9 @@ class VCInterfaceTable(LibreNMSInterfaceTable):
         Determines the selected member based on interface type and name.
         Returns an HTML select element with appropriate member options.
         """
-        members = self.device.virtual_chassis.members.all()
+        # Reuse the per-render member prefetch (see _vc_members) so the dropdown doesn't re-query
+        # the chassis members for every row (N+1 on a large chassis).
+        members = self._vc_members
         interface_name = record.get(self.interface_name_field)
 
         # Default the dropdown to the same owner the relationship sync button resolves (matched

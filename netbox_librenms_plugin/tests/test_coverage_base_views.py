@@ -1826,6 +1826,52 @@ class TestBaseInterfaceTableViewPost:
         cached_snapshot = ports_set_calls[0].args[1]
         assert cached_snapshot["relationship_data_incomplete"] is True
 
+    def test_post_device_os_lookup_failure_fails_closed_no_patterns(self):
+        """A failed/non-string device-OS lookup must scope patterns with "" (load none), never None (load all)."""
+        view = self._make_view()
+        obj = _mock_obj()
+        request = _mock_request()
+
+        view._librenms_api.get_librenms_id.return_value = 42
+        view._librenms_api.get_ports.return_value = (True, {"ports": [{"port_id": 1, "ifName": "Gi0/0"}]})
+        # get_device_info fails → device_os must fall back to "" (fail closed), NOT None (which
+        # compiled_patterns_for_os treats as "load EVERY vendor pattern" and could infer a wrong LAG).
+        view._librenms_api.get_device_info.return_value = (False, None)
+        view._librenms_api.get_port_stack.return_value = (True, [])
+
+        with (
+            patch.object(view, "get_object", return_value=obj),
+            patch.object(view, "get_redirect_url", return_value="/device/1/"),
+            patch.object(view, "_enrich_ports_with_vlan_data", side_effect=lambda ports, field: ports),
+            # Force past the cheap UNscoped preliminary gate (which legitimately loads all patterns)
+            # so the OS-SCOPED lookup — the one this fix governs — actually runs.
+            patch.object(view, "_has_lag_signals", return_value=True),
+            patch.object(view, "get_context_data", return_value={}),
+            patch.object(view, "get_cache_key", return_value="cache-key"),
+            patch.object(view, "get_last_fetched_key", return_value="last-key"),
+            patch(
+                "netbox_librenms_plugin.models.PortStackLagPattern.compiled_patterns_for_os", return_value=[]
+            ) as mock_compiled,
+            patch("netbox_librenms_plugin.views.base.interfaces_view.get_interface_name_field", return_value="ifName"),
+            patch("netbox_librenms_plugin.views.base.interfaces_view.get_librenms_sync_device", return_value=obj),
+            patch("netbox_librenms_plugin.views.base.interfaces_view.get_librenms_oob", return_value=None),
+            patch("netbox_librenms_plugin.views.base.interfaces_view.messages"),
+            patch("netbox_librenms_plugin.views.mixins.render") as mock_render,
+            patch("netbox_librenms_plugin.views.base.interfaces_view.cache"),
+            patch("netbox_librenms_plugin.views.base.interfaces_view.timezone"),
+        ):
+            mock_render.return_value = MagicMock()
+            view.post(request, pk=1)
+
+        # The scoped lookup is reached and fails closed with "" (→ no patterns), never None.
+        assert mock_compiled.call_args_list, "compiled_patterns_for_os was never called"
+        assert any(call.args[0] == "" for call in mock_compiled.call_args_list), (
+            f"expected a device_os='' (fail-closed) scoped lookup, got {[c.args[0] for c in mock_compiled.call_args_list]!r}"
+        )
+        assert all(call.args[0] is not None for call in mock_compiled.call_args_list), (
+            "the scoped lookup must never pass device_os=None (which loads every vendor pattern)"
+        )
+
     def test_post_oob_malformed_but_successful_payload_treated_as_incomplete(self):
         """get_ports is an external boundary: oob_success=True does not guarantee a dict with a list of dict rows."""
         view = self._make_view()
