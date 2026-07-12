@@ -3212,31 +3212,53 @@ class TestVCInterfaceTable:
         assert "switch-2" in result
         assert "vc-member-select" in result
 
-    def test_render_device_selection_non_ethernet_uses_device_id(self):
+    @pytest.mark.django_db
+    def test_render_device_selection_logical_iface_defaults_to_viewed_member(self):
+        """
+        A not-yet-synced LOGICAL interface (Vlan2) on a real VC must default to the VIEWED member,
+        NOT the member whose vc_position happens to equal the name's trailing digit.
+
+        Real-DB: the digit in ``Vlan2`` is a VLAN id, not a member index — the name-position
+        heuristic must not run for logical types. Against the unfixed code (no ethernet/dotted
+        guard) this resolves to the position-2 member (wrong); the guard defaults it to the viewed
+        member. Uses real Devices in a real VirtualChassis so the vc_position map is genuinely
+        queried — a MagicMock member with a MagicMock vc_position hid this by never matching.
+        """
         from netbox_librenms_plugin.tables.interfaces import VCInterfaceTable
+        from netbox_librenms_plugin.tests.conftest import make_device, make_virtual_chassis
 
-        mock_member1 = MagicMock()
-        mock_member1.id = 1
-        mock_member1.name = "switch-1"
-
-        mock_device = MagicMock()
-        mock_device.id = 1
-        mock_device.virtual_chassis = MagicMock()
-        mock_device.virtual_chassis.members.all.return_value = [mock_member1]
+        sw1 = make_device("sw-①-1")
+        sw2 = make_device("sw-①-2")
+        make_virtual_chassis("vc-①-logical", sw1, sw2)  # sw1 -> vc_position 1, sw2 -> 2
 
         with patch("netbox_librenms_plugin.tables.interfaces.get_interface_name_field", return_value="ifName"):
-            table = VCInterfaceTable(data=[], device=mock_device, interface_name_field="ifName")
+            table = VCInterfaceTable(data=[], device=sw1, interface_name_field="ifName")
 
-        table.device = mock_device
-        record = {
-            "ifName": "Vlan100",
-            "ifType": "l3ipvlan",  # non-ethernet
-        }
+        record = {"ifName": "Vlan2", "ifType": "l3ipvlan"}  # digit 2 == sw2's vc_position
 
-        result = str(table.render_device_selection(value=None, record=record))
+        assert table._resolve_row_member_id(record) == sw1.pk  # viewed member, not sw2
+        assert f'value="{sw1.pk}"' in str(table.render_device_selection(value=None, record=record))
 
-        assert "switch-1" in result
-        assert 'value="1"' in result
+    @pytest.mark.django_db
+    def test_render_device_selection_physical_and_subiface_use_name_heuristic(self):
+        """
+        The name-position heuristic is preserved for physical ethernet ports AND their
+        sub-interfaces (dotted names) — the cross-member case _resolve_row_member_id exists for.
+        """
+        from netbox_librenms_plugin.tables.interfaces import VCInterfaceTable
+        from netbox_librenms_plugin.tests.conftest import make_device, make_virtual_chassis
+
+        sw1 = make_device("sw-①b-1")
+        sw2 = make_device("sw-①b-2")
+        make_virtual_chassis("vc-①-physical", sw1, sw2)  # sw1 -> 1, sw2 -> 2
+
+        with patch("netbox_librenms_plugin.tables.interfaces.get_interface_name_field", return_value="ifName"):
+            table = VCInterfaceTable(data=[], device=sw1, interface_name_field="ifName")
+
+        # Physical ethernet port on member 2 (ethernetCsmacd) -> heuristic resolves sw2.
+        assert table._resolve_row_member_id({"ifName": "Ethernet2", "ifType": "ethernetCsmacd"}) == sw2.pk
+        # Non-ethernet SUB-interface of a member-2 port (dotted) -> heuristic still resolves sw2.
+        assert table._resolve_row_member_id({"ifName": "Ethernet2.100", "ifType": "l3ipvlan"}) == sw2.pk
 
     def test_render_device_selection_no_member_uses_device_id(self):
         """When get_virtual_chassis_member returns None, fall back to device.id."""

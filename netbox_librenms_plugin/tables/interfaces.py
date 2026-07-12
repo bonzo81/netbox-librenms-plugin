@@ -526,7 +526,9 @@ class LibreNMSInterfaceTable(tables.Table):
         member is the classic case). Both call this. Preference, most to least authoritative:
         (1) the matched NetBox interface's device, (2) the row-selected object stamped by
         ``format_interface_data`` (the cross-page member switch on the verify path), (3) the
-        name-based VC heuristic (best effort for a row not yet in NetBox), (4) the viewed device.
+        name-based VC heuristic — but only for physical ethernet ports and their sub-interfaces,
+        where the leading number is a slot/member index (best effort for a row not yet in
+        NetBox), (4) the viewed device.
         """
         nb_iface = record.get("netbox_interface")
         if nb_iface is not None and getattr(nb_iface, "device_id", None):
@@ -538,13 +540,23 @@ class LibreNMSInterfaceTable(tables.Table):
             # record name can be None; get_virtual_chassis_member -> re.match() would raise on a
             # None value while rendering a missing relationship button. Coerce to "".
             interface_name = record.get(self.interface_name_field) or ""
-            # Resolve from the per-table prefetched member map (O(1) per row). An empty map (a
-            # mock/attribute-less device in tests) is passed as None so the helper keeps its
-            # original per-call query path / patch point unchanged.
-            member = get_virtual_chassis_member(
-                self.device, interface_name, members_by_position=self._vc_members_by_position or None
-            )
-            return (member or self.device).pk
+            # The name-position heuristic (get_virtual_chassis_member's ``^[A-Za-z]+(\d+)``) only
+            # yields a real member position for physical ethernet ports and their sub-interfaces,
+            # where that leading number is a slot/member index. For a logical interface not yet in
+            # NetBox — Vlan2, Loopback0, Tunnel5 — the number is a unit/VLAN id, so the heuristic
+            # would silently default the sync target to the WRONG VC member. Restrict it to
+            # ethernet-typed rows (physical ports) and dotted names (sub-interfaces of a physical
+            # port — the cross-member case this resolution exists for); any other logical row
+            # defaults to the viewed device, as it did before the ethernet-only guard was widened.
+            if_type = (record.get("ifType") or "").lower()
+            if "ethernet" in if_type or "." in interface_name:
+                # Resolve from the per-table prefetched member map (O(1) per row). An empty map (a
+                # mock/attribute-less device in tests) is passed as None so the helper keeps its
+                # original per-call query path / patch point unchanged.
+                member = get_virtual_chassis_member(
+                    self.device, interface_name, members_by_position=self._vc_members_by_position or None
+                )
+                return (member or self.device).pk
         return self.device.pk if self.device else ""
 
     def _render_relationship_column(
