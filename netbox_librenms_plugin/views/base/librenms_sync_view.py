@@ -243,9 +243,12 @@ class BaseLibreNMSSyncView(LibreNMSPermissionMixin, LibreNMSAPIMixin, generic.Ob
                     _lookup_device._meta.model_name if _lookup_device else obj._meta.model_name
                 ),
                 "object_model_name": obj._meta.model_name,
-                # The _migrated_to marker lives on the viewed device itself, not on
-                # the VC sync/lookup device — build migrated mode from obj so a
-                # VC-member donor renders consistently with the HTMX tab partials.
+                # Build migrated mode from obj (the viewed device), NOT a re-resolved sync/lookup
+                # device, so the full page and the HTMX tab partials — which also pass obj — stay
+                # consistent. The merge stamps the _migrated_to marker on whichever device holds the
+                # LibreNMS link (get_librenms_sync_device): that IS obj for a non-VC device or the
+                # link-holding VC member (the common case); for a non-sync VC member the marker lands
+                # on the sync sibling, whose sync page is where its migrated controls surface.
                 # Use the resolved render key (not the lazy librenms_api property, which re-derives
                 # the global default and mis-namespaces the marker on the stale-?server_key path).
                 **self._build_migrated_context(obj, self._render_server_key or self.active_server_key),

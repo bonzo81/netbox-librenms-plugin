@@ -358,10 +358,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
                 request,
                 obj,
                 active_server_key,
-                {
-                    "module_sync": {"object": obj, "table": None, "cache_expiry": None, "server_key": None},
-                    "has_write_permission": self.has_write_permission(),
-                },
+                {"module_sync": {"object": obj, "table": None, "cache_expiry": None, "server_key": None}},
             )
         sync_device = self._get_sync_device(obj, server_key=server_key)
 
@@ -376,10 +373,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
                 request,
                 obj,
                 server_key,
-                {
-                    "module_sync": {"object": obj, "table": None, "cache_expiry": None, "server_key": server_key},
-                    "has_write_permission": self.has_write_permission(),
-                },
+                {"module_sync": {"object": obj, "table": None, "cache_expiry": None, "server_key": server_key}},
             )
 
         success, inventory_data = self.librenms_api.get_device_inventory(self.librenms_id)
@@ -400,10 +394,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
                 request,
                 obj,
                 server_key,
-                {
-                    "module_sync": {"object": obj, "table": None, "cache_expiry": None, "server_key": server_key},
-                    "has_write_permission": self.has_write_permission(),
-                },
+                {"module_sync": {"object": obj, "table": None, "cache_expiry": None, "server_key": server_key}},
             )
 
         for item in inventory_data:
@@ -539,7 +530,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
             request,
             obj,
             server_key,
-            {"module_sync": context, "has_write_permission": self.has_write_permission()},
+            {"module_sync": context},
         )
 
     def get_context_data(self, request, obj):

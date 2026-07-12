@@ -1977,6 +1977,38 @@ def _normalize_merge_entry(entry, *, owner_label, owner_name, server_key, copy_d
     )
 
 
+def _coerce_link_id_or_raise(raw, *, owner, name, server_key, kind):
+    """
+    Coerce a librenms_id host/oob id field to a positive int, or raise on a non-blank unparseable value.
+
+    Treats a blank/whitespace string as absent (returns None) — lenient, matching the top-level string
+    branch that collapses empty strings to "no id". A non-blank value that :func:`coerce_librenms_id`
+    can't turn into a positive int (``"abc"``, ``0``, ``True``) is corrupt-but-present link state: fail
+    closed with a message naming the owner/kind rather than silently dropping the link. Shared by the
+    four id checks in :func:`merge_librenms_links` (winner/donor host id, winner/donor oob id) so the
+    blank-strip / coerce / fail-closed rule can't drift between the copies.
+
+    Args:
+        raw: The raw id read from the entry (``entry["id"]`` or ``entry["oob"]["id"]``).
+        owner: ``"winner"`` or ``"donor"`` — names the side in the error message.
+        name: The device name, for the error message.
+        server_key: The server key the entry is namespaced under.
+        kind: ``"id"`` or ``"oob id"`` — names the field in the error message.
+
+    Returns:
+        int | None: The positive integer id, or None when the value is blank/absent.
+    """
+    if isinstance(raw, str) and not raw.strip():
+        raw = None
+    coerced = coerce_librenms_id(raw) if raw is not None else None
+    if raw is not None and coerced is None:
+        raise ValueError(
+            f"{owner} '{name}' has an unparseable librenms_id[{server_key!r}] {kind} "
+            f"{raw!r} — expected a positive integer or numeric string."
+        )
+    return coerced
+
+
 def merge_librenms_links(winner, donor, server_key: str = "default") -> dict:
     """
     Merge donor's ``librenms_id[server_key]`` link state into winner's.
@@ -2066,30 +2098,15 @@ def merge_librenms_links(winner, donor, server_key: str = "default") -> dict:
     donor_id = donor_entry.get("id")
     donor_oob = _extract_oob_entry("donor", donor.name, donor_entry)
 
-    # Coerce both IDs before branching so that a malformed but truthy winner_id
-    # (e.g. "abc") does not incorrectly trigger the "demote donor" path.
-    _raw_winner_id = winner_entry.get("id")
-    _raw_donor_id = donor_id
-    # Treat a blank/whitespace string id as "no id" (lenient), matching the top-level
-    # string branch above which collapses empty strings to {}. Only a *non-blank*
-    # unparseable value (e.g. "abc") fails closed below — a blank one must not block
-    # a merge just because it arrived wrapped in dict form.
-    if isinstance(_raw_winner_id, str) and not _raw_winner_id.strip():
-        _raw_winner_id = None
-    if isinstance(_raw_donor_id, str) and not _raw_donor_id.strip():
-        _raw_donor_id = None
-    winner_id = coerce_librenms_id(_raw_winner_id) if _raw_winner_id is not None else None
-    donor_id = coerce_librenms_id(_raw_donor_id) if _raw_donor_id is not None else None
-    if _raw_winner_id is not None and winner_id is None:
-        raise ValueError(
-            f"winner '{winner.name}' has an unparseable librenms_id[{server_key!r}] id "
-            f"{_raw_winner_id!r} — expected a positive integer or numeric string."
-        )
-    if _raw_donor_id is not None and donor_id is None:
-        raise ValueError(
-            f"donor '{donor.name}' has an unparseable librenms_id[{server_key!r}] id "
-            f"{_raw_donor_id!r} — expected a positive integer or numeric string."
-        )
+    # Coerce both IDs before branching so that a malformed but truthy winner_id (e.g. "abc") does
+    # not incorrectly trigger the "demote donor" path. A blank/whitespace string id is treated as
+    # "no id" (lenient, matching the top-level string branch above which collapses empty strings to
+    # {}); only a non-blank unparseable value fails closed. winner is checked before donor so a
+    # corrupt winner id surfaces first, as before.
+    winner_id = _coerce_link_id_or_raise(
+        winner_entry.get("id"), owner="winner", name=winner.name, server_key=server_key, kind="id"
+    )
+    donor_id = _coerce_link_id_or_raise(donor_id, owner="donor", name=donor.name, server_key=server_key, kind="id")
     winner_oob = _extract_oob_entry("winner", winner.name, winner_entry)
     # _extract_oob_entry only validates the oob *shape* (dict/null), not its id. A corrupt
     # non-blank winner oob id (e.g. "abc", 0) would otherwise make the slot look "occupied"
@@ -2098,14 +2115,9 @@ def merge_librenms_links(winner, donor, server_key: str = "default") -> dict:
     # winner keeps an unusable oob. Fail closed, mirroring the winner_id/donor_id checks above;
     # a blank/whitespace id is treated leniently as "no id".
     if winner_oob is not None:
-        _raw_winner_oob_id = winner_oob.get("id")
-        if isinstance(_raw_winner_oob_id, str) and not _raw_winner_oob_id.strip():
-            _raw_winner_oob_id = None
-        if _raw_winner_oob_id is not None and coerce_librenms_id(_raw_winner_oob_id) is None:
-            raise ValueError(
-                f"winner '{winner.name}' has an unparseable librenms_id[{server_key!r}] oob id "
-                f"{_raw_winner_oob_id!r} — expected a positive integer or numeric string."
-            )
+        _coerce_link_id_or_raise(
+            winner_oob.get("id"), owner="winner", name=winner.name, server_key=server_key, kind="oob id"
+        )
 
     # Validate the donor's oob id up-front (mirroring the winner_oob check above) so a corrupt
     # non-blank id fails closed regardless of which branch fires below, and so a metadata-only
@@ -2117,15 +2129,9 @@ def merge_librenms_links(winner, donor, server_key: str = "default") -> dict:
     donor_oob_has_valid_id = False
     _donor_oob_id = None
     if winner_oob is None and donor_oob is not None:
-        _raw_donor_oob_id = donor_oob.get("id")
-        if isinstance(_raw_donor_oob_id, str) and not _raw_donor_oob_id.strip():
-            _raw_donor_oob_id = None
-        _donor_oob_id = coerce_librenms_id(_raw_donor_oob_id) if _raw_donor_oob_id is not None else None
-        if _raw_donor_oob_id is not None and _donor_oob_id is None:
-            raise ValueError(
-                f"donor '{donor.name}' has an unparseable librenms_id[{server_key!r}] oob id "
-                f"{_raw_donor_oob_id!r} — expected a positive integer or numeric string."
-            )
+        _donor_oob_id = _coerce_link_id_or_raise(
+            donor_oob.get("id"), owner="donor", name=donor.name, server_key=server_key, kind="oob id"
+        )
         donor_oob_has_valid_id = _donor_oob_id is not None
 
     # Fail closed when the donor's host id has nowhere to go: the winner already occupies BOTH

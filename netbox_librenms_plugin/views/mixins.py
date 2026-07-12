@@ -555,10 +555,11 @@ class LibreNMSAPIMixin:
 
         # has_write_permission gates the migrated-donor "Move to winner" controls in the shared
         # inc/_migrate_move_button.html include. Inject it at this chokepoint so EVERY partial
-        # render exit (interface/IP success + error branches) carries it — a caller that omitted it
-        # silently collapsed every move button to the disabled read-only branch on an HTMX
-        # re-render, even for a user with change permission. A caller that sets it explicitly
-        # (modules_view renders directly, not through here) still wins via the context spread.
+        # render exit (interface/IP/cable/module/VLAN success + error branches) carries it — a
+        # caller that omitted it silently collapsed every move button to the disabled read-only
+        # branch on an HTMX re-render, even for a user with change permission. Callers therefore
+        # don't need to pass it themselves; the `**context` spread comes last only so that if one
+        # ever does set it explicitly, that value still wins (defensive — no caller relies on it).
         merged = {"has_write_permission": self.has_write_permission(), **context}
         return render(request, self.partial_template_name, {**merged, **build_migrated_context(obj, server_key)})
 
