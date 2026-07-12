@@ -1484,6 +1484,48 @@ class TestSyncLagAndParentRelationships:
         assert member2.lag_id == agg.pk
         assert agg.type == "lag"
 
+    def test_apply_relationship_restores_source_fk_on_validation_failure(self, db):
+        """A failed link must leave source_iface's FK unmutated — it is reused across rows via the shared index."""
+        from django.core.exceptions import ValidationError
+
+        from netbox_librenms_plugin.views.sync.interfaces import _apply_interface_relationship
+
+        device = self._make_device()
+        # A virtual interface cannot be assigned to a LAG, so the link fails full_clean.
+        member = self._iface(device, "virt7", 71, itype="virtual")
+        agg = self._iface(device, "Po7", 107, itype="lag")
+        assert member.lag_id is None
+
+        with pytest.raises(ValidationError):
+            _apply_interface_relationship(member, "lag", agg, prepare_related=None)
+
+        # The attempted FK is rolled back in memory so a later edge reusing this instance doesn't
+        # validate against — or persist — the failed link.
+        assert member.lag is None
+        assert member.lag_id is None
+
+    def test_name_hint_resolves_on_expected_owner_across_vc_duplicate_names(self, db):
+        """On a VC, an id-less interface whose name is shared across members resolves to the SELECTED member, not chassis-wide ambiguity."""
+        from netbox_librenms_plugin.tests.conftest import make_virtual_chassis
+        from netbox_librenms_plugin.views.sync.interfaces import (
+            _interface_owner_for_object,
+            _resolve_interface_by_port_id,
+        )
+
+        dev1 = make_device("vc-nh-m1")
+        dev2 = make_device("vc-nh-m2")
+        make_virtual_chassis("vc-nh", dev1, dev2)
+        i1 = make_interface(dev1, "Gi0/1", iface_type="1000base-t")  # id-less, on member 1
+        make_interface(dev2, "Gi0/1", iface_type="1000base-t")  # SAME name on member 2
+
+        # port_id 909 matches no stored id → name-hint fallback. "Gi0/1" is duplicated across the
+        # chassis; without owner-pinning the name lookup reports ambiguity and never resolves.
+        iface, err = _resolve_interface_by_port_id(
+            dev1, "909", "default", name_hint="Gi0/1", expected_owner=_interface_owner_for_object(dev1)
+        )
+        assert err is None, err
+        assert iface is not None and iface.pk == i1.pk
+
     def test_oob_row_excluded_from_relationship_sync(self, db):
         """An OOB-controller row sharing a selected host display name must not contribute its port_id, or the LAG pass would link the hidden controller interface instead of the host."""
         device = self._make_device()

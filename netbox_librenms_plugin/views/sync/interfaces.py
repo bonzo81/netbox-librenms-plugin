@@ -1067,7 +1067,7 @@ def _resolve_interface_by_port_id(
             return None, ambiguous_msg
 
     if name_hint:
-        iface, err = _resolve_interface_by_name_hint(obj, name_hint, index=index)
+        iface, err = _resolve_interface_by_name_hint(obj, name_hint, index=index, expected_owner=expected_owner)
         if err:
             return None, err
         if iface is not None:
@@ -1082,7 +1082,7 @@ def _resolve_interface_by_port_id(
     return None, f"Interface with LibreNMS port_id {port_id} not found on {obj}"
 
 
-def _resolve_interface_by_name_hint(obj, name_hint, index=None):
+def _resolve_interface_by_name_hint(obj, name_hint, index=None, expected_owner=None):
     """
     Exact-name fallback for :func:`_resolve_interface_by_port_id`.
 
@@ -1091,6 +1091,11 @@ def _resolve_interface_by_name_hint(obj, name_hint, index=None):
         name_hint (str): The exact interface name to match.
         index: Optional prebuilt lookup from :func:`_build_interface_index`; used when
             supplied so a bulk caller avoids a per-name DB query.
+        expected_owner: Optional ``(device_id, virtual_machine_id)`` tuple. On a VC, members
+            commonly share interface names, so the whole chassis matching a name would read as
+            ambiguous; narrow to the selected owner FIRST — mirroring the port-id resolution — so
+            an id-less interface still resolves on its own member (genuine same-owner duplicates
+            still error).
 
     Returns:
         tuple: ``(iface, None)`` on a unique match, ``(None, None)`` when nothing
@@ -1098,6 +1103,10 @@ def _resolve_interface_by_name_hint(obj, name_hint, index=None):
     """
     if index is not None:
         matches = index["by_name"].get(name_hint, [])
+        if expected_owner is not None:
+            owned = [m for m in matches if _interface_owner(m) == expected_owner]
+            if owned:
+                matches = owned
         if not matches:
             return None, None
         if len(matches) > 1:
@@ -1105,7 +1114,11 @@ def _resolve_interface_by_name_hint(obj, name_hint, index=None):
         return matches[0], None
     try:
         if isinstance(obj, Device):
-            if hasattr(obj, "virtual_chassis") and obj.virtual_chassis:
+            if expected_owner is not None and expected_owner[0] is not None:
+                # Owner-pinned to the selected VC member so identical names on other members
+                # don't read as ambiguous (matches the index branch above).
+                iface = Interface.objects.get(device_id=expected_owner[0], name=name_hint)
+            elif hasattr(obj, "virtual_chassis") and obj.virtual_chassis:
                 member_ids = obj.virtual_chassis.members.values_list("id", flat=True)
                 iface = Interface.objects.get(device__in=member_ids, name=name_hint)
             else:
@@ -1200,21 +1213,35 @@ def _apply_interface_relationship(source_iface, relation_field, related_iface, p
         ValidationError: when the source fails ``full_clean()`` (after restoring the related
             mutation); the caller decides how to surface it (bulk logs+skips, single-row 409).
     """
+    # Capture the source's original FK before mutating: source_iface (and the aggregate) are
+    # reused across rows via the shared interface index, so a failed attempt must leave BOTH
+    # unmutated. Otherwise a later edge validates source_iface against the rolled-back (but
+    # still in-memory) FK, or — because the aggregate already looks type=lag in memory — a later
+    # member sharing it skips the type bump and never persists it, leaving the DB type stale.
+    original_related = getattr(source_iface, relation_field)
     setattr(source_iface, relation_field, related_iface)
     prepared = prepare_related(related_iface) if prepare_related else None
     if isinstance(prepared, tuple):
         persist_related, restore_related = prepared
     else:
         persist_related, restore_related = prepared, None
-    try:
-        source_iface.full_clean()
-    except ValidationError:
+
+    def _restore_in_memory():
+        setattr(source_iface, relation_field, original_related)
         if restore_related:
             restore_related()
+
+    try:
+        source_iface.full_clean()
+        if persist_related:
+            persist_related()
+        source_iface.save(update_fields=[relation_field])
+    except (ValidationError, IntegrityError):
+        # full_clean() rejection OR a statement-time persist failure (the savepoint rolls back
+        # the DB, but the in-memory instances stay mutated): undo both before the caller skips
+        # this row and continues the batch against the shared index.
+        _restore_in_memory()
         raise
-    if persist_related:
-        persist_related()
-    source_iface.save(update_fields=[relation_field])
 
 
 class _BaseRelationshipSyncView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreNMSAPIMixin, View):
