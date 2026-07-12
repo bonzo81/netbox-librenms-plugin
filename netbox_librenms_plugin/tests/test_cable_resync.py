@@ -360,3 +360,16 @@ class TestCabledSerialRowFarEndDisplay:
         assert link["cable_status"] == "Connected via Patch Path"
         assert link["remote_port_name"] == "console"  # the path end, not "F1"
         assert link["remote_port_url"]
+
+
+@pytest.mark.django_db
+class TestMakeSerialRowSensorIndex:
+    """make_serial_row's sensor_index_int is an explicit param (default 1), so multi-row tests can give each row a distinct, production-realistic index (serial_utils sorts rows by it)."""
+
+    def test_defaults_to_one(self):
+        acs, (csp,), _ = make_serial_device("idx-default", csp_names=["ttyS1"])
+        assert _serial_row(csp, "x", acs)["sensor_index_int"] == 1
+
+    def test_honours_explicit_index(self):
+        acs, (csp,), _ = make_serial_device("idx-explicit", csp_names=["ttyS2"])
+        assert _serial_row(csp, "x", acs, sensor_index_int=7)["sensor_index_int"] == 7

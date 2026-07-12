@@ -338,11 +338,17 @@ def make_serial_device(name, *, csp_names=(), cp_names=()):
     return dev, csps, cps
 
 
-def make_serial_row(csp, label, obj, **extra):
+def make_serial_row(csp, label, obj, *, sensor_index_int=1, **extra):
     """A serial cable row as it comes out of the cache strip (raw keys only), plus overrides.
 
     One canonical builder for the serial-row shape shared by the picker/resync/verify test
     files, so a change to the row contract is made once instead of kept in sync by hand.
+
+    ``sensor_index_int`` is the port number production derives from the LibreNMS sensor index and
+    SORTS the rows by (serial_utils.build_serial_links). It is an explicit parameter (default 1)
+    rather than a hardcoded field so a caller that builds MORE THAN ONE serial row must give each a
+    distinct index — otherwise every row shares index 1, a cache shape production never produces and
+    one that hides the sort ordering.
     """
     row = {
         "_source": "serial",
@@ -350,7 +356,7 @@ def make_serial_row(csp, label, obj, **extra):
         "local_port": csp.name,
         "local_port_id": f"serial:{csp.pk}",
         "sensor_id": csp.pk,
-        "sensor_index_int": 1,
+        "sensor_index_int": sensor_index_int,
         "is_configured": True,
         "remote_device": label,
     }

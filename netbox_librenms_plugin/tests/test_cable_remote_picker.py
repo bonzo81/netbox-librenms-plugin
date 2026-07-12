@@ -682,6 +682,31 @@ class TestManualRepointOfExistingCable:
         assert 'name="q"' in content  # the real picker, not the cache-expired warning
         assert "Cache has expired" not in content
 
+    def test_pick_modal_get_forged_key_renders_resolved_key(self):
+        """Opening the picker with a stale/forged server_key: the refetch falls back to the active client key and the modal renders THAT resolved key in its fragment URLs + hidden input, so the pick POST hits the cache the refetch just wrote instead of round-tripping the stale key and forcing a SECOND live fetch."""
+        from unittest.mock import patch
+
+        from django.core.cache import cache
+
+        client = self._client_e2e("forged-get")
+        _acs, _csp, _old, link, picker_url = self._seed_cabled("forged-get")
+
+        raw_row = dict(link)
+        cache.clear()  # the forged key misses; the refetch must run and resolve the real key
+
+        with patch(
+            "netbox_librenms_plugin.views.object_sync.devices.DeviceCableTableView.get_links_data",
+            return_value=[raw_row],
+        ):
+            resp = client.get(picker_url, {"port_id": link["local_port_id"], "server_key": "ghost"})
+
+        assert resp.status_code == 200
+        content = resp.content.decode()
+        # The resolved active key ("default") propagates to the rendered URLs; the forged "ghost"
+        # key must not survive into the modal (it would otherwise round-trip on POST → 2nd fetch).
+        assert "server_key=default" in content
+        assert "server_key=ghost" not in content
+
     def _client_e2e(self, name):
         from django.contrib.auth import get_user_model
         from django.test import Client

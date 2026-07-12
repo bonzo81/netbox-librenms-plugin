@@ -1761,8 +1761,13 @@ class CableRemotePickerView(BaseCableTableView):
         Cables" first is needless friction, so do exactly what that button does and retry.
 
         Returns:
-            tuple: The refreshed ``(cache_key, cached_payload)`` — payload None when the
-                LibreNMS fetch itself failed.
+            tuple: The refreshed ``(cache_key, cached_payload, resolved_key)`` — payload None when
+                the LibreNMS fetch itself failed. ``resolved_key`` is the key the snapshot was
+                actually cached under; it differs from the passed ``server_key`` when a stale/forged
+                key fell back to the active client key, so the caller reuses it for the rest of the
+                render and the POST round-trip. Without that, the stale query-string key round-trips
+                back on POST, misses ``_cache_state`` again, and triggers a SECOND live LibreNMS
+                fetch that this first refetch already made unnecessary.
         """
         from netbox_librenms_plugin.views.object_sync.devices import DeviceCableTableView
 
@@ -1777,7 +1782,8 @@ class CableRemotePickerView(BaseCableTableView):
             resolved_key = view.active_server_key
         # Caches the fresh snapshot on success (same write "Refresh Cables" performs).
         view._prepare_context(request, obj, fetch_fresh=True, server_key=resolved_key)
-        return self._cache_state(obj, resolved_key)
+        cache_key, cached = self._cache_state(obj, resolved_key)
+        return cache_key, cached, resolved_key
 
     def get(self, request, pk):
         """Serve the picker modal or one of its search/ports HTMX fragments."""
@@ -1790,7 +1796,10 @@ class CableRemotePickerView(BaseCableTableView):
         # Only the modal render needs the row (fragments carry `source` in their URLs): on a
         # miss, rebuild the snapshot instead of dead-ending on a cache-expired warning.
         if row is None and not action:
-            _cache_key, cached = self._refetch_snapshot(request, obj, server_key)
+            # Reuse the key the refetch actually cached under (it falls back to the active client
+            # key on a stale/forged query-string key) for the rendered URLs and the modal's hidden
+            # server_key input, so a stale key doesn't round-trip on POST and force a second fetch.
+            _cache_key, cached, server_key = self._refetch_snapshot(request, obj, server_key)
             row = self._find_row(cached, port_id)
 
         base_url = reverse("plugins:netbox_librenms_plugin:cable_remote_picker", args=[obj.pk])
@@ -1869,7 +1878,7 @@ class CableRemotePickerView(BaseCableTableView):
             # Snapshot expired between render and pick: rebuild it fresh (what "Refresh
             # Cables" does) and retry before giving up — the port_id is sensor-stable, so
             # the row reappears unless LibreNMS itself dropped it.
-            cache_key, cached = self._refetch_snapshot(request, obj, server_key)
+            cache_key, cached, server_key = self._refetch_snapshot(request, obj, server_key)
             row = self._find_row(cached, port_id)
         if row is None:
             return HttpResponse("Cache has expired. Please refresh the cable data and pick again.", status=400)
