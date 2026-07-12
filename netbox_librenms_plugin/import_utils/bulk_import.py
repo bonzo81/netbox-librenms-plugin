@@ -691,34 +691,20 @@ def _refresh_existing_device(validation: dict, libre_device: dict = None, server
         match_type = None
         found_as_cross_model = False
 
-        def _lookup_in_model(m):
+        def _lookup_value(m, value):
             """
-            Return (device, match_type, ambiguous) by NAME for model m.
-
-            The librenms_id match is resolved up-front by the cross-model collision check below
-            and short-circuits (sets ``new_device``) before this is ever reached, so re-running
-            ``find_by_librenms_id(m, ...)`` here would just repeat that query for no result. This
-            does only the name/hostname/sysName fallbacks.
+            Return (device, ambiguous) for the single NAME *value* in model m.
 
             NetBox device names are unique only per-site, so a name can resolve to MORE THAN ONE
             device. Fail closed exactly like the serial/IP fallback below (and the full
-            validate_device_for_import() path): when a name matches >1 device, return
-            ``(None, None, True)`` so the caller blocks the row instead of binding ``.first()``
-            to an arbitrary one.
+            validate_device_for_import() path): when a value matches >1 object, return
+            ``(None, True)`` so the caller blocks the row instead of binding ``.first()`` to an
+            arbitrary one.
             """
-            for value, mt in (
-                (validation.get("resolved_name"), "resolved_name"),
-                (hostname, "hostname"),
-                (sys_name, "sysname"),
-            ):
-                if not value:
-                    continue
-                matches = list(m.objects.filter(name__iexact=value)[:2])
-                if len(matches) > 1:
-                    return None, None, True
-                if matches:
-                    return matches[0], mt, False
-            return None, None, False
+            matches = list(m.objects.filter(name__iexact=value)[:2])
+            if len(matches) > 1:
+                return None, True
+            return (matches[0] if matches else None), False
 
         # Fail closed on a CROSS-MODEL librenms_id collision before selecting a match — i.e.
         # the same (server_key, librenms_id) bound to BOTH a Device and a VirtualMachine. A
@@ -751,38 +737,54 @@ def _refresh_existing_device(validation: dict, libre_device: dict = None, server
 
         name_ambiguous = False
         if not new_device:
-            # Look up BOTH models by name, not preferred-first. The old code returned on the
-            # first Model name hit and never consulted CrossModel, so a cached row whose
-            # resolved name/hostname/sysName exists as BOTH a Device and a VirtualMachine was
-            # pinned to the preferred model. validate_device_for_import()'s hostname path treats
-            # that cross-model case as ambiguous and binds NEITHER (it warns and lets the user
-            # import as new, then set librenms_id on the correct object), so the refresh re-check
-            # must do the same or it drifts and renders/links the wrong target.
-            model_match, model_mt, model_amb = _lookup_in_model(Model)
-            cross_match, cross_mt, cross_amb = _lookup_in_model(CrossModel)
-            if model_amb or cross_amb:
-                # >1 match within a single model — terminal ambiguity, fail closed below.
-                name_ambiguous = True
-            elif model_match and cross_match:
-                # Same name resolves in BOTH models: warn and leave unmatched (do NOT block),
-                # exactly like the validator's cross-model hostname branch. A serial/IP match can
-                # still bind below (a stronger identity), mirroring the validator's fall-through.
-                # setdefault (not a plain get + isinstance guard) so the warning is surfaced even
-                # when the caller built a minimal validation dict without "warnings", matching the
-                # AmbiguousLibreNMSIdError handler below.
-                validation.setdefault("warnings", []).append(
-                    f"Both a VM and Device exist with hostname '{hostname}' in NetBox. Cannot "
-                    "determine which to match. Please set the librenms_id custom field on the "
-                    "correct object."
-                )
-            elif model_match:
-                new_device, match_type = model_match, model_mt
-            elif cross_match:
-                # Cross-model import that happened after the cache was built (e.g. a LibreNMS
-                # device imported as a VM): the preferred model has no name match, the opposite
-                # one does.
-                new_device, match_type = cross_match, cross_mt
-                found_as_cross_model = True
+            # Compare BOTH models against the SAME name candidate before advancing to the next
+            # fallback. Two INDEPENDENT per-model searches (the old _lookup_in_model, which returned
+            # on the first hit within each model) could match a Device by one candidate (e.g.
+            # resolved_name) and an UNRELATED VM by a *different* one (e.g. raw hostname), then
+            # treat that as a cross-model collision — leaving the real preferred-name match unbound
+            # and letting a duplicate import slip through. Iterate the candidates in priority order
+            # and, per value, query both models: a same-value hit in BOTH is the genuine cross-model
+            # ambiguity (warn + leave unmatched, exactly like validate_device_for_import()'s
+            # hostname path); a single-model hit binds and wins over any lower-priority candidate.
+            # The librenms_id match above already short-circuited, so this only does the
+            # name/hostname/sysName fallbacks.
+            for value, mt in (
+                (validation.get("resolved_name"), "resolved_name"),
+                (hostname, "hostname"),
+                (sys_name, "sysname"),
+            ):
+                if not value:
+                    continue
+                model_match, model_amb = _lookup_value(Model, value)
+                cross_match, cross_amb = _lookup_value(CrossModel, value)
+                if model_amb or cross_amb:
+                    # >1 match within a single model for this value — terminal ambiguity, fail
+                    # closed below.
+                    name_ambiguous = True
+                    break
+                if model_match and cross_match:
+                    # Same value resolves in BOTH models: warn and leave unmatched (do NOT block),
+                    # exactly like the validator's cross-model hostname branch. A serial/IP match
+                    # can still bind below (a stronger identity), mirroring the validator's
+                    # fall-through. setdefault (not a plain get + isinstance guard) so the warning
+                    # is surfaced even when the caller built a minimal validation dict without
+                    # "warnings", matching the AmbiguousLibreNMSIdError handler below.
+                    validation.setdefault("warnings", []).append(
+                        f"Both a VM and Device exist with hostname '{value}' in NetBox. Cannot "
+                        "determine which to match. Please set the librenms_id custom field on the "
+                        "correct object."
+                    )
+                    break
+                if model_match:
+                    new_device, match_type = model_match, mt
+                    break
+                if cross_match:
+                    # Cross-model import that happened after the cache was built (e.g. a LibreNMS
+                    # device imported as a VM): the preferred model has no match on this value, the
+                    # opposite one does.
+                    new_device, match_type = cross_match, mt
+                    found_as_cross_model = True
+                    break
 
         if not new_device and name_ambiguous:
             # A hostname/sysName resolved to MORE THAN ONE NetBox device (names are unique only
@@ -799,6 +801,11 @@ def _refresh_existing_device(validation: dict, libre_device: dict = None, server
             validation["existing_match_type"] = "ambiguous_hostname_or_serial"
             validation["can_import"] = False
             validation["is_ready"] = False
+            # Terminal: this row is blocked pending duplicate resolution. Return before the
+            # no-match `else` below re-adds create-time role/cluster blockers via
+            # _reassert_new_import_blockers — the cached row must show ONLY the
+            # duplicate-resolution blocker, not stale new-import ones.
+            return
 
         if not new_device and not name_ambiguous and not import_as_vm:
             # Serial- and IP-based matches: validate_device_for_import() catches these, so the
@@ -848,6 +855,10 @@ def _refresh_existing_device(validation: dict, libre_device: dict = None, server
                 validation["existing_match_type"] = "ambiguous_hostname_or_serial"
                 validation["can_import"] = False
                 validation["is_ready"] = False
+                # Terminal, same as the name-ambiguous branch above: block on the serial/IP
+                # duplicate and return before the no-match `else` re-adds create-time
+                # role/cluster blockers.
+                return
 
         if new_device:
             validation["existing_device"] = new_device

@@ -525,32 +525,20 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin, 
             if server_key is None:
                 server_key = self._render_server_key()
 
-            # Handle virtual chassis case
+            # Same id-beats-name resolution as the local end — reuse the shared resolver so a fix
+            # in one path can't miss the other again (the drift risk _resolve_local_interface was
+            # extracted to close). VC-member selection stays here because the remote side leaves the
+            # interface unresolved when the member lookup fails.
             if hasattr(device, "virtual_chassis") and device.virtual_chassis:
-                # Get the appropriate chassis member based on the port name
                 chassis_member = get_virtual_chassis_member(device, remote_port)
-
                 if chassis_member:
-                    # First try to find interface by librenms_id
-                    if librenms_remote_port_id:
-                        netbox_remote_interface = chassis_member.interfaces.filter(
-                            _librenms_id_q(server_key, librenms_remote_port_id)
-                        ).first()
-
-                    # If not found by librenms_id, fall back to name matching on the correct chassis member
-                    if not netbox_remote_interface:
-                        netbox_remote_interface = chassis_member.interfaces.filter(name=remote_port).first()
+                    netbox_remote_interface = _resolve_local_interface(
+                        chassis_member, server_key, librenms_remote_port_id, [remote_port]
+                    )
             else:
-                # Non-virtual chassis case
-                # First try to find interface by librenms_id
-                if librenms_remote_port_id:
-                    netbox_remote_interface = device.interfaces.filter(
-                        _librenms_id_q(server_key, librenms_remote_port_id)
-                    ).first()
-
-                # If not found by librenms_id, fall back to name matching
-                if not netbox_remote_interface:
-                    netbox_remote_interface = device.interfaces.filter(name=remote_port).first()
+                netbox_remote_interface = _resolve_local_interface(
+                    device, server_key, librenms_remote_port_id, [remote_port]
+                )
 
             if netbox_remote_interface:
                 link["remote_port_url"] = reverse("dcim:interface", args=[netbox_remote_interface.pk])

@@ -2402,6 +2402,83 @@ class TestBaseInterfaceTableViewGetContextData:
 
         assert ctx["oob_incomplete"] is True
 
+    def test_relationship_data_incomplete_flag_surfaced_from_cache(self):
+        """A cached snapshot tagged relationship_data_incomplete surfaces the flag in context so the template can persistently warn that the Parent / LAG column may be incomplete."""
+        view = self._make_view()
+        obj = _mock_obj()
+        obj.virtual_chassis = None
+        request = _mock_request()
+
+        cached_data = {
+            "ports": [{"port_id": 1, "ifName": "Gi0/0", "ifAdminStatus": "up", "ifAlias": None, "ifDescr": "Gi0/0"}],
+            "relationship_data_incomplete": True,
+        }
+
+        mock_iface = MagicMock()
+        mock_iface.name = "Gi0/0"
+        mock_ifaces_qs = MagicMock()
+        mock_ifaces_qs.select_related.return_value = [mock_iface]
+
+        with (
+            patch.object(view, "get_cache_key", return_value="key"),
+            patch.object(view, "get_last_fetched_key", return_value="last-key"),
+            patch.object(view, "get_vlan_overrides_key", return_value="overrides-key"),
+            patch.object(view, "get_vlan_groups_for_device", return_value=[]),
+            patch.object(view, "_build_vlan_lookup_maps", return_value={"vid_to_groups": {}, "vid_to_vlans": {}}),
+            patch.object(view, "get_interfaces", return_value=mock_ifaces_qs),
+            patch.object(view, "_add_vlan_group_selection"),
+            patch.object(view, "_add_missing_vlans_info"),
+            patch.object(view, "get_table", return_value=MagicMock()),
+            patch("netbox_librenms_plugin.views.base.interfaces_view.get_interface_name_field", return_value="ifName"),
+            patch("netbox_librenms_plugin.views.base.interfaces_view.cache") as mock_cache,
+            patch("netbox_librenms_plugin.views.base.interfaces_view.timezone") as mock_tz,
+        ):
+            mock_cache.get.side_effect = lambda key: cached_data if key == "key" else None
+            mock_cache.ttl.return_value = 300
+            mock_tz.now.return_value = MagicMock()
+            mock_tz.timedelta.return_value = MagicMock()
+            ctx = view.get_context_data(request, obj, "ifName")
+
+        assert ctx["relationship_data_incomplete"] is True
+
+    def test_relationship_data_incomplete_defaults_false(self):
+        """A snapshot without the flag leaves relationship_data_incomplete False (no spurious banner)."""
+        view = self._make_view()
+        obj = _mock_obj()
+        obj.virtual_chassis = None
+        request = _mock_request()
+
+        cached_data = {
+            "ports": [{"port_id": 1, "ifName": "Gi0/0", "ifAdminStatus": "up", "ifAlias": None, "ifDescr": "Gi0/0"}],
+        }
+
+        mock_iface = MagicMock()
+        mock_iface.name = "Gi0/0"
+        mock_ifaces_qs = MagicMock()
+        mock_ifaces_qs.select_related.return_value = [mock_iface]
+
+        with (
+            patch.object(view, "get_cache_key", return_value="key"),
+            patch.object(view, "get_last_fetched_key", return_value="last-key"),
+            patch.object(view, "get_vlan_overrides_key", return_value="overrides-key"),
+            patch.object(view, "get_vlan_groups_for_device", return_value=[]),
+            patch.object(view, "_build_vlan_lookup_maps", return_value={"vid_to_groups": {}, "vid_to_vlans": {}}),
+            patch.object(view, "get_interfaces", return_value=mock_ifaces_qs),
+            patch.object(view, "_add_vlan_group_selection"),
+            patch.object(view, "_add_missing_vlans_info"),
+            patch.object(view, "get_table", return_value=MagicMock()),
+            patch("netbox_librenms_plugin.views.base.interfaces_view.get_interface_name_field", return_value="ifName"),
+            patch("netbox_librenms_plugin.views.base.interfaces_view.cache") as mock_cache,
+            patch("netbox_librenms_plugin.views.base.interfaces_view.timezone") as mock_tz,
+        ):
+            mock_cache.get.side_effect = lambda key: cached_data if key == "key" else None
+            mock_cache.ttl.return_value = 300
+            mock_tz.now.return_value = MagicMock()
+            mock_tz.timedelta.return_value = MagicMock()
+            ctx = view.get_context_data(request, obj, "ifName")
+
+        assert ctx["relationship_data_incomplete"] is False
+
     def test_cache_hit_with_vc_uses_vc_members(self):
         """Cached data with VC queries each chassis member's interfaces."""
         view = self._make_view()

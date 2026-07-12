@@ -1082,9 +1082,12 @@ class BulkImportDevicesView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
                 # page is HTMX, and without an htmx_toasts entry the user's background-import
                 # request silently blocks for the whole synchronous run with no explanation
                 # (only Django messages were queued, which the HTMX path never renders).
+                # Outcome-neutral wording: the per-row summary toasts below report the actual
+                # successes / failures / skips, so this banner must not claim every selected row
+                # was imported when the synchronous run may have failed or skipped some.
                 sync_fallback_msg = (
-                    f"Background job requested but no workers available. "
-                    f"Imported {total_import_count} devices synchronously."
+                    "Background job requested but no workers are available. "
+                    f"The request ran synchronously for {total_import_count} selected row(s)."
                 )
                 if not is_htmx:
                     messages.warning(

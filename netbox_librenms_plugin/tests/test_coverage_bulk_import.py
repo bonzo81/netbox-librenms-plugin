@@ -910,6 +910,55 @@ class TestRefreshExistingDevice:
         assert validation["is_ready"] is False
         assert any("hostname/serial" in i for i in validation["issues"])
 
+    def test_cross_model_different_candidate_values_binds_preferred(self):
+        """A Device matched by resolved_name and an unrelated VM matched by a different candidate (raw hostname) bind the preferred Device, not a phantom cross-model collision."""
+        from netbox_librenms_plugin.import_utils.bulk_import import _refresh_existing_device
+
+        dev = make_device("sw-pref-resolved")  # carries the resolved (preferred) name
+        make_vm("sw-pref-host")  # carries only the raw hostname — a DIFFERENT name
+
+        validation = self._device_validation(resolved_name="sw-pref-resolved")
+        # device_id 88888 matches no librenms_id CF, so the name fallback runs.
+        libre_device = {"device_id": 88888, "hostname": "sw-pref-host", "sysName": "sw-pref-host"}
+
+        _refresh_existing_device(validation, libre_device=libre_device, server_key="default")
+
+        assert validation["existing_device"].pk == dev.pk
+        assert validation["existing_match_type"] == "resolved_name"
+        assert not any("Both a VM and Device" in w for w in validation.get("warnings", [])), (
+            "a different-value VM match must not trigger the cross-model collision warning"
+        )
+        assert validation["can_import"] is False
+
+    def test_ambiguous_hostname_refresh_shows_only_duplicate_blocker(self):
+        """An ambiguous multi-device hostname match is terminal: the row shows only the duplicate-resolution blocker, not a stale create-time role blocker."""
+        from dcim.models import Device, Site
+        from netbox_librenms_plugin.import_utils.bulk_import import _refresh_existing_device
+
+        dev_a = make_device("amb-terminal-sw")
+        site_b = Site.objects.create(name="crfix-amb-site-b", slug="crfix-amb-site-b")
+        Device.objects.create(
+            name="amb-terminal-sw",
+            device_type=dev_a.device_type,
+            role=dev_a.role,
+            site=site_b,
+            status="active",
+        )
+
+        # device_role not selected → the no-match path would (wrongly) re-add its create-time blocker.
+        validation = self._device_validation(resolved_name="amb-terminal-sw")
+        libre_device = {"device_id": 88889, "hostname": "amb-terminal-sw", "sysName": "amb-terminal-sw"}
+
+        _refresh_existing_device(validation, libre_device=libre_device, server_key="default")
+
+        assert validation["existing_match_type"] == "ambiguous_hostname_or_serial"
+        assert any("hostname/serial" in i for i in validation["issues"])
+        assert not any("role must be manually selected" in i.lower() for i in validation["issues"]), (
+            "the terminal ambiguity branch must not leak a stale new-import role blocker"
+        )
+        assert validation["can_import"] is False
+        assert validation["is_ready"] is False
+
     def test_neutralized_link_but_other_match_type_keeps_block(self):
         """A non-librenms cached match (hostname) must survive the linkage refresh: only a neutralized librenms/OOB link triggers re-evaluation, so the device stays matched and the row stays blocked."""
         from netbox_librenms_plugin.import_utils.bulk_import import _refresh_existing_device

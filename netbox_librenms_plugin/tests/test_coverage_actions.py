@@ -631,7 +631,11 @@ class TestBulkImportDevicesViewPost:
             response = view.post(request)
 
         assert response.status_code == 200
-        assert b"no workers available" in response.content
+        # Outcome-neutral wording: the fallback banner must NOT claim every selected row was
+        # "Imported" — the per-row summary toasts report the actual successes/failures/skips.
+        assert b"no workers are available" in response.content
+        assert b"ran synchronously" in response.content
+        assert b"devices synchronously" not in response.content
 
 
 class TestDeviceImportHelperMixin:
@@ -7222,6 +7226,68 @@ class TestCreatePlatformFromImportManufacturer:
         # Neither the constructor nor the manager create() path persisted a Platform.
         mock_platform.assert_not_called()
         mock_platform.objects.create.assert_not_called()
+
+    @pytest.mark.django_db
+    def test_device_platform_manufacturer_mismatch_rejected_and_rolled_back(self):
+        """Assigning a new Platform whose manufacturer conflicts with the target Device's device-type manufacturer is rejected, and the just-created Platform is rolled back."""
+        from dcim.models import Manufacturer, Platform
+
+        device = make_device("plat-assign-mismatch")  # device_type under manufacturer TestMfr
+        other_mfr, _ = Manufacturer.objects.get_or_create(name="PlatAssignOther", slug="platassign-other")
+        assert other_mfr.pk != device.device_type.manufacturer_id
+
+        view = self._view()
+        req = _make_request(
+            post={"platform_name": "Mismatch-OS", "manufacturer": str(other_mfr.pk)},
+            headers={"HX-Request": "true"},
+        )
+
+        with (
+            patch.object(view, "require_write_permission", return_value=None),
+            patch.object(view, "require_object_permissions", return_value=None),
+            patch.object(
+                view,
+                "get_validated_device_with_selections",
+                return_value=(None, {"existing_device": device}, {}),
+            ),
+        ):
+            resp = view.post(req, device_id=device.pk)
+
+        # An error response was returned (not a success), the newly created Platform was rolled
+        # back, and the device's platform is untouched.
+        assert resp is not None
+        assert not Platform.objects.filter(name="Mismatch-OS").exists()
+        device.refresh_from_db()
+        assert device.platform_id is None
+
+    @pytest.mark.django_db
+    def test_device_platform_manufacturer_match_assigns(self):
+        """The consistent case still assigns: a Platform under the device-type's manufacturer is persisted onto the Device."""
+        from dcim.models import Manufacturer, Platform
+
+        device = make_device("plat-assign-ok")
+        mfr = Manufacturer.objects.get(slug="test-mfr")  # make_device's device_type manufacturer
+
+        view = self._view()
+        req = _make_request(
+            post={"platform_name": "Match-OS", "manufacturer": str(mfr.pk)},
+            headers={"HX-Request": "true"},
+        )
+
+        with (
+            patch.object(view, "require_write_permission", return_value=None),
+            patch.object(view, "require_object_permissions", return_value=None),
+            patch.object(
+                view,
+                "get_validated_device_with_selections",
+                return_value=(None, {"existing_device": device}, {}),
+            ),
+        ):
+            view.post(req, device_id=device.pk)
+
+        platform = Platform.objects.get(name="Match-OS")
+        device.refresh_from_db()
+        assert device.platform_id == platform.pk
 
 
 class TestOOBInterfaceSelectTemplate:

@@ -318,6 +318,11 @@ def _module_interface_update_message(bind_result, location):
         )
     if adopted_count:
         return f"Updated interfaces for {location}: adopted {adopted_count} existing standalone interface(s)."
+    if not interface_name:
+        # Pure-adoption path (bind_item is None) where a concurrent/duplicate request already
+        # adopted the interfaces, so adopted_count is 0 too: neither branch above fired. Without
+        # this guard the fall-through renders "Updated interface None for ..." to the user.
+        return f"No interface changes were needed for {location}."
     return f"Updated interface {interface_name} for {location}."
 
 

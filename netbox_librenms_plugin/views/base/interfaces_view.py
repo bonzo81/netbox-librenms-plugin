@@ -468,6 +468,15 @@ class BaseInterfaceTableView(VlanAssignmentMixin, LibreNMSAPIMixin, LibreNMSPerm
         # snapshot (via an inline banner) so the missing OOB rows are never silently absent.
         oob_incomplete = bool(cached_data.get("oob_incomplete")) if isinstance(cached_data, dict) else False
 
+        # Same persistent-warning treatment as oob_incomplete, for a port_stack (LAG / sub-interface
+        # relationship) fetch that failed on the last refresh: the snapshot is cached WITHOUT
+        # relationship data, so a transient Django message shown once at refresh time leaves later
+        # cached renders silently missing the Parent / LAG relationships. Surface it on every render
+        # instead. The flag is set by the refresh path when get_port_stack fails.
+        relationship_data_incomplete = (
+            bool(cached_data.get("relationship_data_incomplete")) if isinstance(cached_data, dict) else False
+        )
+
         # Get VLAN groups for dropdown
         vlan_groups = self.get_vlan_groups_for_device(obj)
         lookup_maps = self._build_vlan_lookup_maps(vlan_groups)
@@ -620,6 +629,7 @@ class BaseInterfaceTableView(VlanAssignmentMixin, LibreNMSAPIMixin, LibreNMSPerm
             "netbox_only_interfaces": netbox_only_interfaces,
             "server_key": server_key,
             "oob_incomplete": oob_incomplete,
+            "relationship_data_incomplete": relationship_data_incomplete,
         }
 
     def _add_vlan_group_selection(self, port, lookup_maps, device, vlan_group_overrides=None):

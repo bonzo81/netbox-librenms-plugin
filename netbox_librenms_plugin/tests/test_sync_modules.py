@@ -5799,6 +5799,14 @@ class TestModuleInterfaceUpdateMessage:
         msg = self._msg({"status": "bound", "interface": "Et1/1", "adopted_count": 0})
         assert msg == "Updated interface Et1/1 for QSFP-100G in Bay 1."
 
+    def test_no_bind_no_adopt_is_a_clean_no_op_message(self):
+        # Pure-adoption path where a concurrent/duplicate request already adopted the interfaces:
+        # neither an interface name nor a positive adopted_count is present. The message must NOT
+        # fall through to "Updated interface None for ...".
+        msg = self._msg({"status": "bound", "adopted_count": 0})
+        assert "None" not in msg
+        assert msg == "No interface changes were needed for QSFP-100G in Bay 1."
+
 
 class TestReplaceModuleRedirectServerKey:
     """ReplaceModuleView computes `server_key = POST or self.librenms_api.server_key`, so its redirects must pass that computed key — otherwise the helper falls back to POST/GET only and drops the active-server context when the POST field is absent, landing on a blank/default modules tab and reading/mutating a different cache namespace."""
