@@ -422,22 +422,34 @@ document.addEventListener('change', function (e) {
     }
 
     // --- LAG: check/uncheck all members ---
-    // Skipped for synthetic parent-UNWIND events (see the uncheck path below): the unwind
-    // only retracts an auto-selected parent, and letting that dispatched event cascade
-    // through here would uncheck ALL of the parent LAG's member rows — including members
-    // the user checked manually (this block carries no data-auto-selected gate), silently
-    // dropping them from the sync POST.
+    // Each member the aggregate pulls in is marked data-auto-selected, and the uncheck side
+    // retracts ONLY marked members — so a member the user ticked manually before touching the
+    // aggregate survives toggling it off. Still skipped for synthetic parent-UNWIND events (see
+    // the uncheck path below): that event already retracted an auto-selected parent directly, so
+    // cascading it through here would only redundantly re-toggle the aggregate's members.
     const portId = row.dataset.portId;
     if (autoSelectEnabled && portId && !(e.detail && e.detail.lnmsParentUnwind)) {
         const memberRows = document.querySelectorAll('tr[data-member-of-lag="' + portId + '"]');
         memberRows.forEach(function (memberRow) {
             const memberCheckbox = memberRow.querySelector('input[name="select"]');
-            // Only act (and dispatch) when the state actually flips — the equality guard
-            // makes this idempotent and prevents a dispatch loop with this same handler.
-            if (memberCheckbox && memberCheckbox.checked !== checkbox.checked) {
-                memberCheckbox.checked = checkbox.checked;
-                // Run the same handler for the member so its own second-order rules apply
-                // (a member that is also a sub-interface child injects/removes its parent).
+            if (!memberCheckbox) return;
+            if (checkbox.checked) {
+                // Aggregate checked: pull in each member not already selected, marking it
+                // auto-selected so unchecking the aggregate can retract ONLY what it added. A
+                // member already checked (manually or otherwise) keeps its state and marker.
+                if (!memberCheckbox.checked) {
+                    memberCheckbox.checked = true;
+                    memberCheckbox.dataset.autoSelected = 'true';
+                    // Run the same handler for the member so its own second-order rules apply
+                    // (a member that is also a sub-interface child injects/removes its parent).
+                    memberCheckbox.dispatchEvent(new Event('change', { bubbles: true }));
+                    changed = true;
+                }
+            } else if (memberCheckbox.checked && memberCheckbox.dataset.autoSelected) {
+                // Aggregate unchecked: retract ONLY members it auto-selected — a member the user
+                // ticked themselves (no marker) is preserved.
+                delete memberCheckbox.dataset.autoSelected;
+                memberCheckbox.checked = false;
                 memberCheckbox.dispatchEvent(new Event('change', { bubbles: true }));
                 changed = true;
             }
