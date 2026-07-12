@@ -294,7 +294,7 @@ class SyncInterfacesView(
                     # otherwise resolve a child/parent uniquely onto a *different* member that carries
                     # the same stale librenms_id, persisting lag/parent on the wrong interface.
                     row_name = port_by_id[port_id].get(interface_name_field)
-                    target_device = self._resolve_row_target_device(obj, row_name)
+                    target_device = self._resolve_row_target_device(obj, row_name, port_id=port_id)
                     if target_device is None:
                         continue
                     expected_owner = _interface_owner_for_object(target_device)
@@ -540,18 +540,25 @@ class SyncInterfacesView(
         queryset = self.restricted_queryset(Device).select_for_update(of=("self",))
         return {device.pk: device for device in queryset.filter(pk__in=target_ids).order_by("pk")}
 
-    def _resolve_row_target_device(self, obj, interface_name):
+    def _resolve_row_target_device(self, obj, interface_name, port_id=None):
         """
         Resolve the Device a given interface row syncs to.
 
-        Honors the POSTed ``device_selection_<name>`` when it names a valid VC member. Returns
-        ``None`` for an invalid, stale, or inaccessible explicit target. The relationship phase
-        reuses this so a lag/parent link is pinned to the same owner the row was synced onto, not
-        an arbitrary VC member that happens to carry the same (possibly stale) librenms_id.
+        Prefers a stable port-id-keyed override ``device_selection_port_<port_id>`` and falls back
+        to ``device_selection_<name>``. Both must identify an accessible VC member. An invalid,
+        stale, or inaccessible explicit target returns ``None``. The relationship phase reuses
+        this result so a lag or parent link stays on the same owner as the synced row.
+
+        The port-id-keyed form exists for a cross-page parent: when a sub-interface's parent lives
+        on a different table page, the JS injects the parent only by its stable ``select_port_id``
+        (there is no ``device_selection_<name>`` for it) plus ``device_selection_port_<port_id>``
+        carrying the child row's live VC-member selection, so the off-page parent resolves onto the
+        correct member instead of defaulting to the page device.
 
         Args:
             obj: The page Device (or VirtualMachine); returned as-is for VMs.
             interface_name (str): The interface row's name (keys the POST selection).
+            port_id: The row's stable LibreNMS port_id, when known (keys the override).
 
         Returns:
             The selected VC member Device when valid, *obj* when no target was selected,
@@ -559,7 +566,11 @@ class SyncInterfacesView(
         """
         if not isinstance(obj, Device):
             return obj
-        selected_device_id = self.request.POST.get(f"device_selection_{interface_name}")
+        selected_device_id = None
+        if port_id is not None:
+            selected_device_id = self.request.POST.get(f"device_selection_port_{port_id}")
+        if not selected_device_id:
+            selected_device_id = self.request.POST.get(f"device_selection_{interface_name}")
         if not selected_device_id:
             return obj
         try:
@@ -601,7 +612,7 @@ class SyncInterfacesView(
 
         if isinstance(obj, Device):
             server_key = getattr(self, "_post_server_key", None) or self.librenms_api.server_key
-            target_device = self._resolve_row_target_device(obj, interface_name)
+            target_device = self._resolve_row_target_device(obj, interface_name, port_id=port_id)
             if target_device is None:
                 # The user explicitly selected a target. If it is stale or outside the
                 # caller's grant, do not silently sync the row onto the page device.

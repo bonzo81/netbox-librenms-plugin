@@ -461,6 +461,20 @@ document.addEventListener('change', function (e) {
                     hidden.value = parentPortId;
                     hidden.id = hiddenId;
                     form.appendChild(hidden);
+                    // Carry the off-page parent's target VC member, derived from THIS child row's
+                    // live member select (a sub-interface shares its parent's member). Keyed by the
+                    // parent's stable port_id so the backend (_resolve_row_target_device) pins the
+                    // parent to that member instead of defaulting to the page device — which would
+                    // skip it or create it on the wrong member.
+                    const memberSelect = row.querySelector('.vc-member-select');
+                    if (memberSelect && memberSelect.value) {
+                        const devOverride = document.createElement('input');
+                        devOverride.type = 'hidden';
+                        devOverride.name = 'device_selection_port_' + parentPortId;
+                        devOverride.value = memberSelect.value;
+                        devOverride.id = 'auto-parent-dev-' + parentPortId;
+                        form.appendChild(devOverride);
+                    }
                     // data-parent-name is human-readable text for the notice only.
                     _showParentCrossPageNotice(row.dataset.parentName || parentPortId);
                 }
@@ -482,6 +496,9 @@ document.addEventListener('change', function (e) {
             if (!siblingStillChecked) {
                 const hidden = form.querySelector('#auto-parent-' + parentPortId);
                 if (hidden) hidden.remove();
+                // Drop the paired cross-page device override too.
+                const devOverride = form.querySelector('#auto-parent-dev-' + parentPortId);
+                if (devOverride) devOverride.remove();
             }
         }
     }
@@ -499,7 +516,9 @@ document.addEventListener('change', function (e) {
     const toggle = e.target;
     if (!toggle.matches('#autoSelectLagMembers') || toggle.checked) return;
 
-    document.querySelectorAll('input[name="select_port_id"][id^="auto-parent-"]').forEach(function (hidden) {
+    // Matches both the injected select_port_id (#auto-parent-<pid>) and its paired device
+    // override (#auto-parent-dev-<pid>).
+    document.querySelectorAll('input[id^="auto-parent-"]').forEach(function (hidden) {
         hidden.remove();
     });
 

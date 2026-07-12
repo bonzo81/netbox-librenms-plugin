@@ -1526,6 +1526,24 @@ class TestSyncLagAndParentRelationships:
         assert err is None, err
         assert iface is not None and iface.pk == i1.pk
 
+    def test_cross_page_parent_resolves_to_port_keyed_member_override(self, db):
+        """A cross-page parent (only select_port_id + device_selection_port_<id>) pins to that member, not the page device."""
+        from netbox_librenms_plugin.tests.conftest import make_virtual_chassis
+
+        page_dev = make_device("vc-page-master")
+        member2 = make_device("vc-page-m2")
+        make_virtual_chassis("vc-page", page_dev, member2)
+
+        view = self._make_view()
+        # The JS submits the off-page parent's member (from the child row's live .vc-member-select)
+        # keyed by the parent's stable port_id; there is no device_selection_<name> for it.
+        view.request.POST = {"device_selection_port_100": str(member2.id)}
+
+        # Port-keyed override wins → the parent resolves onto member2.
+        assert view._resolve_row_target_device(page_dev, "Po1", port_id="100").id == member2.id
+        # No override for this port and no name selection → the page device (unchanged default).
+        assert view._resolve_row_target_device(page_dev, "Po1", port_id="999").id == page_dev.id
+
     def test_oob_row_excluded_from_relationship_sync(self, db):
         """An OOB-controller row sharing a selected host display name must not contribute its port_id, or the LAG pass would link the hidden controller interface instead of the host."""
         device = self._make_device()
