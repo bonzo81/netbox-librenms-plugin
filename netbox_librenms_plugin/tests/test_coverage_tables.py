@@ -1838,7 +1838,7 @@ class TestInterfaceTableLibreNMSIdColumnAndBadgeContrast:
         assert table.columns["librenms_id"].verbose_name == "LibreNMS ID"
 
     def test_vc_fallback_coerces_missing_interface_name(self):
-        """The VC member fallback must coerce a missing interface name to "" before calling get_virtual_chassis_member (which re.match()es it), so a record with no name doesn't raise TypeError while rendering the relationship button."""
+        """An ethernet record with a missing name must coerce it to "" before calling get_virtual_chassis_member (which re.match()es it), so rendering the relationship button doesn't raise TypeError."""
         from netbox_librenms_plugin.tables.interfaces import LibreNMSInterfaceTable
 
         device = MagicMock()
@@ -1849,19 +1849,43 @@ class TestInterfaceTableLibreNMSIdColumnAndBadgeContrast:
         table.migrated_to_marker = None  # not a migrated donor → inline sync controls render
 
         with patch("netbox_librenms_plugin.tables.interfaces.get_virtual_chassis_member", return_value=device) as gvcm:
-            # missing_nb + truthy port id reaches object_id resolution; record has no
+            # Ethernet ifType so the name-position heuristic runs; record has no
             # netbox_interface / selected_object_id / "ifName" → name resolves to None → coerced "".
             table._render_relationship_column(
                 lnms_name="eth0",
                 lnms_port_id=5,
                 sync_status="missing_nb",
-                record={},
+                record={"ifType": "ethernetCsmacd"},
                 btn_class="lag-sync-btn",
                 data_related_key="data-lag-port-id",
             )
 
         gvcm.assert_called_once()
         assert gvcm.call_args.args[1] == ""
+
+    def test_vc_fallback_skips_heuristic_for_logical_nameless_record(self):
+        """A logical (non-ethernet, no-dot) record must NOT invoke the name-position heuristic — it defaults to the viewed device — so a Vlan/loopback row can't pre-select the wrong VC member."""
+        from netbox_librenms_plugin.tables.interfaces import LibreNMSInterfaceTable
+
+        device = MagicMock()
+        device.virtual_chassis = MagicMock()
+        device.pk = 5
+        with patch("netbox_librenms_plugin.tables.interfaces.get_interface_name_field", return_value="ifName"):
+            table = LibreNMSInterfaceTable(data=[], device=device, server_key="default")
+        table.migrated_to_marker = None
+
+        with patch("netbox_librenms_plugin.tables.interfaces.get_virtual_chassis_member", return_value=device) as gvcm:
+            # No ifType, no dotted name → the ① guard short-circuits the heuristic entirely.
+            table._render_relationship_column(
+                lnms_name="Vlan2",
+                lnms_port_id=5,
+                sync_status="missing_nb",
+                record={"ifName": "Vlan2", "ifType": "l3ipvlan"},
+                btn_class="lag-sync-btn",
+                data_related_key="data-lag-port-id",
+            )
+
+        gvcm.assert_not_called()
 
     def test_every_status_badge_pairs_background_with_text_colour(self):
         """A solid ``bg-*`` colour fill with no companion text colour is the grey-on-grey / grey-on-green readability bug."""

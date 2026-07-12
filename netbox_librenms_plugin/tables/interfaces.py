@@ -24,6 +24,16 @@ from netbox_librenms_plugin.utils import (
     render_vc_member_options,
 )
 
+# (colour, mdi icon, full status text) per relationship sync status. Colour + icon read at a
+# glance; the text is the badge tooltip. Module-level so it isn't re-allocated on every
+# _render_relationship_column call (up to twice per table row — LAG + Parent).
+_RELATIONSHIP_STATUS_MAP = {
+    "match": ("success", "mdi-check-circle", "Match"),
+    "mismatch": ("warning", "mdi-alert-circle", "Mismatch"),
+    "missing_nb": ("info", "mdi-plus-circle", "Not in NetBox"),
+    "missing_lnms": ("secondary", "mdi-database-off", "Not in LibreNMS"),
+}
+
 
 class LibreNMSInterfaceTable(tables.Table):
     """
@@ -587,15 +597,11 @@ class LibreNMSInterfaceTable(tables.Table):
         Returns:
             SafeString: The pill markup (plus a sync button when applicable).
         """
-        # (colour, mdi icon, full status text). Colour + icon read at a glance; the text is the
-        # tooltip. mdi-check-circle / mdi-help-circle are already used elsewhere in this table.
-        status_map = {
-            "match": ("success", "mdi-check-circle", "Match"),
-            "mismatch": ("warning", "mdi-alert-circle", "Mismatch"),
-            "missing_nb": ("info", "mdi-plus-circle", "Not in NetBox"),
-            "missing_lnms": ("secondary", "mdi-database-off", "Not in LibreNMS"),
-        }
-        color, icon, status_text = status_map.get(sync_status, ("secondary", "mdi-help-circle", sync_status))
+        # Colour + icon read at a glance; the text is the tooltip. Map hoisted to the module-level
+        # _RELATIONSHIP_STATUS_MAP so it isn't rebuilt on every call.
+        color, icon, status_text = _RELATIONSHIP_STATUS_MAP.get(
+            sync_status, ("secondary", "mdi-help-circle", sync_status)
+        )
         badge_css = f"bg-{color}-lt"
 
         # format_html() escapes its args, so it's the single escape point for the name.
