@@ -152,7 +152,7 @@ def detect_collisions_for_device_ids(
         libre_device = cache.get(device_id)
         if libre_device is None:
             success, libre_device = api.get_device_info(device_id)
-            if not success or not libre_device:
+            if not success or not isinstance(libre_device, dict):
                 # Couldn't fetch device info → can't collision-check this id. Record it so the
                 # caller blocks it instead of importing it unchecked (fail closed).
                 unresolved_ids.append(device_id)
@@ -162,6 +162,15 @@ def detect_collisions_for_device_ids(
             # same device from LibreNMS. Without this, the collision pre-check doubles the API
             # round-trips for any id the caller didn't already pre-populate.
             cache[device_id] = libre_device
+        # Fail closed on a bad cached payload too: a negatively-cached lookup (an empty dict or a
+        # row whose device_id doesn't match the requested id — e.g. a stale/mis-keyed cache entry)
+        # would otherwise reach validation as a brand-new device and make the collision gate report
+        # a clean scan for an id it never actually verified.
+        requested_id = coerce_librenms_id(device_id)
+        cached_id = coerce_librenms_id(libre_device.get("device_id")) if isinstance(libre_device, dict) else None
+        if requested_id is None or cached_id != requested_id:
+            unresolved_ids.append(device_id)
+            continue
         validation = validate_device_for_import(
             # DB-only collision pre-check: don't hand the validator an API client (it would let
             # API-backed validation paths run even with the cache supplied + include_vc_detection

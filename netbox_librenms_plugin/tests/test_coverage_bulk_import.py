@@ -2974,6 +2974,30 @@ class TestDetectCollisionsForDeviceIds:
         assert collisions[0]["nb_model_name"] == "device"
         assert {r["device_id"] for r in collisions[0]["librenms_rows"]} == {8001, 8002}
 
+    def test_empty_cached_row_is_unresolved_not_a_clean_scan(self):
+        """A negatively-cached empty payload can't be collision-checked → unresolved, never importable."""
+        from netbox_librenms_plugin.import_utils.bulk_import import detect_collisions_for_device_ids
+
+        # A prior failed lookup left an empty dict in the shared cache. Without the fix this reaches
+        # validation as a brand-new device and the gate reports a clean scan for an unverified id.
+        collisions, unresolved = detect_collisions_for_device_ids(
+            [8010], self._api(), libre_devices_cache={8010: {}}, sync_options={"use_sysname": True}
+        )
+        assert collisions == []
+        assert unresolved == [8010]
+
+    def test_mismatched_cached_device_id_is_unresolved(self):
+        """A cached row whose device_id doesn't match the requested id is unresolved, not scanned."""
+        from netbox_librenms_plugin.import_utils.bulk_import import detect_collisions_for_device_ids
+
+        # Stale/mis-keyed cache entry: id 8011 requested but the payload describes device 9999.
+        cache = {8011: {"device_id": 9999, "sysName": "wrong-row", "hostname": "wrong-row"}}
+        collisions, unresolved = detect_collisions_for_device_ids(
+            [8011], self._api(), libre_devices_cache=cache, sync_options={"use_sysname": True}
+        )
+        assert collisions == []
+        assert unresolved == [8011]
+
     def test_two_rows_resolving_to_one_vm_collide(self):
         """Two LibreNMS rows whose real validation resolves to one existing VirtualMachine → a collision keyed to the VM model, proving the pre-check gate covers the VM half of a batch (validation flips import_as_vm on the existing-VM match)."""
         from netbox_librenms_plugin.import_utils.bulk_import import detect_collisions_for_device_ids
