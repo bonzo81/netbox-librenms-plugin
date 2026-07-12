@@ -4275,3 +4275,65 @@ class TestEnrichPortLagParentNameFallback:
 
         assert port["librenms_parent_name"] == "CORE-TRUNK-B"
         assert port["parent_sync_status"] == "match"
+
+
+@pytest.mark.django_db
+class TestEnrichPortLagParentStatusSymmetry:
+    """LAG and parent must classify sync status identically across all 5 branches (the invariant the shared helper guarantees)."""
+
+    def _status(self, kind, *, lnms_has_rel, nb_related, n):
+        """Enrich a fresh port for ONE relationship kind and return its sync status.
+
+        kind: "lag" | "parent". nb_related: None | "matching" | "nonmatching".
+        """
+        from netbox_librenms_plugin.utils import set_librenms_device_id
+        from netbox_librenms_plugin.views.base.interfaces_view import BaseInterfaceTableView
+
+        dev = make_device(f"rel-sym-{kind}-{n}")
+        child = make_interface(dev, f"child-{kind}-{n}")
+        child_pid = 1000 + n
+        set_librenms_device_id(child, child_pid, "default")
+        rel_lnms_port_id = 500 + n
+
+        by_id = {}
+        if nb_related is not None:
+            related = make_interface(dev, f"rel-{kind}-{n}", iface_type="lag" if kind == "lag" else "other")
+            if nb_related == "matching":
+                set_librenms_device_id(related, rel_lnms_port_id, "default")
+                related.save()
+            setattr(child, "lag" if kind == "lag" else "parent", related)
+        child.save()
+
+        rel_map = {}
+        if lnms_has_rel:
+            # ifName intentionally "rel-<kind>-<n>" so a "matching" related iface (same name) matches
+            # by name too, and a "nonmatching" one (named "other-...") fails both id and name.
+            by_id[rel_lnms_port_id] = {"port_id": rel_lnms_port_id, "ifName": f"rel-{kind}-{n}"}
+            rel_map = {child_pid: rel_lnms_port_id}
+            if nb_related == "nonmatching":
+                related.name = f"other-{kind}-{n}"
+                related.save()
+
+        port = {"port_id": child_pid, "netbox_interface": child}
+        BaseInterfaceTableView._enrich_port_with_lag_parent(
+            port,
+            rel_map if kind == "lag" else {},
+            rel_map if kind == "parent" else {},
+            by_id,
+            interface_name_field="ifName",
+        )
+        return port["lag_sync_status" if kind == "lag" else "parent_sync_status"]
+
+    def test_all_status_branches_are_symmetric(self):
+        # (lnms_has_rel, nb_related) -> expected status; run through BOTH relationship kinds.
+        scenarios = [
+            (True, "matching", "match"),
+            (True, "nonmatching", "mismatch"),
+            (True, None, "missing_nb"),
+            (False, "matching", "missing_lnms"),  # NetBox has the related iface, LibreNMS doesn't
+            (False, None, None),
+        ]
+        for i, (has_rel, nb_rel, expected) in enumerate(scenarios):
+            lag = self._status("lag", lnms_has_rel=has_rel, nb_related=nb_rel, n=i)
+            parent = self._status("parent", lnms_has_rel=has_rel, nb_related=nb_rel, n=100 + i)
+            assert lag == parent == expected, f"{(has_rel, nb_rel)}: lag={lag} parent={parent} expected={expected}"

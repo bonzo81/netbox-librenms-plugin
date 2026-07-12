@@ -1022,48 +1022,35 @@ class BaseInterfaceTableView(
                 lnms_port_dict.get(interface_name_field),
             )
 
-        # --- LAG ---
-        lnms_lag_port_id = normalize_librenms_port_id(port_id_to_lag.get(port_id)) if port_id else None
-        agg_port = by_id.get(lnms_lag_port_id) if lnms_lag_port_id else None
-        lnms_lag_name = agg_port.get(interface_name_field) if agg_port else None
+        def _relationship_context(port_id_to_rel, nb_rel_attr):
+            """Resolve ``(lnms_name, lnms_port_id, sync_status)`` for one relationship kind (LAG or parent)."""
+            lnms_port_id = normalize_librenms_port_id(port_id_to_rel.get(port_id)) if port_id else None
+            rel_port = by_id.get(lnms_port_id) if lnms_port_id else None
+            lnms_name = rel_port.get(interface_name_field) if rel_port else None
+            nb_rel = getattr(nb_iface, nb_rel_attr, None) if nb_iface else None
+            if lnms_port_id and nb_iface:
+                if nb_rel and _related_iface_matches(nb_rel, rel_port):
+                    status = "match"
+                elif nb_rel:
+                    status = "mismatch"
+                else:
+                    status = "missing_nb"
+            elif lnms_port_id and not nb_iface:
+                status = "missing_nb"
+            elif not lnms_port_id and nb_rel:
+                status = "missing_lnms"
+            else:
+                status = None
+            return lnms_name, lnms_port_id, status
 
+        # --- LAG ---
+        lnms_lag_name, lnms_lag_port_id, lag_status = _relationship_context(port_id_to_lag, "lag")
         port["librenms_lag_name"] = lnms_lag_name
         port["librenms_lag_port_id"] = lnms_lag_port_id
-
-        nb_lag = getattr(nb_iface, "lag", None) if nb_iface else None
-        if lnms_lag_port_id and nb_iface:
-            if nb_lag and _related_iface_matches(nb_lag, agg_port):
-                port["lag_sync_status"] = "match"
-            elif nb_lag:
-                port["lag_sync_status"] = "mismatch"
-            else:
-                port["lag_sync_status"] = "missing_nb"
-        elif lnms_lag_port_id and not nb_iface:
-            port["lag_sync_status"] = "missing_nb"
-        elif not lnms_lag_port_id and nb_lag:
-            port["lag_sync_status"] = "missing_lnms"
-        else:
-            port["lag_sync_status"] = None
+        port["lag_sync_status"] = lag_status
 
         # --- Parent ---
-        lnms_parent_port_id = normalize_librenms_port_id(port_id_to_parent.get(port_id)) if port_id else None
-        parent_port = by_id.get(lnms_parent_port_id) if lnms_parent_port_id else None
-        lnms_parent_name = parent_port.get(interface_name_field) if parent_port else None
-
+        lnms_parent_name, lnms_parent_port_id, parent_status = _relationship_context(port_id_to_parent, "parent")
         port["librenms_parent_name"] = lnms_parent_name
         port["librenms_parent_port_id"] = lnms_parent_port_id
-
-        nb_parent = getattr(nb_iface, "parent", None) if nb_iface else None
-        if lnms_parent_port_id and nb_iface:
-            if nb_parent and _related_iface_matches(nb_parent, parent_port):
-                port["parent_sync_status"] = "match"
-            elif nb_parent:
-                port["parent_sync_status"] = "mismatch"
-            else:
-                port["parent_sync_status"] = "missing_nb"
-        elif lnms_parent_port_id and not nb_iface:
-            port["parent_sync_status"] = "missing_nb"
-        elif not lnms_parent_port_id and nb_parent:
-            port["parent_sync_status"] = "missing_lnms"
-        else:
-            port["parent_sync_status"] = None
+        port["parent_sync_status"] = parent_status
