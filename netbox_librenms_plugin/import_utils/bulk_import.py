@@ -150,6 +150,7 @@ def detect_collisions_for_device_ids(
             unresolved_ids.extend(device_ids[idx - 1 :])
             break
         libre_device = cache.get(device_id)
+        just_fetched = False
         if libre_device is None:
             success, libre_device = api.get_device_info(device_id)
             if not success or not isinstance(libre_device, dict):
@@ -157,11 +158,7 @@ def detect_collisions_for_device_ids(
                 # caller blocks it instead of importing it unchecked (fail closed).
                 unresolved_ids.append(device_id)
                 continue
-            # Persist the freshly fetched row into the shared cache so the downstream import
-            # (bulk_import_devices_shared / bulk_import_vms) reuses it instead of re-fetching the
-            # same device from LibreNMS. Without this, the collision pre-check doubles the API
-            # round-trips for any id the caller didn't already pre-populate.
-            cache[device_id] = libre_device
+            just_fetched = True
         # Fail closed on a bad cached payload too: a negatively-cached lookup (an empty dict or a
         # row whose device_id doesn't match the requested id — e.g. a stale/mis-keyed cache entry)
         # would otherwise reach validation as a brand-new device and make the collision gate report
@@ -171,6 +168,15 @@ def detect_collisions_for_device_ids(
         if requested_id is None or cached_id != requested_id:
             unresolved_ids.append(device_id)
             continue
+        if just_fetched:
+            # Persist the freshly fetched row into the shared cache — but only now that its
+            # device_id is verified to match the requested id — so the downstream import
+            # (bulk_import_devices_shared / bulk_import_vms) reuses it instead of re-fetching the
+            # same device from LibreNMS. Deferring the write until past the mismatch check keeps a
+            # mis-keyed payload from poisoning the shared cache for any other consumer that reads it
+            # (e.g. a same-batch retry that hits the cache instead of re-fetching), even though this
+            # id is (correctly) recorded unresolved above.
+            cache[device_id] = libre_device
         validation = validate_device_for_import(
             # DB-only collision pre-check: don't hand the validator an API client (it would let
             # API-backed validation paths run even with the cache supplied + include_vc_detection

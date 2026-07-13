@@ -3208,3 +3208,28 @@ class TestDetectCollisionsForDeviceIds:
             [8101, 8102], api, libre_devices_cache=shared_cache, sync_options={"use_sysname": True}
         )
         assert calls == [], "second pass must hit the warmed cache, not re-fetch"
+
+    def test_fresh_fetch_mismatched_device_id_is_not_written_back(self):
+        """A freshly fetched payload whose device_id doesn't match the requested id is unresolved and never written back into the shared cache (fresh-fetch analog of the cached-mismatch guard)."""
+        from types import SimpleNamespace
+
+        from netbox_librenms_plugin.import_utils.bulk_import import detect_collisions_for_device_ids
+
+        # 8020 isn't cached; the fetch SUCCEEDS but returns a payload describing device 9999
+        # (a mis-keyed / stale LibreNMS response). It must fail closed WITHOUT persisting.
+        shared_cache = {}
+        api = SimpleNamespace(
+            server_key="default",
+            get_device_info=lambda _did: (
+                True,
+                {"device_id": 9999, "sysName": "wrong-row", "hostname": "wrong-row"},
+            ),
+        )
+        collisions, unresolved = detect_collisions_for_device_ids(
+            [8020], api, libre_devices_cache=shared_cache, sync_options={"use_sysname": True}
+        )
+        assert unresolved == [8020]
+        assert collisions == []
+        # The mismatched payload must NOT leak into the shared cache the caller passed in.
+        assert 8020 not in shared_cache, "mismatched fresh fetch poisoned the shared cache"
+        assert shared_cache == {}, "no mis-keyed payload may survive the collision gate"
