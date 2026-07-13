@@ -23,9 +23,16 @@ def renormalize_device_type_mappings(apps, schema_editor):
     # import/normalization: if anything is unavailable, leave rows untouched rather than corrupt
     # them (a fresh install has no rows to migrate anyway).
     try:
-        from netbox_librenms_plugin.utils import apply_normalization_rules
+        from netbox_librenms_plugin.utils import apply_normalization_rules, preload_normalization_rules
     except Exception:  # pragma: no cover - defensive
         return
+
+    # Preload the device_type rule chain ONCE. Without this, each per-row
+    # apply_normalization_rules() re-queries NormalizationRule (an avoidable N+1 that scales with
+    # the number of existing mappings); passing the preloaded dict makes the whole migration issue
+    # a constant number of rule queries. The mappings are un-scoped (manufacturer=None), matching
+    # the per-row calls below which pass no manufacturer.
+    preloaded_rules = preload_normalization_rules(scope="device_type")
 
     for mapping in DeviceTypeMapping.objects.all().iterator():
         raw = mapping.librenms_hardware or ""
@@ -40,7 +47,11 @@ def renormalize_device_type_mappings(apps, schema_editor):
         # savepoint, so a rollback doesn't invalidate it.)
         try:
             with transaction.atomic():
-                normalized = (apply_normalization_rules(value=raw, scope="device_type") or "").strip().lower()
+                normalized = (
+                    (apply_normalization_rules(value=raw, scope="device_type", preloaded_rules=preloaded_rules) or "")
+                    .strip()
+                    .lower()
+                )
 
                 # Stored values are already lowercased (the model lowercases on save); skip when
                 # the normalization is a no-op so we don't issue pointless writes or fire signals.

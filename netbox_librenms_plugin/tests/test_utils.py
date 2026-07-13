@@ -1239,6 +1239,41 @@ class TestRenormalizeDeviceTypeMappingsMigration:
         assert DeviceTypeMapping.objects.filter(librenms_hardware="x-boom").exists()
         assert DeviceTypeMapping.objects.filter(librenms_hardware="good").exists()
 
+    def test_rule_queries_are_constant_regardless_of_row_count(self):
+        """The migration preloads the device_type rule chain once, so it issues a constant number of NormalizationRule queries instead of one per mapping row (N+1)."""
+        from django.db import connection
+        from django.test.utils import CaptureQueriesContext
+
+        from netbox_librenms_plugin.models import DeviceTypeMapping, NormalizationRule
+
+        dt = self._device_type(model="Renorm-DT-Perf")
+        NormalizationRule.objects.create(
+            scope=NormalizationRule.SCOPE_DEVICE_TYPE,
+            match_pattern=r"^raw-(.+)$",
+            replacement=r"\1",
+            priority=10,
+        )
+        # Several rows that all get re-keyed → each would trigger its own rule fetch without the
+        # single preload. Distinct normalized targets so none collide on the unique constraint.
+        for suffix in ("a", "b", "c", "d"):
+            DeviceTypeMapping.objects.create(librenms_hardware=f"raw-{suffix}", netbox_device_type=dt)
+
+        with CaptureQueriesContext(connection) as ctx:
+            self._run_migration()
+
+        rule_queries = [q for q in ctx.captured_queries if "normalizationrule" in q["sql"].lower()]
+        # preload_normalization_rules(scope="device_type") issues exactly one NormalizationRule
+        # SELECT (unscoped, manufacturer__isnull=True); the per-row calls then read the preloaded
+        # dict with zero further queries. Before the fix this was one query PER ROW (== 4 here),
+        # scaling with install size. Assert it does not scale with the 4 rows.
+        assert len(rule_queries) <= 2, (
+            f"expected a constant number of NormalizationRule queries from the single preload, got "
+            f"{len(rule_queries)} for 4 mapping rows — the migration is re-querying rules per row (N+1)"
+        )
+        # Sanity: behaviour is unchanged — every row was still re-keyed.
+        for suffix in ("a", "b", "c", "d"):
+            assert DeviceTypeMapping.objects.filter(librenms_hardware=suffix).exists()
+
     def test_db_error_on_one_row_does_not_poison_the_rest(self, monkeypatch):
         """A real DB error on one row's save must be confined to that row's savepoint so the rest still migrate.
 
