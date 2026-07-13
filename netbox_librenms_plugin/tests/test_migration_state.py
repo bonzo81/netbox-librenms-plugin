@@ -239,3 +239,19 @@ def test_migration_0013_serial_sensor_field_help_text_matches_model():
         assert migration_fields[field_name].help_text == model_help, (
             f"{field_name}: migration help_text drifted from the model"
         )
+
+
+def test_migration_0014_field_help_text_matches_model():
+    """Same drift guard for LibreNMSSettings's cable-sync fields: migration 0014's AddField ops must carry the model's help_text, else makemigrations tracks a phantom AlterField."""
+    from netbox_librenms_plugin.models import LibreNMSSettings
+
+    mod = importlib.import_module("netbox_librenms_plugin.migrations.0014_librenmssettings_cable_sync")
+
+    for field_name in ("cable_sync_tag", "cable_sync_tag_color", "cable_sync_description"):
+        add_op = next(
+            op
+            for op in mod.Migration.operations
+            if op.__class__.__name__ == "AddField" and op.model_name == "librenmssettings" and op.name == field_name
+        )
+        model_help = LibreNMSSettings._meta.get_field(field_name).help_text
+        assert add_op.field.help_text == model_help, f"{field_name}: migration help_text drifted from the model"
