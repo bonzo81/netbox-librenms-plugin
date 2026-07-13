@@ -554,12 +554,13 @@ class LibreNMSInterfaceTable(tables.Table):
             # yields a real member position for physical ethernet ports and their sub-interfaces,
             # where that leading number is a slot/member index. For a logical interface not yet in
             # NetBox — Vlan2, Loopback0, Tunnel5 — the number is a unit/VLAN id, so the heuristic
-            # would silently default the sync target to the WRONG VC member. Restrict it to
-            # ethernet-typed rows (physical ports) and dotted names (sub-interfaces of a physical
-            # port — the cross-member case this resolution exists for); any other logical row
-            # defaults to the viewed device, as it did before the ethernet-only guard was widened.
+            # would silently default the sync target to the WRONG VC member. Restrict it to ethernet
+            # rows — by ifType (ethernetCsmacd) OR an ethernet-family name (Ethernet1,
+            # GigabitEthernet0/1) for the case ifType is absent — and dotted names (sub-interfaces
+            # of a physical port, the cross-member case this resolution exists for); any other
+            # logical row defaults to the viewed device, as it did before the guard was widened.
             if_type = (record.get("ifType") or "").lower()
-            if "ethernet" in if_type or "." in interface_name:
+            if "ethernet" in if_type or "ethernet" in interface_name.lower() or "." in interface_name:
                 # Resolve from the per-table prefetched member map (O(1) per row). An empty map (a
                 # mock/attribute-less device in tests) is passed as None so the helper keeps its
                 # original per-call query path / patch point unchanged.
