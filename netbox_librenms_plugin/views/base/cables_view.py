@@ -533,7 +533,11 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin, 
                 link["netbox_remote_interface_id"] = netbox_remote_interface.pk
                 link["remote_port_name"] = netbox_remote_interface.name
 
-            return link
+        # Return the link even when remote_port is empty (or unresolved): callers assign the
+        # result back (link = process_remote_device(...)) and then dereference it, so returning
+        # None here would crash enrich_links_data with an AttributeError and take down the whole
+        # Cables tab for LLDP/CDP neighbors that advertise a remote device but no remote port.
+        return link
 
     def check_cable_status(self, link):
         """Check cable status and add cable URL if cable exists in NetBox"""
