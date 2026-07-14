@@ -32,7 +32,23 @@ def renormalize_device_type_mappings(apps, schema_editor):
     # the number of existing mappings); passing the preloaded dict makes the whole migration issue
     # a constant number of rule queries. The mappings are un-scoped (manufacturer=None), matching
     # the per-row calls below which pass no manufacturer.
-    preloaded_rules = preload_normalization_rules(scope="device_type")
+    #
+    # Guard the preload the same way the per-row work is guarded: it issues a DB query, so a failure
+    # here (connection/query error mid-upgrade) would otherwise abort the whole migration BEFORE any
+    # per-row savepoint runs. And because it is a DB error, catching it alone is not enough — on
+    # PostgreSQL it poisons the migration's outer atomic transaction, so subsequent work (or the
+    # migration's own commit) would still fail. Wrap it in its own savepoint and bail out leaving
+    # every row untouched, mirroring the import guard above and the "leave rows untouched rather
+    # than corrupt them" contract.
+    try:
+        with transaction.atomic():
+            preloaded_rules = preload_normalization_rules(scope="device_type")
+    except Exception:
+        logger.exception(
+            "renormalize_device_type_mappings: failed to preload device_type normalization rules; "
+            "leaving all rows untouched."
+        )
+        return
 
     for mapping in DeviceTypeMapping.objects.all().iterator():
         raw = mapping.librenms_hardware or ""

@@ -1361,6 +1361,51 @@ class TestRenormalizeDeviceTypeMappingsMigration:
         assert DeviceTypeMapping.objects.filter(librenms_hardware="z-boom").exists()
         assert DeviceTypeMapping.objects.filter(librenms_hardware="good").exists()
 
+    def test_preload_failure_leaves_all_rows_untouched(self, monkeypatch):
+        """A DB error while preloading the rule chain must leave EVERY row untouched, not abort the upgrade.
+
+        The single preload (the N+1 fix) runs once before the per-row loop and issues its own DB
+        query. A failure there (connection/query error mid-upgrade) would otherwise propagate before
+        any per-row savepoint runs — and, being a DB error, would poison the migration's outer atomic
+        transaction, so even catching the Python exception could not leave a clean state. Its own
+        savepoint must contain the failure and the migration must bail out leaving all rows at their
+        original keys. This drives a genuine DB error (SELECT 1/0) through the preload, not a Python
+        raise, so it actually exercises the savepoint.
+        """
+        from django.db import connection
+
+        from netbox_librenms_plugin import utils as plugin_utils
+        from netbox_librenms_plugin.models import DeviceTypeMapping, NormalizationRule
+
+        dt = self._device_type(model="Renorm-DT8")
+        NormalizationRule.objects.create(
+            scope=NormalizationRule.SCOPE_DEVICE_TYPE,
+            match_pattern=r"^w-(.+)$",
+            replacement=r"\1",
+            priority=10,
+        )
+        DeviceTypeMapping.objects.create(librenms_hardware="w-alpha", netbox_device_type=dt)
+        DeviceTypeMapping.objects.create(librenms_hardware="w-beta", netbox_device_type=dt)
+
+        def poisoned_preload(*args, **kwargs):
+            # A genuine DB failure in the preload query, the way a real connection/query error
+            # during upgrade would behave — recoverable only by rolling back its savepoint.
+            with connection.cursor() as cur:
+                cur.execute("SELECT 1 / 0")
+
+        # The migration imports the symbol inside the function body, so patching the module
+        # attribute is exactly what its runtime import resolves.
+        monkeypatch.setattr(plugin_utils, "preload_normalization_rules", poisoned_preload)
+
+        # Must NOT propagate the preload error out of the migration...
+        self._run_migration()
+
+        # ...and every row must be left at its original (un-normalized) key — nothing re-keyed.
+        assert DeviceTypeMapping.objects.filter(librenms_hardware="w-alpha").exists()
+        assert DeviceTypeMapping.objects.filter(librenms_hardware="w-beta").exists()
+        assert not DeviceTypeMapping.objects.filter(librenms_hardware="alpha").exists()
+        assert not DeviceTypeMapping.objects.filter(librenms_hardware="beta").exists()
+
 
 class TestCacheRemainingTtl:
     """cache_remaining_ttl reads .ttl on django-redis and degrades to None on backends without it."""
