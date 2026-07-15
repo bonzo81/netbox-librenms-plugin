@@ -8,7 +8,7 @@ class Migration(migrations.Migration):
     dependencies = [
         ("contenttypes", "0002_remove_content_type_name"),
         ("extras", "0134_owner"),
-        ("netbox_librenms_plugin", "0012_librenmssettings_location_parse_is_regex_and_more"),
+        ("netbox_librenms_plugin", "0013_librenmssettings_location_parse_is_regex_and_more"),
     ]
 
     operations = [
