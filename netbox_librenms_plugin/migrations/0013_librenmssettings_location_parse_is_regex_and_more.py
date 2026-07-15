@@ -5,7 +5,7 @@ from django.db import migrations, models
 
 class Migration(migrations.Migration):
     dependencies = [
-        ("netbox_librenms_plugin", "0011_locationmapping"),
+        ("netbox_librenms_plugin", "0012_locationmapping"),
     ]
 
     operations = [
