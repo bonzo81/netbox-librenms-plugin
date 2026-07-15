@@ -10,6 +10,8 @@ import re
 from contextlib import contextmanager
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 
 @contextmanager
 def _patch_build_row_deps(view, match_bay_return=None):
@@ -122,110 +124,73 @@ class TestInstallBranchViewCollectChildrenCycleGuard:
         assert len(items) == 0
 
 
+@pytest.mark.django_db
 class TestGetModuleTypesIndexed:
-    """get_module_types_indexed builds a dict keyed by model name, part number, and mappings."""
+    """get_module_types_indexed keys real ModuleTypes by model/part-number with ModuleTypeMappings applied."""
+
+    @staticmethod
+    def _mfr(name):
+        from dcim.models import Manufacturer
+
+        return Manufacturer.objects.create(name=name, slug=name.lower())
+
+    @staticmethod
+    def _mtype(mfr, model, part_number=""):
+        from dcim.models import ModuleType
+
+        return ModuleType.objects.create(manufacturer=mfr, model=model, part_number=part_number)
+
+    @staticmethod
+    def _mapping(librenms_model, netbox_module_type, manufacturer=None):
+        from netbox_librenms_plugin.models import ModuleTypeMapping
+
+        return ModuleTypeMapping.objects.create(
+            librenms_model=librenms_model, netbox_module_type=netbox_module_type, manufacturer=manufacturer
+        )
 
     def test_indexes_by_model_and_part_number(self):
+        """ModuleTypes are keyed by model and part_number, and a global mapping adds its librenms_model key."""
         from netbox_librenms_plugin.utils import get_module_types_indexed
 
-        mt1 = MagicMock()
-        mt1.model = "WS-X4748"
-        mt1.part_number = "ALT-PART-4748"
+        mfr = self._mfr("IdxA")
+        mt1 = self._mtype(mfr, "WS-X4748-IDX", "ALT-PART-4748-IDX")
+        mt2 = self._mtype(mfr, "WS-X4516-IDX", "WS-X4516-IDX")  # part_number == model → single key
+        self._mapping("libre-model-a-idx", mt1)
 
-        mt2 = MagicMock()
-        mt2.model = "WS-X4516"
-        mt2.part_number = "WS-X4516"  # same as model → no extra key
+        result = get_module_types_indexed()
 
-        mock_mapping = MagicMock()
-        mock_mapping.librenms_model = "libre-model-a"
-        mock_mapping.netbox_module_type = mt1
-        mock_mapping.manufacturer_id = None
-
-        mock_mt_cls = MagicMock()
-        mock_mt_cls.objects.all.return_value.select_related.return_value.prefetch_related.return_value = [mt1, mt2]
-
-        mock_map_cls = MagicMock()
-        mock_map_cls.objects.select_related.return_value.prefetch_related.return_value = [mock_mapping]
-
-        with patch.dict(
-            "sys.modules",
-            {
-                "dcim.models": type("m", (), {"ModuleType": mock_mt_cls})(),
-            },
-        ):
-            with patch("netbox_librenms_plugin.models.ModuleTypeMapping", mock_map_cls):
-                result = get_module_types_indexed()
-
-        assert result["WS-X4748"] is mt1
-        assert result["ALT-PART-4748"] is mt1
-        assert result["WS-X4516"] is mt2
-        assert result["libre-model-a"] is mt1
+        assert result["WS-X4748-IDX"] == mt1
+        assert result["ALT-PART-4748-IDX"] == mt1
+        assert result["WS-X4516-IDX"] == mt2
+        assert result["libre-model-a-idx"] == mt1
 
     def test_mapping_overrides_ambiguous_base_key(self):
-        """A unique ModuleTypeMapping entry overrides a base key that became ambiguous."""
+        """A unique ModuleTypeMapping survives even though the colliding base model key is dropped."""
         from netbox_librenms_plugin.utils import get_module_types_indexed
 
-        # Two ModuleTypes share the same model name → base key becomes ambiguous
-        mt1 = MagicMock()
-        mt1.model = "SFP-1G-LX"
-        mt1.part_number = ""
+        # Two ModuleTypes (distinct manufacturers, since (manufacturer, model) is unique) share a
+        # model name → that base key collides and is dropped from the index.
+        mt1 = self._mtype(self._mfr("AmbA"), "SFP-1G-LX-IDX")
+        self._mtype(self._mfr("AmbB"), "SFP-1G-LX-IDX")
+        self._mapping("SFP-1G-LX-EXPLICIT-IDX", mt1)
 
-        mt2 = MagicMock()
-        mt2.model = "SFP-1G-LX"  # same → ambiguous in base pass
-        mt2.part_number = ""
+        result = get_module_types_indexed()
 
-        # Explicit mapping for a distinct key → should be present despite base ambiguity
-        mock_mapping = MagicMock()
-        mock_mapping.librenms_model = "SFP-1G-LX-EXPLICIT"
-        mock_mapping.netbox_module_type = mt1
-        mock_mapping.manufacturer_id = None
-
-        mock_mt_cls = MagicMock()
-        mock_mt_cls.objects.all.return_value.select_related.return_value.prefetch_related.return_value = [mt1, mt2]
-
-        mock_map_cls = MagicMock()
-        mock_map_cls.objects.select_related.return_value.prefetch_related.return_value = [mock_mapping]
-
-        with patch.dict(
-            "sys.modules",
-            {
-                "dcim.models": type("m", (), {"ModuleType": mock_mt_cls})(),
-            },
-        ):
-            with patch("netbox_librenms_plugin.models.ModuleTypeMapping", mock_map_cls):
-                result = get_module_types_indexed()
-
-        # Base key was ambiguous and must be absent; explicit mapping key must be present
-        assert "SFP-1G-LX" not in result
-        assert result["SFP-1G-LX-EXPLICIT"] is mt1
+        assert "SFP-1G-LX-IDX" not in result  # ambiguous base key dropped
+        assert result["SFP-1G-LX-EXPLICIT-IDX"] == mt1  # explicit mapping still resolves
 
     def test_manufacturer_scoped_mapping_kept_separate_from_base_index(self):
-        """A manufacturer-scoped ModuleTypeMapping must not pollute the global key space."""
+        """A manufacturer-scoped mapping lives only in mfr_mappings, never the global key space."""
         from netbox_librenms_plugin.utils import get_module_types_indexed
 
-        mt_juniper = MagicMock()
-        mt_juniper.model = "QSFP-100G-LR4-JUNIPER"
-        mt_juniper.part_number = ""
+        mfr = self._mfr("JuniperIdx")
+        mt = self._mtype(mfr, "QSFP-100G-LR4-JUNIPER-IDX")
+        self._mapping("1F3QAA-IDX", mt, manufacturer=mfr)
 
-        mock_mapping = MagicMock()
-        mock_mapping.librenms_model = "1F3QAA"
-        mock_mapping.netbox_module_type = mt_juniper
-        mock_mapping.manufacturer_id = 42  # scoped → must NOT enter the global dict
+        result = get_module_types_indexed()
 
-        mock_mt_cls = MagicMock()
-        mock_mt_cls.objects.all.return_value.select_related.return_value.prefetch_related.return_value = [mt_juniper]
-
-        mock_map_cls = MagicMock()
-        mock_map_cls.objects.select_related.return_value.prefetch_related.return_value = [mock_mapping]
-
-        with patch.dict("sys.modules", {"dcim.models": type("m", (), {"ModuleType": mock_mt_cls})()}):
-            with patch("netbox_librenms_plugin.models.ModuleTypeMapping", mock_map_cls):
-                result = get_module_types_indexed()
-
-        # The vendor-scoped librenms_model must NOT leak into the global lookup
-        assert "1F3QAA" not in result
-        # …but it must be reachable via the per-manufacturer side index
-        assert result.mfr_mappings[(42, "1F3QAA")] is mt_juniper
+        assert "1F3QAA-IDX" not in result  # vendor-scoped key must not leak globally
+        assert result.mfr_mappings[(mfr.pk, "1F3QAA-IDX")] == mt
 
 
 class TestResolveModuleTypeManufacturerScope:
@@ -298,6 +263,13 @@ class TestInstallModuleViewWiring:
         assert InstallModuleView.__module__ == "netbox_librenms_plugin.views.sync.modules", (
             "InstallModuleView must be defined in views/sync/modules.py, not views/base/"
         )
+
+    def test_has_librenms_api_mixin(self):
+        """InstallModuleView needs LibreNMSAPIMixin so a blank posted server_key can fall back to the client key (like InstallBranchView)."""
+        from netbox_librenms_plugin.views.mixins import LibreNMSAPIMixin
+        from netbox_librenms_plugin.views.sync.modules import InstallModuleView
+
+        assert LibreNMSAPIMixin in InstallModuleView.__mro__
 
 
 class TestInstallBranchViewWiring:
@@ -1241,7 +1213,9 @@ class TestAdoptExistingTemplateInterfaces:
         assert result["status"] == "bound"
         assert result["adopted_count"] == 1
         assert result["interfaces"] == ["TenGigabitEthernet3/1/1"]
-        mock_interface_model.objects.filter.assert_called_once_with(
+        # The standalone lookup is still issued (the function now also queries the module's
+        # own interfaces to detect raw duplicates, so it is no longer the only filter call).
+        mock_interface_model.objects.filter.assert_any_call(
             device=device,
             module__isnull=True,
             name__in=["TenGigabitEthernet3/1/1"],
@@ -1494,8 +1468,649 @@ class TestAdoptExistingTemplateInterfaces:
         assert "multiple module interfaces found" in result["reason"]
 
 
+@pytest.mark.django_db
+class TestAdoptMergesRawDuplicateInterface:
+    """Real-DB: adopting folds the module's raw twin into the externally-created interface.
+
+    Reproduces the Nokia/INR scenario: the module owns a raw interface (``2/x1/1/c28``)
+    bound to a LibreNMS port, while a separate standalone interface already carries the
+    INR-renamed name (``2/x1/1/c28/1``) plus a cable — so INR's rename was skipped on the
+    name collision. Adopting must claim the standalone (keeping its cable), move the
+    LibreNMS port binding off the raw twin, and delete the now-redundant raw twin.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _configure_production_server(self):
+        # These tests post server_key="production"; resolve_posted_server_key now validates the posted
+        # key against the configured servers before honouring it, so "production" must be configured or
+        # it degrades to the active server. Configuring it mirrors a real multi-server deployment.
+        # Patch get_plugin_config (the seam BOTH LibreNMSAPI.__init__ and get_available_servers read),
+        # not just the get_available_servers classmethod: the panel-render path in some of these tests
+        # constructs a real LibreNMSAPI("production"), which __init__ validates against get_plugin_config
+        # — so "production" must be a fully configured server (url+token), else the render KeyErrors.
+        servers = {
+            "default": {"librenms_url": "https://librenms.example.com", "api_token": "test-token"},
+            "production": {"librenms_url": "https://prod.example.com", "api_token": "prod-token"},
+        }
+        with patch("netbox_librenms_plugin.librenms_api.get_plugin_config", return_value=servers):
+            yield
+
+    def _build(self):
+        from dcim.models import (
+            Cable,
+            Device,
+            DeviceRole,
+            DeviceType,
+            Interface,
+            InterfaceTemplate,
+            Manufacturer,
+            Module,
+            ModuleBay,
+            ModuleType,
+            Site,
+        )
+
+        mfr, _ = Manufacturer.objects.get_or_create(name="Nokia-adopt", slug="nokia-adopt")
+        dt, _ = DeviceType.objects.get_or_create(manufacturer=mfr, model="7750-adopt", slug="7750-adopt")
+        role, _ = DeviceRole.objects.get_or_create(name="rtr-adopt", slug="rtr-adopt")
+        site, _ = Site.objects.get_or_create(name="site-adopt", slug="site-adopt")
+        device = Device.objects.create(name="adopt-host", device_type=dt, role=role, site=site, status="active")
+
+        mt = ModuleType.objects.create(manufacturer=mfr, model="QSFP-DD-adopt")
+        InterfaceTemplate.objects.create(module_type=mt, name="2/x1/1/c28", type="other")
+        bay = ModuleBay.objects.create(device=device, name="2/x1/1/c28")
+        module = Module.objects.create(device=device, module_bay=bay, module_type=mt)
+
+        # Deterministic interface set: clear any auto-instantiated module components.
+        Interface.objects.filter(device=device).delete()
+
+        # Raw module interface (template name) bound to LibreNMS port 627.
+        raw = Interface.objects.create(device=device, module=module, name="2/x1/1/c28", type="other")
+        raw.custom_field_data["librenms_id"] = {"production": 627}
+        raw.save(update_fields=["custom_field_data"])
+
+        # Externally-created standalone with the INR-renamed name, carrying a cable.
+        standalone = Interface.objects.create(device=device, name="2/x1/1/c28/1", type="other")
+        peer = Interface.objects.create(device=device, name="peer", type="other")
+        cable = Cable(a_terminations=[standalone], b_terminations=[peer])
+        cable.save()
+
+        return device, module, raw, standalone, cable
+
+    def test_adopt_merges_raw_twin_preserving_cable_and_binding(self):
+        from django.dispatch import receiver
+
+        from dcim.models import Interface
+
+        from netbox_librenms_plugin.signals import predict_module_interface_names
+        from netbox_librenms_plugin.utils import get_librenms_device_id
+        from netbox_librenms_plugin.views.sync.modules import _adopt_existing_template_interfaces
+
+        device, module, raw, standalone, cable = self._build()
+
+        @receiver(predict_module_interface_names)
+        def _append_channel(sender, device, module, names, **kwargs):  # noqa: ARG001
+            # Mirrors the real INR rule '/QSFP-DD.*/ [timos] → {base}/1'.
+            return [f"{n}/1" for n in names]
+
+        try:
+            result = _adopt_existing_template_interfaces(device, module, "production")
+        finally:
+            predict_module_interface_names.disconnect(_append_channel)
+
+        # The externally-created standalone is now the module's interface...
+        standalone.refresh_from_db()
+        assert standalone.module_id == module.pk
+        # ...and keeps its cable (its external relations survive the adopt).
+        assert standalone.cable_id == cable.pk
+        # The raw template twin is folded in, not left as a duplicate.
+        assert not Interface.objects.filter(pk=raw.pk).exists()
+        # The LibreNMS port binding moved from the raw twin onto the adopted interface.
+        assert get_librenms_device_id(standalone, "production") == 627
+
+        assert result["status"] == "bound"
+        assert result["adopted_count"] == 1
+        assert result["merged_count"] == 1
+        assert result["interfaces"] == ["2/x1/1/c28/1"]
+
+    def test_cabled_raw_twin_is_left_in_place(self):
+        """A raw twin that itself carries a cable is not deleted (no silent connection loss)."""
+        from django.dispatch import receiver
+
+        from dcim.models import Cable, Interface
+
+        from netbox_librenms_plugin.signals import predict_module_interface_names
+        from netbox_librenms_plugin.views.sync.modules import _adopt_existing_template_interfaces
+
+        device, module, raw, standalone, _cable = self._build()
+        # Give the raw twin its own cable so deleting it would drop a connection.
+        raw_peer = Interface.objects.create(device=device, name="raw-peer", type="other")
+        raw_cable = Cable(a_terminations=[raw], b_terminations=[raw_peer])
+        raw_cable.save()
+
+        @receiver(predict_module_interface_names)
+        def _append_channel(sender, device, module, names, **kwargs):  # noqa: ARG001
+            return [f"{n}/1" for n in names]
+
+        try:
+            result = _adopt_existing_template_interfaces(device, module, "production")
+        finally:
+            predict_module_interface_names.disconnect(_append_channel)
+
+        # The standalone is still adopted, but the cabled raw twin survives and is reported.
+        standalone.refresh_from_db()
+        assert standalone.module_id == module.pk
+        assert Interface.objects.filter(pk=raw.pk).exists()
+        assert result.get("merged_count") is None
+        assert result["cabled_duplicates"] == ["2/x1/1/c28"]
+
+    def test_update_interface_view_reconciles_when_port_bind_is_noop(self):
+        """The reported bug: the view must adopt/merge even when the LibreNMS port-bind is a no-op.
+
+        Posting the port id that already sits on the module's raw interface makes
+        ``_bind_interface_librenms_id`` return a no-op "bound" result. Previously that
+        short-circuited the adopt; now the adopt/merge still runs end-to-end.
+        """
+        from django.dispatch import receiver
+
+        from dcim.models import Interface
+
+        from netbox_librenms_plugin.signals import predict_module_interface_names
+        from netbox_librenms_plugin.views.sync.modules import UpdateModuleInterfaceView
+
+        device, module, raw, standalone, _cable = self._build()
+
+        view = object.__new__(UpdateModuleInterfaceView)
+        view.required_object_permissions = {}
+        request = _make_request(
+            "POST",
+            data={
+                "module_id": str(module.pk),
+                "server_key": "production",
+                # Port 627 already sits on the module's raw interface → the port-bind no-ops.
+                "librenms_port_id": "627",
+                "librenms_ifname": "2/x1/1/c28",
+            },
+        )
+
+        @receiver(predict_module_interface_names)
+        def _append_channel(sender, device, module, names, **kwargs):  # noqa: ARG001
+            return [f"{n}/1" for n in names]
+
+        try:
+            with (
+                patch.object(view, "require_all_permissions", return_value=None),
+                patch("netbox_librenms_plugin.views.sync.modules.messages") as mock_msg,
+            ):
+                view.post(request, pk=device.pk)
+        finally:
+            predict_module_interface_names.disconnect(_append_channel)
+
+        # The standalone is adopted and the raw twin folded in (was a silent no-op before).
+        standalone.refresh_from_db()
+        assert standalone.module_id == module.pk
+        assert not Interface.objects.filter(pk=raw.pk).exists()
+        # The success message reports the real outcome, not a misleading no-op "bound".
+        assert mock_msg.success.called
+        success_text = mock_msg.success.call_args[0][1]
+        assert "adopted 1" in success_text
+        assert "removed 1 duplicate" in success_text
+
+    def test_real_port_bind_confirmation_survives_concurrent_adopt(self):
+        """A click that BOTH (re)binds a port AND adopts standalones must surface the port-bind
+        confirmation, not let the adopt summary swallow it.
+
+        Before the fix, ``bind_result = adopt_result`` discarded the port-bind's
+        interface/port_id detail whenever adoption also reported "bound", so the user never
+        saw which port_id was bound.
+        """
+        from django.dispatch import receiver
+
+        from dcim.models import Interface
+
+        from netbox_librenms_plugin.signals import predict_module_interface_names
+        from netbox_librenms_plugin.views.sync.modules import UpdateModuleInterfaceView
+
+        device, module, raw, standalone, _cable = self._build()
+        # A separate module interface that is not yet bound: the POSTed port 999 REALLY binds it
+        # (update_fields set → changed=True), distinct from the adopt of the template twin.
+        Interface.objects.create(device=device, module=module, name="extra-port", type="other")
+
+        view = object.__new__(UpdateModuleInterfaceView)
+        view.required_object_permissions = {}
+        request = _make_request(
+            "POST",
+            data={
+                "module_id": str(module.pk),
+                "server_key": "production",
+                "librenms_port_id": "999",
+                "librenms_ifname": "extra-port",
+            },
+        )
+
+        @receiver(predict_module_interface_names)
+        def _append_channel(sender, device, module, names, **kwargs):  # noqa: ARG001
+            return [f"{n}/1" for n in names]
+
+        try:
+            with (
+                patch.object(view, "require_all_permissions", return_value=None),
+                patch("netbox_librenms_plugin.views.sync.modules.messages") as mock_msg,
+            ):
+                view.post(request, pk=device.pk)
+        finally:
+            predict_module_interface_names.disconnect(_append_channel)
+
+        success_texts = [call.args[1] for call in mock_msg.success.call_args_list]
+        # The real port-bind confirmation is present (dropped before the fix)...
+        assert any("extra-port" in t and "999" in t for t in success_texts), success_texts
+        # ...and the adopt summary is still present.
+        assert any("adopted 1" in t for t in success_texts), success_texts
+
+    def test_adopt_moves_assigned_ips_to_adopted_interface(self):
+        """An IP assigned to the raw twin (even the device's primary IP) must be MOVED to the adopted interface — Interface.ip_addresses cascade-deletes on interface delete, so the old code silently destroyed it and SET_NULL wiped Device.primary_ip4."""
+        from django.dispatch import receiver
+
+        from dcim.models import Interface
+        from ipam.models import IPAddress
+
+        from netbox_librenms_plugin.signals import predict_module_interface_names
+        from netbox_librenms_plugin.views.sync.modules import _adopt_existing_template_interfaces
+
+        device, module, raw, standalone, _cable = self._build()
+        ip = IPAddress.objects.create(address="192.0.2.10/24", assigned_object=raw)
+        device.primary_ip4 = ip
+        device.save(update_fields=["primary_ip4"])
+
+        @receiver(predict_module_interface_names)
+        def _append_channel(sender, device, module, names, **kwargs):  # noqa: ARG001
+            return [f"{n}/1" for n in names]
+
+        try:
+            result = _adopt_existing_template_interfaces(device, module, "production")
+        finally:
+            predict_module_interface_names.disconnect(_append_channel)
+
+        # The raw twin is still folded in...
+        assert not Interface.objects.filter(pk=raw.pk).exists()
+        assert result.get("merged_count") == 1
+        # ...but its IP survives, reassigned to the authoritative adopted interface...
+        ip.refresh_from_db()
+        assert ip.assigned_object_id == standalone.pk
+        # ...so the device's primary IP is intact (on_delete=SET_NULL would have nulled it).
+        device.refresh_from_db()
+        assert device.primary_ip4_id == ip.pk
+
+    def test_blank_server_key_never_deletes_a_bound_raw_twin(self):
+        """With no server scope the raw twin's LibreNMS binding cannot be transferred; the twin must be left in place for review (fail closed), not deleted with its binding silently destroyed."""
+        from django.dispatch import receiver
+
+        from netbox_librenms_plugin.signals import predict_module_interface_names
+        from netbox_librenms_plugin.views.sync.modules import _adopt_existing_template_interfaces
+
+        device, module, raw, standalone, _cable = self._build()
+
+        @receiver(predict_module_interface_names)
+        def _append_channel(sender, device, module, names, **kwargs):  # noqa: ARG001
+            return [f"{n}/1" for n in names]
+
+        try:
+            result = _adopt_existing_template_interfaces(device, module, "")
+        finally:
+            predict_module_interface_names.disconnect(_append_channel)
+
+        # The standalone is still adopted...
+        standalone.refresh_from_db()
+        assert standalone.module_id == module.pk
+        # ...but the bound raw twin survives with its binding untouched, reported for review.
+        raw.refresh_from_db()
+        assert raw.custom_field_data.get("librenms_id") == {"production": 627}
+        assert result.get("merged_count") is None
+        assert result["cabled_duplicates"] == ["2/x1/1/c28"]
+
+    def test_update_interface_view_blank_server_key_falls_back_and_transfers_binding(self):
+        """e2e: a POST without server_key (stale tab / fallback-rendered pane) must resolve the active server so the merge still transfers the raw twin's binding — the unfixed view passed the blank key straight through and the binding was destroyed with the twin."""
+        from django.dispatch import receiver
+
+        from dcim.models import Interface
+
+        from netbox_librenms_plugin.signals import predict_module_interface_names
+        from netbox_librenms_plugin.utils import get_librenms_device_id
+        from netbox_librenms_plugin.views.sync.modules import UpdateModuleInterfaceView
+
+        device, module, raw, standalone, _cable = self._build()
+
+        view = object.__new__(UpdateModuleInterfaceView)
+        view.required_object_permissions = {}
+        view._librenms_api = MagicMock(server_key="production")  # blank posted server_key falls back to this
+        request = _make_request("POST", data={"module_id": str(module.pk)})  # NO server_key posted
+
+        @receiver(predict_module_interface_names)
+        def _append_channel(sender, device, module, names, **kwargs):  # noqa: ARG001
+            return [f"{n}/1" for n in names]
+
+        try:
+            with (
+                patch.object(view, "require_all_permissions", return_value=None),
+                patch("netbox_librenms_plugin.views.sync.modules.messages"),
+            ):
+                view.post(request, pk=device.pk)
+        finally:
+            predict_module_interface_names.disconnect(_append_channel)
+
+        # The merge ran under the resolved active server: twin folded, binding transferred.
+        standalone.refresh_from_db()
+        assert standalone.module_id == module.pk
+        assert not Interface.objects.filter(pk=raw.pk).exists()
+        assert get_librenms_device_id(standalone, "production") == 627
+
+    def test_failed_port_bind_reason_survives_successful_adoption(self):
+        """A non-bound port-bind outcome (conflict/skipped/failed) must be surfaced even when adoption succeeds — the adopt summary used to silently replace it, hiding e.g. a port-conflict from the user."""
+        from django.dispatch import receiver
+
+        from netbox_librenms_plugin.signals import predict_module_interface_names
+        from netbox_librenms_plugin.views.sync.modules import UpdateModuleInterfaceView
+
+        device, module, raw, standalone, _cable = self._build()
+
+        view = object.__new__(UpdateModuleInterfaceView)
+        view.required_object_permissions = {}
+        request = _make_request(
+            "POST",
+            data={
+                "module_id": str(module.pk),
+                "server_key": "production",
+                # Port 641 resolves to the module's sole raw interface (single-module-interface
+                # fallback), which is already mapped to 627 → deterministic bind CONFLICT.
+                "librenms_port_id": "641",
+                "librenms_ifname": "no-such-interface",
+            },
+        )
+
+        @receiver(predict_module_interface_names)
+        def _append_channel(sender, device, module, names, **kwargs):  # noqa: ARG001
+            return [f"{n}/1" for n in names]
+
+        try:
+            with (
+                patch.object(view, "require_all_permissions", return_value=None),
+                patch("netbox_librenms_plugin.views.sync.modules.messages") as mock_msg,
+            ):
+                view.post(request, pk=device.pk)
+        finally:
+            predict_module_interface_names.disconnect(_append_channel)
+
+        # The bind conflict is surfaced (silently dropped before the fix)...
+        warning_texts = [call.args[1] for call in mock_msg.warning.call_args_list]
+        assert any("Could not update interface association" in t and "627" in t for t in warning_texts), warning_texts
+        # ...and the adoption summary is still reported.
+        success_texts = [call.args[1] for call in mock_msg.success.call_args_list]
+        assert any("adopted 1" in t for t in success_texts), success_texts
+
+    def test_merge_locks_raw_twin_before_delete(self):
+        """The destructive delete must re-verify its preconditions from a locked row (select_for_update) so a concurrent cabling between the caller's read and the delete is not cascaded away."""
+        from django.db import connection
+        from django.dispatch import receiver
+        from django.test.utils import CaptureQueriesContext
+
+        from netbox_librenms_plugin.signals import predict_module_interface_names
+        from netbox_librenms_plugin.views.sync.modules import _adopt_existing_template_interfaces
+
+        device, module, _raw, _standalone, _cable = self._build()
+
+        @receiver(predict_module_interface_names)
+        def _append_channel(sender, device, module, names, **kwargs):  # noqa: ARG001
+            return [f"{n}/1" for n in names]
+
+        try:
+            with CaptureQueriesContext(connection) as ctx:
+                result = _adopt_existing_template_interfaces(device, module, "production")
+        finally:
+            predict_module_interface_names.disconnect(_append_channel)
+
+        assert result.get("merged_count") == 1
+        assert any(
+            "for update" in q["sql"].lower() and "dcim_interface" in q["sql"].lower() for q in ctx.captured_queries
+        ), "raw twin was deleted without a select_for_update re-verify"
+
+    def test_htmx_swap_renders_page_device_panel_not_vc_member(self):
+        """The HTMX table swap replaces the PAGE device's module panel, so it must re-render for the page device even when the row action targeted a VC member — rendering the member's panel flips unrelated rows' bay matching (the page's own bays vanish)."""
+        from django.contrib.auth.models import AnonymousUser
+        from django.contrib.messages.storage.fallback import FallbackStorage
+        from django.test import RequestFactory
+
+        from dcim.models import Device, Module, ModuleBay, VirtualChassis
+
+        from netbox_librenms_plugin.views.object_sync.devices import DeviceModuleTableView
+        from netbox_librenms_plugin.views.sync.modules import UpdateModuleInterfaceView
+
+        device, module, _raw, _standalone, _cable = self._build()
+        # Make the page device a VC master with a member that owns its own module.
+        vc = VirtualChassis.objects.create(name="vc-panel-scope")
+        Device.objects.filter(pk=device.pk).update(virtual_chassis=vc, vc_position=1)
+        member = Device.objects.create(
+            name="panel-member",
+            device_type=device.device_type,
+            role=device.role,
+            site=device.site,
+            status="active",
+            virtual_chassis=vc,
+            vc_position=2,
+        )
+        member_bay = ModuleBay.objects.create(device=member, name="member-bay")
+        member_module = Module.objects.create(device=member, module_bay=member_bay, module_type=module.module_type)
+
+        view = object.__new__(UpdateModuleInterfaceView)
+        view.required_object_permissions = {}
+        view._librenms_api = MagicMock(server_key="production")
+        view.has_write_permission = MagicMock(return_value=True)
+
+        request = RequestFactory().post(
+            "/",
+            data={
+                "module_id": str(member_module.pk),
+                "selected_device_id": str(member.pk),
+                "server_key": "production",
+            },
+            HTTP_HX_REQUEST="true",
+        )
+        request.user = AnonymousUser()
+        request.session = "session"
+        request._messages = FallbackStorage(request)
+
+        rendered_for = []
+        original_get_context = DeviceModuleTableView.get_context_data
+
+        def _spy(self, request, obj, *args, **kwargs):
+            rendered_for.append(obj)
+            return original_get_context(self, request, obj, *args, **kwargs)
+
+        with (
+            patch.object(view, "require_all_permissions", return_value=None),
+            patch("netbox_librenms_plugin.views.sync.modules.messages"),
+            patch.object(DeviceModuleTableView, "get_context_data", _spy),
+        ):
+            response = view.post(request, pk=device.pk)
+
+        assert response.status_code == 200
+        # The action ran against the member, but the swapped panel is the page device's.
+        assert [d.pk for d in rendered_for] == [device.pk]
+
+    def test_install_bay_occupied_swaps_page_device_panel_not_vc_member(self):
+        """InstallModuleView's bay-occupied branch swaps the PAGE device's panel, not the targeted VC member's."""
+        from django.contrib.auth.models import AnonymousUser
+        from django.contrib.messages.storage.fallback import FallbackStorage
+        from django.test import RequestFactory
+
+        from dcim.models import Device, Module, ModuleBay, ModuleType, VirtualChassis
+
+        from netbox_librenms_plugin.views.object_sync.devices import DeviceModuleTableView
+        from netbox_librenms_plugin.views.sync.modules import InstallModuleView
+
+        device, module, _raw, _standalone, _cable = self._build()
+        # Page device is a VC master; the row action targets a member whose bay is already occupied.
+        vc = VirtualChassis.objects.create(name="vc-install-scope")
+        Device.objects.filter(pk=device.pk).update(virtual_chassis=vc, vc_position=1)
+        member = Device.objects.create(
+            name="install-member",
+            device_type=device.device_type,
+            role=device.role,
+            site=device.site,
+            status="active",
+            virtual_chassis=vc,
+            vc_position=2,
+        )
+        mt = ModuleType.objects.create(manufacturer=device.device_type.manufacturer, model="occupied-mt")
+        member_bay = ModuleBay.objects.create(device=member, name="occupied-bay")
+        Module.objects.create(device=member, module_bay=member_bay, module_type=mt)  # occupy the bay
+
+        view = object.__new__(InstallModuleView)
+        view.required_object_permissions = {}
+        view._librenms_api = MagicMock(server_key="production")
+        view.has_write_permission = MagicMock(return_value=True)
+
+        request = RequestFactory().post(
+            "/",
+            data={
+                "module_bay_id": str(member_bay.pk),
+                "module_type_id": str(mt.pk),
+                "selected_device_id": str(member.pk),
+                "server_key": "production",
+            },
+            HTTP_HX_REQUEST="true",
+        )
+        request.user = AnonymousUser()
+        request.session = "session"
+        request._messages = FallbackStorage(request)
+
+        rendered_for = []
+        original_get_context = DeviceModuleTableView.get_context_data
+
+        def _spy(self, request, obj, *args, **kwargs):
+            rendered_for.append(obj)
+            return original_get_context(self, request, obj, *args, **kwargs)
+
+        with (
+            patch.object(view, "require_all_permissions", return_value=None),
+            patch("netbox_librenms_plugin.views.sync.modules.messages"),
+            patch.object(DeviceModuleTableView, "get_context_data", _spy),
+        ):
+            response = view.post(request, pk=device.pk)
+
+        assert response.status_code == 200
+        # Bay was occupied → the swapped panel must be the PAGE device's, not the member's (target_device).
+        assert [d.pk for d in rendered_for] == [device.pk]
+
+    def test_bind_success_survives_adopt_failure(self):
+        """B2: a committed port-bind is still reported even if the later adoption step raises (not masked)."""
+        from django.contrib.auth.models import AnonymousUser
+        from django.contrib.messages.storage.fallback import FallbackStorage
+        from django.test import RequestFactory
+
+        from netbox_librenms_plugin.views.sync.modules import UpdateModuleInterfaceView
+
+        device, module, _raw, _standalone, _cable = self._build()
+
+        view = object.__new__(UpdateModuleInterfaceView)
+        view.required_object_permissions = {}
+        view._librenms_api = MagicMock(server_key="production")
+        view.has_write_permission = MagicMock(return_value=True)
+
+        request = RequestFactory().post(
+            "/",
+            data={"module_id": str(module.pk), "server_key": "production"},
+            HTTP_HX_REQUEST="true",
+        )
+        request.user = AnonymousUser()
+        request.session = "session"
+        request._messages = FallbackStorage(request)
+
+        # The port-bind commits; the subsequent adoption raises (its own transaction rolls back).
+        bound = {"status": "bound", "changed": True, "interface": "eth-bind", "port_id": 42}
+        with (
+            patch.object(view, "require_all_permissions", return_value=None),
+            patch(
+                "netbox_librenms_plugin.views.sync.modules._resolve_single_install_binding_item",
+                return_value={"ent_physical_index": 1},
+            ),
+            patch("netbox_librenms_plugin.views.sync.modules._bind_interface_librenms_id", return_value=bound),
+            patch(
+                "netbox_librenms_plugin.views.sync.modules._adopt_existing_template_interfaces",
+                side_effect=RuntimeError("adopt boom"),
+            ),
+            # Sentinel the swap so it doesn't consume the flash messages we assert on.
+            patch(
+                "netbox_librenms_plugin.views.sync.modules._render_modules_partial_after_action",
+                return_value="PARTIAL",
+            ),
+        ):
+            view.post(request, pk=device.pk)
+
+        joined = " | ".join(m.message for m in request._messages)
+        # The bind that DID commit is still reported...
+        assert "eth-bind" in joined
+        # ...and is NOT hidden behind the old generic "associating" failure that swallowed it.
+        assert "unexpected error while associating" not in joined
+
+
+class TestPredictModuleInterfaceRenameLengthGuard:
+    """predict_module_interface_rename enforces the 1:1, order-preserving receiver contract."""
+
+    def test_misaligned_receiver_result_is_ignored(self):
+        """A receiver returning fewer names than asked is rejected; identity names are kept."""
+        from django.dispatch import receiver
+
+        from netbox_librenms_plugin.signals import predict_module_interface_names
+        from netbox_librenms_plugin.utils import predict_module_interface_rename
+
+        @receiver(predict_module_interface_names)
+        def _drop_one(sender, device, module, names, **kwargs):  # noqa: ARG001
+            return list(names)[:-1]  # misaligned: one fewer than the input
+
+        try:
+            result = predict_module_interface_rename(object(), object(), ["a", "b", "c"])
+        finally:
+            predict_module_interface_names.disconnect(_drop_one)
+
+        assert result == ["a", "b", "c"]
+
+    def test_aligned_receiver_result_is_applied(self):
+        """Positive control: a correctly-sized receiver result IS used (guard isn't over-broad)."""
+        from django.dispatch import receiver
+
+        from netbox_librenms_plugin.signals import predict_module_interface_names
+        from netbox_librenms_plugin.utils import predict_module_interface_rename
+
+        @receiver(predict_module_interface_names)
+        def _rename(sender, device, module, names, **kwargs):  # noqa: ARG001
+            return [f"{n}/1" for n in names]
+
+        try:
+            result = predict_module_interface_rename(object(), object(), ["a", "b"])
+        finally:
+            predict_module_interface_names.disconnect(_rename)
+
+        assert result == ["a/1", "b/1"]
+
+
 class TestSingleInstallInterfaceBinding:
     """Single-row install should resolve inventory identity and bind interfaces."""
+
+    @pytest.fixture(autouse=True)
+    def _configure_production_server(self):
+        # These tests post server_key="production"; resolve_posted_server_key now validates it against
+        # the configured servers before honouring it, so "production" must be configured or it degrades
+        # to the active server. Configuring it mirrors a real multi-server deployment.
+        # Patch get_plugin_config (the seam BOTH LibreNMSAPI.__init__ and get_available_servers read),
+        # not just the get_available_servers classmethod: the panel-render path in some of these tests
+        # constructs a real LibreNMSAPI("production"), which __init__ validates against get_plugin_config
+        # — so "production" must be a fully configured server (url+token), else the render KeyErrors.
+        servers = {
+            "default": {"librenms_url": "https://librenms.example.com", "api_token": "test-token"},
+            "production": {"librenms_url": "https://prod.example.com", "api_token": "prod-token"},
+        }
+        with patch("netbox_librenms_plugin.librenms_api.get_plugin_config", return_value=servers):
+            yield
 
     def test_resolve_single_install_binding_item_uses_cache_row_by_ent_index(self):
         from netbox_librenms_plugin.views.sync.modules import _resolve_single_install_binding_item
@@ -1599,6 +2214,7 @@ class TestSingleInstallInterfaceBinding:
 
         view = object.__new__(InstallModuleView)
         view.required_object_permissions = {}
+        view._librenms_api = MagicMock(server_key="default")  # blank posted server_key falls back to this
         device = _make_device()
 
         module_bay = MagicMock()
@@ -1682,6 +2298,7 @@ class TestSingleInstallInterfaceBinding:
 
         view = object.__new__(InstallModuleView)
         view.required_object_permissions = {}
+        view._librenms_api = MagicMock(server_key="default")  # blank posted server_key falls back to this
         device = _make_device()
 
         module_bay = MagicMock()
@@ -1729,7 +2346,7 @@ class TestSingleInstallInterfaceBinding:
             patch("netbox_librenms_plugin.views.sync.modules.cache") as mock_cache,
             patch(
                 "netbox_librenms_plugin.views.sync.modules._bind_interface_librenms_id",
-                return_value={"status": "bound", "interface": "Te1/1/1", "port_id": 42},
+                return_value={"status": "bound", "interface": "Te1/1/1", "port_id": 42, "changed": True},
             ) as mock_bind,
         ):
             mock_tx.atomic = noop_atomic
@@ -1754,11 +2371,99 @@ class TestSingleInstallInterfaceBinding:
         assert bind_call.args[1]["_librenms_port_id"] == 42
         mock_messages.info.assert_called()
 
+    def test_install_module_view_binds_with_blank_server_key_via_client_fallback(self):
+        """A blank posted server_key falls back to the resolved client server so the interface still binds.
+
+        The install form posts server_key="{{ module_sync.server_key|default:'' }}", so a fallback
+        render sends an empty server_key. Without LibreNMSAPIMixin + the `or self.librenms_api.server_key`
+        fallback (like InstallBranchView), `if bind_item and server_key` was skipped and the module
+        installed with its interface silently never bound. This pins the fallback.
+        """
+        from contextlib import contextmanager
+
+        from dcim.models import ModuleBay
+
+        from netbox_librenms_plugin.views.sync.modules import InstallModuleView
+
+        view = object.__new__(InstallModuleView)
+        view.required_object_permissions = {}
+        # No POST server_key → must fall back to the bound client's server ("default").
+        view._librenms_api = MagicMock(server_key="default")
+        device = _make_device()
+
+        module_bay = MagicMock()
+        module_bay.name = "Slot 1"
+        module_bay.installed_module = None
+
+        module_type = MagicMock()
+        module_type.pk = 5
+        module_type.model = "SFP-10G-SR"
+
+        new_module = MagicMock()
+        new_module.pk = 321
+
+        request = _make_request(
+            "POST",
+            data={
+                "module_bay_id": "10",
+                "module_type_id": "5",
+                "serial": "SN1",
+                "server_key": "",  # blank — as a fallback render would post
+                "ent_index": "77",
+            },
+        )
+
+        @contextmanager
+        def noop_atomic():
+            yield
+
+        mock_qs = MagicMock()
+        mock_qs.get.return_value = module_bay
+
+        with (
+            patch.object(view, "require_all_permissions", return_value=None),
+            patch(
+                "netbox_librenms_plugin.views.sync.modules.get_object_or_404",
+                side_effect=[device, module_bay, module_type],
+            ),
+            patch("netbox_librenms_plugin.views.sync.modules.reverse", return_value="/sync/"),
+            patch("netbox_librenms_plugin.views.sync.modules.transaction") as mock_tx,
+            patch("netbox_librenms_plugin.views.sync.modules.messages"),
+            patch("netbox_librenms_plugin.views.sync.modules.redirect"),
+            patch("dcim.models.Module") as mock_module_cls,
+            patch.object(ModuleBay, "objects") as mock_objects,
+            patch.object(view, "get_cache_key", return_value="inv-key"),
+            patch("netbox_librenms_plugin.views.sync.modules.cache") as mock_cache,
+            patch("netbox_librenms_plugin.views.sync.modules._get_sync_device_for_inventory", return_value=device),
+            patch(
+                "netbox_librenms_plugin.views.sync.modules._bind_interface_librenms_id",
+                return_value={"status": "bound", "interface": "Te1/1/1", "port_id": 42},
+            ) as mock_bind,
+        ):
+            mock_tx.atomic = noop_atomic
+            mock_module_cls.return_value = new_module
+            mock_objects.select_for_update.return_value = mock_qs
+            mock_cache.get.return_value = {
+                "inventory": [
+                    {
+                        "entPhysicalIndex": 77,
+                        "_librenms_port_id": 42,
+                        "_librenms_ifname": "Te1/1/1",
+                    }
+                ]
+            }
+            view.post(request, pk=24)
+
+        # The bind ran under the fallback server key, not the blank posted one.
+        mock_bind.assert_called_once()
+        assert mock_bind.call_args.args[3] == "default"
+
     def test_install_module_view_rejects_missing_bay_id_for_interface_child(self):
         from netbox_librenms_plugin.views.sync.modules import InstallModuleView
 
         view = object.__new__(InstallModuleView)
         view.required_object_permissions = {}
+        view._librenms_api = MagicMock(server_key="default")  # blank posted server_key falls back to this
         device = _make_device()
 
         request = _make_request(
@@ -1818,7 +2523,10 @@ class TestSingleInstallInterfaceBinding:
             patch("netbox_librenms_plugin.views.sync.modules.get_librenms_device_id", return_value=999),
             patch(
                 "netbox_librenms_plugin.views.sync.modules._bind_interface_librenms_id",
-                return_value={"status": "bound", "interface": "Te1/1/1", "port_id": 42},
+                # Real _bind_interface_librenms_id always returns "changed" (bool(update_fields));
+                # binding an unbound interface actually writes, so changed=True. The success message
+                # now gates on it, so the mock must carry the field the production branch reads.
+                return_value={"status": "bound", "interface": "Te1/1/1", "port_id": 42, "changed": True},
             ) as mock_bind,
             patch("netbox_librenms_plugin.views.sync.modules.messages") as mock_messages,
             patch("netbox_librenms_plugin.views.sync.modules._modules_redirect_response", return_value="redirected"),
@@ -1883,7 +2591,7 @@ class TestSingleInstallInterfaceBinding:
             response = view.post(request, pk=24)
 
         mock_bind.assert_called_once()
-        mock_adopt.assert_called_once_with(device, module)
+        mock_adopt.assert_called_once_with(device, module, "production")
         mock_messages.success.assert_called_once()
         assert "adopted 2 existing standalone interface(s)" in mock_messages.success.call_args[0][1]
         assert response is not None
@@ -1954,7 +2662,7 @@ class TestSingleInstallInterfaceBinding:
             ) as mock_normalize,
             patch(
                 "netbox_librenms_plugin.views.sync.modules._bind_interface_librenms_id",
-                return_value={"status": "bound", "interface": "Te1/1/1", "port_id": 42},
+                return_value={"status": "bound", "interface": "Te1/1/1", "port_id": 42, "changed": True},
             ) as mock_bind,
             patch("dcim.models.Module") as mock_module_cls,
         ):
@@ -2467,6 +3175,7 @@ class TestInstallViewsDoNotDeleteCache:
 
         view = object.__new__(InstallModuleView)
         view.required_object_permissions = {}
+        view._librenms_api = MagicMock(server_key="default")  # blank posted server_key falls back to this
         device = _make_device()
 
         module_bay = MagicMock()
@@ -2601,6 +3310,62 @@ class TestInstallViewsDoNotDeleteCache:
 
         mock_messages.success.assert_called_once()
         mock_cache.delete.assert_not_called()
+
+    def test_install_selected_success_path_uses_htmx_partial_swap(self):
+        """B1: InstallSelectedView's success path swaps the HTMX partial, not a full-page HX-Redirect (matches InstallBranchView + its own early exits)."""
+        from netbox_librenms_plugin.views.sync.modules import InstallBranchView, InstallSelectedView
+
+        view = object.__new__(InstallSelectedView)
+        view.required_object_permissions = {}
+        view.has_write_permission = MagicMock(return_value=True)
+        device = _make_device()
+
+        request = _make_request("POST", data={"server_key": "default"})
+        post_mock = MagicMock()
+        post_mock.get = MagicMock(side_effect=lambda k, d=None: {"server_key": "default"}.get(k, d))
+        post_mock.getlist = MagicMock(return_value=["100"])
+        request.POST = post_mock
+
+        cached_inventory = [
+            {
+                "entPhysicalIndex": 100,
+                "entPhysicalClass": "module",
+                "entPhysicalModelName": "MOD-A",
+                "entPhysicalContainedIn": 0,
+                "entPhysicalName": "Slot 0",
+            },
+        ]
+        install_result = {"status": "installed", "name": "Slot 0"}
+
+        with (
+            patch.object(view, "require_all_permissions", return_value=None),
+            patch("netbox_librenms_plugin.views.sync.modules.get_object_or_404", return_value=device),
+            patch("netbox_librenms_plugin.views.sync.modules.reverse", return_value="/sync/"),
+            patch("netbox_librenms_plugin.views.sync.modules.cache") as mock_cache,
+            patch.object(view, "get_cache_key", return_value="test-key"),
+            patch.object(InstallBranchView, "_install_single", return_value=install_result),
+            patch("netbox_librenms_plugin.views.sync.modules.get_module_types_indexed", return_value={}),
+            patch("netbox_librenms_plugin.utils.get_enabled_ignore_rules", return_value=[]),
+            patch("netbox_librenms_plugin.utils.load_bay_mappings", return_value=([], [])),
+            patch("netbox_librenms_plugin.utils.preload_normalization_rules", return_value={}),
+            patch("netbox_librenms_plugin.views.sync.modules.transaction") as mock_tx,
+            patch("netbox_librenms_plugin.views.sync.modules.messages"),
+            patch(
+                "netbox_librenms_plugin.views.sync.modules._render_modules_partial_after_action",
+                return_value="PARTIAL",
+            ) as mock_partial,
+            patch(
+                "netbox_librenms_plugin.views.sync.modules._modules_redirect_response",
+                return_value="REDIRECT",
+            ) as mock_redirect,
+        ):
+            mock_cache.get.return_value = {"inventory": cached_inventory, "librenms_id": "test"}
+            mock_tx.atomic = lambda *a, **kw: MagicMock(__enter__=MagicMock(), __exit__=MagicMock(return_value=False))
+            result = view.post(request, pk=24)
+
+        assert result == "PARTIAL"  # not the full-page HX-Redirect
+        mock_partial.assert_called_once()
+        mock_redirect.assert_not_called()
 
     def test_install_branch_rejects_stale_cached_inventory_context(self):
         """Branch install should fail closed when cached inventory librenms_id mismatches target device context."""
@@ -3656,6 +4421,7 @@ class TestPKValidationErrorPaths:
 
         view = object.__new__(InstallModuleView)
         view.required_object_permissions = {}
+        view._librenms_api = MagicMock(server_key="default")  # blank posted server_key falls back to this
         device = _make_device()
         request = _make_request(
             "POST",
@@ -3788,6 +4554,7 @@ class TestInstallModuleViewBehavior:
 
         v = object.__new__(InstallModuleView)
         v.required_object_permissions = {}
+        v._librenms_api = MagicMock(server_key="default")  # blank posted server_key falls back to this
         return v
 
     def test_bay_already_occupied_warns(self):
@@ -5314,3 +6081,778 @@ class TestPredictModuleInterfaceNamesSignal:
             assert get_module_template_interface_names(device, module) == ["Gi1/0/1"]
         finally:
             predict_module_interface_names.disconnect(boom)
+
+
+def _make_install_device():
+    """Create a real device with one empty module bay and a matching module type."""
+    from dcim.models import Device, DeviceRole, DeviceType, Manufacturer, ModuleBay, ModuleType, Site
+
+    mfr, _ = Manufacturer.objects.get_or_create(name="HTMX-Mfr", slug="htmx-mfr")
+    dt, _ = DeviceType.objects.get_or_create(manufacturer=mfr, model="HTMX-DT", slug="htmx-dt")
+    role, _ = DeviceRole.objects.get_or_create(name="HTMX-Role", slug="htmx-role")
+    site, _ = Site.objects.get_or_create(name="HTMX-Site", slug="htmx-site")
+    device = Device.objects.create(name="htmx-install-dev", device_type=dt, role=role, site=site, status="active")
+    bay = ModuleBay.objects.create(device=device, name="Slot1")
+    mtype = ModuleType.objects.create(manufacturer=mfr, model="HTMX-SFP")
+    return device, bay, mtype
+
+
+@pytest.mark.django_db
+class TestInstallModuleHTMXSwap:
+    """InstallModuleView returns an in-place table partial for HTMX, a full redirect otherwise."""
+
+    def _login(self, client):
+        from django.contrib.auth import get_user_model
+
+        user = get_user_model().objects.create_superuser(username="htmx-admin", email="a@b.c", password="x")
+        client.force_login(user)
+
+    def test_htmx_install_returns_table_partial_not_redirect(self, client):
+        """An HX-Request install installs the module and swaps back the table partial (200), not a redirect."""
+        from django.urls import reverse
+        from dcim.models import Module
+
+        device, bay, mtype = _make_install_device()
+        self._login(client)
+
+        url = reverse("plugins:netbox_librenms_plugin:install_module", kwargs={"pk": device.pk})
+        resp = client.post(
+            url,
+            {"module_bay_id": bay.pk, "module_type_id": mtype.pk, "server_key": "", "serial": "SN-HTMX-1"},
+            HTTP_HX_REQUEST="true",
+        )
+
+        # In-place swap: a 200 carrying the rendered table partial + its flash message,
+        # NOT the 204/HX-Redirect (which would full-reload the whole sync page).
+        assert resp.status_code == 200
+        assert "HX-Redirect" not in resp
+        assert b"Installed" in resp.content
+        assert Module.objects.filter(module_bay=bay, module_type=mtype).exists()
+
+    def test_non_htmx_install_still_redirects(self, client):
+        """A classic (non-HTMX) install still 302-redirects, so the button degrades without JS."""
+        from django.urls import reverse
+        from dcim.models import Module
+
+        device, bay, mtype = _make_install_device()
+        self._login(client)
+
+        url = reverse("plugins:netbox_librenms_plugin:install_module", kwargs={"pk": device.pk})
+        resp = client.post(
+            url,
+            {"module_bay_id": bay.pk, "module_type_id": mtype.pk, "server_key": "", "serial": "SN-HTMX-2"},
+        )
+
+        assert resp.status_code == 302
+        assert Module.objects.filter(module_bay=bay, module_type=mtype).exists()
+
+
+@pytest.mark.django_db
+class TestInstallBranchSelectedHTMXSwap:
+    """InstallBranchView/InstallSelectedView also swap the table in place for HTMX, redirect otherwise."""
+
+    def _login(self, client):
+        from django.contrib.auth import get_user_model
+
+        user = get_user_model().objects.create_superuser(username="htmx-admin2", email="a@b.c", password="x")
+        client.force_login(user)
+
+    def test_branch_htmx_returns_partial_not_redirect(self, client):
+        """A branch install via HX-Request renders the table partial (200), not a 204/redirect."""
+        from django.urls import reverse
+
+        device = _make_install_device()[0]
+        self._login(client)
+        url = reverse("plugins:netbox_librenms_plugin:install_branch", kwargs={"pk": device.pk})
+        # Missing parent_index → early exit, routed through the partial helper.
+        resp = client.post(url, {"server_key": ""}, HTTP_HX_REQUEST="true")
+        assert resp.status_code == 200
+        assert "HX-Redirect" not in resp
+        assert b"parent inventory index" in resp.content
+
+    def test_branch_non_htmx_redirects(self, client):
+        """A classic branch install still 302-redirects."""
+        from django.urls import reverse
+
+        device = _make_install_device()[0]
+        self._login(client)
+        url = reverse("plugins:netbox_librenms_plugin:install_branch", kwargs={"pk": device.pk})
+        resp = client.post(url, {"server_key": ""})
+        assert resp.status_code == 302
+
+    def test_selected_htmx_returns_partial_not_redirect(self, client):
+        """An install-selected via HX-Request renders the table partial (200), not a 204/redirect."""
+        from django.urls import reverse
+
+        device = _make_install_device()[0]
+        self._login(client)
+        url = reverse("plugins:netbox_librenms_plugin:install_selected", kwargs={"pk": device.pk})
+        # No selection → early exit, routed through the partial helper.
+        resp = client.post(url, {"server_key": ""}, HTTP_HX_REQUEST="true")
+        assert resp.status_code == 200
+        assert "HX-Redirect" not in resp
+        assert b"No modules selected" in resp.content
+
+    def test_selected_non_htmx_redirects(self, client):
+        """A classic install-selected still 302-redirects."""
+        from django.urls import reverse
+
+        device = _make_install_device()[0]
+        self._login(client)
+        url = reverse("plugins:netbox_librenms_plugin:install_selected", kwargs={"pk": device.pk})
+        resp = client.post(url, {"server_key": ""})
+        assert resp.status_code == 302
+
+
+def _make_device_with_installed_module(name_suffix, *, with_template_standalone=False):
+    """Create a real device with one installed module.
+
+    When ``with_template_standalone`` is set, give the module type one interface template
+    and a matching standalone (module-less) interface so an Update-Interface adopt succeeds.
+    """
+    from dcim.models import (
+        Device,
+        DeviceRole,
+        DeviceType,
+        Interface,
+        InterfaceTemplate,
+        Manufacturer,
+        Module,
+        ModuleBay,
+        ModuleType,
+        Site,
+    )
+
+    mfr, _ = Manufacturer.objects.get_or_create(name=f"HMod-Mfr-{name_suffix}", slug=f"hmod-mfr-{name_suffix}")
+    dt, _ = DeviceType.objects.get_or_create(
+        manufacturer=mfr, model=f"HMod-DT-{name_suffix}", slug=f"hmod-dt-{name_suffix}"
+    )
+    role, _ = DeviceRole.objects.get_or_create(name=f"HMod-Role-{name_suffix}", slug=f"hmod-role-{name_suffix}")
+    site, _ = Site.objects.get_or_create(name=f"HMod-Site-{name_suffix}", slug=f"hmod-site-{name_suffix}")
+    device = Device.objects.create(
+        name=f"hmod-dev-{name_suffix}", device_type=dt, role=role, site=site, status="active"
+    )
+    mtype = ModuleType.objects.create(manufacturer=mfr, model=f"HMod-MT-{name_suffix}")
+    if with_template_standalone:
+        InterfaceTemplate.objects.create(module_type=mtype, name="Gi0/1", type="1000base-t")
+    bay = ModuleBay.objects.create(device=device, name="Slot1")
+    module = Module.objects.create(device=device, module_bay=bay, module_type=mtype, serial="OLD-SN")
+    if with_template_standalone:
+        # Clear the auto-instantiated module component so the standalone owns the template name,
+        # then create the module-less interface the adopt should claim.
+        Interface.objects.filter(device=device).delete()
+        Interface.objects.create(device=device, name="Gi0/1", type="1000base-t", module=None)
+    return device, module
+
+
+@pytest.mark.django_db
+class TestUpdateModuleSerialHTMXSwap:
+    """UpdateModuleSerialView returns an HX-Redirect for HTMX (the mismatch modal expects it), redirects otherwise."""
+
+    def _login(self, client):
+        from django.contrib.auth import get_user_model
+
+        user = get_user_model().objects.create_superuser(username="htmx-serial", email="a@b.c", password="x")
+        client.force_login(user)
+
+    def test_htmx_update_serial_returns_hx_redirect_not_table_partial(self, client):
+        """An HX-Request serial update persists the serial and returns an empty HX-Redirect response.
+
+        The 'Update Serial Only' modal form posts hx-swap='none', so a table partial would be
+        thrown away, leaving the modal open on stale data — it needs the HX-Redirect to close and
+        reload (like the sibling MoveModuleView).
+        """
+        from django.urls import reverse
+
+        device, module = _make_device_with_installed_module("serial-hx")
+        self._login(client)
+
+        url = reverse("plugins:netbox_librenms_plugin:update_module_serial", kwargs={"pk": device.pk})
+        resp = client.post(
+            url,
+            {"module_id": module.pk, "serial": "NEW-SN", "selected_device_id": device.pk},
+            HTTP_HX_REQUEST="true",
+        )
+
+        # Empty HX-Redirect response back to the modules tab, NOT an in-place 200 table partial.
+        assert resp.status_code == 204
+        assert "tab=modules" in resp["HX-Redirect"]
+        module.refresh_from_db()
+        assert module.serial == "NEW-SN"
+
+    def test_non_htmx_update_serial_still_redirects(self, client):
+        """A classic (non-HTMX) serial update still 302-redirects, so the button degrades without JS."""
+        from django.urls import reverse
+
+        device, module = _make_device_with_installed_module("serial-classic")
+        self._login(client)
+
+        url = reverse("plugins:netbox_librenms_plugin:update_module_serial", kwargs={"pk": device.pk})
+        resp = client.post(url, {"module_id": module.pk, "serial": "NEW-SN", "selected_device_id": device.pk})
+
+        assert resp.status_code == 302
+        module.refresh_from_db()
+        assert module.serial == "NEW-SN"
+
+
+@pytest.mark.django_db
+class TestUpdateModuleInterfaceHTMXSwap:
+    """UpdateModuleInterfaceView swaps the table partial in place for HTMX, redirects otherwise."""
+
+    def _login(self, client):
+        from django.contrib.auth import get_user_model
+
+        user = get_user_model().objects.create_superuser(username="htmx-iface", email="a@b.c", password="x")
+        client.force_login(user)
+
+    def test_htmx_update_interface_adopts_and_returns_table_partial(self, client):
+        """An HX-Request interface update adopts the matching standalone and swaps back the partial (200)."""
+        from django.urls import reverse
+
+        from dcim.models import Interface
+
+        device, module = _make_device_with_installed_module("iface-hx", with_template_standalone=True)
+        self._login(client)
+
+        url = reverse("plugins:netbox_librenms_plugin:update_module_interface", kwargs={"pk": device.pk})
+        resp = client.post(
+            url,
+            {"module_id": module.pk, "server_key": "", "selected_device_id": device.pk},
+            HTTP_HX_REQUEST="true",
+        )
+
+        assert resp.status_code == 200
+        assert "HX-Redirect" not in resp
+        assert b"adopted 1 existing standalone" in resp.content
+        # The standalone "Gi0/1" is now owned by the module.
+        assert Interface.objects.get(device=device, name="Gi0/1").module_id == module.pk
+
+    def test_non_htmx_update_interface_still_redirects(self, client):
+        """A classic (non-HTMX) interface update still 302-redirects."""
+        from django.urls import reverse
+
+        from dcim.models import Interface
+
+        device, module = _make_device_with_installed_module("iface-classic", with_template_standalone=True)
+        self._login(client)
+
+        url = reverse("plugins:netbox_librenms_plugin:update_module_interface", kwargs={"pk": device.pk})
+        resp = client.post(url, {"module_id": module.pk, "server_key": "", "selected_device_id": device.pk})
+
+        assert resp.status_code == 302
+        assert Interface.objects.get(device=device, name="Gi0/1").module_id == module.pk
+
+
+@pytest.mark.django_db
+class TestAdoptableCountStandaloneGate:
+    """_count_adoptable_template_interfaces skips the INR prediction when nothing can be adopted."""
+
+    def _view(self):
+        from netbox_librenms_plugin.views.object_sync.devices import DeviceModuleTableView
+
+        return object.__new__(DeviceModuleTableView)
+
+    def _device_with_module(self):
+        from dcim.models import Device, DeviceRole, DeviceType, Manufacturer, Module, ModuleBay, ModuleType, Site
+
+        mfr, _ = Manufacturer.objects.get_or_create(name="GateMfr", slug="gatemfr")
+        dt, _ = DeviceType.objects.get_or_create(manufacturer=mfr, model="GateDT", slug="gatedt")
+        role, _ = DeviceRole.objects.get_or_create(name="GateRole", slug="gaterole")
+        site, _ = Site.objects.get_or_create(name="GateSite", slug="gatesite")
+        device = Device.objects.create(name="gate-dev", device_type=dt, role=role, site=site, status="active")
+        bay = ModuleBay.objects.create(device=device, name="Slot1")
+        mtype = ModuleType.objects.create(manufacturer=mfr, model="GateMT")
+        module = Module.objects.create(device=device, module_bay=bay, module_type=mtype, status="active")
+        return device, module
+
+    def test_skips_prediction_when_no_standalone_interfaces(self):
+        """A fully-adopted device (no module-less interfaces) returns 0 without calling the INR prediction."""
+        from dcim.models import Interface
+
+        device, module = self._device_with_module()
+        # The only interface is already adopted into the module → no standalone interfaces remain.
+        Interface.objects.create(device=device, name="Gi1/0/1", type="1000base-t", module=module)
+
+        view = self._view()
+        with patch("netbox_librenms_plugin.views.base.modules_view.get_module_template_interface_names") as mock_pred:
+            count = view._count_adoptable_template_interfaces(module)
+
+        assert count == 0
+        mock_pred.assert_not_called()  # gated out before the per-row prediction signal
+
+    def test_counts_when_standalone_interface_matches(self):
+        """With a standalone interface matching a predicted template name, the count still works."""
+        from dcim.models import Interface
+
+        device, module = self._device_with_module()
+        Interface.objects.create(device=device, name="Gi1/0/2", type="1000base-t")  # module=None → standalone
+
+        view = self._view()
+        with patch(
+            "netbox_librenms_plugin.views.base.modules_view.get_module_template_interface_names",
+            return_value=["Gi1/0/2"],
+        ) as mock_pred:
+            count = view._count_adoptable_template_interfaces(module)
+
+        assert count == 1
+        mock_pred.assert_called_once()
+
+
+@pytest.mark.django_db
+class TestModuleTypesIndexCache:
+    """get_module_types_indexed caches the index and rebuilds only when its inputs change."""
+
+    def test_repeated_calls_reuse_cached_index(self):
+        """A second call returns the same cached index object instead of rebuilding it."""
+        from netbox_librenms_plugin.utils import get_module_types_indexed
+
+        idx1 = get_module_types_indexed()
+        idx2 = get_module_types_indexed()
+        assert idx1 is idx2  # served from cache, not rebuilt
+
+    def test_module_type_change_invalidates_cache(self):
+        """Creating a ModuleType changes the fingerprint, so the next call rebuilds and indexes it."""
+        from dcim.models import Manufacturer, ModuleType
+
+        from netbox_librenms_plugin.utils import get_module_types_indexed
+
+        idx1 = get_module_types_indexed()
+        mfr, _ = Manufacturer.objects.get_or_create(name="IdxMfr", slug="idxmfr")
+        ModuleType.objects.create(manufacturer=mfr, model="IDX-NEW", part_number="IDX-NEW")
+        idx2 = get_module_types_indexed()
+
+        assert idx1 is not idx2  # rebuilt after the change
+        assert idx2.get("IDX-NEW") is not None  # the new type is indexed
+
+    def test_concurrent_cold_access_builds_index_once(self):
+        """Under concurrent cold-cache access the index is built exactly once (lock-serialised) and every caller gets the same object."""
+        import threading
+        from unittest.mock import patch
+
+        import netbox_librenms_plugin.utils as u
+
+        sentinel = u._ModuleTypeIndex()
+        # Cold cache + a pinned fingerprint so all threads race into the rebuild path together.
+        u._MODULE_TYPES_INDEX_CACHE = (None, None)
+        results = []
+        barrier = threading.Barrier(8)
+
+        with (
+            patch.object(u, "_module_types_index_version", return_value=("v",)),
+            patch.object(u, "_build_module_types_index", return_value=sentinel) as mock_build,
+        ):
+
+            def worker():
+                barrier.wait(timeout=10)
+                results.append(u.get_module_types_indexed())
+
+            threads = [threading.Thread(target=worker) for _ in range(8)]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join(timeout=10)
+
+        # The lock prevents the redundant concurrent rebuilds the unsynchronised version allowed...
+        assert mock_build.call_count == 1
+        # ...and every caller observes the one consistent index object.
+        assert len(results) == 8
+        assert all(r is sentinel for r in results)
+
+
+@pytest.mark.django_db
+class TestAdoptableTemplateInterfaceQueryCost:
+    """Real-DB: the module-sync adoptable-interface count keeps its per-row query cost low."""
+
+    def _view(self):
+        from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
+
+        return object.__new__(BaseModuleTableView)
+
+    def _device_with_installed_module(self):
+        from dcim.models import (
+            Device,
+            DeviceRole,
+            DeviceType,
+            Interface,
+            InterfaceTemplate,
+            Manufacturer,
+            Module,
+            ModuleBay,
+            ModuleType,
+            Site,
+        )
+
+        mfr, _ = Manufacturer.objects.get_or_create(name="qcost-mfr", slug="qcost-mfr")
+        dt, _ = DeviceType.objects.get_or_create(manufacturer=mfr, model="qcost-dt", slug="qcost-dt")
+        role, _ = DeviceRole.objects.get_or_create(name="qcost-role", slug="qcost-role")
+        site, _ = Site.objects.get_or_create(name="qcost-site", slug="qcost-site")
+        device = Device.objects.create(name="qcost-dev", device_type=dt, role=role, site=site, status="active")
+        mt = ModuleType.objects.create(manufacturer=mfr, model="qcost-mt")
+        for i in range(1, 4):
+            InterfaceTemplate.objects.create(module_type=mt, name=f"Gi0/{i}", type="1000base-t")
+        bay = ModuleBay.objects.create(device=device, name="Bay 1")
+        Module.objects.create(device=device, module_bay=bay, module_type=mt)
+        Interface.objects.create(device=device, name="standalone0", type="1000base-t", module=None)
+        return device
+
+    def test_get_module_bays_prefetches_installed_module_interface_templates(self, django_assert_num_queries):
+        """_get_module_bays prefetches the installed module's interface templates, so the per-row
+        adoptable-interface count does not re-query them once per row."""
+        device = self._device_with_installed_module()
+        view = self._view()
+        device_bays, _ = view._get_module_bays(device)
+        bay = device_bays["Bay 1"]
+        with django_assert_num_queries(0):
+            list(bay.installed_module.module_type.interfacetemplates.all())
+
+
+@pytest.mark.django_db
+class TestModulePartialUsesPostedServerKey:
+    """The post-action HTMX partial re-renders the module table for the POSTed server_key."""
+
+    def test_partial_resolves_posted_server_key_not_global(self):
+        """The partial builds its table view for the POSTed server_key ('alpha'), not the globally-selected one ('beta')."""
+        from unittest.mock import patch
+
+        from django.contrib.auth.models import AnonymousUser
+        from django.http import HttpResponse
+        from django.test import RequestFactory
+
+        from netbox_librenms_plugin.models import LibreNMSSettings
+        from netbox_librenms_plugin.views.sync.modules import _render_modules_partial_after_action
+
+        device = _make_install_device()[0]
+
+        # Two configured servers; the GLOBAL active server is 'beta', but the form POSTs 'alpha'.
+        multi = {
+            "alpha": {"librenms_url": "http://alpha", "api_token": "ta", "cache_timeout": 300, "verify_ssl": True},
+            "beta": {"librenms_url": "http://beta", "api_token": "tb", "cache_timeout": 300, "verify_ssl": True},
+        }
+        LibreNMSSettings.objects.create(selected_server="beta")
+
+        request = RequestFactory().post("/x/", {"server_key": "alpha"}, HTTP_HX_REQUEST="true")
+        request.user = AnonymousUser()
+
+        captured = {}
+
+        def fake_render(req, template, context):
+            captured["context"] = context
+            return HttpResponse("ok")
+
+        # Patch only the external config boundary (server catalogue) and the template render
+        # (to capture the resolved context); the server_key resolution itself is real.
+        with (
+            patch("netbox_librenms_plugin.librenms_api.get_plugin_config", return_value=multi),
+            patch("netbox_librenms_plugin.views.sync.modules.render", side_effect=fake_render),
+        ):
+            _render_modules_partial_after_action(request, device, "/sync/", lambda: True)
+
+        # get_context_data returns server_key from the table view's LibreNMSAPI; it must be the
+        # POSTed 'alpha' (the cache namespace the install acted on), not the global 'beta'.
+        assert captured["context"]["module_sync"]["server_key"] == "alpha"
+
+
+@pytest.mark.django_db
+class TestMergeRawDuplicatePreservesMac:
+    """Folding a module's raw template interface into its adopted twin must not lose MAC data."""
+
+    @staticmethod
+    def _device():
+        from dcim.models import Device, DeviceRole, DeviceType, Manufacturer, Site
+
+        mfr, _ = Manufacturer.objects.get_or_create(name="Merge-Mfr", slug="merge-mfr")
+        dt, _ = DeviceType.objects.get_or_create(manufacturer=mfr, model="Merge-DT", slug="merge-dt")
+        role, _ = DeviceRole.objects.get_or_create(name="Merge-Role", slug="merge-role")
+        site, _ = Site.objects.get_or_create(name="Merge-Site", slug="merge-site")
+        return Device.objects.create(name="merge-dev", device_type=dt, role=role, site=site, status="active")
+
+    def test_raw_twin_mac_is_reassigned_to_adopted_before_delete(self):
+        """The raw twin's MAC (and primary-MAC) move to the adopted interface instead of being deleted with it."""
+        from dcim.models import Interface, MACAddress
+
+        from netbox_librenms_plugin.views.sync.modules import _merge_raw_duplicate_interface
+
+        device = self._device()
+        # Authoritative externally-named interface (adopted); no MAC of its own yet.
+        adopted = Interface.objects.create(device=device, name="GigabitEthernet0/1", type="1000base-t")
+        # Module's raw template twin that accumulated a MAC from a prior partial sync.
+        raw = Interface.objects.create(device=device, name="1/1", type="1000base-t")
+        mac = MACAddress.objects.create(mac_address="00:11:22:33:44:55", assigned_object=raw)
+        raw.primary_mac_address = mac
+        raw.save()
+
+        result = _merge_raw_duplicate_interface(raw, adopted, server_key="default")
+
+        assert result is True
+        assert not Interface.objects.filter(pk=raw.pk).exists()
+        # The MAC survives and is now assigned to the adopted interface...
+        assert MACAddress.objects.filter(pk=mac.pk).exists()
+        mac.refresh_from_db()
+        assert mac.assigned_object_id == adopted.pk
+        adopted.refresh_from_db()
+        assert adopted.mac_addresses.filter(pk=mac.pk).exists()
+        # ...and the adopted interface (which had no primary MAC) inherits it.
+        assert adopted.primary_mac_address_id == mac.pk
+
+
+@pytest.mark.django_db
+class TestAdoptBatchesRenamePrediction:
+    """_adopt_existing_template_interfaces resolves all raw names in ONE rename-prediction dispatch."""
+
+    def test_rename_prediction_is_dispatched_once_for_all_raw_interfaces(self):
+        """No per-interface (single-name) predict dispatch happens; raw names are resolved in one batched call."""
+        from dcim.models import (
+            Device,
+            DeviceRole,
+            DeviceType,
+            InterfaceTemplate,
+            Manufacturer,
+            Module,
+            ModuleBay,
+            ModuleType,
+            Site,
+        )
+        from django.dispatch import receiver
+
+        from netbox_librenms_plugin.signals import predict_module_interface_names
+        from netbox_librenms_plugin.views.sync.modules import _adopt_existing_template_interfaces
+
+        mfr, _ = Manufacturer.objects.get_or_create(name="Batch-Mfr", slug="batch-mfr")
+        dt, _ = DeviceType.objects.get_or_create(manufacturer=mfr, model="Batch-DT", slug="batch-dt")
+        role, _ = DeviceRole.objects.get_or_create(name="Batch-Role", slug="batch-role")
+        site, _ = Site.objects.get_or_create(name="Batch-Site", slug="batch-site")
+        device = Device.objects.create(name="batch-dev", device_type=dt, role=role, site=site, status="active")
+
+        mtype = ModuleType.objects.create(manufacturer=mfr, model="Batch-MT")
+        InterfaceTemplate.objects.create(module_type=mtype, name="1/1", type="1000base-t")
+        InterfaceTemplate.objects.create(module_type=mtype, name="1/2", type="1000base-t")
+        bay = ModuleBay.objects.create(device=device, name="Bay1")
+        module = Module.objects.create(device=device, module_bay=bay, module_type=mtype)
+
+        recorded = []
+
+        @receiver(predict_module_interface_names)
+        def rename(sender, device, module, names, **kwargs):
+            recorded.append(list(names))
+            return ["Gi" + n for n in names]
+
+        try:
+            # A standalone interface matching a predicted template name takes adoption past the
+            # early "no matches" return so the rename-prediction loop actually runs.
+            from dcim.models import Interface
+
+            Interface.objects.create(device=device, name="Gi1/1", type="1000base-t")
+
+            result = _adopt_existing_template_interfaces(device, module)
+        finally:
+            predict_module_interface_names.disconnect(rename)
+
+        assert result["status"] == "bound"
+        # The module's two raw interfaces ('1/1', '1/2') must be predicted in a single dispatch.
+        # A per-interface implementation would emit single-name dispatches; assert none exist.
+        single_name_dispatches = [names for names in recorded if len(names) == 1]
+        assert single_name_dispatches == [], f"rename prediction was not batched: {recorded}"
+
+
+class TestRenderModulesPartialServerKeyGuard:
+    """_render_modules_partial_after_action must not 500 on a stale/forged POSTed server_key.
+
+    In a multi-server config, passing the raw key straight into LibreNMSAPI(server_key=...) raises
+    KeyError for an unconfigured key. The HTMX partial must validate membership first and leave the
+    default-server API in place instead of crashing the in-place table swap.
+    """
+
+    def test_forged_server_key_does_not_500_the_partial(self):
+        from django.http import HttpResponse
+        from django.test import RequestFactory
+
+        from netbox_librenms_plugin.views.object_sync.devices import DeviceModuleTableView
+        from netbox_librenms_plugin.views.sync import modules as modules_mod
+
+        device = _make_device()
+        # HX-Request → the in-place swap path (where the rebind happens).
+        request = RequestFactory().post("/", {"server_key": "forged-key"}, HTTP_HX_REQUEST="true")
+
+        servers = {
+            "alpha": {"librenms_url": "https://a.example.com", "api_token": "t"},
+            "beta": {"librenms_url": "https://b.example.com", "api_token": "t"},
+        }
+        with (
+            patch(
+                "netbox_librenms_plugin.librenms_api.get_plugin_config",
+                side_effect=lambda app, key, default=None: servers if key == "servers" else default,
+            ),
+            patch.object(DeviceModuleTableView, "get_context_data", return_value={}),
+            patch("netbox_librenms_plugin.views.sync.modules.render", return_value=HttpResponse("ok")),
+        ):
+            # On the unfixed code LibreNMSAPI(server_key="forged-key") raises KeyError here.
+            resp = modules_mod._render_modules_partial_after_action(request, device, "/sync/", lambda: True)
+
+        assert resp.status_code == 200
+
+
+class TestModulesRedirectPreservesServerKey:
+    """_modules_redirect_response must carry a configured POSTed server_key on the classic redirect."""
+
+    def _request(self, server_key=None):
+        from django.test import RequestFactory
+
+        data = {"server_key": server_key} if server_key is not None else {}
+        return RequestFactory().post("/", data)
+
+    def test_classic_redirect_preserves_configured_server_key(self):
+        """A non-HTMX action on a configured non-default server redirects back to that server's tab."""
+        from netbox_librenms_plugin.views.sync import modules as modules_mod
+
+        request = self._request("prod")
+        with patch(
+            "netbox_librenms_plugin.librenms_api.LibreNMSAPI.get_available_servers",
+            return_value={"prod": "Prod"},
+        ):
+            resp = modules_mod._modules_redirect_response(request, "/sync/url")
+
+        assert resp.status_code == 302
+        assert "tab=modules" in resp.url
+        assert "server_key=prod" in resp.url
+
+    def test_classic_redirect_drops_unconfigured_server_key(self):
+        """A stale/forged server_key is not forwarded on the redirect."""
+        from netbox_librenms_plugin.views.sync import modules as modules_mod
+
+        request = self._request("ghost")
+        with patch(
+            "netbox_librenms_plugin.librenms_api.LibreNMSAPI.get_available_servers",
+            return_value={"prod": "Prod"},
+        ):
+            resp = modules_mod._modules_redirect_response(request, "/sync/url")
+
+        assert "server_key" not in resp.url
+
+    def test_htmx_redirect_preserves_configured_server_key(self):
+        """The HTMX HX-Redirect target carries the configured server_key too."""
+        from django.test import RequestFactory
+
+        from netbox_librenms_plugin.views.sync import modules as modules_mod
+
+        request = RequestFactory().post("/", {"server_key": "prod"}, HTTP_HX_REQUEST="true")
+        with patch(
+            "netbox_librenms_plugin.librenms_api.LibreNMSAPI.get_available_servers",
+            return_value={"prod": "Prod"},
+        ):
+            resp = modules_mod._modules_redirect_response(request, "/sync/url")
+
+        assert resp.status_code == 204
+        assert "server_key=prod" in resp["HX-Redirect"]
+
+
+@pytest.mark.django_db
+class TestModulePartialDegradesOnBrokenDefault:
+    """_render_modules_partial_after_action degrades instead of 500ing when the default server is misconfigured."""
+
+    def test_render_after_action_does_not_500(self):
+        """With a broken default and no configured POST key, the committed action renders an empty panel (200)."""
+        from dcim.models import Device, DeviceRole, DeviceType, Manufacturer, Site
+        from django.contrib.auth.models import AnonymousUser
+        from django.test import RequestFactory, override_settings
+        from django.urls import reverse
+
+        from netbox_librenms_plugin.views.sync.modules import _render_modules_partial_after_action
+
+        mfr, _ = Manufacturer.objects.get_or_create(name="Mfr-mpd", slug="mfr-mpd")
+        dt, _ = DeviceType.objects.get_or_create(manufacturer=mfr, model="DT-mpd", slug="dt-mpd")
+        role, _ = DeviceRole.objects.get_or_create(name="Role-mpd", slug="role-mpd")
+        site, _ = Site.objects.get_or_create(name="Site-mpd", slug="site-mpd")
+        device = Device.objects.create(name="host-mpd", device_type=dt, role=role, site=site, status="active")
+
+        request = RequestFactory().post("/modules/action/", data={})
+        request.headers = {"HX-Request": "true"}  # force the HTMX render branch
+        request.user = AnonymousUser()  # the rendered partial's context processors read request.user
+        sync_url = reverse("plugins:netbox_librenms_plugin:device_librenms_sync", kwargs={"pk": device.pk})
+
+        with override_settings(PLUGINS_CONFIG={"netbox_librenms_plugin": {"servers": {"default": {}}}}):
+            response = _render_modules_partial_after_action(request, device, sync_url, lambda: True)
+
+        assert response.status_code == 200
+
+
+@pytest.mark.django_db
+class TestInstallModuleBindMessageGating:
+    """InstallModuleView must not report a 'Bound ...' info message for a no-op bind (changed=False)."""
+
+    def _build(self, prebind):
+        from dcim.models import (
+            Device,
+            DeviceRole,
+            DeviceType,
+            Interface,
+            InterfaceTemplate,
+            Manufacturer,
+            ModuleBay,
+            ModuleType,
+            Site,
+        )
+
+        tag = "prebound" if prebind else "fresh"
+        mfr, _ = Manufacturer.objects.get_or_create(name=f"Mfr-bindmsg-{tag}", slug=f"mfr-bindmsg-{tag}")
+        dt, _ = DeviceType.objects.get_or_create(manufacturer=mfr, model=f"DT-bindmsg-{tag}", slug=f"dt-bindmsg-{tag}")
+        role, _ = DeviceRole.objects.get_or_create(name=f"Role-bindmsg-{tag}", slug=f"role-bindmsg-{tag}")
+        site, _ = Site.objects.get_or_create(name=f"Site-bindmsg-{tag}", slug=f"site-bindmsg-{tag}")
+        device = Device.objects.create(
+            name=f"host-bindmsg-{tag}", device_type=dt, role=role, site=site, status="active"
+        )
+
+        mt = ModuleType.objects.create(manufacturer=mfr, model=f"MT-bindmsg-{tag}")
+        InterfaceTemplate.objects.create(module_type=mt, name="Gi0/1", type="other")
+        bay = ModuleBay.objects.create(device=device, name="bay-bindmsg")
+
+        # A standalone interface matching the module template name; the install adopts it (sets
+        # module FK) before the port-bind runs. When it is ALSO already bound to the posted port_id,
+        # the subsequent _bind_interface_librenms_id is a no-op (changed=False).
+        Interface.objects.filter(device=device).delete()
+        standalone = Interface.objects.create(device=device, name="Gi0/1", type="other")
+        if prebind:
+            standalone.custom_field_data["librenms_id"] = {"default": 42}
+            standalone.save(update_fields=["custom_field_data"])
+        return device, bay, mt
+
+    def _install(self, device, bay, mt):
+        from netbox_librenms_plugin.views.sync.modules import InstallModuleView
+
+        view = object.__new__(InstallModuleView)
+        request = _make_request(
+            "POST",
+            data={
+                "module_bay_id": str(bay.pk),
+                "module_type_id": str(mt.pk),
+                "librenms_port_id": "42",
+                "librenms_ifname": "Gi0/1",
+                "server_key": "default",
+            },
+        )
+        with (
+            patch.object(view, "require_all_permissions", return_value=None),
+            patch.object(view, "has_write_permission", return_value=True),
+            patch("netbox_librenms_plugin.views.sync.modules.messages") as mock_msg,
+            patch(
+                "netbox_librenms_plugin.views.sync.modules._render_modules_partial_after_action",
+                return_value="RENDERED",
+            ),
+        ):
+            view.post(request, pk=device.pk)
+        return mock_msg
+
+    def test_noop_bind_suppresses_bound_message(self):
+        """A port already on the adopted interface (no-op bind) must NOT emit a 'Bound ...' info toast."""
+        device, bay, mt = self._build(prebind=True)
+        mock_msg = self._install(device, bay, mt)
+
+        info_texts = [c.args[1] for c in mock_msg.info.call_args_list]
+        assert not any("Bound" in t and "port_id 42" in t for t in info_texts), info_texts
+
+    def test_real_bind_reports_bound_message(self):
+        """A port newly bound to the adopted interface (changed=True) still reports the 'Bound ...' toast."""
+        device, bay, mt = self._build(prebind=False)
+        mock_msg = self._install(device, bay, mt)
+
+        info_texts = [c.args[1] for c in mock_msg.info.call_args_list]
+        assert any("Bound" in t and "port_id 42" in t for t in info_texts), info_texts

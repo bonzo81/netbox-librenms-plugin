@@ -7,6 +7,24 @@ device retrieval, and device validation functions.
 
 from unittest.mock import MagicMock, patch
 
+import pytest
+
+
+def _matchable_filter_result():
+    """Return a mock queryset whose ``[:2]`` slice derives from ``.first.return_value``.
+
+    validate_device_for_import's unique-serial guard slices the queryset (``[:2]``, issue #101), so a
+    mocked ``.filter()`` result must honour that slice: a single match -> ``[match]``, no match -> ``[]``.
+    Callers set ``.first.return_value`` after constructing it (the slice reads it lazily). Centralized so
+    the slice contract lives in one place if the guard's slice size ever changes again.
+    """
+    result = MagicMock()
+    result.__getitem__.side_effect = lambda _s: (
+        [result.first.return_value] if result.first.return_value is not None else []
+    )
+    return result
+
+
 # =============================================================================
 # TestCacheKeyGeneration - 4 tests
 # =============================================================================
@@ -1622,6 +1640,56 @@ class TestNameMatchesWithNamingPreferencesLegacy:
         assert result["name_sync_available"] is False
 
 
+@pytest.mark.django_db
+class TestSerialNumberMatchingRealDB:
+    """Real-DB coverage for the serial-match path (issue #101): serial is not unique in NetBox, so the match must run against real rows."""
+
+    @staticmethod
+    def _make_device(name, serial):
+        from dcim.models import Device, DeviceRole, DeviceType, Manufacturer, Site
+
+        mfr, _ = Manufacturer.objects.get_or_create(name="ACME-101", slug="acme-101")
+        dt, _ = DeviceType.objects.get_or_create(manufacturer=mfr, model="DT-101", slug="dt-101")
+        role, _ = DeviceRole.objects.get_or_create(name="Role-101", slug="role-101")
+        site, _ = Site.objects.get_or_create(name="Site-101", slug="site-101")
+        return Device.objects.create(name=name, device_type=dt, role=role, site=site, status="active", serial=serial)
+
+    def test_duplicate_serials_block_import(self):
+        """Two real devices share the incoming serial → no arbitrary bind AND the row is blocked from import."""
+        from netbox_librenms_plugin.import_utils import validate_device_for_import
+
+        self._make_device("dup-a-101", "DUP123")
+        self._make_device("dup-b-101", "DUP123")
+
+        result = validate_device_for_import(
+            # device_id matches no NetBox librenms_id, so the flow reaches the serial block.
+            {"device_id": 99999, "hostname": "new-host-101", "serial": "DUP123"},
+            include_vc_detection=False,
+        )
+
+        assert result["existing_device"] is None
+        assert result.get("existing_match_type") != "serial"
+        # Ambiguity is a blocking issue, not a mere warning: importing anyway would mint a THIRD
+        # device with the same serial.
+        assert any("share serial" in i for i in result["issues"])
+        assert result["serial_duplicate"] is True
+        assert result["can_import"] is False
+
+    def test_unique_serial_still_binds(self):
+        """A single device with the serial still binds via the serial path (guards against the unique guard over-rejecting)."""
+        from netbox_librenms_plugin.import_utils import validate_device_for_import
+
+        dev = self._make_device("solo-101", "SOLO123")
+
+        result = validate_device_for_import(
+            {"device_id": 99998, "hostname": "new-host-101b", "serial": "SOLO123"},
+            include_vc_detection=False,
+        )
+
+        assert result["existing_device"] == dev
+        assert result["existing_match_type"] == "serial"
+
+
 class TestSerialNumberMatching:
     """Test serial number matching in device validation."""
 
@@ -1678,7 +1746,7 @@ class TestSerialNumberMatching:
         self.mock_vm.objects.filter.return_value.first.return_value = None
 
         def device_filter(*args, **kwargs):
-            result = MagicMock()
+            result = _matchable_filter_result()
             if "serial" in kwargs:
                 result.first.return_value = existing
             else:
@@ -1705,7 +1773,7 @@ class TestSerialNumberMatching:
         self.mock_vm.objects.filter.return_value.first.return_value = None
 
         def device_filter(*args, **kwargs):
-            result = MagicMock()
+            result = _matchable_filter_result()
             if "serial" in kwargs:
                 result.first.return_value = existing
             else:
@@ -1732,7 +1800,7 @@ class TestSerialNumberMatching:
         self.mock_vm.objects.filter.return_value.first.return_value = None
 
         def device_filter(*args, **kwargs):
-            result = MagicMock()
+            result = _matchable_filter_result()
             if "serial" in kwargs:
                 result.first.return_value = existing
             else:
@@ -1759,7 +1827,7 @@ class TestSerialNumberMatching:
         self.mock_vm.objects.filter.return_value.first.return_value = None
 
         def device_filter(*args, **kwargs):
-            result = MagicMock()
+            result = _matchable_filter_result()
             if "name__iexact" in kwargs:
                 result.first.return_value = existing
             elif "serial" in kwargs:
@@ -1839,7 +1907,7 @@ class TestSerialNumberMatching:
         self.mock_vm.objects.filter.return_value.first.return_value = None
 
         def device_filter(*args, **kwargs):
-            result = MagicMock()
+            result = _matchable_filter_result()
             if "name__iexact" in kwargs:
                 result.first.return_value = hostname_device
             elif "serial" in kwargs:
@@ -1870,7 +1938,7 @@ class TestSerialNumberMatching:
         self.mock_vm.objects.filter.return_value.first.return_value = None
 
         def device_filter(*args, **kwargs):
-            result = MagicMock()
+            result = _matchable_filter_result()
             q_has_librenms = any("librenms_id" in str(arg) for arg in args) or any(
                 k.startswith("custom_field_data__librenms_id") for k in kwargs
             )
@@ -1914,7 +1982,7 @@ class TestSerialNumberMatching:
         self.mock_vm.objects.filter.return_value.first.return_value = None
 
         def device_filter(*args, **kwargs):
-            result = MagicMock()
+            result = _matchable_filter_result()
             q_has_librenms = any("librenms_id" in str(arg) for arg in args) or any(
                 k.startswith("custom_field_data__librenms_id") for k in kwargs
             )
@@ -1960,7 +2028,7 @@ class TestSerialNumberMatching:
         self.mock_vm.objects.filter.return_value.first.return_value = None
 
         def device_filter(*args, **kwargs):
-            result = MagicMock()
+            result = _matchable_filter_result()
             q_has_librenms = any("librenms_id" in str(arg) for arg in args) or any(
                 k.startswith("custom_field_data__librenms_id") for k in kwargs
             )
@@ -2007,7 +2075,7 @@ class TestSerialNumberMatching:
         self.mock_vm.objects.filter.return_value.first.return_value = None
 
         def device_filter(*args, **kwargs):
-            result = MagicMock()
+            result = _matchable_filter_result()
             if "serial" in kwargs:
                 result.first.return_value = existing
             else:
@@ -2060,7 +2128,7 @@ class TestSerialNumberMatching:
         self.mock_vm.objects.filter.return_value.first.return_value = None
 
         def device_filter(*args, **kwargs):
-            result = MagicMock()
+            result = _matchable_filter_result()
             if "serial" in kwargs:
                 result.first.return_value = existing
             else:
@@ -2111,7 +2179,7 @@ class TestSerialNumberMatching:
         self.mock_vm.objects.filter.return_value.first.return_value = None
 
         def device_filter(*args, **kwargs):
-            result = MagicMock()
+            result = _matchable_filter_result()
             if "serial" in kwargs:
                 result.first.return_value = existing
             else:
@@ -2203,7 +2271,7 @@ class TestNameMatchesWithNamingPreferences:
 
     def _setup_librenms_id_filter(self, existing):
         def device_filter(*args, **kwargs):
-            result = MagicMock()
+            result = _matchable_filter_result()
             q_has_librenms = any("librenms_id" in str(arg) for arg in args) or any(
                 k.startswith("custom_field_data__librenms_id") for k in kwargs
             )
@@ -2543,6 +2611,41 @@ class TestLegacyLibreNMSIdMigration:
         result = migrate_legacy_librenms_id(obj, "primary")
 
         assert result is False
+
+    def test_migrate_legacy_librenms_id_whitespace_padded_string_migrates(self):
+        """A whitespace-padded ' 42 ' migrates (issue #99): the writer must accept what the gate does."""
+        from types import SimpleNamespace
+
+        from netbox_librenms_plugin.utils import migrate_legacy_librenms_id
+
+        obj = SimpleNamespace(custom_field_data={"librenms_id": " 42 "})
+        result = migrate_legacy_librenms_id(obj, "primary")
+
+        assert result is True
+        assert obj.custom_field_data["librenms_id"] == {"primary": 42}
+
+    def test_migrate_gate_and_writer_agree_on_padded_id(self):
+        """The Convert-ID gate (is_legacy) and the writer (migrate) must not disagree on ' 42 '."""
+        from types import SimpleNamespace
+
+        from netbox_librenms_plugin.utils import is_legacy_librenms_id, migrate_legacy_librenms_id
+
+        # The gate reports ' 42 ' as legacy, so the UI offers the Convert-ID button...
+        assert is_legacy_librenms_id(" 42 ") is True
+        # ...and the writer must actually migrate it, not dead-end with "could not be converted".
+        obj = SimpleNamespace(custom_field_data={"librenms_id": " 42 "})
+        assert migrate_legacy_librenms_id(obj, "primary") is True
+        assert obj.custom_field_data["librenms_id"] == {"primary": 42}
+
+    def test_migrate_legacy_librenms_id_non_numeric_string_noop(self):
+        """A non-numeric string is not a legacy id and must not migrate (matches the gate)."""
+        from types import SimpleNamespace
+
+        from netbox_librenms_plugin.utils import migrate_legacy_librenms_id
+
+        obj = SimpleNamespace(custom_field_data={"librenms_id": "abc"})
+        assert migrate_legacy_librenms_id(obj, "primary") is False
+        assert obj.custom_field_data["librenms_id"] == "abc"
 
 
 class TestDeviceConflictActionView:
@@ -3580,6 +3683,16 @@ class TestDeviceNamingPreferences:
 
 class TestProcessDeviceFilters:
     """Tests for process_device_filters and related bulk_import utilities."""
+
+    @pytest.fixture(autouse=True)
+    def _stub_norm_preload(self):
+        # bulk_import_devices_shared preloads device_type NormalizationRule once (issue #90);
+        # these are mock-based (no DB), so stub the preload to avoid real DB access.
+        with patch(
+            "netbox_librenms_plugin.import_utils.bulk_import.preload_normalization_rules",
+            return_value={},
+        ):
+            yield
 
     def test_show_disabled_filters_integer_disabled_1(self):
         """show_disabled=False should exclude devices with disabled==1 (int)."""
@@ -4786,6 +4899,14 @@ class TestSyncModuleBayCounter:
 class TestBulkImportCancellation:
     """Test that bulk_import_devices_shared respects RQ and DB cancellation."""
 
+    @pytest.fixture(autouse=True)
+    def _stub_norm_preload(self):
+        with patch(
+            "netbox_librenms_plugin.import_utils.bulk_import.preload_normalization_rules",
+            return_value={},
+        ):
+            yield
+
     def _run_bulk_import(self, mock_rq_job=None, db_status="running", device_ids=None):
         """Helper: run bulk_import with provided mocks, return import call count."""
         from unittest.mock import MagicMock, patch
@@ -4881,6 +5002,14 @@ class TestBulkImportCancellation:
 
 class TestBulkImportVCPermission:
     """Test VC creation behavior during bulk import."""
+
+    @pytest.fixture(autouse=True)
+    def _stub_norm_preload(self):
+        with patch(
+            "netbox_librenms_plugin.import_utils.bulk_import.preload_normalization_rules",
+            return_value={},
+        ):
+            yield
 
     def _make_stack_validation(self):
         from unittest.mock import MagicMock
@@ -5962,3 +6091,52 @@ class TestResolveSetPrimaryIp:
         request = self._make_request()
         with patch("netbox_librenms_plugin.utils.get_user_pref", return_value=True):
             assert resolve_set_primary_ip(request) is True
+
+
+class TestBulkImportColdCacheBackfill:
+    """bulk_import_devices_shared backfills the shared device cache for the post-import render loop."""
+
+    def setup_method(self):
+        self._norm = patch(
+            "netbox_librenms_plugin.import_utils.bulk_import.preload_normalization_rules",
+            return_value={},
+        )
+        self._norm.start()
+
+    def teardown_method(self):
+        self._norm.stop()
+
+    @patch("netbox_librenms_plugin.import_utils.bulk_import.import_single_device")
+    @patch("netbox_librenms_plugin.import_utils.bulk_import.validate_device_for_import")
+    @patch("netbox_librenms_plugin.import_utils.bulk_import.require_permissions")
+    @patch("netbox_librenms_plugin.import_utils.bulk_import.LibreNMSAPI")
+    def test_cold_cache_miss_is_backfilled_after_fetch(self, mock_api_cls, mock_require, mock_validate, mock_import):
+        """A device fetched on a cold-cache miss is written back so the render loop won't re-fetch it."""
+        from netbox_librenms_plugin.import_utils import bulk_import_devices_shared
+
+        payload = {"device_id": 123, "hostname": "host-123", "sysName": "host-123"}
+        api = MagicMock(server_key="default")
+        api.get_device_info.return_value = (True, payload)
+        mock_api_cls.return_value = api
+
+        mock_validate.return_value = {
+            "virtual_chassis": {},
+            "site": {"found": False},
+            "device_type": {"found": False},
+            "platform": {"found": False},
+        }
+        mock_import.return_value = {"success": True, "device": MagicMock(), "message": "ok"}
+
+        cold_cache = {}  # nothing pre-seeded — the seed loop left misses out on purpose
+        bulk_import_devices_shared(
+            device_ids=[123],
+            server_key="default",
+            libre_devices_cache=cold_cache,
+            user=MagicMock(),
+        )
+
+        # The fetched payload is backfilled so the synchronous import's post-import row re-render
+        # (fetch_device_with_cache) hits the dict instead of issuing a second LibreNMS round-trip.
+        assert cold_cache.get(123) == payload
+        # Import decisions must run against live data, so the short device-info cache is bypassed.
+        api.get_device_info.assert_called_once_with(123, use_cache=False)

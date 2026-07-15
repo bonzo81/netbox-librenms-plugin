@@ -17,14 +17,17 @@
 </div>
 
 {% if has_write_permission %}
-{# Separate form for Install Selected — uses JS to collect checked rows before submit #}
+{# Install Selected: checked rows are injected into the HTMX POST at htmx:configRequest (ordering-independent — htmx's own submit listener serializes first on a fresh load); the submit-phase injector covers only the native no-JS fallback. hx-post swaps the table in place. #}
 <form id="install-selected-form" method="post"
-    action="{% url 'plugins:netbox_librenms_plugin:install_selected' pk=module_sync.object.pk %}">
+    action="{% url 'plugins:netbox_librenms_plugin:install_selected' pk=module_sync.object.pk %}"
+    hx-post="{% url 'plugins:netbox_librenms_plugin:install_selected' pk=module_sync.object.pk %}"
+    hx-target="#module-sync-content" hx-swap="innerHTML" hx-disabled-elt="find button">
     {% csrf_token %}
     <input type="hidden" name="server_key" value="{{ module_sync.server_key|default:'' }}">
     <div class="noprint mb-3">
         <button type="submit" class="btn btn-primary" id="install-selected-btn">
-            <i class="mdi mdi-package-down"></i> Install Selected
+            <span class="lnms-btn-idle"><i class="mdi mdi-package-down"></i> Install Selected</span>
+            <span class="lnms-installing"><span class="spinner-border spinner-border-sm me-1" role="status" aria-hidden="true"></span>Installing…</span>
         </button>
     </div>
 </form>

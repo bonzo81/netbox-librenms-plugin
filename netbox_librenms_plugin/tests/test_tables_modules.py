@@ -313,6 +313,57 @@ class TestLibreNMSModuleTable:
         result = str(table.render_status("Matched", {}))
         assert "bg-info" in result
 
+    def test_render_status_wraps_live_badge_with_install_indicator(self):
+        """The live badge is wrapped and a hidden 'Installing…' spinner badge is appended."""
+        table = self._make_table()
+        result = str(table.render_status("Matched", {}))
+        # Live badge wrapper so CSS can hide it while an install POST is in flight.
+        assert "lnms-status-live" in result
+        # Hidden spinner badge revealed by tr.htmx-request (see _module_sync.html).
+        assert "lnms-installing" in result
+        assert "spinner-border" in result
+        assert "Installing" in result
+        # The real status badge is still present inside the wrapper.
+        assert "bg-info" in result
+
+    def test_render_status_install_indicator_present_for_every_status(self):
+        """The install spinner badge rides along on non-installable statuses too (hidden by CSS)."""
+        table = self._make_table()
+        for status in ("Installed", "No Bay", "Serial Mismatch"):
+            result = str(table.render_status(status, {}))
+            assert "lnms-installing" in result, status
+
+    def test_render_status_update_serial_row_spinner_says_updating(self):
+        """An installed-module row offering Update Serial labels the spinner 'Updating…', not 'Installing…'."""
+        table = self._make_table()
+        record = {"installed_module_id": 42, "can_update_serial": True}
+        result = str(table.render_status("Serial Mismatch", record))
+        assert "Updating…" in result
+        assert "Installing…" not in result
+
+    def test_render_status_update_interface_row_spinner_says_updating(self):
+        """An installed-module row offering Update Interface labels the spinner 'Updating…'."""
+        table = self._make_table()
+        record = {"installed_module_id": 42, "can_update_interface_binding": True}
+        result = str(table.render_status("Installed", record))
+        assert "Updating…" in result
+        assert "Installing…" not in result
+
+    def test_render_status_install_row_spinner_still_says_installing(self):
+        """An installable (not-yet-installed) row keeps the 'Installing…' spinner label."""
+        table = self._make_table()
+        result = str(table.render_status("Matched", {"can_install": True}))
+        assert "Installing…" in result
+        assert "Updating…" not in result
+
+    def test_render_status_carrier_row_spinner_says_installing(self):
+        """A No Bay carrier-install row labels the spinner 'Installing…' (it installs a module)."""
+        table = self._make_table()
+        record = {"carrier_install_options": [{"bay_id": 1, "module_type_id": 2}]}
+        result = str(table.render_status("No Bay", record))
+        assert "Installing…" in result
+        assert "Updating…" not in result
+
     def test_render_status_no_bay_uses_warning_badge(self):
         """'No Bay' status renders a bg-warning badge."""
         table = self._make_table()
@@ -446,6 +497,10 @@ class TestLibreNMSModuleTable:
         assert "/install-url/" in result
         assert "SN123" in result
         assert "mdi-download" in result
+        # The install form posts via HTMX so a single install swaps just the module table
+        # in place instead of full-page reloading the whole sync view.
+        assert 'hx-post="/install-url/"' in result
+        assert 'hx-target="#module-sync-content"' in result
 
     def test_render_actions_has_installable_children_renders_branch_button(self):
         """has_installable_children + ent_physical_index renders Install Branch button."""
@@ -525,6 +580,12 @@ class TestLibreNMSModuleTable:
         assert "update-module-serial" in result or "/url/" in result
         assert "NS225161205" in result
         assert "mdi-sync" in result
+        # Posts via HTMX so the update swaps just the module table in place (with the
+        # closest-row spinner) instead of full-page reloading the whole sync view.
+        assert 'hx-post="/url/"' in result
+        assert 'hx-target="#module-sync-content"' in result
+        assert 'hx-indicator="closest tr"' in result
+        assert 'hx-disabled-elt="find button"' in result
 
     def test_render_actions_no_update_serial_without_flag(self):
         """Update Serial button not rendered when can_update_serial is not set."""
@@ -577,6 +638,12 @@ class TestLibreNMSModuleTable:
         assert "Update Interface" in result
         assert "mdi-link-variant" in result
         assert 'name="module_id" value="42"' in result
+        # Posts via HTMX so the update swaps just the module table in place (with the
+        # closest-row spinner) instead of full-page reloading the whole sync view.
+        assert 'hx-post="/url/"' in result
+        assert 'hx-target="#module-sync-content"' in result
+        assert 'hx-indicator="closest tr"' in result
+        assert 'hx-disabled-elt="find button"' in result
 
     def test_render_actions_update_interface_requires_permission(self):
         """Update Interface button is hidden without change-interface permission."""
@@ -592,6 +659,30 @@ class TestLibreNMSModuleTable:
             result = str(table.render_actions(None, record))
 
         assert "Update Interface" not in result
+
+    def test_render_actions_carrier_install_option_renders_htmx_form(self):
+        """A No Bay row with a carrier_install_options entry renders an HTMX install form."""
+        device = MagicMock()
+        device.pk = 83
+        table = self._make_table(device=device)
+        record = {
+            "status": "No Bay",
+            "carrier_install_options": [
+                {"bay_id": 12, "module_type_id": 34, "module_type_name": "CARRIER-A", "bay_name": "Slot 0"},
+            ],
+        }
+        with patch("netbox_librenms_plugin.tables.modules.reverse", return_value="/install-url/"):
+            result = str(table.render_actions(None, record))
+
+        assert "Install CARRIER-A into" in result
+        assert 'name="module_bay_id" value="12"' in result
+        assert 'name="module_type_id" value="34"' in result
+        # Carrier-install posts to install_module, which returns the table partial for HTMX,
+        # so it swaps in place with the closest-row spinner like the other install actions.
+        assert 'hx-post="/install-url/"' in result
+        assert 'hx-target="#module-sync-content"' in result
+        assert 'hx-indicator="closest tr"' in result
+        assert 'hx-disabled-elt="find button"' in result
 
     def test_render_actions_can_replace_renders_replace_button(self):
         """can_replace=True with installed_module_id renders a Replace button."""

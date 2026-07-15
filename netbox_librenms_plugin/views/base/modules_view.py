@@ -8,6 +8,7 @@ from django.utils import timezone
 from django.views import View
 
 from netbox_librenms_plugin.utils import (
+    cache_remaining_ttl,
     get_librenms_device_id,
     get_librenms_sync_device,
     get_module_template_interface_names,
@@ -196,6 +197,18 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
         if device is None:
             return 0
 
+        # Short-circuit before the (per-row) interface-name prediction: if the device has no
+        # module-less interfaces, nothing can be adopted, so the count is 0 regardless. The
+        # existence is cached per device on this render so it costs one query, not one per row —
+        # a fully-adopted device then skips the prediction signal entirely.
+        # Named to avoid shadowing the module-level Django ``cache`` import: this is a per-render
+        # in-memory memo of "device has module-less interfaces", not the Django cache.
+        standalone_exists = self.__dict__.setdefault("_standalone_iface_exists", {})
+        if device.pk not in standalone_exists:
+            standalone_exists[device.pk] = device.interfaces.filter(module__isnull=True).exists()
+        if not standalone_exists[device.pk]:
+            return 0
+
         template_names = get_module_template_interface_names(device, module)
         if not template_names:
             return 0
@@ -351,18 +364,27 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
 
     def get_context_data(self, request, obj):
         """Get context from cache (used by the main sync view on initial page load)."""
+        # Resolve the server key through the DEGRADING helper (mirrors the cables/IP tabs):
+        # the lazy librenms_api property raises KeyError/ValueError on a missing or
+        # misconfigured server config, which would 500 the whole sync-page render for this
+        # tab. With no buildable client there is no valid server scope (and the librenms_id
+        # validation below needs the client too), so degrade to the empty panel — its
+        # refresh POST surfaces the configuration error properly.
+        server_key = self._render_server_key()
+        if server_key is None:
+            return {"table": None, "object": obj, "cache_expiry": None, "server_key": None}
         sync_device = self._get_sync_device(obj)
-        cache_key = self.get_cache_key(sync_device, "inventory", server_key=self.librenms_api.server_key)
+        cache_key = self.get_cache_key(sync_device, "inventory", server_key=server_key)
         cached_payload = cache.get(cache_key)
         if not isinstance(cached_payload, dict) or "inventory" not in cached_payload:
             cache.delete(cache_key)
-            return {"table": None, "object": obj, "cache_expiry": None, "server_key": self.librenms_api.server_key}
+            return {"table": None, "object": obj, "cache_expiry": None, "server_key": server_key}
         # Validate that the cached inventory was built for the same LibreNMS device.
         # If the object has been remapped to a different device, discard stale inventory.
         current_librenms_id = self.librenms_api.get_librenms_id(sync_device)
         if cached_payload.get("librenms_id") != current_librenms_id:
             cache.delete(cache_key)
-            return {"table": None, "object": obj, "cache_expiry": None, "server_key": self.librenms_api.server_key}
+            return {"table": None, "object": obj, "cache_expiry": None, "server_key": server_key}
         return self._build_context(request, obj, cached_payload["inventory"])
 
     def _build_context(self, request, obj, inventory_data):
@@ -446,8 +468,8 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
         table.configure(request)
 
         sync_device = self._get_sync_device(obj)
-        cache_ttl = getattr(cache, "ttl", lambda k: None)(
-            self.get_cache_key(sync_device, "inventory", server_key=self.librenms_api.server_key)
+        cache_ttl = cache_remaining_ttl(
+            cache, self.get_cache_key(sync_device, "inventory", server_key=self.librenms_api.server_key)
         )
         cache_expiry = (
             timezone.now() + timezone.timedelta(seconds=cache_ttl) if cache_ttl is not None and cache_ttl > 0 else None
@@ -708,16 +730,6 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
             interfaces_by_name.pop(name, None)
 
         return interfaces_by_port_id, interfaces_by_name
-
-    def _get_interfaces_by_port_id(self, member):
-        """Build an index of device interfaces keyed by LibreNMS port_id."""
-        interface_map, _ = self._build_interface_indexes(member)
-        return interface_map
-
-    def _get_interfaces_by_name(self, member):
-        """Build an index of device interfaces keyed by unique interface names."""
-        _, interface_map = self._build_interface_indexes(member)
-        return interface_map
 
     @staticmethod
     def _build_interface_match_candidates(row):
@@ -1053,8 +1065,21 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
         if not transceivers:
             return inventory_data, None
 
+        # LibreNMS may return SNMP entity indices as ints on one endpoint and numeric strings on
+        # another (e.g. ENTITY-MIB "300" vs the transceiver API's 300). Coerce both sides to int
+        # so a matching ENTITY row is found instead of caching a duplicate synthetic transceiver.
+        # Local helper to avoid shadowing/duplicating the module-level _try_int the feature stack
+        # adds with the same semantics.
+        def _coerce_idx(value):
+            try:
+                return int(value)
+            except (TypeError, ValueError):
+                return None
+
         # Build lookup of existing inventory items by index and serial
-        inv_by_index = {idx: item for item in inventory_data if (idx := item.get("entPhysicalIndex")) is not None}
+        inv_by_index = {
+            idx: item for item in inventory_data if (idx := _coerce_idx(item.get("entPhysicalIndex"))) is not None
+        }
         inv_serials = {
             s
             for item in inventory_data
@@ -1067,8 +1092,8 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
         # Types that are containers, not real transceiver modules
 
         for txr in transceivers:
-            ent_idx = txr.get("entity_physical_index")
-            if not ent_idx:
+            ent_idx = _coerce_idx(txr.get("entity_physical_index"))
+            if ent_idx is None or ent_idx <= 0:
                 continue
 
             port_id = txr.get("port_id")
@@ -1572,9 +1597,23 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
         """
         from dcim.models import ModuleBay
 
-        bays = ModuleBay.objects.filter(device=obj).select_related(
-            "installed_module__module_type",
-            "module__module_bay",
+        # Prefetch the installed module's device/type/platform: the per-row interface-name
+        # prediction (get_module_template_interface_names → naming-plugin rule lookup) reads
+        # installed_module.device.device_type/platform, which is otherwise an N+1 per
+        # installed-module row (all resolving to the same page device).
+        bays = (
+            ModuleBay.objects.filter(device=obj)
+            .select_related(
+                "installed_module__module_type",
+                "installed_module__device__device_type",
+                "installed_module__device__platform",
+                "module__module_bay",
+            )
+            .prefetch_related(
+                # adoptable-interface count instantiates the installed module's interface templates
+                # (get_module_template_interface_names); prefetch them so it isn't one query per row.
+                "installed_module__module_type__interfacetemplates",
+            )
         )
         device_bays = {}
         module_scoped_bays = {}

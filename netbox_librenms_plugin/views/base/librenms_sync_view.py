@@ -12,6 +12,7 @@ from netbox_librenms_plugin.utils import (
     get_interface_name_field,
     get_librenms_device_id,
     get_librenms_sync_device,
+    is_legacy_librenms_id,
     match_librenms_hardware_to_device_type,
     resolve_naming_preferences,
 )
@@ -112,9 +113,7 @@ class BaseLibreNMSSyncView(LibreNMSPermissionMixin, LibreNMSAPIMixin, generic.Ob
         # Detect legacy bare-int librenms_id format for conversion badge
         _lookup_device = getattr(self, "_librenms_lookup_device", obj)
         _raw_cf = _lookup_device.cf.get("librenms_id") if _lookup_device else None
-        librenms_id_is_legacy = (isinstance(_raw_cf, int) and not isinstance(_raw_cf, bool)) or (
-            isinstance(_raw_cf, str) and _raw_cf.isdigit()
-        )
+        librenms_id_is_legacy = is_legacy_librenms_id(_raw_cf)
 
         # Determine if serial match allows legacy ID conversion.
         # VMs have no serial field in NetBox; skip the gate so the Convert ID button is enabled.
@@ -189,14 +188,25 @@ class BaseLibreNMSSyncView(LibreNMSPermissionMixin, LibreNMSAPIMixin, generic.Ob
 
         result = []
         for sk, did in cf_value.items():
-            # Validate device ID — accept int or digit-string, skip bool/None/junk.
+            # Validate device ID consistently with the int()-based coercion used everywhere
+            # else for librenms_id: int() strips surrounding whitespace, so a value written as
+            # " 42 " (hand-edited, or from a path that doesn't normalize) resolves fine in the
+            # rest of the app but str.isdigit() wrongly rejected it here, hiding a valid link
+            # from the per-server mappings UI (issue #99). Reject bool/None/non-numeric and
+            # non-positive ids.
             if isinstance(did, bool) or did is None:
                 continue
+            # Only str/int are valid stored shapes; coercing a float here would silently
+            # truncate (1.9 → 1) and surface a link to the wrong device. This mirrors
+            # get_librenms_device_id() in utils.py, which rejects non-str/int before int() (#99).
             if isinstance(did, str):
-                if not did.isdigit():
+                try:
+                    did = int(did)
+                except (TypeError, ValueError):
                     continue
-                did = int(did)
             elif not isinstance(did, int):
+                continue
+            if did <= 0:
                 continue
             srv_cfg = servers_config.get(sk)
             # Legacy single-server config: "default" key with no matching servers entry —
@@ -250,7 +260,10 @@ class BaseLibreNMSSyncView(LibreNMSPermissionMixin, LibreNMSAPIMixin, generic.Ob
 
         if self.librenms_id:
             success, device_info = self.librenms_api.get_device_info(self.librenms_id)
-            if success and device_info:
+            # isinstance(dict) guard: a truthy non-dict payload (string/list) would 500 on the
+            # device_info.get(...) calls below; fall back to the default details block instead
+            # of trusting success=True alone (issue #100).
+            if success and isinstance(device_info, dict):
                 # Get NetBox device details
                 netbox_ip = str(obj.primary_ip.address.ip).lower() if obj.primary_ip else None
                 netbox_name = obj.name

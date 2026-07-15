@@ -19,6 +19,7 @@ from netbox_librenms_plugin.utils import (
     find_by_librenms_id,
     find_matching_platform,
     get_librenms_sync_device,
+    is_legacy_librenms_id,
     match_librenms_hardware_to_device_type,
     migrate_legacy_librenms_id,
     resolve_naming_preferences,
@@ -56,7 +57,7 @@ class UpdateDeviceNameView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin,
             messages.error(request, "Device not found in LibreNMS")
             return redirect("plugins:netbox_librenms_plugin:device_librenms_sync", pk=pk)
 
-        success, device_info = self.librenms_api.get_device_info(self.librenms_id)
+        success, device_info = self.get_live_device_info(self.librenms_id)
 
         if not success or not device_info:
             messages.error(request, "Failed to retrieve device info from LibreNMS")
@@ -130,7 +131,7 @@ class UpdateDeviceSerialView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixi
             messages.error(request, "Device not found in LibreNMS")
             return redirect("plugins:netbox_librenms_plugin:device_librenms_sync", pk=pk)
 
-        success, device_info = self.librenms_api.get_device_info(self.librenms_id)
+        success, device_info = self.get_live_device_info(self.librenms_id)
 
         if not success or not device_info:
             messages.error(request, "Failed to retrieve device info from LibreNMS")
@@ -184,7 +185,7 @@ class UpdateDeviceTypeView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin,
             messages.error(request, "Device not found in LibreNMS")
             return redirect("plugins:netbox_librenms_plugin:device_librenms_sync", pk=pk)
 
-        success, device_info = self.librenms_api.get_device_info(self.librenms_id)
+        success, device_info = self.get_live_device_info(self.librenms_id)
 
         if not success or not device_info:
             messages.error(request, "Failed to retrieve device info from LibreNMS")
@@ -252,7 +253,7 @@ class UpdateDevicePlatformView(LibreNMSPermissionMixin, NetBoxObjectPermissionMi
             messages.error(request, "Device not found in LibreNMS")
             return redirect("plugins:netbox_librenms_plugin:device_librenms_sync", pk=pk)
 
-        success, device_info = self.librenms_api.get_device_info(self.librenms_id)
+        success, device_info = self.get_live_device_info(self.librenms_id)
 
         if not success or not device_info:
             messages.error(request, "Failed to retrieve device info from LibreNMS")
@@ -699,14 +700,17 @@ class ConvertLegacyLibreNMSIdView(LibreNMSPermissionMixin, NetBoxObjectPermissio
         if not isinstance(cf_value, (int, str)):
             messages.warning(request, "librenms_id is already in the server-scoped JSON format.")
             return self._sync_url(object_type, pk)
-        if isinstance(cf_value, str):
-            if not cf_value.isdigit():
-                messages.error(request, "librenms_id is not a valid integer; cannot convert.")
-                return self._sync_url(object_type, pk)
+        # Gate with is_legacy_librenms_id() (not str.isdigit()) so this handler accepts exactly the
+        # values the "Convert ID" badge shows — a whitespace-padded legacy int (" 42 ") is legacy
+        # via int() coercion, so it must not be a dead-end button (issue #99).
+        if not is_legacy_librenms_id(cf_value):
+            messages.error(request, "librenms_id is not a valid integer; cannot convert.")
+            return self._sync_url(object_type, pk)
+        librenms_id = int(cf_value)
 
-        # Verify serial match before converting
-        librenms_id = int(cf_value) if isinstance(cf_value, str) else cf_value
-        success, device_info = self.librenms_api.get_device_info(librenms_id)
+        # Verify serial match before converting — get_live_device_info reads live (uncached): the
+        # serial gate decides whether to rewrite the id, so it must not read a stale sync-tab snapshot.
+        success, device_info = self.get_live_device_info(librenms_id)
         if not success or not device_info:
             messages.error(request, "Could not retrieve device info from LibreNMS to verify serial.")
             return self._sync_url(object_type, pk)
@@ -734,10 +738,10 @@ class ConvertLegacyLibreNMSIdView(LibreNMSPermissionMixin, NetBoxObjectPermissio
             if not isinstance(locked_cf, (int, str)) or isinstance(locked_cf, bool):
                 messages.warning(request, "librenms_id is already in the server-scoped JSON format.")
                 return self._sync_url(object_type, pk)
-            locked_id = int(locked_cf) if isinstance(locked_cf, str) and locked_cf.isdigit() else locked_cf
-            if not isinstance(locked_id, int):
+            if not is_legacy_librenms_id(locked_cf):
                 messages.error(request, "librenms_id changed before lock was acquired; aborting.")
                 return self._sync_url(object_type, pk)
+            locked_id = int(locked_cf)
             locked_serial = (getattr(locked, "serial", None) or "").strip()
             if locked_id != librenms_id or locked_serial != netbox_serial:
                 messages.error(request, "Device data changed before lock was acquired; aborting conversion.")

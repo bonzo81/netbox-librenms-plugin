@@ -971,6 +971,23 @@ class TestSyncIPAddressesViewNoSelection:
         mock_msgs.error.assert_called_once()
 
 
+class TestSyncIPAddressesGetManagementIp:
+    """get_management_ip feeds the Primary-IP write decision, so it must read live LibreNMS info."""
+
+    def test_fetches_live_device_info_not_cached(self):
+        from netbox_librenms_plugin.views.sync.ip_addresses import SyncIPAddressesView
+
+        view = object.__new__(SyncIPAddressesView)
+        view._librenms_api = MagicMock()
+        view._librenms_api.get_librenms_id.return_value = 42
+        view._librenms_api.get_device_info.return_value = (True, {"ip": "10.0.0.9"})
+
+        assert view.get_management_ip(MagicMock()) == "10.0.0.9"
+        # Unfixed: get_device_info(42) → use_cache defaults True → a stale render snapshot could
+        # pick the wrong management IP as Primary. Fixed: use_cache=False.
+        assert view._librenms_api.get_device_info.call_args.kwargs.get("use_cache") is False
+
+
 class TestSyncIPAddressesViewCreateIP:
     def test_new_ip_is_created(self):
         from netbox_librenms_plugin.views.sync.ip_addresses import SyncIPAddressesView
@@ -1511,7 +1528,8 @@ class TestSyncVLANsViewWithGroup:
             defaults={"name": "Production", "status": "active"},
         )
 
-    def test_invalid_vlan_group_id_falls_back_to_global(self):
+    def test_invalid_vlan_group_id_is_rejected(self):
+        """A requested-but-missing VLAN group fails closed: no VLAN is created (not even a global one) and an error is surfaced."""
         from netbox_librenms_plugin.views.sync.vlans import SyncVLANsView
 
         view = object.__new__(SyncVLANsView)
@@ -1531,7 +1549,7 @@ class TestSyncVLANsViewWithGroup:
         with (
             patch("netbox_librenms_plugin.views.sync.vlans.get_object_or_404", return_value=mock_device),
             patch("netbox_librenms_plugin.views.sync.vlans.cache") as mock_cache,
-            patch("netbox_librenms_plugin.views.sync.vlans.messages"),
+            patch("netbox_librenms_plugin.views.sync.vlans.messages") as mock_messages,
             patch("netbox_librenms_plugin.views.sync.vlans.redirect"),
             patch("netbox_librenms_plugin.views.sync.vlans.transaction"),
             patch("netbox_librenms_plugin.views.sync.vlans.reverse", return_value="/sync/"),
@@ -1549,9 +1567,9 @@ class TestSyncVLANsViewWithGroup:
             )
             view.post(view.request, object_type="device", object_id=1)
 
-        # Falls back to global VLAN (group=None)
-        call_kwargs = mock_vlan_cls.objects.get_or_create.call_args[1]
-        assert call_kwargs.get("group") is None
+        # Fail closed: never create a VLAN in any scope, and surface an error.
+        mock_vlan_cls.objects.get_or_create.assert_not_called()
+        mock_messages.error.assert_called()
 
     def test_invalid_vid_string_skipped(self):
         from netbox_librenms_plugin.views.sync.vlans import SyncVLANsView

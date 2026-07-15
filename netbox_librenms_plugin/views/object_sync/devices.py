@@ -6,6 +6,7 @@ from django.http import JsonResponse
 from django.shortcuts import get_object_or_404
 from django.urls import reverse
 from django.views import View
+from ipam.models import VLAN
 from utilities.views import ViewTab, register_model_view
 
 from netbox_librenms_plugin.constants import PERM_VIEW_PLUGIN
@@ -19,6 +20,7 @@ from netbox_librenms_plugin.tables.interfaces import (
 )
 from netbox_librenms_plugin.tables.modules import LibreNMSModuleTable, VCModuleTable
 from netbox_librenms_plugin.utils import (
+    cache_remaining_ttl,
     get_interface_name_field,
     get_librenms_sync_device,
     get_missing_vlan_warning,
@@ -38,6 +40,7 @@ from ..mixins import (
     LibreNMSAPIMixin,
     LibreNMSPermissionMixin,
     NetBoxObjectPermissionMixin,
+    extract_cached_ports,
     parse_request_json,
 )
 
@@ -117,25 +120,40 @@ class DeviceInterfaceTableView(BaseInterfaceTableView):
         return table
 
 
-class SingleInterfaceVerifyView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin, View):
+class SingleInterfaceVerifyView(
+    LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreNMSAPIMixin, CacheMixin, View
+):
     """Verify single interface data for a device via cached LibreNMS payload."""
+
+    # Read-only verify endpoint: require object-view permission (mirrors SingleModuleVerifyView).
+    required_object_permissions = {"POST": [("view", Device)]}
 
     def post(self, request):
         """Verify interface data against cached LibreNMS ports for a device."""
         data, err = parse_request_json(request)
         if err:
             return err
+        # Gate BEFORE resolving the device: without this an unauthorized caller could probe
+        # arbitrary device IDs (existence via 404) through this endpoint.
+        if error := self.require_object_permissions_json("POST"):
+            return error
         selected_device_id = data.get("device_id")
         interface_name = data.get("interface_name")
         interface_name_field = data.get("interface_name_field") or get_interface_name_field()
-        server_key = data.get("server_key")
 
         if not selected_device_id:
             return JsonResponse({"status": "error", "message": "No device ID provided"}, status=400)
-        if not server_key:
-            server_key = self.librenms_api.server_key
+        # Only honour a CONFIGURED string server_key (mirrors the cable/IP verify siblings):
+        # the raw value scopes cache reads and the per-server cf lookups below, so a forged
+        # key must not address another server's namespace — and a non-string value (e.g. a
+        # JSON list) is unhashable, so cf_dict.get(server_key) would TypeError-500 this
+        # endpoint. Anything unrecognized falls back to the degrading active-server resolve.
+        server_key = self.resolve_requested_server_key(data)
 
-        selected_device = get_object_or_404(Device, pk=selected_device_id)
+        # Restrict the lookup to the caller's viewable devices: the gate above only checked the
+        # model-level view_device perm, so a site-scoped grant would otherwise read another
+        # device's cached verify payload by raw pk.
+        selected_device = self.restrict_object_or_404(Device, pk=selected_device_id)
 
         # Normalise to the VC sync device so cache keys match what the sync view stored
         if selected_device.virtual_chassis:
@@ -147,7 +165,10 @@ class SingleInterfaceVerifyView(LibreNMSPermissionMixin, LibreNMSAPIMixin, Cache
         else:
             primary_device = selected_device
 
-        cached_data = cache.get(self.get_cache_key(primary_device, "ports", server_key))
+        ports_cache_key = self.get_cache_key(primary_device, "ports", server_key)
+        # Shape-guard the cached entry: a truthy but malformed snapshot must degrade to the
+        # "Interface data not found" 404 below, not AttributeError-500 on .get("ports").
+        cached_data = extract_cached_ports(cache.get(ports_cache_key), ports_cache_key)
 
         if cached_data:
             port_data = next(
@@ -186,9 +207,16 @@ class SingleModuleVerifyView(
         data, err = parse_request_json(request)
         if err:
             return err
+        # Gate BEFORE resolving the device: without this an unauthorized caller could probe
+        # arbitrary device IDs (existence via 404) through this endpoint (mirrors
+        # SingleInterfaceVerifyView).
+        if error := self.require_object_permissions_json("POST"):
+            return error
         selected_device_id = data.get("device_id")
         ent_physical_index = data.get("ent_physical_index")
-        server_key = data.get("server_key") or self.librenms_api.server_key
+        # Configured-string-key-or-fallback, mirroring SingleInterfaceVerifyView above: a
+        # forged/non-string key must neither probe another namespace nor TypeError-500.
+        server_key = self.resolve_requested_server_key(data)
         row_depth = data.get("depth", 0)
 
         if not selected_device_id:
@@ -206,12 +234,10 @@ class SingleModuleVerifyView(
         except (TypeError, ValueError):
             row_depth = 0
 
-        selected_device = get_object_or_404(Device, pk=selected_device_id)
-
-        # Read-only verify endpoint: only require object-view permission, not
-        # plugin write (which require_all_permissions_json would enforce).
-        if error := self.require_object_permissions_json("POST"):
-            return error
+        # Restrict the lookup to the caller's viewable devices: the gate above only checked the
+        # model-level view_device perm, so a site-scoped grant would otherwise read another
+        # device's cached verify payload by raw pk.
+        selected_device = self.restrict_object_or_404(Device, pk=selected_device_id)
 
         if selected_device.virtual_chassis:
             sync_device = get_librenms_sync_device(selected_device, server_key=server_key)
@@ -333,7 +359,7 @@ class SingleModuleVerifyView(
         return JsonResponse({"status": "success", "formatted_row": formatted_row})
 
 
-class SingleVlanGroupVerifyView(LibreNMSPermissionMixin, CacheMixin, View):
+class SingleVlanGroupVerifyView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, CacheMixin, View):
     """
     Verify VLAN assignments for an interface against a specific VLAN group.
 
@@ -342,12 +368,20 @@ class SingleVlanGroupVerifyView(LibreNMSPermissionMixin, CacheMixin, View):
     updated HTML for the VLANs cell with correct colors.
     """
 
+    # Read-only verify endpoint that surfaces a device's interface VLAN assignments —
+    # require object-view permission on the underlying Device (mirrors the other verify views).
+    required_object_permissions = {"POST": [("view", Device)]}
+
     def post(self, request):
-        from ipam.models import VLAN, VLANGroup
+        from ipam.models import VLANGroup
 
         data, err = parse_request_json(request)
         if err:
             return err
+        # Gate BEFORE resolving the device/VLAN group so an unauthorized caller can't probe
+        # device IDs (existence via 404) through this endpoint.
+        if error := self.require_object_permissions_json("POST"):
+            return error
         device_id = data.get("device_id")
         interface_name = data.get("interface_name")
         vlan_group_id = data.get("vlan_group_id")
@@ -359,7 +393,9 @@ class SingleVlanGroupVerifyView(LibreNMSPermissionMixin, CacheMixin, View):
         if not vid_str:
             return JsonResponse({"status": "error", "message": "No VID provided"}, status=400)
 
-        device = get_object_or_404(Device, pk=device_id)
+        # Object-scope the lookup (see SingleInterfaceVerifyView): the gate only checked model-level
+        # view_device, so an out-of-scope pk must 404 rather than expose the device.
+        device = self.restrict_object_or_404(Device, pk=device_id)
         try:
             vid = int(vid_str)
         except (ValueError, TypeError):
@@ -461,7 +497,7 @@ class SingleVlanGroupVerifyView(LibreNMSPermissionMixin, CacheMixin, View):
         return mark_safe(", ".join(parts))
 
 
-class VerifyVlanSyncGroupView(LibreNMSPermissionMixin, View):
+class VerifyVlanSyncGroupView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, View):
     """
     Verify whether a VLAN (by VID) exists in a selected VLAN group.
 
@@ -470,12 +506,20 @@ class VerifyVlanSyncGroupView(LibreNMSPermissionMixin, View):
     update row colors without a full page reload.
     """
 
+    # Read-only verify endpoint that surfaces NetBox VLAN existence + names — require
+    # object-view permission on VLAN (there is no device in scope here, unlike the other
+    # verify views), so an unauthorized caller can't enumerate VLANs/groups.
+    required_object_permissions = {"POST": [("view", VLAN)]}
+
     def post(self, request):
-        from ipam.models import VLAN, VLANGroup
+        from ipam.models import VLANGroup
 
         data, err = parse_request_json(request)
         if err:
             return err
+        # Gate BEFORE resolving the VLAN group / querying VLANs (mirrors the other verify views).
+        if error := self.require_object_permissions_json("POST"):
+            return error
         vlan_group_id = data.get("vlan_group_id")
         vid_str = data.get("vid", "")
         librenms_name = data.get("name", "")
@@ -511,7 +555,9 @@ class VerifyVlanSyncGroupView(LibreNMSPermissionMixin, View):
         )
 
 
-class SaveVlanGroupOverridesView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin, View):
+class SaveVlanGroupOverridesView(
+    LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreNMSAPIMixin, CacheMixin, View
+):
     """
     Persist user VLAN-group-override selections in cache.
 
@@ -532,22 +578,28 @@ class SaveVlanGroupOverridesView(LibreNMSPermissionMixin, LibreNMSAPIMixin, Cach
             return err
         device_id = data.get("device_id")
         vid_group_map = data.get("vid_group_map", {})
-        server_key = data.get("server_key")
 
         if not device_id:
             return JsonResponse({"status": "error", "message": "No device ID provided"}, status=400)
-        if not server_key:
-            server_key = self.librenms_api.server_key
+        # Configured-string-key-or-fallback, mirroring the verify views: this WRITES the
+        # overrides into a server-scoped cache namespace, so a forged/non-string key must
+        # neither address an arbitrary namespace nor TypeError-500 the cf lookups below.
+        server_key = self.resolve_requested_server_key(data)
 
-        device = get_object_or_404(Device, pk=device_id)
+        # Object-scope the lookup: require_write_permission_json above only checks plugin-wide write
+        # access, so without this any plugin-writer could persist VLAN overrides for a device they
+        # can't even view (out-of-scope pk). Restrict fail-closes it to a 404 like a nonexistent id.
+        device = self.restrict_object_or_404(Device, pk=device_id)
 
         # Normalise to the VC sync device so cache keys match what the sync view stored
         sync_device = get_librenms_sync_device(device, server_key=server_key)
         if sync_device is None:
             sync_device = device
 
-        # Use the remaining TTL of the ports cache so both expire together
-        ports_ttl = cache.ttl(self.get_cache_key(sync_device, "ports", server_key))
+        # Use the remaining TTL of the ports cache so both expire together. .ttl() is a
+        # django-redis extension; degrade to None on a backend without it (e.g. LocMemCache)
+        # so a non-Redis deployment gets a graceful "refresh first" 400 instead of a 500.
+        ports_ttl = cache_remaining_ttl(cache, self.get_cache_key(sync_device, "ports", server_key))
         if ports_ttl is None or ports_ttl <= 0:
             return JsonResponse(
                 {"status": "error", "message": "No cached port data; refresh interfaces first"},

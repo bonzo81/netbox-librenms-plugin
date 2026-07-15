@@ -22,6 +22,38 @@
     </div>
 </div>
 
+<style>
+/*
+ * In-flight row-action feedback (HTMX).
+ *
+ * The per-row action forms (Install / Install Branch / carrier-install / Update Serial /
+ * Update Interface) set hx-indicator="closest tr", so HTMX adds .htmx-request to the row
+ * while its POST is in flight. The status cell then swaps its live badge for a spinner
+ * badge ("Installing…" or "Updating…" per the row's action, see render_status) and the
+ * row's buttons dim, making the ~1s table rebuild feel responsive (and preventing a
+ * double-submit). When the response swaps the fresh table in, the row is replaced and
+ * shows its new status. The bulk "Install Selected" form carries .htmx-request on the
+ * form itself and swaps its own button label.
+ */
+#module-sync-content .lnms-installing { display: none; }
+#module-sync-content tr.htmx-request .lnms-status-live { display: none; }
+#module-sync-content tr.htmx-request .lnms-installing {
+    display: inline-flex;
+    align-items: center;
+    gap: .35rem;
+}
+#module-sync-content tr.htmx-request .lnms-installing .spinner-border {
+    width: .85rem;
+    height: .85rem;
+    border-width: .15em;
+}
+#module-sync-content tr.htmx-request form[hx-post] button { opacity: .55; }
+
+/* Bulk "Install Selected": its own button shows the spinner + label swap. */
+#install-selected-form.htmx-request .lnms-installing { display: inline-block; }
+#install-selected-form.htmx-request .lnms-btn-idle { display: none; }
+</style>
+
 <!-- Container for the module sync content -->
 <div id="module-sync-content">
     {% include 'netbox_librenms_plugin/_module_sync_content.html' %}

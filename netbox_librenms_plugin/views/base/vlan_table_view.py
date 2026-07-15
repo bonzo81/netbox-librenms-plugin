@@ -6,6 +6,7 @@ from django.views import View
 
 from netbox_librenms_plugin.constants import LIBRENMS_VLAN_STATE_ACTIVE
 from netbox_librenms_plugin.tables.vlans import LibreNMSVLANTable
+from netbox_librenms_plugin.utils import cache_remaining_ttl, is_list_of_dicts
 from netbox_librenms_plugin.views.mixins import (
     CacheMixin,
     LibreNMSAPIMixin,
@@ -63,6 +64,13 @@ class BaseVLANTableView(VlanAssignmentMixin, LibreNMSAPIMixin, LibreNMSPermissio
         if not success:
             return False, f"Failed to fetch VLANs: {vlans_data}"
 
+        # A success=True response can still carry a malformed-but-truthy payload (string, list
+        # of scalars, etc.); caching it would later 500 in compare_vlans() on vlan.get(...).
+        # Reject anything that isn't a list of dict rows before caching (issue #100). An empty
+        # list is valid (a device with no VLANs).
+        if not is_list_of_dicts(vlans_data):
+            return False, "Unexpected response from LibreNMS (malformed VLAN payload)."
+
         # Cache VLANs
         server_key = self.librenms_api.server_key
         cache.set(
@@ -88,10 +96,24 @@ class BaseVLANTableView(VlanAssignmentMixin, LibreNMSAPIMixin, LibreNMSPermissio
         """
         vlan_table = None
 
-        # Get cached data
-        server_key = getattr(self.librenms_api, "server_key", None)
+        # Get cached data. Use the shared degrading resolver (not a bare getattr on the lazy
+        # librenms_api property): on a missing/misconfigured default the property raises
+        # KeyError/ValueError, which would 500 the VLAN tab on GET — the exact failure mode
+        # _render_server_key() fixes for the sibling interface/module/cable/ip tabs.
+        server_key = self._render_server_key()
         cached_vlans = cache.get(self.get_cache_key(obj, "vlans", server_key))
         last_fetched = cache.get(self.get_last_fetched_key(obj, "vlans", server_key))
+
+        # Fail closed on a stale/corrupt cached entry. compare_vlans() iterates the rows and
+        # calls vlan.get(...), so a malformed snapshot (string, list of scalars) would 500 the
+        # VLAN tab on render. _fetch_and_cache_vlan_data() guards the write side, but a pre-fix
+        # entry can still be in the cache — drop and purge it, then render empty (mirrors the
+        # interfaces read-path guard). An empty list is valid (device with no VLANs).
+        if cached_vlans is not None and not is_list_of_dicts(cached_vlans):
+            cache.delete(self.get_cache_key(obj, "vlans", server_key))
+            cache.delete(self.get_last_fetched_key(obj, "vlans", server_key))
+            cached_vlans = None
+            last_fetched = None
 
         # Get available VLAN groups for this device
         vlan_groups = self.get_vlan_groups_for_device(obj)
@@ -99,7 +121,10 @@ class BaseVLANTableView(VlanAssignmentMixin, LibreNMSAPIMixin, LibreNMSPermissio
         # Build lookup maps for VLAN matching
         lookup_maps = self._build_vlan_lookup_maps(vlan_groups)
 
-        if cached_vlans:
+        # `is not None` (not a bare truthiness check): an empty list is a valid successful refresh
+        # (a device with no VLANs) and must still render an empty table — a truthy check would skip
+        # construction and make a VLAN-less device look like it never loaded.
+        if cached_vlans is not None:
             # Compare VLANs with NetBox (against all device-available VLANs)
             compared_vlans = self.compare_vlans(cached_vlans, lookup_maps, device=obj)
 
@@ -107,7 +132,7 @@ class BaseVLANTableView(VlanAssignmentMixin, LibreNMSAPIMixin, LibreNMSPermissio
             vlan_table.configure(request)
 
         # Calculate cache TTL
-        cache_ttl = cache.ttl(self.get_cache_key(obj, "vlans", server_key))
+        cache_ttl = cache_remaining_ttl(cache, self.get_cache_key(obj, "vlans", server_key))
         cache_expiry = timezone.now() + timezone.timedelta(seconds=cache_ttl) if cache_ttl and cache_ttl > 0 else None
 
         return {

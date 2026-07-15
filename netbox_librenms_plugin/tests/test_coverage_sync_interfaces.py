@@ -163,6 +163,46 @@ class TestSyncInterfacesViewGetCachedPortsData:
 
         assert result == ports
 
+    def test_malformed_cached_ports_treated_as_miss(self):
+        """A stale/malformed cache entry (ports not a list of dicts, e.g."""
+        from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
+
+        view = object.__new__(SyncInterfacesView)
+        view.get_cache_key = MagicMock(return_value="k")
+        req = _make_request()
+        mock_obj = MagicMock(pk=1)
+
+        for bad in ({"ports": None}, {"ports": "oops"}, {"ports": [None]}, ["not-a-dict"]):
+            with (
+                patch("netbox_librenms_plugin.views.sync.interfaces.cache") as mock_cache,
+                patch("netbox_librenms_plugin.views.sync.interfaces.messages") as mock_msgs,
+            ):
+                mock_cache.get.return_value = bad
+                result = view.get_cached_ports_data(req, mock_obj, "default")
+
+            assert result is None, f"malformed {bad!r} should be a miss"
+            mock_msgs.warning.assert_called_once()
+
+    def test_dict_without_ports_key_is_noop_not_miss(self):
+        """A cached dict that simply lacks a 'ports' key is a harmless empty no-op (historical behavior), not a 'refresh first' abort — only PRESENT-but-malformed ports fail closed."""
+        from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
+
+        view = object.__new__(SyncInterfacesView)
+        view.get_cache_key = MagicMock(return_value="k")
+        req = _make_request()
+        mock_obj = MagicMock(pk=1)
+
+        for empty in ({}, {"librenms_id": 5}, {"ports": []}):
+            with (
+                patch("netbox_librenms_plugin.views.sync.interfaces.cache") as mock_cache,
+                patch("netbox_librenms_plugin.views.sync.interfaces.messages") as mock_msgs,
+            ):
+                mock_cache.get.return_value = empty
+                result = view.get_cached_ports_data(req, mock_obj, "default")
+
+            assert result == [], f"{empty!r} should be an empty no-op, not a miss"
+            mock_msgs.warning.assert_not_called()
+
     def test_no_server_key_uses_librenms_api(self):
         from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
 
@@ -314,6 +354,57 @@ class TestSyncInterfacesViewPost:
 
         mock_msgs.success.assert_called_once()
         mock_redirect.assert_called_once()
+
+
+class TestSyncInterfacesViewServerKeyAndRedirect:
+    """Issues #107/#108/#109: the POST server_key must be validated against configured servers before it scopes cache/CF lookups, and interface_name_field must be URL-escaped in the post-sync redirect."""
+
+    def _make_view(self, configured_servers):
+        from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
+
+        view = object.__new__(SyncInterfacesView)
+        view.require_all_permissions = MagicMock(return_value=None)
+        view.get_required_permissions_for_object_type = MagicMock(return_value=[])
+        mock_api = MagicMock(server_key="default")
+        mock_api.get_available_servers.return_value = configured_servers
+        return view, mock_api
+
+    def _run_no_selection(self, view, mock_api, post_data, name_field="ifName"):
+        """Drive post() down the no-selection redirect path (server_key + redirect_url are set before that), returning the redirect call mock."""
+        with (
+            patch("netbox_librenms_plugin.views.sync.interfaces.get_object_or_404", return_value=MagicMock(pk=1)),
+            patch("netbox_librenms_plugin.views.sync.interfaces.get_interface_name_field", return_value=name_field),
+            patch("netbox_librenms_plugin.views.sync.interfaces.messages"),
+            patch("netbox_librenms_plugin.views.sync.interfaces.redirect") as mock_redirect,
+            patch("netbox_librenms_plugin.views.sync.interfaces.reverse", return_value="/sync/"),
+            # The POSTed key is validated via the LibreNMSAPI classmethod (not the instance property)
+            # so a misconfigured default client is never built during validation — mock the classmethod.
+            patch(
+                "netbox_librenms_plugin.librenms_api.LibreNMSAPI.get_available_servers",
+                return_value=mock_api.get_available_servers.return_value,
+            ),
+            patch.object(type(view), "librenms_api", new_callable=lambda: property(lambda s: mock_api)),
+        ):
+            view.post(_make_request(post_data=post_data), "device", 1)
+        return mock_redirect
+
+    def test_unconfigured_server_key_falls_back_to_active(self):
+        view, mock_api = self._make_view({"default": "Default", "secondary": "Secondary"})
+        self._run_no_selection(view, mock_api, {"server_key": "evil-server"})
+        # The forged key is not configured, so it is dropped in favour of the active server.
+        assert view._post_server_key == "default"
+
+    def test_configured_server_key_is_honoured(self):
+        view, mock_api = self._make_view({"default": "Default", "secondary": "Secondary"})
+        self._run_no_selection(view, mock_api, {"server_key": "secondary"})
+        assert view._post_server_key == "secondary"
+
+    def test_interface_name_field_is_url_escaped_in_redirect(self):
+        view, mock_api = self._make_view({"default": "Default"})
+        mock_redirect = self._run_no_selection(view, mock_api, {}, name_field="ifName&injected=1")
+        url = mock_redirect.call_args.args[0]
+        assert "ifName%26injected%3D1" in url
+        assert "ifName&injected=1" not in url
 
 
 # ===========================================================================
@@ -1308,3 +1399,44 @@ class TestDeleteNetBoxInterfacesViewPost:
         assert data["deleted_count"] == 1
         assert "error" in data["message"]
         mock_interface_ok.delete.assert_called_once()
+
+
+class TestSyncInterfacesViewServerKeyValidation:
+    """A POSTed valid non-default server_key must be validated via the LibreNMSAPI classmethod.
+
+    Touching the ``self.librenms_api`` instance property builds the default/selected client, so a
+    misconfigured default would 500 a sync the user legitimately requested on a working non-default
+    server. The POSTed key only scopes cache + librenms_id CF reads, so validation must not build.
+    """
+
+    def test_valid_server_key_does_not_build_default_client(self):
+        from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
+
+        view = object.__new__(SyncInterfacesView)
+        view.require_all_permissions = MagicMock(return_value=None)
+        view.get_required_permissions_for_object_type = MagicMock(return_value=[])
+        view.get_object = MagicMock(return_value=MagicMock(pk=7))
+        # No selection → redirect right after server_key is resolved (keeps the test focused).
+        view.get_selected_interfaces = MagicMock(return_value=None)
+
+        def _boom(self):
+            raise RuntimeError("default LibreNMS client build must not happen during key validation")
+
+        request = _make_request(post_data={"server_key": "production"})
+
+        with (
+            patch(
+                "netbox_librenms_plugin.librenms_api.LibreNMSAPI.get_available_servers",
+                return_value={"production": {"url": "u", "token": "t"}},
+            ),
+            patch.object(type(view), "librenms_api", property(_boom)),
+            patch("netbox_librenms_plugin.views.sync.interfaces.get_interface_name_field", return_value="ifName"),
+            patch("netbox_librenms_plugin.views.sync.interfaces.reverse", return_value="/sync/"),
+            patch("netbox_librenms_plugin.views.sync.interfaces.redirect", side_effect=lambda url: url),
+        ):
+            result = view.post(request, object_type="device", object_id=7)
+
+        # Fixed: classmethod validates "production" without touching the property. Unfixed:
+        # self.librenms_api.get_available_servers() builds the misconfigured default → RuntimeError.
+        assert view._post_server_key == "production"
+        assert "server_key=production" in result

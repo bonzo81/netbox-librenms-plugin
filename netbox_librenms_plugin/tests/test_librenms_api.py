@@ -57,6 +57,54 @@ class TestLibreNMSAPIInit:
 
         assert api.librenms_url == "https://legacy.example.com"
 
+    def test_legacy_mode_normalizes_server_key_to_default(self, mock_librenms_config):
+        """In legacy single-server mode a posted/stale server_key must not survive as api.server_key (it would become a bogus cache/redirect discriminator)."""
+        mock_config = mock_librenms_config["mock_config"]
+
+        def config_side_effect(plugin, key, default=None):
+            if key == "servers":
+                return None  # legacy single-server mode
+            legacy = {"librenms_url": "https://legacy.example.com", "api_token": "legacy-token"}
+            return legacy.get(key, default)
+
+        mock_config.side_effect = config_side_effect
+
+        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+
+        # A non-default (stale/tampered) key in legacy mode must normalize to "default".
+        api = LibreNMSAPI(server_key="ghost")
+        assert api.server_key == "default"
+
+    def test_init_non_string_server_key_falls_back_cleanly(self, mock_librenms_config):
+        """An unhashable non-string server_key (e.g. a list) is treated as unset, not raised on at the dict membership check."""
+        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+
+        # Pre-fix: `[] not in servers_config` raised TypeError (unhashable type: 'list').
+        api = LibreNMSAPI(server_key=[])
+
+        assert api.server_key == "default"
+        assert api.librenms_url == "https://librenms.example.com"
+
+    def test_init_fallback_skips_incomplete_server_entry(self, mock_librenms_config):
+        """The auto-default fallback skips a structurally incomplete entry (dict without url/token) and picks the first usable server."""
+        mock_config = mock_librenms_config["mock_config"]
+
+        def config_side_effect(plugin, key, default=None):
+            if key == "servers":
+                # 'bad' is a dict but carries no url/token; 'prod' is usable.
+                return {"bad": {}, "prod": {"librenms_url": "https://prod.example.com", "api_token": "prod-token"}}
+            return default
+
+        mock_config.side_effect = config_side_effect
+
+        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+
+        # 'default' isn't configured → auto-default fallback; it must skip 'bad' and pick 'prod'.
+        api = LibreNMSAPI(server_key="default")
+
+        assert api.server_key == "prod"
+        assert api.librenms_url == "https://prod.example.com"
+
     def test_init_missing_config_raises_valueerror(self, mock_librenms_config):
         """Verify ValueError raised when configuration is missing."""
         mock_config = mock_librenms_config["mock_config"]
@@ -89,6 +137,111 @@ class TestLibreNMSAPIInit:
         api = LibreNMSAPI(server_key="default")
         assert api.server_key == "primary"
         assert api.librenms_url == "https://primary.example.com"
+
+    def test_init_stale_auto_selected_server_falls_back(self, mock_librenms_config):
+        """Issue #110: a stale LibreNMSSettings.selected_server (no longer configured) must fall back to the first server rather than hard-fail — it was auto-resolved, not explicitly requested, so the KeyError guard must not fire."""
+        mock_config = mock_librenms_config["mock_config"]
+        mock_config.return_value = {
+            "primary": {"librenms_url": "https://primary.example.com", "api_token": "t"},
+        }
+        mock_settings = mock_librenms_config["mock_settings"]
+        mock_settings.objects.first.return_value.selected_server = "gone-server"
+
+        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+
+        api = LibreNMSAPI()  # server_key=None -> auto-resolved from (stale) settings
+        assert api.server_key == "primary"
+
+    def test_init_blank_server_key_treated_as_non_explicit_falls_back(self, mock_librenms_config):
+        """A blank/whitespace server_key is 'no key': a stale selected_server must still fall back, not hard-fail. Treating '' as explicit would mark the auto-resolved key explicit and defeat the issue #110 fallback (KeyError)."""
+        mock_config = mock_librenms_config["mock_config"]
+        mock_config.return_value = {
+            "primary": {"librenms_url": "https://primary.example.com", "api_token": "t"},
+        }
+        mock_settings = mock_librenms_config["mock_settings"]
+        mock_settings.objects.first.return_value.selected_server = "gone-server"
+
+        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+
+        for blank in ("", "   "):
+            api = LibreNMSAPI(server_key=blank)  # blank → auto-resolved from the (stale) settings
+            assert api.server_key == "primary"
+
+    def test_init_skips_leading_malformed_server_entry(self, mock_librenms_config):
+        """Issue #110: the first-entry fallback must pick the first *valid* mapping, skipping a malformed (non-dict) leading entry that would otherwise raise at the config read."""
+        mock_config = mock_librenms_config["mock_config"]
+        mock_config.return_value = {
+            "broken": "not-a-dict",
+            "good": {"librenms_url": "https://good.example.com", "api_token": "t"},
+        }
+
+        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+
+        api = LibreNMSAPI(server_key="default")
+        assert api.server_key == "good"
+        assert api.librenms_url == "https://good.example.com"
+
+    def test_init_all_malformed_server_entries_raise_valueerror(self, mock_librenms_config):
+        """Issue #110: when no configured entry is a valid mapping, raise a clear ValueError instead of crashing on the malformed entry's config read."""
+        mock_config = mock_librenms_config["mock_config"]
+        mock_config.return_value = {"broken": "not-a-dict", "also-bad": 123}
+
+        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+
+        with pytest.raises(ValueError):
+            LibreNMSAPI(server_key="default")
+
+    def test_init_selected_key_malformed_raises_valueerror_not_typeerror(self, mock_librenms_config):
+        """Issue #110: an explicitly requested key that *exists* but maps to a non-dict must raise a clear ValueError, not an opaque TypeError from indexing the string at the config read."""
+        mock_config = mock_librenms_config["mock_config"]
+        mock_config.return_value = {"broken": "not-a-dict"}
+
+        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+
+        with pytest.raises(ValueError, match="expected a mapping"):
+            LibreNMSAPI(server_key="broken")
+
+    def test_get_available_servers_skips_malformed_entry(self, mock_librenms_config):
+        """get_available_servers() powers the sync-POST server-key membership check."""
+        mock_config = mock_librenms_config["mock_config"]
+        mock_config.return_value = {
+            "good": {"librenms_url": "https://good.example.com", "api_token": "t", "display_name": "Good"},
+            "broken": "not-a-dict",
+        }
+
+        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+
+        servers = LibreNMSAPI.get_available_servers()
+
+        assert servers == {"good": "Good"}
+        assert "broken" not in servers
+
+    def test_init_incomplete_dict_entry_raises_valueerror_not_keyerror(self, mock_librenms_config):
+        """A dict-shaped but incomplete entry ({"bad": {}}) passes the isinstance check, so the config read must fail with ValueError, not an opaque KeyError on config['librenms_url']."""
+        mock_config = mock_librenms_config["mock_config"]
+        mock_config.return_value = {"bad": {}}
+
+        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+
+        with pytest.raises(ValueError):
+            LibreNMSAPI(server_key="bad")
+
+    def test_get_available_servers_skips_incomplete_dict_entry(self, mock_librenms_config):
+        """An incomplete dict entry (no librenms_url/api_token) must not be selectable — it would pass the membership check and then crash LibreNMSAPI construction."""
+        mock_config = mock_librenms_config["mock_config"]
+        mock_config.return_value = {
+            "good": {"librenms_url": "https://good.example.com", "api_token": "t", "display_name": "Good"},
+            "bad": {},  # dict-shaped but unusable
+            "tokenless": {"librenms_url": "https://x.example.com"},  # url but no token
+        }
+
+        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+
+        servers = LibreNMSAPI.get_available_servers()
+
+        assert servers == {"good": "Good"}
+        assert "bad" not in servers
+        assert "tokenless" not in servers
 
 
 # =============================================================================
@@ -831,6 +984,68 @@ class TestLibreNMSAPIDeviceOperations:
         success, result = api.get_device_info(1)
         assert success is False
         assert result is None
+
+    @patch("netbox_librenms_plugin.librenms_api.requests.get")
+    def test_get_device_info_caches_success(self, mock_get, mock_librenms_config):
+        """A successful lookup is cached: a second call within the TTL skips the HTTP request."""
+        mock_get.return_value.status_code = 200
+        mock_get.return_value.json.return_value = {
+            "status": "ok",
+            "devices": [{"device_id": 7777, "hostname": "cached-device"}],
+        }
+
+        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+
+        api = LibreNMSAPI(server_key="default")
+        first = api.get_device_info(device_id=7777)
+        second = api.get_device_info(device_id=7777)
+
+        assert first == second == (True, {"device_id": 7777, "hostname": "cached-device"})
+        assert mock_get.call_count == 1  # second call served from cache, not re-fetched
+
+    @patch("netbox_librenms_plugin.librenms_api.requests.get")
+    def test_get_device_info_does_not_cache_failure(self, mock_get, mock_librenms_config):
+        """Failures are never cached, so a transient error doesn't persist for the cache window."""
+        mock_get.side_effect = requests.exceptions.Timeout("boom")
+
+        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+
+        api = LibreNMSAPI(server_key="default")
+        assert api.get_device_info(device_id=7778) == (False, None)
+        assert api.get_device_info(device_id=7778) == (False, None)
+
+        assert mock_get.call_count == 2  # not cached → re-attempted on the next call
+
+    @patch("netbox_librenms_plugin.librenms_api.requests.get")
+    def test_get_device_info_use_cache_false_bypasses_stale_cache(self, mock_get, mock_librenms_config):
+        """use_cache=False refetches live data instead of returning a stale cached payload, and refreshes the cache."""
+        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+
+        mock_get.return_value.status_code = 200
+        mock_get.return_value.json.return_value = {
+            "status": "ok",
+            "devices": [{"device_id": 424242, "hostname": "stale"}],
+        }
+
+        api = LibreNMSAPI(server_key="default")
+        # First call populates the 60s cache with the (soon-to-be-stale) value.
+        assert api.get_device_info(device_id=424242) == (True, {"device_id": 424242, "hostname": "stale"})
+
+        # The hostname is corrected in LibreNMS within the cache window.
+        mock_get.return_value.json.return_value = {
+            "status": "ok",
+            "devices": [{"device_id": 424242, "hostname": "fresh"}],
+        }
+
+        # A normal (cached) read still returns the stale value...
+        assert api.get_device_info(device_id=424242) == (True, {"device_id": 424242, "hostname": "stale"})
+        # ...but the import path (use_cache=False) fetches live data...
+        assert api.get_device_info(device_id=424242, use_cache=False) == (
+            True,
+            {"device_id": 424242, "hostname": "fresh"},
+        )
+        # ...and that live fetch refreshes the cache, so subsequent cached reads see the correction.
+        assert api.get_device_info(device_id=424242) == (True, {"device_id": 424242, "hostname": "fresh"})
 
     @patch("netbox_librenms_plugin.librenms_api.requests.get")
     def test_list_devices_with_filters(self, mock_get, mock_librenms_config):

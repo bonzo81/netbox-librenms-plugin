@@ -15,6 +15,7 @@ from ..utils import (
     find_by_librenms_id,
     find_matching_platform,
     find_matching_site,
+    is_legacy_librenms_id,
     match_librenms_hardware_to_device_type,
     set_librenms_device_id,
 )
@@ -29,7 +30,7 @@ from .virtual_chassis import (
 logger = logging.getLogger(__name__)
 
 
-def _try_chassis_device_type_match(api, device_id):
+def _try_chassis_device_type_match(api, device_id, preloaded_device_type_rules: dict | None = None):
     """
     Attempt device type matching using chassis inventory fields.
 
@@ -41,8 +42,15 @@ def _try_chassis_device_type_match(api, device_id):
     Tries entPhysicalName first (typically the chassis part number),
     then entPhysicalModelName as fallback.
 
+    Args:
+        api (LibreNMSAPI): API client used to fetch the chassis inventory.
+        device_id (int): LibreNMS device ID whose chassis inventory to inspect.
+        preloaded_device_type_rules (dict | None): Optional device_type NormalizationRule set from
+            :func:`preload_normalization_rules`, threaded into the inner match so bulk imports don't
+            reissue the rule query per device.
+
     Returns:
-        dict with matched/device_type/match_type keys, or None on failure.
+        dict | None: Dict with matched/device_type/match_type keys, or None on failure.
     """
     skip_values = {"", "-", "Unspecified", "BUILTIN", "None"}
 
@@ -56,7 +64,9 @@ def _try_chassis_device_type_match(api, device_id):
             for field in ("entPhysicalName", "entPhysicalModelName"):
                 value = item.get(field) or ""
                 if value and value not in skip_values:
-                    chassis_match = match_librenms_hardware_to_device_type(value)
+                    chassis_match = match_librenms_hardware_to_device_type(
+                        value, preloaded_rules=preloaded_device_type_rules
+                    )
                     if chassis_match is None:
                         continue
                     if chassis_match["matched"]:
@@ -135,6 +145,7 @@ def validate_device_for_import(
     force_vc_refresh: bool = False,
     use_sysname: bool = True,
     strip_domain: bool = False,
+    preloaded_device_type_rules: dict | None = None,
 ) -> dict:
     """
     Validate if a LibreNMS device can be imported to NetBox.
@@ -301,9 +312,7 @@ def validate_device_for_import(
             # LibreNMSAPI.get_librenms_id() returns an int in both formats, so only the
             # raw type check on custom_field_data reveals whether migration is needed.
             _vm_cf_id = existing_vm.custom_field_data.get("librenms_id")
-            if (isinstance(_vm_cf_id, int) and not isinstance(_vm_cf_id, bool)) or (
-                isinstance(_vm_cf_id, str) and _vm_cf_id.isdigit()
-            ):
+            if is_legacy_librenms_id(_vm_cf_id):
                 result["librenms_id_needs_migration"] = True
 
             # Check if name matches resolved name (accounts for use_sysname/strip_domain)
@@ -323,6 +332,10 @@ def validate_device_for_import(
                 logger.info(f"Found existing device: {existing_device.name} (matched by librenms_id={librenms_id})")
                 result["existing_device"] = existing_device
                 result["existing_match_type"] = "librenms_id"
+                # A Device matched: force Device mode so a user-selected VM mode doesn't carry a
+                # Device-mapped row into the VM validation/UI path (the VM branches above set
+                # import_as_vm=True; the Device branches must symmetrically set it False).
+                result["import_as_vm"] = False
                 result["can_import"] = False
 
                 # Detect legacy bare-integer or string-digit format so UI can offer a migration action.
@@ -330,9 +343,7 @@ def validate_device_for_import(
                 # LibreNMSAPI.get_librenms_id() returns an int in both formats, so only the
                 # raw type check on custom_field_data reveals whether migration is needed.
                 _dev_cf_id = existing_device.custom_field_data.get("librenms_id")
-                if (isinstance(_dev_cf_id, int) and not isinstance(_dev_cf_id, bool)) or (
-                    isinstance(_dev_cf_id, str) and _dev_cf_id.isdigit()
-                ):
+                if is_legacy_librenms_id(_dev_cf_id):
                     result["librenms_id_needs_migration"] = True
 
                 # Check if name matches resolved name (VC-aware: compare against VC member name)
@@ -411,6 +422,9 @@ def validate_device_for_import(
                 logger.info(f"Found existing device by hostname: {existing_device.name}")
                 result["existing_device"] = existing_device
                 result["existing_match_type"] = "hostname"
+                # Force Device mode (see the librenms_id branch above): a hostname match to a
+                # Device must not leave a user-selected VM mode active.
+                result["import_as_vm"] = False
 
                 # Check for serial conflict on hostname-matched device
                 incoming_serial = libre_device.get("serial") or ""
@@ -443,7 +457,26 @@ def validate_device_for_import(
             if not result["existing_device"]:
                 serial = libre_device.get("serial") or ""
                 if serial and serial != "-" and not import_as_vm:
-                    existing_by_serial = Device.objects.filter(serial=serial).first()
+                    # Serial is not unique in NetBox, so .first() would bind an arbitrary row
+                    # and the downstream serial/OOB/merge flow would derive its guidance from a
+                    # random device. Require a unique match before binding, mirroring the
+                    # merge-peer [:2] guard (issue #101).
+                    serial_matches = list(Device.objects.filter(serial=serial)[:2])
+                    if len(serial_matches) > 1:
+                        # Device.serial is not unique in NetBox, so several rows already share it.
+                        # Binding to an arbitrary one is wrong, and importing anyway would mint YET
+                        # ANOTHER same-serial device. Make it a blocking issue (issue -> can_import
+                        # False) and flag the duplicate, rather than only warning and letting the row
+                        # import. Not serial_action="conflict": there is no single peer to resolve
+                        # against, so the sync-serial UI (which needs one existing_device) can't apply.
+                        result["serial_duplicate"] = True
+                        result["issues"].append(
+                            f"Multiple NetBox devices share serial '{serial}'; resolve the duplicate "
+                            "serial before importing."
+                        )
+                        existing_by_serial = None
+                    else:
+                        existing_by_serial = serial_matches[0] if serial_matches else None
                     if existing_by_serial:
                         logger.info(f"Found existing device by serial: {existing_by_serial.name} (serial={serial})")
                         result["existing_device"] = existing_by_serial
@@ -528,7 +561,7 @@ def validate_device_for_import(
 
             # 3. Validate DeviceType (required)
             hardware = libre_device.get("hardware", "")
-            dt_match = match_librenms_hardware_to_device_type(hardware)
+            dt_match = match_librenms_hardware_to_device_type(hardware, preloaded_rules=preloaded_device_type_rules)
 
             if dt_match is None:
                 result["device_type"]["found"] = False
@@ -544,7 +577,9 @@ def validate_device_for_import(
                 if not dt_match["matched"] and api:
                     device_id = libre_device.get("device_id")
                     if device_id:
-                        chassis_match = _try_chassis_device_type_match(api, device_id)
+                        chassis_match = _try_chassis_device_type_match(
+                            api, device_id, preloaded_device_type_rules=preloaded_device_type_rules
+                        )
                         if chassis_match and chassis_match["matched"]:
                             dt_match = chassis_match
 
@@ -755,9 +790,12 @@ def import_single_device(
     try:
         api = LibreNMSAPI(server_key=server_key)
 
-        # Use pre-fetched device data if provided, otherwise fetch from API
+        # Use pre-fetched device data if provided, otherwise fetch from API. Read LIVE
+        # (use_cache=False): this is the device-CREATION path — name/serial/status/hardware are
+        # derived from libre_device — so it must not build a NetBox device from the 60s get_device_info
+        # snapshot a sync-tab render may have seeded, mirroring the import flow's live-read policy.
         if libre_device is None:
-            success, libre_device = api.get_device_info(device_id)
+            success, libre_device = api.get_device_info(device_id, use_cache=False)
             if not success or not libre_device:
                 return {
                     "success": False,
@@ -936,20 +974,23 @@ def import_single_device(
         }
 
 
-def get_librenms_device_by_id(api: LibreNMSAPI, device_id: int) -> dict:
+def get_librenms_device_by_id(api: LibreNMSAPI, device_id: int, use_cache: bool = True) -> dict:
     """
     Retrieve a single device from LibreNMS by ID.
 
     Args:
         api: LibreNMSAPI instance
         device_id: LibreNMS device ID
+        use_cache: Passed through to ``get_device_info``. The import fallback passes ``False`` so
+            that when ``fetch_device_with_cache``'s own caches miss, the API fallback returns live
+            data rather than the 60s get_device_info snapshot a sync-tab render may have seeded.
 
     Returns:
         Device dictionary or None if not found
     """
     try:
         # Use the dedicated API endpoint to get device by ID
-        success, device = api.get_device_info(device_id)
+        success, device = api.get_device_info(device_id, use_cache=use_cache)
         if success and device:
             return device
 
@@ -1005,8 +1046,11 @@ def fetch_device_with_cache(
     libre_device = cache.get(cache_key)
 
     if not libre_device:
-        # Fallback to API fetch
-        libre_device = get_librenms_device_by_id(api, device_id)
+        # Fallback to API fetch. Read LIVE: both this function's caches (the pre-fetched dict and the
+        # import Django cache) have already missed, so the fallback must reflect current LibreNMS
+        # state — not the separate 60s get_device_info snapshot a sync-tab render may have populated —
+        # or the confirm modal / re-rendered row shows metadata that disagrees with what import uses.
+        libre_device = get_librenms_device_by_id(api, device_id, use_cache=False)
         if libre_device:
             # Cache for future use
             cache.set(cache_key, libre_device, timeout=api.cache_timeout)

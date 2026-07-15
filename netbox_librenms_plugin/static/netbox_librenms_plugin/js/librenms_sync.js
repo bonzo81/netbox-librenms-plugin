@@ -19,6 +19,17 @@ const TOMSELECT_INIT_DELAY_MS = 100;
 const COUNTDOWN_UPDATE_INTERVAL_MS = 1000;
 
 /**
+ * Return the CSRF token value, or null when the hidden input is missing/empty.
+ * Callers MUST bail (running any needed UI cleanup) on null instead of reading
+ * `.value` off a missing element, which throws a TypeError and breaks the handler.
+ * @returns {string|null}
+ */
+function getCsrfToken() {
+    const input = document.querySelector('[name=csrfmiddlewaretoken]');
+    return input && input.value ? input.value : null;
+}
+
+/**
  * Show a Bootstrap modal, using native Bootstrap Modal when available,
  * falling back to manual DOM manipulation otherwise.
  * Matches the ModalManager pattern in librenms_import.js.
@@ -291,34 +302,59 @@ function initializeTableCheckboxes(tableId) {
     const table = document.getElementById(tableId);
     if (!table) return;
 
+    // Query the CURRENT checkboxes live inside every handler instead of closing over a snapshot.
+    // The master initializer re-runs on each htmx:afterSwap, but the dataset guards below keep the
+    // toggle/shift handlers from re-binding on a SURVIVING <thead> toggle; a NodeList captured once
+    // would then go stale, so select-all / shift-range would iterate detached checkboxes and miss
+    // the rows a later row-level swap injected.
+    const liveCheckboxes = () => Array.from(table.querySelectorAll('td input[name="select"]'));
     const toggleAll = table.querySelector('th input.toggle');
-    const checkboxes = table.querySelectorAll('td input[name="select"]');
-    let lastChecked = null;
+    // Persist the shift-range anchor on the TABLE element, not in a per-call closure. This
+    // initializer re-runs on every htmx:afterSwap: checkboxes bound in an earlier run keep their
+    // handlers (the dataset guard skips re-binding), so a closure-scoped anchor would leave old
+    // rows referencing a stale `lastChecked` while rows added by a later swap use a fresh one —
+    // shift-clicking between the two then uses disconnected anchors and selects nothing. One
+    // anchor on the shared table node keeps every row's handler in sync across swaps.
+    const getAnchor = () => table._lnmsLastChecked || null;
+    const setAnchor = (cb) => {
+        table._lnmsLastChecked = cb;
+    };
 
-    if (toggleAll) {
+    // Guard against stacked handlers: register each listener at most once per element (a dataset
+    // flag marks it done) since the master initializer re-runs on every htmx:afterSwap.
+    if (toggleAll && toggleAll.dataset.tableToggleInitialized !== 'true') {
+        toggleAll.dataset.tableToggleInitialized = 'true';
         toggleAll.addEventListener('change', function () {
-            checkboxes.forEach(checkbox => {
+            liveCheckboxes().forEach(checkbox => {
                 checkbox.checked = toggleAll.checked;
             });
         });
     }
 
-    checkboxes.forEach(checkbox => {
+    liveCheckboxes().forEach(checkbox => {
+        if (checkbox.dataset.tableClickInitialized === 'true') return;
+        checkbox.dataset.tableClickInitialized = 'true';
         checkbox.addEventListener('click', function (e) {
-            if (!lastChecked) {
-                lastChecked = checkbox;
+            const anchor = getAnchor();
+            if (!anchor) {
+                setAnchor(checkbox);
                 return;
             }
 
             if (e.shiftKey) {
-                const start = Array.from(checkboxes).indexOf(checkbox);
-                const end = Array.from(checkboxes).indexOf(lastChecked);
-                Array.from(checkboxes).slice(Math.min(start, end), Math.max(start, end) + 1).forEach(cb => {
-                    cb.checked = lastChecked.checked;
-                });
+                const current = liveCheckboxes();
+                const start = current.indexOf(checkbox);
+                const end = current.indexOf(anchor);
+                // Skip the range when the prior anchor was swapped out (indexOf -1) rather than
+                // slicing a bogus range off the live list.
+                if (start !== -1 && end !== -1) {
+                    current.slice(Math.min(start, end), Math.max(start, end) + 1).forEach(cb => {
+                        cb.checked = anchor.checked;
+                    });
+                }
             }
 
-            lastChecked = checkbox;
+            setAnchor(checkbox);
         });
     });
 }
@@ -589,11 +625,17 @@ function verifyVlanInGroup(select, deviceId, vid, vlanType, groupId) {
     const modal = document.getElementById('vlanDetailModal');
     const capturedSafeName = modal?.dataset.currentSafeName;
 
+    const csrfToken = getCsrfToken();
+    if (!csrfToken) {
+        _vlanVerifyEnd(saveBtn);  // don't leave the Save button stuck disabled
+        return;
+    }
+
     fetch('/plugins/librenms_plugin/verify-vlan-group/', {
         method: 'POST',
         headers: {
             'Content-Type': 'application/json',
-            'X-CSRFToken': document.querySelector('[name=csrfmiddlewaretoken]').value
+            'X-CSRFToken': csrfToken
         },
         body: JSON.stringify({
             device_id: deviceId,
@@ -774,11 +816,24 @@ function initializeVlanModalSave() {
         // Persist overrides in server cache so other table pages pick them up
         if (applyToAll && Object.keys(vidGroupMap).length > 0) {
             const deviceId = modalEl.dataset.currentDeviceId;
+            const csrfToken = getCsrfToken();
+            if (!csrfToken) {
+                // Can't persist without a CSRF token; surface it via the same error UI the
+                // fetch .catch uses rather than letting a `.value`-on-null TypeError abort silently.
+                let alertEl = modalEl.querySelector('.vlan-override-error');
+                if (!alertEl) {
+                    alertEl = document.createElement('div');
+                    alertEl.className = 'vlan-override-error alert alert-danger mt-2';
+                    modalEl.querySelector('.modal-body')?.appendChild(alertEl);
+                }
+                alertEl.textContent = 'Failed to save VLAN group overrides: CSRF token not found.';
+                return;
+            }
             fetch('/plugins/librenms_plugin/save-vlan-group-overrides/', {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
-                    'X-CSRFToken': document.querySelector('[name=csrfmiddlewaretoken]').value
+                    'X-CSRFToken': csrfToken
                 },
                 body: JSON.stringify({
                     device_id: deviceId,
@@ -916,11 +971,14 @@ function handleVRFChange(select, value) {
     }
     const deviceId = deviceInfo.id;
 
+    const csrfToken = getCsrfToken();
+    if (!csrfToken) return;  // missing token → abort rather than throw on `.value`
+
     fetch('/plugins/librenms_plugin/verify-ipaddress/', {
         method: 'POST',
         headers: {
             'Content-Type': 'application/json',
-            'X-CSRFToken': document.querySelector('[name=csrfmiddlewaretoken]').value
+            'X-CSRFToken': csrfToken
         },
         body: JSON.stringify({
             device_id: deviceId,
@@ -958,11 +1016,14 @@ function handleVRFChange(select, value) {
  * @param {string} value - Selected device ID
  */
 function handleInterfaceChange(select, value) {
+    const csrfToken = getCsrfToken();
+    if (!csrfToken) return;  // missing token → abort rather than throw on `.value`
+
     fetch('/plugins/librenms_plugin/verify-interface/', {
         method: 'POST',
         headers: {
             'Content-Type': 'application/json',
-            'X-CSRFToken': document.querySelector('[name=csrfmiddlewaretoken]').value
+            'X-CSRFToken': csrfToken
         },
         body: JSON.stringify({
             device_id: value,
@@ -1004,11 +1065,14 @@ function handleInterfaceChange(select, value) {
  * @param {string} value - Selected device ID
  */
 function handleCableChange(select, value) {
+    const csrfToken = getCsrfToken();
+    if (!csrfToken) return;  // missing token → abort rather than throw on `.value`
+
     fetch('/plugins/librenms_plugin/verify-cable/', {
         method: 'POST',
         headers: {
             'Content-Type': 'application/json',
-            'X-CSRFToken': document.querySelector('[name=csrfmiddlewaretoken]').value
+            'X-CSRFToken': csrfToken
         },
         body: JSON.stringify({
             device_id: value,
@@ -1058,11 +1122,14 @@ function handleModuleChange(select, value) {
     const controller = new AbortController();
     select._moduleVerifyController = controller;
 
+    const csrfToken = getCsrfToken();
+    if (!csrfToken) return;  // missing token → abort rather than throw on `.value`
+
     fetch('/plugins/librenms_plugin/verify-module/', {
         method: 'POST',
         headers: {
             'Content-Type': 'application/json',
-            'X-CSRFToken': document.querySelector('[name=csrfmiddlewaretoken]').value
+            'X-CSRFToken': csrfToken
         },
         body: JSON.stringify({
             device_id: value,
@@ -1159,15 +1226,22 @@ function initializeBulkEditApply() {
 function initializeCheckboxListeners() {
     const interfaceTable = document.getElementById('librenms-interface-table');
     if (!interfaceTable) return;
-    const checkboxes = interfaceTable.querySelectorAll('input[name="select"]');
-    checkboxes.forEach(checkbox => {
+    // Query live inside the handlers: the bulkToggle guard below keeps the toggle handler from
+    // re-binding on a surviving <thead> toggle across htmx:afterSwap, so a captured NodeList would
+    // go stale and select-all would skip rows added by later row-level swaps.
+    const liveCheckboxes = () => interfaceTable.querySelectorAll('input[name="select"]');
+    // Idempotent across htmx:afterSwap re-runs — register the change handler once per checkbox.
+    liveCheckboxes().forEach(checkbox => {
+        if (checkbox.dataset.bulkChangeInitialized === 'true') return;
+        checkbox.dataset.bulkChangeInitialized = 'true';
         checkbox.addEventListener('change', updateBulkActionButton);
     });
 
     const toggleAll = interfaceTable.querySelector('input.toggle');
-    if (toggleAll) {
+    if (toggleAll && toggleAll.dataset.bulkToggleInitialized !== 'true') {
+        toggleAll.dataset.bulkToggleInitialized = 'true';
         toggleAll.addEventListener('change', function () {
-            checkboxes.forEach(checkbox => {
+            liveCheckboxes().forEach(checkbox => {
                 checkbox.checked = toggleAll.checked;
             });
             updateBulkActionButton();
@@ -1629,6 +1703,14 @@ function initializeSyncFormSpinners() {
  * The form is separate from the table (to avoid nested forms), so we copy the
  * selected checkbox values into hidden inputs just before the form is submitted.
  * Guard against duplicate listeners on repeated HTMX swaps via a data attribute.
+ *
+ * NOTE: this submit-phase injection only reliably covers the NATIVE (no-htmx) submit
+ * fallback. When htmx drives the POST, its own submit listener can be registered on the
+ * form BEFORE this one (fresh page load: htmx's DOMContentLoaded processNode runs before
+ * initializeScripts), so it serializes the form first and these hidden inputs arrive too
+ * late. The htmx path is therefore injected at htmx:configRequest (see the
+ * DOMContentLoaded handler), which fires after serialization and replaces any
+ * select/device_selection values this handler managed to add.
  */
 function handleInstallSelectedSubmit() {
     // Remove any previously-injected hidden inputs to avoid duplicates
@@ -1942,6 +2024,33 @@ document.addEventListener('DOMContentLoaded', function () {
         const csrfToken = document.querySelector('[name=csrfmiddlewaretoken]');
         if (csrfToken) {
             event.detail.headers['X-CSRFToken'] = csrfToken.value;
+        }
+        // Install Selected: the checked rows live in the table OUTSIDE the form, and htmx's
+        // own submit listener (attached to the form at ITS DOMContentLoaded processNode,
+        // which on a fresh page load runs before initializeScripts registers the
+        // submit-phase injector on the same element — listener ORDER, not event phase,
+        // decides) serializes the form BEFORE the hidden inputs are injected. The first
+        // click after a full page load then POSTs no 'select' values and the view warns
+        // "No modules selected." while wiping the selection. configRequest fires AFTER
+        // htmx serialization, exactly to let listeners amend the outgoing parameters, so
+        // injecting here is ordering-independent. Replace (not append to) any
+        // select/device_selection values the submit-phase injector already serialized so
+        // rows are never posted twice.
+        if (event.detail.elt && event.detail.elt.id === 'install-selected-form') {
+            const params = event.detail.parameters;
+            Array.from(params.keys())
+                .filter((k) => k === 'select' || k.startsWith('device_selection_'))
+                .forEach((k) => params.delete(k));
+            const table = document.getElementById('librenms-module-table');
+            if (table) {
+                table.querySelectorAll('input[name="select"]:checked').forEach((cb) => {
+                    params.append('select', cb.value);
+                    const selectedDevice = table.querySelector(`#device_selection_${cb.value}`);
+                    if (selectedDevice) {
+                        params.append(`device_selection_${cb.value}`, selectedDevice.value);
+                    }
+                });
+            }
         }
     });
 });

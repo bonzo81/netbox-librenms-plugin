@@ -2,6 +2,8 @@
 
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 
 def _make_post(data):
     """Return a mock POST object backed by a real dict."""
@@ -1553,6 +1555,30 @@ class TestSyncIPAddressesViewGetVrfSelection:
         assert result is None
 
 
+class TestSyncIPAddressesViewGetManagementIp:
+    def test_non_string_ip_returns_none(self):
+        """A non-string ip in the device_info payload yields None via an explicit type guard (like _resolve_management_ip), not by raising AttributeError into the broad except."""
+        from netbox_librenms_plugin.views.sync.ip_addresses import SyncIPAddressesView
+
+        view = _make_view(SyncIPAddressesView)
+        view._librenms_api = MagicMock()
+        view._librenms_api.get_librenms_id.return_value = 42
+        view._librenms_api.get_device_info.return_value = (True, {"ip": 167772163})  # int, not str
+
+        assert view.get_management_ip(MagicMock()) is None
+
+    def test_string_ip_is_returned_stripped(self):
+        """A normal string ip is returned (whitespace-stripped)."""
+        from netbox_librenms_plugin.views.sync.ip_addresses import SyncIPAddressesView
+
+        view = _make_view(SyncIPAddressesView)
+        view._librenms_api = MagicMock()
+        view._librenms_api.get_librenms_id.return_value = 42
+        view._librenms_api.get_device_info.return_value = (True, {"ip": "  10.0.0.5  "})
+
+        assert view.get_management_ip(MagicMock()) == "10.0.0.5"
+
+
 class TestSyncIPAddressesViewGetCachedIpData:
     def test_cache_miss_returns_none(self):
         from netbox_librenms_plugin.views.sync.ip_addresses import SyncIPAddressesView
@@ -2524,30 +2550,25 @@ class TestSyncVLANsViewHandleCreateVlans:
                                 view._handle_create_vlans(req, mock_obj, "device", 1)
         mock_vlan.save.assert_not_called()
 
-    def test_invalid_group_id_falls_back_to_global(self):
-        from ipam.models import VLANGroup
+    @pytest.mark.django_db
+    def test_invalid_group_id_is_rejected(self):
+        """A stale/tampered vlan_group_{vid} pointing at a missing group fails closed: the VID is skipped with an error, not persisted as a global VLAN in the wrong scope."""
+        from ipam.models import VLAN
 
         view = self._make_view()
-        req = _make_request({"select": ["10"], "vlan_group_10": "999"})
+        # Group 999999 does not exist → must NOT silently fall back to a global VLAN.
+        req = _make_request({"select": ["10"], "vlan_group_10": "999999"})
         mock_obj = MagicMock()
         cached_vlans = [{"vlan_vlan": 10, "vlan_name": "Management"}]
-        mock_vlan = MagicMock()
-        mock_vlan.name = "Management"
         with patch("netbox_librenms_plugin.views.sync.vlans.cache") as mock_cache:
             mock_cache.get.return_value = cached_vlans
             with patch.object(view, "get_cache_key", return_value="key"):
-                with patch("netbox_librenms_plugin.views.sync.vlans.transaction", _atomic_txn()):
-                    with patch("netbox_librenms_plugin.views.sync.vlans.VLANGroup") as mock_vg_cls:
-                        mock_vg_cls.DoesNotExist = VLANGroup.DoesNotExist
-                        mock_vg_cls.objects.get.side_effect = VLANGroup.DoesNotExist
-                        with patch("netbox_librenms_plugin.views.sync.vlans.VLAN") as mock_vlan_cls:
-                            mock_vlan_cls.objects.get_or_create.return_value = (mock_vlan, True)
-                            with patch("netbox_librenms_plugin.views.sync.vlans.messages"):
-                                with patch.object(view, "_redirect", return_value=MagicMock()):
-                                    view._handle_create_vlans(req, mock_obj, "device", 1)
-        # Falls back to group=None when VLANGroup.DoesNotExist
-        call_kwargs = mock_vlan_cls.objects.get_or_create.call_args[1]
-        assert call_kwargs["group"] is None
+                with patch("netbox_librenms_plugin.views.sync.vlans.messages") as mock_msg:
+                    with patch.object(view, "_redirect", return_value=MagicMock()):
+                        view._handle_create_vlans(req, mock_obj, "device", 1)
+        # Real VLAN model + real VLANGroup lookup: nothing created in any scope, error surfaced.
+        assert not VLAN.objects.filter(vid=10).exists()
+        mock_msg.error.assert_called()
 
     def test_summary_message_shows_counts(self):
         view = self._make_view()

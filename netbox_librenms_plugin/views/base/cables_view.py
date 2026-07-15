@@ -12,6 +12,7 @@ from django.utils.html import escape
 from django.views import View
 
 from netbox_librenms_plugin.utils import (
+    cache_remaining_ttl,
     get_interface_name_field,
     get_librenms_sync_device,
     get_virtual_chassis_member,
@@ -20,6 +21,8 @@ from netbox_librenms_plugin.views.mixins import (
     CacheMixin,
     LibreNMSAPIMixin,
     LibreNMSPermissionMixin,
+    NetBoxObjectPermissionMixin,
+    extract_cached_ports,
     parse_request_json,
 )
 
@@ -30,8 +33,22 @@ def _librenms_id_q(server_key: str, value) -> Q:
 
     Matches both integer and string representations to handle any stored format.
     """
-    if isinstance(value, bool):
-        return Q(pk__isnull=True) & Q(pk__isnull=False)  # match nothing
+    # Match nothing for values that can't be a valid librenms_id. Reject bools (an int subclass)
+    # and any non-int/str type up front: int() would truncate a float like 1.9 to 1 and match the
+    # wrong device/interface — looser than find_by_librenms_id's int/str-only contract (issue
+    # #103). Also reject blank strings and non-positive ids.
+    _match_nothing = Q(pk__isnull=True) & Q(pk__isnull=False)
+    if isinstance(value, bool) or not isinstance(value, (int, str)):
+        return _match_nothing
+    if isinstance(value, str) and not value.strip():
+        return _match_nothing
+    try:
+        if int(value) <= 0:
+            return _match_nothing
+    except (TypeError, ValueError):
+        # Non-numeric string: it can't equal a numeric id, but keep the literal match below
+        # rather than failing closed (no behaviour change for that case).
+        pass
 
     q = Q(**{f"custom_field_data__librenms_id__{server_key}": value}) | Q(custom_field_data__librenms_id=value)
     try:
@@ -46,6 +63,34 @@ def _librenms_id_q(server_key: str, value) -> Q:
     except (TypeError, ValueError):
         pass
     return q
+
+
+def _extract_cached_links(cached, cache_key=None):
+    """
+    Return the validated link list from a cached "links" entry, or None when malformed.
+
+    A stale/corrupt but truthy cache value — a non-dict, a non-list ``links``, or any non-dict
+    link row — would crash the cached GET render or the verify path on ``.get()`` / ``.items()``
+    / iteration. Treat those as a cache miss: when ``cache_key`` is given, purge the bad entry so
+    the next read doesn't keep serving garbage.
+
+    Args:
+        cached: The raw value read from the links cache key.
+        cache_key: Optional cache key to delete when the entry is malformed.
+
+    Returns:
+        list | None: The list of (dict) link rows, or None if the entry is malformed.
+    """
+    if not isinstance(cached, dict) or not isinstance(cached.get("links"), list):
+        if cache_key is not None:
+            cache.delete(cache_key)
+        return None
+    links = cached["links"]
+    if any(not isinstance(link, dict) for link in links):
+        if cache_key is not None:
+            cache.delete(cache_key)
+        return None
+    return links
 
 
 class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin, View):
@@ -68,8 +113,11 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin, 
 
     def get_ports_data(self, obj):
         """Get ports data without affecting cache"""
-        server_key = self.librenms_api.server_key
-        cached_data = cache.get(self.get_cache_key(obj, "ports", server_key))
+        server_key = self._render_server_key()
+        ports_cache_key = self.get_cache_key(obj, "ports", server_key)
+        # Shape-guard the cached entry (mirrors _extract_cached_links): a truthy but
+        # malformed value would AttributeError-500 get_links_data's .get("ports") reads.
+        cached_data = extract_cached_ports(cache.get(ports_cache_key), ports_cache_key)
         if cached_data:
             return cached_data
         success, data = self.librenms_api.get_ports(self.librenms_id)
@@ -116,7 +164,7 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin, 
     def get_device_by_id_or_name(self, remote_device_id, hostname, server_key=None):
         """Try to find device in NetBox first by librenms_id custom field, then by name"""
         if server_key is None:
-            server_key = self.librenms_api.server_key
+            server_key = self._render_server_key()
         # First try matching by LibreNMS ID
         if remote_device_id is not None:
             try:
@@ -162,7 +210,7 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin, 
             interface = None
             local_port_id = link.get("local_port_id")
             if server_key is None:
-                server_key = self.librenms_api.server_key
+                server_key = self._render_server_key()
 
             if hasattr(obj, "virtual_chassis") and obj.virtual_chassis:
                 chassis_member = get_virtual_chassis_member(obj, local_port)
@@ -194,7 +242,7 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin, 
             netbox_remote_interface = None
             librenms_remote_port_id = link.get("remote_port_id")
             if server_key is None:
-                server_key = self.librenms_api.server_key
+                server_key = self._render_server_key()
 
             # Handle virtual chassis case
             if hasattr(device, "virtual_chassis") and device.virtual_chassis:
@@ -304,7 +352,7 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin, 
     def get_table(self, data, obj):
         """Get the table instance for the view."""
         table = super().get_table(data, obj)
-        server_key = self.librenms_api.server_key
+        server_key = self._render_server_key()
         table.htmx_url = f"{self.request.path}?tab=cables" + (f"&server_key={server_key}" if server_key else "")
         return table
 
@@ -312,7 +360,7 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin, 
         """Helper method to prepare the context data for cable sync views."""
         table = None
         cache_expiry = None
-        server_key = self.librenms_api.server_key
+        server_key = self._render_server_key()
         # For VC devices, cache under the sync device's key so SingleCableVerifyView reads the same entry.
         cache_device = get_librenms_sync_device(obj, server_key=server_key) or obj
 
@@ -323,9 +371,14 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin, 
                 return None
         else:
             # Try to use cached data
-            cached_links_data = cache.get(self.get_cache_key(cache_device, "links", server_key))
+            links_cache_key = self.get_cache_key(cache_device, "links", server_key)
+            cached_links_data = cache.get(links_cache_key)
             if cached_links_data:
-                links_data = cached_links_data.get("links", [])
+                # Fail closed on a malformed/corrupt cache entry (non-dict, non-list "links", or a
+                # non-dict link row) instead of crashing the cached render below on .items().
+                links_data = _extract_cached_links(cached_links_data, links_cache_key)
+                if links_data is None:
+                    return None
             else:
                 return None
 
@@ -356,12 +409,12 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin, 
             )
         else:
             # Write enriched data back, preserving original TTL
-            remaining_ttl = cache.ttl(cache_key)
+            remaining_ttl = cache_remaining_ttl(cache, cache_key)
             if remaining_ttl and remaining_ttl > 0:
                 cache.set(cache_key, {"links": links_data}, timeout=remaining_ttl)
 
         # Calculate cache expiry
-        cache_ttl = cache.ttl(cache_key)
+        cache_ttl = cache_remaining_ttl(cache, cache_key)
         if cache_ttl is not None and cache_ttl > 0:
             cache_expiry = timezone.now() + timezone.timedelta(seconds=cache_ttl)
         # Generate the table
@@ -382,7 +435,7 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin, 
         context = self._prepare_context(request, obj, fetch_fresh=False)
         if context is None:
             # No data found; return context with empty table
-            context = {"table": None, "object": obj, "cache_expiry": None, "server_key": self.librenms_api.server_key}
+            context = {"table": None, "object": obj, "cache_expiry": None, "server_key": self._render_server_key()}
         return context
 
     def post(self, request, pk):
@@ -400,7 +453,7 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin, 
                         "object": obj,
                         "table": None,
                         "cache_expiry": None,
-                        "server_key": self.librenms_api.server_key,
+                        "server_key": self._render_server_key(),
                     }
                 },
             )
@@ -413,21 +466,46 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin, 
         )
 
 
-class SingleCableVerifyView(BaseCableTableView):
+class SingleCableVerifyView(NetBoxObjectPermissionMixin, BaseCableTableView):
     """
     View to verify a single cable link between two devices.
     """
+
+    # Read-only verify endpoint: require object-view permission (mirrors the interface/module
+    # verify views). Without it any user with mere plugin-view rights could POST an arbitrary
+    # device id and read back that device's rendered cable/topology rows.
+    required_object_permissions = {"POST": [("view", Device)]}
 
     def post(self, request):
         data, err = parse_request_json(request)
         if err:
             return err
+        # Gate BEFORE resolving the device / touching the LibreNMS client: an unauthorized caller
+        # must not be able to probe device IDs or trigger work through this endpoint.
+        if error := self.require_object_permissions_json("POST"):
+            return error
         selected_device_id = data.get("device_id")
         local_port_id = data.get("local_port_id")
-        # Read server_key from POST so we use the exact server the user was viewing
-        server_key = data.get("server_key")
-        if not server_key:
-            server_key = self.librenms_api.server_key
+        # Read server_key from POST so we use the exact server the user was viewing, but only honour
+        # it when it names a configured server: the raw value scopes the links cache and the
+        # _librenms_id_q() JSONField lookups below, so a forged/unconfigured key must not address
+        # another server's namespace (mirrors the interfaces POST path, issues #108/#109). Fall back
+        # to the active server when the POSTed key isn't configured.
+        # get_available_servers() is a dict, so the membership test hashes requested_server_key;
+        # a forged JSON array/object would raise TypeError (unhashable). Require a str first so a
+        # malformed key falls back to the active server instead of crashing the endpoint.
+        # Resolve the configured-server set via the CLASSMETHOD, not self.librenms_api: the lazy
+        # ``librenms_api`` property builds ``LibreNMSAPI()``, whose constructor raises KeyError/
+        # ValueError on a missing/misconfigured default server — so probing membership through the
+        # instance would 500 this verify POST exactly where the sibling IP-verify path degrades.
+        # get_available_servers() needs no instance.
+        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+
+        requested_server_key = data.get("server_key")
+        if isinstance(requested_server_key, str) and requested_server_key in LibreNMSAPI.get_available_servers():
+            server_key = requested_server_key
+        else:
+            server_key = self._render_server_key()
 
         formatted_row = {
             "local_port": "",
@@ -438,7 +516,9 @@ class SingleCableVerifyView(BaseCableTableView):
         }
 
         if selected_device_id:
-            selected_device = get_object_or_404(Device, pk=selected_device_id)
+            # Object-scope the lookup: the gate only checked model-level view_device, so an
+            # out-of-scope pk must 404 rather than expose that device's cached cable row.
+            selected_device = self.restrict_object_or_404(Device, pk=selected_device_id)
 
             # Use the same sync-device resolution as the GET path so the cache
             # key matches what _prepare_context wrote. When the VC has no
@@ -450,15 +530,16 @@ class SingleCableVerifyView(BaseCableTableView):
             else:
                 primary_device = selected_device
 
-            cached_links = cache.get(self.get_cache_key(primary_device, "links", server_key))
+            links_cache_key = self.get_cache_key(primary_device, "links", server_key)
+            cached_links = cache.get(links_cache_key)
 
-            if cached_links:
+            # Same fail-closed guard as the cached GET render: a malformed entry (non-dict, non-list
+            # "links", or a non-dict link row) is purged and treated as no cache, so the verify path
+            # returns the empty formatted_row instead of crashing on .get()/.items().
+            valid_links = _extract_cached_links(cached_links, links_cache_key) if cached_links else None
+            if valid_links:
                 link_data = next(
-                    (
-                        link
-                        for link in cached_links.get("links", [])
-                        if str(link.get("local_port_id", "")) == str(local_port_id)
-                    ),
+                    (link for link in valid_links if str(link.get("local_port_id", "")) == str(local_port_id)),
                     None,
                 )
                 if link_data:

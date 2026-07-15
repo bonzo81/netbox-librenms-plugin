@@ -14,6 +14,8 @@ All tests follow strict project conventions:
 
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 
 # =============================================================================
 # Helpers
@@ -37,6 +39,33 @@ def _mock_request(path="/plugins/librenms/device/1/cables/"):
     req.POST = {}
     req.headers = {}
     return req
+
+
+def _authorized_superuser(tag):
+    """A real superuser so the object-perm gate passes and restrict() resolves the real device."""
+    from django.contrib.auth import get_user_model
+
+    return get_user_model().objects.create_superuser(username=f"cbv2-{tag}", email="", password="x")
+
+
+def _real_cable_device(tag, *, vc=False, bound_port_id=None, iface_name="Gi0/0"):
+    """A real Device for cable-verify post() tests; optionally in a VC and/or with a librenms-id-bound interface."""
+    from dcim.models import Device, DeviceRole, DeviceType, Interface, Manufacturer, Site, VirtualChassis
+
+    mfr, _ = Manufacturer.objects.get_or_create(name=f"Cbv2Mfr-{tag}", slug=f"cbv2mfr-{tag}")
+    dt, _ = DeviceType.objects.get_or_create(manufacturer=mfr, model=f"Cbv2DT-{tag}", slug=f"cbv2dt-{tag}")
+    role, _ = DeviceRole.objects.get_or_create(name="Cbv2Role", slug="cbv2role")
+    site, _ = Site.objects.get_or_create(name="Cbv2Site", slug="cbv2site")
+    extra = {}
+    if vc:
+        extra["virtual_chassis"] = VirtualChassis.objects.create(name=f"Cbv2VC-{tag}")
+        extra["vc_position"] = 1
+    device = Device.objects.create(name=f"cbv2-{tag}", device_type=dt, role=role, site=site, status="active", **extra)
+    if bound_port_id is not None:
+        iface = Interface.objects.create(device=device, name=iface_name, type="1000base-t")
+        iface.custom_field_data = {"librenms_id": {"default": bound_port_id}}
+        iface.save()
+    return device
 
 
 # =============================================================================
@@ -105,6 +134,24 @@ class TestLibreNMSIdQ:
 
         result = _librenms_id_q("default", None)
         assert result is not None
+
+    def test_float_value_returns_match_nothing_q(self):
+        """Issue #103: a float like 1.9 must NOT int()-truncate to 1 and match device id 1."""
+        from django.db.models import Q
+        from netbox_librenms_plugin.views.base.cables_view import _librenms_id_q
+
+        result = _librenms_id_q("default", 1.9)
+        expected = Q(pk__isnull=True) & Q(pk__isnull=False)
+        assert str(result) == str(expected)
+
+    def test_non_positive_int_returns_match_nothing_q(self):
+        """Zero / negative values can't be a valid librenms_id, so they match nothing."""
+        from django.db.models import Q
+        from netbox_librenms_plugin.views.base.cables_view import _librenms_id_q
+
+        expected = str(Q(pk__isnull=True) & Q(pk__isnull=False))
+        assert str(_librenms_id_q("default", 0)) == expected
+        assert str(_librenms_id_q("default", -5)) == expected
 
 
 # =============================================================================
@@ -661,26 +708,62 @@ class TestPostHandlerVC:
         view = object.__new__(SingleCableVerifyView)
         view._librenms_api = MagicMock()
         view._librenms_api.server_key = "default"
+        # dispatch() sets self.request in production; tests call post() directly, so set an
+        # authorized request here for the object-permission gate (reads self.request.user).
+        view.request = _mock_request()
+        view.request.user.has_perm.return_value = True
         return view
 
+    @pytest.mark.django_db
+    def test_unconfigured_posted_server_key_falls_back_to_session(self):
+        """A posted server_key naming no configured server must not scope the links cache / _librenms_id_q ORM lookups — fall back to the active server."""
+        import json
+
+        view = self._make_view()
+        view.request.user = _authorized_superuser("srvkey")
+        view._librenms_api.server_key = "good"
+        device = _real_cable_device("srvkey")  # non-VC → primary_device = selected_device
+
+        mock_request = MagicMock()
+        mock_request.body = json.dumps({"device_id": device.pk, "local_port_id": 10, "server_key": "ghost"}).encode()
+
+        captured = {}
+
+        def fake_cache_key(dev, kind, sk):
+            captured["server_key"] = sk
+            return "ck"
+
+        with (
+            # "ghost" is not configured → the view must fall back to the active-server key.
+            patch(
+                "netbox_librenms_plugin.librenms_api.LibreNMSAPI.get_available_servers",
+                return_value={"good": "Good"},
+            ),
+            patch("netbox_librenms_plugin.views.base.cables_view.cache") as mock_cache,
+            patch.object(view, "get_cache_key", side_effect=fake_cache_key),
+        ):
+            mock_cache.get.return_value = None  # no cached links → exits after building the (validated) key
+            view.post(mock_request)
+
+        assert captured["server_key"] == "good"  # "ghost" is unconfigured → session key used
+
+    @pytest.mark.django_db
     def test_vc_member_resolution_calls_get_virtual_chassis_member(self):
         """VC device → get_virtual_chassis_member called with device and local_port."""
         import json
 
         view = self._make_view()
+        view.request.user = _authorized_superuser("vcmember")
+        device = _real_cable_device("vcmember", vc=True)  # real VC device
 
         mock_request = MagicMock()
         mock_request.body = json.dumps(
             {
-                "device_id": 1,
+                "device_id": device.pk,
                 "local_port_id": 10,
                 "server_key": "default",
             }
         ).encode()
-
-        mock_device = MagicMock()
-        mock_device.virtual_chassis = MagicMock()  # truthy
-        mock_device.id = 1
 
         mock_member = MagicMock()
         mock_interface = MagicMock()
@@ -703,12 +786,8 @@ class TestPostHandlerVC:
 
         with (
             patch(
-                "netbox_librenms_plugin.views.base.cables_view.get_object_or_404",
-                return_value=mock_device,
-            ),
-            patch(
                 "netbox_librenms_plugin.views.base.cables_view.get_librenms_sync_device",
-                return_value=mock_device,
+                return_value=device,
             ),
             patch("netbox_librenms_plugin.views.base.cables_view.cache") as mock_cache,
             patch.object(view, "get_cache_key", return_value="test-key"),
@@ -743,7 +822,7 @@ class TestPostHandlerVC:
             mock_cache.get.return_value = cached_links
             view.post(mock_request)
 
-        mock_vc.assert_called_once_with(mock_device, "Gi0/0")
+        mock_vc.assert_called_once_with(device, "Gi0/0")
         # Verify server_key is forwarded to process_remote_device
         assert mock_process_remote.called
         call_kwargs = mock_process_remote.call_args[1]
@@ -764,28 +843,29 @@ class TestPostHandlerInterfaceNotFound:
         view = object.__new__(SingleCableVerifyView)
         view._librenms_api = MagicMock()
         view._librenms_api.server_key = "default"
+        # dispatch() sets self.request in production; tests call post() directly, so set an
+        # authorized request here for the object-permission gate (reads self.request.user).
+        view.request = _mock_request()
+        view.request.user.has_perm.return_value = True
         return view
 
+    @pytest.mark.django_db
     def test_interface_not_found_fills_formatted_row(self):
         """When no local interface found, formatted_row reflects missing interface."""
         import json as json_mod
 
         view = self._make_view()
+        view.request.user = _authorized_superuser("ifnotfound")
+        device = _real_cable_device("ifnotfound")  # non-VC, no interfaces → local lookup returns None
 
         mock_request = MagicMock()
         mock_request.body = json_mod.dumps(
             {
-                "device_id": 1,
+                "device_id": device.pk,
                 "local_port_id": 10,
                 "server_key": "default",
             }
         ).encode()
-
-        mock_device = MagicMock()
-        mock_device.virtual_chassis = None  # non-VC
-        mock_device.id = 1
-        # Both interface lookups return None
-        mock_device.interfaces.filter.return_value.first.return_value = None
 
         cached_links = {
             "links": [
@@ -813,12 +893,8 @@ class TestPostHandlerInterfaceNotFound:
 
         with (
             patch(
-                "netbox_librenms_plugin.views.base.cables_view.get_object_or_404",
-                return_value=mock_device,
-            ),
-            patch(
                 "netbox_librenms_plugin.views.base.cables_view.get_librenms_sync_device",
-                return_value=mock_device,
+                return_value=device,
             ),
             patch("netbox_librenms_plugin.views.base.cables_view.cache") as mock_cache,
             patch.object(view, "get_cache_key", return_value="test-key"),
@@ -840,29 +916,23 @@ class TestPostHandlerInterfaceNotFound:
         assert row["local_port"] == "Gi0/0"
         assert "cable_status" in row
 
+    @pytest.mark.django_db
     def test_cable_url_present_wraps_cable_status_in_anchor(self):
         """When cable_url is in link_data, cable_status is wrapped in an <a> tag (line 514)."""
         import json as json_mod
 
         view = self._make_view()
+        view.request.user = _authorized_superuser("cableurl")
+        device = _real_cable_device("cableurl", bound_port_id=10)  # local interface bound to librenms id 10
 
         mock_request = MagicMock()
         mock_request.body = json_mod.dumps(
             {
-                "device_id": 1,
+                "device_id": device.pk,
                 "local_port_id": 10,
                 "server_key": "default",
             }
         ).encode()
-
-        mock_device = MagicMock()
-        mock_device.virtual_chassis = None
-        mock_device.id = 1
-
-        mock_interface = MagicMock()
-        mock_interface.pk = 99
-        # librenms_id lookup returns the interface; name lookup not needed
-        mock_device.interfaces.filter.return_value.first.side_effect = [mock_interface, None]
 
         cached_links = {
             "links": [
@@ -894,12 +964,8 @@ class TestPostHandlerInterfaceNotFound:
 
         with (
             patch(
-                "netbox_librenms_plugin.views.base.cables_view.get_object_or_404",
-                return_value=mock_device,
-            ),
-            patch(
                 "netbox_librenms_plugin.views.base.cables_view.get_librenms_sync_device",
-                return_value=mock_device,
+                return_value=device,
             ),
             patch("netbox_librenms_plugin.views.base.cables_view.cache") as mock_cache,
             patch.object(view, "get_cache_key", return_value="test-key"),
@@ -946,6 +1012,31 @@ class TestIpAddressViewMethods:
         view._librenms_api.server_key = "default"
         view.model = MagicMock()
         return view
+
+    @pytest.mark.parametrize(
+        "payload",
+        [None, {"port": []}, {"port": ["bad"]}, "not-a-dict", {"port": "x"}],
+    )
+    def test_get_port_info_caches_none_for_malformed_payload(self, payload):
+        """Issue #111: a truthy success with a malformed get_port_by_id payload must cache None without raising (None -> 'port' in None TypeError; ['bad'] -> non-dict row that later crashes at port_info.get())."""
+        view = self._make_view()
+        view._librenms_api.get_port_by_id.return_value = (True, payload)
+        cache = {}
+
+        result = view._get_port_info(7, cache, "ifName")
+
+        assert result is None
+        assert cache[7] is None
+
+    def test_get_port_info_caches_first_dict_row(self):
+        """A well-formed payload caches the first port dict."""
+        view = self._make_view()
+        row = {"ifName": "eth0", "port_id": 7}
+        view._librenms_api.get_port_by_id.return_value = (True, {"port": [row]})
+        cache = {}
+
+        assert view._get_port_info(7, cache, "ifName") == row
+        assert cache[7] == row
 
     def test_get_object_calls_get_object_or_404(self):
         """get_object delegates to get_object_or_404 with the view's model."""
@@ -1107,99 +1198,92 @@ class TestPrepareContextInterfaceNameFieldNone:
         mock_gif.assert_called_once_with(request)
         assert result is None  # returns None because cache miss
 
+    def test_non_dict_cached_entry_drops_to_none_not_500(self):
+        """A stale/corrupt non-dict cached entry (e.g. a list from a legacy snapshot shape) must drop to None and render empty, not 500 on a .get() against a list — mirrors the interfaces/modules cached-path isinstance guard."""
+        view = self._make_view()
+
+        obj = _mock_obj()
+        request = _mock_request()
+
+        with (
+            patch("netbox_librenms_plugin.views.base.ip_addresses_view.cache") as mock_cache,
+            patch.object(view, "get_cache_key", return_value="test-key"),
+        ):
+            mock_cache.get.return_value = ["not", "a", "dict"]  # corrupt non-dict cache entry
+            result = view._prepare_context(request, obj, "ifName", fetch_fresh=False)
+
+        assert result is None
+
 
 # =============================================================================
 # TestSingleIPAddressVerifyViewGetObject  — _get_object (lines 325-339)
 # =============================================================================
 
 
+@pytest.mark.django_db
 class TestSingleIPAddressVerifyViewGetObject:
-    """Tests for SingleIPAddressVerifyView._get_object."""
+    """_get_object resolves the right real object by type (and untyped), scoped to the caller's perms.
 
-    def _make_view(self):
+    Rewritten from get_object_or_404/Device.objects.filter call-shape mocks to real Device/VM rows:
+    the object-scoping added in this PR routes the lookup through ``Model.objects.restrict`` and reads
+    ``self.request.user``, which the old call-signature assertions never exercised.
+    """
+
+    def _view(self):
+        from django.contrib.auth import get_user_model
+        from django.test import RequestFactory
+
         from netbox_librenms_plugin.views.base.ip_addresses_view import SingleIPAddressVerifyView
 
         view = object.__new__(SingleIPAddressVerifyView)
+        request = RequestFactory().get("/")
+        request.user = get_user_model().objects.create_superuser(username="ipverify-getobj", email="", password="x")
+        view.request = request
         return view
 
-    def test_device_type_calls_get_object_or_404_for_device(self):
-        """object_type='device' → get_object_or_404(Device, pk=object_id)."""
-        from dcim.models import Device
+    def _device(self, name="ipverify-dev"):
+        from dcim.models import Device, DeviceRole, DeviceType, Manufacturer, Site
 
-        view = self._make_view()
-        mock_device = MagicMock()
+        mfr, _ = Manufacturer.objects.get_or_create(name="IPV-Mfr", slug="ipv-mfr")
+        dt, _ = DeviceType.objects.get_or_create(manufacturer=mfr, model="IPV-DT", slug="ipv-dt")
+        role, _ = DeviceRole.objects.get_or_create(name="IPV-Role", slug="ipv-role")
+        site, _ = Site.objects.get_or_create(name="IPV-Site", slug="ipv-site")
+        return Device.objects.create(name=name, device_type=dt, role=role, site=site, status="active")
 
-        with patch(
-            "netbox_librenms_plugin.views.base.ip_addresses_view.get_object_or_404",
-            return_value=mock_device,
-        ) as mock_get:
-            result = view._get_object(1, "device")
+    def _vm(self, name="ipverify-vm"):
+        from virtualization.models import Cluster, ClusterType, VirtualMachine
 
-        mock_get.assert_called_once_with(Device, pk=1)
-        assert result is mock_device
+        ct, _ = ClusterType.objects.get_or_create(name="IPV-CT", slug="ipv-ct")
+        cluster, _ = Cluster.objects.get_or_create(name="IPV-Cluster", type=ct)
+        return VirtualMachine.objects.create(name=name, cluster=cluster, status="active")
 
-    def test_vm_type_calls_get_object_or_404_for_vm(self):
-        """object_type='virtualmachine' → get_object_or_404(VirtualMachine, pk=object_id)."""
-        from virtualization.models import VirtualMachine
+    def test_device_type_resolves_real_device(self):
+        view = self._view()
+        device = self._device()
+        assert view._get_object(device.pk, "device").pk == device.pk
 
-        view = self._make_view()
-        mock_vm = MagicMock()
-
-        with patch(
-            "netbox_librenms_plugin.views.base.ip_addresses_view.get_object_or_404",
-            return_value=mock_vm,
-        ) as mock_get:
-            result = view._get_object(2, "virtualmachine")
-
-        mock_get.assert_called_once_with(VirtualMachine, pk=2)
-        assert result is mock_vm
+    def test_vm_type_resolves_real_vm(self):
+        view = self._view()
+        vm = self._vm()
+        assert view._get_object(vm.pk, "virtualmachine").pk == vm.pk
 
     def test_no_type_finds_device(self):
-        """No type given → tries Device.objects.filter; returns device when found."""
-        view = self._make_view()
+        view = self._view()
+        device = self._device("ipverify-dev-nt")
+        assert view._get_object(device.pk, None).pk == device.pk
 
-        mock_device = MagicMock()
-
-        with patch("netbox_librenms_plugin.views.base.ip_addresses_view.Device") as MockDevice:
-            MockDevice.objects.filter.return_value.first.return_value = mock_device
-            result = view._get_object(1, None)
-
-        assert result is mock_device
-
-    def test_no_type_device_not_found_tries_vm(self):
-        """No type, Device not found → tries VirtualMachine; returns VM when found."""
-        view = self._make_view()
-
-        mock_vm = MagicMock()
-
-        with (
-            patch("netbox_librenms_plugin.views.base.ip_addresses_view.Device") as MockDevice,
-            patch("netbox_librenms_plugin.views.base.ip_addresses_view.VirtualMachine") as MockVM,
-        ):
-            MockDevice.objects.filter.return_value.first.return_value = None
-            MockVM.objects.filter.return_value.first.return_value = mock_vm
-            result = view._get_object(2, None)
-
-        assert result is mock_vm
+    def test_no_type_device_absent_finds_vm(self):
+        view = self._view()
+        vm = self._vm("ipverify-vm-nt")
+        # No Device exists with this pk, so the device lookup misses and the VM lookup resolves.
+        assert view._get_object(vm.pk, None).pk == vm.pk
 
     def test_no_type_neither_found_raises_http404(self):
-        """No type, nothing found → raises Http404."""
         from django.http import Http404
 
-        view = self._make_view()
-
-        with (
-            patch("netbox_librenms_plugin.views.base.ip_addresses_view.Device") as MockDevice,
-            patch("netbox_librenms_plugin.views.base.ip_addresses_view.VirtualMachine") as MockVM,
-        ):
-            MockDevice.objects.filter.return_value.first.return_value = None
-            MockVM.objects.filter.return_value.first.return_value = None
-
-            try:
-                view._get_object(99, None)
-                assert False, "Expected Http404"
-            except Http404:
-                pass
+        view = self._view()
+        with pytest.raises(Http404):
+            view._get_object(2_147_483_647, None)
 
 
 # =============================================================================
@@ -1297,8 +1381,14 @@ class TestSingleIPAddressVerifyViewFindInCache:
 # =============================================================================
 
 
+@pytest.mark.django_db
 class TestSingleIPAddressVerifyViewFindExistingIp:
-    """Tests for SingleIPAddressVerifyView._find_existing_ip."""
+    """Real-DB tests for SingleIPAddressVerifyView._find_existing_ip.
+
+    _find_existing_ip queries the real IPAddress model the plugin owns, so these exercise the
+    actual ORM lookup (address + vrf scoping). Mocking IPAddress.objects here left the exact
+    filter kwargs unverified — a change to the lookup fields would pass while the real query broke.
+    """
 
     def _make_view(self):
         from netbox_librenms_plugin.views.base.ip_addresses_view import SingleIPAddressVerifyView
@@ -1306,50 +1396,50 @@ class TestSingleIPAddressVerifyViewFindExistingIp:
         return object.__new__(SingleIPAddressVerifyView)
 
     def test_ip_not_found_returns_false_false_none(self):
-        """IP not in NetBox → (False, False, None)."""
+        """An address absent from NetBox → (False, False, None)."""
         view = self._make_view()
 
-        with patch("netbox_librenms_plugin.views.base.ip_addresses_view.IPAddress") as MockIP:
-            MockIP.objects.filter.return_value.first.return_value = None
-            result = view._find_existing_ip("192.168.1.1", 24, vrf_id=None)
+        assert view._find_existing_ip("192.168.1.1", 24, vrf_id=None) == (False, False, None)
 
-        assert result == (False, False, None)
+    def test_ip_found_global_vrf(self):
+        """A real global (no-VRF) IPAddress is found and reported as existing in the global VRF."""
+        from ipam.models import IPAddress
 
-    def test_ip_found_with_vrf_id_checks_specific_vrf(self):
-        """IP exists; vrf_id given → queries for specific VRF membership."""
+        ip = IPAddress.objects.create(address="10.0.0.1/8")
         view = self._make_view()
 
-        mock_ip = MagicMock()
-        mock_ip.get_absolute_url.return_value = "/ip/1/"
-
-        with patch("netbox_librenms_plugin.views.base.ip_addresses_view.IPAddress") as MockIP:
-            MockIP.objects.filter.return_value.first.return_value = mock_ip
-            MockIP.objects.filter.return_value.exists.return_value = True
-            exists_any, exists_vrf, url = view._find_existing_ip("192.168.1.1", 24, vrf_id=5)
+        exists_any, exists_vrf, url = view._find_existing_ip("10.0.0.1", 8, vrf_id=None)
 
         assert exists_any is True
         assert exists_vrf is True
-        assert url == "/ip/1/"
-        # Verify VRF-scoped second query was made
-        MockIP.objects.filter.assert_any_call(address="192.168.1.1/24", vrf__id=5)
+        assert url == ip.get_absolute_url()
 
-    def test_ip_found_without_vrf_id_checks_global(self):
-        """IP exists; vrf_id=None → queries for global VRF (vrf__isnull=True)."""
+    def test_ip_found_specific_vrf(self):
+        """A real IPAddress in a specific VRF is matched when that vrf_id is queried."""
+        from ipam.models import VRF, IPAddress
+
+        vrf = VRF.objects.create(name="cr116-vrf")
+        ip = IPAddress.objects.create(address="192.168.1.1/24", vrf=vrf)
         view = self._make_view()
 
-        mock_ip = MagicMock()
-        mock_ip.get_absolute_url.return_value = "/ip/2/"
-
-        with patch("netbox_librenms_plugin.views.base.ip_addresses_view.IPAddress") as MockIP:
-            MockIP.objects.filter.return_value.first.return_value = mock_ip
-            MockIP.objects.filter.return_value.exists.return_value = True
-            exists_any, exists_vrf, url = view._find_existing_ip("10.0.0.1", 8, vrf_id=None)
+        exists_any, exists_vrf, url = view._find_existing_ip("192.168.1.1", 24, vrf_id=vrf.pk)
 
         assert exists_any is True
         assert exists_vrf is True
-        assert url == "/ip/2/"
-        # Verify global VRF second query was made
-        MockIP.objects.filter.assert_any_call(address="10.0.0.1/8", vrf__isnull=True)
+        assert url == ip.get_absolute_url()
+
+    def test_ip_in_vrf_not_matched_as_global(self):
+        """An IP that exists only inside a VRF is present but NOT in the global VRF (vrf__isnull=True)."""
+        from ipam.models import VRF, IPAddress
+
+        vrf = VRF.objects.create(name="cr116-vrf2")
+        IPAddress.objects.create(address="172.16.0.1/24", vrf=vrf)
+        view = self._make_view()
+
+        exists_any, exists_vrf, _url = view._find_existing_ip("172.16.0.1", 24, vrf_id=None)
+
+        assert exists_any is True
+        assert exists_vrf is False
 
 
 # =============================================================================
@@ -1410,6 +1500,9 @@ class TestSingleIPAddressVerifyViewPost:
         view = object.__new__(SingleIPAddressVerifyView)
         # CacheMixin needs server_key attr indirectly via get_cache_key
         view._librenms_api = MagicMock()
+        # Direct post() calls bypass dispatch() (which sets self.request), so null the object-perm
+        # gate; the gate itself is covered by TestSingleIPAddressVerifyObjectPermissionGate (real DB).
+        view.require_object_permissions_json = MagicMock(return_value=None)
         return view
 
     def test_no_ip_address_returns_400(self):
@@ -1652,6 +1745,12 @@ class TestSingleIPAddressVerifyViewPost:
         mock_obj.interfaces.first.return_value = None
 
         with (
+            # "secondary" must be a configured server for the verify gate to honour it as the cache
+            # namespace (an unconfigured/forged key falls back to the active server).
+            patch(
+                "netbox_librenms_plugin.librenms_api.LibreNMSAPI.get_available_servers",
+                return_value={"secondary": "Secondary"},
+            ),
             patch.object(view, "_get_object", return_value=mock_obj),
             patch.object(view, "_parse_ip_address", return_value=("192.168.1.1", 24)),
             patch.object(view, "get_cache_key", return_value="secondary-cache-key") as mock_get_cache_key,
@@ -1836,30 +1935,29 @@ class TestPostHandlerCanCreateCable:
         view = object.__new__(SingleCableVerifyView)
         view._librenms_api = MagicMock()
         view._librenms_api.server_key = "default"
+        # dispatch() sets self.request in production; tests call post() directly, so set an
+        # authorized request here for the object-permission gate (reads self.request.user).
+        view.request = _mock_request()
+        view.request.user.has_perm.return_value = True
         return view
 
+    @pytest.mark.django_db
     def test_can_create_cable_adds_form_action(self):
         """can_create_cable=True → formatted_row['actions'] contains form."""
         import json as json_mod
 
         view = self._make_view()
+        view.request.user = _authorized_superuser("cancreate")
+        device = _real_cable_device("cancreate", bound_port_id=10)  # local interface bound to librenms id 10
 
         mock_request = MagicMock()
         mock_request.body = json_mod.dumps(
             {
-                "device_id": 1,
+                "device_id": device.pk,
                 "local_port_id": 10,
                 "server_key": "default",
             }
         ).encode()
-
-        mock_device = MagicMock()
-        mock_device.virtual_chassis = None
-        mock_device.id = 1
-
-        mock_interface = MagicMock()
-        mock_interface.pk = 99
-        mock_device.interfaces.filter.return_value.first.side_effect = [mock_interface, None]
 
         cached_links = {
             "links": [
@@ -1890,12 +1988,8 @@ class TestPostHandlerCanCreateCable:
 
         with (
             patch(
-                "netbox_librenms_plugin.views.base.cables_view.get_object_or_404",
-                return_value=mock_device,
-            ),
-            patch(
                 "netbox_librenms_plugin.views.base.cables_view.get_librenms_sync_device",
-                return_value=mock_device,
+                return_value=device,
             ),
             patch("netbox_librenms_plugin.views.base.cables_view.cache") as mock_cache,
             patch.object(view, "get_cache_key", return_value="test-key"),
@@ -1943,25 +2037,27 @@ class TestPostHandlerInterfaceNotFoundBranches:
         view = object.__new__(SingleCableVerifyView)
         view._librenms_api = MagicMock()
         view._librenms_api.server_key = "default"
+        # dispatch() sets self.request in production; tests call post() directly, so set an
+        # authorized request here for the object-permission gate (reads self.request.user).
+        view.request = _mock_request()
+        view.request.user.has_perm.return_value = True
         return view
 
     def _run_post(self, view, process_result):
-        """Helper: run the post with a given process_result dict."""
+        """Helper: run the post against a real non-VC device (no interface) with a given process_result dict."""
         import json as json_mod
+
+        view.request.user = _authorized_superuser("notfoundbranch")
+        device = _real_cable_device("notfoundbranch")  # non-VC, no interface → local lookup returns None
 
         mock_request = MagicMock()
         mock_request.body = json_mod.dumps(
             {
-                "device_id": 1,
+                "device_id": device.pk,
                 "local_port_id": 10,
                 "server_key": "default",
             }
         ).encode()
-
-        mock_device = MagicMock()
-        mock_device.virtual_chassis = None
-        mock_device.id = 1
-        mock_device.interfaces.filter.return_value.first.return_value = None  # no interface
 
         cached_links = {
             "links": [
@@ -1978,12 +2074,8 @@ class TestPostHandlerInterfaceNotFoundBranches:
 
         with (
             patch(
-                "netbox_librenms_plugin.views.base.cables_view.get_object_or_404",
-                return_value=mock_device,
-            ),
-            patch(
                 "netbox_librenms_plugin.views.base.cables_view.get_librenms_sync_device",
-                return_value=mock_device,
+                return_value=device,
             ),
             patch("netbox_librenms_plugin.views.base.cables_view.cache") as mock_cache,
             patch.object(view, "get_cache_key", return_value="test-key"),
@@ -2000,6 +2092,7 @@ class TestPostHandlerInterfaceNotFoundBranches:
 
         return json_mod2.loads(response.content)
 
+    @pytest.mark.django_db
     def test_no_remote_device_url_sets_device_not_found(self):
         """remote_device present, no remote_device_url → 'Device Not Found in NetBox' (line 554)."""
         view = self._make_view()
@@ -2017,6 +2110,7 @@ class TestPostHandlerInterfaceNotFoundBranches:
         assert data["status"] == "success"
         assert data["formatted_row"]["cable_status"] == "Device Not Found in NetBox"
 
+    @pytest.mark.django_db
     def test_device_url_but_no_port_url_sets_missing_interface(self):
         """remote_device_url present, no remote_port_url → 'Missing Interface' (line 559)."""
         view = self._make_view()

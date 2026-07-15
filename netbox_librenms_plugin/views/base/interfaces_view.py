@@ -5,8 +5,10 @@ from django.utils import timezone
 from django.views import View
 
 from netbox_librenms_plugin.utils import (
+    cache_remaining_ttl,
     get_interface_name_field,
     get_virtual_chassis_member,
+    is_list_of_dicts,
     normalize_librenms_port_id,
 )
 from netbox_librenms_plugin.views.mixins import (
@@ -83,7 +85,15 @@ class BaseInterfaceTableView(VlanAssignmentMixin, LibreNMSAPIMixin, LibreNMSPerm
         by_librenms_id = {}
         duplicate_librenms_ids = set()
 
-        for interface in self.get_interfaces(obj).select_related(self.get_select_related_field(obj)):
+        # Prefetch the M2M relations the table renderers dereference per matched row
+        # (render_vlans -> tagged_vlans, render_mac_address -> mac_addresses); without this each
+        # rendered interface row issues its own query for these.
+        interfaces = (
+            self.get_interfaces(obj)
+            .select_related(self.get_select_related_field(obj))
+            .prefetch_related("tagged_vlans", "tagged_vlans__group", "mac_addresses")
+        )
+        for interface in interfaces:
             by_name[interface.name] = interface
             librenms_id = self._get_object_librenms_id(interface)
             if librenms_id is None:
@@ -120,8 +130,15 @@ class BaseInterfaceTableView(VlanAssignmentMixin, LibreNMSAPIMixin, LibreNMSPerm
             messages.error(request, librenms_data)
             return redirect(self.get_redirect_url(obj))
 
+        # A success=True response can still carry a malformed-but-truthy body (string/list/
+        # dict-with-non-list "ports"); dereferencing it would 500 the refresh. Fail closed like
+        # the not-success path instead (issue #100). An empty ports list stays valid.
+        ports = librenms_data.get("ports", []) if isinstance(librenms_data, dict) else None
+        if not is_list_of_dicts(ports):
+            messages.error(request, "Unexpected response from LibreNMS (malformed ports payload).")
+            return redirect(self.get_redirect_url(obj))
+
         # Enrich ports with VLAN data for trunk ports
-        ports = librenms_data.get("ports", [])
         enriched_ports = self._enrich_ports_with_vlan_data(ports, interface_name_field)
         librenms_data["ports"] = enriched_ports
 
@@ -181,7 +198,10 @@ class BaseInterfaceTableView(VlanAssignmentMixin, LibreNMSAPIMixin, LibreNMSPerm
             interface_name_field = get_interface_name_field(request)
 
         if server_key is None:
-            server_key = getattr(self.librenms_api, "server_key", None)
+            # getattr does NOT protect this: the lazy librenms_api property RAISES
+            # KeyError/ValueError (not AttributeError) on a misconfigured server config,
+            # 500ing the cached tab render. Use the degrading resolve like cables/IP.
+            server_key = self._render_server_key()
 
         cached_data = cache.get(self.get_cache_key(obj, "ports", server_key))
         last_fetched = cache.get(self.get_last_fetched_key(obj, "ports", server_key))
@@ -193,8 +213,18 @@ class BaseInterfaceTableView(VlanAssignmentMixin, LibreNMSAPIMixin, LibreNMSPerm
         # Load any user VLAN group overrides from cache (set by "apply to all")
         vlan_group_overrides = cache.get(self.get_vlan_overrides_key(obj, server_key)) or {}
 
-        if cached_data:
+        # isinstance(dict) guard (mirroring the IP/VLAN/Cables/Modules render paths and the
+        # interfaces SYNC path): a truthy-but-malformed cache entry — a legacy/older-shape snapshot
+        # or corrupt value — must degrade to an empty table, not AttributeError-500 on .get("ports").
+        if isinstance(cached_data, dict):
             ports_data = cached_data.get("ports", [])
+            # The isinstance(dict) guard above only proves the ENVELOPE is a dict; "ports" itself can
+            # still be a present-but-null value or a list with non-dict items (legacy/corrupt snapshot).
+            # `for port in ports_data` would then TypeError on None, and `port.get(...)`/`port["enabled"] = `
+            # would AttributeError/TypeError on a non-dict item — 500ing the cached render. Reuse the
+            # shared is_list_of_dicts guard (as the SYNC path does) and degrade to an empty table instead.
+            if not is_list_of_dicts(ports_data):
+                ports_data = []
             matched_interface_ids = set()
 
             # Pre-fetch all interfaces for all potential chassis members
@@ -284,7 +314,7 @@ class BaseInterfaceTableView(VlanAssignmentMixin, LibreNMSAPIMixin, LibreNMSPerm
         if hasattr(obj, "virtual_chassis") and obj.virtual_chassis:
             virtual_chassis_members = obj.virtual_chassis.members.all()
 
-        cache_ttl = cache.ttl(self.get_cache_key(obj, "ports", server_key))
+        cache_ttl = cache_remaining_ttl(cache, self.get_cache_key(obj, "ports", server_key))
         cache_expiry = (
             timezone.now() + timezone.timedelta(seconds=cache_ttl) if cache_ttl is not None and cache_ttl > 0 else None
         )
