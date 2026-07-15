@@ -1932,6 +1932,139 @@ class TestImportSingleDeviceMoreEdgeCases:
         assert result["success"] is True
         assert Device.objects.get(pk=result["device"].pk).rack_id == rack.pk
 
+    def _run_import_with_tokens(self, *, parsed_location, manual_mappings=None, validation=None):
+        """Run import_single_device with a patched parse_location_for_import.
+
+        Returns the (result, MockDevice) tuple so callers can assert on the
+        keyword arguments passed to ``Device(**device_data)``.
+        """
+        from netbox_librenms_plugin.import_utils.device_operations import import_single_device
+
+        libre_device = {
+            "device_id": 1,
+            "hostname": "r01",
+            "serial": "-",
+            "hardware": "-",
+            "os": "-",
+            "location": "anything",
+        }
+        validation = validation or self._base_validation()
+
+        mock_new_device = MagicMock()
+        mock_new_device.full_clean.return_value = None
+        mock_new_device.save.return_value = None
+        mock_new_device.pk = 10
+
+        with (
+            patch("netbox_librenms_plugin.import_utils.device_operations.transaction", self._mock_tx()),
+            patch("netbox_librenms_plugin.import_utils.device_operations.Device") as MockDevice,
+            patch("netbox_librenms_plugin.import_utils.device_operations.set_librenms_device_id"),
+            patch("netbox_librenms_plugin.import_utils.device_operations.LibreNMSAPI") as MockAPI,
+            patch("netbox_librenms_plugin.import_utils.device_operations.timezone") as mock_tz,
+            patch(
+                "netbox_librenms_plugin.import_utils.device_operations.parse_location_for_import",
+                return_value=parsed_location,
+            ),
+        ):
+            MockDevice.objects.filter.return_value.first.return_value = None
+            MockDevice.return_value = mock_new_device
+            MockAPI.return_value = self._make_api()
+            mock_tz.now.return_value.strftime.return_value = "2024-01-01"
+            result = import_single_device(
+                device_id=1,
+                libre_device=libre_device,
+                validation=validation,
+                manual_mappings=manual_mappings,
+                server_key="default",
+            )
+        return result, MockDevice
+
+    def test_rack_resolved_from_parsed_token_exact_match(self):
+        """A parsed rack token resolves to a rack by exact name within the site."""
+        parsed = {"region": None, "site": None, "location": None, "rack": "R1", "tenant": None}
+        mock_rack = MagicMock()
+
+        with patch("netbox_librenms_plugin.import_utils.device_operations.Rack") as MockRack:
+            MockRack.objects.filter.return_value.select_related.return_value.first.return_value = mock_rack
+            with patch(
+                "netbox_librenms_plugin.import_utils.device_operations.resolve_location_mapping", return_value=None
+            ):
+                result, MockDevice = self._run_import_with_tokens(parsed_location=parsed)
+
+        assert result.get("success") is True
+        assert MockDevice.call_args.kwargs.get("rack") is mock_rack
+
+    def test_rack_resolved_from_parsed_token_via_mapping(self):
+        """When no exact rack match exists, the rack token falls back to a LocationMapping."""
+        parsed = {"region": None, "site": None, "location": None, "rack": "R1", "tenant": None}
+        mock_rack = MagicMock()
+
+        with patch("netbox_librenms_plugin.import_utils.device_operations.Rack") as MockRack:
+            MockRack.objects.filter.return_value.select_related.return_value.first.return_value = None
+            with patch(
+                "netbox_librenms_plugin.import_utils.device_operations.resolve_location_mapping"
+            ) as mock_resolve:
+                mock_resolve.return_value = mock_rack
+                result, MockDevice = self._run_import_with_tokens(parsed_location=parsed)
+
+        assert result.get("success") is True
+        assert MockDevice.call_args.kwargs.get("rack") is mock_rack
+        # Resolver was asked for the 'rack' field type with the parsed value.
+        rack_calls = [c for c in mock_resolve.call_args_list if c.args and c.args[0] == "rack"]
+        assert rack_calls and rack_calls[0].args[1] == "R1"
+
+    def test_manual_rack_not_overridden_by_parsed_token(self):
+        """A rack chosen via validation is never overwritten by the parsed rack token."""
+        parsed = {"region": None, "site": None, "location": None, "rack": "R9", "tenant": None}
+        preselected_rack = MagicMock()
+        validation = self._base_validation()
+        validation["rack"] = {"rack": preselected_rack}
+
+        with patch("netbox_librenms_plugin.import_utils.device_operations.Rack") as MockRack:
+            with patch(
+                "netbox_librenms_plugin.import_utils.device_operations.resolve_location_mapping"
+            ) as mock_resolve:
+                result, MockDevice = self._run_import_with_tokens(parsed_location=parsed, validation=validation)
+
+        assert result.get("success") is True
+        assert MockDevice.call_args.kwargs.get("rack") is preselected_rack
+        # No auto-resolution attempted because a rack was already selected.
+        MockRack.objects.filter.assert_not_called()
+        assert not [c for c in mock_resolve.call_args_list if c.args and c.args[0] == "rack"]
+
+    def test_tenant_resolved_from_parsed_token_exact_match(self):
+        """A parsed tenant token resolves to a tenant by exact name."""
+        parsed = {"region": None, "site": None, "location": None, "rack": None, "tenant": "Acme"}
+        mock_tenant = MagicMock()
+
+        with patch("tenancy.models.Tenant") as MockTenant:
+            MockTenant.objects.filter.return_value.first.return_value = mock_tenant
+            with patch(
+                "netbox_librenms_plugin.import_utils.device_operations.resolve_location_mapping", return_value=None
+            ):
+                result, MockDevice = self._run_import_with_tokens(parsed_location=parsed)
+
+        assert result.get("success") is True
+        assert MockDevice.call_args.kwargs.get("tenant") is mock_tenant
+
+    def test_tenant_resolved_from_parsed_token_via_mapping(self):
+        """When no exact tenant match exists, the tenant token falls back to a LocationMapping."""
+        parsed = {"region": None, "site": None, "location": None, "rack": None, "tenant": "Acme"}
+        mock_tenant = MagicMock()
+
+        with patch("tenancy.models.Tenant") as MockTenant:
+            MockTenant.objects.filter.return_value.first.return_value = None
+            with patch(
+                "netbox_librenms_plugin.import_utils.device_operations.resolve_location_mapping"
+            ) as mock_resolve:
+                mock_resolve.return_value = mock_tenant
+                result, MockDevice = self._run_import_with_tokens(parsed_location=parsed)
+
+        assert result.get("success") is True
+        assert MockDevice.call_args.kwargs.get("tenant") is mock_tenant
+        tenant_calls = [c for c in mock_resolve.call_args_list if c.args and c.args[0] == "tenant"]
+        assert tenant_calls and tenant_calls[0].args[1] == "Acme"
+
 
 @pytest.mark.django_db
 class TestValidateDeviceExistingVMGuard:

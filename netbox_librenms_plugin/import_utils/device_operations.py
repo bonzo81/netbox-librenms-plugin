@@ -1712,6 +1712,34 @@ def import_single_device(
                 if location:
                     device_data["location"] = location
 
+            # Resolve the rack from the parsed location token, but only when the
+            # user did not select one manually. Try an exact name match scoped to
+            # the site first, then fall back to a LocationMapping alias.
+            if not rack:
+                rack_token = parsed_location.get("rack")
+                if rack_token and rack_token != "-":
+                    rack = (
+                        Rack.objects.filter(Q(location__site=site) | Q(site=site), name__iexact=rack_token)
+                        .select_related("location", "site")
+                        .first()
+                    )
+                    if rack is None:
+                        rack = resolve_location_mapping("rack", rack_token, parent_site=site)
+                    if rack:
+                        device_data["rack"] = rack
+
+            # Resolve the tenant from the parsed location token. Tenants are
+            # globally unique in NetBox, so no site scoping is required.
+            tenant_token = parsed_location.get("tenant")
+            if tenant_token and tenant_token != "-":
+                from tenancy.models import Tenant
+
+                tenant = Tenant.objects.filter(name__iexact=tenant_token).first()
+                if tenant is None:
+                    tenant = resolve_location_mapping("tenant", tenant_token)
+                if tenant:
+                    device_data["tenant"] = tenant
+
             # Create the device
             device = Device(**device_data)
             device.full_clean()
