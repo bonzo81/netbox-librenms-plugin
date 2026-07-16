@@ -1111,7 +1111,9 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObject
     def enrich_links_data(self, links_data, obj, server_key=None, sync_device=None):
         """Enrich links data with local and remote port URLs and cable status."""
         if server_key is None:
-            server_key = self.librenms_api.server_key
+            # Use the degrading resolver (mirrors the other render sites) so a broken/missing
+            # default server yields None instead of raising ValueError and 500ing a cached render.
+            server_key = self._render_server_key()
         # Resolve the serial sync device once for the whole loop (loop-invariant) instead of
         # per serial row. Reuse the device the caller (_prepare_context) already resolved to
         # avoid a second get_librenms_sync_device() VC-members query per request; falls back to

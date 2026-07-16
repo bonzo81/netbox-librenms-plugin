@@ -455,6 +455,10 @@ class TestSerialVerifyRowEscaping:
 
         view = object.__new__(SingleCableVerifyView)
         view._librenms_api = MagicMock(server_key="default")
+        # post() routes through the object-perm gate + restrict_object_or_404, both of which read
+        # self.request.user; give the view a request so the real gate runs (mirrors
+        # TestSingleCableVerifySerial in test_serial_cables_view).
+        view.request = MagicMock()
         cache.set(view.get_cache_key(acs, "links", "default"), {"links": [link]}, timeout=300)
 
         request = _make_request_json(
