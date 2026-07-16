@@ -5354,6 +5354,9 @@ class TestBulkImportRerenderVMClassification:
                 "os": "",
             }
 
+        # detect_collisions falls back to api.get_device_info for cold-cache misses — feed it _fetch.
+        view._librenms_api.get_device_info = lambda did, *a, **k: (True, _fetch(did))
+
         # Mock ONLY genuine boundaries: the import process, the LibreNMS fetch, the template render,
         # and the permission/background-job gates. validate_device_for_import, the cache and the
         # request routing all run for real.
@@ -5646,6 +5649,9 @@ class TestBulkImportDevicesViewCollisionGate:
             1: {"device_id": 1, "sysName": "gate-collide-host", "hostname": "gate-collide-host"},
             2: {"device_id": 2, "sysName": "gate-collide-host", "hostname": "gate-collide-host"},
         }
+        # The collision pre-check reads the seeded libre cache (cold Django cache in the test) and
+        # falls back to api.get_device_info for the misses — stub that seam so the misses resolve.
+        view._librenms_api.get_device_info = lambda did, *a, **k: (True, libre[did]) if did in libre else (False, None)
         with (
             patch.object(view, "require_write_permission", return_value=None),
             patch(
@@ -5679,6 +5685,7 @@ class TestBulkImportDevicesViewCollisionGate:
             1: {"device_id": 1, "sysName": "gate-clean-a", "hostname": "gate-clean-a"},
             2: {"device_id": 2, "sysName": "gate-clean-b", "hostname": "gate-clean-b"},
         }
+        view._librenms_api.get_device_info = lambda did, *a, **k: (True, libre[did]) if did in libre else (False, None)
         import_result = {"success": [], "failed": [], "skipped": [], "virtual_chassis_created": 0}
         with (
             patch.object(view, "require_write_permission", return_value=None),
@@ -5708,7 +5715,7 @@ class TestBulkImportDevicesViewCollisionGate:
         """A selected id whose LibreNMS info can't be fetched (not cached + get_device_info fails) is SKIPPED, not a whole-batch block: the fetchable rows still import and the skipped row is surfaced. Restores the per-device resilience the old fail-closed block removed."""
         view = self._make_view()
         # id 2 isn't cached and its info fetch fails → it can't be collision-checked → skipped.
-        view._librenms_api.get_device_info = MagicMock(return_value=(False, None))
+        view._librenms_api.get_device_info = lambda did, *a, **k: (True, libre[did]) if did in libre else (False, None)
         request = _make_request(post={"select": ["1", "2"]}, headers={"HX-Request": "true"})
         request.POST.getlist = MagicMock(return_value=["1", "2"])
         request.user = AnonymousUser()
@@ -5797,6 +5804,7 @@ class TestBulkImportDevicesViewCollisionGate:
             1: {"device_id": 1, "sysName": "gate-collide-plain", "hostname": "gate-collide-plain"},
             2: {"device_id": 2, "sysName": "gate-collide-plain", "hostname": "gate-collide-plain"},
         }
+        view._librenms_api.get_device_info = lambda did, *a, **k: (True, libre[did]) if did in libre else (False, None)
         with (
             patch.object(view, "require_write_permission", return_value=None),
             patch(
