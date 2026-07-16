@@ -192,7 +192,7 @@ class TestMigration0012Preflight:
     def _preflight():
         import importlib
 
-        mig = importlib.import_module("netbox_librenms_plugin.migrations.0012_portstacklagpattern_ci_unique")
+        mig = importlib.import_module("netbox_librenms_plugin.migrations.0013_portstacklagpattern_ci_unique")
         return mig.normalize_librenms_os_case
 
     @staticmethod
@@ -252,14 +252,14 @@ class TestMigration0012Preflight:
         from netbox_librenms_plugin.models import PortStackLagPattern
 
         # Invoke the preflight with the HISTORICAL model as the migration actually sees it (state at
-        # 0011, before 0012). 0011 serialized FullCleanOnSaveMixin into the historical model's bases,
+        # 0012, before 0013). 0012 serialized FullCleanOnSaveMixin into the historical model's bases,
         # so its save() still runs full_clean() — we stub full_clean below during the preflight so a
         # future clean() gaining a strip can't mask a Lower()-only migration bug. With it stubbed the
         # migration's OWN normalization is the only thing that writes the value, so this is the only
         # way the test can tell a Lower()-only rewrite (leaves " zzws ") from .strip().lower() ("zzws").
         historical_apps = (
             MigrationExecutor(connection)
-            .loader.project_state(("netbox_librenms_plugin", "0011_portstacklagpattern"))
+            .loader.project_state(("netbox_librenms_plugin", "0012_portstacklagpattern"))
             .apps
         )
         historical_model = historical_apps.get_model("netbox_librenms_plugin", "portstacklagpattern")
@@ -281,7 +281,7 @@ class TestMigration0012Preflight:
         assert PortStackLagPattern.objects.get(pk=pk).librenms_os == "zzws"
 
     def test_preflight_pins_orm_traffic_to_the_migration_alias_not_the_router(self):
-        """Multi-DB safety (matching sibling migrations 0011/0013): the preflight's OWN queryset iteration and save must be pinned to schema_editor.connection.alias via .using()/save(using=...). Unpinned ORM calls consult the database router, so `migrate --database=other` would normalize rows on the router's choice instead of the migration's target database — detected here by recording router consultations whose call stack passes through the migration module. Consults from INSIDE Model.full_clean are excluded: 0011 serialized FullCleanOnSaveMixin into the historical model's bases, so even a fully pinned save() runs full_clean, whose validate_unique/validate_constraints ask the router with instance hints and correctly fall back to the pinned instance._state.db — Django offers no using hook there, and the migration cannot avoid it."""
+        """Multi-DB safety (matching sibling migrations 0012/0014): the preflight's OWN queryset iteration and save must be pinned to schema_editor.connection.alias via .using()/save(using=...). Unpinned ORM calls consult the database router, so `migrate --database=other` would normalize rows on the router's choice instead of the migration's target database — detected here by recording router consultations whose call stack passes through the migration module. Consults from INSIDE Model.full_clean are excluded: 0012 serialized FullCleanOnSaveMixin into the historical model's bases, so even a fully pinned save() runs full_clean, whose validate_unique/validate_constraints ask the router with instance hints and correctly fall back to the pinned instance._state.db — Django offers no using hook there, and the migration cannot avoid it."""
         import traceback
 
         from django.db import connection
@@ -292,7 +292,7 @@ class TestMigration0012Preflight:
 
         historical_apps = (
             MigrationExecutor(connection)
-            .loader.project_state(("netbox_librenms_plugin", "0011_portstacklagpattern"))
+            .loader.project_state(("netbox_librenms_plugin", "0012_portstacklagpattern"))
             .apps
         )
 
@@ -309,7 +309,7 @@ class TestMigration0012Preflight:
                 if model._meta.model_name != "portstacklagpattern":
                     return
                 frames = traceback.extract_stack()
-                in_migration = any("0012_portstacklagpattern_ci_unique" in f.filename for f in frames)
+                in_migration = any("0013_portstacklagpattern_ci_unique" in f.filename for f in frames)
                 from_full_clean = any(f.name == "full_clean" for f in frames)
                 if in_migration and not from_full_clean:
                     unpinned.append(kind)

@@ -43,7 +43,7 @@ class Migration(migrations.Migration):
         # nothing from the 4.3-era 0138. ``makemigrations`` will try to bump this to the dev
         # environment's NetBox tip; revert it unless we actually start depending on a newer field.
         ("extras", "0122_charfield_null_choices"),
-        ("netbox_librenms_plugin", "0010_inventory_and_mapping_models"),
+        ("netbox_librenms_plugin", "0011_renormalize_device_type_mappings"),
     ]
 
     operations = [
