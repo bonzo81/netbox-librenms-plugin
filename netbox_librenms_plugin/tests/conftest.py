@@ -14,15 +14,21 @@ def _clear_device_info_cache():
     name and a pk (``CacheMixin.get_cache_key`` → ``librenms_links_device_7_default``), so a
     value cached by one test is read by the next test that draws the same pk, with entirely
     different data behind it. ``librenms_*`` covers the per-object render caches (ports, links,
-    vlans, ip_addresses, inventory, last-fetched stamps, VLAN group overrides) as well as
-    ``get_device_info()``'s short-lived lookup cache.
+    vlans, ip_addresses, inventory, last-fetched stamps, VLAN group overrides), ``get_device_info()``'s
+    short-lived lookup cache and the cached import search results. ``import_device_data_*`` sits
+    outside that prefix: the bulk-import collision gate reads it via ``cache.get_many``
+    (actions.py) BEFORE falling back to the stubbed ``get_device_info``, so a leaked entry for a
+    selected id silently bypasses the stub and defeats the collision check.
     """
     from django.core.cache import cache
 
-    try:
-        cache.delete_pattern("librenms_*")
-    except (AttributeError, NotImplementedError):
-        cache.clear()
+    for pattern in ("librenms_*", "import_device_data_*"):
+        try:
+            cache.delete_pattern(pattern)
+        except (AttributeError, NotImplementedError):
+            # No django-redis delete_pattern (e.g. LocMemCache): a single clear() covers all.
+            cache.clear()
+            break
     yield
 
 
