@@ -1573,6 +1573,7 @@ class TestPrepareContextInterfaceNameFieldNone:
             result = view._prepare_context(request, obj, "ifName", fetch_fresh=False)
 
         assert result is None
+
     def test_fetch_fresh_malformed_ip_payload_returns_none(self):
         """A success flag with a non-list get_ip_addresses() payload (or a list with non-dict entries) must be treated as a fetch failure — return None before enrichment so post() neither renders an empty table under a success banner nor caches the empty snapshot."""
         view = self._make_view()

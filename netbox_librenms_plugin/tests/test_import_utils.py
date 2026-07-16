@@ -6345,6 +6345,8 @@ class TestBulkImportColdCacheBackfill:
         assert cold_cache.get(123) == payload
         # Import decisions must run against live data, so the short device-info cache is bypassed.
         api.get_device_info.assert_called_once_with(123, use_cache=False)
+
+
 class TestDeviceValidationDetailsTemplate:
     """The 'Full Sync Page' link in the import-validation panel must carry the active server_key so it opens on the same LibreNMS instance the user is validating against, not the session/default server."""
 

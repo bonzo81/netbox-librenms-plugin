@@ -265,6 +265,7 @@ class TestLibreNMSAPIInit:
         assert servers == {"good": "Good"}
         assert "bad" not in servers
         assert "tokenless" not in servers
+
     def test_init_non_mapping_server_config_raises_valueerror(self, mock_librenms_config):
         """A structurally invalid (non-mapping) server entry must raise ValueError, not leak a TypeError from the dict access — so build_librenms_api falls back to None."""
         mock_config = mock_librenms_config["mock_config"]
