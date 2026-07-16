@@ -2417,7 +2417,7 @@ class TestBaseInterfaceTableViewGetContextData:
         mock_iface = MagicMock()
         mock_iface.name = "Gi0/0"
         mock_ifaces_qs = MagicMock()
-        mock_ifaces_qs.select_related.return_value = [mock_iface]
+        mock_ifaces_qs.select_related.return_value.prefetch_related.return_value = [mock_iface]
 
         with (
             patch.object(view, "get_cache_key", return_value="key"),
@@ -2455,7 +2455,7 @@ class TestBaseInterfaceTableViewGetContextData:
         mock_iface = MagicMock()
         mock_iface.name = "Gi0/0"
         mock_ifaces_qs = MagicMock()
-        mock_ifaces_qs.select_related.return_value = [mock_iface]
+        mock_ifaces_qs.select_related.return_value.prefetch_related.return_value = [mock_iface]
 
         with (
             patch.object(view, "get_cache_key", return_value="key"),

@@ -6029,7 +6029,10 @@ class TestGetValidatedDeviceLibreDeviceReuse:
 
         with (
             patch("netbox_librenms_plugin.views.imports.actions.fetch_device_with_cache", side_effect=_boom),
-            patch.object(view, "_should_enable_vc_detection", return_value=False),
+            patch(
+                "netbox_librenms_plugin.views.imports.actions.validate_device_for_import",
+                return_value={"import_as_vm": False},
+            ),
         ):
             libre_device, validation, _selections = view.get_validated_device_with_selections(
                 4242, request, libre_device=supplied
@@ -6051,7 +6054,10 @@ class TestGetValidatedDeviceLibreDeviceReuse:
                 "netbox_librenms_plugin.views.imports.actions.fetch_device_with_cache",
                 return_value={"device_id": 7},
             ) as mock_fetch,
-            patch.object(view, "_should_enable_vc_detection", return_value=False),
+            patch(
+                "netbox_librenms_plugin.views.imports.actions.validate_device_for_import",
+                return_value={"import_as_vm": False},
+            ),
         ):
             view.get_validated_device_with_selections(7, request)
 
@@ -7231,8 +7237,8 @@ class TestCreatePlatformFromImportManufacturer:
         mock_platform.objects.create.assert_not_called()
 
     @pytest.mark.django_db
-    def test_device_platform_manufacturer_mismatch_rejected_and_rolled_back(self):
-        """Assigning a new Platform whose manufacturer conflicts with the target Device's device-type manufacturer is rejected, and the just-created Platform is rolled back."""
+    def test_device_platform_manufacturer_mismatch_surfaced_platform_kept(self):
+        """A new Platform whose manufacturer conflicts with the target Device's device-type manufacturer fails to assign; the failure is surfaced to the user and the device is left unassigned, but the just-created Platform is intentionally kept (aec0360a1: the platform create is the primary action and the assignment runs in its own transaction)."""
         from dcim.models import Manufacturer, Platform
 
         device = make_device("plat-assign-mismatch")  # device_type under manufacturer TestMfr
@@ -7256,10 +7262,12 @@ class TestCreatePlatformFromImportManufacturer:
         ):
             resp = view.post(req, device_id=device.pk)
 
-        # An error response was returned (not a success), the newly created Platform was rolled
-        # back, and the device's platform is untouched.
+        # The platform create is the primary action: the manufacturer-mismatch assignment failure is
+        # surfaced to the user (error toast) and the device is left unassigned, but the just-created
+        # Platform is intentionally NOT rolled back.
         assert resp is not None
-        assert not Platform.objects.filter(name="Mismatch-OS").exists()
+        assert Platform.objects.filter(name="Mismatch-OS").exists()
+        assert b"could not be assigned" in resp.content
         device.refresh_from_db()
         assert device.platform_id is None
 

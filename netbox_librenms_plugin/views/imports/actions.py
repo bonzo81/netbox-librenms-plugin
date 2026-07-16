@@ -86,7 +86,11 @@ def _attach_messages_oob(response, request):
     storage = messages.get_messages(request)
     if not list(storage):
         return response
-    storage.used = False
+    # ``get_messages`` returns a bare ``list`` (no ``.used``) when no message-storage
+    # middleware ran (e.g. RequestFactory requests); a real request always has a storage
+    # backend. Guard so re-marking the storage unconsumed can't AttributeError.
+    if hasattr(storage, "used"):
+        storage.used = False
     try:
         rendered = render_to_string("inc/messages.html", request=request)
     except Exception:  # pragma: no cover - defensive: don't break HTMX response on render error

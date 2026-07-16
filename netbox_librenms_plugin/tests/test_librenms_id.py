@@ -381,7 +381,7 @@ class TestIsLegacyLibreNMSId:
             ({"default": {"id": 5}}, False),
             ([], False),
             ("007", True),  # zero-padded numeric string is still legacy
-            ("-3", True),  # negative numeric string parses via int()
+            ("-3", False),  # negative numeric string parses to a value < 0 -> not a valid legacy id
             ("4.2", False),  # float-form string is not the legacy int format
             (4.2, False),  # float is not the legacy format
             ({}, False),  # empty dict is the (empty) modern form, not legacy
