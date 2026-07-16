@@ -37,13 +37,13 @@ def remove_types(apps, schema_editor):
 
 class Migration(migrations.Migration):
     dependencies = [
-        # Pinned to the NetBox 4.2 floor for the same reason as sibling 0011:
+        # Pinned to the NetBox 4.2 floor for the same reason as sibling 0012:
         # SerialSensorTypePattern is a plain NetBoxModel that only references
         # ``extras.Tag``/``TaggedItem`` (via taggit) — all present in 4.2.x.
         # ``makemigrations`` will try to bump this to the dev environment's NetBox tip;
         # revert it unless we actually start depending on a newer field.
         ("extras", "0122_charfield_null_choices"),
-        ("netbox_librenms_plugin", "0012_portstacklagpattern_ci_unique"),
+        ("netbox_librenms_plugin", "0013_portstacklagpattern_ci_unique"),
     ]
 
     operations = [
