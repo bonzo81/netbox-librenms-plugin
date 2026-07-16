@@ -259,7 +259,7 @@ class TestSingleInterfaceVerifyView:
 
     @patch("netbox_librenms_plugin.views.object_sync.devices.BaseInterfaceTableView")
     @patch("netbox_librenms_plugin.views.object_sync.devices.LibreNMSInterfaceTable")
-    @patch("netbox_librenms_plugin.views.object_sync.devices.get_object_or_404")
+    @patch.object(SingleInterfaceVerifyView, "restrict_object_or_404")
     @patch("netbox_librenms_plugin.views.object_sync.devices.cache")
     def test_verify_normalizes_relationship_map_keys(self, mock_cache, mock_get_obj, mock_table_cls, mock_base):
         """Cached relationship maps with stringified port_id keys must be normalized to ints before enrichment, mirroring the main table path — otherwise the int-keyed lookup in _enrich_port_with_lag_parent silently drops Parent/LAG context."""
@@ -299,7 +299,7 @@ class TestSingleInterfaceVerifyView:
 
     @patch("netbox_librenms_plugin.views.object_sync.devices.BaseInterfaceTableView")
     @patch("netbox_librenms_plugin.views.object_sync.devices.LibreNMSInterfaceTable")
-    @patch("netbox_librenms_plugin.views.object_sync.devices.get_object_or_404")
+    @patch.object(SingleInterfaceVerifyView, "restrict_object_or_404")
     @patch("netbox_librenms_plugin.views.object_sync.devices.cache")
     def test_verify_handles_malformed_relationship_cache(self, mock_cache, mock_get_obj, mock_table_cls, mock_base):
         """A cached port_stack_relationships that is None / a non-dict (or whose lag_members/sub_interfaces is None / a non-dict) must fail soft like the table path (test_malformed_port_stack_relationships_does_not_crash) — the .get(key, {}) default only fills a *missing* key, so a present-but-None value would AttributeError on .items() and 500 the verify endpoint."""

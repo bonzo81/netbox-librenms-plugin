@@ -188,7 +188,13 @@ class BaseInterfaceTableView(
         """
         lag_members, sub_interfaces = normalize_relationship_maps(cached_data.get("port_stack_relationships"))
         by_port_id = {}
-        for p in cached_data.get("ports", []):
+        # "ports" can be a present-but-null value or a list with non-dict items on a legacy/corrupt
+        # snapshot; iterating it raw would TypeError on None or AttributeError on `p.get(...)`. Reuse
+        # the shared is_list_of_dicts guard (as the render paths do) and degrade to no host index.
+        ports = cached_data.get("ports", [])
+        if not is_list_of_dicts(ports):
+            ports = []
+        for p in ports:
             if p.get("_source") == "oob":
                 continue
             pid = normalize_librenms_port_id(p.get("port_id"))

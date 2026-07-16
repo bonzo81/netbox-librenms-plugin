@@ -28,8 +28,8 @@
                         <button type="button"
                                 hx-post="{{ interface_sync_url }}"
                                 hx-target="#interface-sync-content"
-                                hx-include="[name='interface_name_field'], [name='server_key']"
-                                hx-vals="js:{interfaces_per_page: new URLSearchParams(window.location.search).get('interfaces_per_page') || ''}"
+                                hx-include="[name='interface_name_field']"
+                                hx-vals="js:{interfaces_per_page: new URLSearchParams(window.location.search).get('interfaces_per_page') || '', server_key: new URLSearchParams(window.location.search).get('server_key') || '{{ librenms_server_info.server_key|default:''|escapejs }}'}"
                                 class="btn btn-outline-primary">
                             Refresh Interfaces
                         </button>

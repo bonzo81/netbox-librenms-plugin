@@ -410,7 +410,7 @@ class TestSingleInterfaceVerifyView:
         mock_device = MagicMock()
         mock_device.virtual_chassis = None
 
-        with patch("netbox_librenms_plugin.views.object_sync.devices.get_object_or_404", return_value=mock_device):
+        with patch.object(view, "restrict_object_or_404", return_value=mock_device):
             with patch(
                 "netbox_librenms_plugin.views.object_sync.devices.get_librenms_sync_device", return_value=mock_device
             ):
@@ -590,6 +590,7 @@ class TestSingleInterfaceVerifyView:
                 ),
                 content_type="application/json",
             )
+            request.user = _make_verify_superuser("verify-portid")
             response = view.post(request)
 
             assert response.status_code == 200
@@ -651,6 +652,7 @@ class TestSingleInterfaceVerifyView:
                 ),
                 content_type="application/json",
             )
+            request.user = _make_verify_superuser("verify-badge")
             response = view.post(request)
 
             assert response.status_code == 200
@@ -723,6 +725,7 @@ class TestSingleInterfaceVerifyView:
                 ),
                 content_type="application/json",
             )
+            request.user = _make_verify_superuser("verify-vc")
             response = view.post(request)
 
             assert response.status_code == 200
