@@ -43,7 +43,7 @@ class TestBaseLibreNMSSyncViewGet:
         view.get_context_data = MagicMock(return_value={"test": "ctx"})
         mock_render.return_value = MagicMock()
 
-        request = MagicMock()
+        request = RequestFactory().get("/")
         view.get(request, pk=1)
 
         # lookup device should be obj

@@ -653,7 +653,10 @@ class TestSingleModuleVerifyView:
         mock_table.format_module_data.return_value = "<tr>row</tr>"
 
         with (
-            patch("netbox_librenms_plugin.views.object_sync.devices.get_object_or_404", return_value=selected_device),
+            patch.object(view, "restrict_object_or_404", return_value=selected_device),
+            patch(
+                "netbox_librenms_plugin.librenms_api.LibreNMSAPI.get_available_servers", return_value={"prod": "Prod"}
+            ),
             patch("netbox_librenms_plugin.views.object_sync.devices.cache") as mock_cache,
             patch("netbox_librenms_plugin.utils.load_bay_mappings", return_value=([], [])),
             patch("netbox_librenms_plugin.utils.get_enabled_ignore_rules", return_value=[]),
@@ -1157,6 +1160,8 @@ class TestSaveVlanGroupOverridesRealCacheBackend:
         view = object.__new__(SaveVlanGroupOverridesView)
         view._librenms_api = MagicMock()
         view._librenms_api.server_key = "default"
+        request.user = _make_verify_superuser(device.name)
+        view.request = request
         with patch.object(view, "require_write_permission_json", return_value=None):
             with patch("netbox_librenms_plugin.views.object_sync.devices.cache", cache_backend):
                 return view.post(request)

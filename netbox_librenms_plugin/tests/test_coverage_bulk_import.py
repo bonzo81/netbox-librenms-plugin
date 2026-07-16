@@ -2578,6 +2578,7 @@ class TestCrossModelConflictDetection:
 
         mock_vm = MagicMock()
         mock_vm.role = None  # the id-linked VM
+        mock_vm.cf = {"librenms_id": {"default": {"id": 99}}}  # real host link _refresh_librenms_linkage re-derives
         mock_device = MagicMock()
         mock_device.role = MagicMock()  # a Device that merely shares the name
 

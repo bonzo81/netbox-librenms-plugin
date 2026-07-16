@@ -874,6 +874,65 @@ class TestValidateDeviceForImportEdgeCases:
             libre_device, api=self._make_api(), include_vc_detection=include_vc_detection, **kwargs
         )
 
+    def _start_patches(self, extra_patches=None):
+        mock_device = MagicMock()
+        mock_device.objects.filter.return_value.first.return_value = None
+        mock_device.objects.filter.return_value.exclude.return_value.first.return_value = None
+        mock_device.objects.all.return_value = []
+
+        mock_vm = MagicMock()
+        mock_vm.objects.filter.return_value.first.return_value = None
+
+        mock_cluster = MagicMock()
+        mock_cluster.objects.all.return_value = []
+
+        mock_role = MagicMock()
+        mock_role.objects.all.return_value = []
+
+        mock_ip = MagicMock()
+        mock_ip.objects.filter.return_value.first.return_value = None
+
+        mock_site = MagicMock()
+        mock_site.objects.all.return_value = []
+
+        patches = [
+            patch(
+                "netbox_librenms_plugin.import_utils.device_operations.find_matching_site",
+                return_value={"found": False, "site": None, "match_type": None, "suggestions": []},
+            ),
+            patch(
+                "netbox_librenms_plugin.import_utils.device_operations.match_librenms_hardware_to_device_type",
+                return_value={"matched": False, "device_type": None, "match_type": None},
+            ),
+            patch(
+                "netbox_librenms_plugin.import_utils.device_operations.find_matching_platform",
+                return_value={"found": False, "platform": None, "match_type": None},
+            ),
+            patch(
+                "netbox_librenms_plugin.import_utils.device_operations.get_virtual_chassis_data",
+                return_value={"is_stack": False, "member_count": 0, "members": [], "detection_error": None},
+            ),
+            patch("netbox_librenms_plugin.import_utils.device_operations.DeviceRole", mock_role),
+            patch("netbox_librenms_plugin.import_utils.device_operations.Cluster", mock_cluster),
+            patch("netbox_librenms_plugin.import_utils.device_operations.Device", mock_device),
+            patch("netbox_librenms_plugin.import_utils.device_operations.DeviceType", MagicMock()),
+            patch("netbox_librenms_plugin.import_utils.device_operations.Site", mock_site),
+            patch("netbox_librenms_plugin.import_utils.device_operations.find_by_librenms_id", return_value=None),
+            patch("netbox_librenms_plugin.import_utils.device_operations.cache"),
+            patch("virtualization.models.VirtualMachine", mock_vm),
+            patch("ipam.models.IPAddress", mock_ip),
+        ]
+        if extra_patches:
+            patches.extend(extra_patches)
+        started = []
+        for p in patches:
+            started.append(p.start())
+        return patches, started
+
+    def _stop_patches(self, patches):
+        for p in reversed(patches):
+            p.stop()
+
     def test_duplicate_hostname_match_fails_closed(self):
         """When the hostname match is non-unique (duplicate device names), the earlier .first() existing_device is an arbitrary row."""
         from dcim.models import Device, DeviceRole, DeviceType, Manufacturer, Site
@@ -1881,6 +1940,8 @@ class TestImportFallbackReadsLive:
 
         assert result["success"] is False
         assert "retrieve" in (result.get("error") or "").lower()
+
+
 class TestDetectOOBTypeFromName:
     """_detect_oob_type_from_name must use the same normalization as normalize_oob_type so a vendor-specific token wins over the generic "oob", even when "oob" appears earlier in the name."""
 

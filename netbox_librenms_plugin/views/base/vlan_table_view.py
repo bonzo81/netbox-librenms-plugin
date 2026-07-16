@@ -148,6 +148,11 @@ class BaseVLANTableView(VlanAssignmentMixin, LibreNMSAPIMixin, LibreNMSPermissio
                     "cache_expiry": None,
                     "server_key": server_key,
                 }
+            # No buildable client → no valid server scope: degrade to None (empty table) instead of
+            # the "default" placeholder resolve_get_render_server_key falls back to, mirroring the
+            # sibling tabs' _render_server_key() None fallback (develop hardening).
+            if self._render_server_key() is None:
+                server_key = None
         # Honour the POST-resolved server when provided; otherwise use the shared degrading resolver
         # (not a bare getattr on the lazy librenms_api property): on a missing/misconfigured default
         # the property raises KeyError/ValueError, which would 500 the VLAN tab on GET.

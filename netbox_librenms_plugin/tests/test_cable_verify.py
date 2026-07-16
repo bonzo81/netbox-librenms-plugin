@@ -392,6 +392,26 @@ class TestSingleCableVerifyMisconfiguredDefault:
         assert json.loads(response.content)["status"] == "success"
 
 
+def _make_view(server_key="default"):
+    """Create a SingleCableVerifyView instance without database access."""
+    from netbox_librenms_plugin.views.base.cables_view import SingleCableVerifyView
+
+    view = object.__new__(SingleCableVerifyView)
+    view._librenms_api = MagicMock()
+    view._librenms_api.server_key = server_key
+    view.request = MagicMock()
+    return view
+
+
+def _make_request(body_dict):
+    """Create a mock POST request with JSON body."""
+    request = MagicMock()
+    request.method = "POST"
+    request.body = json.dumps(body_dict).encode()
+    request.META = {"HTTP_X_REQUESTED_WITH": "XMLHttpRequest"}
+    return request
+
+
 @pytest.mark.django_db
 class TestVerifyDualNameFallback:
     """Issue #88 (verify parity): SingleCableVerifyView.post must resolve a row whose NetBox interface is named from the LibreNMS field the user is NOT currently displaying — using the same dual-name (local_port / local_port_alt) fallback as enrich_local_port."""
@@ -585,7 +605,11 @@ class TestSingleCableVerifyServerKeyRouting:
         self._seed(view, device, "production")  # links cached ONLY under 'production'
 
         request = _make_request({"device_id": device.pk, "local_port_id": 700, "server_key": "production"})
-        row = json.loads(view.post(request).content)["formatted_row"]
+        with patch(
+            "netbox_librenms_plugin.librenms_api.LibreNMSAPI.get_available_servers",
+            return_value={"production": "Production"},
+        ):
+            row = json.loads(view.post(request).content)["formatted_row"]
 
         # The 'production' cache was read → the port link renders (not the empty Missing-Ports row).
         assert "eth0" in row["local_port"]

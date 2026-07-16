@@ -502,7 +502,7 @@ def _bind_interface_librenms_id(device, item, module_pk, server_key):
     if update_fields:
         candidate.save(update_fields=sorted(set(update_fields)))
 
-    return {"status": "bound", "interface": candidate.name, "port_id": port_id}
+    return {"status": "bound", "interface": candidate.name, "port_id": port_id, "changed": bool(update_fields)}
 
 
 def _resolve_single_install_binding_item(request, target_device, server_key, get_cache_key):
@@ -1506,7 +1506,11 @@ class UpdateModuleInterfaceView(LibreNMSPermissionMixin, NetBoxObjectPermissionM
             messages.error(request, "No LibreNMS interface identity is available for this row.")
         elif bind_result.get("status") == "bound":
             location = f"{module.module_type.model} in {module.module_bay.name}"
-            messages.success(request, _module_interface_update_message(bind_result, location))
+            # Only announce an update that actually changed something: a no-op rebind returns
+            # changed=False (nothing written). Gate on changed (or an adoption tally) so a no-op
+            # click doesn't tell the user an interface was updated when it wasn't.
+            if bind_result.get("changed") or bind_result.get("adopted_count"):
+                messages.success(request, _module_interface_update_message(bind_result, location))
         else:
             messages.warning(
                 request,
@@ -1583,6 +1587,11 @@ class ModuleMismatchPreviewView(
         )
 
         type_mismatch = matched_type is not None and installed_module.module_type_id != matched_type.pk
+        # type_matched: the LibreNMS model RESOLVED to the installed module's type (directly or via a
+        # ModuleTypeMapping). Distinct from "not type_mismatch", which also covers an UNRECOGNISED model
+        # (matched_type is None). The modal uses this to badge the LibreNMS model when its display string
+        # differs from the NetBox type but is a confirmed match (the common serial-mismatch case).
+        type_matched = matched_type is not None and installed_module.module_type_id == matched_type.pk
         installed_serial = (installed_module.serial or "").strip()
         if installed_serial.lower() in _PLACEHOLDER_VALUES:
             installed_serial = ""
@@ -1617,6 +1626,7 @@ class ModuleMismatchPreviewView(
                 "librenms_model": librenms_model,
                 "librenms_serial": librenms_serial,
                 "type_mismatch": type_mismatch,
+                "type_matched": type_matched,
                 "serial_mismatch": serial_mismatch,
                 "serial_conflict": serial_conflict,
                 "serial_conflict_ambiguous": serial_conflict_ambiguous,

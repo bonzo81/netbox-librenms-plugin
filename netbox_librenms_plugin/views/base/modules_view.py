@@ -543,6 +543,12 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
             # empty table scoped to that key instead of silently falling back to the default
             # server's cached inventory and attributing it to the requested server.
             return {"table": None, "object": obj, "cache_expiry": None, "server_key": scoped_server}
+        # No buildable client (missing/misconfigured default and no ?server_key rebind): there is no
+        # valid server scope, so degrade to the empty panel with server_key=None — mirrors the
+        # sibling tabs' _render_server_key() None fallback (develop hardening) instead of the
+        # "default" placeholder resolve_get_render_server_key falls back to.
+        if self._render_server_key() is None:
+            return {"table": None, "object": obj, "cache_expiry": None, "server_key": None}
         # Scope the VC sync-device resolution to the RESOLVED server explicitly, rather than
         # relying on resolve_get_render_server_key having rebound self.librenms_api as a side
         # effect — otherwise a future ordering/rebind change would silently key VC resolution on

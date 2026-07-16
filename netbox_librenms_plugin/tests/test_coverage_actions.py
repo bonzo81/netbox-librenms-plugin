@@ -2102,15 +2102,16 @@ class TestDeviceConflictActionMigrateLibreNMSId:
     def test_migrate_classifies_signed_numeric_string_via_shared_helper(self):
         """A signed numeric string is classified by is_legacy_librenms_id (int-parse), not the old isdigit inline.
 
-        "-42".isdigit() is False, so the old hand-inlined predicate treated it as "already JSON" and
-        bailed early; is_legacy_librenms_id parses it with int(), so the gate now agrees with the
-        link/OOB-attach paths and set_librenms_device_id's own skip rule — the value reaches the
-        real ID-match check (where the negative id fails as a genuine mismatch, not a phantom
-        "already migrated"). Pins the two gates to the shared classifier so they can't drift.
+        "+99".isdigit() is False, so the old hand-inlined predicate treated it as "already JSON" and
+        bailed early; is_legacy_librenms_id parses it with int() (and accepts a positive value), so the
+        gate now agrees with the link/OOB-attach paths and set_librenms_device_id's own skip rule — the
+        value reaches the real ID-match check (where 99 fails as a genuine mismatch against the active
+        id 42, not a phantom "already migrated"). Pins the two gates to the shared classifier so they
+        can't drift.
         """
         view = self._make_view()
         vm = make_vm("vm01-migrate-signed")
-        vm.custom_field_data["librenms_id"] = "-42"  # int-parseable but not isdigit()
+        vm.custom_field_data["librenms_id"] = "+99"  # positive, int-parseable but not isdigit()
         vm.save()
         request = _make_request(
             post={
@@ -4628,8 +4629,6 @@ class TestBulkImportEdgePaths:
         assert enqueue_kwargs["server_key"] == "default"
         assert enqueue_kwargs["sync_options"]["use_sysname"] is True
 
-
-
     def test_cold_cache_seed_does_not_fetch_from_librenms_before_enqueue(self):
         """On a cold cache + background path, the pre-enqueue seed reads the Django cache only (no fetch_device_with_cache, which HTTP-fetches on a miss) and enqueues an empty libre_devices_cache."""
         view = self._make_view()
@@ -5307,6 +5306,8 @@ class TestImportActionRebindGuard:
             response = view.post(request)
 
         assert response.status_code != 500
+
+
 class TestAddAsOOBViewGenericSentinel:
     """AddAsOOBView must not return HTTP 400 when oob_candidate.type == "oob"."""
 
@@ -6643,8 +6644,10 @@ class TestAddDeviceTypeMappingSingleUpfrontQuery:
             ),
             patch("netbox_librenms_plugin.views.imports.actions.DeviceValidationDetailsView") as mock_detail,
             # Skip the post-save modal/row re-render (template URL reversal) — irrelevant to the
-            # upfront query count, which has already run by then.
-            patch.object(view, "get_validated_device_with_selections", return_value=(None, None, None)),
+            # upfront query count, which has already run by then. post() reuses the in-memory
+            # libre_device via validate_and_apply_selections (returns (validation, selections)); a
+            # None validation short-circuits the render_device_row call.
+            patch.object(view, "validate_and_apply_selections", return_value=(None, None)),
         ):
             mock_detail.return_value.get.return_value = MagicMock(content=b"<div></div>")
             with CaptureQueriesContext(connection) as ctx:

@@ -119,13 +119,17 @@ class LibreNMSAPI:
                 (k for k, cfg in servers_config.items() if self._is_usable_server_config(cfg)),
                 None,
             )
-            if first_key:
-                logger.info(
-                    "Server '%s' not found in config, falling back to '%s'",
-                    server_key,
-                    first_key,
-                )
-                server_key = first_key
+            # #110: a non-empty servers_config with no usable entry must surface a clear error
+            # rather than silently falling through to a (possibly stale) legacy single-server
+            # config. build_librenms_api() converts this ValueError into a clean None.
+            if first_key is None:
+                raise ValueError("No valid LibreNMS server configuration entries found.")
+            logger.info(
+                "Server '%s' not found in config, falling back to '%s'",
+                server_key,
+                first_key,
+            )
+            server_key = first_key
 
         self.server_key = server_key
 
@@ -136,7 +140,10 @@ class LibreNMSAPI:
             # entry (e.g. {"default": "not-a-dict"}) would otherwise raise an opaque TypeError
             # at the key reads below. Fail with a clear configuration error instead (issue #110).
             if not isinstance(config, dict):
-                raise ValueError(f"Invalid LibreNMS server configuration for '{server_key}': expected a mapping.")
+                raise ValueError(
+                    f"LibreNMS server '{server_key}' is misconfigured "
+                    f"(expected a mapping, got {type(config).__name__})."
+                )
             # Read with .get() rather than direct indexing: a dict-shaped but incomplete entry
             # (e.g. {"default": {}}) passes the isinstance check, so config["librenms_url"] would
             # raise an opaque KeyError instead of the ValueError contract callers rely on. The

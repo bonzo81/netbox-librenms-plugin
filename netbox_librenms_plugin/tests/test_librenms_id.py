@@ -367,10 +367,10 @@ class TestIsLegacyLibreNMSId:
         "value,expected",
         [
             (42, True),  # legacy bare int
-            (0, True),
-            (-5, True),
+            (0, False),  # 0 is not a valid (positive) legacy id
+            (-5, False),  # negative is not a valid legacy id
             ("42", True),  # legacy numeric string
-            ("0", True),
+            ("0", False),  # parses to 0 -> not a valid legacy id
             (True, False),  # bool is never a valid id (isinstance(True, int) is True)
             (False, False),
             ("abc", False),  # corrupt string, not a legacy id

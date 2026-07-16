@@ -539,17 +539,20 @@ class TestSyncInterfacesViewPost:
 
 
 class TestSyncInterfacesViewServerKeyAndRedirect:
-    """Issues #107/#108/#109: the POST server_key must be validated against configured servers before it scopes cache/CF lookups, and interface_name_field must be URL-escaped in the post-sync redirect."""
+    """Issue #107: interface_name_field must be URL-escaped in the post-sync redirect.
 
-    def _make_view(self, configured_servers):
+    The POSTed server_key rebind / fail-closed behavior (#108/#109) is covered by
+    test_coverage_sync_views.TestSyncInterfacesViewServerRebind, which exercises the same
+    rebind_api_for_server seam SyncInterfacesView.post actually uses.
+    """
+
+    def _make_view(self):
         from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
 
         view = object.__new__(SyncInterfacesView)
         view.require_all_permissions = MagicMock(return_value=None)
         view.get_required_permissions_for_object_type = MagicMock(return_value=[])
-        mock_api = MagicMock(server_key="default")
-        mock_api.get_available_servers.return_value = configured_servers
-        return view, mock_api
+        return view
 
     def _run_no_selection(self, view, mock_api, post_data, name_field="ifName"):
         """Drive post() down the no-selection redirect path (server_key + redirect_url are set before that), returning the redirect call mock."""
@@ -559,30 +562,16 @@ class TestSyncInterfacesViewServerKeyAndRedirect:
             patch("netbox_librenms_plugin.views.sync.interfaces.messages"),
             patch("netbox_librenms_plugin.views.sync.interfaces.redirect") as mock_redirect,
             patch("netbox_librenms_plugin.views.sync.interfaces.reverse", return_value="/sync/"),
-            # The POSTed key is validated via the LibreNMSAPI classmethod (not the instance property)
-            # so a misconfigured default client is never built during validation — mock the classmethod.
-            patch(
-                "netbox_librenms_plugin.librenms_api.LibreNMSAPI.get_available_servers",
-                return_value=mock_api.get_available_servers.return_value,
-            ),
-            patch.object(type(view), "librenms_api", new_callable=lambda: property(lambda s: mock_api)),
+            # post() rebinds the client to the POSTed server via build_librenms_api (the fail-closed
+            # seam); return a mock so a blank/valid key resolves without touching the DB or a real client.
+            patch("netbox_librenms_plugin.librenms_api.build_librenms_api", return_value=mock_api),
         ):
             view.post(_make_request(post_data=post_data), "device", 1)
         return mock_redirect
 
-    def test_unconfigured_server_key_falls_back_to_active(self):
-        view, mock_api = self._make_view({"default": "Default", "secondary": "Secondary"})
-        self._run_no_selection(view, mock_api, {"server_key": "evil-server"})
-        # The forged key is not configured, so it is dropped in favour of the active server.
-        assert view._post_server_key == "default"
-
-    def test_configured_server_key_is_honoured(self):
-        view, mock_api = self._make_view({"default": "Default", "secondary": "Secondary"})
-        self._run_no_selection(view, mock_api, {"server_key": "secondary"})
-        assert view._post_server_key == "secondary"
-
     def test_interface_name_field_is_url_escaped_in_redirect(self):
-        view, mock_api = self._make_view({"default": "Default"})
+        view = self._make_view()
+        mock_api = MagicMock(server_key="default")
         mock_redirect = self._run_no_selection(view, mock_api, {}, name_field="ifName&injected=1")
         url = mock_redirect.call_args.args[0]
         assert "ifName%26injected%3D1" in url
@@ -1653,42 +1642,8 @@ class TestDeleteNetBoxInterfacesViewPost:
         mock_interface_ok.delete.assert_called_once()
 
 
-class TestSyncInterfacesViewServerKeyValidation:
-    """A POSTed valid non-default server_key must be validated via the LibreNMSAPI classmethod.
-
-    Touching the ``self.librenms_api`` instance property builds the default/selected client, so a
-    misconfigured default would 500 a sync the user legitimately requested on a working non-default
-    server. The POSTed key only scopes cache + librenms_id CF reads, so validation must not build.
-    """
-
-    def test_valid_server_key_does_not_build_default_client(self):
-        from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
-
-        view = object.__new__(SyncInterfacesView)
-        view.require_all_permissions = MagicMock(return_value=None)
-        view.get_required_permissions_for_object_type = MagicMock(return_value=[])
-        view.get_object = MagicMock(return_value=MagicMock(pk=7))
-        # No selection → redirect right after server_key is resolved (keeps the test focused).
-        view.get_selected_interfaces = MagicMock(return_value=None)
-
-        def _boom(self):
-            raise RuntimeError("default LibreNMS client build must not happen during key validation")
-
-        request = _make_request(post_data={"server_key": "production"})
-
-        with (
-            patch(
-                "netbox_librenms_plugin.librenms_api.LibreNMSAPI.get_available_servers",
-                return_value={"production": {"url": "u", "token": "t"}},
-            ),
-            patch.object(type(view), "librenms_api", property(_boom)),
-            patch("netbox_librenms_plugin.views.sync.interfaces.get_interface_name_field", return_value="ifName"),
-            patch("netbox_librenms_plugin.views.sync.interfaces.reverse", return_value="/sync/"),
-            patch("netbox_librenms_plugin.views.sync.interfaces.redirect", side_effect=lambda url: url),
-        ):
-            result = view.post(request, object_type="device", object_id=7)
-
-        # Fixed: classmethod validates "production" without touching the property. Unfixed:
-        # self.librenms_api.get_available_servers() builds the misconfigured default → RuntimeError.
-        assert view._post_server_key == "production"
-        assert "server_key=production" in result
+# A POSTed valid non-default server_key must scope the sync to that server without 500ing on a
+# misconfigured default client. Under the stack that behavior comes from rebind_api_for_server, so
+# its coverage lives with the rebind seam in
+# test_coverage_sync_views.TestSyncInterfacesViewServerRebind
+# (test_posted_server_key_is_bound_for_the_sync / test_stale_server_key_fails_closed_without_sync).

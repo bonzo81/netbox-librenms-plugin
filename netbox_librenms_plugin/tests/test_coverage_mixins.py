@@ -20,7 +20,7 @@ class TestCacheRemainingTtl:
     """cache_remaining_ttl centralises the django-redis-only cache.ttl() guard."""
 
     def test_returns_value_when_backend_exposes_ttl(self):
-        from netbox_librenms_plugin.views.mixins import cache_remaining_ttl
+        from netbox_librenms_plugin.utils import cache_remaining_ttl
 
         backend = MagicMock()
         backend.ttl.return_value = 123
@@ -28,7 +28,7 @@ class TestCacheRemainingTtl:
         backend.ttl.assert_called_once_with("some-key")
 
     def test_returns_none_when_backend_lacks_ttl(self):
-        from netbox_librenms_plugin.views.mixins import cache_remaining_ttl
+        from netbox_librenms_plugin.utils import cache_remaining_ttl
 
         # A core Django backend (e.g. LocMemCache) exposes no ttl() — the guard must degrade to
         # None rather than raising AttributeError mid-render.
@@ -128,7 +128,7 @@ class TestLibreNMSAPIMixinResolveGetRenderServerKey:
         return m
 
     def test_blank_key_misconfigured_default_does_not_rebuild_client(self):
-        """Blank key + no cached client + misconfigured default scopes to "default" without rebuilding."""
+        """Blank key + no cached client + misconfigured default degrades to None scope without rebuilding."""
         m = self._mixin()
         with (
             patch("netbox_librenms_plugin.librenms_api.build_librenms_api", return_value=None),
@@ -138,7 +138,7 @@ class TestLibreNMSAPIMixinResolveGetRenderServerKey:
         mock_api_cls.assert_not_called()  # the lazy property must never reconstruct the default
         assert m._librenms_api is None  # left unbound, not a freshly-built client
         assert unresolved is False
-        assert scoped == "default"
+        assert scoped is None
 
     def test_blank_key_reads_cached_client_key_without_rebuild(self):
         """Blank key with a cached client returns that client's key, read directly without rebuilding."""

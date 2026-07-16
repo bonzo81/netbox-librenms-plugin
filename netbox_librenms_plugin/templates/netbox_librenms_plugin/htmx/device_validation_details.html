@@ -449,7 +449,7 @@
           {% csrf_token %}
           <input type="hidden" name="existing_device_id" value="{{ validation.existing_device.pk }}">
           <input type="hidden" name="existing_device_type" value="{{ existing_device_model_name|default:'device' }}">
-          {% include "netbox_librenms_plugin/inc/_hidden_server_key.html" %}
+          <input type="hidden" name="server_key" value="{{ server_key }}">
           <input type="hidden" name="action" value="migrate_librenms_id">
           {% if validation.existing_device.cluster %}
           <input type="hidden" name="cluster_{{ libre_device.device_id }}" value="{{ validation.existing_device.cluster.pk }}">
@@ -615,7 +615,7 @@
             <input type="hidden" name="existing_device_id" value="{{ validation.existing_device.pk }}">
             <input type="hidden" name="existing_device_type" value="{{ existing_device_model_name|default:'device' }}">
             {% comment %}Carry the modal's server scope (mirrors the Add-as-OOB form below).{% endcomment %}
-            {% include "netbox_librenms_plugin/inc/_hidden_server_key.html" %}
+            <input type="hidden" name="server_key" value="{{ server_key }}">
             {% if validation.device_type_mismatch %}
               <div class="form-check mb-2">
                 <input class="form-check-input" type="checkbox" name="force" id="force-promote-{{ libre_device.device_id }}"

@@ -224,7 +224,7 @@ class BaseInterfaceTableView(VlanAssignmentMixin, LibreNMSAPIMixin, LibreNMSPerm
         ports = librenms_data.get("ports", []) if isinstance(librenms_data, dict) else None
         if not is_list_of_dicts(ports):
             messages.error(request, "Unexpected response from LibreNMS (malformed ports payload).")
-            return redirect(self.get_redirect_url(obj))
+            return self._failure_redirect(request, obj, _server_key)
 
         # Enrich ports with VLAN data for trunk ports
         enriched_ports = self._enrich_ports_with_vlan_data(ports, interface_name_field)
@@ -452,12 +452,16 @@ class BaseInterfaceTableView(VlanAssignmentMixin, LibreNMSAPIMixin, LibreNMSPerm
 
         # Fail closed on a stale/corrupt cache entry: the enrichment below assumes a dict with a
         # list of dict ports (same contract post() validates before caching), so a malformed
-        # snapshot would 500 the sync tab before the user could refresh. Drop it and render empty.
+        # snapshot would 500 the sync tab before the user could refresh. Purge it so a later render
+        # re-fetches. A dict envelope with a malformed "ports" is kept so the isinstance(dict) block
+        # below degrades ports_data to [] and still builds an empty (but real) table (issue #100
+        # site 4); a non-dict snapshot has no envelope to render and drops to None.
         if cached_data is not None and not is_valid_ports_payload(cached_data):
             if fresh_data is None:
                 cache.delete(self.get_cache_key(cache_device, "ports", server_key))
                 cache.delete(self.get_last_fetched_key(cache_device, "ports", server_key))
-            cached_data = None
+            if not isinstance(cached_data, dict):
+                cached_data = None
             last_fetched = None
 
         # A snapshot tagged oob_incomplete is host-only because the linked OOB controller's

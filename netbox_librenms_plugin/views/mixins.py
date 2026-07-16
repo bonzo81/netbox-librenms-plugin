@@ -475,6 +475,7 @@ class LibreNMSAPIMixin:
             tuple[bool, dict | None]: ``(success, device_info)`` from ``get_device_info``.
         """
         return self.librenms_api.get_device_info(librenms_id, use_cache=False)
+
     def rebind_api_for_server(self, server_key):
         """
         Rebind ``self.librenms_api`` to the POST-scoped *server_key*.
@@ -553,7 +554,7 @@ class LibreNMSAPIMixin:
         scoped = (
             resolved
             if resolved is not None
-            else (requested or getattr(getattr(self, "_librenms_api", None), "server_key", None) or "default")
+            else (requested or getattr(getattr(self, "_librenms_api", None), "server_key", None))
         )
         return scoped, False
 

@@ -919,7 +919,10 @@ def validate_device_for_import(
                 else []
             )
             _serial_peers = (
-                list(Device.objects.filter(serial=_serial_now)[:2])
+                # Reuse the Stage-1 serial [:2] result (issue #101 guard, computed above) instead of
+                # re-issuing the identical UNIQUE query — keeps the single-query invariant while the
+                # fail-closed guard stays in place. Only defined when existing_match_type == "serial".
+                serial_matches
                 if _dup_eligible and _match_type == "serial" and _serial_now and _serial_now != "-"
                 else []
             )

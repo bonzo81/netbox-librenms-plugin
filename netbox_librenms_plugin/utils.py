@@ -1297,36 +1297,6 @@ def get_librenms_device_id(obj, server_key: str = "default", *, auto_save: bool 
     return None
 
 
-def is_legacy_librenms_id(value) -> bool:
-    """
-    Return True if *value* is a legacy bare-integer librenms_id (or its string form).
-
-    The multi-server format is a ``{server_key: ...}`` dict; the legacy format is a bare int (or
-    the string that parses as one). ``set_librenms_device_id`` refuses to overwrite a legacy value
-    (it would silently migrate it), so the link/OOB-attach views gate on this and ask the user to
-    "Convert mapping" first. Centralised so those call sites can't drift from each other or from
-    ``set_librenms_device_id``'s own skip rule. A bool is never a valid id
-    (``isinstance(True, int)`` is True), so it is excluded.
-
-    Args:
-        value: The raw ``librenms_id`` custom-field value to classify.
-
-    Returns:
-        bool: True for a legacy bare int / numeric string; False otherwise.
-    """
-    if isinstance(value, bool):
-        return False
-    if isinstance(value, int):
-        return True
-    if isinstance(value, str):
-        try:
-            int(value)
-        except (ValueError, TypeError):
-            return False
-        return True
-    return False
-
-
 def set_librenms_device_id(obj, device_id, server_key: str = "default"):
     """
     Set the LibreNMS device/port ID for a specific server on the JSON custom field.

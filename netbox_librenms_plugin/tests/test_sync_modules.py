@@ -124,110 +124,73 @@ class TestInstallBranchViewCollectChildrenCycleGuard:
         assert len(items) == 0
 
 
+@pytest.mark.django_db
 class TestGetModuleTypesIndexed:
-    """get_module_types_indexed builds a dict keyed by model name, part number, and mappings."""
+    """get_module_types_indexed keys real ModuleTypes by model/part-number with ModuleTypeMappings applied."""
+
+    @staticmethod
+    def _mfr(name):
+        from dcim.models import Manufacturer
+
+        return Manufacturer.objects.create(name=name, slug=name.lower())
+
+    @staticmethod
+    def _mtype(mfr, model, part_number=""):
+        from dcim.models import ModuleType
+
+        return ModuleType.objects.create(manufacturer=mfr, model=model, part_number=part_number)
+
+    @staticmethod
+    def _mapping(librenms_model, netbox_module_type, manufacturer=None):
+        from netbox_librenms_plugin.models import ModuleTypeMapping
+
+        return ModuleTypeMapping.objects.create(
+            librenms_model=librenms_model, netbox_module_type=netbox_module_type, manufacturer=manufacturer
+        )
 
     def test_indexes_by_model_and_part_number(self):
+        """ModuleTypes are keyed by model and part_number, and a global mapping adds its librenms_model key."""
         from netbox_librenms_plugin.utils import get_module_types_indexed
 
-        mt1 = MagicMock()
-        mt1.model = "WS-X4748"
-        mt1.part_number = "ALT-PART-4748"
+        mfr = self._mfr("IdxA")
+        mt1 = self._mtype(mfr, "WS-X4748-IDX", "ALT-PART-4748-IDX")
+        mt2 = self._mtype(mfr, "WS-X4516-IDX", "WS-X4516-IDX")  # part_number == model → single key
+        self._mapping("libre-model-a-idx", mt1)
 
-        mt2 = MagicMock()
-        mt2.model = "WS-X4516"
-        mt2.part_number = "WS-X4516"  # same as model → no extra key
+        result = get_module_types_indexed()
 
-        mock_mapping = MagicMock()
-        mock_mapping.librenms_model = "libre-model-a"
-        mock_mapping.netbox_module_type = mt1
-        mock_mapping.manufacturer_id = None
-
-        mock_mt_cls = MagicMock()
-        mock_mt_cls.objects.all.return_value.select_related.return_value.prefetch_related.return_value = [mt1, mt2]
-
-        mock_map_cls = MagicMock()
-        mock_map_cls.objects.select_related.return_value.prefetch_related.return_value = [mock_mapping]
-
-        with patch.dict(
-            "sys.modules",
-            {
-                "dcim.models": type("m", (), {"ModuleType": mock_mt_cls})(),
-            },
-        ):
-            with patch("netbox_librenms_plugin.models.ModuleTypeMapping", mock_map_cls):
-                result = get_module_types_indexed()
-
-        assert result["WS-X4748"] is mt1
-        assert result["ALT-PART-4748"] is mt1
-        assert result["WS-X4516"] is mt2
-        assert result["libre-model-a"] is mt1
+        assert result["WS-X4748-IDX"] == mt1
+        assert result["ALT-PART-4748-IDX"] == mt1
+        assert result["WS-X4516-IDX"] == mt2
+        assert result["libre-model-a-idx"] == mt1
 
     def test_mapping_overrides_ambiguous_base_key(self):
-        """A unique ModuleTypeMapping entry overrides a base key that became ambiguous."""
+        """A unique ModuleTypeMapping survives even though the colliding base model key is dropped."""
         from netbox_librenms_plugin.utils import get_module_types_indexed
 
-        # Two ModuleTypes share the same model name → base key becomes ambiguous
-        mt1 = MagicMock()
-        mt1.model = "SFP-1G-LX"
-        mt1.part_number = ""
+        # Two ModuleTypes (distinct manufacturers, since (manufacturer, model) is unique) share a
+        # model name → that base key collides and is dropped from the index.
+        mt1 = self._mtype(self._mfr("AmbA"), "SFP-1G-LX-IDX")
+        self._mtype(self._mfr("AmbB"), "SFP-1G-LX-IDX")
+        self._mapping("SFP-1G-LX-EXPLICIT-IDX", mt1)
 
-        mt2 = MagicMock()
-        mt2.model = "SFP-1G-LX"  # same → ambiguous in base pass
-        mt2.part_number = ""
+        result = get_module_types_indexed()
 
-        # Explicit mapping for a distinct key → should be present despite base ambiguity
-        mock_mapping = MagicMock()
-        mock_mapping.librenms_model = "SFP-1G-LX-EXPLICIT"
-        mock_mapping.netbox_module_type = mt1
-        mock_mapping.manufacturer_id = None
-
-        mock_mt_cls = MagicMock()
-        mock_mt_cls.objects.all.return_value.select_related.return_value.prefetch_related.return_value = [mt1, mt2]
-
-        mock_map_cls = MagicMock()
-        mock_map_cls.objects.select_related.return_value.prefetch_related.return_value = [mock_mapping]
-
-        with patch.dict(
-            "sys.modules",
-            {
-                "dcim.models": type("m", (), {"ModuleType": mock_mt_cls})(),
-            },
-        ):
-            with patch("netbox_librenms_plugin.models.ModuleTypeMapping", mock_map_cls):
-                result = get_module_types_indexed()
-
-        # Base key was ambiguous and must be absent; explicit mapping key must be present
-        assert "SFP-1G-LX" not in result
-        assert result["SFP-1G-LX-EXPLICIT"] is mt1
+        assert "SFP-1G-LX-IDX" not in result  # ambiguous base key dropped
+        assert result["SFP-1G-LX-EXPLICIT-IDX"] == mt1  # explicit mapping still resolves
 
     def test_manufacturer_scoped_mapping_kept_separate_from_base_index(self):
-        """A manufacturer-scoped ModuleTypeMapping must not pollute the global key space."""
+        """A manufacturer-scoped mapping lives only in mfr_mappings, never the global key space."""
         from netbox_librenms_plugin.utils import get_module_types_indexed
 
-        mt_juniper = MagicMock()
-        mt_juniper.model = "QSFP-100G-LR4-JUNIPER"
-        mt_juniper.part_number = ""
+        mfr = self._mfr("JuniperIdx")
+        mt = self._mtype(mfr, "QSFP-100G-LR4-JUNIPER-IDX")
+        self._mapping("1F3QAA-IDX", mt, manufacturer=mfr)
 
-        mock_mapping = MagicMock()
-        mock_mapping.librenms_model = "1F3QAA"
-        mock_mapping.netbox_module_type = mt_juniper
-        mock_mapping.manufacturer_id = 42  # scoped → must NOT enter the global dict
+        result = get_module_types_indexed()
 
-        mock_mt_cls = MagicMock()
-        mock_mt_cls.objects.all.return_value.select_related.return_value.prefetch_related.return_value = [mt_juniper]
-
-        mock_map_cls = MagicMock()
-        mock_map_cls.objects.select_related.return_value.prefetch_related.return_value = [mock_mapping]
-
-        with patch.dict("sys.modules", {"dcim.models": type("m", (), {"ModuleType": mock_mt_cls})()}):
-            with patch("netbox_librenms_plugin.models.ModuleTypeMapping", mock_map_cls):
-                result = get_module_types_indexed()
-
-        # The vendor-scoped librenms_model must NOT leak into the global lookup
-        assert "1F3QAA" not in result
-        # …but it must be reachable via the per-manufacturer side index
-        assert result.mfr_mappings[(42, "1F3QAA")] is mt_juniper
+        assert "1F3QAA-IDX" not in result  # vendor-scoped key must not leak globally
+        assert result.mfr_mappings[(mfr.pk, "1F3QAA-IDX")] == mt
 
 
 class TestResolveModuleTypeManufacturerScope:
@@ -1940,7 +1903,9 @@ class TestSingleInstallInterfaceBinding:
             patch("netbox_librenms_plugin.views.sync.modules.get_librenms_device_id", return_value=999),
             patch(
                 "netbox_librenms_plugin.views.sync.modules._bind_interface_librenms_id",
-                return_value={"status": "bound", "interface": "Te1/1/1", "port_id": 42},
+                # changed=True: a real (re)bind wrote update_fields, so the success toast fires;
+                # the message is gated on `changed` (develop's _bind_interface_librenms_id contract).
+                return_value={"status": "bound", "interface": "Te1/1/1", "port_id": 42, "changed": True},
             ) as mock_bind,
             patch("netbox_librenms_plugin.views.sync.modules.messages") as mock_messages,
             patch("netbox_librenms_plugin.views.sync.modules._modules_redirect_response", return_value="redirected"),
@@ -2040,7 +2005,9 @@ class TestSingleInstallInterfaceBinding:
             patch("netbox_librenms_plugin.views.sync.modules.get_librenms_device_id", return_value=999),
             patch(
                 "netbox_librenms_plugin.views.sync.modules._bind_interface_librenms_id",
-                return_value={"status": "bound", "interface": "Te1/1/1", "port_id": 42},
+                # changed=True: the primary bind wrote update_fields, so it stays a success even
+                # after adoption raises; the success toast is gated on `changed`.
+                return_value={"status": "bound", "interface": "Te1/1/1", "port_id": 42, "changed": True},
             ) as mock_bind,
             patch(
                 "netbox_librenms_plugin.views.sync.modules._adopt_existing_template_interfaces",

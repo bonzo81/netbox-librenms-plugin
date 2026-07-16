@@ -2,8 +2,6 @@
 
 from unittest.mock import MagicMock, patch
 
-import pytest
-
 
 def _make_view(cls_name, module_path="netbox_librenms_plugin.views.sync.devices"):
     import importlib

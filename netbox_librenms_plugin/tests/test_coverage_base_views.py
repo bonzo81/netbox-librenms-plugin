@@ -2273,7 +2273,7 @@ class TestBaseInterfaceTableViewGetContextData:
         mock_iface = MagicMock()
         mock_iface.name = "Gi0/0"
         mock_ifaces_qs = MagicMock()
-        mock_ifaces_qs.select_related.return_value = [mock_iface]
+        mock_ifaces_qs.select_related.return_value.prefetch_related.return_value = [mock_iface]
         mock_table = MagicMock()
 
         # spec without "ttl" → getattr(cache, "ttl", ...) must take the fallback; a direct
@@ -2314,7 +2314,7 @@ class TestBaseInterfaceTableViewGetContextData:
         mock_iface = MagicMock()
         mock_iface.name = "Gi0/0"
         mock_ifaces_qs = MagicMock()
-        mock_ifaces_qs.select_related.return_value = [mock_iface]
+        mock_ifaces_qs.select_related.return_value.prefetch_related.return_value = [mock_iface]
 
         with (
             patch.object(view, "get_cache_key", return_value="key"),
@@ -3400,7 +3400,7 @@ class TestBaseInterfaceTableViewMissingLines:
         obj = MagicMock()
         obj.virtual_chassis = None
         obj.id = 1
-        request = MagicMock()
+        request = _mock_request()
 
         with (
             patch.object(view, "get_cache_key", return_value="k"),
@@ -3603,6 +3603,7 @@ class TestBaseIPAddressTableViewFlagManagementIp:
         view = self._make_view()
         view._librenms_api.get_device_info.return_value = (True, {"ip": 123})
         assert view._resolve_management_ip() == ""
+
 
 class TestSingleCableVerifyViewPermissionGate:
     """SingleCableVerifyView is a read-only JSON endpoint exposing a device's cable/topology rows; it must require dcim.view_device like the interface/module verify views."""
