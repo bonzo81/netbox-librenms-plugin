@@ -1352,6 +1352,27 @@ class TestLibreNMSAPIPortsAndInventory:
         assert success is True
         assert len(ips) == 0
 
+    @patch("netbox_librenms_plugin.librenms_api.requests.get")
+    def test_get_device_ips_404_is_empty_not_failure(self, mock_get, mock_librenms_config):
+        """LibreNMS 404s /devices/{id}/ip for a device with no IPs — a successful empty result, not a fetch failure."""
+        import requests
+
+        response = mock_get.return_value
+        response.status_code = 404
+        error = requests.exceptions.HTTPError("404 Client Error: Not Found")
+        error.response = response
+        response.raise_for_status.side_effect = error
+
+        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+
+        api = LibreNMSAPI(server_key="default")
+        success, ips = api.get_device_ips(device_id=123)
+
+        # A device with no IPs must surface as an empty success so the IP tab shows an empty
+        # table, not a red "Failed to fetch IP addresses" error (mirrors get_device_links).
+        assert success is True
+        assert ips == []
+
 
 # =============================================================================
 # Test Class 8: Poller and Devices (4 tests)
