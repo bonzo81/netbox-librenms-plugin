@@ -27,6 +27,11 @@ Only these identity essentials are stored. The controller's IP and firmware vers
 
 When a searched LibreNMS device looks like an OOB controller (by its OS/hardware strings, e.g. an iDRAC) and matches an existing NetBox device, the validation details show an **OOB Detected** panel instead of a plain import button. From there one of three resolution flows is offered, depending on what already exists.
 
+![OOB Detected validation panel, showing the OOB attach effect and the Add-as-OOB action](../img/oob/oob-detected-validation.png)
+
+!!! tip "Not seeing the panel?"
+    The panel only appears when **both** conditions hold: the incoming LibreNMS device's `os`/`hardware` (or hostname) matches an OOB pattern (`idrac`, `ilo`, `ipmi`, `bmc`, `drac`, `cimc`), **and** it matches an existing NetBox device by unique **serial** or by **management IP**. If the incoming hostname already matches a NetBox device name it takes the plain hostname-match path instead, and if the device is already linked to LibreNMS no OOB action is offered. (Device identifiers are blurred in these screenshots.)
+
 ### Add as OOB
 
 Use when the existing NetBox device is the **host** and the incoming LibreNMS device is its OOB controller.
@@ -35,6 +40,8 @@ The **Add as OOB to *device*** action links the controller's LibreNMS ID into th
 
 - A sensible interface is **pre-selected** (matched by name — `idrac`/`ilo`/`bmc`-style). Because the OOB IP is frequently *not* physically on that interface, the selection is **overridable**.
 - Choose **+ Create new interface…** to create one (default name suggested) to hang the OOB IP on.
+
+![OOB IP interface picker with "+ Create new interface" selected and a suggested name](../img/oob/oob-create-new-interface.png)
 
 The OOB IP is then created (or re-homed) assigned to the chosen interface and set as the device's `oob_ip`. If you make no interface selection, the link is still recorded and the OOB IP is left for you to set later.
 
