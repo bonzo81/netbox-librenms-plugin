@@ -53,6 +53,40 @@ Matching is case-insensitive and exact: the LibreNMS hardware string must equal 
 
 ---
 
+## Location Mappings
+
+Maps a value parsed from the LibreNMS location string to a specific NetBox **Site**, **Location**, **Rack**, or **Tenant**. Use these when a parsed token does not match the NetBox object's name exactly (e.g. LibreNMS reports `NYC` but the NetBox site is named `New York`).
+
+> `region` is a [parse token](../librenms_import/import_settings.md#location-parsing) only — it has no mapping type, because a device inherits its region from its site and there is no device-level region field to populate.
+
+**Used by:**
+- Device Import — resolves parsed location tokens after the [Location Parse Pattern](../librenms_import/import_settings.md#location-parsing) splits the LibreNMS location string
+
+Matching is case-insensitive. During import the plugin first tries an exact NetBox name match for each token; if none is found it falls back to a matching `LocationMapping`.
+
+**Scoping:**
+- **Site / Tenant** values are globally unique — a given LibreNMS value maps to exactly one object, and duplicate mappings are rejected.
+- **Location / Rack** are scoped to a parent site in NetBox, so the same value may map to different objects under different sites. Resolution uses the site parsed from the same location string to pick the right one; for bulk import, supply `parent_site` to disambiguate.
+
+**YAML format:**
+
+```yaml
+- field_type: site
+  librenms_value: NYC
+  netbox_object: New York
+  description: "LibreNMS 'NYC' -> NetBox site 'New York'"
+
+- field_type: rack
+  librenms_value: R12
+  netbox_object: Rack-12
+  parent_site: New York
+  description: "Rack alias scoped to a site"
+```
+
+`netbox_object` is the **name** of the target NetBox object. For `location` and `rack`, include `parent_site` when the name is not unique across sites.
+
+---
+
 ## Module Type Mappings
 
 Maps a LibreNMS `entPhysicalModelName` string (e.g. `SFP-1G-T`, `3HE16474AA`) to a NetBox ModuleType object.
