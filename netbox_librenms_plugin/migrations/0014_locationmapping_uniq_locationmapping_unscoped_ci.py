@@ -17,7 +17,7 @@ class Migration(migrations.Migration):
             constraint=models.UniqueConstraint(
                 models.F("field_type"),
                 django.db.models.functions.text.Lower("librenms_value"),
-                condition=models.Q(("field_type__in", ["region", "site", "tenant"])),
+                condition=models.Q(("field_type__in", ["site", "tenant"])),
                 name="uniq_locationmapping_unscoped_ci",
             ),
         ),

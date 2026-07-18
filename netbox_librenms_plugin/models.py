@@ -781,7 +781,6 @@ class PlatformMapping(FullCleanOnSaveMixin, NetBoxModel):
 
 # Maps LocationMapping.field_type -> (app_label, model_name) of the target NetBox object.
 LOCATION_MAPPING_TARGETS = {
-    "region": ("dcim", "region"),
     "site": ("dcim", "site"),
     "location": ("dcim", "location"),
     "rack": ("dcim", "rack"),
@@ -796,18 +795,18 @@ class LocationMapping(FullCleanOnSaveMixin, NetBoxModel):
     its structure with a parse pattern which yields tokens for
     region/site/location/rack/tenant. When a token does not match a NetBox
     object's name exactly, a LocationMapping provides an explicit alias from the
-    LibreNMS value to a specific NetBox object (Region, Site, Location, Rack, or
-    Tenant) via a generic foreign key.
+    LibreNMS value to a specific NetBox object (Site, Location, Rack, or Tenant)
+    via a generic foreign key. Region is a parse token only and has no mapping
+    target, because a device inherits its region from its site.
 
-    Region/Site/Tenant values are globally unique, so a single LibreNMS value
-    maps to exactly one object of that type. Location/Rack are scoped to a parent
+    Site/Tenant values are globally unique, so a single LibreNMS value maps to
+    exactly one object of that type. Location/Rack are scoped to a parent
     site in NetBox, so the same value may map to different objects under different
     sites; resolution disambiguates by the parent site parsed from the same
     location string.
     """
 
     FIELD_TYPE_CHOICES = (
-        ("region", "Region"),
         ("site", "Site"),
         ("location", "Location"),
         ("rack", "Rack"),
@@ -851,11 +850,11 @@ class LocationMapping(FullCleanOnSaveMixin, NetBoxModel):
             if (ct.app_label, ct.model) != expected:
                 raise ValidationError({"content_type": f"Target object must be a {self.get_field_type_display()}."})
 
-        # region/site/tenant names are globally unique, so the same LibreNMS value
+        # site/tenant names are globally unique, so the same LibreNMS value
         # mapping to two different objects of the same type would be ambiguous.
         # location/rack are scoped to a parent site, so duplicates are allowed and
         # disambiguated at resolution time by the parent site.
-        if self.field_type in ("region", "site", "tenant"):
+        if self.field_type in ("site", "tenant"):
             qs = LocationMapping.objects.filter(
                 field_type=self.field_type,
                 librenms_value__iexact=self.librenms_value,
@@ -880,7 +879,7 @@ class LocationMapping(FullCleanOnSaveMixin, NetBoxModel):
 
         ordering = ["field_type", "librenms_value"]
         constraints = [
-            # region/site/tenant values are globally unique, so a case-insensitive
+            # site/tenant values are globally unique, so a case-insensitive
             # (field_type, librenms_value) pair must be unique to keep resolution
             # deterministic. location/rack are scoped to a parent site, so they are
             # intentionally excluded and may legitimately repeat. The partial index
@@ -888,7 +887,7 @@ class LocationMapping(FullCleanOnSaveMixin, NetBoxModel):
             models.UniqueConstraint(
                 models.F("field_type"),
                 Lower("librenms_value"),
-                condition=Q(field_type__in=["region", "site", "tenant"]),
+                condition=Q(field_type__in=["site", "tenant"]),
                 name="uniq_locationmapping_unscoped_ci",
             ),
         ]

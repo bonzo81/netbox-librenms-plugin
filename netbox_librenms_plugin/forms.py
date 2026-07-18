@@ -12,7 +12,6 @@ from dcim.models import (
     ModuleType,
     Platform,
     Rack,
-    Region,
     Site,
 )
 from django import forms
@@ -841,7 +840,6 @@ class LocationMappingForm(NetBoxModelForm):
     ``field_type`` is required and used to populate the generic foreign key.
     """
 
-    region = DynamicModelChoiceField(queryset=Region.objects.all(), required=False, label="NetBox Region")
     site = DynamicModelChoiceField(queryset=Site.objects.all(), required=False, label="NetBox Site")
     location = DynamicModelChoiceField(queryset=Location.objects.all(), required=False, label="NetBox Location")
     rack = DynamicModelChoiceField(queryset=Rack.objects.all(), required=False, label="NetBox Rack")
@@ -851,7 +849,6 @@ class LocationMappingForm(NetBoxModelForm):
     # (single) visible selector appears directly below it.
     field_order = [
         "field_type",
-        "region",
         "site",
         "location",
         "rack",
@@ -901,7 +898,7 @@ class LocationMappingImportForm(NetBoxModelImportForm):
 
     field_type = CSVChoiceField(
         choices=LocationMapping.FIELD_TYPE_CHOICES,
-        help_text="Type of NetBox object the value maps to (region, site, location, rack, tenant)",
+        help_text="Type of NetBox object the value maps to (site, location, rack, tenant)",
     )
     netbox_object = forms.CharField(help_text="Name of the target NetBox object")
     parent_site = CSVModelChoiceField(
@@ -936,7 +933,6 @@ class LocationMappingImportForm(NetBoxModelImportForm):
     def _resolve_object(self, field_type, name, parent_site):
         """Look up the target NetBox object by name, scoping location/rack to a site."""
         model_map = {
-            "region": Region,
             "site": Site,
             "location": Location,
             "rack": Rack,
