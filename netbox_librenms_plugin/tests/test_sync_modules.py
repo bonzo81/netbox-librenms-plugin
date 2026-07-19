@@ -264,6 +264,30 @@ class TestInstallModuleViewWiring:
             "InstallModuleView must be defined in views/sync/modules.py, not views/base/"
         )
 
+    def test_has_librenms_api_mixin(self):
+        """LibreNMSAPIMixin must stay in the MRO so resolve_posted_server_key scopes the port_id bind."""
+        from netbox_librenms_plugin.views.mixins import LibreNMSAPIMixin
+        from netbox_librenms_plugin.views.sync.modules import InstallModuleView
+
+        assert LibreNMSAPIMixin in InstallModuleView.__mro__
+
+
+class TestUpdateModuleInterfaceViewWiring:
+    """UpdateModuleInterfaceView must resolve server_key through LibreNMSAPIMixin (mirror of Install)."""
+
+    def test_has_librenms_permission_mixin(self):
+        from netbox_librenms_plugin.views.mixins import LibreNMSPermissionMixin
+        from netbox_librenms_plugin.views.sync.modules import UpdateModuleInterfaceView
+
+        assert LibreNMSPermissionMixin in UpdateModuleInterfaceView.__mro__
+
+    def test_has_librenms_api_mixin(self):
+        """LibreNMSAPIMixin must stay in the MRO so a blank/forged server_key degrades, not skips binding."""
+        from netbox_librenms_plugin.views.mixins import LibreNMSAPIMixin
+        from netbox_librenms_plugin.views.sync.modules import UpdateModuleInterfaceView
+
+        assert LibreNMSAPIMixin in UpdateModuleInterfaceView.__mro__
+
 
 class TestInstallBranchViewWiring:
     """InstallBranchView must have CacheMixin for cache key generation."""
@@ -1684,6 +1708,7 @@ class TestSingleInstallInterfaceBinding:
 
         view = object.__new__(InstallModuleView)
         view.required_object_permissions = {}
+        view._librenms_api = MagicMock(server_key="production")
         device = _make_device()
 
         module_bay = MagicMock()
@@ -1767,6 +1792,7 @@ class TestSingleInstallInterfaceBinding:
 
         view = object.__new__(InstallModuleView)
         view.required_object_permissions = {}
+        view._librenms_api = MagicMock(server_key="production")
         device = _make_device()
 
         module_bay = MagicMock()
@@ -1839,11 +1865,94 @@ class TestSingleInstallInterfaceBinding:
         assert bind_call.args[1]["_librenms_port_id"] == 42
         mock_messages.info.assert_called()
 
+    def test_install_module_view_binds_with_blank_server_key_via_active_fallback(self):
+        """A blank posted server_key falls back to the active server so the port_id bind still runs."""
+        from contextlib import contextmanager
+
+        from dcim.models import ModuleBay
+
+        from netbox_librenms_plugin.views.sync.modules import InstallModuleView
+
+        view = object.__new__(InstallModuleView)
+        view.required_object_permissions = {}
+        # The active client server that resolve_posted_server_key falls back to for a blank posted key.
+        view._librenms_api = MagicMock(server_key="production")
+        device = _make_device()
+
+        module_bay = MagicMock()
+        module_bay.name = "Slot 1"
+        module_bay.installed_module = None
+
+        module_type = MagicMock()
+        module_type.pk = 5
+        module_type.model = "SFP-10G-SR"
+
+        new_module = MagicMock()
+        new_module.pk = 321
+
+        request = _make_request(
+            "POST",
+            data={
+                "module_bay_id": "10",
+                "module_type_id": "5",
+                "serial": "SN1",
+                # Blank — e.g. a fallback render where module_sync.server_key is empty. Pre-fix this
+                # stayed "" and `if bind_item and server_key` below silently skipped the bind.
+                "server_key": "",
+                "ent_index": "77",
+            },
+        )
+
+        @contextmanager
+        def noop_atomic():
+            yield
+
+        mock_qs = MagicMock()
+        mock_qs.get.return_value = module_bay
+
+        with (
+            patch.object(view, "require_all_permissions", return_value=None),
+            patch(
+                "netbox_librenms_plugin.views.sync.modules.get_object_or_404",
+                side_effect=[device, module_bay, module_type],
+            ),
+            patch("netbox_librenms_plugin.views.sync.modules.reverse", return_value="/sync/"),
+            patch("netbox_librenms_plugin.views.sync.modules.transaction") as mock_tx,
+            patch("netbox_librenms_plugin.views.sync.modules.messages"),
+            patch("netbox_librenms_plugin.views.sync.modules.redirect"),
+            patch("dcim.models.Module") as mock_module_cls,
+            patch.object(ModuleBay, "objects") as mock_objects,
+            patch.object(view, "get_cache_key", return_value="inv-key"),
+            patch("netbox_librenms_plugin.views.sync.modules.cache") as mock_cache,
+            patch(
+                "netbox_librenms_plugin.views.sync.modules._bind_interface_librenms_id",
+                return_value={"status": "bound", "interface": "Te1/1/1", "port_id": 42},
+            ) as mock_bind,
+        ):
+            mock_tx.atomic = noop_atomic
+            mock_module_cls.return_value = new_module
+            mock_objects.select_for_update.return_value = mock_qs
+            mock_cache.get.return_value = {
+                "inventory": [
+                    {
+                        "entPhysicalIndex": 77,
+                        "_librenms_port_id": 42,
+                        "_librenms_ifname": "Te1/1/1",
+                    }
+                ]
+            }
+            view.post(request, pk=24)
+
+        # The bind must run and be scoped to the active server the blank key fell back to.
+        mock_bind.assert_called_once()
+        assert mock_bind.call_args.args[3] == "production"
+
     def test_install_module_view_rejects_missing_bay_id_for_interface_child(self):
         from netbox_librenms_plugin.views.sync.modules import InstallModuleView
 
         view = object.__new__(InstallModuleView)
         view.required_object_permissions = {}
+        view._librenms_api = MagicMock(server_key="production")
         device = _make_device()
 
         request = _make_request(
@@ -1875,6 +1984,7 @@ class TestSingleInstallInterfaceBinding:
 
         view = object.__new__(UpdateModuleInterfaceView)
         view.required_object_permissions = {}
+        view._librenms_api = MagicMock(server_key="production")
         device = _make_device()
 
         module = MagicMock()
@@ -1925,6 +2035,7 @@ class TestSingleInstallInterfaceBinding:
 
         view = object.__new__(UpdateModuleInterfaceView)
         view.required_object_permissions = {}
+        view._librenms_api = MagicMock(server_key="production")
         device = _make_device()
 
         module = MagicMock()
@@ -1981,6 +2092,7 @@ class TestSingleInstallInterfaceBinding:
 
         view = object.__new__(UpdateModuleInterfaceView)
         view.required_object_permissions = {}
+        view._librenms_api = MagicMock(server_key="production")
         device = _make_device()
 
         module = MagicMock()
@@ -2037,11 +2149,12 @@ class TestSingleInstallInterfaceBinding:
         assert response is not None
 
     def test_update_module_interface_view_no_server_key_does_not_fake_adoption_success(self):
-        """A primary identity exists (bind_item resolved) but server_key is blank, so the bind is never attempted."""
+        """bind_item resolves but server_key degrades to blank (no active server), so the bind is skipped."""
         from netbox_librenms_plugin.views.sync.modules import UpdateModuleInterfaceView
 
         view = object.__new__(UpdateModuleInterfaceView)
         view.required_object_permissions = {}
+        view._librenms_api = MagicMock(server_key="")
         device = _make_device()
 
         module = MagicMock()
@@ -2049,7 +2162,9 @@ class TestSingleInstallInterfaceBinding:
         module.module_type.model = "SFP-10G-SR"
         module.module_bay.name = "SFP 1"
 
-        # No server_key in POST → bind cannot be attempted.
+        # No server_key posted AND the active server resolves to blank → bind cannot be attempted
+        # (post-fix, a blank posted key alone falls back to the active server; only a blank active
+        # server leaves server_key empty and reaches this fail-closed "no server context" branch).
         request = _make_request("POST", data={"module_id": "321", "ent_index": "77"})
 
         with (
@@ -2087,6 +2202,7 @@ class TestSingleInstallInterfaceBinding:
 
         view = object.__new__(UpdateModuleInterfaceView)
         view.required_object_permissions = {}
+        view._librenms_api = MagicMock(server_key="production")
         device = _make_device()
 
         module = MagicMock()
@@ -2140,6 +2256,7 @@ class TestSingleInstallInterfaceBinding:
 
         view = object.__new__(UpdateModuleInterfaceView)
         view.required_object_permissions = {}
+        view._librenms_api = MagicMock(server_key="production")
         device = _make_device()
 
         module = MagicMock()
@@ -2186,6 +2303,7 @@ class TestSingleInstallInterfaceBinding:
 
         view = object.__new__(ReplaceModuleView)
         view.required_object_permissions = {}
+        view._librenms_api = MagicMock(server_key="production")
         device = _make_device()
 
         target_bay = MagicMock()
@@ -2760,6 +2878,7 @@ class TestInstallViewsDoNotDeleteCache:
 
         view = object.__new__(InstallModuleView)
         view.required_object_permissions = {}
+        view._librenms_api = MagicMock(server_key="production")
         device = _make_device()
 
         module_bay = MagicMock()
@@ -3949,6 +4068,7 @@ class TestPKValidationErrorPaths:
 
         view = object.__new__(InstallModuleView)
         view.required_object_permissions = {}
+        view._librenms_api = MagicMock(server_key="production")
         device = _make_device()
         request = _make_request(
             "POST",
@@ -4081,6 +4201,7 @@ class TestInstallModuleViewBehavior:
 
         v = object.__new__(InstallModuleView)
         v.required_object_permissions = {}
+        v._librenms_api = MagicMock(server_key="production")
         return v
 
     def test_bay_already_occupied_warns(self):

@@ -550,7 +550,7 @@ def _should_attempt_bind_for_result(result):
     return False
 
 
-class InstallModuleView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, CacheMixin, View):
+class InstallModuleView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreNMSAPIMixin, CacheMixin, View):
     """Install a NetBox Module into a ModuleBay from LibreNMS inventory data."""
 
     def post(self, request, pk):
@@ -568,7 +568,12 @@ class InstallModuleView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Ca
         )
         if invalid_selected_device:
             _warn_invalid_selected_device(request)
-        server_key = (request.POST.get("server_key") or "").strip()
+        # Validate the posted server_key against configured servers, else fall back to the active
+        # client server (resolve_posted_server_key). A blank key (e.g. a fallback render where
+        # module_sync.server_key is empty) OR a forged/unconfigured one must degrade rather than scope
+        # the bind under a bogus namespace — without a usable key `if bind_item and server_key` below is
+        # skipped and the module installs but its interface is never bound to its LibreNMS port_id.
+        server_key = self.resolve_posted_server_key(request.POST)
         bind_item = _resolve_single_install_binding_item(request, target_device, server_key, self.get_cache_key)
         serial = request.POST.get("serial", "").strip()
         if serial.lower() in _PLACEHOLDER_VALUES:
@@ -677,7 +682,7 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
         if invalid_selected_device:
             _warn_invalid_selected_device(request)
         parent_index = request.POST.get("parent_index")
-        server_key = request.POST.get("server_key") or self.librenms_api.server_key
+        server_key = self.resolve_posted_server_key(request.POST)
         sync_url = reverse("plugins:netbox_librenms_plugin:device_librenms_sync", kwargs={"pk": pk})
 
         if not parent_index:
@@ -1228,7 +1233,7 @@ class InstallSelectedView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
             return error
 
         page_device = get_object_or_404(Device, pk=pk)
-        server_key = request.POST.get("server_key") or self.librenms_api.server_key
+        server_key = self.resolve_posted_server_key(request.POST)
         sync_url = reverse("plugins:netbox_librenms_plugin:device_librenms_sync", kwargs={"pk": pk})
 
         selected_indices = request.POST.getlist("select")
@@ -1399,7 +1404,9 @@ class UpdateModuleSerialView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixi
         return _modules_redirect_response(request, sync_url)
 
 
-class UpdateModuleInterfaceView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, CacheMixin, View):
+class UpdateModuleInterfaceView(
+    LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreNMSAPIMixin, CacheMixin, View
+):
     """Associate a matching NetBox interface with an already-installed module."""
 
     def post(self, request, pk):
@@ -1415,7 +1422,12 @@ class UpdateModuleInterfaceView(LibreNMSPermissionMixin, NetBoxObjectPermissionM
         )
         if invalid_selected_device:
             _warn_invalid_selected_device(request)
-        server_key = (request.POST.get("server_key") or "").strip()
+        # Validate the posted server_key against configured servers, else fall back to the active
+        # client server (mirrors InstallModuleView via resolve_posted_server_key). A blank key (stale
+        # tab / fallback render) OR a forged/unconfigured one degrades to the active server rather than
+        # scoping under a bogus namespace. Without a usable key the port-bind is skipped AND the
+        # adopt/merge runs without a server scope, so the raw twin's LibreNMS binding can't transfer.
+        server_key = self.resolve_posted_server_key(request.POST)
         bind_item = _resolve_single_install_binding_item(request, target_device, server_key, self.get_cache_key)
         sync_url = reverse("plugins:netbox_librenms_plugin:device_librenms_sync", kwargs={"pk": pk})
 
@@ -1545,7 +1557,7 @@ class ModuleMismatchPreviewView(
         )
         if invalid_selected_device:
             _warn_invalid_selected_device(request)
-        server_key = request.GET.get("server_key") or self.librenms_api.server_key
+        server_key = self.resolve_posted_server_key(request.GET)
 
         try:
             module_id = int(request.GET.get("module_id"))
@@ -1717,7 +1729,7 @@ class ReplaceModuleView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjectP
         )
         if invalid_selected_device:
             _warn_invalid_selected_device(request)
-        server_key = request.POST.get("server_key") or self.librenms_api.server_key
+        server_key = self.resolve_posted_server_key(request.POST)
         sync_url = reverse("plugins:netbox_librenms_plugin:device_librenms_sync", kwargs={"pk": pk})
 
         try:
