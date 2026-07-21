@@ -296,3 +296,51 @@ def test_capture_view_errors_on_mid_capture_transport_failure(recording_server):
     assert "Capture failed" in html
     assert "no HTTP response" in html
     assert "Anonymized recording" not in html
+
+
+@pytest.mark.django_db
+def test_capture_view_denies_device_outside_users_object_scope(recording_server):
+    """Object-level authz: a user whose ``view_device`` grant is CONSTRAINED to other devices
+    must not capture an out-of-scope device by raw pk.
+
+    The model-level ``has_perm('dcim.view_device')`` gate the view runs first passes for ANY
+    constrained grant (NetBox checks constraints only when given an instance), so resolving the
+    id through the plain manager would leak another site's device shape — including the raw values
+    ``find_pii`` surfaces in the modal. The view must resolve through the restricted queryset so an
+    out-of-scope id 404s exactly like a nonexistent one (mirrors ip_addresses_view's
+    ``restrict_object_or_404``). Exercises REAL ObjectPermissions + ``.restrict`` — a mocked
+    ``has_perm`` would hide the missing object-scoping entirely.
+    """
+    from core.models import ObjectType
+    from dcim.models import Device
+    from django.http import Http404
+    from users.models import ObjectPermission
+
+    server, api = recording_server(load_recording("cisco-stackwise-3member"))
+    target = make_device("secret-rtr", librenms_cf={"test": {"id": 1000}})
+
+    user = get_user_model().objects.create_user(username="scoped-viewer", password="x")
+    op = ObjectPermission.objects.create(
+        name="view-only-other-devices", actions=["view"], constraints={"name": "not-the-target"}
+    )
+    op.object_types.set([ObjectType.objects.get_for_model(Device)])
+    op.users.set([user])
+    user = get_user_model().objects.get(pk=user.pk)  # clear the per-request perm cache
+
+    # The model-level gate the view runs first PASSES for this constrained grant...
+    assert user.has_perm("dcim.view_device")
+    # ...but the target device is NOT within the user's object scope.
+    assert not Device.objects.restrict(user, "view").filter(pk=target.pk).exists()
+
+    request = RequestFactory().get("/?server_key=test")
+    request.user = user
+    view = _view_with_api(api)
+
+    servers_config = {
+        "test": {"librenms_url": server.url, "api_token": "test-token", "cache_timeout": 0, "verify_ssl": False}
+    }
+    with patch("netbox_librenms_plugin.librenms_api.get_plugin_config") as mock_cfg:
+        mock_cfg.side_effect = lambda _plugin, key: servers_config if key == "servers" else None
+        # Out-of-scope id must 404 (fail-closed), never render the device's captured shape.
+        with pytest.raises(Http404):
+            view.get(request, device_id=target.pk)

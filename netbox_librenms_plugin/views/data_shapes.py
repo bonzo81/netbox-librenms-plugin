@@ -11,7 +11,7 @@ import json
 from urllib.parse import urlencode
 
 from dcim.models import Device
-from django.shortcuts import get_object_or_404, render
+from django.shortcuts import render
 from django.views import View
 
 from netbox_librenms_plugin.data_shapes import recordings_store
@@ -42,7 +42,11 @@ class CaptureDataShapeView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin,
         if error := self.require_object_permissions("GET"):
             return error
 
-        device = get_object_or_404(Device, pk=device_id)
+        # Resolve through the RESTRICTED queryset, not the plain manager: require_object_permissions
+        # only checks model-level has_perm (no instance), which a site-constrained view_device grant
+        # passes — so a plain get_object_or_404 would let such a user capture (and see the modal's
+        # find_pii values for) any device by raw pk. An out-of-scope id 404s like a nonexistent one.
+        device = self.restrict_object_or_404(Device, pk=device_id)
 
         # Scope the LibreNMS client + id lookup to the server the user is viewing (multi-server).
         server_key = self.rebind_api_for_server(request.GET.get("server_key"))
