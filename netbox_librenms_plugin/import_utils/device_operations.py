@@ -1807,9 +1807,16 @@ def fetch_device_with_cache(
         >>> cache_dict = {123: {...}, 456: {...}}
         >>> libre_device = fetch_device_with_cache(123, api, libre_devices_cache=cache_dict)
     """
-    # Check pre-fetched cache dict first (fastest)
-    if libre_devices_cache and device_id in libre_devices_cache:
-        return libre_devices_cache[device_id]
+    # Check pre-fetched cache dict first (fastest) — but only when the cached row's OWN device_id
+    # doesn't contradict the requested id, so a mis-keyed/stale entry (another device's row under
+    # this id) isn't served AS this device. A contradiction falls through to the Django cache / API
+    # fetch below. (A real LibreNMS row always carries device_id; one lacking it stays trusted.)
+    cached_row = libre_devices_cache.get(device_id) if libre_devices_cache else None
+    cached_row_id = cached_row.get("device_id") if isinstance(cached_row, dict) else None
+    if cached_row is not None and (
+        cached_row_id is None or coerce_librenms_id(cached_row_id) == coerce_librenms_id(device_id)
+    ):
+        return cached_row
 
     # Check Django cache
     cache_key = get_import_device_cache_key(device_id, server_key or api.server_key)

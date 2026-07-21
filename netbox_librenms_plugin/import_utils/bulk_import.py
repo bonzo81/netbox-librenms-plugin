@@ -152,7 +152,18 @@ def detect_collisions_for_device_ids(
         libre_device = cache.get(device_id)
         just_fetched = False
         if libre_device is None:
-            success, libre_device = api.get_device_info(device_id)
+            try:
+                success, libre_device = api.get_device_info(device_id)
+            except Exception as exc:
+                # get_device_info can RAISE rather than return (False, None) — e.g. a cache-backend
+                # outage, since its cache.get() runs before its own try. An unhandled raise here would
+                # crash the whole gate/batch, but the gate's contract is to fail CLOSED per row, so
+                # treat an exception like a fetch miss: record the id unresolved and let the caller
+                # block it instead of importing it unchecked.
+                if getattr(job, "logger", None):
+                    job.logger.warning(f"Collision pre-check couldn't fetch device {device_id}: {exc}")
+                unresolved_ids.append(device_id)
+                continue
             if not success or not isinstance(libre_device, dict):
                 # Couldn't fetch device info → can't collision-check this id. Record it so the
                 # caller blocks it instead of importing it unchecked (fail closed).
@@ -385,9 +396,19 @@ def bulk_import_devices_shared(
             break
 
         try:
-            # Use cached device data if available to avoid redundant API calls
-            if libre_devices_cache and device_id in libre_devices_cache:
-                libre_device = libre_devices_cache[device_id]
+            # Use cached device data if available to avoid redundant API calls — but only when the
+            # cached row's OWN device_id doesn't contradict the requested id. A mis-keyed/stale cache
+            # entry (another device's row stored under this id) would otherwise be imported AS this
+            # device. detect_collisions_for_device_ids verifies this too, but its callers skip the
+            # pre-check for single-row imports, so re-check at the point of use; a contradiction falls
+            # through to a live fetch below. (A real LibreNMS row always carries device_id; a cached
+            # row lacking it can't be verified and is left trusted.)
+            cached_row = libre_devices_cache.get(device_id) if libre_devices_cache else None
+            cached_row_id = cached_row.get("device_id") if isinstance(cached_row, dict) else None
+            if cached_row is not None and (
+                cached_row_id is None or coerce_librenms_id(cached_row_id) == coerce_librenms_id(device_id)
+            ):
+                libre_device = cached_row
                 success = True
             else:
                 # Import decisions (DeviceType match, serial-conflict, hostname) must run against

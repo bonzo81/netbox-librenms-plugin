@@ -237,6 +237,44 @@ class TestBulkImportDevicesShared:
         mock_api.get_device_info.assert_not_called()
         assert len(result["success"]) == 1
 
+    def test_mis_keyed_cache_row_is_refetched_not_trusted(self):
+        """A cached row whose own device_id contradicts the requested id (mis-keyed/stale) is NOT imported as this device — a live fetch runs instead.
+
+        The multi-row collision pre-check verifies this, but its callers skip it for single-row
+        imports, so the import path must re-check at the point of use.
+        """
+        # Requested id 1, but the cached payload describes device 99 (a mis-keyed/stale entry).
+        libre_cache = {1: {"device_id": 99, "hostname": "someone-else"}}
+
+        with (
+            patch("netbox_librenms_plugin.import_utils.bulk_import.require_permissions"),
+            patch("netbox_librenms_plugin.import_utils.bulk_import.LibreNMSAPI") as mock_api_cls,
+            patch(
+                "netbox_librenms_plugin.import_utils.bulk_import.validate_device_for_import",
+                return_value=_make_validation(),
+            ),
+            patch(
+                "netbox_librenms_plugin.import_utils.bulk_import.import_single_device",
+                return_value=_make_import_result(),
+            ),
+        ):
+            mock_api = MagicMock()
+            mock_api.server_key = "default"
+            mock_api.get_device_info.return_value = (True, {"device_id": 1, "hostname": "real-device-1"})
+            mock_api_cls.return_value = mock_api
+
+            from netbox_librenms_plugin.import_utils.bulk_import import bulk_import_devices_shared
+
+            bulk_import_devices_shared(
+                device_ids=[1],
+                user=MagicMock(),
+                libre_devices_cache=libre_cache,
+            )
+
+        # The mis-keyed cache row is rejected → a live fetch for the REAL id 1 runs instead of
+        # importing device 99's data under the id-1 selection.
+        mock_api.get_device_info.assert_called_once_with(1, use_cache=False)
+
     # ------------------------------------------------------------------
     # Line 183 – job.logger.info("Imported device X of Y")
     # ------------------------------------------------------------------
@@ -2997,6 +3035,23 @@ class TestDetectCollisionsForDeviceIds:
         )
         assert collisions == []
         assert unresolved == [8011]
+
+    def test_get_device_info_exception_is_unresolved_not_crash(self):
+        """A get_device_info that RAISES (e.g. a cache-backend outage — its cache.get runs before its own try) must fail closed to unresolved, not crash the whole gate."""
+        from types import SimpleNamespace
+
+        from netbox_librenms_plugin.import_utils.bulk_import import detect_collisions_for_device_ids
+
+        def _boom(device_id):
+            raise RuntimeError("cache backend unavailable")
+
+        # Id not in the cache → the gate must fetch it; get_device_info raises instead of returning
+        # (False, None). The row can't be collision-checked, so it's recorded unresolved (the caller
+        # fails closed on it) rather than propagating and aborting the whole batch.
+        api = SimpleNamespace(server_key="default", get_device_info=_boom)
+        collisions, unresolved = detect_collisions_for_device_ids([8099], api, libre_devices_cache={})
+        assert collisions == []
+        assert unresolved == [8099]
 
     def test_two_rows_resolving_to_one_vm_collide(self):
         """Two LibreNMS rows whose real validation resolves to one existing VirtualMachine → a collision keyed to the VM model, proving the pre-check gate covers the VM half of a batch (validation flips import_as_vm on the existing-VM match)."""

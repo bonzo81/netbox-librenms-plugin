@@ -575,6 +575,23 @@ class TestFetchDeviceWithCache:
         mock_cache.get.assert_not_called()
 
     @patch("netbox_librenms_plugin.import_utils.device_operations.cache")
+    def test_mis_keyed_cache_dict_row_is_not_returned(self, mock_cache):
+        """A pre-fetched cache row whose device_id contradicts the requested id (mis-keyed/stale) is NOT served as this device — resolution falls through to the Django cache / API."""
+        from netbox_librenms_plugin.import_utils.device_operations import fetch_device_with_cache
+
+        api = MagicMock()
+        api.server_key = "default"
+        # The dict maps id 1 -> device 99's row (mis-keyed); the Django cache holds the REAL id-1 row.
+        real_row = {"device_id": 1, "hostname": "real-1"}
+        mock_cache.get.return_value = real_row
+
+        result = fetch_device_with_cache(1, api, libre_devices_cache={1: {"device_id": 99}})
+
+        # The mis-keyed dict row is rejected → the Django cache's real row is returned instead.
+        assert result is real_row
+        mock_cache.get.assert_called_once()
+
+    @patch("netbox_librenms_plugin.import_utils.device_operations.cache")
     def test_from_django_cache(self, mock_cache):
         from netbox_librenms_plugin.import_utils.device_operations import fetch_device_with_cache
 
