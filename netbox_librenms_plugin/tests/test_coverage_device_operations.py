@@ -1932,6 +1932,26 @@ class TestValidateSerialMatchStripsWhitespace:
         assert result.get("serial_action") is None, "whitespace-only serial diff wrongly flagged as drift"
         assert not any("differs" in w for w in result.get("warnings", [])), result.get("warnings")
 
+    def test_numeric_serial_is_coerced_not_crashed(self):
+        """A numeric serial (an int, e.g. an all-digit serial parsed from JSON) must be coerced to a string before .strip(), not raise AttributeError, and still match an existing device stored with the string form."""
+        from netbox_librenms_plugin.import_utils.device_operations import validate_device_for_import
+
+        device = self._make_device("numeric-serial-host", serial="123456")
+        libre_device = {
+            "device_id": 8814,
+            "hostname": "numeric-import-row",  # matches no device → falls to the serial-identity match
+            "sysName": "numeric-import-row",
+            "serial": 123456,  # int, not str — .strip() would raise AttributeError without a str() cast
+            "hardware": "-",
+            "os": "-",
+            "location": "-",
+        }
+
+        result = validate_device_for_import(libre_device, api=None, server_key="default", include_vc_detection=False)
+
+        assert result["existing_device"] is not None, "numeric serial was not matched (crash swallowed by validator)"
+        assert result["existing_device"].pk == device.pk
+
 
 @pytest.mark.django_db
 class TestImportPersistsTrimmedSerial:
