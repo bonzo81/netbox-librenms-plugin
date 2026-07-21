@@ -200,6 +200,21 @@ def test_find_pii_flags_dotless_domain_email_in_preserved_field():
     assert "netops@corp" in emails
 
 
+def test_email_regex_is_not_redos_prone():
+    """The dotless-email relaxation must stay linear (no exponential domain-label or quadratic local backtracking)."""
+    import time
+
+    from netbox_librenms_plugin.data_shapes import anonymize
+
+    # (1) The exponential domain-label shape CodeQL flagged (py/redos): the label class must not
+    # overlap the '.' separator. (2) A long no-'@' run must not blow up the local part quadratically.
+    for evil in ("a@b" + "-." * 26, "a." * 15000 + " "):
+        t0 = time.time()
+        anonymize._EMAIL_RE.search(evil)
+        elapsed = time.time() - t0
+        assert elapsed < 1.0, f"_EMAIL_RE took {elapsed:.2f}s on {evil[:6]}...-style input (ReDoS)"
+
+
 def test_find_pii_does_not_echo_secret_value_after_redaction():
     """A secret-keyed value that also looks like PII must be redacted once, never re-reported with the raw secret echoed."""
     rec = _ports()

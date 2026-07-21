@@ -201,9 +201,12 @@ _IPV6_RE = re.compile(
 _MAC_RE = re.compile(r"\b(?:[0-9a-fA-F]{2}[:-]){5}[0-9a-fA-F]{2}\b")
 # Match a full email AND the dotless internal-domain form (``user@host``): internal mail domains and
 # short-hostname contacts (e.g. ``netops@corp``) carry no dot, so requiring one let a real leak slip
-# through a preserved free-text field. The domain dot(s) are optional; the local part before ``@`` is
-# still required, so a bare ``@handle`` or a spaced ``x @ y`` does not match.
-_EMAIL_RE = re.compile(r"\b[\w.+-]+@[\w-]+(?:\.[\w.-]+)*\b")
+# through a preserved free-text field. Two ReDoS-safety details keep this linear: each domain label is
+# ``[\w-]+`` (NO ``.``), so ``.`` is an unambiguous separator — a ``[\w.-]`` label would overlap the
+# ``\.`` and backtrack exponentially (CodeQL py/redos); and the local part is bounded to the RFC 5321
+# max of 64, so a long no-``@`` run can't backtrack quadratically across word boundaries. A local part
+# is still required, so a bare ``@handle`` or a spaced ``x @ y`` does not match.
+_EMAIL_RE = re.compile(r"\b[\w.+-]{1,64}@[\w-]+(?:\.[\w-]+)*\b")
 # Free-text FQDN safety-net (dotted labels + an alphabetic TLD). Anonymized hostnames are
 # single-label ("device-xxxx") and versions/OIDs lack an alpha TLD, so they don't match.
 _FQDN_RE = re.compile(r"\b(?:[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z]{2,}\b")
