@@ -1911,6 +1911,84 @@ class TestValidateSerialMatchStripsWhitespace:
         assert result["existing_device"] is not None, "whitespace-padded serial was not matched (duplicate risk)"
         assert result["existing_device"].pk == device.pk
 
+    def test_whitespace_only_serial_difference_is_not_a_drift_conflict(self):
+        """A hostname-matched device whose stored serial equals the incoming serial modulo whitespace must not be reported as a serial difference/conflict (the drift check compares the trimmed value)."""
+        from netbox_librenms_plugin.import_utils.device_operations import validate_device_for_import
+
+        device = self._make_device("serial-drift-host", serial="SN-DRIFT-7")
+        libre_device = {
+            "device_id": 8812,
+            "hostname": "serial-drift-host",  # hostname-matches the existing device
+            "sysName": "serial-drift-host",
+            "serial": " SN-DRIFT-7 ",  # same serial, only SNMP whitespace differs
+            "hardware": "-",
+            "os": "-",
+            "location": "-",
+        }
+
+        result = validate_device_for_import(libre_device, api=None, server_key="default", include_vc_detection=False)
+
+        assert result["existing_device"].pk == device.pk
+        assert result.get("serial_action") is None, "whitespace-only serial diff wrongly flagged as drift"
+        assert not any("differs" in w for w in result.get("warnings", [])), result.get("warnings")
+
+
+@pytest.mark.django_db
+class TestImportPersistsTrimmedSerial:
+    """import_single_device must persist a whitespace-trimmed serial, so the next import's trimmed filter(serial=...) matches it instead of minting a duplicate (real DB, real Device.save())."""
+
+    def test_padded_incoming_serial_is_stored_trimmed(self):
+        from unittest.mock import patch
+
+        from dcim.models import Device, DeviceRole, DeviceType, Manufacturer, Site
+
+        from netbox_librenms_plugin.import_utils.device_operations import import_single_device
+
+        mfr, _ = Manufacturer.objects.get_or_create(name="ACME-trimp", slug="acme-trimp")
+        dt, _ = DeviceType.objects.get_or_create(manufacturer=mfr, model="DT-trimp", slug="dt-trimp")
+        role, _ = DeviceRole.objects.get_or_create(name="Role-trimp", slug="role-trimp")
+        site, _ = Site.objects.get_or_create(name="Site-trimp", slug="site-trimp")
+
+        libre_device = {
+            "device_id": 8813,
+            "hostname": "trim-persist-host",
+            "sysName": "trim-persist-host",
+            "hardware": "-",
+            "serial": "  SN-PERSIST-9  ",  # SNMP whitespace padding around the real serial
+            "os": "-",
+            "status": 1,
+            "location": "-",
+        }
+        validation = {
+            "existing_device": None,
+            "resolved_name": "trim-persist-host",
+            "site": {"found": True, "site": site},
+            "device_type": {"matched": True, "device_type": dt},
+            "device_role": {"found": True, "role": role},
+            "platform": {"found": False, "platform": None},
+            "rack": {"rack": None},
+        }
+
+        # Patch only set_librenms_device_id: it writes the librenms_id custom field, which isn't
+        # registered in the isolated test DB and would fail Device.full_clean() — orthogonal to the
+        # serial persistence under test. The real Device is created, full_clean'd, and saved.
+        with (
+            patch("netbox_librenms_plugin.import_utils.device_operations.LibreNMSAPI"),
+            patch("netbox_librenms_plugin.import_utils.device_operations.set_librenms_device_id"),
+        ):
+            result = import_single_device(
+                8813,
+                server_key="default",
+                validation=validation,
+                libre_device=libre_device,
+                sync_options={"sync_interfaces": False},
+            )
+
+        assert result["success"] is True, result.get("error")
+        device = Device.objects.get(name="trim-persist-host")
+        # Stored TRIMMED → a later filter(serial="SN-PERSIST-9") finds it, so no duplicate is minted.
+        assert device.serial == "SN-PERSIST-9"
+
 
 @pytest.mark.django_db
 class TestImportFallbackReadsLive:
