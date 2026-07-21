@@ -387,3 +387,190 @@ def test_signature_subinterface_detected_in_ifdescr():
     sig = compute_shape_signature(rec)
     assert sig["sub_interfaces"]["present"] is True
     assert sig["sub_interfaces"]["styles"] == ["dot-numeric"]
+
+
+def test_signature_serial_axis_reflects_captured_sensors():
+    """Serial-port presence is a signature axis: a captured non-empty /resources/sensors list → serial True.
+
+    The capture pipeline synthesizes a /resources/sensors body carrying ONLY the device's serial
+    sensors, so any non-empty sensors list means the recording exercises the serial-port shape.
+    """
+    base = {
+        "schema_version": 1,
+        "name": "x",
+        "device_id": 1,
+        "responses": {"GET /api/v0/devices/1/ports": {"status": "ok", "ports": [{"port_id": 1, "ifName": "Gi0/1"}]}},
+    }
+    assert compute_shape_signature(base)["serial"] is False
+
+    def _with_sensors(sensors):
+        return {**base, "responses": {**base["responses"], "GET /api/v0/resources/sensors": {"sensors": sensors}}}
+
+    assert (
+        compute_shape_signature(
+            _with_sensors([{"sensor_id": 5, "sensor_type": "acsSerialPortTable", "sensor_descr": "ttyS1"}])
+        )["serial"]
+        is True
+    )
+    # An empty (or error) sensors body must NOT flip the axis, mirroring the transceivers axis.
+    assert compute_shape_signature(_with_sensors([]))["serial"] is False
+
+
+def test_serial_and_non_serial_host_are_distinct_novelty_buckets():
+    """A serial-console capture must not be reported as covered by an otherwise-identical non-serial host.
+
+    Before serial became a structural axis, a device with recognized serial sensors and a plain
+    device of the same OS/VC/LAG/sub shape collapsed into one novelty bucket — so the first-ever
+    Avocent serial recording would be reported 'likely-covered' by a non-serial sibling.
+    """
+    base = {
+        "schema_version": 1,
+        "name": "x",
+        "device_id": 1,
+        "meta": {"os": "linux"},
+        "responses": {
+            "GET /api/v0/devices/1": {"status": "ok", "devices": [{"device_id": 1, "os": "linux"}]},
+            "GET /api/v0/devices/1/ports": {"status": "ok", "ports": [{"port_id": 1, "ifName": "eth0"}]},
+        },
+    }
+    serial = {
+        **base,
+        "responses": {
+            **base["responses"],
+            "GET /api/v0/resources/sensors": {
+                "sensors": [{"sensor_id": 5, "sensor_type": "acsSerialPortTable", "sensor_descr": "ttyS1"}]
+            },
+        },
+    }
+    serial_sig = compute_shape_signature(serial)
+    plain_sig = compute_shape_signature(base)
+    assert serial_sig["serial"] is True and plain_sig["serial"] is False
+    # With only the plain host known, the serial capture is genuinely new (distinct shape axis)...
+    assert classify_novelty(serial_sig, build_manifest([base]))["verdict"] == "new"
+    # ...and symmetrically.
+    assert classify_novelty(plain_sig, build_manifest([serial]))["verdict"] == "new"
+
+
+def test_classify_novelty_distinguishes_lag_detection_style():
+    """classify_novelty must CONSUME the lag.ieee8023ad axis the signature computes.
+
+    A pattern-only LAG (ieee8023ad=False) and an ifType LAG (ieee8023ad=True) of the same OS +
+    name_prefix + shape must not collapse: the 802.3ad-ifType style must not report the pattern-only
+    fallback as covered (they exercise different detection code). Before the fix, _structural_axes
+    dropped ieee8023ad, so the two were 'likely-covered' by each other.
+    """
+    pattern_lag = {
+        "schema_version": 1,
+        "name": "pat",
+        "device_id": 1,
+        "meta": {"os": "ios"},
+        "lag_patterns": {"ios": r"^Po\d+$"},
+        "responses": {
+            "GET /api/v0/devices/1": {"status": "ok", "devices": [{"device_id": 1, "os": "ios"}]},
+            "GET /api/v0/devices/1/ports": {
+                "status": "ok",
+                "ports": [{"port_id": 1, "ifName": "Po1", "ifType": "propVirtual"}],
+            },
+        },
+    }
+    iftype_lag = {
+        "schema_version": 1,
+        "name": "ift",
+        "device_id": 1,
+        "meta": {"os": "ios"},
+        "responses": {
+            "GET /api/v0/devices/1": {"status": "ok", "devices": [{"device_id": 1, "os": "ios"}]},
+            "GET /api/v0/devices/1/ports": {
+                "status": "ok",
+                "ports": [{"port_id": 1, "ifName": "Po1", "ifType": "ieee8023adLag"}],
+            },
+        },
+    }
+    pat_sig = compute_shape_signature(pattern_lag)
+    ift_sig = compute_shape_signature(iftype_lag)
+    # Same OS, same name_prefix, same present — differ ONLY in the ieee8023ad detection style.
+    assert pat_sig["lag"]["ieee8023ad"] is False and ift_sig["lag"]["ieee8023ad"] is True
+    assert pat_sig["lag"]["name_prefix"] == ift_sig["lag"]["name_prefix"] == "Po"
+    assert classify_novelty(pat_sig, build_manifest([iftype_lag]))["verdict"] != "likely-covered"
+    assert classify_novelty(ift_sig, build_manifest([pattern_lag]))["verdict"] != "likely-covered"
+
+
+def test_signature_ignores_failed_response_frames():
+    """A recorded [status, body] frame for a non-2xx response must NOT contribute to the signature.
+
+    Replay's real client drops the non-2xx and sees no usable data, so counting the framed body
+    (a 500 that happens to carry a transceivers list, a 503 port_stack) would inflate the novelty
+    signature past what a replay of the same recording can reproduce.
+    """
+    rec = {
+        "schema_version": 1,
+        "name": "x",
+        "device_id": 1,
+        "responses": {
+            "GET /api/v0/devices/1/ports": {"status": "ok", "ports": [{"port_id": 1, "ifName": "Gi0/1"}]},
+            "GET /api/v0/devices/1/transceivers": [500, {"transceivers": [{"port_id": 1, "type": "sfp"}]}],
+            "GET /api/v0/devices/1/port_stack": [503, {"mappings": [{"high_port_id": 1, "low_port_id": 2}]}],
+        },
+    }
+    sig = compute_shape_signature(rec)
+    assert sig["transceivers"] is False
+    assert sig["port_stack"] is False
+
+
+def test_signature_lag_name_prefix_ignores_aggregate_number_for_sub_units():
+    """A sub-unit first LAG port (ae1.0) yields the naming convention (ae), not the aggregate number."""
+
+    def _rec(name):
+        return {
+            "schema_version": 1,
+            "name": "x",
+            "device_id": 1,
+            "lag_patterns": {"junos": r"^ae\d"},
+            "responses": {
+                "GET /api/v0/devices/1/ports": {
+                    "status": "ok",
+                    "ports": [{"port_id": 1, "ifName": name, "ifType": "ieee8023adLag"}],
+                }
+            },
+        }
+
+    assert compute_shape_signature(_rec("ae1.0"))["lag"]["name_prefix"] == "ae"
+    assert (
+        compute_shape_signature(_rec("ae1.0"))["lag"]["name_prefix"]
+        == compute_shape_signature(_rec("ae2.0"))["lag"]["name_prefix"]
+    )
+    # The base-aggregate case is unchanged (regression guard for the common shape).
+    assert compute_shape_signature(_rec("ae7"))["lag"]["name_prefix"] == "ae"
+
+
+def test_is_redos_prone_flags_nested_quantifiers_but_not_real_lag_patterns():
+    """The ReDoS guard flags nested unbounded quantifiers (the ^(a+)+$ class), not real LAG patterns."""
+    from netbox_librenms_plugin.data_shapes import signature
+
+    for evil in (r"^(a+)+$", r"(a*)*", r"(a+)*", r"(.*x)+", r"(ab+)+"):
+        assert signature._is_redos_prone(evil) is True, evil
+    for ok in (r"^Po\d+$", r"^Port-channel\d+$", r"^ae\d+$", r"^Bundle-Ether\d+$", r"^(Po|Te)\d+$", r"bond\d+"):
+        assert signature._is_redos_prone(ok) is False, ok
+    # A non-string and an over-long (garbage/suspect) pattern are also refused — the latter bounds the
+    # detector's own scan cost on an adversarial input.
+    assert signature._is_redos_prone(None) is True
+    assert signature._is_redos_prone("(" * 500) is True
+
+
+def test_signature_skips_redos_prone_untrusted_lag_pattern():
+    """A ReDoS-prone untrusted LAG pattern is skipped, not applied — the port isn't classified a LAG."""
+    rec = {
+        "schema_version": 1,
+        "name": "x",
+        "device_id": 1,
+        "lag_patterns": {"evil": r"^(a+)+$"},
+        "responses": {
+            "GET /api/v0/devices/1/ports": {
+                "status": "ok",
+                # "aaaa" MATCHES ^(a+)+$ instantly — if the pattern were applied the port would be a
+                # LAG; skipping it (the fix) leaves present=False. No pathological input needed.
+                "ports": [{"port_id": 1, "ifName": "aaaa", "ifType": "propVirtual"}],
+            }
+        },
+    }
+    assert compute_shape_signature(rec)["lag"]["present"] is False

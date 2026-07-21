@@ -55,11 +55,18 @@ def _os_family(os_name):
 
 
 def _body(recording, predicate):
-    """Return the first response body whose route key satisfies *predicate* (unwrapping [status, body])."""
+    """
+    Return the first response body whose route key satisfies *predicate*.
+
+    A recorded ``[status, body]`` frame is unwrapped, but a NON-2xx frame yields ``None``: replay's
+    real client drops a non-2xx response and sees no usable data, so the signature must not count a
+    failed frame (e.g. a captured ``[500, {"transceivers": [...]}]``) as present data.
+    """
     for key, value in recording.get("responses", {}).items():
         if predicate(key):
             if isinstance(value, list) and len(value) == 2 and isinstance(value[0], int):
-                return value[1]
+                status, body = value
+                return body if 200 <= status < 300 else None
             return value
     return None
 
@@ -102,12 +109,47 @@ def _ports(recording):
     return []
 
 
-# Upper bound on the interface name fed to an untrusted (recording-supplied) LAG regex. Catastrophic
-# backtracking cost scales with the search-input length, so capping it keeps a valid-but-pathological
-# pattern in a community-submitted recording from hanging the `librenms_recordings --validate` command
-# (which runs in CI). Real interface names are well under this; a longer one is anonymized garbage that
-# never needs LAG name-pattern classification.
+# Upper bound on the interface name fed to an untrusted (recording-supplied) LAG regex. This trims the
+# input a well-behaved pattern scans; it is NOT a ReDoS defense on its own — a nested unbounded
+# quantifier backtracks exponentially in the input length, so no practical length cap tames it (that's
+# what _is_redos_prone below is for). Real interface names are well under this; a longer one is
+# anonymized garbage that never needs LAG name-pattern classification.
 _MAX_LAG_NAME_LEN = 256
+
+# lag_patterns in a community-submitted recording are UNTRUSTED regexes that --validate compiles and
+# matches in CI. A length cap on the search input cannot bound catastrophic backtracking, so refuse to
+# compile a pattern whose structure is the classic ReDoS shape — a group that itself contains an
+# unbounded quantifier and is again unbounded-quantified (``^(a+)+$``, ``(a*)*``, ``(a+){2,}``) — and
+# cap how many patterns are compiled at all. This is a heuristic, not a guarantee (it won't catch every
+# pathological regex, e.g. overlapping alternation); the real gates remain human review of submissions
+# and the CI job timeout. A skipped pattern is simply not used for LAG-name classification (a lossless
+# nudge), exactly like the non-string/typo'd patterns already skipped below.
+_MAX_LAG_PATTERNS = 100
+# Bound the untrusted pattern length before running the detector on it: a real LAG pattern is short
+# (``^Bundle-Ether\d+$`` is ~17 chars), and capping keeps the O(n^2) worst case of the detector's own
+# scan on a pathological all-``(`` string trivially small — an over-long pattern is garbage/suspect and
+# never needs LAG classification, so it's treated as ReDoS-prone (skipped) too.
+_MAX_LAG_PATTERN_LEN = 200
+_NESTED_QUANTIFIER_RE = re.compile(r"\([^()]*[*+][^()]*\)\s*[*+]|\([^()]*[*+][^()]*\)\{\d*,\}")
+
+
+def _is_redos_prone(pattern):
+    """
+    Return whether *pattern* is unsafe to compile+match as an untrusted LAG regex.
+
+    Rejects a non-string, an over-long pattern (garbage/suspect, and it bounds this check's own cost),
+    and the classic catastrophic-backtracking shape — a group that itself contains an unbounded
+    quantifier and is again unbounded-quantified (``^(a+)+$``, ``(a*)*``, ``(a+){2,}``).
+
+    Args:
+        pattern: A candidate regex string (untrusted, from a recording's ``lag_patterns``).
+
+    Returns:
+        True if the pattern must be skipped rather than compiled and applied.
+    """
+    if not isinstance(pattern, str) or len(pattern) > _MAX_LAG_PATTERN_LEN:
+        return True
+    return _NESTED_QUANTIFIER_RE.search(pattern) is not None
 
 
 def compute_shape_signature(recording):
@@ -121,7 +163,7 @@ def compute_shape_signature(recording):
     Returns:
         dict: ``{os, virtual_chassis:{present,root_class,member_count,position_base},
             lag:{present,ieee8023ad,name_prefix}, sub_interfaces:{present,styles}, port_stack,
-            vlans, transceivers, oob}``.
+            vlans, transceivers, serial, oob}``.
     """
     device_id = recording.get("device_id")
     dev_body = _body(recording, lambda k: k == f"GET /api/v0/devices/{device_id}")
@@ -164,13 +206,16 @@ def compute_shape_signature(recording):
     # has no .values() and must degrade to "no patterns", not crash --validate.
     lag_patterns = recording.get("lag_patterns")
     lag_patterns = lag_patterns if isinstance(lag_patterns, dict) else {}
-    for pattern_str in lag_patterns.values():
+    for pattern_str in list(lag_patterns.values())[:_MAX_LAG_PATTERNS]:
+        # recording lag_patterns are untrusted (community-submitted): skip a ReDoS-prone pattern
+        # (a length cap can't bound its backtracking — see _is_redos_prone) before compiling, and
+        # skip a typo'd regex (re.error) or a non-string value (TypeError on re.compile) — not
+        # crashed — mirroring resolve_port_relationships' explicit-pattern hardening.
+        if _is_redos_prone(pattern_str):
+            continue
         try:
             compiled_lag_patterns.append(re.compile(pattern_str))
         except (re.error, TypeError):
-            # recording lag_patterns are untrusted (community-submitted): a typo'd regex (re.error)
-            # or a non-string value (TypeError on re.compile) is skipped, not crashed — mirroring
-            # resolve_port_relationships' explicit-pattern hardening.
             continue
 
     def _lag_names(port):
@@ -189,7 +234,10 @@ def compute_shape_signature(recording):
 
     lag_ports = [p for p in ports if _is_lag_port(p)]
     lag_port_names = [name for p in lag_ports for name in _lag_names(p)]
-    name_prefix = re.sub(r"\d+$", "", lag_port_names[0]) if lag_port_names else None
+    # name_prefix is the LAG naming CONVENTION. Strip a trailing sub-unit (".N") BEFORE the aggregate
+    # number so a first LAG port of "ae1.0" yields "ae" (like "ae2.0"), not "ae1." — the arbitrary
+    # aggregate number is not a structural difference between two ae<N>.<unit> devices.
+    name_prefix = re.sub(r"\d+$", "", re.sub(r"\.\d+$", "", lag_port_names[0])) if lag_port_names else None
     sub_styles = set()
     for p in ports:
         # Scan BOTH name fields like every neighbouring detector (_lag_names above,
@@ -209,6 +257,17 @@ def compute_shape_signature(recording):
         isinstance(transceiver_body, dict)
         and isinstance(transceiver_body.get("transceivers"), list)
         and bool(transceiver_body["transceivers"])
+    )
+
+    # Serial-port sensor presence. Capture synthesizes a /resources/sensors body carrying ONLY the
+    # device's serial sensors (and records the route only when there are any), so a non-empty sensors
+    # list is the authoritative signal that this recording exercises the serial-console shape. Without
+    # this axis a serial capture and a plain host of the same OS/VC/LAG/sub shape collapse into one
+    # novelty bucket — the modal would report the first Avocent serial shape as already covered by a
+    # non-serial sibling. Mirrors the transceivers axis (require a real non-empty list, not just a body).
+    serial_body = _body(recording, lambda k: k.split("?", 1)[0].endswith("/resources/sensors"))
+    has_serial = (
+        isinstance(serial_body, dict) and isinstance(serial_body.get("sensors"), list) and bool(serial_body["sensors"])
     )
 
     # OOB controller presence. Capture stamps meta["oob_id"] only when a separate OOB-controller
@@ -233,6 +292,7 @@ def compute_shape_signature(recording):
         "port_stack": port_stack,
         "vlans": any(port_has_vlan(p) for p in ports),
         "transceivers": has_transceivers,
+        "serial": has_serial,
         "oob": oob_present,
     }
 
@@ -263,12 +323,16 @@ def _structural_axes(signature):
         vc.get("member_count"),
         vc.get("position_base"),
         lag.get("present", False),
+        # The ifType-vs-pattern LAG detection style is a distinct shape: a pattern-only LAG
+        # (ieee8023ad False) must not be reported as covered by an 802.3ad-ifType LAG, and vice versa.
+        lag.get("ieee8023ad", False),
         lag.get("name_prefix"),
         sub.get("present", False),
         tuple(styles),
         signature.get("port_stack", False),
         signature.get("vlans", False),
         signature.get("transceivers", False),
+        signature.get("serial", False),
         signature.get("oob", False),
     )
 
