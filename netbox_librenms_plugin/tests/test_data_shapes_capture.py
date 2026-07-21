@@ -481,6 +481,42 @@ def test_capture_raises_when_inventory_all_fallback_fails():
         capture_device_recording(api, 1000)
 
 
+def test_capture_raises_when_inventory_all_fallback_errors_5xx():
+    """A 5xx on the sole /all inventory source is a failed fetch, not "no inventory" — capture must raise."""
+    api = _StubApi({k: (200, v) for k, v in _all_ok_routes().items()})
+    # Filtered inventory is empty, so /all is the only source. A server error there means we don't
+    # KNOW the topology — recording an empty inventory would ship a VC device as a plain one.
+    api.routes["inventory/1000/all"] = (500, {"status": "error", "message": "boom"})
+
+    with pytest.raises(RuntimeError, match="inventory/1000/all"):
+        capture_device_recording(api, 1000)
+
+
+def test_capture_treats_inventory_all_404_as_no_inventory_not_failure():
+    """A 404 (or 2xx-empty) on /all is a definitive "no inventory" for a plain device — it must NOT raise."""
+    api = _StubApi({k: (200, v) for k, v in _all_ok_routes().items()})
+    api.routes["inventory/1000/all"] = (404, {"status": "error", "message": "not found"})
+
+    captured = capture_device_recording(api, 1000)  # must not raise
+
+    key = "GET /api/v0/inventory/1000?entPhysicalContainedIn=0"
+    assert captured["responses"][key]["inventory"] == []
+
+
+def test_capture_omits_serial_type_patterns_when_device_has_no_serial_sensors():
+    """serial_type_patterns is snapshotted ONLY when the device has serial sensors, not embedded in every capture."""
+    from netbox_librenms_plugin.models import SerialSensorTypePattern
+
+    SerialSensorTypePattern.objects.create(sensor_type="captestSerialTable", port_name_pattern="cap{N}")
+    # _StubApi has no get_serial_port_sensors, so capture records no /resources/sensors route.
+    api = _StubApi({k: (200, v) for k, v in _all_ok_routes().items()})
+
+    captured = capture_device_recording(api, 1000)
+
+    assert "GET /api/v0/resources/sensors" not in captured["responses"]
+    assert "serial_type_patterns" not in captured
+
+
 def test_capture_does_not_mark_oob_when_controller_ports_fail():
     """record() skips an un-replayable controller-ports route (transport error); the recording must NOT then be marked OOB with no controller ports behind it."""
     api = _StubApi({k: (200, v) for k, v in _all_ok_routes().items()})

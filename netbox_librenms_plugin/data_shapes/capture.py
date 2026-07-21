@@ -123,11 +123,18 @@ def capture_device_recording(api, device_id, *, name=None, description="", meta=
             # would silently degrade to an empty inventory and still ship a "successful" capture —
             # recording a VC device with the wrong topology/signature. Once the filtered query came
             # back empty, /all is the only inventory source, so a no-response failure is fatal here,
-            # mirroring record(required=True). A real HTTP answer (incl. 404 / 2xx-empty) is a
-            # definitive "no inventory" for a plain device and stays an empty list.
+            # mirroring record(required=True).
             if not (100 <= all_status < 600):
                 raise RuntimeError(
                     f"Capture failed for inventory/{device_id}/all: no HTTP response (status {all_status})"
+                )
+            # A 5xx on that sole remaining source is a FAILED fetch, not an answer — production's
+            # get_device_inventory treats it as a failure, so recording an empty inventory here would
+            # ship a VC device as a plain one. Fail loudly, like record(required=True) on a non-2xx.
+            # (A 404 / 2xx-empty IS a definitive "no inventory" for a plain device and stays [] below.)
+            if 500 <= all_status < 600:
+                raise RuntimeError(
+                    f"Capture failed for inventory/{device_id}/all: HTTP {all_status} (inventory source errored)"
                 )
             all_items = all_body.get("inventory") if isinstance(all_body, dict) else None
             _all_inventory.append(all_items if isinstance(all_items, list) else [])
@@ -182,12 +189,14 @@ def capture_device_recording(api, device_id, *, name=None, description="", meta=
     #    sensors, which is exactly what replay's get_serial_port_sensors pipeline reads back. Recorded
     #    only when the device actually has serial sensors (most don't), so the instance-wide route is
     #    never added to unrelated recordings.
+    serial_sensors_present = False
     if hasattr(api, "get_serial_port_sensors"):
         # Bypass the per-server sensor cache: a capture records the CURRENT LibreNMS shape, so a
         # subset cached by an earlier refresh would embed stale sensors into the recording.
         ss_ok, device_serial_sensors = api.get_serial_port_sensors(device_id, use_cache=False)
         if ss_ok and device_serial_sensors:
             responses["GET /api/v0/resources/sensors"] = {"status": "ok", "sensors": device_serial_sensors}
+            serial_sensors_present = True
 
     # 7. OOB controller ports — a SEPARATE LibreNMS device the interfaces view merges into the host.
     #    Record them under the controller's own /ports route so replay's get_ports(oob_id) serves them.
@@ -232,21 +241,26 @@ def capture_device_recording(api, device_id, *, name=None, description="", meta=
         pattern_qs = pattern_qs.filter(librenms_os__iexact=os_filter) if os_filter else pattern_qs.none()
     lag_patterns = {row.librenms_os: row.lag_name_pattern for row in pattern_qs}
 
-    # 9. Serial sensor recognition map. Same fidelity argument as lag_patterns: recognition
-    #    lives in the SerialSensorTypePattern table, so a recording captured under a custom map
-    #    could not reproduce its serial rows on a host with different (or no) rows. Replay
-    #    feeds this through the sensor_types injection points (get_serial_port_sensors /
-    #    map_sensors_to_serial_links). Global, not OS-scoped — sensor types identify vendor
-    #    sensor tables, not the captured device's OS.
-    from netbox_librenms_plugin.serial_utils import get_serial_sensor_type_patterns
-
-    return {
+    recording = {
         "schema_version": SCHEMA_VERSION,
         "name": name or f"device-{device_id}",
         "description": description,
         "meta": meta_out,
         "device_id": device_id,
         "lag_patterns": lag_patterns,
-        "serial_type_patterns": get_serial_sensor_type_patterns(),
         "responses": responses,
     }
+    # 9. Serial sensor recognition map — ONLY when this device actually has serial sensors. Same
+    #    fidelity argument as lag_patterns: recognition lives in the SerialSensorTypePattern table, so
+    #    a recording captured under a custom map could not reproduce its serial rows on a host with
+    #    different (or no) rows; replay feeds it through the sensor_types injection points
+    #    (get_serial_port_sensors / map_sensors_to_serial_links). But that map is read ONLY to
+    #    reproduce serial rows, so embedding the whole (possibly operator-customized) table into every
+    #    no-sensor recording is dead weight and needless exposure — gate it on sensor presence, which
+    #    also matches the bundled recordings (only the serial capture carries it). Global, not
+    #    OS-scoped — sensor types identify vendor sensor tables, not the captured device's OS.
+    if serial_sensors_present:
+        from netbox_librenms_plugin.serial_utils import get_serial_sensor_type_patterns
+
+        recording["serial_type_patterns"] = get_serial_sensor_type_patterns()
+    return recording
