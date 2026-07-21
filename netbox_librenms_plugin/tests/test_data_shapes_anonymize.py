@@ -191,6 +191,15 @@ def test_find_pii_flags_ip_and_fqdn_in_sysdescr():
     assert ("fqdn", "router.corp.example.net") in kinds
 
 
+def test_find_pii_flags_dotless_domain_email_in_preserved_field():
+    """A dotless-domain email (user@host) in a preserved free-text field must still be flagged as email."""
+    rec = _ports({"port_id": 1, "ifName": "Gi0/1", "entPhysicalName": "maintained by netops@corp"})
+    anon = anonymize_recording(rec)  # entPhysicalName is preserved verbatim, so find_pii is the only net
+
+    emails = {f["value"] for f in find_pii(anon) if f["kind"] == "email"}
+    assert "netops@corp" in emails
+
+
 def test_find_pii_does_not_echo_secret_value_after_redaction():
     """A secret-keyed value that also looks like PII must be redacted once, never re-reported with the raw secret echoed."""
     rec = _ports()

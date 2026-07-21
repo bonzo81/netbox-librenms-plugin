@@ -199,7 +199,11 @@ _IPV6_RE = re.compile(
     r")(?![0-9A-Fa-f:])"
 )
 _MAC_RE = re.compile(r"\b(?:[0-9a-fA-F]{2}[:-]){5}[0-9a-fA-F]{2}\b")
-_EMAIL_RE = re.compile(r"\b[\w.+-]+@[\w-]+\.[\w.-]+\b")
+# Match a full email AND the dotless internal-domain form (``user@host``): internal mail domains and
+# short-hostname contacts (e.g. ``netops@corp``) carry no dot, so requiring one let a real leak slip
+# through a preserved free-text field. The domain dot(s) are optional; the local part before ``@`` is
+# still required, so a bare ``@handle`` or a spaced ``x @ y`` does not match.
+_EMAIL_RE = re.compile(r"\b[\w.+-]+@[\w-]+(?:\.[\w.-]+)*\b")
 # Free-text FQDN safety-net (dotted labels + an alphabetic TLD). Anonymized hostnames are
 # single-label ("device-xxxx") and versions/OIDs lack an alpha TLD, so they don't match.
 _FQDN_RE = re.compile(r"\b(?:[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z]{2,}\b")
