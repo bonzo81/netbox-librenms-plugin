@@ -1878,6 +1878,41 @@ class TestValidateForcesDeviceModeRealDB:
 
 
 @pytest.mark.django_db
+class TestValidateSerialMatchStripsWhitespace:
+    """A whitespace-padded incoming serial (common from SNMP) must still match an existing device by serial, so import doesn't mint a duplicate (real DB)."""
+
+    def _make_device(self, name, serial):
+        from dcim.models import Device, DeviceRole, DeviceType, Manufacturer, Site
+
+        mfr, _ = Manufacturer.objects.get_or_create(name="ACME-serialws", slug="acme-serialws")
+        dt, _ = DeviceType.objects.get_or_create(manufacturer=mfr, model="DT-serialws", slug="dt-serialws")
+        role, _ = DeviceRole.objects.get_or_create(name="Role-serialws", slug="role-serialws")
+        site, _ = Site.objects.get_or_create(name="Site-serialws", slug="site-serialws")
+        return Device.objects.create(name=name, device_type=dt, role=role, site=site, status="active", serial=serial)
+
+    def test_whitespace_padded_incoming_serial_matches_existing(self):
+        """An incoming serial with surrounding whitespace resolves to the existing device, not a new duplicate."""
+        from netbox_librenms_plugin.import_utils.device_operations import validate_device_for_import
+
+        device = self._make_device("serial-ws-existing", serial="SN-WS-4242")
+        libre_device = {
+            "device_id": 7777,
+            # Hostname matches no device, so the identity search falls through to the serial match.
+            "hostname": "serial-ws-importrow",
+            "sysName": "serial-ws-importrow",
+            "serial": " SN-WS-4242 ",  # SNMP-style whitespace padding around the real serial
+            "hardware": "-",
+            "os": "-",
+            "location": "-",
+        }
+
+        result = validate_device_for_import(libre_device, api=None, server_key="default", include_vc_detection=False)
+
+        assert result["existing_device"] is not None, "whitespace-padded serial was not matched (duplicate risk)"
+        assert result["existing_device"].pk == device.pk
+
+
+@pytest.mark.django_db
 class TestImportFallbackReadsLive:
     """Import fallbacks read LibreNMS live (use_cache=False) rather than the 60s get_device_info snapshot."""
 

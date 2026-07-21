@@ -850,7 +850,10 @@ def validate_device_for_import(
 
             # Check by serial number (strong physical match - hardware identity)
             if not result["existing_device"]:
-                serial = libre_device.get("serial") or ""
+                # Strip the incoming serial before matching: SNMP-sourced serials often carry
+                # trailing/leading whitespace, so a raw ``filter(serial=...)`` would miss an existing
+                # device that stored the trimmed value and mint a duplicate. Mirrors ``_serial_now``.
+                serial = (libre_device.get("serial") or "").strip()
                 if serial and serial != "-" and not import_as_vm:
                     # Serial is not unique in NetBox, so .first() would bind an arbitrary row
                     # and the downstream serial/OOB/merge flow would derive its guidance from a
