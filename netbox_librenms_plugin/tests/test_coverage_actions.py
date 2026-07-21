@@ -47,6 +47,19 @@ def _make_request(post=None, get=None, headers=None, user_is_superuser=False):
     return req
 
 
+def _import_authorized_user():
+    """A stand-in user authorized for device/VM import (``has_perm`` → True).
+
+    The synchronous import view authorizes the model add/change perms before the collision
+    pre-check (mirroring ImportDevicesJob), so a collision-gate test must supply an authorized
+    user — the gate runs downstream of authorization.
+    """
+    user = MagicMock()
+    user.has_perm.return_value = True
+    user.is_superuser = False
+    return user
+
+
 def _make_api():
     """Create a minimal LibreNMSAPI mock."""
     api = MagicMock()
@@ -668,6 +681,41 @@ class TestBulkImportDevicesViewPost:
         assert b"no workers are available" in response.content
         assert b"ran synchronously" in response.content
         assert b"devices synchronously" not in response.content
+
+    def test_import_denied_without_model_add_perms_before_collision_precheck(self):
+        """A user with the plugin change perm but WITHOUT dcim.add_device is denied BEFORE the sync collision pre-check (which surfaces NetBox object names/pks in its modal) — mirroring the async job's authorize-before-scan ordering."""
+        view = self._make_view()
+        request = _make_request(
+            post={"select": ["1", "2"]},  # >=2 ids: the collision pre-check would otherwise run
+            headers={"HX-Request": "true"},
+            user_is_superuser=False,
+        )
+        # require_write_permission (plugin perm) passes, but the user lacks the model add perms.
+        request.user.has_perm = lambda perm: (
+            perm
+            not in {
+                "dcim.add_device",
+                "dcim.change_device",
+                "virtualization.add_virtualmachine",
+            }
+        )
+        detect_spy = MagicMock(return_value=([], []))
+        with (
+            patch.object(view, "require_write_permission", return_value=None),
+            patch(
+                "netbox_librenms_plugin.views.imports.actions.detect_collisions_for_device_ids",
+                detect_spy,
+            ),
+            patch("netbox_librenms_plugin.views.imports.actions.bulk_import_devices") as mock_import,
+        ):
+            response = view.post(request)
+
+        # Denied before any collision scan or import: the detector and importer never ran, and the
+        # response is the permission redirect (HX-Redirect), not the collision modal or an import.
+        detect_spy.assert_not_called()
+        mock_import.assert_not_called()
+        assert response.status_code == 200
+        assert response.get("HX-Redirect")
 
 
 class TestDeviceImportHelperMixin:
@@ -5325,7 +5373,9 @@ class TestBulkImportRerenderVMClassification:
 
         view = self._make_view()
         User = get_user_model()
-        user = User.objects.create_user(username="u-rerender", password="x")
+        # Superuser so has_perm passes the import view's authorize-before-precheck gate; this test
+        # exercises the VM-classification re-render path, not permission enforcement.
+        user = User.objects.create_user(username="u-rerender", password="x", is_superuser=True)
 
         # device 1 → Device import; devices 2 & 3 → VM imports (a cluster is selected for them).
         request = RequestFactory().post(
@@ -5642,7 +5692,7 @@ class TestBulkImportDevicesViewCollisionGate:
         view = self._make_view()
         request = _make_request(post={"select": ["1", "2"]}, headers={"HX-Request": "true"})
         request.POST.getlist = MagicMock(return_value=["1", "2"])
-        request.user = AnonymousUser()
+        request.user = _import_authorized_user()
 
         nb = make_device("gate-collide-host")
         libre = {
@@ -5677,7 +5727,7 @@ class TestBulkImportDevicesViewCollisionGate:
         view = self._make_view()
         request = _make_request(post={"select": ["1", "2"]})
         request.POST.getlist = MagicMock(return_value=["1", "2"])
-        request.user = AnonymousUser()
+        request.user = _import_authorized_user()
 
         make_device("gate-clean-a")
         make_device("gate-clean-b")
@@ -5718,7 +5768,7 @@ class TestBulkImportDevicesViewCollisionGate:
         view._librenms_api.get_device_info = lambda did, *a, **k: (True, libre[did]) if did in libre else (False, None)
         request = _make_request(post={"select": ["1", "2"]}, headers={"HX-Request": "true"})
         request.POST.getlist = MagicMock(return_value=["1", "2"])
-        request.user = AnonymousUser()
+        request.user = _import_authorized_user()
 
         make_device("gate-unresolved-host")
         libre = {1: {"device_id": 1, "sysName": "gate-unresolved-host", "hostname": "gate-unresolved-host"}}
@@ -5797,7 +5847,7 @@ class TestBulkImportDevicesViewCollisionGate:
         # No HX-Request header → the messages.error + redirect branch.
         request = _make_request(post={"select": ["1", "2"]})
         request.POST.getlist = MagicMock(return_value=["1", "2"])
-        request.user = AnonymousUser()
+        request.user = _import_authorized_user()
 
         make_device("gate-collide-plain")
         libre = {
@@ -6911,6 +6961,52 @@ class TestMergeNetBoxDevicesViewOOBTransfer:
         entry = donor.custom_field_data["librenms_id"]["default"]
         assert entry == {"id": 10}
         assert "_migrated_to" not in entry
+
+    def test_transfer_survives_interface_move_onto_winner_between_read_and_lock(self):
+        """A concurrent interface move ONTO the winner, landing between the assigned_object read and the interface lock, must not spuriously fail the merge: the locked IP's GFK cache is refreshed to the freshly-locked (winner-owned) interface before set_device_ip_fk re-checks ownership."""
+        from dcim.models import Interface
+        from django.http import HttpResponse
+
+        from netbox_librenms_plugin.tests.conftest import ip_on
+
+        view = self._make_view()
+        winner = make_device("merge-winner-race", librenms_cf={"default": {"id": 20}})
+        donor = make_device("merge-donor-race", librenms_cf={"default": {"id": 10}})
+        # The IP starts on a DONOR interface, so the merge's assigned_object read caches device_id=donor.
+        oob_ip = ip_on(donor, "192.0.2.11/32", "mgmt0")
+        donor.oob_ip = oob_ip
+        donor.save()
+        iface_pk = oob_ip.assigned_object_id
+
+        request = _make_request(post={"winner_pk": str(winner.pk), "donor_pk": str(donor.pk)})
+        validation = {"merge_candidates": {"host_named": {"pk": winner.pk}, "oob_named": {"pk": donor.pk}}}
+        view.get_validated_device_with_selections = MagicMock(return_value=({"device_id": 99}, validation, {}))
+        view.render_device_row = MagicMock(return_value=HttpResponse("row"))
+
+        # Simulate the concurrent move: the first Interface SELECT ... FOR UPDATE (the oob_ip's owning
+        # interface lock) fires AFTER the merge cached assigned_object with device_id=donor. Move the
+        # interface onto the winner right then, so the freshly locked row is winner-owned while the
+        # cached GFK is stale — exactly the TOCTOU the freshen-after-lock guards against.
+        real_sfu = Interface.objects.select_for_update
+        state = {"moved": False}
+
+        def moving_sfu(*args, **kwargs):
+            if not state["moved"]:
+                state["moved"] = True
+                Interface.objects.filter(pk=iface_pk).update(device=winner)
+            return real_sfu(*args, **kwargs)
+
+        with patch.object(Interface.objects, "select_for_update", moving_sfu):
+            resp = view.post(request, device_id=99)
+
+        assert resp.status_code == 200
+        winner.refresh_from_db()
+        donor.refresh_from_db()
+        # The interface is now on the winner, so the transfer MUST complete — not be rejected against
+        # the stale cached device_id and roll the merge back.
+        assert winner.oob_ip_id == oob_ip.pk
+        assert donor.oob_ip_id is None
+        assert state["moved"], "the injected interface move never fired — test wiring is stale"
 
 
 def _two_member_vc(name, *, m1_cf=None, m2_cf=None):

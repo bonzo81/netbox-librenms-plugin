@@ -1132,6 +1132,29 @@ class BulkImportDevicesView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
                         f"Background job requested but no workers available. Importing {total_import_count} devices synchronously...",
                     )
 
+        # Authorize the model add/change perms BEFORE the collision pre-check below (mirrors
+        # ImportDevicesJob, which authorizes before its scan). require_write_permission() above only
+        # checks the plugin-settings perm, but the pre-check surfaces NetBox collision details (object
+        # names + pks) in the returned modal, and the import paths' own require_permissions runs only
+        # later — so a user with change_librenmssettings but without dcim.add_device could otherwise
+        # see that modal. Enforce the same perm sets the import paths do, for every synchronous import.
+        required_import_perms = set()
+        if device_ids_to_import:
+            # Any device row may be flagged import_as_vm during validation; VC updates need change.
+            required_import_perms.update({"dcim.add_device", "dcim.change_device", "virtualization.add_virtualmachine"})
+        if vm_imports:
+            required_import_perms.add("virtualization.add_virtualmachine")
+        missing_import_perms = [p for p in sorted(required_import_perms) if not request.user.has_perm(p)]
+        if missing_import_perms:
+            deny_msg = f"You do not have permission to import these rows (missing: {', '.join(missing_import_perms)})."
+            messages.error(request, deny_msg)
+            if is_htmx:
+                # 200 + HX-Redirect, like the other denial paths: HTMX skips the swap on non-2xx.
+                return HttpResponse(
+                    "", headers={"HX-Redirect": reverse("plugins:netbox_librenms_plugin:librenms_import")}
+                )
+            return redirect("plugins:netbox_librenms_plugin:librenms_import")
+
         # Re-run the same-NetBox-device collision check the confirm modal performs. The confirm
         # preview is advisory only — a re-submitted stale confirm form or a scripted POST reaches
         # this view directly — so block a colliding batch here too. This runs on the SYNCHRONOUS
@@ -3576,6 +3599,15 @@ class MergeNetBoxDevicesView(
                     if isinstance(oob_assigned, Interface):
                         locked_iface = Interface.objects.select_for_update().filter(pk=oob_assigned.pk).first()
                         if locked_iface is not None and locked_iface.device_id == winner.pk:
+                            # Refresh the cached GenericForeignKey on locked_oob_ip to the freshly
+                            # locked interface: set_device_ip_fk() re-reads locked_oob_ip.assigned_object
+                            # for its ownership check, but the GFK cache still holds the pre-lock
+                            # snapshot (the FK id fields didn't change, so Django won't re-query). A
+                            # concurrent move ONTO the winner landing between the assigned_object read
+                            # above and this lock would otherwise pass the locked-row gate here and then
+                            # be spuriously rejected against the stale device_id — mirrors the
+                            # freshen-after-lock pattern in migrate._reconcile_donor_device_ip_fks.
+                            locked_oob_ip.assigned_object = locked_iface
                             # set_device_ip_fk() re-checks the address is on a winner interface
                             # (verified above under lock) and assigns without saving — the batched
                             # donor-then-winner save below preserves the release-before-claim
