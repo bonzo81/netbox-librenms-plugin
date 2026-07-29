@@ -21,7 +21,7 @@ from django.core.exceptions import ValidationError
 from django.db import IntegrityError, transaction
 from django.db.models import Q
 from django.http import HttpResponse
-from django.shortcuts import get_object_or_404, redirect
+from django.shortcuts import redirect
 from django.urls import get_script_prefix, reverse
 from django.views import View
 from ipam.models import IPAddress
@@ -501,7 +501,9 @@ class MoveInterfaceToWinnerView(_BaseMoveToWinnerView):
         if gate is not None:
             return gate
 
-        interface = get_object_or_404(Interface, pk=pk)
+        # Object-scoped: the gate above is model-level only, so a constrained change_interface
+        # grant would otherwise move an interface it cannot see.
+        interface = self.restrict_object_or_404(Interface, "change", pk=pk)
         donor = interface.device
         if donor is None:
             return self._fail(request, "Interface has no device.")
@@ -700,7 +702,8 @@ class MoveIPAddressToWinnerView(_BaseMoveToWinnerView):
         if gate is not None:
             return gate
 
-        ip = get_object_or_404(IPAddress, pk=pk)
+        # Object-scoped — see MoveInterfaceToWinnerView.post.
+        ip = self.restrict_object_or_404(IPAddress, "change", pk=pk)
         assigned = ip.assigned_object
         if not isinstance(assigned, Interface):
             return self._fail(
@@ -806,7 +809,8 @@ class TransferDeviceIPView(_BaseMoveToWinnerView):
             return self._fail(request, f"Unknown ip_kind '{ip_kind}'.")
         human = DEVICE_IP_FK_LABELS[field]
 
-        donor = get_object_or_404(Device, pk=pk)
+        # Object-scoped — see MoveInterfaceToWinnerView.post.
+        donor = self.restrict_object_or_404(Device, "change", pk=pk)
         # Fall back to active_server_key (never builds LibreNMSAPI) so a misconfigured default
         # server can't 500 a move that only needs the marker's server namespace, not the live API.
         server_key = _server_key_from_request(request, default_factory=lambda: self.active_server_key)

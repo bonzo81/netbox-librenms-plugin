@@ -55,6 +55,32 @@ def _make_api():
     return api
 
 
+def _scoped_device_writer(in_scope_device, username):
+    """A real non-superuser with plugin write access and a pk-constrained change_device grant."""
+    from core.models import ObjectType
+    from dcim.models import Device
+    from django.apps import apps
+    from django.contrib.auth import get_user_model
+    from users.models import ObjectPermission
+
+    # Resolve via the app registry: the autouse config fixtures patch the models module during
+    # the full suite, so a plain import could hand get_for_model() a mock class.
+    LibreNMSSettings = apps.get_model("netbox_librenms_plugin", "LibreNMSSettings")
+
+    user = get_user_model().objects.create_user(username=username, password="x")
+    write = ObjectPermission.objects.create(name=f"{username}-plugin-write", actions=["change"])
+    write.object_types.set([ObjectType.objects.get_for_model(LibreNMSSettings)])
+    write.users.set([user])
+
+    scoped = ObjectPermission.objects.create(
+        name=f"{username}-scoped-change-device", actions=["change"], constraints={"pk": in_scope_device.pk}
+    )
+    scoped.object_types.set([ObjectType.objects.get_for_model(Device)])
+    scoped.users.set([user])
+
+    return get_user_model().objects.get(pk=user.pk)  # clear the per-request perm cache
+
+
 class TestSaveDevice:
     """Tests for _save_device (lines 44-56)."""
 
@@ -6021,6 +6047,7 @@ class TestGetValidatedDeviceLibreDeviceReuse:
 
         view = object.__new__(PromoteToHostView)
         view._librenms_api = _make_api()
+        view.request = MagicMock()
         request = _make_request(post={})
         supplied = {"device_id": 4242, "hostname": "reuse-host", "sysName": "reuse-host"}
 
@@ -6047,6 +6074,7 @@ class TestGetValidatedDeviceLibreDeviceReuse:
 
         view = object.__new__(PromoteToHostView)
         view._librenms_api = _make_api()
+        view.request = MagicMock()
         request = _make_request(post={})
 
         with (
@@ -6077,6 +6105,7 @@ class TestPostActionRebindFailsClosed:
 
         view = object.__new__(PromoteToHostView)
         view.kwargs = {}
+        view.request = MagicMock()
         view.require_write_permission = MagicMock(return_value=None)
         view.require_object_permissions = MagicMock(return_value=None)
         # No session client bound + a default that won't build → the mixin must fail closed on the
@@ -6099,6 +6128,7 @@ class TestPromoteToHostViewPost:
 
         view = object.__new__(PromoteToHostView)
         view.kwargs = {}
+        view.request = MagicMock()
         view._librenms_api = _make_api()
         view.require_write_permission = MagicMock(return_value=None)
         view.require_object_permissions = MagicMock(return_value=None)
@@ -6350,6 +6380,7 @@ class TestMergeNetBoxDevicesViewOOBTransfer:
 
         view = object.__new__(MergeNetBoxDevicesView)
         view._librenms_api = _make_api()
+        view.request = MagicMock()
         view.require_write_permission = MagicMock(return_value=None)
         view.require_object_permissions = MagicMock(return_value=None)
         return view
@@ -6505,6 +6536,7 @@ class TestMergeNetBoxDevicesViewVCSyncDevice:
 
         view = object.__new__(MergeNetBoxDevicesView)
         view._librenms_api = _make_api()
+        view.request = MagicMock()
         view.require_write_permission = MagicMock(return_value=None)
         view.require_object_permissions = MagicMock(return_value=None)
         return view
@@ -6604,6 +6636,7 @@ class TestMergeNetBoxDevicesViewFailClosed:
 
         view = object.__new__(MergeNetBoxDevicesView)
         view._librenms_api = _make_api()
+        view.request = MagicMock()
         view.require_write_permission = MagicMock(return_value=None)
         view.require_object_permissions = MagicMock(return_value=None)
         return view
@@ -7740,31 +7773,7 @@ class TestConflictActionsObjectScope:
     device by raw pk.
     """
 
-    @staticmethod
-    def _scoped_writer(in_scope_device, username):
-        """A real non-superuser with plugin write access and a pk-constrained change_device grant."""
-        from core.models import ObjectType
-        from dcim.models import Device
-        from django.apps import apps
-        from django.contrib.auth import get_user_model
-        from users.models import ObjectPermission
-
-        # Resolve via the app registry: the autouse config fixtures patch the models module during
-        # the full suite, so a plain import could hand get_for_model() a mock class.
-        LibreNMSSettings = apps.get_model("netbox_librenms_plugin", "LibreNMSSettings")
-
-        user = get_user_model().objects.create_user(username=username, password="x")
-        write = ObjectPermission.objects.create(name=f"{username}-plugin-write", actions=["change"])
-        write.object_types.set([ObjectType.objects.get_for_model(LibreNMSSettings)])
-        write.users.set([user])
-
-        scoped = ObjectPermission.objects.create(
-            name=f"{username}-scoped-change-device", actions=["change"], constraints={"pk": in_scope_device.pk}
-        )
-        scoped.object_types.set([ObjectType.objects.get_for_model(Device)])
-        scoped.users.set([user])
-
-        return get_user_model().objects.get(pk=user.pk)  # clear the per-request perm cache
+    _scoped_writer = staticmethod(_scoped_device_writer)
 
     def _post_conflict(self, user, target, action="link"):
         """Drive the real DeviceConflictActionView.post against *target* with only the LibreNMS seams patched."""
@@ -7947,6 +7956,7 @@ class TestMergeNetBoxDevicesViewDonorDerivation:
 
         view = object.__new__(MergeNetBoxDevicesView)
         view._librenms_api = _make_api()
+        view.request = MagicMock()
         view.require_write_permission = MagicMock(return_value=None)
         view.require_object_permissions = MagicMock(return_value=None)
         return view
@@ -7984,3 +7994,121 @@ class TestMergeNetBoxDevicesViewDonorDerivation:
         assert "_migrated_to" not in winner_entry
         assert winner_entry["id"] == 20
         assert winner_entry["oob"]["id"] == 10
+
+
+@pytest.mark.django_db
+class TestPromoteAndMergeObjectScope:
+    """Promote and merge resolve client-supplied pks, so both must go through a restricted queryset.
+
+    ``require_object_permissions`` only asks the model-level ``dcim.change_device``, which a
+    pk-constrained grant satisfies; a raw lookup would then let it re-point the LibreNMS linkage of
+    any device.
+    """
+
+    def _post_promote(self, user, target):
+        """Drive the real PromoteToHostView.post against *target* with only the LibreNMS seams patched."""
+        from django.http import HttpResponse
+
+        from netbox_librenms_plugin.views.imports.actions import PromoteToHostView
+
+        view = PromoteToHostView()
+        view._librenms_api = _make_api()
+        libre_device = {"device_id": 55, "hostname": target.name, "sysName": target.name}
+        validation = {
+            "existing_device": target,
+            "promote_to_host": {"existing_libre_id": 10, "existing_oob_type": "idrac"},
+        }
+        request = RequestFactory().post(
+            "/promote-to-host/", {"existing_device_id": str(target.pk), "server_key": "default"}
+        )
+        request.user = user
+        view.request = request
+        with (
+            patch.object(
+                PromoteToHostView,
+                "get_validated_device_with_selections",
+                return_value=(libre_device, validation, {}),
+            ),
+            patch.object(PromoteToHostView, "render_device_row", return_value=HttpResponse(b"row-ok")),
+            patch.object(PromoteToHostView, "rebind_api_for_server", return_value="default"),
+        ):
+            return view.post(request, device_id=55)
+
+    def _post_merge(self, user, winner, donor):
+        """Drive the real MergeNetBoxDevicesView.post with *winner* kept and *donor* absorbed."""
+        from django.http import HttpResponse
+
+        from netbox_librenms_plugin.views.imports.actions import MergeNetBoxDevicesView
+
+        view = MergeNetBoxDevicesView()
+        view._librenms_api = _make_api()
+        validation = {"merge_candidates": {"host_named": {"pk": winner.pk}, "oob_named": {"pk": donor.pk}}}
+        request = RequestFactory().post("/merge-devices/", {"winner_pk": str(winner.pk), "server_key": "default"})
+        request.user = user
+        view.request = request
+        with (
+            patch.object(
+                MergeNetBoxDevicesView,
+                "get_validated_device_with_selections",
+                return_value=({"device_id": 99}, validation, {}),
+            ),
+            patch.object(MergeNetBoxDevicesView, "render_device_row", return_value=HttpResponse(b"row-ok")),
+            patch.object(MergeNetBoxDevicesView, "rebind_api_for_server", return_value="default"),
+        ):
+            return view.post(request, device_id=99)
+
+    def test_promote_cannot_repoint_an_out_of_scope_device(self):
+        """A pk-constrained change_device grant clears the model-level gate but must not promote a device outside its scope."""
+        from dcim.models import Device
+
+        in_scope = make_device("promote-scope-in")
+        out_of_scope = make_device("promote-scope-out", librenms_cf={"default": {"id": 10}})
+        user = _scoped_device_writer(in_scope, "scoped-promote-writer")
+
+        response = self._post_promote(user, out_of_scope)
+
+        assert b"Existing device not found" in response.content
+        entry = Device.objects.get(pk=out_of_scope.pk).custom_field_data["librenms_id"]["default"]
+        assert entry["id"] == 10  # untouched: no host swap, no OOB demotion
+        assert "oob" not in entry
+
+    def test_promote_still_works_for_the_in_scope_device(self):
+        """The device the grant DOES cover promotes normally (no over-block)."""
+        from dcim.models import Device
+
+        in_scope = make_device("promote-scope-in-2", librenms_cf={"default": {"id": 10}})
+        user = _scoped_device_writer(in_scope, "scoped-promote-writer-2")
+
+        response = self._post_promote(user, in_scope)
+
+        assert b"Existing device not found" not in response.content
+        entry = Device.objects.get(pk=in_scope.pk).custom_field_data["librenms_id"]["default"]
+        assert entry["id"] == 55
+        assert entry["oob"]["id"] == 10
+
+    def test_merge_cannot_absorb_an_out_of_scope_donor(self):
+        """The donor is derived server-side but still resolved by pk, so an out-of-scope donor must not be merged away."""
+        from dcim.models import Device
+
+        winner = make_device("merge-scope-winner", librenms_cf={"default": {"id": 20}})
+        donor = make_device("merge-scope-donor", librenms_cf={"default": {"id": 10}})
+        user = _scoped_device_writer(winner, "scoped-merge-writer")  # scoped to the winner only
+
+        response = self._post_merge(user, winner, donor)
+
+        assert b"Winner or donor device not found" in response.content
+        assert "_migrated_to" not in Device.objects.get(pk=donor.pk).custom_field_data["librenms_id"]["default"]
+        assert "oob" not in Device.objects.get(pk=winner.pk).custom_field_data["librenms_id"]["default"]
+
+    def test_merge_succeeds_when_both_sides_are_in_scope(self):
+        """A superuser (unrestricted queryset) still merges both candidates."""
+        from dcim.models import Device
+
+        winner = make_device("merge-scope-winner-2", librenms_cf={"default": {"id": 20}})
+        donor = make_device("merge-scope-donor-2", librenms_cf={"default": {"id": 10}})
+
+        response = self._post_merge(make_superuser(), winner, donor)
+
+        assert b"Winner or donor device not found" not in response.content
+        donor_entry = Device.objects.get(pk=donor.pk).custom_field_data["librenms_id"]["default"]
+        assert donor_entry["_migrated_to"]["device_id"] == winner.pk

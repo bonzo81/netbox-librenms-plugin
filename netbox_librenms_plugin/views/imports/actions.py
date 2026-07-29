@@ -3078,14 +3078,16 @@ class PromoteToHostView(
         if self.rebind_api_for_server(request.POST.get("server_key")) is None:
             return _htmx_error_response("Selected LibreNMS server is no longer configured.")
 
-        try:
-            existing_device = Device.objects.get(pk=int(existing_device_id))
-        except (Device.DoesNotExist, ValueError):
-            return _htmx_error_response("Existing device not found")
-
+        # Gate before the lookup (see DeviceConflictActionView.post).
         self.required_object_permissions = {"POST": [("change", Device)]}
         if error := self.require_object_permissions("POST"):
             return error
+
+        try:
+            # Scope by "change" so a constrained grant can't re-point another device's linkage.
+            existing_device = self.restricted_queryset(Device, "change").get(pk=int(existing_device_id))
+        except (Device.DoesNotExist, ValueError):
+            return _htmx_error_response("Existing device not found")
 
         # Optional per-field overrides from the pre-promote pick modal.
         # All three default to "keep current"; only applied when the POST
@@ -3344,16 +3346,19 @@ class MergeNetBoxDevicesView(
             return _htmx_error_response("winner_pk does not match the validation result's merge candidates")
         donor_pk = next(pk for pk in candidate_pks if pk != winner_pk)
 
-        try:
-            winner = Device.objects.get(pk=winner_pk)
-            donor = Device.objects.get(pk=donor_pk)
-        except Device.DoesNotExist:
-            return _htmx_error_response("Winner or donor device not found")
-
-        # Permission gate: user must be able to change BOTH devices.
+        # Permission gate: user must be able to change BOTH devices. Model-level first, then
+        # object-scoped: the gate below passes for a constrained grant, so both sides must be
+        # resolved through the restricted queryset or the merge could absorb an unseen device.
         self.required_object_permissions = {"POST": [("change", Device)]}
         if error := self.require_object_permissions("POST"):
             return error
+
+        changeable = self.restricted_queryset(Device, "change")
+        try:
+            winner = changeable.get(pk=winner_pk)
+            donor = changeable.get(pk=donor_pk)
+        except Device.DoesNotExist:
+            return _htmx_error_response("Winner or donor device not found")
 
         # Reject legacy bare-int librenms_id form on either side. The merge
         # helpers refuse to operate on legacy data to prevent silent migration.

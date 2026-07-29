@@ -301,6 +301,8 @@ class TestMoveInterfaceToWinnerView:
         from netbox_librenms_plugin.views.sync.migrate import MoveInterfaceToWinnerView
 
         view = MoveInterfaceToWinnerView()
+        # Bind a superuser-backed request: restrict() reads self.request.user (Django sets it in dispatch()).
+        view.request = _hx_request()
         # The plugin-write + object-perm gate is exercised separately in
         # test_perm_gate_short_circuits; null it here so each test drives the real
         # move logic against real rows.
@@ -661,6 +663,8 @@ class TestMoveInterfaceToWinnerView:
         from netbox_librenms_plugin.views.sync.migrate import MoveInterfaceToWinnerView
 
         view = MoveInterfaceToWinnerView()
+        # Bind a superuser-backed request: restrict() reads self.request.user (Django sets it in dispatch()).
+        view.request = _hx_request()
         view.require_all_permissions = MagicMock(return_value=HttpResponse(status=403))
         req = _hx_request()
         resp = view.post(req, pk=5)
@@ -687,6 +691,8 @@ class TestTransferDeviceIPView:
         from netbox_librenms_plugin.views.sync.migrate import TransferDeviceIPView
 
         view = TransferDeviceIPView()
+        # Bind a superuser-backed request: restrict() reads self.request.user (Django sets it in dispatch()).
+        view.request = _hx_request()
         view.require_all_permissions = MagicMock(return_value=None)
         return view
 
@@ -841,6 +847,8 @@ class TestMoveIPAddressToWinnerView:
         from netbox_librenms_plugin.views.sync.migrate import MoveIPAddressToWinnerView
 
         view = MoveIPAddressToWinnerView()
+        # Bind a superuser-backed request: restrict() reads self.request.user (Django sets it in dispatch()).
+        view.request = _hx_request()
         view.require_all_permissions = MagicMock(return_value=None)
         return view
 
@@ -1199,6 +1207,8 @@ class TestNonHtmxFallbackRedirect:
         from netbox_librenms_plugin.views.sync.migrate import MoveInterfaceToWinnerView
 
         view = MoveInterfaceToWinnerView()
+        # Bind a superuser-backed request: restrict() reads self.request.user (Django sets it in dispatch()).
+        view.request = _hx_request()
         view.require_all_permissions = MagicMock(return_value=None)
         return view
 
@@ -1214,7 +1224,7 @@ class TestNonHtmxFallbackRedirect:
         interface.name = "Eth0"
 
         with (
-            patch("netbox_librenms_plugin.views.sync.migrate.get_object_or_404", return_value=interface),
+            patch.object(type(view), "restrict_object_or_404", return_value=interface),
             patch(
                 "netbox_librenms_plugin.views.sync.migrate._resolve_winner_for_donor",
                 return_value=(None, None),
@@ -1776,3 +1786,125 @@ class TestMoveToWinnerConcurrencyHelpers:
             d, w, err = self._view()._lock_donor_winner_and_reverify(self._req(), donor, winner, "default")
         assert d is None and w is None
         assert err is not None  # "Donor migration changed concurrently; refresh and retry."
+
+
+@pytest.mark.django_db
+class TestMoveEndpointsObjectScope:
+    """The move-to-winner endpoints must resolve their URL pk through a restricted queryset.
+
+    NetBoxObjectPermissionMixin checks the required ``change`` perms at model level only, so a
+    constrained grant clears the gate; a raw ``get_object_or_404`` would then let it move an
+    interface, IP or device FK it can't see.
+    """
+
+    @staticmethod
+    def _writer(username, specs):
+        """A real non-superuser with plugin write access plus ``specs`` = [(model, constraints|None)] change grants."""
+        from core.models import ObjectType
+        from django.apps import apps
+        from django.contrib.auth import get_user_model
+        from users.models import ObjectPermission
+
+        LibreNMSSettings = apps.get_model("netbox_librenms_plugin", "LibreNMSSettings")
+
+        user = get_user_model().objects.create_user(username=username, password="x")
+        write = ObjectPermission.objects.create(name=f"{username}-plugin-write", actions=["change"])
+        write.object_types.set([ObjectType.objects.get_for_model(LibreNMSSettings)])
+        write.users.set([user])
+
+        for i, (model, constraints) in enumerate(specs):
+            perm = ObjectPermission.objects.create(
+                name=f"{username}-change-{i}", actions=["change"], constraints=constraints
+            )
+            perm.object_types.set([ObjectType.objects.get_for_model(model)])
+            perm.users.set([user])
+
+        return get_user_model().objects.get(pk=user.pk)  # clear the per-request perm cache
+
+    @staticmethod
+    def _request(user):
+        """A real HTMX POST request bound to *user* so the gate and restrict() both run for real."""
+        from django.test import RequestFactory
+
+        request = RequestFactory().post("/move/", {"server_key": "default"}, HTTP_HX_REQUEST="true")
+        request.user = user
+        return request
+
+    def _drive(self, view_cls, user, **kwargs):
+        view = view_cls()
+        request = self._request(user)
+        view.request = request
+        return view.post(request, **kwargs)
+
+    def test_interface_move_404s_an_out_of_scope_interface(self):
+        """A change_interface grant constrained to another interface must not reach the move logic."""
+        from dcim.models import Device, Interface
+        from django.http import Http404
+
+        from netbox_librenms_plugin.views.sync.migrate import MoveInterfaceToWinnerView
+
+        donor = make_device("scope-mi-donor")
+        in_scope = make_interface(make_device("scope-mi-other"), "Eth0")
+        out_of_scope = make_interface(donor, "Eth1")
+        user = self._writer("scoped-move-iface", [(Interface, {"pk": in_scope.pk}), (Device, None)])
+
+        with pytest.raises(Http404):
+            self._drive(MoveInterfaceToWinnerView, user, pk=out_of_scope.pk)
+
+        out_of_scope.refresh_from_db()
+        assert out_of_scope.device_id == donor.pk  # not moved
+
+    def test_interface_move_resolves_the_in_scope_interface(self):
+        """The interface the grant DOES cover resolves and reaches the marker check (no over-block)."""
+        from dcim.models import Device, Interface
+
+        from netbox_librenms_plugin.views.sync.migrate import MoveInterfaceToWinnerView
+
+        donor = make_device("scope-mi-in-donor")
+        iface = make_interface(donor, "Eth0")
+        user = self._writer("scoped-move-iface-ok", [(Interface, {"pk": iface.pk}), (Device, None)])
+
+        response = self._drive(MoveInterfaceToWinnerView, user, pk=iface.pk)
+
+        # No marker on the donor, so the move is refused on its merits — not 404'd at the lookup.
+        assert response.status_code == 200
+        assert b"not marked" in response.content or b"django-messages" in response.content
+
+    def test_ip_move_404s_an_out_of_scope_ip(self):
+        """A change_ipaddress grant constrained to another IP must not reach the move logic."""
+        from dcim.models import Device
+        from django.http import Http404
+        from ipam.models import IPAddress
+
+        from netbox_librenms_plugin.views.sync.migrate import MoveIPAddressToWinnerView
+
+        donor = make_device("scope-ip-donor")
+        in_scope = ip_on(make_device("scope-ip-other"), "10.60.0.1/24", "eth0")
+        out_of_scope = ip_on(donor, "10.60.1.1/24", "eth0")
+        user = self._writer("scoped-move-ip", [(IPAddress, {"pk": in_scope.pk}), (Device, None)])
+
+        with pytest.raises(Http404):
+            self._drive(MoveIPAddressToWinnerView, user, pk=out_of_scope.pk)
+
+        out_of_scope.refresh_from_db()
+        assert out_of_scope.assigned_object.device_id == donor.pk  # not moved
+
+    def test_device_ip_transfer_404s_an_out_of_scope_donor(self):
+        """A pk-constrained change_device grant must not transfer another device's primary IP."""
+        from dcim.models import Device
+        from django.http import Http404
+
+        from netbox_librenms_plugin.views.sync.migrate import TransferDeviceIPView
+
+        in_scope = make_device("scope-xfer-in")
+        donor = make_device("scope-xfer-donor")
+        donor_ip = ip_on(donor, "10.61.0.1/24", "eth0")
+        donor.primary_ip4 = donor_ip
+        donor.save()
+        user = self._writer("scoped-xfer-device", [(Device, {"pk": in_scope.pk})])
+
+        with pytest.raises(Http404):
+            self._drive(TransferDeviceIPView, user, pk=donor.pk, ip_kind="primary4")
+
+        donor.refresh_from_db()
+        assert donor.primary_ip4_id == donor_ip.pk  # not transferred
