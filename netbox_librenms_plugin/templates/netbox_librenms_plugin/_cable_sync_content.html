@@ -3,16 +3,34 @@
 
 <!-- Cable Sync Table -->
 {% if cable_sync.table %}
+{# Migrated donors must not sync: hiding only the button leaves the POST form live (Enter in a filter still submits), so drop the form in migrated mode. #}
+{% if migrated_to_marker %}
+<div>
+    {% comment %}
+    No POST form in migrated mode, but the cable table still renders interactive controls whose
+    verify-cable fetch (handleCableChange) reads document.querySelector('[name=csrfmiddlewaretoken]').value
+    and input[name="server_key"]. Emit standalone hidden inputs so those JS-driven requests don't hit a
+    null CSRF token (TypeError/403) or fall back to the default server on a non-default deployment. A bare
+    hidden input never auto-submits, so it doesn't reintroduce the live-form problem migrated mode avoids.
+    Mirrors _interface_sync_content.html.
+    {% endcomment %}
+    <input type="hidden" name="csrfmiddlewaretoken" value="{{ csrf_token }}">
+    {% if cable_sync.server_key %}<input type="hidden" name="server_key" value="{{ cable_sync.server_key }}">{% endif %}
+{% else %}
 <form method="post" action="{% url 'plugins:netbox_librenms_plugin:sync_device_cables' cable_sync.object.pk %}">
+    {# The sync POST's own inputs (token + selected_port) live inside the <form> branch only. #}
     {% csrf_token %}
     {% if cable_sync.server_key %}<input type="hidden" name="server_key" value="{{ cable_sync.server_key }}">{% endif %}
     <input type="hidden" id="selected_port" name="select" value="">
+{% endif %}
     <div class="noprint d-flex justify-content-between align-items-center mt-3 mb-3">
         <div>
+            {% if not migrated_to_marker %}
             <button type="submit" class="btn btn-primary">
                 <span class="spinner spinner-border d-none" id="sync-spinner"></span>
                 <span>Sync Selected Cables</span>
             </button>
+            {% endif %}
             <a href="#" class="m-2" data-bs-toggle="modal" data-bs-target="#cableSyncHelpModal">
                 <i class="mdi mdi-help-circle"></i> info
             </a>
@@ -70,7 +88,11 @@
             </div>
         </div>
     </div>
+{% if migrated_to_marker %}
+</div>
+{% else %}
 </form>
+{% endif %}
 {% else %}
 <div class="card">
     <div class="card-body text-center text-muted py-4">

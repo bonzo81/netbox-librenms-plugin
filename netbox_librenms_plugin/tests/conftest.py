@@ -4,6 +4,227 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+
+@pytest.fixture(autouse=True)
+def _clear_device_info_cache():
+    """Clear get_device_info()'s short-lived cache between tests.
+
+    get_device_info() caches successful lookups in the shared cache. Without this,
+    a cached success from one test leaks into another that reuses the same
+    (server_key, device_id) but mocks a different response — e.g. the failure-path
+    tests keyed on device_id=123 that run after test_get_device_info_success.
+    """
+    from django.core.cache import cache
+
+    try:
+        cache.delete_pattern("librenms_device_info_*")
+    except (AttributeError, NotImplementedError):
+        cache.clear()
+    yield
+
+
+# =============================================================================
+# Real-DB builders (shared by the DB-backed conversions)
+# =============================================================================
+#
+# These plain helpers create real NetBox objects for tests marked
+# ``@pytest.mark.django_db`` (they must be called from within a DB-enabled test).
+# Centralised here so the DB-backed tests stop hand-rolling a private
+# Site/Manufacturer/DeviceType/DeviceRole quartet in every file. No new dependency
+# (e.g. factory_boy) is introduced — get_or_create keeps the shared infra to a single
+# row set per test transaction, and everything is rolled back between tests.
+
+
+def _shared_infra():
+    """get_or_create the shared Site / Manufacturer / DeviceType / DeviceRole."""
+    from dcim.models import DeviceRole, DeviceType, Manufacturer, Site
+
+    site, _ = Site.objects.get_or_create(name="TestSite", slug="test-site")
+    mfr, _ = Manufacturer.objects.get_or_create(name="TestMfr", slug="test-mfr")
+    dtype, _ = DeviceType.objects.get_or_create(model="TestDT", slug="test-dt", defaults={"manufacturer": mfr})
+    role, _ = DeviceRole.objects.get_or_create(name="TestRole", slug="test-role", defaults={"color": "00ff00"})
+    return site, mfr, dtype, role
+
+
+def make_device(name, *, serial="", librenms_cf=None):
+    """Create a real Device on the shared infra, optionally seeding its librenms_id CF."""
+    from dcim.models import Device
+
+    site, _mfr, dtype, role = _shared_infra()
+    dev = Device.objects.create(name=name, device_type=dtype, role=role, site=site, status="active", serial=serial)
+    if librenms_cf is not None:
+        dev.custom_field_data["librenms_id"] = librenms_cf
+        dev.save()
+    return dev
+
+
+def make_cluster(name):
+    """Create a real Cluster on a shared ClusterType."""
+    from virtualization.models import Cluster, ClusterType
+
+    ctype, _ = ClusterType.objects.get_or_create(name="TestCType", slug="test-ctype")
+    return Cluster.objects.create(name=name, type=ctype)
+
+
+def make_vm(name, cluster=None):
+    """Create a real VirtualMachine (on a shared cluster unless one is supplied)."""
+    from virtualization.models import Cluster, ClusterType, VirtualMachine
+
+    if cluster is None:
+        ctype, _ = ClusterType.objects.get_or_create(name="TestCType", slug="test-ctype")
+        cluster, _ = Cluster.objects.get_or_create(name="TestCluster", defaults={"type": ctype})
+    return VirtualMachine.objects.create(name=name, cluster=cluster, status="active")
+
+
+def make_serial_device(name, *, csp_names=(), cp_names=()):
+    """Create a real Device with optional ConsoleServerPorts / ConsolePorts."""
+    from dcim.models import ConsolePort, ConsoleServerPort
+
+    dev = make_device(name)
+    csps = [ConsoleServerPort.objects.create(device=dev, name=n) for n in csp_names]
+    cps = [ConsolePort.objects.create(device=dev, name=n) for n in cp_names]
+    return dev, csps, cps
+
+
+def cable_together(term_a, term_b):
+    """Create a real Cable between two terminations (NetBox 4.x multi-termination API)."""
+    from dcim.models import Cable
+
+    cable = Cable(a_terminations=[term_a], b_terminations=[term_b])
+    cable.save()
+    return cable
+
+
+def make_interface(device, name, *, iface_type="other"):
+    """Create a real Interface on *device*."""
+    from dcim.models import Interface
+
+    return Interface.objects.create(device=device, name=name, type=iface_type)
+
+
+def make_ip(address, *, assigned_object=None, status="active"):
+    """Create a real IPAddress, optionally assigned to an interface/object."""
+    from ipam.models import IPAddress
+
+    return IPAddress.objects.create(address=address, assigned_object=assigned_object, status=status)
+
+
+def make_module_type(model, *, manufacturer=None):
+    """Create a real ModuleType (on the shared TestMfr unless one is supplied)."""
+    from dcim.models import ModuleType
+
+    if manufacturer is None:
+        _, manufacturer, _, _ = _shared_infra()
+    return ModuleType.objects.create(manufacturer=manufacturer, model=model)
+
+
+def make_module_bay(device, name):
+    """Create a real ModuleBay on *device*."""
+    from dcim.models import ModuleBay
+
+    return ModuleBay.objects.create(device=device, name=name)
+
+
+def make_module_type_with_bays(model, *, manufacturer=None, bay_names=()):
+    """get_or_create a real ModuleType and (when first created) attach ModuleBayTemplates."""
+    from dcim.models import ModuleBayTemplate, ModuleType
+
+    if manufacturer is None:
+        _, manufacturer, _, _ = _shared_infra()
+    # Additive: reusing the same model with new bay_names must add the missing templates rather
+    # than silently skip them (the create-only guard made tests order-dependent).
+    mt, _ = ModuleType.objects.get_or_create(manufacturer=manufacturer, model=model)
+    for bn in bay_names:
+        ModuleBayTemplate.objects.get_or_create(module_type=mt, name=bn)
+    return mt
+
+
+def make_device_with_module_bays(name, bay_names, *, manufacturer=None, serial=""):
+    """Create a real Device on a dedicated DeviceType carrying device-level ModuleBayTemplates."""
+    from dcim.models import Device, DeviceType, ModuleBayTemplate
+
+    site, mfr, _, role = _shared_infra()
+    if manufacturer is None:
+        manufacturer = mfr
+    slug = f"mbt-dt-{name}".lower().replace(" ", "-")
+    dtype = DeviceType.objects.create(manufacturer=manufacturer, model=f"DT-{name}", slug=slug)
+    for bn in bay_names:
+        ModuleBayTemplate.objects.create(device_type=dtype, name=bn)
+    return Device.objects.create(name=name, device_type=dtype, role=role, site=site, status="active", serial=serial)
+
+
+def load_contrib_bay_mappings():
+    """Create real ModuleBayMapping rows from contrib/module_bay_mappings.yaml."""
+    from pathlib import Path
+
+    import yaml
+
+    from netbox_librenms_plugin.models import ModuleBayMapping
+
+    contrib = Path(__file__).resolve().parents[2] / "contrib" / "module_bay_mappings.yaml"
+    with open(contrib) as f:
+        data = yaml.safe_load(f)
+    return [
+        ModuleBayMapping.objects.create(
+            librenms_name=m["librenms_name"],
+            librenms_class=m.get("librenms_class") or "",
+            netbox_bay_name=m["netbox_bay_name"],
+            is_regex=m.get("is_regex", False),
+        )
+        for m in data
+    ]
+
+
+def install_module(device, bay_name, model, *, serial="", child_bays=(), manufacturer=None, parent_module=None):
+    """Install a real Module of type *model* into *device*'s ModuleBay named *bay_name*."""
+    from dcim.models import Module, ModuleBay
+
+    mt = make_module_type_with_bays(model, manufacturer=manufacturer, bay_names=child_bays)
+    qs = ModuleBay.objects.filter(device=device, name=bay_name)
+    if parent_module is not None:
+        qs = qs.filter(module=parent_module)
+    bay = qs.get()
+    return Module.objects.create(device=device, module_bay=bay, module_type=mt, serial=serial, status="active")
+
+
+def ip_on(device, address, ifname, *, iface_type="1000base-t"):
+    """Create an Interface on *device* and assign a real IPAddress to it."""
+    iface = make_interface(device, ifname, iface_type=iface_type)
+    return make_ip(address, assigned_object=iface)
+
+
+def delete_keeping_pk(obj):
+    """Delete the row via the queryset so the in-memory instance keeps its pk."""
+    type(obj).objects.filter(pk=obj.pk).delete()
+
+
+def make_superuser(username="review-su"):
+    """Return an ACTUAL active superuser for permission-sensitive view tests.
+
+    ``User.objects.first()`` can hand back a pre-seeded non-superuser (DB-ordering dependent),
+    which would run the test under the wrong principal and cover the wrong branch. This filters
+    explicitly for an active superuser, and otherwise get_or_creates one — reusing and correcting
+    a pre-existing inactive/non-superuser row of the same username rather than tripping the
+    unique-username constraint a bare create() would hit. NetBox's User model has no is_staff
+    field; only is_superuser/is_active gate access here.
+    """
+    from django.contrib.auth import get_user_model
+
+    User = get_user_model()
+    user = User.objects.filter(is_superuser=True, is_active=True).first()
+    if user:
+        return user
+    user, _ = User.objects.get_or_create(
+        username=username,
+        defaults={"is_superuser": True, "is_active": True},
+    )
+    if not user.is_superuser or not user.is_active:
+        user.is_superuser = True
+        user.is_active = True
+        user.save(update_fields=["is_superuser", "is_active"])
+    return user
+
+
 # =============================================================================
 # Configuration Fixtures
 # =============================================================================

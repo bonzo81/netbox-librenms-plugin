@@ -7,6 +7,7 @@ from django.utils.html import escape, format_html, mark_safe
 from netbox.tables.columns import ToggleColumn
 from utilities.paginator import EnhancedPaginator
 
+from netbox_librenms_plugin.constants import OOB_BADGE_HTML
 from netbox_librenms_plugin.utils import get_table_paginate_count
 
 
@@ -81,6 +82,40 @@ class LibreNMSModuleTable(tables.Table):
         self.can_add_module_bay_mapping = can_add_module_bay_mapping
         self.can_add_module_type_mapping = can_add_module_type_mapping
         super().__init__(*args, **kwargs)
+        # Batch-load the installed modules (with module_type + interface templates) referenced by
+        # the rows, so render_actions' VC "Report VC issue" diagnostic doesn't run a per-row
+        # Module.objects.get() + interfacetemplates.all() — an N+1 over the whole module table.
+        # Only VC devices reach that branch, so skip the query otherwise.
+        self._installed_modules_by_id = {}
+        if isinstance(getattr(self.device, "virtual_chassis_id", None), int):
+            data_rows = args[0] if args else kwargs.get("data") or []
+            installed_ids = {
+                row["installed_module_id"]
+                for row in data_rows
+                if isinstance(row, dict) and row.get("installed_module_id")
+            }
+            if installed_ids:
+                from dcim.models import Module
+                from django.db import DatabaseError
+
+                try:
+                    self._installed_modules_by_id = {
+                        m.pk: m
+                        for m in Module.objects.select_related(
+                            "module_type",
+                            "module_type__manufacturer",
+                            "module_bay",
+                            "device",
+                            "device__device_type",
+                            "device__virtual_chassis",
+                        )
+                        .prefetch_related("module_type__interfacetemplates")
+                        .filter(pk__in=installed_ids)
+                    }
+                except (DatabaseError, RuntimeError):
+                    # RuntimeError: pytest "Database access not allowed" in unit-test contexts
+                    # whose self.device is a MagicMock with a real-looking virtual_chassis_id.
+                    self._installed_modules_by_id = {}
         if not (has_write_permission and can_add_module) and hasattr(self, "columns"):
             self.columns["selection"].column.visible = False
         self.tab = "modules"
@@ -147,16 +182,26 @@ class LibreNMSModuleTable(tables.Table):
             rendered_name = display_name
 
         depth = record.get("depth", 0)
+        # Static trusted markup — use mark_safe, not format_html (which requires
+        # interpolation args and raises TypeError when given a bare string).
+        oob_badge = (
+            mark_safe(OOB_BADGE_HTML)  # noqa: S308
+            if record.get("_source") == "oob"
+            else ""
+        )
         if depth == 0:
-            return rendered_name
+            return format_html("{}{}", rendered_name, oob_badge)
         # Build visual tree prefix based on nesting depth
         padding_px = depth * 20
         prefix = "└─ "
+        # Keep the OOB badge inside the padded container so it stays indented
+        # with the module name on nested rows (was rendering at column 0).
         return format_html(
-            '<span style="padding-left:{}px"><span style="white-space: nowrap;">{}{}</span></span>',
+            '<span style="padding-left:{}px"><span style="white-space: nowrap;">{}{}</span>{}</span>',
             padding_px,
             prefix,
             rendered_name,
+            oob_badge,
         )
 
     def render_model(self, value, record):
@@ -227,6 +272,42 @@ class LibreNMSModuleTable(tables.Table):
         return format_html("{}", value)
 
     def render_status(self, value, record):
+        """
+        Render the sync-status badge alongside a hidden in-flight spinner badge.
+
+        The live badge is wrapped so CSS (see ``_module_sync.html``) can swap it
+        for the spinner badge while a row-action POST is in flight — the row forms
+        set ``hx-indicator="closest tr"``, so HTMX marks the row with ``htmx-request``
+        for the duration. The spinner label tracks the row's action: "Updating…" on an
+        installed-module row offering Update Serial / Update Interface, "Installing…"
+        on an install / install-branch / carrier-install row. It stays hidden in every
+        other state, including the inline verify-endpoint cell updates.
+        """
+        # An update action (Update Serial / Update Interface) acts on an already-installed module
+        # and a row never offers it alongside an install-flavoured action, so a row with an update
+        # flag and no install/branch/carrier action shows "Updating…"; everything else "Installing…".
+        in_flight_label = (
+            "Updating"
+            if (
+                record.get("installed_module_id")
+                and (record.get("can_update_serial") or record.get("can_update_interface_binding"))
+                and not record.get("can_install")
+                and not record.get("has_installable_children")
+                and not record.get("carrier_install_options")
+            )
+            else "Installing"
+        )
+        badge = self._status_badge_html(value, record)
+        return format_html(
+            '<span class="lnms-status-live">{}</span>'
+            '<span class="lnms-installing badge bg-primary text-white" role="status" title="{}…">'
+            '<span class="spinner-border spinner-border-sm" aria-hidden="true"></span>{}…</span>',
+            badge,
+            in_flight_label,
+            in_flight_label,
+        )
+
+    def _status_badge_html(self, value, record):
         """Render sync status with badge."""
         # Promote No Bay → Missing Carrier when concrete carrier-install rules
         # produced suggestions for this row (one-click install offered below).
@@ -429,7 +510,11 @@ class LibreNMSModuleTable(tables.Table):
             url = reverse("plugins:netbox_librenms_plugin:install_module", kwargs={"pk": self.device.pk})
             buttons.append(
                 format_html(
-                    '<form method="post" action="{}" style="display:inline">'
+                    # hx-post swaps just the module table in place (the view returns the
+                    # table partial for HTMX); method/action keep it working without JS.
+                    '<form method="post" action="{}" hx-post="{}"'
+                    ' hx-target="#module-sync-content" hx-swap="innerHTML"'
+                    ' hx-indicator="closest tr" hx-disabled-elt="find button" style="display:inline">'
                     '<input type="hidden" name="csrfmiddlewaretoken" value="{}">'
                     '<input type="hidden" name="server_key" value="{}">'
                     '<input type="hidden" name="selected_device_id" value="{}">'
@@ -445,6 +530,7 @@ class LibreNMSModuleTable(tables.Table):
                     '<button type="submit" class="btn btn-sm btn-success" title="Install module in bay">'
                     '<i class="mdi mdi-download"></i> Install'
                     "</button></form>",
+                    url,
                     url,
                     self.csrf_token,
                     self.server_key,
@@ -466,7 +552,11 @@ class LibreNMSModuleTable(tables.Table):
             url = reverse("plugins:netbox_librenms_plugin:install_branch", kwargs={"pk": self.device.pk})
             buttons.append(
                 format_html(
-                    '<form method="post" action="{}" style="display:inline">'
+                    # hx-post swaps just the module table in place (the view returns the
+                    # table partial for HTMX); method/action keep it working without JS.
+                    '<form method="post" action="{}" hx-post="{}"'
+                    ' hx-target="#module-sync-content" hx-swap="innerHTML"'
+                    ' hx-indicator="closest tr" hx-disabled-elt="find button" style="display:inline">'
                     '<input type="hidden" name="csrfmiddlewaretoken" value="{}">'
                     '<input type="hidden" name="server_key" value="{}">'
                     '<input type="hidden" name="selected_device_id" value="{}">'
@@ -475,6 +565,7 @@ class LibreNMSModuleTable(tables.Table):
                     ' title="Install this module and all installable children">'
                     '<i class="mdi mdi-file-tree"></i> Install Branch'
                     "</button></form>",
+                    url,
                     url,
                     self.csrf_token,
                     self.server_key,
@@ -488,7 +579,11 @@ class LibreNMSModuleTable(tables.Table):
             url = reverse("plugins:netbox_librenms_plugin:update_module_serial", kwargs={"pk": self.device.pk})
             buttons.append(
                 format_html(
-                    '<form method="post" action="{}" style="display:inline">'
+                    # hx-post swaps just the module table in place (the view returns the
+                    # table partial for HTMX); method/action keep it working without JS.
+                    '<form method="post" action="{}" hx-post="{}"'
+                    ' hx-target="#module-sync-content" hx-swap="innerHTML"'
+                    ' hx-indicator="closest tr" hx-disabled-elt="find button" style="display:inline">'
                     '<input type="hidden" name="csrfmiddlewaretoken" value="{}">'
                     '<input type="hidden" name="server_key" value="{}">'
                     '<input type="hidden" name="selected_device_id" value="{}">'
@@ -498,6 +593,7 @@ class LibreNMSModuleTable(tables.Table):
                     ' title="Update serial in NetBox to match LibreNMS">'
                     '<i class="mdi mdi-sync"></i> Update Serial'
                     "</button></form>",
+                    url,
                     url,
                     self.csrf_token,
                     self.server_key,
@@ -515,7 +611,11 @@ class LibreNMSModuleTable(tables.Table):
             url = reverse("plugins:netbox_librenms_plugin:update_module_interface", kwargs={"pk": self.device.pk})
             buttons.append(
                 format_html(
-                    '<form method="post" action="{}" style="display:inline">'
+                    # hx-post swaps just the module table in place (the view returns the
+                    # table partial for HTMX); method/action keep it working without JS.
+                    '<form method="post" action="{}" hx-post="{}"'
+                    ' hx-target="#module-sync-content" hx-swap="innerHTML"'
+                    ' hx-indicator="closest tr" hx-disabled-elt="find button" style="display:inline">'
                     '<input type="hidden" name="csrfmiddlewaretoken" value="{}">'
                     '<input type="hidden" name="server_key" value="{}">'
                     '<input type="hidden" name="selected_device_id" value="{}">'
@@ -530,6 +630,7 @@ class LibreNMSModuleTable(tables.Table):
                     ' title="Associate matching NetBox interface with installed module">'
                     '<i class="mdi mdi-link-variant"></i> Update Interface'
                     "</button></form>",
+                    url,
                     url,
                     self.csrf_token,
                     self.server_key,
@@ -613,7 +714,11 @@ class LibreNMSModuleTable(tables.Table):
             for opt in record["carrier_install_options"]:
                 buttons.append(
                     format_html(
-                        '<form method="post" action="{}" style="display:inline">'
+                        # hx-post swaps just the module table in place (install_module returns the
+                        # table partial for HTMX); method/action keep it working without JS.
+                        '<form method="post" action="{}" hx-post="{}"'
+                        ' hx-target="#module-sync-content" hx-swap="innerHTML"'
+                        ' hx-indicator="closest tr" hx-disabled-elt="find button" style="display:inline">'
                         '<input type="hidden" name="csrfmiddlewaretoken" value="{}">'
                         '<input type="hidden" name="server_key" value="{}">'
                         '<input type="hidden" name="selected_device_id" value="{}">'
@@ -624,6 +729,7 @@ class LibreNMSModuleTable(tables.Table):
                         " title=\"Install carrier {} into empty bay '{}'\">"
                         '<i class="mdi mdi-puzzle-plus-outline"></i> Install {} into &#39;{}&#39;'
                         "</button></form>",
+                        install_url,
                         install_url,
                         self.csrf_token,
                         self.server_key,
@@ -791,26 +897,12 @@ class LibreNMSModuleTable(tables.Table):
         # `virtual_chassis_id` is an int in production (or None); MagicMock-only tests
         # see a MagicMock here, which the isinstance check correctly skips.
         if record.get("installed_module_id") and isinstance(getattr(self.device, "virtual_chassis_id", None), int):
-            from dcim.models import Module
-            from django.db import DatabaseError
-
             from netbox_librenms_plugin.utils import detect_vc_normalization_noop
 
-            installed_module = None
-            try:
-                installed_module = Module.objects.select_related(
-                    "module_type",
-                    "module_type__manufacturer",
-                    "module_bay",
-                    "device",
-                    "device__device_type",
-                    "device__virtual_chassis",
-                ).get(pk=record["installed_module_id"])
-            except (Module.DoesNotExist, DatabaseError, RuntimeError):
-                # RuntimeError: pytest's "Database access not allowed" in unit-test
-                # contexts that supply self.device as a MagicMock with a real-looking
-                # virtual_chassis_id. Production rows wouldn't reach here.
-                installed_module = None
+            # Served from the __init__ batch prefetch (with interface templates), so this
+            # diagnostic adds no per-row query. A missing id (deleted concurrently, or a
+            # unit-test MagicMock device that skipped the prefetch) yields None → no button.
+            installed_module = self._installed_modules_by_id.get(record["installed_module_id"])
 
             if installed_module is not None and detect_vc_normalization_noop(installed_module.device, installed_module):
                 report_url = reverse(

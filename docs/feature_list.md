@@ -10,6 +10,15 @@
 * Background job processing for large device sets
 * Duplicate detection to prevent re-importing existing devices
 
+### [Out-of-Band (OOB) Management](usage_tips/oob_management.md)
+
+* Detects when a LibreNMS device (iDRAC/iLO/BMC/IPMI/CIMC) is the OOB controller of an existing NetBox device
+* **Add as OOB** — link the controller to the host and set `oob_ip` on a chosen (or new) interface
+* **Promote to host** — re-point a device currently linked to its OOB controller onto the incoming host device
+* **Merge NetBox devices** — reconcile two devices (hostname-matched vs serial-matched) that represent one physical box
+* Per-server linkage stored in the `librenms_id` custom field as `{"<server_key>": {"id": N, "oob": {"id": M, "type": "drac"}}}`
+* Post-merge **Move to winner** actions to migrate interfaces, IP addresses, and primary/OOB IPs at your own pace
+
 ### [Module / Inventory Sync](usage_tips/module_sync.md)
 
 * Compare LibreNMS ENTITY-MIB inventory to NetBox module bays and installed modules

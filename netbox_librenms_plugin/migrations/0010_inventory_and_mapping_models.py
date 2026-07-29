@@ -96,13 +96,8 @@ def _delete_default_inventory_ignore_rules(apps, schema_editor):
 
 class Migration(migrations.Migration):
     dependencies = [
-        # Pinned to the NetBox 4.2 floor declared by ``min_version`` in
-        # ``netbox_librenms_plugin/__init__.py``. Only ``Manufacturer``,
-        # ``DeviceType``, ``ModuleType``, and ``Platform`` are referenced from
-        # dcim, and only ``Tag``/``TaggedItem`` from extras (via taggit) — all
-        # of which exist in 4.2.x. ``makemigrations`` will try to bump these to
-        # the dev environment's NetBox tip; revert it unless we actually start
-        # depending on a newer field.
+        # makemigrations will try to bump these to the dev NetBox tip; revert unless we
+        # actually depend on a newer field.
         ("dcim", "0200_populate_mac_addresses"),
         ("extras", "0122_charfield_null_choices"),
         ("netbox_librenms_plugin", "0009_convert_librenms_id_to_json"),

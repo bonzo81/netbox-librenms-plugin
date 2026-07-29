@@ -13,10 +13,149 @@ Targets:
 
 from unittest.mock import MagicMock, patch
 
+import pytest
+
+
+class TestCacheRemainingTtl:
+    """cache_remaining_ttl centralises the django-redis-only cache.ttl() guard."""
+
+    def test_returns_value_when_backend_exposes_ttl(self):
+        from netbox_librenms_plugin.utils import cache_remaining_ttl
+
+        backend = MagicMock()
+        backend.ttl.return_value = 123
+        assert cache_remaining_ttl(backend, "some-key") == 123
+        backend.ttl.assert_called_once_with("some-key")
+
+    def test_returns_none_when_backend_lacks_ttl(self):
+        from netbox_librenms_plugin.utils import cache_remaining_ttl
+
+        # A core Django backend (e.g. LocMemCache) exposes no ttl() — the guard must degrade to
+        # None rather than raising AttributeError mid-render.
+        class _NoTtlCache:
+            def get(self, *args, **kwargs):
+                return None
+
+        assert cache_remaining_ttl(_NoTtlCache(), "some-key") is None
+
 
 # =============================================================================
 # LibreNMSAPIMixin.get_context_data
 # =============================================================================
+
+
+class TestLibreNMSAPIMixinRebindApiForServer:
+    """LibreNMSAPIMixin.rebind_api_for_server: POST-scoped API client for base views."""
+
+    def _mixin(self, session_key="default"):
+        from netbox_librenms_plugin.views.mixins import LibreNMSAPIMixin
+
+        m = object.__new__(LibreNMSAPIMixin)
+        m._librenms_api = MagicMock(server_key=session_key)
+        return m
+
+    def test_empty_key_keeps_session_api(self):
+        """No POSTed key → returns the session server key and does not rebind."""
+        m = self._mixin("default")
+        original = m._librenms_api
+        assert m.rebind_api_for_server("") == "default"
+        assert m.rebind_api_for_server(None) == "default"
+        assert m._librenms_api is original  # unchanged
+
+    def test_valid_key_rebinds_and_returns_key(self):
+        m = self._mixin("default")
+        new_api = MagicMock(server_key="prod")
+        with patch("netbox_librenms_plugin.librenms_api.build_librenms_api", return_value=new_api) as mock_build:
+            result = m.rebind_api_for_server("prod")
+        mock_build.assert_called_once_with("prod")
+        assert result == "prod"
+        assert m._librenms_api is new_api  # rebound
+
+    def test_returns_resolved_key_not_raw_post_value(self):
+        """build_librenms_api may normalize the posted key (e.g."""
+        m = self._mixin("default")
+        resolved_api = MagicMock(server_key="primary")
+        with patch("netbox_librenms_plugin.librenms_api.build_librenms_api", return_value=resolved_api):
+            result = m.rebind_api_for_server("default")
+        assert result == "primary"  # resolved key, not the raw posted "default"
+        assert m._librenms_api is resolved_api
+
+    def test_unknown_key_returns_none_without_rebinding(self):
+        """A stale/tampered key (build returns None) → None, API left untouched."""
+        m = self._mixin("default")
+        original = m._librenms_api
+        with patch("netbox_librenms_plugin.librenms_api.build_librenms_api", return_value=None):
+            assert m.rebind_api_for_server("ghost") is None
+        assert m._librenms_api is original
+
+    def test_empty_key_no_cached_api_builds_default(self):
+        """No POSTed key and no cached client → build the default via build_librenms_api(None), cache it, and return its key — never touching the LibreNMSAPI() property directly."""
+        from netbox_librenms_plugin.views.mixins import LibreNMSAPIMixin
+
+        m = object.__new__(LibreNMSAPIMixin)
+        m._librenms_api = None
+        default_api = MagicMock(server_key="default")
+        with patch("netbox_librenms_plugin.librenms_api.build_librenms_api", return_value=default_api) as mock_build:
+            assert m.rebind_api_for_server("") == "default"
+        mock_build.assert_called_once_with(None)
+        assert m._librenms_api is default_api  # cached for reuse
+
+    def test_empty_key_misconfigured_default_returns_none(self):
+        """No POSTed key, no cached client, and the default server is misconfigured (build_librenms_api returns None) → fail closed with None instead of raising."""
+        from netbox_librenms_plugin.views.mixins import LibreNMSAPIMixin
+
+        m = object.__new__(LibreNMSAPIMixin)
+        m._librenms_api = None
+        with patch("netbox_librenms_plugin.librenms_api.build_librenms_api", return_value=None):
+            assert m.rebind_api_for_server("") is None
+        assert m._librenms_api is None
+
+
+class TestLibreNMSAPIMixinResolveGetRenderServerKey:
+    """LibreNMSAPIMixin.resolve_get_render_server_key: GET-render cache-scope resolution."""
+
+    class _Req:
+        """Minimal request stand-in exposing only ``GET`` (a dict supports ``.get``)."""
+
+        def __init__(self, server_key=None):
+            self.GET = {} if server_key is None else {"server_key": server_key}
+
+    def _mixin(self):
+        from netbox_librenms_plugin.views.mixins import LibreNMSAPIMixin
+
+        m = object.__new__(LibreNMSAPIMixin)
+        m._librenms_api = None
+        return m
+
+    def test_blank_key_misconfigured_default_does_not_rebuild_client(self):
+        """Blank key + no cached client + misconfigured default degrades to None scope without rebuilding."""
+        m = self._mixin()
+        with (
+            patch("netbox_librenms_plugin.librenms_api.build_librenms_api", return_value=None),
+            patch("netbox_librenms_plugin.views.mixins.LibreNMSAPI") as mock_api_cls,
+        ):
+            scoped, unresolved = m.resolve_get_render_server_key(self._Req())
+        mock_api_cls.assert_not_called()  # the lazy property must never reconstruct the default
+        assert m._librenms_api is None  # left unbound, not a freshly-built client
+        assert unresolved is False
+        assert scoped is None
+
+    def test_blank_key_reads_cached_client_key_without_rebuild(self):
+        """Blank key with a cached client returns that client's key, read directly without rebuilding."""
+        m = self._mixin()
+        m._librenms_api = MagicMock(server_key="prod")
+        with patch("netbox_librenms_plugin.views.mixins.LibreNMSAPI") as mock_api_cls:
+            scoped, unresolved = m.resolve_get_render_server_key(self._Req())
+        mock_api_cls.assert_not_called()
+        assert unresolved is False
+        assert scoped == "prod"
+
+    def test_unknown_requested_key_flags_unresolved(self):
+        """A non-blank server_key that no longer resolves returns (requested, True)."""
+        m = self._mixin()
+        with patch("netbox_librenms_plugin.librenms_api.build_librenms_api", return_value=None):
+            scoped, unresolved = m.resolve_get_render_server_key(self._Req("ghost"))
+        assert (scoped, unresolved) == ("ghost", True)
 
 
 class TestLibreNMSAPIMixinGetContextData:
@@ -1045,3 +1184,29 @@ class TestUpdateInterfaceVlanAssignmentBranches:
 
         for key in ("mode_set", "untagged_set", "tagged_set", "missing_vlans"):
             assert key in result
+
+
+class TestRenderServerKeyDegradation:
+    """LibreNMSAPIMixin._render_server_key degrades a misconfigured default to None and is shared across views."""
+
+    @pytest.mark.django_db
+    def test_render_server_key_returns_none_on_broken_default(self):
+        """A misconfigured default must not raise out of a render path; it degrades to None."""
+        from django.test import override_settings
+
+        from netbox_librenms_plugin.views.base.ip_addresses_view import BaseIPAddressTableView
+
+        view = object.__new__(BaseIPAddressTableView)
+        view._librenms_api = None  # live property -> LibreNMSAPI() would raise ValueError
+
+        with override_settings(PLUGINS_CONFIG={"netbox_librenms_plugin": {"servers": {"default": {}}}}):
+            assert view._render_server_key() is None
+
+    def test_render_server_key_is_shared_from_mixin(self):
+        """The IP and cable table views inherit ONE _render_server_key (no per-view duplicate)."""
+        from netbox_librenms_plugin.views.base.cables_view import BaseCableTableView
+        from netbox_librenms_plugin.views.base.ip_addresses_view import BaseIPAddressTableView
+        from netbox_librenms_plugin.views.mixins import LibreNMSAPIMixin
+
+        assert BaseIPAddressTableView._render_server_key is LibreNMSAPIMixin._render_server_key
+        assert BaseCableTableView._render_server_key is LibreNMSAPIMixin._render_server_key

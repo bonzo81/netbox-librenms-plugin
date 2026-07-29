@@ -24,7 +24,10 @@
                     <a href="{{ installed_module.module_type.get_absolute_url }}">{{ installed_module.module_type.model }}</a>
                 {% else %}-{% endif %}
             </td>
-            <td{% if type_mismatch %} class="text-danger fw-semibold"{% endif %}>{{ librenms_model }}</td>
+            <td{% if type_mismatch %} class="text-danger fw-semibold"{% endif %}>
+                {{ librenms_model }}
+                {% if type_matched %}<i class="mdi mdi-check-decagram text-success ms-1" title="Recognised as NetBox module type {{ installed_module.module_type.model }}"></i>{% endif %}
+            </td>
         </tr>
         <tr>
             <td><strong>Serial</strong></td>
@@ -40,10 +43,17 @@
     <strong>Different module type</strong> — the installed module type does not match LibreNMS.
     Replacing will delete the current module and install <strong>{{ librenms_model }}</strong>.
 </div>
-{% elif serial_mismatch %}
+{% elif serial_mismatch and type_matched %}
 <div class="alert alert-info py-2 mb-3">
-    <i class="mdi mdi-information me-1"></i>
-    Same module type, different serial — the module may have been physically replaced.
+    <i class="mdi mdi-check-decagram me-1"></i>
+    Same module type — the LibreNMS model is recognised as this module type (see the badge above).
+    Only the serial differs, so the module may have been physically replaced.
+</div>
+{% elif serial_mismatch %}
+<div class="alert alert-secondary py-2 mb-3">
+    <i class="mdi mdi-help-circle-outline me-1"></i>
+    The LibreNMS model isn't recognised as a NetBox module type, so only the serial can be compared —
+    it differs from the installed module.
 </div>
 {% endif %}
 

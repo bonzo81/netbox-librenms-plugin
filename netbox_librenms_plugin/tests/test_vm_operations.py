@@ -95,6 +95,37 @@ class TestCreateVmFromLibrenms:
         with pytest.raises(ValueError, match="VM cannot be imported"):
             create_vm_from_librenms(libre_device, validation)
 
+    def test_numeric_like_device_id_rejected_before_vm_creation(self):
+        """A numeric-like device_id (1.9 / Decimal('1.9') / '1.9' / True) must be rejected — int() would truncate a float to a valid-looking but WRONG pk, creating a VM with a garbage librenms_id mapping. The guard runs before any VM is created."""
+        from decimal import Decimal
+
+        from netbox_librenms_plugin.import_utils.vm_operations import create_vm_from_librenms
+
+        validation = {"can_import": True, "cluster": {"cluster": MagicMock()}, "platform": {"platform": None}}
+        for bad in (1.9, Decimal("1.9"), "1.9", True):
+            libre_device = {"device_id": bad, "hostname": "vm-bad", "_computed_name": "vm-bad"}
+            with patch("virtualization.models.VirtualMachine") as mock_vm_class:
+                with pytest.raises(ValueError):
+                    create_vm_from_librenms(libre_device, validation)
+                mock_vm_class.objects.create.assert_not_called()  # no VM created on an invalid id
+
+    def test_digit_string_device_id_accepted(self):
+        """A plain digit string ('42') is still accepted and coerced to int (so a JSON-string id from LibreNMS keeps working)."""
+        from netbox_librenms_plugin.import_utils.vm_operations import create_vm_from_librenms
+
+        libre_device = {"device_id": "42", "hostname": "vm42", "_computed_name": "vm42"}
+        validation = {"can_import": True, "cluster": {"cluster": MagicMock()}, "platform": {"platform": None}}
+        mock_vm = MagicMock()
+
+        with (
+            patch("virtualization.models.VirtualMachine") as mock_vm_class,
+            patch("netbox_librenms_plugin.utils.set_librenms_device_id") as mock_setter,
+        ):
+            mock_vm_class.objects.create.return_value = mock_vm
+            create_vm_from_librenms(libre_device, validation)
+
+        assert mock_setter.call_args[0][1] == 42  # coerced to int, not left as "42"
+
     def test_server_key_stored_in_custom_field(self):
         """librenms_id custom field uses the provided server_key via set_librenms_device_id."""
         from unittest.mock import patch

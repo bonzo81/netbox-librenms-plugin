@@ -7,6 +7,7 @@ from netbox.tables.columns import BooleanColumn, ToggleColumn
 from utilities.paginator import EnhancedPaginator
 from utilities.templatetags.helpers import humanize_speed
 
+from netbox_librenms_plugin.constants import OOB_BADGE_HTML
 from netbox_librenms_plugin.models import InterfaceTypeMapping
 from netbox_librenms_plugin.utils import (
     check_vlan_group_matches,
@@ -52,7 +53,12 @@ class LibreNMSInterfaceTable(tables.Table):
         self.device = device
         self.interface_name_field = interface_name_field or get_interface_name_field()
         self.vlan_groups = vlan_groups or []
-        self.server_key = server_key
+        # Default the key so render_librenms_id's get_librenms_device_id(self.server_key) lookup
+        # falls back to the "default" server entry; a None key would miss {"default": 42} values.
+        self.server_key = server_key or "default"
+        # Lazily-built {(librenms_type, librenms_speed): mapping} cache so render_type doesn't run
+        # 1-2 InterfaceTypeMapping queries for every interface row (the table is small and static).
+        self._interface_type_mapping_cache = None
 
         # Update column accessors after initialization
         for column in ["selection", "name"]:
@@ -178,23 +184,31 @@ class LibreNMSInterfaceTable(tables.Table):
             else:
                 css = get_tagged_vlan_css_class(vid, netbox_tagged_vids, exists_in_netbox, missing_vlans, group_matches)
             warning = get_missing_vlan_warning(vid, missing_vlans)
-            inline_parts.append(f'<span class="{css}">{vid}({vlan_type}){warning}</span>')
+            # Escape the LibreNMS-sourced vid/vlan_type (XSS, issue #105 class). css is an
+            # internal class name; warning is the static icon HTML from get_missing_vlan_warning,
+            # so it is marked safe rather than escaped.
+            inline_parts.append(
+                format_html('<span class="{}">{}({}){}</span>', css, vid, vlan_type, mark_safe(warning))
+            )
 
-        summary = ", ".join(inline_parts)
+        # inline_parts are already escaped SafeStrings; join them and keep the result safe.
+        summary = mark_safe(", ".join(str(part) for part in inline_parts))
         if len(all_vlans) > MAX_INLINE:
             extra = len(all_vlans) - MAX_INLINE
-            summary += f' <span class="text-muted">+{extra} more</span>'
+            summary = format_html('{} <span class="text-muted">+{} more</span>', summary, extra)
 
-        # Build tooltip showing auto-selected VLAN group per VLAN
+        # Build tooltip showing auto-selected VLAN group per VLAN. Escape the LibreNMS-sourced
+        # vid/vlan_type and group_name; the "&#10;" separator is a literal newline entity for the
+        # title attribute, so join the escaped lines and mark the whole tooltip safe.
         tooltip_lines = []
         for vlan_type, vid in all_vlans:
             if vid in missing_vlans:
-                tooltip_lines.append(f"VLAN {vid}({vlan_type}) → ⚠ Not in NetBox")
+                tooltip_lines.append(format_html("VLAN {}({}) → ⚠ Not in NetBox", vid, vlan_type))
             else:
                 group_info = vlan_group_map.get(vid, {})
                 group_name = group_info.get("group_name", "Global")
-                tooltip_lines.append(f"VLAN {vid}({vlan_type}) → {escape(group_name)}")
-        tooltip_text = "&#10;".join(tooltip_lines)
+                tooltip_lines.append(format_html("VLAN {}({}) → {}", vid, vlan_type, group_name))
+        tooltip_text = mark_safe("&#10;".join(str(line) for line in tooltip_lines))
 
         # Build hidden inputs for per-VLAN group selections (submitted with form)
         hidden_inputs = []
@@ -282,8 +296,8 @@ class LibreNMSInterfaceTable(tables.Table):
 
         return format_html(
             '<span title="{}">{}</span>{}{}',
-            mark_safe(tooltip_text),
-            mark_safe(summary),
+            tooltip_text,
+            summary,
             edit_btn,
             hidden_inputs_html,
         )
@@ -300,7 +314,15 @@ class LibreNMSInterfaceTable(tables.Table):
 
     def render_name(self, value, record):
         """Render interface name with appropriate styling based on comparison with NetBox"""
-        return self._render_field(value, record, self.interface_name_field, "name")
+        rendered = self._render_field(value, record, self.interface_name_field, "name")
+        badges = ""
+        if record.get("_source") == "oob":
+            badges += OOB_BADGE_HTML
+        if record.get("_dedup_conflict"):
+            badges += '<span class="badge bg-warning text-dark ms-1" title="Same MAC seen on both main and OOB">Shared LOM</span>'
+        if badges:
+            return format_html("{}{}", rendered, mark_safe(badges))
+        return rendered
 
     def _get_interface_status_display(self, enabled, record):
         """
@@ -355,29 +377,31 @@ class LibreNMSInterfaceTable(tables.Table):
     def render_librenms_id(self, value, record):
         """Render the 'librenms_id' field with appropriate styling based on comparison with NetBox."""
 
+        # Same XSS guard as _render_field: value/netbox_librenms_id originate outside NetBox, so
+        # use format_html to auto-escape both the body and the title attribute (issue #105).
         if not record.get("exists_in_netbox"):
-            return mark_safe(f'<span class="text-danger">{value}</span>')
+            return format_html('<span class="text-danger">{}</span>', value)
 
         netbox_interface = record.get("netbox_interface")
         if not netbox_interface:
-            return mark_safe(f'<span class="text-danger">{value}</span>')
+            return format_html('<span class="text-danger">{}</span>', value)
 
         netbox_librenms_id = get_librenms_device_id(netbox_interface, self.server_key, auto_save=False)
 
         if netbox_librenms_id is None:
-            return mark_safe(
-                f'<span class="text-danger" title="No librenms_id custom field value found">{value}</span>'
+            return format_html(
+                '<span class="text-danger" title="No librenms_id custom field value found">{}</span>', value
             )
 
         # Compare the IDs
         if str(value) != str(netbox_librenms_id):
             # IDs do not match
-            return mark_safe(
-                f'<span class="text-warning" title="Existing LibreNMS ID: {netbox_librenms_id}">{value}</span>'
+            return format_html(
+                '<span class="text-warning" title="Existing LibreNMS ID: {}">{}</span>', netbox_librenms_id, value
             )
         else:
             # IDs match
-            return mark_safe(f'<span class="text-success">{value}</span>')
+            return format_html('<span class="text-success">{}</span>', value)
 
     def _compare_mac_addresses(self, librenms_mac, netbox_interface):
         """
@@ -399,17 +423,20 @@ class LibreNMSInterfaceTable(tables.Table):
     def _render_field(self, value, record, librenms_key, netbox_key):
         """Render a field value with appropriate styling based on the comparison with NetBox."""
 
+        # value is an untrusted LibreNMS field (ifName, description, MAC, …). Use format_html so
+        # it is auto-escaped — a device reporting e.g. ifName="<img src=x onerror=alert(1)>" must
+        # not render as live HTML (stored XSS, issue #105). The class names stay literal.
         if not record.get("exists_in_netbox"):
-            return mark_safe(f'<span class="text-danger">{value}</span>')
+            return format_html('<span class="text-danger">{}</span>', value)
 
         netbox_interface = record.get("netbox_interface")
         if not netbox_interface:
-            return mark_safe(f'<span class="text-danger">{value}</span>')
+            return format_html('<span class="text-danger">{}</span>', value)
 
         if librenms_key == "ifPhysAddress":
             mac_matches = self._compare_mac_addresses(value, netbox_interface)
             css_class = "text-success" if mac_matches else "text-warning"
-            return mark_safe(f'<span class="{css_class}">{value}</span>')
+            return format_html('<span class="{}">{}</span>', css_class, value)
 
         netbox_value = getattr(netbox_interface, netbox_key, None)
         librenms_value = record.get(librenms_key)
@@ -418,9 +445,9 @@ class LibreNMSInterfaceTable(tables.Table):
             librenms_value = convert_speed_to_kbps(librenms_value)
 
         if librenms_value != netbox_value:
-            return mark_safe(f'<span class="text-warning">{value}</span>')
+            return format_html('<span class="text-warning">{}</span>', value)
 
-        return mark_safe(f'<span class="text-success">{value}</span>')
+        return format_html('<span class="text-success">{}</span>', value)
 
     def render_type(self, value, record):
         """Render interface type with appropriate styling based on comparison with NetBox"""
@@ -445,18 +472,23 @@ class LibreNMSInterfaceTable(tables.Table):
         return format_html('<span class="text-danger">{}</span>', combined_display)
 
     def get_interface_mapping(self, librenms_type, speed):
-        """Get interface type mapping based on type and speed"""
+        """Get interface type mapping based on type and speed.
 
-        # First try exact match with type and speed
-        mapping = InterfaceTypeMapping.objects.filter(librenms_type=librenms_type, librenms_speed=speed).first()
+        Resolves from a single in-memory snapshot of the (small, static)
+        InterfaceTypeMapping table, built on first use, so a table render doesn't
+        issue 1-2 queries per interface row.
+        """
+        if getattr(self, "_interface_type_mapping_cache", None) is None:
+            cache = {}
+            # Keep the FIRST mapping per key to match the previous .filter().first() semantics.
+            for m in InterfaceTypeMapping.objects.all():
+                cache.setdefault((m.librenms_type, m.librenms_speed), m)
+            self._interface_type_mapping_cache = cache
 
-        # If no match found, fall back to type-only match
-        if not mapping:
-            mapping = InterfaceTypeMapping.objects.filter(
-                librenms_type=librenms_type, librenms_speed__isnull=True
-            ).first()
-
-        return mapping
+        # Exact (type, speed) match, then the type-only (speed is NULL) fallback.
+        return self._interface_type_mapping_cache.get((librenms_type, speed)) or self._interface_type_mapping_cache.get(
+            (librenms_type, None)
+        )
 
     def render_mapping_tooltip(self, value, speed, mapping):
         """Render tooltip for interface type mapping"""
@@ -478,7 +510,16 @@ class LibreNMSInterfaceTable(tables.Table):
         # Add NetBox interface data
         interface_name = port_data.get(self.interface_name_field)
 
-        port_data["netbox_interface"] = device.interfaces.filter(name=interface_name).first()
+        # OOB-controller rows live on a SEPARATE LibreNMS device — mirror the
+        # interfaces-tab guard (BaseInterfaceTableView.get_context_data): never bind
+        # one to a host interface by name. Otherwise a row-level re-render (the VC
+        # member dropdown via SingleInterfaceVerifyView) flips a deliberately-unmatched
+        # shared-LOM row to green "matched", comparing speed/MTU/MAC against an
+        # unrelated host interface and inviting a sync the server then silently skips.
+        if port_data.get("_source") == "oob":
+            port_data["netbox_interface"] = None
+        else:
+            port_data["netbox_interface"] = device.interfaces.filter(name=interface_name).first()
         port_data["exists_in_netbox"] = bool(port_data["netbox_interface"])
 
         # Clear description if it matches interface name
@@ -551,7 +592,7 @@ class VCInterfaceTable(LibreNMSInterfaceTable):
         base_id = f"device_selection_{interface_name}_{hash(interface_name)}"
 
         options = [
-            f'<option value="{member.id}"{" selected" if member.id == selected_member_id else ""}>{member.name}</option>'
+            f'<option value="{member.id}"{" selected" if member.id == selected_member_id else ""}>{escape(member.name)}</option>'
             for member in members
         ]
 

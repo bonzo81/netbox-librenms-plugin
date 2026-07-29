@@ -10,6 +10,8 @@ from django.db import models
 from django.urls import reverse
 from netbox.models import NetBoxModel
 
+from netbox_librenms_plugin.utils import validate_regex_field
+
 logger = logging.getLogger(__name__)
 
 
@@ -364,10 +366,7 @@ class ModuleBayMapping(FullCleanOnSaveMixin, NetBoxModel):
             raise ValidationError({"netbox_bay_name": "NetBox bay name must not be empty or whitespace-only."})
         self.netbox_bay_name = netbox_bay_name_stripped
         if self.is_regex:
-            try:
-                pattern = re.compile(self.librenms_name)
-            except re.error as e:
-                raise ValidationError({"librenms_name": f"Invalid regex: {e}"})
+            pattern = validate_regex_field(self.librenms_name, "librenms_name")
             try:
                 _validate_replacement_template(pattern, self.netbox_bay_name)
             except (re.error, IndexError) as e:
@@ -487,10 +486,7 @@ class NormalizationRule(FullCleanOnSaveMixin, NetBoxModel):
             errors["replacement"] = "This field is required."
         if errors:
             raise ValidationError(errors)
-        try:
-            compiled = re.compile(self.match_pattern)
-        except re.error as e:
-            raise ValidationError({"match_pattern": f"Invalid regex: {e}"})
+        compiled = validate_regex_field(self.match_pattern, "match_pattern")
         # Validate the replacement template by running a dummy substitution
         try:
             _validate_replacement_template(compiled, self.replacement)
@@ -621,10 +617,7 @@ class InventoryIgnoreRule(FullCleanOnSaveMixin, NetBoxModel):
         self.__dict__.pop("_compiled_pattern", None)
         pattern_stripped = self.pattern.strip() if self.pattern else ""
         if self.match_type == self.MATCH_REGEX and pattern_stripped:
-            try:
-                re.compile(pattern_stripped)
-            except re.error as e:
-                raise ValidationError({"pattern": f"Invalid regex: {e}"})
+            validate_regex_field(pattern_stripped, "pattern")
         if self.match_type != self.MATCH_SERIAL_DEVICE and not pattern_stripped:
             raise ValidationError({"pattern": "Pattern is required for name-based match types."})
         # Normalize stored pattern to the stripped form so matches_name() and
@@ -863,10 +856,7 @@ class CarrierAutoInstallRule(FullCleanOnSaveMixin, NetBoxModel):
         ):
             if not value:
                 continue
-            try:
-                re.compile(value)
-            except re.error as e:
-                raise ValidationError({field: f"Invalid regex: {e}"})
+            validate_regex_field(value, field)
 
     def get_absolute_url(self):
         return reverse(

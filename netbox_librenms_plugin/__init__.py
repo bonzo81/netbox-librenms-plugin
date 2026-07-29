@@ -12,7 +12,7 @@ class LibreNMSSyncConfig(PluginConfig):
     author = __author__
     version = __version__
     base_url = "librenms_plugin"
-    min_version = "4.2.0"
+    min_version = "4.4.0"
     required_settings = []  # Custom validation in ready() method
     default_settings = {
         "enable_caching": True,

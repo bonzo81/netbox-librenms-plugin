@@ -1,4 +1,5 @@
 import json
+from urllib.parse import quote_plus
 
 import django_tables2 as tables
 from dcim.models import Device
@@ -9,7 +10,7 @@ from django.utils.safestring import mark_safe
 from django_tables2 import Column
 from virtualization.models import VirtualMachine
 
-from netbox_librenms_plugin.utils import get_librenms_sync_device
+from netbox_librenms_plugin.utils import coerce_librenms_id, get_librenms_sync_device
 
 
 class DeviceStatusTable(DeviceTable):
@@ -93,6 +94,10 @@ class DeviceImportTable(tables.Table):
 
     def __init__(self, *args, **kwargs):
         """Initialize table with cached querysets and apply sorting."""
+        # The server the import page was rendered against. Threaded onto the validation-details
+        # modal URL so the modal-open HTMX GET fetches from this server rather than whatever
+        # LibreNMSSettings.selected_server happens to be when the modal is opened.
+        self.server_key = kwargs.pop("server_key", None)
         super().__init__(*args, **kwargs)
 
         # Cache querysets to avoid N queries per render
@@ -106,6 +111,20 @@ class DeviceImportTable(tables.Table):
         # Since we're working with dictionaries, not QuerySets, we handle sorting manually
         if self.order_by:
             self._sort_data()
+
+    def _server_key_hx_vals(self):
+        """
+        hx-vals attribute carrying the import page's server_key on row-update posts.
+
+        The role/cluster/rack selects hx-post to DeviceRole/Cluster/RackUpdateView, which
+        rebind to the POSTed server_key before re-fetching/re-validating the row. Without
+        this value the rebind falls back to the global selected server — with overlapping
+        device_ids across servers that live-fetches and caches the WRONG server's device.
+        """
+        server_key = getattr(self, "server_key", None)
+        if not server_key:
+            return ""
+        return f"hx-vals='{escape(json.dumps({'server_key': str(server_key)}))}' "
 
     def _sort_data(self):
         """Sort table data based on order_by parameter."""
@@ -282,6 +301,7 @@ class DeviceImportTable(tables.Table):
             f'hx-post="{update_url}{vc_detection_flag}" '
             f'hx-trigger="change" '
             f'hx-swap="none" '
+            f"{self._server_key_hx_vals()}"
             f'hx-include="[name=role_{device_id}], [name=rack_{device_id}]" '
             f'style="width: 180px;">'
             f"{''.join(options)}"
@@ -349,6 +369,7 @@ class DeviceImportTable(tables.Table):
             f'hx-post="{update_url}{vc_detection_flag}" '
             f'hx-trigger="change" '
             f'hx-swap="none" '
+            f"{self._server_key_hx_vals()}"
             f'hx-include="[name=cluster_{device_id}], [name=rack_{device_id}]" '
             f'style="width: 150px;">'
             f"{''.join(options)}"
@@ -423,6 +444,7 @@ class DeviceImportTable(tables.Table):
             f'hx-post="{update_url}{vc_detection_flag}" '
             f'hx-trigger="change" '
             f'hx-swap="none" '
+            f"{self._server_key_hx_vals()}"
             f'hx-include="[name=cluster_{device_id}], [name=role_{device_id}]" '
             f'style="width: 200px;">'
             f"{''.join(options)}"
@@ -467,11 +489,59 @@ class DeviceImportTable(tables.Table):
             match_type = validation.get("existing_match_type", "")
             serial_action = validation.get("serial_action")
             has_mismatch = validation.get("device_type_mismatch", False)
-            has_actions = match_type == "hostname" or (match_type == "serial" and serial_action is not None)
+            is_oob_candidate = serial_action == "oob_candidate"
+            # 'oob_already_linked' is informational (re-import just updates the existing OOB
+            # entry), not an actionable conflict — exclude it like 'oob_candidate' so a correctly
+            # OOB-linked row doesn't render the warning "Conflict" button.
+            is_oob_already_linked = serial_action == "oob_already_linked"
+            is_oob_linked = match_type == "librenms_oob"
+            has_actions = match_type == "hostname" or (
+                match_type == "serial"
+                and serial_action is not None
+                and not is_oob_candidate
+                and not is_oob_already_linked
+            )
             has_name_sync = validation.get("name_sync_available", False)
             has_sync_needed = match_type == "librenms_id" and serial_action in ("update_serial", "conflict")
 
-            if has_mismatch:
+            existing_link = validation.get("existing_librenms_link")
+            if not isinstance(existing_link, dict):
+                # Malformed payload must not break the actions-column render for the page.
+                existing_link = {}
+            paired_oob_id = existing_link.get("oob_id")
+            paired_host_id = existing_link.get("host_id")
+            paired_oob_type = existing_link.get("oob_type") or "OOB"
+
+            def _coerce_pair_id(value):
+                # Strict coercion (rejects booleans and floats, unlike int()) so malformed
+                # custom-field data can't make the host/OOB pair comparison hide or mislabel a
+                # pair. Matches the coercion used by the refresh path / find_by_librenms_id.
+                return coerce_librenms_id(value)
+
+            # Coerce both pair ids once. A malformed id becomes None, so the host/OOB pair branches
+            # below require a *valid* id before rendering a paired state — otherwise a bogus value
+            # (e.g. "bad") would slip past the `!= host` check and print "LibreNMS #bad".
+            paired_oob_id_int = _coerce_pair_id(paired_oob_id) if paired_oob_id is not None else None
+            paired_host_id_int = _coerce_pair_id(paired_host_id) if paired_host_id is not None else None
+
+            if is_oob_candidate:
+                btn_class = "btn-outline-purple"
+                btn_icon = "mdi-chip"
+                btn_label = " OOB"
+                btn_title = "Add as OOB controller"
+            elif is_oob_linked:
+                # This LibreNMS row is the OOB half of an existing pair.
+                btn_class = "btn-outline-info"
+                btn_icon = "mdi-chip"
+                btn_label = " OOB"
+                # Use the same strict coercion as the host-half branch (rejects bool/float) so the
+                # OOB-linked and host-half titles share one ID contract — a malformed paired id
+                # isn't shown as a bogus "LibreNMS #1".
+                if paired_host_id_int is not None:
+                    btn_title = f"Linked as OOB controller (paired host: LibreNMS #{paired_host_id_int})"
+                else:
+                    btn_title = "Linked as OOB controller"
+            elif has_mismatch:
                 btn_class = "btn-outline-danger"
                 btn_icon = "mdi-alert-circle"
                 btn_label = " Conflict"
@@ -481,6 +551,29 @@ class DeviceImportTable(tables.Table):
                 btn_icon = "mdi-alert"
                 btn_label = " Conflict"
                 btn_title = "View conflict details"
+            elif (
+                match_type == "librenms_id"
+                and paired_host_id_int is not None
+                and paired_oob_id_int is not None
+                and paired_oob_id_int != paired_host_id_int
+            ):
+                # This LibreNMS row is the host half of an existing host/OOB
+                # pair. Render it with the same info-tinted styling as the OOB
+                # row so the user sees them as one paired device rather than
+                # two unrelated statuses (one green "ready", one blue "OOB").
+                # Evaluated BEFORE the generic name-sync/sync-needed branch so a
+                # paired host that also needs review still shows the Host state
+                # rather than falling back to the generic warning button.
+                btn_class = "btn-outline-info"
+                btn_icon = "mdi-server-network"
+                btn_label = " Host"
+                # paired_oob_type comes from a user-editable custom field
+                # (librenms_id.<server>.oob.type) and is only string-type-checked,
+                # not sanitised, on the read path. Escape before interpolating
+                # into the title attribute to prevent stored XSS.
+                # paired_oob_id_int is the strictly-coerced value (guaranteed not None by the
+                # branch condition), so the title can never print a malformed raw id.
+                btn_title = f"Linked as host (paired OOB: LibreNMS #{escape(str(paired_oob_id_int))}, {escape(paired_oob_type or '')})"
             elif has_name_sync or has_sync_needed:
                 btn_class = "btn-outline-warning"
                 btn_icon = "mdi-information-outline"
@@ -609,8 +702,7 @@ class DeviceImportTable(tables.Table):
             f'<i class="mdi mdi-server-network"></i> {member_count} members</button>'
         )
 
-    @staticmethod
-    def _build_validation_details_url(device_id: int, validation: dict) -> str:
+    def _build_validation_details_url(self, device_id: int, validation: dict) -> str:
         """
         Build validation details URL with appropriate query parameters.
 
@@ -631,6 +723,14 @@ class DeviceImportTable(tables.Table):
 
         # Build query params based on import type
         params = []
+
+        # Scope the modal to the server the import page was rendered for, so the modal-open GET
+        # (which reaches DeviceValidationDetailsView via its own URL, with no parent handler to
+        # inject the import-scoped client) fetches from that server rather than the global
+        # LibreNMSSettings.selected_server (which may have drifted).
+        server_key = getattr(self, "server_key", None)
+        if server_key:
+            params.append(f"server_key={quote_plus(str(server_key))}")
 
         # Add cluster_id if this is a VM import
         if validation.get("cluster", {}).get("found") and validation.get("cluster", {}).get("cluster"):

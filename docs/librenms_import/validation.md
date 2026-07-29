@@ -46,6 +46,11 @@ The plugin checks for existing devices using:
 
 If both a VM and Device with the same hostname exist, the plugin cannot determine which to match and allows import. Set the `librenms_id` custom field on the correct existing object to clarify the match.
 
+## Out-of-Band (OOB) Detection
+
+When an incoming LibreNMS device looks like an out-of-band controller (iDRAC, iLO, BMC, …) and matches an existing NetBox device, the validation details show an **OOB Detected** panel instead of a plain import button. Rather than creating a duplicate device, the plugin offers the appropriate reconciliation action — **Add as OOB**, **Promote to host**, or **Merge NetBox devices**. See [Out-of-Band (OOB) Management](../usage_tips/oob_management.md) for the full flow.
+
 ## Next Steps
 
 - [Import Settings](import_settings.md) - Configure device naming and import options
+- [Out-of-Band Management](../usage_tips/oob_management.md) - Reconcile OOB controllers with their host devices

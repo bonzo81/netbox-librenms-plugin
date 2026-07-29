@@ -2,6 +2,8 @@
 
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -204,6 +206,128 @@ class TestModuleMismatchPreviewView:
         assert ctx["serial_conflict"] is conflict_module
 
 
+@pytest.mark.django_db
+class TestModuleMismatchTypeMatchedBadge:
+    """The mismatch modal badges the LibreNMS model as matched when it resolves to the installed type.
+
+    DB-backed and rendering the REAL template (the sibling tests above patch render/resolve): builds a
+    real ModuleTypeMapping so a LibreNMS model string that DIFFERS from the NetBox type still resolves
+    to it — the user's serial-mismatch case where only text said "same type".
+    """
+
+    def _build(self, *, installed_type_model, mapped_type_model, librenms_model, installed_serial, librenms_serial):
+        from dcim.models import (
+            Device,
+            DeviceRole,
+            DeviceType,
+            Manufacturer,
+            Module,
+            ModuleBay,
+            ModuleType,
+            Site,
+        )
+
+        from netbox_librenms_plugin.models import ModuleTypeMapping
+
+        tag = mapped_type_model.lower().replace(" ", "-")
+        mfr, _ = Manufacturer.objects.get_or_create(name=f"Mfr-mmb-{tag}", slug=f"mfr-mmb-{tag}")
+        dt, _ = DeviceType.objects.get_or_create(manufacturer=mfr, model=f"DT-mmb-{tag}", slug=f"dt-mmb-{tag}")
+        role, _ = DeviceRole.objects.get_or_create(name=f"Role-mmb-{tag}", slug=f"role-mmb-{tag}")
+        site, _ = Site.objects.get_or_create(name=f"Site-mmb-{tag}", slug=f"site-mmb-{tag}")
+        device = Device.objects.create(name=f"host-mmb-{tag}", device_type=dt, role=role, site=site, status="active")
+
+        installed_type = ModuleType.objects.create(manufacturer=mfr, model=installed_type_model)
+        mapped_type = (
+            installed_type
+            if mapped_type_model == installed_type_model
+            else ModuleType.objects.create(manufacturer=mfr, model=mapped_type_model)
+        )
+        # The LibreNMS model string DIFFERS from the NetBox type model but maps to it (the user's case).
+        ModuleTypeMapping.objects.create(
+            librenms_model=librenms_model, netbox_module_type=mapped_type, manufacturer=mfr
+        )
+
+        bay = ModuleBay.objects.create(device=device, name="Slot 1")
+        module = Module.objects.create(
+            device=device, module_bay=bay, module_type=installed_type, serial=installed_serial
+        )
+        return device, module
+
+    def _render_modal(self, device, module, librenms_model, librenms_serial):
+        from unittest.mock import MagicMock
+
+        from django.contrib.auth.models import AnonymousUser
+        from django.core.cache import cache
+        from django.test import RequestFactory
+
+        from netbox_librenms_plugin.views.sync.modules import (
+            ModuleMismatchPreviewView,
+            _get_sync_device_for_inventory,
+        )
+
+        view = object.__new__(ModuleMismatchPreviewView)
+        view._librenms_api = MagicMock()
+        view._librenms_api.server_key = "default"
+        request = RequestFactory().get("/", {"module_id": str(module.pk), "ent_index": "100", "server_key": "default"})
+        request.user = AnonymousUser()
+        view.setup(request)
+
+        sync_device = _get_sync_device_for_inventory(device, "default")
+        ckey = view.get_cache_key(sync_device, "inventory", server_key="default")
+        cache.set(
+            ckey,
+            {
+                "inventory": [
+                    {
+                        "entPhysicalIndex": 100,
+                        "entPhysicalModelName": librenms_model,
+                        "entPhysicalSerialNum": librenms_serial,
+                    }
+                ],
+                "librenms_id": 1,
+            },
+        )
+        try:
+            with patch.object(view, "require_object_permissions", return_value=None):
+                resp = view.get(request, pk=device.pk)
+        finally:
+            cache.delete(ckey)
+        return resp
+
+    def test_matched_model_shows_check_badge(self):
+        """A mapped LibreNMS model (different string, same type) renders the matched check badge."""
+        device, module = self._build(
+            installed_type_model="MDA-s36-400gb-qsfpdd",
+            mapped_type_model="MDA-s36-400gb-qsfpdd",
+            librenms_model="3HE12391AARK01",
+            installed_serial="",  # NetBox has no serial (the user's exact case)
+            librenms_serial="NS2217F6334",
+        )
+        resp = self._render_modal(device, module, "3HE12391AARK01", "NS2217F6334")
+
+        assert resp.status_code == 200
+        html = resp.content.decode()
+        assert "mdi-check-decagram" in html  # the matched badge is present
+        assert "Recognised as NetBox module type MDA-s36-400gb-qsfpdd" in html
+        assert "3HE12391AARK01" in html  # the differing LibreNMS string is still shown
+
+    def test_mismatched_type_has_no_check_badge(self):
+        """When the LibreNMS model maps to a DIFFERENT type, no matched badge — the danger path shows."""
+        device, module = self._build(
+            installed_type_model="MDA-s36-400gb-qsfpdd",
+            mapped_type_model="XMA-other-type",
+            librenms_model="3HE-OTHER-PN",
+            installed_serial="EXISTING",
+            librenms_serial="NS-NEW",
+        )
+        resp = self._render_modal(device, module, "3HE-OTHER-PN", "NS-NEW")
+
+        assert resp.status_code == 200
+        html = resp.content.decode()
+        assert "mdi-check-decagram" not in html  # type mismatch → no matched badge
+        assert "Different module type" in html
+
+
 # ---------------------------------------------------------------------------
 # ReplaceModuleView
 # ---------------------------------------------------------------------------
@@ -276,6 +400,12 @@ class TestReplaceModuleView:
         with (
             patch("netbox_librenms_plugin.views.sync.modules.get_object_or_404", side_effect=[device, installed]),
             patch.object(view, "require_all_permissions", return_value=None),
+            # "prod" must be a configured server for resolve_posted_server_key to honour the posted key
+            # (else it degrades to the active "default"); mirrors a real multi-server deployment.
+            patch(
+                "netbox_librenms_plugin.librenms_api.LibreNMSAPI.get_available_servers",
+                return_value={"prod": "Prod", "default": "Default"},
+            ),
             patch.object(view, "get_cache_key", return_value="ck") as mock_get_cache_key,
             patch(
                 "netbox_librenms_plugin.views.sync.modules._get_sync_device_for_inventory",

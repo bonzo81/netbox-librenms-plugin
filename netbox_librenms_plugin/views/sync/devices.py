@@ -12,6 +12,7 @@ from netbox_librenms_plugin.views.mixins import (
     LibreNMSPermissionMixin,
     NetBoxObjectPermissionMixin,
 )
+from netbox_librenms_plugin.views.sync.device_fields import _device_sync_redirect
 
 
 class AddDeviceToLibreNMSView(
@@ -150,6 +151,16 @@ class UpdateDeviceLocationView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
             return error
 
         device = get_object_or_404(Device, pk=pk)
+
+        # Rebind the API client to the POSTed server before resolving the per-server
+        # librenms_id and writing the location, so a multi-server user acting on a
+        # non-default tab isn't routed through the globally selected server (writing
+        # the location to the wrong LibreNMS instance). Mirrors UpdateDeviceNameView.
+        server_key = self.rebind_api_for_server(request.POST.get("server_key"))
+        if server_key is None:
+            messages.error(request, "Selected LibreNMS server is no longer configured.")
+            return _device_sync_redirect(request, pk, server_key)
+
         self.librenms_id = self.librenms_api.get_librenms_id(device)
 
         if device.site:
@@ -170,4 +181,4 @@ class UpdateDeviceLocationView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
         else:
             messages.warning(request, "Device has no associated site in NetBox")
 
-        return redirect("plugins:netbox_librenms_plugin:device_librenms_sync", pk=pk)
+        return _device_sync_redirect(request, pk, server_key)
