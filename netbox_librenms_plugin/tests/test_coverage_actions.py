@@ -3753,7 +3753,8 @@ class TestSyncSerialMorePaths:
         )
         with stack:
             MockDevice.objects.select_for_update.return_value.get.return_value = locked_device
-            # The conflict lookup runs under select_for_update() too (row lock on the conflicting device).
+            # The conflict lookup is deliberately UNLOCKED (advisory lock on the serial value instead);
+            # a second row lock would deadlock two swap-direction requests (A→B / B→A).
             MockDevice.objects.filter.return_value.exclude.return_value.first.return_value = conflict_device
             response = view.post(request, device_id=42)
 
@@ -3782,7 +3783,8 @@ class TestSyncSerialMorePaths:
         )
         with stack:
             MockDevice.objects.select_for_update.return_value.get.return_value = locked_device
-            # The conflict lookup runs under select_for_update() too (row lock on the conflicting device).
+            # The conflict lookup is deliberately UNLOCKED (advisory lock on the serial value instead);
+            # a second row lock would deadlock two swap-direction requests (A→B / B→A).
             MockDevice.objects.filter.return_value.exclude.return_value.first.return_value = None
             with patch("netbox_librenms_plugin.views.imports.actions._save_device", return_value=err):
                 response = view.post(request, device_id=42)
@@ -6903,6 +6905,15 @@ class TestSerialActionsNormalizeAndLock:
         sqls = [q["sql"] for q in ctx.captured_queries]
         assert any("pg_advisory_xact_lock" in s for s in sqls)
         assert [s for s in sqls if "FOR UPDATE" in s and '."serial" = ' in s.split("WHERE", 1)[-1]] == []
+
+    def test_conflict_toast_escapes_the_conflicting_device_name(self):
+        """_htmx_error_response substitutes the message via format_html('{}', ...), so a marked-up conflicting device name renders escaped — adding escape() at the call site would double-escape."""
+        make_device("<script>alert(1)</script>-owner", serial="SN-XSS")
+        target = make_device("ser-act-xss-target")
+        resp = self._post_action("update_serial", target, "SN-XSS")
+        assert b"Serial conflict" in resp.content
+        assert b"<script>" not in resp.content
+        assert b"&lt;script&gt;" in resp.content
 
 
 @pytest.mark.django_db
