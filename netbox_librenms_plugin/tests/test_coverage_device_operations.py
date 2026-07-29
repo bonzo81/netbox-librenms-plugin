@@ -1387,7 +1387,10 @@ class TestValidateDeviceForImportEdgeCases:
         assert validation.get("existing_match_type") == "ambiguous_hostname_or_serial"
         assert any("serial or management IP" in i for i in validation.get("issues", []))
 
-        # Resolve the duplicate: dev_b no longer carries the shared host address.
+        # Resolve the duplicate: dev_b no longer carries the shared host address. Refresh first so
+        # `address` is an IPNetwork, not the str it was constructed with — NetBox 4.4's pre_delete
+        # `clear_primary_ip` reads `instance.family`, which dereferences `.version` unguarded there.
+        ip_b.refresh_from_db()
         ip_b.delete()
 
         _refresh_existing_device(validation, libre_device=libre_device, server_key="default")
