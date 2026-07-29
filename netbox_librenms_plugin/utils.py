@@ -1150,6 +1150,24 @@ def check_vlan_group_matches(
     return True
 
 
+def filter_by_trimmed_serial(queryset, serial):
+    """
+    Filter *queryset* to rows whose ``serial`` equals *serial* after DB-side trimming.
+
+    Rows imported before serial normalization landed may store space-padded
+    serials (the old import persisted the raw LibreNMS value), so an exact
+    ``filter(serial=<trimmed>)`` would miss them and let a re-import mint a
+    duplicate or a conflict guard pass. TRIM() covers that legacy padding.
+
+    Args:
+        queryset: The Device (or serial-bearing) queryset to filter.
+        serial: The already-trimmed serial to match.
+    """
+    from django.db.models.functions import Trim
+
+    return queryset.annotate(_serial_trimmed=Trim("serial")).filter(_serial_trimmed=serial)
+
+
 def normalize_serial(value) -> str:
     """
     Return the trimmed str form of a LibreNMS serial; only None means missing.

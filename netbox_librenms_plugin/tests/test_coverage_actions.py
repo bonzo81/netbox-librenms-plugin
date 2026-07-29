@@ -6915,6 +6915,15 @@ class TestSerialActionsNormalizeAndLock:
         assert b"<script>" not in resp.content
         assert b"&lt;script&gt;" in resp.content
 
+    def test_conflict_detected_against_legacy_padded_stored_serial(self):
+        """A conflict row imported before serial normalization may store a padded serial; the trimmed conflict lookup must still find it."""
+        make_device("ser-act-legacy-owner", serial=" SN-LEG-9 ")
+        target = make_device("ser-act-legacy-loser")
+        resp = self._post_action("update_serial", target, "SN-LEG-9")
+        assert b"Serial conflict" in resp.content
+        target.refresh_from_db()
+        assert target.serial == ""
+
 
 @pytest.mark.django_db
 class TestConflictActionsObjectScope:

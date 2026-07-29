@@ -21,6 +21,7 @@ from ..utils import (
     get_librenms_oob,
     is_legacy_librenms_id,
     match_librenms_hardware_to_device_type,
+    filter_by_trimmed_serial,
     normalize_serial,
     set_librenms_device_id,
 )
@@ -757,7 +758,9 @@ def validate_device_for_import(
                         result["serial_confirmed"] = True
                     elif existing_device.serial and existing_device.serial != incoming_serial:
                         serial_conflict = (
-                            Device.objects.filter(serial=incoming_serial).exclude(pk=existing_device.pk).first()
+                            filter_by_trimmed_serial(Device.objects.all(), incoming_serial)
+                            .exclude(pk=existing_device.pk)
+                            .first()
                         )
                         if serial_conflict:
                             result["serial_action"] = "conflict"
@@ -825,7 +828,9 @@ def validate_device_for_import(
                 incoming_serial = normalize_serial(libre_device.get("serial"))
                 if incoming_serial and incoming_serial != "-" and existing_device.serial != incoming_serial:
                     serial_conflict = (
-                        Device.objects.filter(serial=incoming_serial).exclude(pk=existing_device.pk).first()
+                        filter_by_trimmed_serial(Device.objects.all(), incoming_serial)
+                        .exclude(pk=existing_device.pk)
+                        .first()
                     )
                     if serial_conflict:
                         result["serial_action"] = "conflict"
@@ -862,7 +867,7 @@ def validate_device_for_import(
                     # and the downstream serial/OOB/merge flow would derive its guidance from a
                     # random device. Require a unique match before binding, mirroring the
                     # merge-peer [:2] guard (issue #101).
-                    serial_matches = list(Device.objects.filter(serial=serial)[:2])
+                    serial_matches = list(filter_by_trimmed_serial(Device.objects.all(), serial)[:2])
                     if len(serial_matches) > 1:
                         # Device.serial is not unique in NetBox, so several rows already share it.
                         # Binding to an arbitrary one is wrong, and importing anyway would mint YET
@@ -1027,7 +1032,9 @@ def validate_device_for_import(
                     # otherwise skip the suggestion and warn.
                     if _hostname_match and not _serial_match:
                         _serial_peers = list(
-                            Device.objects.filter(serial=_serial_for_pair).exclude(pk=_hostname_match.pk)[:2]
+                            filter_by_trimmed_serial(Device.objects.all(), _serial_for_pair).exclude(
+                                pk=_hostname_match.pk
+                            )[:2]
                         )
                         if len(_serial_peers) == 1:
                             _serial_match = _serial_peers[0]

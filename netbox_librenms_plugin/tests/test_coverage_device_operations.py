@@ -2001,6 +2001,26 @@ class TestValidateSerialMatchStripsWhitespace:
         assert result["existing_device"].pk == device.pk
         assert not any("Validation error" in i for i in result.get("issues", [])), result.get("issues")
 
+    def test_legacy_padded_stored_serial_still_matches(self):
+        """A device row imported before serial normalization may store a padded serial; the trimmed identity match must still bind it instead of minting a duplicate."""
+        from netbox_librenms_plugin.import_utils.device_operations import validate_device_for_import
+
+        device = self._make_device("legacy-padded-host", serial=" SN-LEG-7 ")
+        libre_device = {
+            "device_id": 8816,
+            "hostname": "legacy-import-row",
+            "sysName": "legacy-import-row",
+            "serial": "SN-LEG-7",
+            "hardware": "-",
+            "os": "-",
+            "location": "-",
+        }
+
+        result = validate_device_for_import(libre_device, api=None, server_key="default", include_vc_detection=False)
+
+        assert result["existing_device"] is not None, "legacy padded stored serial was not matched"
+        assert result["existing_device"].pk == device.pk
+
 
 @pytest.mark.django_db
 class TestImportPersistsTrimmedSerial:

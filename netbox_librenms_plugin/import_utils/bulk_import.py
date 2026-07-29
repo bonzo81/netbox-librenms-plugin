@@ -18,6 +18,7 @@ from ..utils import (
     coerce_librenms_id,
     find_by_librenms_id,
     get_librenms_oob,
+    filter_by_trimmed_serial,
     normalize_serial,
     preload_normalization_rules,
 )
@@ -792,7 +793,7 @@ def _refresh_existing_device(validation: dict, libre_device: dict = None, server
             ambiguous_fallback = False
             serial = normalize_serial(libre_device.get("serial"))
             if serial and serial != "-":
-                serial_matches = list(_Device.objects.filter(serial=serial)[:2])
+                serial_matches = list(filter_by_trimmed_serial(_Device.objects.all(), serial)[:2])
                 if len(serial_matches) > 1:
                     ambiguous_fallback = True
                 elif serial_matches:
