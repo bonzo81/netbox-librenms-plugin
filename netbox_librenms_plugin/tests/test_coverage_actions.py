@@ -8811,3 +8811,80 @@ class TestPromoteAndMergeObjectScope:
         assert "id" not in sync_entry
         assert sync_entry["_migrated_to"]["device_id"] == winner.pk
         assert Device.objects.get(pk=winner.pk).custom_field_data["librenms_id"]["default"]["oob"]["id"] == 30
+
+
+@pytest.mark.django_db
+class TestBulkImportPermGateRunsBeforeEnqueue:
+    """The import model-perm gate must run BEFORE the background job is dispatched.
+
+    Otherwise an unauthorized caller both enqueues a job that can only fail and is told
+    "Import job started", while the denial surfaces nowhere.
+    """
+
+    def _make_view(self):
+        from netbox_librenms_plugin.views.imports.actions import BulkImportDevicesView
+
+        view = object.__new__(BulkImportDevicesView)
+        view._librenms_api = _make_api()
+        return view
+
+    @staticmethod
+    def _plugin_writer_without_import_perms(username):
+        """A real active user with plugin write access but no dcim/virtualization add perms."""
+        from core.models import ObjectType
+        from django.apps import apps
+        from django.contrib.auth import get_user_model
+        from users.models import ObjectPermission
+
+        LibreNMSSettings = apps.get_model("netbox_librenms_plugin", "LibreNMSSettings")
+
+        user = get_user_model().objects.create_user(username=username, password="x")
+        write = ObjectPermission.objects.create(name=f"{username}-plugin-write", actions=["change"])
+        write.object_types.set([ObjectType.objects.get_for_model(LibreNMSSettings)])
+        write.users.set([user])
+        return get_user_model().objects.get(pk=user.pk)  # clear the per-request perm cache
+
+    def test_unauthorized_background_import_is_denied_without_enqueueing(self):
+        """A plugin-writer without dcim.add_device is denied and no ImportDevicesJob is enqueued."""
+        from django.contrib.messages.storage.fallback import FallbackStorage
+        from django.contrib.sessions.middleware import SessionMiddleware
+        from django.test import RequestFactory
+
+        view = self._make_view()
+        user = self._plugin_writer_without_import_perms("bulk-no-import-perms")
+
+        request = RequestFactory().post("/device-import/bulk/", data={"select": ["1"]})
+        request.user = user
+        SessionMiddleware(lambda req: None).process_request(request)
+        request.session.save()
+        request._messages = FallbackStorage(request)
+        view.request = request  # Django binds this in dispatch(); the perm gate reads it
+
+        def _fetch(device_id, *a, **k):
+            return {
+                "device_id": device_id,
+                "hostname": f"host{device_id}",
+                "sysName": f"host{device_id}",
+                "serial": f"SN{device_id}",
+                "hardware": "",
+                "os": "",
+            }
+
+        with (
+            # The background branch is superuser-only, and a real superuser passes every has_perm;
+            # stub only that decision so the ordering under test is reachable with a real principal.
+            patch.object(type(view), "should_use_background_job_for_import", return_value=True, create=False),
+            patch("utilities.rqworker.get_workers_for_queue", return_value=1),
+            patch("netbox_librenms_plugin.jobs.ImportDevicesJob.enqueue") as mock_enqueue,
+            patch("netbox_librenms_plugin.views.imports.actions.fetch_device_with_cache", side_effect=_fetch),
+        ):
+            # A real pk so the too-late-gate path renders its "job started" link instead of
+            # crashing in reverse() — the failure under test is the enqueue, not the URL build.
+            mock_enqueue.return_value.pk = 4321
+            response = view.post(request)
+
+        mock_enqueue.assert_not_called()
+        messages_sent = [str(m) for m in request._messages]
+        assert any("do not have permission to import" in m for m in messages_sent), messages_sent
+        assert not any("Import job started" in m for m in messages_sent), messages_sent
+        assert response.status_code in (301, 302)

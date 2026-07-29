@@ -1040,6 +1040,30 @@ class BulkImportDevicesView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
         device_ids_to_import = [d for d in parsed_ids if d not in vm_imports]
         vm_ids_to_import = list(vm_imports.keys())
 
+        # Authorize the model add/change perms BEFORE the background dispatch and the collision
+        # pre-check below (mirrors ImportDevicesJob, which authorizes before its scan).
+        # require_write_permission() above only checks the plugin-settings perm, while the job would
+        # raise PermissionDenied only once it ran — leaving the caller with a doomed job and an
+        # "Import job started" message. The pre-check likewise surfaces NetBox collision details
+        # (object names + pks) in its modal. Enforce the same perm sets the import paths do, for
+        # every import, before either path starts.
+        required_import_perms = set()
+        if device_ids_to_import:
+            # Any device row may be flagged import_as_vm during validation; VC updates need change.
+            required_import_perms.update({"dcim.add_device", "dcim.change_device", "virtualization.add_virtualmachine"})
+        if vm_imports:
+            required_import_perms.add("virtualization.add_virtualmachine")
+        missing_import_perms = [p for p in sorted(required_import_perms) if not request.user.has_perm(p)]
+        if missing_import_perms:
+            deny_msg = f"You do not have permission to import these rows (missing: {', '.join(missing_import_perms)})."
+            messages.error(request, deny_msg)
+            if is_htmx:
+                # 200 + HX-Redirect, like the other denial paths: HTMX skips the swap on non-2xx.
+                return HttpResponse(
+                    "", headers={"HX-Redirect": reverse("plugins:netbox_librenms_plugin:librenms_import")}
+                )
+            return redirect("plugins:netbox_librenms_plugin:librenms_import")
+
         # Seed the shared device cache from ALREADY-cached entries only, before the
         # background-vs-sync decision. Reading the Django cache directly (not
         # fetch_device_with_cache, which falls through to the LibreNMS HTTP API on a miss)
@@ -1132,33 +1156,10 @@ class BulkImportDevicesView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
                         f"Background job requested but no workers available. Importing {total_import_count} devices synchronously...",
                     )
 
-        # Authorize the model add/change perms BEFORE the collision pre-check below (mirrors
-        # ImportDevicesJob, which authorizes before its scan). require_write_permission() above only
-        # checks the plugin-settings perm, but the pre-check surfaces NetBox collision details (object
-        # names + pks) in the returned modal, and the import paths' own require_permissions runs only
-        # later — so a user with change_librenmssettings but without dcim.add_device could otherwise
-        # see that modal. Enforce the same perm sets the import paths do, for every synchronous import.
-        required_import_perms = set()
-        if device_ids_to_import:
-            # Any device row may be flagged import_as_vm during validation; VC updates need change.
-            required_import_perms.update({"dcim.add_device", "dcim.change_device", "virtualization.add_virtualmachine"})
-        if vm_imports:
-            required_import_perms.add("virtualization.add_virtualmachine")
-        missing_import_perms = [p for p in sorted(required_import_perms) if not request.user.has_perm(p)]
-        if missing_import_perms:
-            deny_msg = f"You do not have permission to import these rows (missing: {', '.join(missing_import_perms)})."
-            messages.error(request, deny_msg)
-            if is_htmx:
-                # 200 + HX-Redirect, like the other denial paths: HTMX skips the swap on non-2xx.
-                return HttpResponse(
-                    "", headers={"HX-Redirect": reverse("plugins:netbox_librenms_plugin:librenms_import")}
-                )
-            return redirect("plugins:netbox_librenms_plugin:librenms_import")
-
         # Re-run the same-NetBox-device collision check the confirm modal performs. The confirm
         # preview is advisory only — a re-submitted stale confirm form or a scripted POST reaches
         # this view directly — so block a colliding batch here too. This runs on the SYNCHRONOUS
-        # path only: it sits AFTER the background-job dispatch above, so a batch that enqueued a job
+        # path only: it sits after the background-job dispatch above, so a batch that enqueued a job
         # doesn't pay this validation cost synchronously (ImportDevicesJob re-runs the same check).
         # A single selected device can never collide (collisions need two distinct LibreNMS ids on
         # one NetBox object), so skip the extra validation pass for the common single-row case.
