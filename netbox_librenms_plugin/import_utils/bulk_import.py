@@ -133,7 +133,7 @@ def detect_collisions_for_device_ids(
     # Reuse the caller's dict object (mutate it in place) rather than `or {}`, which would swap in a
     # throwaway dict when the caller passes an empty one — the write-back below must be visible to
     # the caller so the downstream import reuses it.
-    cache = libre_devices_cache if libre_devices_cache is not None else {}
+    devices_cache = libre_devices_cache if libre_devices_cache is not None else {}
     vm_id_set = set(vm_device_ids or ())
     devices = []
     unresolved_ids = []
@@ -149,7 +149,7 @@ def detect_collisions_for_device_ids(
                 job.logger.warning(f"Collision pre-check stopped by cancellation at id {idx} of {len(device_ids)}")
             unresolved_ids.extend(device_ids[idx - 1 :])
             break
-        libre_device = cache.get(device_id)
+        libre_device = devices_cache.get(device_id)
         just_fetched = False
         if libre_device is None:
             try:
@@ -187,7 +187,7 @@ def detect_collisions_for_device_ids(
             # mis-keyed payload from poisoning the shared cache for any other consumer that reads it
             # (e.g. a same-batch retry that hits the cache instead of re-fetching), even though this
             # id is (correctly) recorded unresolved above.
-            cache[device_id] = libre_device
+            devices_cache[device_id] = libre_device
         validation = validate_device_for_import(
             # DB-only collision pre-check: don't hand the validator an API client (it would let
             # API-backed validation paths run even with the cache supplied + include_vc_detection

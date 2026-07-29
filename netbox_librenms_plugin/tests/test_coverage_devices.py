@@ -1471,9 +1471,14 @@ class TestIpCachedSnapshotMgmtIpBackfill:
             view._prepare_context(request, device, "ifName", fetch_fresh=False, server_key="default")
             # The missing key triggered a one-time live resolve of the management IP...
             api.get_device_info.assert_called_once_with(7)
-            # ...and the resolved VALUE was backfilled into the re-cached snapshot, so
-            # subsequent cached renders read it without another live call.
+            # ...and the resolved VALUE was backfilled into the re-cached snapshot...
             assert real_cache.get(key)["mgmt_ip"] == "10.0.0.9"
+            # ...so the next cached render reads it WITHOUT a second LibreNMS round-trip. Proving
+            # the backfill is consumed is the point of storing it; asserting only the stored value
+            # would still pass if every render re-resolved.
+            api.get_device_info.reset_mock()
+            view._prepare_context(request, device, "ifName", fetch_fresh=False, server_key="default")
+            api.get_device_info.assert_not_called()
         finally:
             real_cache.delete(key)
 

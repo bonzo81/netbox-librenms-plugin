@@ -148,6 +148,7 @@ def detect_bulk_collisions(devices: list[dict] | None) -> list[dict]:
                 {
                     "nb_device_pk": int,
                     "nb_device_name": str,
+                    "nb_model_name": str,  # "device" | "virtualmachine"
                     "librenms_rows": [
                         {"device_id": int, "hostname": str, "role": str},
                         ...
