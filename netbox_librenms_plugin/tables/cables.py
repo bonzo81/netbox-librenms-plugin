@@ -6,6 +6,7 @@ from django.utils.safestring import mark_safe
 from netbox.tables.columns import ToggleColumn
 from utilities.paginator import EnhancedPaginator
 
+from netbox_librenms_plugin.constants import OOB_BADGE_HTML
 from netbox_librenms_plugin.utils import (
     get_table_paginate_count,
 )
@@ -62,9 +63,19 @@ class LibreNMSCableTable(tables.Table):
 
     def render_local_port(self, value, record):
         """Render local port name as a link if URL is available."""
+        # Static trusted markup — use mark_safe, not format_html (which requires
+        # interpolation args and raises TypeError when given a bare string in Django 6+).
+        oob_badge = (
+            mark_safe(" " + OOB_BADGE_HTML)  # noqa: S308  (leading space: it follows the port name)
+            if record.get("_source") == "oob"
+            else ""
+        )
+        # Normalize None to "" in both branches; otherwise the linked branch
+        # renders the literal "None" as the link text when value is missing.
+        display_value = value or ""
         if url := record.get("local_port_url"):
-            return format_html('<a href="{}">{}</a>', url, value)
-        return value
+            return format_html('<a href="{}">{}</a>{}', url, display_value, oob_badge)
+        return format_html("{}{}", display_value, oob_badge)
 
     def render_remote_port(self, value, record):
         """Render remote port name as a link if URL is available."""

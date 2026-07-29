@@ -7,6 +7,7 @@ from django.utils.html import escape, format_html, mark_safe
 from netbox.tables.columns import ToggleColumn
 from utilities.paginator import EnhancedPaginator
 
+from netbox_librenms_plugin.constants import OOB_BADGE_HTML
 from netbox_librenms_plugin.utils import get_table_paginate_count
 
 
@@ -181,16 +182,26 @@ class LibreNMSModuleTable(tables.Table):
             rendered_name = display_name
 
         depth = record.get("depth", 0)
+        # Static trusted markup — use mark_safe, not format_html (which requires
+        # interpolation args and raises TypeError when given a bare string).
+        oob_badge = (
+            mark_safe(OOB_BADGE_HTML)  # noqa: S308
+            if record.get("_source") == "oob"
+            else ""
+        )
         if depth == 0:
-            return rendered_name
+            return format_html("{}{}", rendered_name, oob_badge)
         # Build visual tree prefix based on nesting depth
         padding_px = depth * 20
         prefix = "└─ "
+        # Keep the OOB badge inside the padded container so it stays indented
+        # with the module name on nested rows (was rendering at column 0).
         return format_html(
-            '<span style="padding-left:{}px"><span style="white-space: nowrap;">{}{}</span></span>',
+            '<span style="padding-left:{}px"><span style="white-space: nowrap;">{}{}</span>{}</span>',
             padding_px,
             prefix,
             rendered_name,
+            oob_badge,
         )
 
     def render_model(self, value, record):

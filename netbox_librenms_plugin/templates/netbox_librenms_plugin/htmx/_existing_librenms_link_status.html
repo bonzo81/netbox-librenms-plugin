@@ -1,0 +1,9 @@
+{% comment %}
+Existing-device LibreNMS link-status suffix, shared by the hostname-match and serial-match
+branches of device_validation_details.html so the two copies can't drift. Renders the trailing
+", currently linked to LibreNMS device #… / OOB #… / not linked to LibreNMS." clause from
+``validation.existing_librenms_link`` (host_id / oob_id / oob_type). Expects that context key.
+{% endcomment %}{% if validation.existing_librenms_link.host_id %},
+currently linked to LibreNMS device #{{ validation.existing_librenms_link.host_id }}{% if validation.existing_librenms_link.oob_id %} (OOB #{{ validation.existing_librenms_link.oob_id }}{% if validation.existing_librenms_link.oob_type %}, {{ validation.existing_librenms_link.oob_type }}{% endif %}){% endif %}.{% elif validation.existing_librenms_link.oob_id %},
+currently linked to LibreNMS as OOB #{{ validation.existing_librenms_link.oob_id }}{% if validation.existing_librenms_link.oob_type %} ({{ validation.existing_librenms_link.oob_type }}){% endif %}.{% else %},
+not linked to LibreNMS.{% endif %}

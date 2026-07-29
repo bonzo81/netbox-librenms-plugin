@@ -3,6 +3,7 @@
 from unittest.mock import MagicMock, patch
 
 import pytest
+from django.test import RequestFactory
 
 
 def _make_view():
@@ -42,11 +43,57 @@ class TestBaseLibreNMSSyncViewGet:
         view.get_context_data = MagicMock(return_value={"test": "ctx"})
         mock_render.return_value = MagicMock()
 
-        request = MagicMock()
+        request = RequestFactory().get("/")
         view.get(request, pk=1)
 
         # lookup device should be obj
         assert view._librenms_lookup_device is obj
+
+    @patch("netbox_librenms_plugin.views.base.librenms_sync_view.render")
+    @patch("netbox_librenms_plugin.views.base.librenms_sync_view.get_object_or_404")
+    def test_get_rebinds_header_to_request_server_key(self, mock_get_obj, mock_render, mock_multi_server_config):
+        """The page header must rebind to ?server_key so it matches the server the tabs render for."""
+        view = _make_view()
+        view._librenms_api.server_key = "default"  # bound to the default server
+        obj = MagicMock()
+        obj.virtual_chassis = None
+        obj.custom_field_data = {}
+        mock_get_obj.return_value = obj
+        view.get_context_data = MagicMock(return_value={})
+        mock_render.return_value = MagicMock()
+
+        request = RequestFactory().get("/x/?server_key=secondary")
+        with patch(
+            "netbox_librenms_plugin.librenms_api.get_plugin_config",
+            side_effect=lambda _plugin, key: mock_multi_server_config if key == "servers" else None,
+        ):
+            view.get(request, pk=1)
+
+        assert view._librenms_api.server_key == "secondary"
+
+    @patch("netbox_librenms_plugin.views.base.librenms_sync_view.render")
+    @patch("netbox_librenms_plugin.views.base.librenms_sync_view.get_object_or_404")
+    @patch("netbox_librenms_plugin.views.base.librenms_sync_view.get_librenms_sync_device")
+    def test_get_unresolved_server_key_fails_closed(self, mock_get_sync, mock_get_obj, mock_render):
+        """Stale ?server_key fails closed: no default-server librenms_id, VC delegation skipped."""
+        view = _make_view()
+        view._librenms_api.server_key = "default"  # stays bound to the default server
+        view._librenms_api.get_librenms_id.return_value = 99  # default server's mapping; must NOT surface
+
+        obj = MagicMock()
+        obj.virtual_chassis = MagicMock()  # VC member: delegation would normally run
+        mock_get_obj.return_value = obj
+        view.get_context_data = MagicMock(return_value={})
+        mock_render.return_value = MagicMock()
+
+        request = RequestFactory().get("/x/?server_key=ghost")
+        # Non-blank ?server_key=ghost the factory can't resolve -> rebind None -> unresolved=True.
+        with patch("netbox_librenms_plugin.librenms_api.build_librenms_api", return_value=None):
+            view.get(request, pk=1)
+
+        mock_get_sync.assert_not_called()  # VC delegation skipped on unresolved
+        assert view._librenms_lookup_device is obj
+        assert view.librenms_id is None  # no default-server mapping attributed to the gone server
 
     @patch("netbox_librenms_plugin.views.base.librenms_sync_view.render")
     @patch("netbox_librenms_plugin.views.base.librenms_sync_view.get_object_or_404")
@@ -70,7 +117,7 @@ class TestBaseLibreNMSSyncViewGet:
         view.get_context_data = MagicMock(return_value={})
         mock_render.return_value = MagicMock()
 
-        request = MagicMock()
+        request = RequestFactory().get("/")
         view.get(request, pk=1)
 
         mock_get_sync.assert_called_once_with(obj, server_key="default")
@@ -98,7 +145,7 @@ class TestBaseLibreNMSSyncViewGet:
         view.get_context_data = MagicMock(return_value={})
         mock_render.return_value = MagicMock()
 
-        request = MagicMock()
+        request = RequestFactory().get("/")
         view.get(request, pk=1)
 
         mock_get_sync.assert_called_once_with(obj, server_key="default")
@@ -125,7 +172,7 @@ class TestBaseLibreNMSSyncViewGet:
         view.get_context_data = MagicMock(return_value={})
         mock_render.return_value = MagicMock()
 
-        request = MagicMock()
+        request = RequestFactory().get("/")
         view.get(request, pk=1)
 
         mock_get_sync.assert_called_once_with(obj, server_key="default")
@@ -357,6 +404,58 @@ class TestContextAllTabsPresent:
         assert ctx["interface_sync"] is interface_ctx
         assert ctx["module_sync"] is module_ctx
 
+    @pytest.mark.django_db
+    def test_get_context_data_exposes_active_server_key(self):
+        """The active server_key is in context so the create-platform modal forwards it (preserving the server tab on redirect)."""
+        from netbox_librenms_plugin.tests.conftest import make_device
+
+        view = _make_view()
+        view.librenms_id = 42
+        view._librenms_api.server_key = "production"  # non-default active server
+
+        obj = make_device("ctx-serverkey-dev", librenms_cf={"production": 42})
+
+        view.get_librenms_device_info = MagicMock(
+            return_value={
+                "found_in_librenms": True,
+                "librenms_device_details": {
+                    "librenms_device_serial": "SN001",
+                    "librenms_device_hardware": "Cisco",
+                    "librenms_device_os": "ios",
+                    "librenms_device_version": "16.9",
+                    "librenms_device_features": "-",
+                    "librenms_device_location": "NYC",
+                    "librenms_device_hardware_match": None,
+                    "vc_inventory_serials": [],
+                },
+                "mismatched_device": False,
+            }
+        )
+        view.get_interface_context = MagicMock(return_value=None)
+        view.get_cable_context = MagicMock(return_value=None)
+        view.get_ip_context = MagicMock(return_value=None)
+        view.get_vlan_context = MagicMock(return_value=None)
+        view.get_module_context = MagicMock(return_value=None)
+
+        with patch(
+            "netbox_librenms_plugin.views.base.librenms_sync_view.LibreNMSAPIMixin.get_context_data",
+            return_value={},
+        ):
+            with patch(
+                "netbox_librenms_plugin.views.base.librenms_sync_view.get_interface_name_field", return_value="ifName"
+            ):
+                with patch(
+                    "netbox_librenms_plugin.views.base.librenms_sync_view.BaseLibreNMSSyncView._get_platform_info",
+                    return_value={},
+                ):
+                    with patch("netbox_librenms_plugin.views.base.librenms_sync_view.AddToLIbreSNMPV1V2"):
+                        with patch("netbox_librenms_plugin.views.base.librenms_sync_view.AddToLIbreSNMPV3"):
+                            ctx = view.get_context_data(MagicMock(), obj)
+
+        # The create-platform modal include (no `only`) inherits this; without it the modal's
+        # {% if server_key %} hidden field never renders and the redirect drops the server tab.
+        assert ctx["server_key"] == "production"
+
 
 class TestModuleContextDefaults:
     """Tests for module-context defaults and concrete overrides."""
@@ -447,6 +546,26 @@ class TestBuildAllServerMappings:
         assert len(result) == 1
         assert result[0]["server_key"] == "other"
 
+    def test_oob_only_entry_with_invalid_host_id_is_surfaced(self):
+        """An entry whose host "id" is a corrupt non-None value (0) but whose "oob.id" is valid must still surface as an OOB-only mapping so the user can see/remove it, not be dropped by the <=0 guard."""
+        from netbox_librenms_plugin.views.base.librenms_sync_view import BaseLibreNMSSyncView
+
+        obj = MagicMock()
+        obj.custom_field_data = {"librenms_id": {"default": {"id": 0, "oob": {"id": 42}}}}
+
+        with patch("netbox_librenms_plugin.views.base.librenms_sync_view.django_settings") as mock_settings:
+            mock_settings.PLUGINS_CONFIG = {
+                "netbox_librenms_plugin": {
+                    "servers": {"default": {"librenms_url": "https://x.example.com", "display_name": "Default"}}
+                }
+            }
+            result = BaseLibreNMSSyncView._build_all_server_mappings(obj, "default")
+
+        assert result is not None
+        entry = next((m for m in result if m["server_key"] == "default"), None)
+        assert entry is not None  # not dropped despite the invalid host id
+        assert entry["is_oob_only"] is True
+
     def test_string_device_id_converted_to_int(self):
         from netbox_librenms_plugin.views.base.librenms_sync_view import BaseLibreNMSSyncView
 
@@ -508,6 +627,59 @@ class TestBuildAllServerMappings:
 
         assert result is not None
         assert result[0]["is_configured"] is False
+
+    def test_dict_entry_uses_host_id(self):
+        """New dict form {server_key: {"id": N, "oob": {...}}} renders the host id."""
+        from netbox_librenms_plugin.views.base.librenms_sync_view import BaseLibreNMSSyncView
+
+        obj = MagicMock()
+        obj.custom_field_data = {"librenms_id": {"default": {"id": 42, "oob": {"id": 17, "type": "idrac"}}}}
+
+        with patch("netbox_librenms_plugin.views.base.librenms_sync_view.django_settings") as mock_settings:
+            mock_settings.PLUGINS_CONFIG = {
+                "netbox_librenms_plugin": {
+                    "servers": {"default": {"librenms_url": "https://x.example.com", "display_name": "Default"}}
+                }
+            }
+            result = BaseLibreNMSSyncView._build_all_server_mappings(obj, "default")
+
+        assert result is not None
+        assert result[0]["device_id"] == 42
+        assert result[0]["is_oob_only"] is False
+
+    def test_oob_only_entry_surfaced_with_oob_id(self):
+        """An OOB-only entry ({"oob": {...}} with no host id) must still surface so the user can see/remove it; it falls back to the OOB controller's id and is flagged."""
+        from netbox_librenms_plugin.views.base.librenms_sync_view import BaseLibreNMSSyncView
+
+        obj = MagicMock()
+        obj.custom_field_data = {"librenms_id": {"default": {"oob": {"id": 17, "type": "idrac"}}}}
+
+        with patch("netbox_librenms_plugin.views.base.librenms_sync_view.django_settings") as mock_settings:
+            mock_settings.PLUGINS_CONFIG = {
+                "netbox_librenms_plugin": {
+                    "servers": {"default": {"librenms_url": "https://x.example.com", "display_name": "Default"}}
+                }
+            }
+            result = BaseLibreNMSSyncView._build_all_server_mappings(obj, "default")
+
+        assert result is not None
+        assert len(result) == 1
+        assert result[0]["device_id"] == 17
+        assert result[0]["is_oob_only"] is True
+        assert result[0]["device_url"] == "https://x.example.com/device/device=17/"
+
+    def test_migrated_only_dict_entry_skipped(self):
+        """A migrated-only entry ({"_migrated_to": ...}) has neither id nor oob → skipped."""
+        from netbox_librenms_plugin.views.base.librenms_sync_view import BaseLibreNMSSyncView
+
+        obj = MagicMock()
+        obj.custom_field_data = {"librenms_id": {"default": {"_migrated_to": {"device_id": 5}}}}
+
+        with patch("netbox_librenms_plugin.views.base.librenms_sync_view.django_settings") as mock_settings:
+            mock_settings.PLUGINS_CONFIG = {"netbox_librenms_plugin": {"servers": {}}}
+            result = BaseLibreNMSSyncView._build_all_server_mappings(obj, "default")
+
+        assert result is None
 
 
 class TestAllServerMappingsDidValidation:
@@ -934,12 +1106,11 @@ class TestInterfaceSyncRefreshButtonServerKey:
     """The 'Refresh Interfaces' buttons must carry the active server_key (hidden input + hx-include) so a non-default server tab refreshes from the right LibreNMS server/cache, not the fallback."""
 
     def _render(self, *, server_key="prod"):
+        from dcim.models import Device, DeviceRole, DeviceType, Manufacturer, Site
         from django.contrib.auth.models import AnonymousUser
         from django.template.loader import render_to_string
         from django.test import RequestFactory
         from django_tables2 import RequestConfig
-
-        from dcim.models import Device, DeviceRole, DeviceType, Manufacturer, Site
 
         from netbox_librenms_plugin.tables.interfaces import LibreNMSInterfaceTable
 

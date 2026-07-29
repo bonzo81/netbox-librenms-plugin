@@ -7,6 +7,8 @@ comparison logic in _build_row.
 
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -37,73 +39,32 @@ def _captured_table_view(view):
     return rows_store
 
 
-def _run_build_context(view, inventory_data, device_bays, module_scoped_bays, module_types, bay_mappings=None):
-    """Call _build_context with all DB-accessing calls mocked out.
-
-    `bay_mappings` is an optional (exact_list, regex_list) tuple of ModuleBayMapping-like
-    objects.  When None, mappings are empty and matching exercises only direct-name
-    and positional fallbacks.
-    """
-    rows_store = _captured_table_view(view)
-    view._get_module_bays = MagicMock(return_value=(device_bays, module_scoped_bays))
-    view._get_module_types = MagicMock(return_value=module_types)
-    view._get_generic_module_types = MagicMock(return_value={})
-    view._get_module_type_ambiguities = MagicMock(return_value={})
-    view._get_carrier_install_rules = MagicMock(return_value=[])
-
-    if bay_mappings is None:
-        bay_mappings = ([], [])
-
-    with (
-        patch("netbox_librenms_plugin.views.base.modules_view.cache") as mock_cache,
-        patch("netbox_librenms_plugin.utils.load_bay_mappings", return_value=bay_mappings),
-        patch("netbox_librenms_plugin.utils.get_enabled_ignore_rules", return_value=[]),
-        patch("netbox_librenms_plugin.utils.apply_normalization_rules", side_effect=lambda v, *a, **kw: v),
-        patch("netbox_librenms_plugin.utils.preload_normalization_rules", return_value={}),
-        patch("netbox_librenms_plugin.utils.has_nested_name_conflict", return_value=False),
-        # _detect_serial_conflicts makes a real DB query; mock it out for unit tests
-        patch.object(view.__class__, "_detect_serial_conflicts", return_value=None),
-    ):
-        mock_cache.ttl = MagicMock(return_value=None)
-
-        # Inline import: patch ModuleBayMapping inside models module
-        view._build_context(MagicMock(), MagicMock(), inventory_data)
-
-    return rows_store.get("rows", [])
-
-
-def _load_contrib_bay_mappings():
-    """Load contrib bay mappings as fake ModuleBayMapping objects (no DB)."""
-    import re as _re
-    from pathlib import Path
-
-    import yaml
-
-    contrib_path = Path(__file__).resolve().parents[2] / "contrib" / "module_bay_mappings.yaml"
-    with open(contrib_path) as f:
-        data = yaml.safe_load(f)
-
-    class _FakeMap:
-        def __init__(self, **kw):
-            self.librenms_name = kw["librenms_name"]
-            self.librenms_class = kw.get("librenms_class") or ""
-            self.netbox_bay_name = kw["netbox_bay_name"]
-            self.is_regex = kw.get("is_regex", False)
-            self._compiled_pattern = None
-            if self.is_regex:
-                try:
-                    self._compiled_pattern = _re.compile(self.librenms_name)
-                except _re.error:
-                    pass
-
-    mappings = [_FakeMap(**m) for m in data]
-    exact = [m for m in mappings if not m.is_regex]
-    regex = [m for m in mappings if m.is_regex]
-    return exact, regex
-
-
 class TestMergeTransceiverDataPortIdentity:
     """Transceiver merge should preserve stable port identity metadata."""
+
+    def test_malformed_transceiver_payload_returns_error_without_crashing(self):
+        """A truthy success with a non-list payload (or a list of non-dicts) must surface as an error string — not 500 on txr.get(...) — so the caller skips the cache and warns."""
+        from copy import deepcopy
+
+        view = _make_view()
+        view.librenms_id = 100
+        seed = [{"entPhysicalIndex": 1, "entPhysicalName": "Gi0/1"}]
+
+        def assert_malformed(payload):
+            # Deep-copy the seed so a mutation of the SHARED inner dict by _merge_transceiver_data
+            # can't also mutate `seed` and make the "untouched" assertion pass vacuously.
+            candidate = deepcopy(seed)
+            view._librenms_api.get_device_transceivers.return_value = (True, payload)
+            inventory, error = view._merge_transceiver_data(candidate)
+            assert inventory == seed  # untouched, compared against the pristine seed
+            assert error and "malformed transceiver payload" in error
+
+        assert_malformed({"unexpected": "dict"})  # dict payload under success=True
+        assert_malformed([{"entity_physical_index": 2}, "bad"])  # list with a non-dict entry
+        # empty NON-list payload ({}) is also malformed — it must NOT be treated as a successful
+        # "no transceivers" response (which would cache a degraded snapshot). Regression for the
+        # emptiness check running before the type check: {} is falsy, so the old order mislabeled it.
+        assert_malformed({})
 
     def test_synthetic_item_includes_port_identity_metadata(self):
         view = _make_view()
@@ -296,6 +257,11 @@ class TestMergeTransceiverDataPortIdentity:
         obj = MagicMock()
         request = MagicMock()
 
+        # No POSTed keys → get(key, default) must honour the caller's default (QueryDict
+        # semantics); a blanket return_value=None would break default-fallback paths.
+        request.POST.get.side_effect = lambda key, default=None: (
+            default
+        )  # no POSTed server_key → rebind keeps session API
         view.get_object = MagicMock(return_value=obj)
         view._get_sync_device = MagicMock(return_value=obj)
         view.has_write_permission = MagicMock(return_value=True)
@@ -329,12 +295,141 @@ class TestMergeTransceiverDataPortIdentity:
         assert mock_merge.call_args.kwargs.get("ports_data") == ports_payload
         assert mock_enrich.call_args.kwargs.get("ports_data") == ports_payload
 
+    def test_post_treats_non_list_inventory_as_fetch_failure(self):
+        """get_device_inventory is an external boundary: a success flag with a non-list payload (e.g."""
+        view = _make_view()
+        view.model = MagicMock()
+        obj = MagicMock()
+        request = MagicMock()
+        request.POST.get.side_effect = lambda key, default=None: default
+        view.get_object = MagicMock(return_value=obj)
+        view._get_sync_device = MagicMock(return_value=obj)
+        view.has_write_permission = MagicMock(return_value=True)
+        view._librenms_api.get_librenms_id.return_value = 777
+        # success=True but the payload is a dict, not list[dict].
+        view._librenms_api.get_device_inventory.return_value = (True, {"error": "weird shape"})
+
+        with (
+            patch("netbox_librenms_plugin.views.base.modules_view.cache") as mock_cache,
+            patch("netbox_librenms_plugin.views.base.modules_view.messages") as mock_messages,
+            patch("netbox_librenms_plugin.views.base.modules_view.render", return_value=MagicMock()),
+        ):
+            view.post(request, pk=1)
+
+        # Failure branch: error surfaced, stale inventory cache cleared, and the ports fetch
+        # (which only runs after a *valid* inventory) is never reached.
+        mock_messages.error.assert_called_once()
+        # _make_view() fixes get_cache_key() to "test_cache_key"; assert the exact key so the
+        # failure path can't silently start deleting the wrong cache entry.
+        mock_cache.delete.assert_called_once_with("test_cache_key")
+        view._librenms_api.get_ports.assert_not_called()
+
+    def test_post_treats_non_dict_inventory_entry_as_fetch_failure(self):
+        """A list payload that carries non-dict entries (e.g."""
+        view = _make_view()
+        view.model = MagicMock()
+        obj = MagicMock()
+        request = MagicMock()
+        request.POST.get.side_effect = lambda key, default=None: default
+        view.get_object = MagicMock(return_value=obj)
+        view._get_sync_device = MagicMock(return_value=obj)
+        view.has_write_permission = MagicMock(return_value=True)
+        view._librenms_api.get_librenms_id.return_value = 777
+        # success=True and a list, but one element is not a dict.
+        view._librenms_api.get_device_inventory.return_value = (True, [{"entPhysicalIndex": 1}, None])
+
+        with (
+            patch("netbox_librenms_plugin.views.base.modules_view.cache") as mock_cache,
+            patch("netbox_librenms_plugin.views.base.modules_view.messages") as mock_messages,
+            patch("netbox_librenms_plugin.views.base.modules_view.render", return_value=MagicMock()),
+        ):
+            view.post(request, pk=1)
+
+        mock_messages.error.assert_called_once()
+        mock_cache.delete.assert_called_once_with("test_cache_key")
+        view._librenms_api.get_ports.assert_not_called()  # bad inventory short-circuits before ports fetch
+
+    def test_get_context_data_rejects_malformed_cached_inventory(self):
+        """post() now fails closed on malformed inventory before caching, but a stale pre-fix cache entry like {"inventory": [None]} can still be read."""
+        view = _make_view()
+        obj = MagicMock()
+        view._get_sync_device = MagicMock(return_value=obj)
+        # Pin the librenms_id + OOB fingerprint so they MATCH the cached payload and don't trigger
+        # an earlier cache invalidation — otherwise the test would pass for the wrong reason (the
+        # id/oob mismatch deleting the cache before the malformed-inventory guard is even reached).
+        view._librenms_api.get_librenms_id.return_value = 1
+        view._build_context = MagicMock()  # must NOT be reached for a malformed payload
+        request = MagicMock()
+        request.GET = {}  # real query dict (no server_key) so the GET-rebind guard doesn't early-return
+
+        with (
+            patch("netbox_librenms_plugin.views.base.modules_view.cache") as mock_cache,
+            patch("netbox_librenms_plugin.views.base.modules_view.get_librenms_oob", return_value=None),
+        ):
+            mock_cache.get.return_value = {"inventory": [None], "librenms_id": 1}
+            result = view.get_context_data(request, obj)
+
+        view._build_context.assert_not_called()
+        mock_cache.delete.assert_called_once_with("test_cache_key")
+        assert result["table"] is None
+        assert result["object"] is obj
+
+    def test_get_context_data_keys_cache_on_resolved_scoped_server(self):
+        """The cache read keys on the scoped server RETURNED by the resolver, not the bound api.server_key (equal only via the rebind side effect)."""
+        view = _make_view()
+        obj = MagicMock()
+        view._get_sync_device = MagicMock(return_value=obj)
+        view._librenms_api.get_librenms_id.return_value = 1
+        view._build_context = MagicMock()
+        request = MagicMock()
+        request.GET = {}
+        # Simulate the regression the finding guards against: the resolver returns a scoped server
+        # but does NOT rebind the bound client (which stays "test-server"). The cache key must
+        # follow the RESOLVED scoped server, not the now-stale bound api.server_key.
+        view.resolve_get_render_server_key = MagicMock(return_value=("scoped-srv", False))
+
+        with (
+            patch("netbox_librenms_plugin.views.base.modules_view.cache") as mock_cache,
+            patch("netbox_librenms_plugin.views.base.modules_view.get_librenms_oob", return_value=None),
+        ):
+            mock_cache.get.return_value = {"inventory": [None], "librenms_id": 1}
+            view.get_context_data(request, obj)
+
+        view.get_cache_key.assert_called_once_with(obj, "inventory", server_key="scoped-srv")
+
+    def test_get_context_data_scopes_sync_device_to_resolved_server(self):
+        """The VC sync-device resolution is scoped to the RESOLVED server explicitly, not left to rely on the rebind side effect."""
+        view = _make_view()
+        obj = MagicMock()
+        view._get_sync_device = MagicMock(return_value=obj)
+        view._librenms_api.get_librenms_id.return_value = 1
+        view._build_context = MagicMock()
+        request = MagicMock()
+        request.GET = {}
+        # Resolver returns a scoped server WITHOUT rebinding the bound client (the regression case).
+        view.resolve_get_render_server_key = MagicMock(return_value=("scoped-srv", False))
+
+        with (
+            patch("netbox_librenms_plugin.views.base.modules_view.cache") as mock_cache,
+            patch("netbox_librenms_plugin.views.base.modules_view.get_librenms_oob", return_value=None),
+        ):
+            mock_cache.get.return_value = {"inventory": [None], "librenms_id": 1}
+            view.get_context_data(request, obj)
+
+        # _get_sync_device must receive the resolved scoped server, not be called unscoped.
+        view._get_sync_device.assert_called_once_with(obj, server_key="scoped-srv")
+
     def test_post_warns_when_ports_fetch_fails(self):
         view = _make_view()
         view.model = MagicMock()
         obj = MagicMock()
         request = MagicMock()
 
+        # No POSTed keys → get(key, default) must honour the caller's default (QueryDict
+        # semantics); a blanket return_value=None would break default-fallback paths.
+        request.POST.get.side_effect = lambda key, default=None: (
+            default
+        )  # no POSTed server_key → rebind keeps session API
         view.get_object = MagicMock(return_value=obj)
         view._get_sync_device = MagicMock(return_value=obj)
         view.has_write_permission = MagicMock(return_value=True)
@@ -365,6 +460,298 @@ class TestMergeTransceiverDataPortIdentity:
             " See server logs for details.",
         )
         mock_messages.success.assert_not_called()
+
+    def test_post_treats_malformed_ports_payload_as_fetch_failure(self):
+        """get_ports() returning success with a dict whose "ports" is missing/None (or carries non-dict entries) makes port-id enrichment silently no-op."""
+        view = _make_view()
+        view.model = MagicMock()
+        obj = MagicMock()
+        request = MagicMock()
+        request.POST.get.side_effect = lambda key, default=None: default
+        view.get_object = MagicMock(return_value=obj)
+        view._get_sync_device = MagicMock(return_value=obj)
+        view.has_write_permission = MagicMock(return_value=True)
+        view._build_context = MagicMock(
+            return_value={"table": None, "object": obj, "cache_expiry": None, "server_key": "default"}
+        )
+
+        view._librenms_api.get_librenms_id.return_value = 777
+        view._librenms_api.get_device_inventory.return_value = (True, [])
+        view._librenms_api.get_device_transceivers.return_value = (True, [])
+        # success=True and a dict, but "ports" is None (not a list of dicts) → malformed.
+        view._librenms_api.get_ports.return_value = (True, {"ports": None})
+
+        with (
+            patch("netbox_librenms_plugin.views.base.modules_view.cache") as mock_cache,
+            patch("netbox_librenms_plugin.views.base.modules_view.messages") as mock_messages,
+            patch("netbox_librenms_plugin.views.base.modules_view.render", return_value=MagicMock()),
+            patch("netbox_librenms_plugin.views.base.modules_view.get_librenms_oob", return_value=None),
+        ):
+            view.post(request, pk=1)
+
+        mock_cache.set.assert_not_called()  # degraded snapshot not persisted as complete
+        mock_cache.delete.assert_called_once_with("test_cache_key")
+        mock_messages.warning.assert_called_once_with(
+            request,
+            "Inventory refreshed, but port metadata fetch failed; interface matching may be incomplete."
+            " See server logs for details.",
+        )
+        mock_messages.success.assert_not_called()
+
+    def test_post_skips_cache_on_oob_inventory_failure(self):
+        """When the OOB inventory fetch fails, the main-only snapshot must NOT be cached under the current oob fingerprint — otherwise get_context_data() accepts it as complete and the OOB rows (and warning) vanish until TTL/manual refresh."""
+        view = _make_view()
+        view.model = MagicMock()
+        obj = MagicMock()
+        request = MagicMock()
+        request.POST.get.side_effect = lambda key, default=None: default
+
+        view.get_object = MagicMock(return_value=obj)
+        view._get_sync_device = MagicMock(return_value=obj)
+        view.has_write_permission = MagicMock(return_value=True)
+        view._build_context = MagicMock(
+            return_value={"table": None, "object": obj, "cache_expiry": None, "server_key": "default"}
+        )
+
+        view._librenms_api.get_librenms_id.return_value = 777
+        view._librenms_api.get_device_transceivers.return_value = (True, [])
+        view._librenms_api.get_ports.return_value = (True, {"ports": []})
+        # Main inventory succeeds; the linked OOB controller's inventory fails.
+        view._librenms_api.get_device_inventory.side_effect = lambda dev_id: (
+            (True, []) if dev_id == 777 else (False, "oob inventory unavailable")
+        )
+
+        with (
+            patch("netbox_librenms_plugin.views.base.modules_view.cache") as mock_cache,
+            patch("netbox_librenms_plugin.views.base.modules_view.messages") as mock_messages,
+            patch("netbox_librenms_plugin.views.base.modules_view.render", return_value=MagicMock()),
+            patch("netbox_librenms_plugin.views.base.modules_view.get_librenms_oob", return_value={"id": 999}),
+        ):
+            view.post(request, pk=1)
+
+        mock_cache.set.assert_not_called()  # no partial snapshot persisted
+        mock_cache.delete.assert_called_once_with("test_cache_key")  # the active device's stale entry cleared
+        mock_messages.warning.assert_called_once()  # user is told the OOB inventory fetch failed
+        mock_messages.success.assert_not_called()  # warning, not success
+        # The toast must stay generic — internal LibreNMS ids (777 / OOB 999) belong only in
+        # the server log, not the UI.
+        warn_msg = mock_messages.warning.call_args[0][1]
+        assert "777" not in warn_msg and "999" not in warn_msg and "OOB id" not in warn_msg
+
+    def test_post_treats_non_dict_oob_inventory_entry_as_fetch_failure(self):
+        """The OOB inventory merge offsets indices and sets item["_source"] on every entry, so a success flag with non-dict elements (e.g."""
+        view = _make_view()
+        view.model = MagicMock()
+        obj = MagicMock()
+        request = MagicMock()
+        request.POST.get.side_effect = lambda key, default=None: default
+
+        view.get_object = MagicMock(return_value=obj)
+        view._get_sync_device = MagicMock(return_value=obj)
+        view.has_write_permission = MagicMock(return_value=True)
+        view._build_context = MagicMock(
+            return_value={"table": None, "object": obj, "cache_expiry": None, "server_key": "default"}
+        )
+
+        view._librenms_api.get_librenms_id.return_value = 777
+        view._librenms_api.get_device_transceivers.return_value = (True, [])
+        view._librenms_api.get_ports.return_value = (True, {"ports": []})
+        # Main inventory succeeds; the OOB controller returns success but a malformed list.
+        view._librenms_api.get_device_inventory.side_effect = lambda dev_id: (
+            (True, []) if dev_id == 777 else (True, [{"entPhysicalIndex": 1}, None])
+        )
+
+        with (
+            patch("netbox_librenms_plugin.views.base.modules_view.cache") as mock_cache,
+            patch("netbox_librenms_plugin.views.base.modules_view.messages") as mock_messages,
+            patch("netbox_librenms_plugin.views.base.modules_view.render", return_value=MagicMock()),
+            patch("netbox_librenms_plugin.views.base.modules_view.get_librenms_oob", return_value={"id": 999}),
+        ):
+            view.post(request, pk=1)
+
+        mock_cache.set.assert_not_called()  # no partial snapshot persisted
+        mock_cache.delete.assert_called_once_with("test_cache_key")
+        mock_messages.warning.assert_called_once()  # malformed OOB inventory treated as a fetch failure
+        mock_messages.success.assert_not_called()
+
+    def test_post_corrupt_oob_id_fails_closed(self):
+        """A linked OOB controller whose stored id is corrupt (bool/non-numeric) must fail CLOSED like the interfaces/cables tabs: no fetch with the garbage id, but a warning and NO cached host-only snapshot — a bare falsy check would conflate it with 'no OOB linked' and silently drop the controller's rows until TTL."""
+        view = _make_view()
+        view.model = MagicMock()
+        obj = MagicMock()
+        request = MagicMock()
+        request.POST.get.side_effect = lambda key, default=None: default
+
+        view.get_object = MagicMock(return_value=obj)
+        view._get_sync_device = MagicMock(return_value=obj)
+        view.has_write_permission = MagicMock(return_value=True)
+        view._build_context = MagicMock(
+            return_value={"table": None, "object": obj, "cache_expiry": None, "server_key": "default"}
+        )
+
+        view._librenms_api.get_librenms_id.return_value = 777
+        view._librenms_api.get_device_transceivers.return_value = (True, [])
+        view._librenms_api.get_ports.return_value = (True, {"ports": []})
+        # Only the main device (777) is a valid id; a second call with a garbage OOB id would
+        # return failure and trip the OOB-failed path.
+        view._librenms_api.get_device_inventory.side_effect = lambda dev_id: (
+            (True, []) if dev_id == 777 else (False, "should never be called")
+        )
+
+        with (
+            patch("netbox_librenms_plugin.views.base.modules_view.cache") as mock_cache,
+            patch("netbox_librenms_plugin.views.base.modules_view.messages") as mock_messages,
+            # post() renders here via modules_view.render; a higher branch refactors that to
+            # render_sync_partial() (mixins.render). Patch both (create=True) so this test stays
+            # robust as it rides up the stack regardless of which render site post() uses.
+            patch("netbox_librenms_plugin.views.base.modules_view.render", return_value=MagicMock(), create=True),
+            patch("netbox_librenms_plugin.views.mixins.render", return_value=MagicMock(), create=True),
+            patch(
+                "netbox_librenms_plugin.views.base.modules_view.get_librenms_oob",
+                return_value={"id": "not-a-number"},
+            ),
+        ):
+            view.post(request, pk=1)
+
+        # The garbage id is never fired at get_device_inventory...
+        view._librenms_api.get_device_inventory.assert_called_once_with(777)
+        # ...but the user is warned and the host-only snapshot is NOT cached as complete.
+        mock_messages.warning.assert_called_once()
+        mock_messages.success.assert_not_called()
+        mock_cache.set.assert_not_called()
+        mock_cache.delete.assert_called_once_with("test_cache_key")
+
+    def test_post_no_oob_linked_stays_clean_success(self):
+        """No OOB linked at all (get_librenms_oob returns None) is NOT a failure: clean success toast and the snapshot is cached."""
+        view = _make_view()
+        view.model = MagicMock()
+        obj = MagicMock()
+        request = MagicMock()
+        request.POST.get.side_effect = lambda key, default=None: default
+
+        view.get_object = MagicMock(return_value=obj)
+        view._get_sync_device = MagicMock(return_value=obj)
+        view.has_write_permission = MagicMock(return_value=True)
+        view._build_context = MagicMock(
+            return_value={"table": None, "object": obj, "cache_expiry": None, "server_key": "default"}
+        )
+
+        view._librenms_api.get_librenms_id.return_value = 777
+        view._librenms_api.get_device_transceivers.return_value = (True, [])
+        view._librenms_api.get_ports.return_value = (True, {"ports": []})
+        view._librenms_api.get_device_inventory.return_value = (True, [])
+
+        with (
+            patch("netbox_librenms_plugin.views.base.modules_view.cache") as mock_cache,
+            patch("netbox_librenms_plugin.views.base.modules_view.messages") as mock_messages,
+            patch("netbox_librenms_plugin.views.base.modules_view.render", return_value=MagicMock(), create=True),
+            patch("netbox_librenms_plugin.views.mixins.render", return_value=MagicMock(), create=True),
+            patch("netbox_librenms_plugin.views.base.modules_view.get_librenms_oob", return_value=None),
+        ):
+            view.post(request, pk=1)
+
+        mock_messages.success.assert_called_once()
+        mock_messages.warning.assert_not_called()
+        assert mock_cache.set.call_args[0][1]["oob_librenms_id"] is None
+
+    def test_post_treats_non_int_oob_index_as_fetch_failure(self):
+        """An OOB inventory row with a non-int entPhysicalIndex fails closed (no offset TypeError, no cache)."""
+        view = _make_view()
+        view.model = MagicMock()
+        obj = MagicMock()
+        request = MagicMock()
+        request.POST.get.side_effect = lambda key, default=None: default
+
+        view.get_object = MagicMock(return_value=obj)
+        view._get_sync_device = MagicMock(return_value=obj)
+        view.has_write_permission = MagicMock(return_value=True)
+        view._build_context = MagicMock(
+            return_value={"table": None, "object": obj, "cache_expiry": None, "server_key": "default"}
+        )
+
+        view._librenms_api.get_librenms_id.return_value = 777
+        view._librenms_api.get_device_transceivers.return_value = (True, [])
+        view._librenms_api.get_ports.return_value = (True, {"ports": []})
+        # Main inventory OK; OOB returns a row whose entPhysicalIndex is a string — the offset
+        # arithmetic ("5" + offset) would TypeError and 500 the tab without the guard.
+        view._librenms_api.get_device_inventory.side_effect = lambda dev_id: (
+            (True, []) if dev_id == 777 else (True, [{"entPhysicalIndex": "5", "entPhysicalName": "oob-fan"}])
+        )
+
+        with (
+            patch("netbox_librenms_plugin.views.base.modules_view.cache") as mock_cache,
+            patch("netbox_librenms_plugin.views.base.modules_view.messages") as mock_messages,
+            # Patch both render sites (create=True) — see test_post_ignores_non_numeric_oob_id:
+            # a higher branch moves post()'s render to render_sync_partial() (mixins.render).
+            patch("netbox_librenms_plugin.views.base.modules_view.render", return_value=MagicMock(), create=True),
+            patch("netbox_librenms_plugin.views.mixins.render", return_value=MagicMock(), create=True),
+            patch("netbox_librenms_plugin.views.base.modules_view.get_librenms_oob", return_value={"id": 999}),
+        ):
+            view.post(request, pk=1)  # must not raise
+
+        mock_cache.set.assert_not_called()  # no partial snapshot persisted
+        mock_messages.warning.assert_called_once()  # malformed OOB indices treated as a fetch failure
+        mock_messages.success.assert_not_called()
+
+    def test_get_context_data_oob_fingerprint_equates_int_and_string(self):
+        """Cached int oob id and a current string id of the same value compare equal — cache not wrongly invalidated."""
+        view = _make_view()
+        obj = MagicMock()
+        view._get_sync_device = MagicMock(return_value=obj)
+        view._librenms_api.get_librenms_id.return_value = 1
+        sentinel = {"table": "built", "object": obj}
+        view._build_context = MagicMock(return_value=sentinel)
+        request = MagicMock()
+        request.GET = {}
+
+        with (
+            patch("netbox_librenms_plugin.views.base.modules_view.cache") as mock_cache,
+            # Stored fingerprint is the coerced int 5; the live OOB CF reads back the string "5".
+            patch("netbox_librenms_plugin.views.base.modules_view.get_librenms_oob", return_value={"id": "5"}),
+        ):
+            mock_cache.get.return_value = {
+                "inventory": [{"entPhysicalIndex": 1}],
+                "librenms_id": 1,
+                "oob_librenms_id": 5,
+            }
+            result = view.get_context_data(request, obj)
+
+        # int 5 == coerce("5") → fingerprint matches → cache kept → real context built.
+        view._build_context.assert_called_once()
+        assert result is sentinel
+        mock_cache.delete.assert_not_called()
+
+    def test_post_skips_cache_on_transceiver_failure(self):
+        """A transceiver-enrichment failure drops the synthetic transceiver rows, so the truncated inventory must NOT be cached — same reasoning as the OOB-failure case."""
+        view = _make_view()
+        view.model = MagicMock()
+        obj = MagicMock()
+        request = MagicMock()
+        request.POST.get.side_effect = lambda key, default=None: default
+
+        view.get_object = MagicMock(return_value=obj)
+        view._get_sync_device = MagicMock(return_value=obj)
+        view.has_write_permission = MagicMock(return_value=True)
+        view._build_context = MagicMock(
+            return_value={"table": None, "object": obj, "cache_expiry": None, "server_key": "default"}
+        )
+
+        view._librenms_api.get_librenms_id.return_value = 777
+        view._librenms_api.get_ports.return_value = (True, {"ports": []})
+        # Main (and OOB) inventory succeed, but the transceiver API fails → txr_error.
+        view._librenms_api.get_device_inventory.return_value = (True, [])
+        view._librenms_api.get_device_transceivers.return_value = (False, "transceiver fetch failed")
+
+        with (
+            patch("netbox_librenms_plugin.views.base.modules_view.cache") as mock_cache,
+            patch("netbox_librenms_plugin.views.base.modules_view.messages"),
+            patch("netbox_librenms_plugin.views.base.modules_view.render", return_value=MagicMock()),
+            patch("netbox_librenms_plugin.views.base.modules_view.get_librenms_oob", return_value=None),
+        ):
+            view.post(request, pk=1)
+
+        mock_cache.set.assert_not_called()  # truncated (transceiver-less) snapshot not persisted
+        mock_cache.delete.assert_called_once_with("test_cache_key")
 
 
 # ---------------------------------------------------------------------------
@@ -473,76 +860,37 @@ def _linecard_inventory():
     ]
 
 
-def _bay_setup():
-    """Build mock device_bays and module_scoped_bays matching _linecard_inventory."""
-    # --- module instances (NetBox Module objects) ---
-    linecard_module = MagicMock()
-    linecard_module.pk = 100
-    linecard_module.serial = "S_LINECARD"
-    linecard_module.module_type_id = 10  # matches mt_linecard.pk
-
-    cvr2_module = MagicMock()
-    cvr2_module.pk = 200
-    cvr2_module.serial = "FDO_CVR2"
-    cvr2_module.module_type_id = 20  # matches mt_cvr.pk
-
-    glc_te_installed = MagicMock()
-    glc_te_installed.serial = "MTC213403BB"
-    glc_te_installed.get_absolute_url.return_value = "/modules/99/"
-    glc_te_installed.module_type_id = 30  # matches mt_glc_te.pk
-
-    # --- device-level bays ---
-    slot3_bay = MagicMock()
-    slot3_bay.name = "Slot 3"
-    slot3_bay.installed_module = linecard_module
-    device_bays = {"Slot 3": slot3_bay}
-
-    # --- module-scoped bays created by the linecard ---
-    x2p2_bay = MagicMock()
-    x2p2_bay.name = "X2 Port 2"
-    x2p2_bay.installed_module = cvr2_module  # INSTALLED
-
-    x2p4_bay = MagicMock()
-    x2p4_bay.name = "X2 Port 4"
-    x2p4_bay.installed_module = None  # NOT installed
-
-    # --- module-scoped bays created by the installed CVR at X2 Port 2 ---
-    sfp1_bay = MagicMock()
-    sfp1_bay.name = "SFP 1"
-    sfp1_bay.installed_module = glc_te_installed
-
-    sfp2_bay = MagicMock()
-    sfp2_bay.name = "SFP 2"
-    sfp2_bay.installed_module = None
-
-    module_scoped_bays = {
-        100: {"X2 Port 2": x2p2_bay, "X2 Port 4": x2p4_bay},
-        200: {"SFP 1": sfp1_bay, "SFP 2": sfp2_bay},
-    }
-
-    return device_bays, module_scoped_bays
+# ---------------------------------------------------------------------------
+# Real-DB scenario builders (replace the MagicMock _bay_setup / _module_types)
+# ---------------------------------------------------------------------------
 
 
-def _module_types():
-    """Minimal module-type dict for the test scenario."""
-    mt_linecard = MagicMock()
-    mt_linecard.pk = 10
-    mt_linecard.model = "WS-X4908"
-    mt_cvr = MagicMock()
-    mt_cvr.pk = 20
-    mt_cvr.model = "CVR-X2-SFP"
-    mt_glc_te = MagicMock()
-    mt_glc_te.pk = 30
-    mt_glc_te.model = "GLC-TE"
-    mt_glc_t = MagicMock()
-    mt_glc_t.pk = 40
-    mt_glc_t.model = "GLC-T"
-    return {
-        "WS-X4908": mt_linecard,
-        "CVR-X2-SFP": mt_cvr,
-        "GLC-TE": mt_glc_te,
-        "GLC-T": mt_glc_t,
-    }
+def _build_linecard_device(*, with_cvr6=False):
+    """Real-DB equivalent of ``_bay_setup()`` + ``_module_types()``."""
+    from netbox_librenms_plugin.tests.conftest import (
+        install_module,
+        make_device_with_module_bays,
+        make_module_type_with_bays,
+    )
+
+    linecard_bays = ["X2 Port 2", "X2 Port 4"] + (["X2 Port 6"] if with_cvr6 else [])
+    dev = make_device_with_module_bays("lc-dev", ["Slot 3"])
+    install_module(dev, "Slot 3", "WS-X4908", serial="S_LINECARD", child_bays=linecard_bays)
+    install_module(dev, "X2 Port 2", "CVR-X2-SFP", serial="FDO_CVR2", child_bays=["SFP 1", "SFP 2"])
+    install_module(dev, "SFP 1", "GLC-TE", serial="MTC213403BB")
+    make_module_type_with_bays("GLC-T")  # exists for matching the uninstalled converter's child
+    if with_cvr6:
+        # A third converter (installed) at X2 Port 6 with its own SFP 1 holding a GLC-TE.
+        cvr6 = install_module(dev, "X2 Port 6", "CVR-X2-SFP", serial="FDO_CVR6")
+        install_module(dev, "SFP 1", "GLC-TE", serial="SFP6_SERIAL", parent_module=cvr6)
+    return dev
+
+
+def _run_build_context_real(view, inventory_data, device):
+    """Drive ``_build_context`` against a REAL device — real ``_get_module_bays`` / ``_get_module_types`` and the real bay-matching algorithm; only ``get_table`` is captured."""
+    rows_store = _captured_table_view(view)
+    view._build_context(MagicMock(), device, inventory_data)
+    return rows_store.get("rows", [])
 
 
 # ---------------------------------------------------------------------------
@@ -550,6 +898,7 @@ def _module_types():
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.django_db
 class TestBayDepthScopeWithUninstalledParent:
     """
     Regression tests for the stale bays_by_depth bug.
@@ -569,9 +918,8 @@ class TestBayDepthScopeWithUninstalledParent:
 
     def _build_rows(self):
         view = _make_view()
-        device_bays, module_scoped_bays = _bay_setup()
-        module_types = _module_types()
-        return _run_build_context(view, _linecard_inventory(), device_bays, module_scoped_bays, module_types)
+        device = _build_linecard_device()
+        return _run_build_context_real(view, _linecard_inventory(), device)
 
     def _row(self, rows, name):
         for r in rows:
@@ -667,31 +1015,10 @@ class TestBayDepthScopeWithUninstalledParent:
         ]
 
         view = _make_view()
-        device_bays, module_scoped_bays = _bay_setup()
-        module_types = _module_types()
+        # Real device with the extra installed CVR at X2 Port 6 (its own SFP 1 holds a GLC-TE).
+        device = _build_linecard_device(with_cvr6=True)
 
-        # Add a third installed CVR at X2 Port 6 with its own SFP 1 bay
-        cvr6_module = MagicMock()
-        cvr6_module.pk = 300
-        cvr6_module.serial = "FDO_CVR6"
-        cvr6_module.module_type_id = 20  # matches mt_cvr.pk
-
-        sfp1_bay_6 = MagicMock()
-        sfp1_bay_6.name = "SFP 1"
-        sfp6_installed = MagicMock()
-        sfp6_installed.serial = "SFP6_SERIAL"
-        sfp6_installed.get_absolute_url.return_value = "/modules/199/"
-        sfp6_installed.module_type_id = 30  # matches mt_glc_te.pk
-        sfp1_bay_6.installed_module = sfp6_installed
-
-        x2p6_bay = MagicMock()
-        x2p6_bay.name = "X2 Port 6"
-        x2p6_bay.installed_module = cvr6_module
-
-        module_scoped_bays[100]["X2 Port 6"] = x2p6_bay
-        module_scoped_bays[300] = {"SFP 1": sfp1_bay_6}
-
-        rows = _run_build_context(view, inventory, device_bays, module_scoped_bays, module_types)
+        rows = _run_build_context_real(view, inventory, device)
 
         def _row(name):
             return next((r for r in rows if r.get("name") == name), None)
@@ -827,99 +1154,41 @@ def _prod_inventory_ws_x4908():
     ]
 
 
-def _prod_bay_setup_ws_x4908(cvr_installed=True):
-    """
-    NetBox bay structure mirroring prod-lab03-sw4:
-        Device-bays: Slot 3 (linecard installed)
-        WS-X4908-10GE bays: X2 Port 1..8 (X2 Port 2 holds CVR if cvr_installed)
-        CVR-X2-SFP bays: SFP 1, SFP 2 (none installed)
-    """
-    linecard_module = MagicMock()
-    linecard_module.pk = 100
-    linecard_module.serial = "S_LINECARD"
-    linecard_module.module_type_id = 10
+def _build_prod_ws4908_device(*, cvr_installed=True):
+    """Real-DB equivalent of ``_prod_bay_setup_ws_x4908``: a prod-lab03-sw4-shaped device."""
+    from netbox_librenms_plugin.tests.conftest import (
+        install_module,
+        make_device_with_module_bays,
+        make_module_type_with_bays,
+    )
 
-    cvr2_module = MagicMock()
-    cvr2_module.pk = 200
-    cvr2_module.serial = "S_CVR2"
-    cvr2_module.module_type_id = 20
-
-    slot3_bay = MagicMock()
-    slot3_bay.name = "Slot 3"
-    slot3_bay.installed_module = linecard_module
-    slot3_bay.get_absolute_url.return_value = "/bay/slot3"
-    device_bays = {"Slot 3": slot3_bay}
-
-    linecard_bays = {}
-    for n in range(1, 9):
-        b = MagicMock()
-        b.name = f"X2 Port {n}"
-        b.installed_module = cvr2_module if (n == 2 and cvr_installed) else None
-        b.get_absolute_url.return_value = f"/bay/x2-{n}"
-        linecard_bays[f"X2 Port {n}"] = b
-
-    module_scoped_bays = {100: linecard_bays}
-
+    dev = make_device_with_module_bays("prod-sw4", ["Slot 3"])
+    install_module(
+        dev,
+        "Slot 3",
+        "WS-X4908-10GE",
+        serial="S_LINECARD",
+        child_bays=[f"X2 Port {n}" for n in range(1, 9)],
+    )
     if cvr_installed:
-        cvr_bays = {}
-        for n in range(1, 3):
-            b = MagicMock()
-            b.name = f"SFP {n}"
-            b.installed_module = None
-            b.get_absolute_url.return_value = f"/bay/sfp-{n}"
-            cvr_bays[f"SFP {n}"] = b
-        module_scoped_bays[200] = cvr_bays
-
-    return device_bays, module_scoped_bays
+        install_module(dev, "X2 Port 2", "CVR-X2-SFP", serial="S_CVR2", child_bays=["SFP 1", "SFP 2"])
+    # Transceiver module types exist so resolve_module_type can match the port rows.
+    make_module_type_with_bays("GLC-TE")
+    make_module_type_with_bays("GLC-T")
+    return dev
 
 
-def _prod_module_types():
-    mt_lc = MagicMock()
-    mt_lc.pk = 10
-    mt_lc.model = "WS-X4908-10GE"
-    mt_lc.get_absolute_url.return_value = "/mt/lc"
-    mt_cvr = MagicMock()
-    mt_cvr.pk = 20
-    mt_cvr.model = "CVR-X2-SFP"
-    mt_cvr.get_absolute_url.return_value = "/mt/cvr"
-    mt_glc_te = MagicMock()
-    mt_glc_te.pk = 30
-    mt_glc_te.model = "GLC-TE"
-    mt_glc_te.get_absolute_url.return_value = "/mt/glc-te"
-    mt_glc_t = MagicMock()
-    mt_glc_t.pk = 40
-    mt_glc_t.model = "GLC-T"
-    mt_glc_t.get_absolute_url.return_value = "/mt/glc-t"
-    return {
-        "WS-X4908-10GE": mt_lc,
-        "CVR-X2-SFP": mt_cvr,
-        "GLC-TE": mt_glc_te,
-        "GLC-T": mt_glc_t,
-    }
-
-
+@pytest.mark.django_db
 class TestProdShapeWS4908Matching:
-    """
-    Bay matching against real production data shape from a Cisco WS-X4908-10GE.
-
-    Distinct from `TestBayDepthScopeWithUninstalledParent`, whose synthetic
-    container names match bay names directly without exercising the contrib
-    regex paths.  This class loads the contrib YAML and asserts each level
-    of the chain — linecard regex, X2 slot regex, and CVR-internal positional
-    fallback — actually does what the contrib mappings claim.
-    """
+    """Bay matching against real production data shape from a Cisco WS-X4908-10GE."""
 
     def _build_rows(self, cvr_installed=True):
+        from netbox_librenms_plugin.tests.conftest import load_contrib_bay_mappings
+
         view = _make_view()
-        device_bays, module_scoped_bays = _prod_bay_setup_ws_x4908(cvr_installed=cvr_installed)
-        return _run_build_context(
-            view,
-            _prod_inventory_ws_x4908(),
-            device_bays,
-            module_scoped_bays,
-            _prod_module_types(),
-            bay_mappings=_load_contrib_bay_mappings(),
-        )
+        load_contrib_bay_mappings()  # real ModuleBayMapping rows drive load_bay_mappings()
+        device = _build_prod_ws4908_device(cvr_installed=cvr_installed)
+        return _run_build_context_real(view, _prod_inventory_ws_x4908(), device)
 
     def _row(self, rows, name):
         for r in rows:
@@ -1072,16 +1341,12 @@ class TestProdShapeWS4908Matching:
                 "entPhysicalParentRelPos": 1,
             },
         ]
+        from netbox_librenms_plugin.tests.conftest import load_contrib_bay_mappings
+
         view = _make_view()
-        device_bays, module_scoped_bays = _prod_bay_setup_ws_x4908(cvr_installed=True)
-        rows = _run_build_context(
-            view,
-            no_cvr_inventory,
-            device_bays,
-            module_scoped_bays,
-            _prod_module_types(),
-            bay_mappings=_load_contrib_bay_mappings(),
-        )
+        load_contrib_bay_mappings()
+        device = _build_prod_ws4908_device(cvr_installed=True)
+        rows = _run_build_context_real(view, no_cvr_inventory, device)
         row = self._row(rows, "GigabitEthernet3/11")
         assert row is not None, "GigabitEthernet3/11 row not found"
         assert row["module_bay"] != "X2 Port 2", (
@@ -1598,6 +1863,66 @@ class TestBuildRowSerialMismatch:
         assert row["status"] == "Serial Mismatch"
         assert row.get("can_update_serial")
         assert row.get("can_replace")
+
+    def test_oob_row_short_circuits_before_host_matching(self):
+        """An OOB-controller item whose model/name WOULD match a host bay+type must not be compared against the host: it short-circuits to a neutral read-only row (status 'OOB', '-' bay/type, no action flags) before any bay/type/status resolution runs."""
+        view = self._view()
+        # This bay+type would produce a "Serial Mismatch"/"Installed" match for a host row,
+        # so a regression that drops the early return would surface a host status here.
+        bay = self._make_bay(installed_serial="TESTSRL")
+        matched_type = MagicMock()
+        matched_type.model = "XCM-7s-b"
+        matched_type.pk = 5
+        matched_type.get_absolute_url.return_value = "/dcim/module-types/5/"
+
+        oob_item = self._make_item(serial="NS225161205")
+        oob_item["_source"] = "oob"
+
+        with (
+            patch.object(view, "_match_module_bay", return_value=bay) as mock_match_bay,
+            patch("netbox_librenms_plugin.utils.apply_normalization_rules", return_value="XCM-7s-b"),
+            patch("netbox_librenms_plugin.utils.has_nested_name_conflict", return_value=False),
+        ):
+            row = view._build_row(
+                oob_item,
+                {},
+                {"Slot 1": bay},
+                {"XCM-7s-b": matched_type},
+            )
+
+        # Host matching never ran, so the row carries neutral bay/type/status and no actions.
+        mock_match_bay.assert_not_called()
+        assert row["_source"] == "oob"
+        assert row["status"] == "OOB"
+        assert row["module_bay"] == "-"
+        assert row["module_type"] == "-"
+        assert row["module_bay_id"] is None
+        assert row["module_type_id"] is None
+        assert row["can_install"] is False
+        for flag in ("can_replace", "can_update_serial", "can_update_interface_binding"):
+            assert not row.get(flag)
+        for key in ("model_suggestion", "type_suggestion", "module_type_create", "installed_module_id"):
+            assert key not in row
+
+    def test_oob_row_with_integrating_ancestor_still_reports_oob(self):
+        """An OOB item that also looks like an integrated-child duplicate must stay 'OOB', not flip to 'Integrated'."""
+        view = self._view()
+        oob_item = self._make_item(serial="NS225161205")
+        oob_item["_source"] = "oob"
+
+        with (
+            patch.object(
+                view, "_find_integrating_ancestor", return_value={"entPhysicalName": "P", "entPhysicalIndex": 1}
+            ) as mock_anc,
+            patch.object(view, "_match_module_bay", return_value=None) as mock_match_bay,
+        ):
+            row = view._build_row(oob_item, {}, {}, {})
+
+        assert row["status"] == "OOB"
+        assert row["_source"] == "oob"
+        # OOB returns before the integrated-child check even consults the ancestor.
+        mock_anc.assert_not_called()
+        mock_match_bay.assert_not_called()
 
     def _common_patches(self, view, bay, matched_type_name):
         """Return a stack of common patches for _build_row helper calls."""
@@ -3491,6 +3816,22 @@ class TestMatchedInterfaceLinking:
         assert row["matched_interface_source"] == "port_id"
         assert row["matched_interface_confidence"] == "high"
 
+    def test_attach_interface_match_skips_oob_rows(self):
+        """OOB-sourced rows must not name-match the main device's interfaces — only the main device's interfaces are indexed in the context."""
+        from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
+
+        iface = MagicMock()
+        iface.name = "TenGigabitEthernet1/1/1"
+        row = {"_source": "oob", "name": "TenGigabitEthernet1/1/1", "librenms_port_id": None}
+        context = {"interfaces_by_port_id": {}, "interfaces_by_name": {"TenGigabitEthernet1/1/1": iface}}
+
+        BaseModuleTableView._attach_interface_match(row, context)
+
+        # No matched_interface_* key may survive for an OOB row — assert the whole payload
+        # stays empty so a regression leaving matched_interface_url/source/confidence behind
+        # (which would still render the row as matched) is caught.
+        assert not any(key.startswith("matched_interface_") for key in row)
+
     def test_attach_interface_match_falls_back_to_name_lookup(self):
         from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
 
@@ -4528,3 +4869,148 @@ class TestRenderActionsPortIdentityFields:
             html = str(table.render_actions("", record))
 
         assert '<i class="mdi mdi-download"></i> Install' not in html
+
+
+class TestGetContextDataOOBCacheFingerprint:
+    """get_context_data must invalidate cached inventory when the linked OOB controller changes (re-link / unlink), not only when the main id changes."""
+
+    def test_invalidates_when_oob_relinked(self):
+        from unittest.mock import MagicMock, patch
+
+        view = _make_view()
+        obj = MagicMock(pk=1)
+        view._get_sync_device = MagicMock(return_value=obj)
+        view._librenms_api.get_librenms_id = MagicMock(return_value=10)
+        view._build_context = MagicMock()
+        cached = {"inventory": [{"x": 1}], "librenms_id": 10, "oob_librenms_id": 5}
+        with (
+            patch("netbox_librenms_plugin.views.base.modules_view.cache") as mock_cache,
+            patch("netbox_librenms_plugin.views.base.modules_view.get_librenms_oob", return_value={"id": 7}),
+        ):
+            mock_cache.get.return_value = cached
+            # GET={} → no server_key in the query, so rebind_api_for_server reuses the cached
+            # (mocked) _librenms_api instead of building a new client.
+            ctx = view.get_context_data(MagicMock(GET={}), obj)
+
+        mock_cache.delete.assert_called_once_with("test_cache_key")
+        assert ctx["table"] is None
+        view._build_context.assert_not_called()
+
+    def test_invalidates_when_oob_unlinked(self):
+        from unittest.mock import MagicMock, patch
+
+        view = _make_view()
+        obj = MagicMock(pk=1)
+        view._get_sync_device = MagicMock(return_value=obj)
+        view._librenms_api.get_librenms_id = MagicMock(return_value=10)
+        view._build_context = MagicMock()
+        cached = {"inventory": [{"x": 1}], "librenms_id": 10, "oob_librenms_id": 5}
+        with (
+            patch("netbox_librenms_plugin.views.base.modules_view.cache") as mock_cache,
+            patch("netbox_librenms_plugin.views.base.modules_view.get_librenms_oob", return_value=None),
+        ):
+            mock_cache.get.return_value = cached
+            # GET={} → no server_key in the query, so rebind_api_for_server reuses the cached
+            # (mocked) _librenms_api instead of building a new client.
+            ctx = view.get_context_data(MagicMock(GET={}), obj)
+
+        mock_cache.delete.assert_called_once_with("test_cache_key")
+        assert ctx["table"] is None
+
+    def test_keeps_cache_when_oob_unchanged(self):
+        from unittest.mock import MagicMock, patch
+
+        view = _make_view()
+        obj = MagicMock(pk=1)
+        view._get_sync_device = MagicMock(return_value=obj)
+        view._librenms_api.get_librenms_id = MagicMock(return_value=10)
+        view._build_context = MagicMock(return_value={"built": True})
+        cached = {"inventory": [{"x": 1}], "librenms_id": 10, "oob_librenms_id": 5}
+        request = MagicMock(GET={})  # no server_key → rebind reuses the cached (mocked) _librenms_api
+        with (
+            patch("netbox_librenms_plugin.views.base.modules_view.cache") as mock_cache,
+            patch("netbox_librenms_plugin.views.base.modules_view.get_librenms_oob", return_value={"id": 5}),
+        ):
+            mock_cache.get.return_value = cached
+            ctx = view.get_context_data(request, obj)
+
+        # The reuse contract: the unchanged-fingerprint path must rebuild from the cached
+        # inventory snapshot, not some other payload. It also forwards the already-resolved
+        # sync_device AND the resolved server_key (so _build_context keys on the scoped server
+        # explicitly, not the rebind side effect) — matching post()'s call shape.
+        view._build_context.assert_called_once_with(
+            request, obj, cached["inventory"], server_key="test-server", sync_device=obj
+        )
+        assert ctx == {"built": True}
+        # Lock in the "cache preserved when OOB linkage is unchanged" contract: the
+        # unchanged-fingerprint path must rebuild from cache without deleting it.
+        mock_cache.delete.assert_not_called()
+
+    def test_get_context_data_rebinds_to_request_server_key(self):
+        """The GET render must rebind to the active server from the request query so the cache read keys on the same server post() wrote under (else a non-default-server tab cache-misses and the OOB guard no-ops)."""
+        from unittest.mock import MagicMock, patch
+
+        view = _make_view()
+        obj = MagicMock(pk=1)
+        view._get_sync_device = MagicMock(return_value=obj)
+        view.rebind_api_for_server = MagicMock(return_value="prod")
+        request = MagicMock()
+        request.GET = {"server_key": "prod"}
+
+        with patch("netbox_librenms_plugin.views.base.modules_view.cache") as mock_cache:
+            mock_cache.get.return_value = None  # cache miss → early return after the rebind
+            view.get_context_data(request, obj)
+
+        view.rebind_api_for_server.assert_called_once_with("prod")
+
+
+@pytest.mark.django_db
+class TestInterfacePortIdActiveServerScope:
+    """_get_interface_port_id must read the interface's port_id under the ACTIVE server key.
+
+    The module verify path (SingleModuleVerifyView) sets ``_active_server_key`` to the POSTed
+    server but leaves the API bound to the default client. With the multi-server dict CF form an
+    interface stores different port_ids per server, so reading under the default-bound client's
+    key (instead of ``_active_server_key``) returns the wrong server's port_id — and the verify
+    row's interface index then disagrees with the interface match, which uses the active key.
+    """
+
+    def _real_default_api(self):
+        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+
+        # Pass server_key explicitly so construction skips the LibreNMSSettings.objects.first()
+        # selected-server lookup — in the full suite a prior test can leave that mocked, which would
+        # otherwise make LibreNMSAPI() resolve to a MagicMock server and raise KeyError. Pinning to
+        # "default" keeps the fix (read under _active_server_key) and the bug (read under the client
+        # key) resolving to visibly different port_ids.
+        return LibreNMSAPI(server_key="default")
+
+    def test_reads_port_id_under_active_server_not_default_client(self):
+        """With _active_server_key set, the per-server port_id for THAT server is returned."""
+        from netbox_librenms_plugin.tests.conftest import make_device, make_interface
+        from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
+
+        device = make_device("mod-verify-scope")
+        iface = make_interface(device, "Gi0/1")
+        iface.custom_field_data["librenms_id"] = {"default": 111, "server2": 222}
+        iface.save()
+
+        view = object.__new__(BaseModuleTableView)
+        view._librenms_api = self._real_default_api()
+        view._active_server_key = "server2"
+
+        # Must resolve under the active server (222), not the default-bound client (111).
+        assert view._get_interface_port_id(iface) == 222
+
+    def test_get_stored_librenms_id_honors_explicit_server_key(self):
+        """LibreNMSAPI.get_stored_librenms_id(obj, server_key=...) reads that server's dict entry."""
+        from netbox_librenms_plugin.tests.conftest import make_device, make_interface
+
+        device = make_device("mod-verify-scope-api")
+        iface = make_interface(device, "Gi0/2")
+        iface.custom_field_data["librenms_id"] = {"default": 111, "server2": 222}
+        iface.save()
+
+        api = self._real_default_api()
+        assert api.get_stored_librenms_id(iface) == 111  # bound (default) key
+        assert api.get_stored_librenms_id(iface, server_key="server2") == 222  # explicit override

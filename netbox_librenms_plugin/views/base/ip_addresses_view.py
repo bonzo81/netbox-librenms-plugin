@@ -1,5 +1,6 @@
 import json
 import logging
+from urllib.parse import quote_plus
 
 from dcim.models import Device
 from django.contrib import messages
@@ -14,6 +15,7 @@ from virtualization.models import VirtualMachine
 from netbox_librenms_plugin.tables.ipaddresses import IPAddressTable
 from netbox_librenms_plugin.utils import (
     cache_remaining_ttl,
+    coerce_librenms_id,
     get_interface_name_field,
     get_librenms_device_id,
     resolve_set_primary_ip,
@@ -42,21 +44,45 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMix
 
     def get_ip_addresses(self, obj):
         """Fetch IP address data from LibreNMS for the given object."""
-        self.librenms_id = self.librenms_api.get_librenms_id(obj)
+        # Coerce before the HTTP call: a poisoned cached id (e.g. True or a
+        # non-numeric string) must fail closed here rather than reach the
+        # LibreNMS device-ip endpoint, where it would build a malformed URL.
+        self.librenms_id = coerce_librenms_id(self.librenms_api.get_librenms_id(obj))
+        if self.librenms_id is None:
+            return False, "Device not found in LibreNMS"
         return self.librenms_api.get_device_ips(self.librenms_id)
 
-    def enrich_ip_data(self, ip_data, obj, interface_name_field):
+    def enrich_ip_data(self, ip_data, obj, interface_name_field, mgmt_ip="", server_key=None, port_data_cache=None):
         """
         Enrich IP data with NetBox information in a more efficient manner.
 
-        This optimized implementation:
-        1. Caches port data to reduce API calls
-        2. Pre-loads all relevant device data
-        3. Uses dictionary lookups instead of repeated iterations
+        This optimized implementation caches port data to reduce API calls,
+        pre-loads all relevant device data, and uses dictionary lookups instead of
+        repeated iterations.
+
+        Args:
+            ip_data: The LibreNMS IP rows to enrich.
+            obj: The NetBox device the IPs belong to.
+            interface_name_field: The interface name field preference used for port
+                lookups.
+            mgmt_ip (str): The device's LibreNMS management IP, resolved once on the
+                fresh-fetch path and passed back in on cached renders so this method
+                never makes a live LibreNMS API call.
+            server_key: The LibreNMS server key scoping per-server interface matching.
+            port_data_cache: Optional pre-populated port map (keyed by port_id) so
+                cached renders avoid live ``get_port_by_id()`` calls.
+
+        Returns:
+            list: The enriched IP entries.
         """
-        # Prefetch all necessary data
-        prefetched_data = self._prefetch_netbox_data(obj)
-        port_data_cache = {}  # Cache for LibreNMS port data to minimize API calls
+        # Prefetch all necessary data (scoped to the POST-resolved server when provided
+        # so interface librenms_id matching uses the right per-server mapping).
+        prefetched_data = self._prefetch_netbox_data(obj, server_key=server_key)
+        # LibreNMS port data, keyed by port_id. Callers pass a map pre-populated from the
+        # cache on warm-cache renders so _get_port_info() reads it instead of making N
+        # live get_port_by_id() calls (the cached pipeline must read cache + NetBox only).
+        if port_data_cache is None:
+            port_data_cache = {}
 
         enriched_data = []
 
@@ -110,26 +136,50 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMix
 
             enriched_data.append(enriched_ip)
 
-        self._flag_management_ip(enriched_data)
+        self._flag_management_ip(enriched_data, mgmt_ip)
         return enriched_data
 
-    def _flag_management_ip(self, enriched_data):
-        """Mark the entry whose IP equals the device's LibreNMS management IP.
+    def _resolve_management_ip(self):
+        """
+        Fetch the LibreNMS management/polling IP for ``self.librenms_id``.
 
-        Used by the "Set Primary IP" toggle on the IP-sync tab to auto-select
-        the right row. Best-effort: a lookup failure simply leaves nothing
-        flagged so the sync table still renders.
+        Called only on the fresh-fetch path; the result is cached alongside the IP
+        rows so cached renders don't re-hit the LibreNMS API.
+
+        Returns:
+            str: The management IP, or an empty string on any failure (best-effort,
+                so the sync table still renders).
         """
         librenms_id = getattr(self, "librenms_id", None)
         if not librenms_id:
-            return
+            return ""
         try:
             success, info = self.librenms_api.get_device_info(librenms_id)
         except Exception:  # pragma: no cover - defensive
-            return
+            return ""
         if not success or not isinstance(info, dict):
-            return
-        mgmt_ip = (info.get("ip") or "").strip()
+            return ""
+        # Best-effort contract: a malformed-but-dict-shaped payload (e.g. {"ip": 123})
+        # must not raise on .strip(); only strip a genuine string, else fall back to "".
+        ip_value = info.get("ip")
+        return ip_value.strip() if isinstance(ip_value, str) else ""
+
+    def _flag_management_ip(self, enriched_data, mgmt_ip):
+        """
+        Mark the entry whose IP equals the device's LibreNMS management IP.
+
+        Used by the "Set Primary IP" toggle on the IP-sync tab to auto-select the
+        right row. *mgmt_ip* is resolved once on fetch and cached, so this makes no
+        API call; an empty *mgmt_ip* simply flags nothing.
+
+        Args:
+            enriched_data: The enriched IP entries to scan; the matching entry is
+                mutated in place (``is_mgmt_ip = True``).
+            mgmt_ip (str): The device's LibreNMS management IP.
+
+        Returns:
+            None
+        """
         if not mgmt_ip:
             return
         for entry in enriched_data:
@@ -137,18 +187,31 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMix
                 entry["is_mgmt_ip"] = True
                 break
 
-    def _prefetch_netbox_data(self, obj):
+    def _prefetch_netbox_data(self, obj, server_key=None):
         """Prefetch all necessary NetBox data to minimize database queries"""
         # Get all interfaces for the device
         all_interfaces = list(obj.interfaces.all())
 
-        # Create maps for efficient lookups
-        server_key = self._render_server_key()
+        # Create maps for efficient lookups (POST-resolved server when provided; else the
+        # shared degrading resolver so a missing/misconfigured default can't 500 the GET render).
+        server_key = server_key or self._render_server_key()
+        # Fail closed on duplicate server-scoped LibreNMS IDs: if two NetBox interfaces share one,
+        # keeping either would bind an IP to whichever was iterated last. Drop the ambiguous id so
+        # _add_interface_info_to_ip() falls back to the (unambiguous) name match instead.
         interfaces_by_librenms_id = {}
+        ambiguous_librenms_ids = set()
         for interface in all_interfaces:
             lib_id = get_librenms_device_id(interface, server_key, auto_save=False)
-            if lib_id is not None:
-                interfaces_by_librenms_id[str(lib_id)] = interface
+            if lib_id is None:
+                continue
+            lib_id_key = str(lib_id)
+            if lib_id_key in ambiguous_librenms_ids:
+                continue
+            if lib_id_key in interfaces_by_librenms_id:
+                ambiguous_librenms_ids.add(lib_id_key)
+                interfaces_by_librenms_id.pop(lib_id_key, None)
+                continue
+            interfaces_by_librenms_id[lib_id_key] = interface
 
         interfaces_by_name = {interface.name: interface for interface in all_interfaces}
 
@@ -262,44 +325,142 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMix
             # Don't overwrite the interface name from LibreNMS but do add the URL
             enriched_ip["interface_url"] = interface.get_absolute_url()
 
-    def get_table(self, data, obj, request):
+    def get_table(self, data, obj, request, server_key=None):
         """Get the table instance for the view."""
         table = IPAddressTable(data)
-        server_key = self._render_server_key()
-        table.htmx_url = f"{request.path}?tab=ipaddresses" + (f"&server_key={server_key}" if server_key else "")
+        server_key = server_key or self._render_server_key()
+        # server_key is config data, not a guaranteed slug — URL-encode it so a key with
+        # &/=/space doesn't build a broken query string and silently change server scope.
+        table.htmx_url = f"{request.path}?tab=ipaddresses" + (
+            f"&server_key={quote_plus(server_key)}" if server_key else ""
+        )
         return table
 
-    def _prepare_context(self, request, obj, interface_name_field, fetch_fresh=False):
+    def _prepare_context(self, request, obj, interface_name_field, fetch_fresh=False, server_key=None):
         """Helper method to prepare the context data for IP address sync views."""
         table = None
         cache_expiry = None
-        server_key = self._render_server_key()
+        # Scoped to the POST-resolved server when provided; else the degrading resolver.
+        server_key = server_key or self._render_server_key()
 
         if interface_name_field is None:
             interface_name_field = get_interface_name_field(request)
 
+        # Validate the per-row schema, not just the container shape: a dict row missing
+        # port_id or any supported address/prefix pair would KeyError inside
+        # _create_base_ip_entry() mid-enrichment and 500 the render. Shared by the
+        # fresh-fetch and the cached-snapshot fail-closed paths so a malformed LibreNMS
+        # payload or a corrupt cache entry both fail closed identically.
+        def _valid_ip_row(item):
+            if not isinstance(item, dict) or "port_id" not in item:
+                return False
+            # port_id is used as a cache-dict key in _get_port_info(); an unhashable
+            # (e.g. {}/[]) or bool value would raise inside `port_id not in port_data_cache`
+            # and 500 the render. Reject anything that is not a plain int/str.
+            port_id = item.get("port_id")
+            if isinstance(port_id, bool) or not isinstance(port_id, (int, str)):
+                return False
+            return (
+                {"ip_address", "prefix_length"} <= item.keys()
+                or {"ipv6_compressed", "ipv6_prefixlen"} <= item.keys()
+                or {"ipv4_address", "ipv4_prefixlen"} <= item.keys()
+            )
+
         if fetch_fresh:
             success, ip_data = self.get_ip_addresses(obj)
-        else:
-            cached_ip_data = cache.get(self.get_cache_key(obj, "ip_addresses", server_key))
-            if isinstance(cached_ip_data, dict):
-                ip_data = cached_ip_data.get("ip_addresses", [])
-            else:
-                # Missing, or a stale/corrupt non-dict entry (legacy snapshot shape): drop it and
-                # render empty rather than 500 on a .get() against a list/str. Mirrors the
-                # isinstance fail-closed guard the interfaces/modules cached paths use.
+
+            # Bail out on a failed *or malformed* fetch instead of enriching an error payload
+            # and rendering an empty table under a success banner. A success flag with a
+            # non-list payload (dict/string) or a list with non-dict entries makes
+            # enrich_ip_data() silently drop every row and caches that empty snapshot as
+            # complete, so treat it as a fetch failure.
+            if not success or not isinstance(ip_data, list) or any(not _valid_ip_row(item) for item in ip_data):
+                # Purge any prior valid snapshot so this fail-closed actually takes effect: without
+                # it, a bad-but-successful refresh leaves the previous rows in cache and the next GET
+                # serves them as stale until the TTL expires.
+                cache.delete(self.get_cache_key(obj, "ip_addresses", server_key))
                 return None
+            # Resolve the management IP once here (live LibreNMS call) and cache it
+            # below so cached renders don't re-hit the API.
+            mgmt_ip = self._resolve_management_ip()
+            # Fresh fetch may call get_port_by_id() per port; collect those into this
+            # map and cache it so warm-cache renders enrich without any live calls.
+            port_data_cache = {}
+        else:
+            cache_key = self.get_cache_key(obj, "ip_addresses", server_key)
+            cached_ip_data = cache.get(cache_key)
+            if cached_ip_data is None:
+                return None
+            # Fail closed on a malformed/corrupt cache entry: a truthy non-dict (list/str), or a
+            # dict whose "ip_addresses" isn't a list, would crash the cached-render derefs below
+            # (cached_ip_data["mgmt_ip"], .get("ports_by_id")). Treat it as a cache miss — purge
+            # it and bail — mirroring the fresh path's fail-closed validation above.
+            if not isinstance(cached_ip_data, dict) or not isinstance(cached_ip_data.get("ip_addresses"), list):
+                cache.delete(cache_key)
+                return None
+            # Container shape is valid, but the nested fields still need the same fail-closed
+            # checks as the fresh path: a stale row missing port_id (or with a bool/unhashable
+            # one) would KeyError in _create_base_ip_entry(); a truthy non-mapping ports_by_id
+            # (e.g. a list) would raise in dict(...) below; a non-str mgmt_ip would break the
+            # cached["mgmt_ip"] deref. Purge and treat as a miss instead of 500-ing the tab.
+            cached_ports_by_id = cached_ip_data.get("ports_by_id")
+            if (
+                any(not _valid_ip_row(item) for item in cached_ip_data["ip_addresses"])
+                or ("mgmt_ip" in cached_ip_data and not isinstance(cached_ip_data["mgmt_ip"], str))
+                or (cached_ports_by_id is not None and not isinstance(cached_ports_by_id, dict))
+            ):
+                cache.delete(cache_key)
+                return None
+            ip_data = cached_ip_data.get("ip_addresses", [])
+            # Pre-upgrade entries cached before mgmt_ip was stored lack the key entirely
+            # (distinct from a present-but-empty "" meaning "no mgmt IP"). Resolve it now —
+            # a one-time live call, mirroring the ports_by_id backfill below — so the
+            # "Set Primary IP" auto-select works without forcing a manual refresh first.
+            cached_mgmt_ip_missing = "mgmt_ip" not in cached_ip_data
+            if cached_mgmt_ip_missing:
+                # coerce_librenms_id fails closed on a poisoned cached value (bool/zero/garbage):
+                # get_stored_librenms_id reads the device-id cache verbatim, so a stray True would
+                # otherwise int() to 1 in _resolve_management_ip and fetch a stranger's mgmt IP.
+                self.librenms_id = coerce_librenms_id(self.librenms_api.get_stored_librenms_id(obj))
+                mgmt_ip = self._resolve_management_ip()
+            else:
+                mgmt_ip = cached_ip_data["mgmt_ip"]
+            # Pre-populate the port map from cache so the cached render reads only
+            # cache + NetBox and never re-hits LibreNMS (resilient when it's down).
+            port_data_cache = dict(cached_ip_data.get("ports_by_id") or {})
+            # Pre-upgrade entries lack ports_by_id; remember so we can backfill below.
+            cached_had_ports_by_id = bool(cached_ip_data.get("ports_by_id"))
+
+        cache_key = self.get_cache_key(obj, "ip_addresses", server_key)
 
         # Enrich data in both cases to ensure current NetBox state
-        ip_data = self.enrich_ip_data(ip_data, obj, interface_name_field)
+        ip_data = self.enrich_ip_data(
+            ip_data, obj, interface_name_field, mgmt_ip, server_key=server_key, port_data_cache=port_data_cache
+        )
 
         if fetch_fresh:
-            # Cache the fresh data after enrichment
+            # Cache the fresh data after enrichment, including the port map gathered
+            # during enrichment so cached renders don't re-fetch ports.
             cache.set(
-                self.get_cache_key(obj, "ip_addresses", server_key),
-                {"ip_addresses": ip_data},
+                cache_key,
+                {"ip_addresses": ip_data, "mgmt_ip": mgmt_ip, "ports_by_id": port_data_cache},
                 timeout=self.librenms_api.cache_timeout,
             )
+        elif (not cached_had_ports_by_id and port_data_cache) or cached_mgmt_ip_missing:
+            # Backfill: a pre-upgrade cache entry had no ports_by_id and/or no mgmt_ip, so they
+            # were rebuilt above via live calls. Persist them under the
+            # *remaining* TTL (don't extend the entry's lifetime) so subsequent cached
+            # renders stop re-hitting LibreNMS until the entry would have expired anyway.
+            # cache.ttl() isn't part of Django's core cache API (only django-redis-style backends
+            # expose it). Guard it like base/modules_view does so a non-Redis backend degrades to
+            # "no backfill" rather than raising AttributeError while rendering.
+            remaining_ttl = cache_remaining_ttl(cache, cache_key)
+            if remaining_ttl and remaining_ttl > 0:
+                cache.set(
+                    cache_key,
+                    {"ip_addresses": ip_data, "mgmt_ip": mgmt_ip, "ports_by_id": port_data_cache},
+                    timeout=remaining_ttl,
+                )
 
         # Calculate cache expiry
         cache_ttl = cache_remaining_ttl(cache, self.get_cache_key(obj, "ip_addresses", server_key))
@@ -307,7 +468,7 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMix
             cache_expiry = timezone.now() + timezone.timedelta(seconds=cache_ttl)
 
         # Generate the table
-        table = self.get_table(ip_data, obj, request)
+        table = self.get_table(ip_data, obj, request, server_key=server_key)
 
         table.configure(request)
 
@@ -323,20 +484,48 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMix
     def get_context_data(self, request, obj):
         """Get the context data for the IP address sync view."""
         interface_name_field = get_interface_name_field(request)
-        context = self._prepare_context(request, obj, interface_name_field, fetch_fresh=False)
+        # GET render: scope the cache read to ?server_key (mirrors the interfaces/cables/VLAN/
+        # module tabs) so a non-default-server tab reads that server's IP cache, not the
+        # default's — without this the IP tab renders empty after a successful refresh on a
+        # non-default server. An unresolved non-blank key scopes to that key (cache miss →
+        # empty) rather than falling back to the default server's cached IPs.
+        scoped, unresolved = self.resolve_get_render_server_key(request)
+        if unresolved:
+            # ?server_key named a server that no longer resolves (deleted/misconfigured). Its IP
+            # snapshot may still be cached, but the failed rebind left self.librenms_api bound to the
+            # DEFAULT server; render an empty table scoped to the requested key rather than that
+            # stale server's cached IPs (mirrors modules_view.get_context_data's unresolved guard).
+            return {"table": None, "object": obj, "cache_expiry": None, "server_key": scoped}
+        context = self._prepare_context(request, obj, interface_name_field, fetch_fresh=False, server_key=scoped)
         if context is None:
             # No data found; return context with empty table
-            context = {"table": None, "object": obj, "cache_expiry": None, "server_key": self._render_server_key()}
+            context = {"table": None, "object": obj, "cache_expiry": None, "server_key": scoped}
         return context
 
     def post(self, request, pk):
         """Handle POST request for IP address sync view."""
         obj = self.get_object(pk)
         interface_name_field = get_interface_name_field(request)
-        context = self._prepare_context(request, obj, interface_name_field, fetch_fresh=True)
+        # Rebind the API to the POSTed server so the live IP/management-IP fetches hit the
+        # same LibreNMS instance the cached rows are namespaced under (multi-server tabs).
+        posted_server_key = request.POST.get("server_key")
+        server_key = self.rebind_api_for_server(posted_server_key)
+        if server_key is None:
+            messages.error(request, "Selected LibreNMS server is no longer configured.")
+            return render(
+                request,
+                self.partial_template_name,
+                {
+                    "ip_sync": {"object": obj, "table": None, "cache_expiry": None, "server_key": None},
+                },
+            )
+        context = self._prepare_context(request, obj, interface_name_field, fetch_fresh=True, server_key=server_key)
 
         if context is None:
-            messages.error(request, "No IP addresses found in LibreNMS")
+            # _prepare_context(fetch_fresh=True) only returns None when the live
+            # LibreNMS fetch failed (a genuine empty result yields a context with an
+            # empty table). Report the failure rather than a misleading "no data".
+            messages.error(request, "Failed to fetch IP addresses from LibreNMS; see server logs for details.")
             return render(
                 request,
                 self.partial_template_name,
@@ -345,8 +534,8 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMix
                         "object": obj,
                         "table": None,
                         "cache_expiry": None,
-                        "server_key": self._render_server_key(),
-                    }
+                        "server_key": server_key,
+                    },
                 },
             )
 
@@ -541,17 +730,6 @@ class SingleIPAddressVerifyView(NetBoxObjectPermissionMixin, LibreNMSPermissionM
 
             ip_address = data.get("ip_address")
             vrf_id = data.get("vrf_id")
-            # Coerce/validate vrf_id before it reaches IPAddress.objects.filter(vrf__id=…) in
-            # _find_existing_ip: a non-numeric (or bool) JSON value would raise ValueError there and the
-            # broad handler below would mask it as an opaque 500. Fail closed with a 400 instead. None
-            # (no VRF) is legitimate and passes through unchanged.
-            if isinstance(vrf_id, bool):
-                return JsonResponse({"status": "error", "message": "Invalid VRF ID"}, status=400)
-            if vrf_id is not None:
-                try:
-                    vrf_id = int(vrf_id)
-                except (TypeError, ValueError):
-                    return JsonResponse({"status": "error", "message": "Invalid VRF ID"}, status=400)
             # Validate the requested server key before using it as a cache namespace: an
             # unconfigured/forged key would otherwise let a caller probe arbitrary server-key cache
             # namespaces via get_cache_key(). Mirror the sync/cable membership check; anything
@@ -566,8 +744,36 @@ class SingleIPAddressVerifyView(NetBoxObjectPermissionMixin, LibreNMSPermissionM
             if not ip_address:
                 return JsonResponse({"status": "error", "message": "No IP address provided"}, status=400)
 
+            # Reject JSON booleans explicitly before the falsy check: bool is an int
+            # subclass, so True/False would otherwise pass int() and validate as IDs 1/0,
+            # and object_id=False would be misreported as "No object ID provided".
+            if isinstance(object_id, bool):
+                return JsonResponse({"status": "error", "message": "Invalid object ID"}, status=400)
+            # Reject JSON floats too: int(1.9) silently truncates to 1, so a fractional id
+            # would coerce to a different object instead of returning a clean 400.
+            if isinstance(object_id, float):
+                return JsonResponse({"status": "error", "message": "Invalid object ID"}, status=400)
+
             if not object_id:
                 return JsonResponse({"status": "error", "message": "No object ID provided"}, status=400)
+
+            # Validate the client-supplied numeric IDs up front so a bad value returns a
+            # clean 400 instead of raising deep in the ORM and being caught as a generic 500.
+            try:
+                object_id = int(object_id)
+            except (TypeError, ValueError):
+                return JsonResponse({"status": "error", "message": "Invalid object ID"}, status=400)
+            if vrf_id in (None, ""):
+                vrf_id = None
+            elif isinstance(vrf_id, bool):
+                return JsonResponse({"status": "error", "message": "Invalid VRF ID"}, status=400)
+            elif isinstance(vrf_id, float):
+                return JsonResponse({"status": "error", "message": "Invalid VRF ID"}, status=400)
+            else:
+                try:
+                    vrf_id = int(vrf_id)
+                except (TypeError, ValueError):
+                    return JsonResponse({"status": "error", "message": "Invalid VRF ID"}, status=400)
 
             # Get the object (Device or VirtualMachine)
             try:

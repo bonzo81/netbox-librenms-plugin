@@ -18,10 +18,47 @@ DEVICE_INFO_CACHE_TIMEOUT = 60
 logger = logging.getLogger(__name__)
 
 
+def build_librenms_api(server_key):
+    """
+    Build a :class:`LibreNMSAPI` for a server key, tolerating bad keys.
+
+    ``LibreNMSAPI(server_key=...)`` raises ``KeyError`` for an unknown non-default
+    key and ``ValueError`` when the URL/token is missing. Views take ``server_key``
+    from request POST, where a stale page or tampered request can carry a key that
+    no longer exists — returning ``None`` lets the caller surface a user-facing
+    error instead of an unhandled 500.
+
+    Args:
+        server_key (str): The configured LibreNMS server key to build a client for.
+
+    Returns:
+        LibreNMSAPI | None: A client for *server_key*, or None when the key is
+            unknown or the server is misconfigured.
+    """
+    try:
+        return LibreNMSAPI(server_key=server_key)
+    except (KeyError, ValueError):
+        return None
+
+
 class LibreNMSAPI:
     """
     Client to interact with the LibreNMS API and retrieve interface data for devices.
     """
+
+    @staticmethod
+    def _is_usable_server_config(config):
+        """
+        Return True only for a server mapping that ``__init__`` can bind.
+
+        A server entry is usable only when it is a dict carrying a non-empty
+        ``librenms_url`` and ``api_token`` — the same fields ``__init__`` requires
+        before it will build a client. Sharing this predicate keeps the server
+        picker (``get_available_servers``) and the auto-default fallback from
+        offering, or silently selecting, a partially configured entry that would
+        immediately raise ``ValueError``.
+        """
+        return isinstance(config, dict) and bool(config.get("librenms_url")) and bool(config.get("api_token"))
 
     def __init__(self, server_key=None):
         """
@@ -75,18 +112,16 @@ class LibreNMSAPI:
                 raise KeyError(
                     f"Server '{server_key}' not found in LibreNMS plugin configuration. Available servers: {available}"
                 )
-            # Pick the first *usable* mapping — a dict that actually carries a url + token. A
-            # non-dict or incomplete entry would otherwise be selected and then raise at the config
-            # read below, masking a perfectly usable later server (e.g. {"bad": {}, "prod": {...}}).
-            # If none are usable, fail with a clear error (issue #110).
+            # Skip partially configured entries so the auto-default doesn't land on a server
+            # missing its url/token (which __init__ would reject below) while a later entry is
+            # fully usable.
             first_key = next(
-                (
-                    key
-                    for key, config in servers_config.items()
-                    if isinstance(config, dict) and config.get("librenms_url") and config.get("api_token")
-                ),
+                (k for k, cfg in servers_config.items() if self._is_usable_server_config(cfg)),
                 None,
             )
+            # #110: a non-empty servers_config with no usable entry must surface a clear error
+            # rather than silently falling through to a (possibly stale) legacy single-server
+            # config. build_librenms_api() converts this ValueError into a clean None.
             if first_key is None:
                 raise ValueError("No valid LibreNMS server configuration entries found.")
             logger.info(
@@ -105,7 +140,10 @@ class LibreNMSAPI:
             # entry (e.g. {"default": "not-a-dict"}) would otherwise raise an opaque TypeError
             # at the key reads below. Fail with a clear configuration error instead (issue #110).
             if not isinstance(config, dict):
-                raise ValueError(f"Invalid LibreNMS server configuration for '{server_key}': expected a mapping.")
+                raise ValueError(
+                    f"LibreNMS server '{server_key}' is misconfigured "
+                    f"(expected a mapping, got {type(config).__name__})."
+                )
             # Read with .get() rather than direct indexing: a dict-shaped but incomplete entry
             # (e.g. {"default": {}}) passes the isinstance check, so config["librenms_url"] would
             # raise an opaque KeyError instead of the ValueError contract callers rely on. The
@@ -209,12 +247,17 @@ class LibreNMSAPI:
             # Multi-server configuration
             result = {}
             for key, config in servers_config.items():
-                # Skip non-usable entries: a non-dict raises on config.get(...) below, and a
-                # dict-shaped but incomplete entry (no librenms_url/api_token, e.g. {"bad": {}})
-                # would pass the redirect/rebind membership check that keys off this map and then
-                # blow up LibreNMSAPI(server_key="bad"). A server that can't be constructed must not
-                # be selectable — exposing it 500s a sync POST instead of degrading to the active one.
-                if not isinstance(config, dict) or not config.get("librenms_url") or not config.get("api_token"):
+                # Only offer servers that __init__ can actually bind: a dict with a non-empty
+                # librenms_url and api_token. Mirroring the constructor's validation keeps a
+                # malformed (non-mapping) or partially configured entry from appearing selectable
+                # and then failing the moment it is chosen.
+                if not cls._is_usable_server_config(config):
+                    logger.warning(
+                        "Skipping unusable LibreNMS server config %r (needs a librenms_url and api_token).",
+                        key,
+                    )
+                    continue
+                if not config.get("librenms_url") or not config.get("api_token"):
                     continue
                 result[key] = config.get("display_name", key)
             return result
@@ -225,7 +268,7 @@ class LibreNMSAPI:
                 return {"default": f"Default Server ({legacy_url})"}
             return {"default": "Default Server"}
 
-    def get_stored_librenms_id(self, obj):
+    def get_stored_librenms_id(self, obj, server_key=None):
         """
         Return the stored or cached LibreNMS ID for an object without discovery.
 
@@ -234,18 +277,25 @@ class LibreNMSAPI:
 
         Args:
             obj: NetBox object with a librenms_id custom field or cache identity
+            server_key: LibreNMS server key to read the per-server id under; defaults
+                to this client's bound ``server_key``. A caller scoped to a specific
+                server (e.g. the module verify path, which sets ``_active_server_key``
+                but leaves the API bound to the default client) must pass its key so
+                the multi-server dict CF is read under the right server rather than the
+                client's default.
 
         Returns:
             int: LibreNMS ID if found in the custom field or cache, None otherwise
         """
         from netbox_librenms_plugin.utils import get_librenms_device_id
 
-        librenms_id = get_librenms_device_id(obj, self.server_key, auto_save=False)
+        resolved_key = server_key or self.server_key
+        librenms_id = get_librenms_device_id(obj, resolved_key, auto_save=False)
         if librenms_id is not None:
             return librenms_id
 
-        # Check cache
-        cache_key = self._get_cache_key(obj)
+        # Check cache (scoped to the same server the CF was read under)
+        cache_key = self._get_cache_key(obj, server_key=resolved_key)
         librenms_id = cache.get(cache_key)
         if librenms_id is not None:
             return librenms_id
@@ -281,7 +331,7 @@ class LibreNMSAPI:
         primary_ip_address = getattr(primary_ip, "address", None)
         ip_address = getattr(primary_ip_address, "ip", None) if primary_ip else None
         dns_name = getattr(primary_ip, "dns_name", None) if primary_ip else None
-        hostname = getattr(obj, "name", None) or None
+        hostname = getattr(obj, "name", None)
 
         # Try IP address
         if ip_address:
@@ -308,31 +358,38 @@ class LibreNMSAPI:
 
     @staticmethod
     def _normalize_librenms_id(value):
-        """Coerce a raw LibreNMS ID value to int or None.
-
-        Booleans are rejected because bool is a subclass of int in Python,
-        so int(True) silently becomes 1 — a valid-looking device ID.
         """
-        if value is None or isinstance(value, bool):
-            return None
-        try:
-            return int(value)
-        except (ValueError, TypeError):
-            return None
+        Coerce a raw LibreNMS ID value to int or None.
 
-    def _get_cache_key(self, obj):
+        Thin wrapper around :func:`netbox_librenms_plugin.utils.coerce_librenms_id`
+        kept for back-compat with internal callers in this module.
+
+        Args:
+            value: The raw LibreNMS id value (int, digit string, or other).
+
+        Returns:
+            int | None: The coerced id, or None if it can't be coerced.
+        """
+        from netbox_librenms_plugin.utils import coerce_librenms_id
+
+        return coerce_librenms_id(value)
+
+    def _get_cache_key(self, obj, server_key=None):
         """
         Generate a unique cache key for an object.
 
         Args:
             obj: NetBox device or VM object
+            server_key: LibreNMS server key to scope the key to; defaults to this
+                client's bound ``server_key``. Pass an explicit key when reading on
+                behalf of a different (scoped) server than the client is bound to.
 
         Returns:
             str: Cache key
         """
         object_type = obj._meta.model_name
-        server_key = getattr(self, "server_key", "default")
-        return f"librenms_device_id_{object_type}_{obj.pk}_{server_key}"
+        resolved_key = server_key if server_key is not None else getattr(self, "server_key", "default")
+        return f"librenms_device_id_{object_type}_{obj.pk}_{resolved_key}"
 
     def _store_librenms_id(self, obj, librenms_id):
         """

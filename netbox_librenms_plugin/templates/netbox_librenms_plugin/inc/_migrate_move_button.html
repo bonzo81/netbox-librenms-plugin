@@ -1,0 +1,34 @@
+{% comment %}
+Shared "Move to winner" button cell for the device-merge migration tables (interface + IP).
+
+The ``{% url ... as %}`` form does NOT raise NoReverseMatch: the move-to-winner routes are
+registered by the device-merge feature further up the stack, so on branches without them
+``move_url`` is '' and the live button degrades to read-only instead of 500ing the whole tab.
+
+Params (passed via {% include ... with %}):
+  move_url_name  - the move-to-winner URL name (string)
+  obj_id         - pk of the row object
+  obj_label      - display value for the confirm text (interface.name / ip.address)
+  entity_word    - "interface" or "IP" (drives confirm/title wording)
+  winner         - the migrated_to_winner device
+  server_key     - resolved server_key for the hx-vals scope (may be empty)
+  obj_interface_name - (IP only) the interface the IP is assigned to, for the title detail
+``has_write_permission`` and ``csrf_token`` come from the parent context.
+{% endcomment %}
+{% url move_url_name pk=obj_id as move_url %}
+{% if has_write_permission and winner and move_url %}
+<button type="button"
+    class="btn btn-sm btn-outline-warning"
+    hx-post="{{ move_url }}"
+    hx-headers='{"X-CSRFToken": "{{ csrf_token }}"}'
+    {% if server_key %}hx-vals='{"server_key": "{{ server_key|escapejs }}"}'{% endif %}
+    hx-swap="none"
+    hx-confirm="Move {{ entity_word }} '{{ obj_label }}' to {{ winner.name }}?"
+    {% if entity_word == "IP" %}title="Reassign this IP to {{ winner.name }}'s '{{ obj_interface_name }}' interface"{% else %}title="Reassign this interface (and its cables/IPs/MACs) to {{ winner.name }}"{% endif %}>
+    <i class="mdi mdi-transfer-right"></i> Move
+</button>
+{% elif winner %}
+<span class="text-muted small">read-only</span>
+{% else %}
+<span class="text-muted small">winner missing</span>
+{% endif %}

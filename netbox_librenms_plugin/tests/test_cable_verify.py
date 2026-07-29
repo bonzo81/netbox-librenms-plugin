@@ -78,6 +78,16 @@ def _post_with_links(view, request, device, links):
     return json.loads(response.content)
 
 
+@pytest.fixture(autouse=True)
+def _clear_cache_around_each_test():
+    """Clear the real cache before and after each test so cache.set() link/port payloads (keyed by device PK, NOT rolled back with the test DB) can't feed a reused PK stale data."""
+    from django.core.cache import cache
+
+    cache.clear()
+    yield
+    cache.clear()
+
+
 @pytest.mark.django_db
 class TestStaleFieldStripping:
     """Cached derived fields (URLs/ids from a previous enrichment) must be recomputed from live state."""
@@ -380,3 +390,256 @@ class TestSingleCableVerifyMisconfiguredDefault:
 
         assert response.status_code == 200
         assert json.loads(response.content)["status"] == "success"
+
+
+def _make_view(server_key="default"):
+    """Create a SingleCableVerifyView instance without database access."""
+    from netbox_librenms_plugin.views.base.cables_view import SingleCableVerifyView
+
+    view = object.__new__(SingleCableVerifyView)
+    view._librenms_api = MagicMock()
+    view._librenms_api.server_key = server_key
+    view.request = MagicMock()
+    return view
+
+
+def _make_request(body_dict):
+    """Create a mock POST request with JSON body."""
+    request = MagicMock()
+    request.method = "POST"
+    request.body = json.dumps(body_dict).encode()
+    request.META = {"HTTP_X_REQUESTED_WITH": "XMLHttpRequest"}
+    return request
+
+
+@pytest.mark.django_db
+class TestVerifyDualNameFallback:
+    """Issue #88 (verify parity): SingleCableVerifyView.post must resolve a row whose NetBox interface is named from the LibreNMS field the user is NOT currently displaying — using the same dual-name (local_port / local_port_alt) fallback as enrich_local_port."""
+
+    def test_verify_resolves_interface_by_alternate_name(self):
+        from django.core.cache import cache
+
+        from dcim.models import Interface
+        from netbox_librenms_plugin.tests.conftest import make_device
+
+        device = make_device("verify-sw")
+        # The NetBox interface is named from the ALTERNATE LibreNMS field (e.g. ifDescr),
+        # which differs from the displayed local_port (ifName).
+        iface = Interface.objects.create(device=device, name="GigabitEthernet0/1", type="1000base-t")
+
+        view = _make_view()
+        # Seed the links cache exactly as the GET path would. local_port_id (555) matches no
+        # interface librenms_id, so resolution must fall back to the name — and only the
+        # alternate name matches.
+        link = {
+            "local_port": "Gi0/1",  # displayed name — does NOT match iface.name
+            "local_port_alt": "GigabitEthernet0/1",  # alternate field — matches iface.name
+            "local_port_id": 555,
+            "remote_device": "",
+            "remote_port": "",
+            "remote_port_id": None,
+            "remote_device_id": None,
+        }
+        cache.set(view.get_cache_key(device, "links", "default"), {"links": [link]}, 300)
+
+        request = _make_request({"device_id": device.pk, "local_port_id": 555, "server_key": "default"})
+        response = view.post(request)
+        payload = json.loads(response.content)
+
+        # Resolved via the alternate name → local_port rendered as a link to the interface.
+        local_port_html = payload["formatted_row"]["local_port"]
+        assert f"/interfaces/{iface.pk}/" in local_port_html
+
+    def test_verify_unresolved_none_local_port_does_not_render_literal_none(self):
+        """A row whose local_port is None and resolves to no interface must render "" (or a badge), not the literal "None"."""
+        from django.core.cache import cache
+
+        from netbox_librenms_plugin.tests.conftest import make_device
+
+        device = make_device("verify-none-sw")
+        view = _make_view()
+        # OOB row whose local interface name couldn't be resolved: local_port is None while
+        # local_port_id is set (matches no NetBox interface → falls to the unmatched branch).
+        link = {
+            "local_port": None,
+            "local_port_alt": None,
+            "local_port_id": 7777,
+            "remote_device": "",
+            "remote_port": "",
+            "remote_port_id": None,
+            "remote_device_id": None,
+            "_source": "oob",
+        }
+        cache.set(view.get_cache_key(device, "links", "default"), {"links": [link]}, 300)
+
+        request = _make_request({"device_id": device.pk, "local_port_id": 7777, "server_key": "default"})
+        response = view.post(request)
+        payload = json.loads(response.content)
+
+        # render_local_port in the table was fixed to normalize None→""; the verify path must match.
+        assert payload["formatted_row"]["local_port"] != "None"
+        assert "None" not in payload["formatted_row"]["local_port"]
+
+
+@pytest.mark.django_db
+class TestRemoteDeviceResolutionExcludesOOB:
+    """A cable's remote device_id is the remote device's OWN LibreNMS identity, so resolving it must not also match a different device that merely references that id as its OOB controller — that over-match raises MultipleObjectsReturned and blocks the (valid) resolution."""
+
+    def test_remote_device_id_does_not_match_an_oob_controller_reference(self):
+        from netbox_librenms_plugin.tests.conftest import make_device
+        from netbox_librenms_plugin.views.base.cables_view import BaseCableTableView
+
+        host = make_device("remote-host", librenms_cf={"default": {"id": 42}})
+        # A DIFFERENT device references LibreNMS id 42 as its OOB controller (not its own id).
+        make_device("oob-referencer", librenms_cf={"default": {"oob": {"id": 42}}})
+
+        view = object.__new__(BaseCableTableView)
+        # Pass a hostname that matches NO device so the resolution can only succeed via the id-42
+        # path: with "remote-host" as the hint, get_device_by_id_or_name() could still return host
+        # through the hostname fallback even if the id lookup regressed to MultipleObjectsReturned,
+        # making the test pass vacuously.
+        device, found, error = view.get_device_by_id_or_name(42, "no-matching-hostname", "default")
+
+        # Resolves to the device whose own LibreNMS id is 42, not MultipleObjectsReturned.
+        assert found is True
+        assert error is None
+        assert device.pk == host.pk
+
+
+@pytest.mark.django_db
+class TestOOBRowsNeverActionable:
+    """check_cable_status must keep context-only OOB rows non-actionable (no Sync Cable)."""
+
+    # OOB-controller rows are merged into the host's cable list for context only (shared-LOM
+    # detection) and are skipped by SyncCablesView.process_single_interface, so they must never
+    # offer a Sync Cable action. check_cable_status is the single source of truth for
+    # can_create_cable (read by both the table render and the verify response), so it stays
+    # non-actionable even when an OOB row's shared-name local port resolves to a host interface.
+
+    def _make_resolved_no_cable_link(self, source):
+        """A link whose both endpoints resolve to real, cable-free NetBox interfaces."""
+        from netbox_librenms_plugin.tests.conftest import make_device, make_interface
+
+        local_if = make_interface(make_device(f"local-{source}"), "eth0")
+        remote_if = make_interface(make_device(f"remote-{source}"), "eth1")
+        return {
+            "netbox_local_interface_id": local_if.pk,
+            "netbox_remote_interface_id": remote_if.pk,
+            "_source": source,
+        }
+
+    def test_host_row_with_no_cable_is_actionable(self):
+        from netbox_librenms_plugin.views.base.cables_view import BaseCableTableView
+
+        view = object.__new__(BaseCableTableView)
+        link = view.check_cable_status(self._make_resolved_no_cable_link("main"))
+
+        assert link["cable_status"] == "No Cable"
+        assert link["can_create_cable"] is True
+
+    def test_oob_row_with_no_cable_is_not_actionable(self):
+        from netbox_librenms_plugin.views.base.cables_view import BaseCableTableView
+
+        view = object.__new__(BaseCableTableView)
+        link = view.check_cable_status(self._make_resolved_no_cable_link("oob"))
+
+        # Status is still reported, but no Sync Cable action is offered.
+        assert link["cable_status"] == "No Cable"
+        assert link["can_create_cable"] is False
+
+    @pytest.mark.parametrize(
+        "source,expect_sync",
+        [("main", True), ("oob", False)],
+    )
+    def test_verify_response_offers_sync_only_for_non_oob_rows(self, source, expect_sync):
+        """Verify POST offers Sync Cable for a host row but not for an OOB row."""
+        # Both rows resolve to cable-free interfaces on both ends; only _source differs.
+        from django.core.cache import cache
+
+        from dcim.models import Interface
+        from netbox_librenms_plugin.tests.conftest import make_device
+
+        local_dev = make_device(f"verify-local-{source}")
+        Interface.objects.create(device=local_dev, name="eth0", type="1000base-t")
+        remote_dev = make_device(f"verify-remote-{source}")
+        Interface.objects.create(device=remote_dev, name="eth9", type="1000base-t")
+
+        view = _make_view()
+        link = {
+            "local_port": "eth0",
+            "local_port_id": 700,
+            "remote_port": "eth9",
+            "remote_device": remote_dev.name,
+            "remote_port_id": None,
+            "remote_device_id": None,
+            "_source": source,
+        }
+        cache.set(view.get_cache_key(local_dev, "links", "default"), {"links": [link]}, 300)
+
+        request = _make_request({"device_id": local_dev.pk, "local_port_id": 700, "server_key": "default"})
+        payload = json.loads(view.post(request).content)
+        actions = payload["formatted_row"]["actions"]
+
+        assert ("Sync Cable" in actions) is expect_sync
+
+
+@pytest.mark.django_db
+class TestSingleCableVerifyServerKeyRouting:
+    """post() must resolve the links cache under the POSTed server_key, else the api's bound key."""
+
+    def _seed(self, view, device, server_key):
+        from django.core.cache import cache
+
+        # A minimal host link keyed under *server_key*; local port matches the interface by name.
+        link = {"local_port": "eth0", "local_port_id": 700, "remote_device": "", "_source": "main"}
+        cache.set(view.get_cache_key(device, "links", server_key), {"links": [link]}, 300)
+
+    def test_post_server_key_selects_that_servers_cache(self):
+        from dcim.models import Interface
+
+        from netbox_librenms_plugin.tests.conftest import make_device
+
+        device = make_device("verify-key-dev")
+        Interface.objects.create(device=device, name="eth0", type="1000base-t")
+        view = _make_view(server_key="default-server")
+        self._seed(view, device, "production")  # links cached ONLY under 'production'
+
+        request = _make_request({"device_id": device.pk, "local_port_id": 700, "server_key": "production"})
+        with patch(
+            "netbox_librenms_plugin.librenms_api.LibreNMSAPI.get_available_servers",
+            return_value={"production": "Production"},
+        ):
+            row = json.loads(view.post(request).content)["formatted_row"]
+
+        # The 'production' cache was read → the port link renders (not the empty Missing-Ports row).
+        assert "eth0" in row["local_port"]
+        assert "/dcim/interfaces/" in row["local_port"]
+
+    def test_absent_server_key_falls_back_to_api_default(self):
+        from dcim.models import Interface
+
+        from netbox_librenms_plugin.tests.conftest import make_device
+
+        device = make_device("verify-fallback-dev")
+        Interface.objects.create(device=device, name="eth0", type="1000base-t")
+        view = _make_view(server_key="fallback-server")
+        self._seed(view, device, "fallback-server")  # cached under the api's bound key
+
+        request = _make_request({"device_id": device.pk, "local_port_id": 700})  # POST omits server_key
+        row = json.loads(view.post(request).content)["formatted_row"]
+
+        assert "eth0" in row["local_port"]  # the fallback (api.server_key) cache key was used
+
+    def test_post_server_key_does_not_read_a_different_servers_cache(self):
+        from netbox_librenms_plugin.tests.conftest import make_device
+
+        device = make_device("verify-miss-dev")
+        view = _make_view(server_key="default-server")
+        self._seed(view, device, "staging")  # cached under 'staging' only
+
+        request = _make_request({"device_id": device.pk, "local_port_id": 700, "server_key": "production"})
+        row = json.loads(view.post(request).content)["formatted_row"]
+
+        # No cross-server bleed: the 'production' lookup misses → the default Missing-Ports row.
+        assert row["local_port"] == ""
+        assert row["cable_status"] == "Missing Ports"

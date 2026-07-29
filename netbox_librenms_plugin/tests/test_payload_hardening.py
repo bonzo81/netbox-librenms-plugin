@@ -66,25 +66,32 @@ class TestInterfacePostMalformedPorts:
         view._librenms_api.get_librenms_id.return_value = 1
         # success=True but the body is a bare string (malformed).
         view._librenms_api.get_ports.return_value = (True, "garbage-string")
-        view.get_object = MagicMock(return_value=MagicMock())
-        view.get_redirect_url = MagicMock(return_value="/redirect")
+        obj = MagicMock()
+        request = MagicMock()
 
         with (
+            patch.object(view, "get_object", return_value=obj),
+            patch.object(view, "get_redirect_url", return_value="/redirect"),
+            patch.object(view, "rebind_api_for_server", return_value="default"),
+            patch.object(view, "get_cache_key", return_value="cache-key"),
+            patch.object(view, "get_last_fetched_key", return_value="last-key"),
             patch(
                 "netbox_librenms_plugin.views.base.interfaces_view.get_interface_name_field",
                 return_value="ifName",
             ),
-            patch("netbox_librenms_plugin.views.base.interfaces_view.messages") as mock_messages,
             patch(
-                "netbox_librenms_plugin.views.base.interfaces_view.redirect",
-                return_value="REDIRECT",
-            ) as mock_redirect,
+                "netbox_librenms_plugin.views.base.interfaces_view.get_librenms_sync_device",
+                return_value=obj,
+            ),
+            patch("netbox_librenms_plugin.views.base.interfaces_view.messages") as mock_messages,
+            patch("netbox_librenms_plugin.views.base.interfaces_view.cache"),
         ):
-            result = view.post(MagicMock(), pk=1)
+            response = view.post(request, pk=1)
 
-        assert result == "REDIRECT"
-        mock_redirect.assert_called_once_with("/redirect")
-        assert mock_messages.error.called  # error surfaced, not a 500
+        # Fail closed (issue #100 site 1): an error is surfaced (not a 500) and the failure
+        # redirect preserves the POST-scoped server_key via redirect_with_server_key.
+        assert mock_messages.error.called
+        assert response.url == "/redirect?server_key=default"
 
 
 class TestSyncViewDeviceInfoMalformed:

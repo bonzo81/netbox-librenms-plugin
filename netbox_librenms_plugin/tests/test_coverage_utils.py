@@ -134,6 +134,24 @@ class TestGetLibreNMSSyncDeviceServerKey:
         result = get_librenms_sync_device(device, server_key=None)
         assert result is member_with_id
 
+    def test_float_id_is_rejected_not_int_truncated(self):
+        """A float id (e.g."""
+        from netbox_librenms_plugin.utils import get_librenms_sync_device
+
+        device = MagicMock()
+        vc = MagicMock()
+        device.virtual_chassis = vc
+
+        member_float = MagicMock()
+        member_float.cf = {"librenms_id": {"default": 1.0}}  # invalid: float, not int/str
+        member_valid = MagicMock()
+        member_valid.cf = {"librenms_id": {"prod": 5}}
+
+        vc.members.all.return_value = [member_float, member_valid]
+
+        result = get_librenms_sync_device(device, server_key=None)
+        assert result is member_valid
+
     def test_server_key_none_matches_legacy_cf(self):
         """server_key=None: matches member with legacy bare int librenms_id."""
         from netbox_librenms_plugin.utils import get_librenms_sync_device
@@ -756,6 +774,23 @@ class TestFindByLibreNMSIdNoneGuard:
         result = find_by_librenms_id(model, None, server_key="default")
         assert result is None
         model.objects.filter.assert_not_called()
+
+    @pytest.mark.django_db(transaction=False)
+    def test_select_for_update_locks_and_returns_owner(self):
+        """find_by_librenms_id(..., select_for_update=True) locks + returns the owning row inside a txn (serializes a concurrent conflict check against an existing owner)."""
+        from django.db import transaction
+
+        from dcim.models import Device
+
+        from netbox_librenms_plugin.tests.conftest import make_device
+        from netbox_librenms_plugin.utils import find_by_librenms_id
+
+        device = make_device("locked-owner", librenms_cf={"default": 4242})
+        # select_for_update requires an open transaction; the locked read must still resolve
+        # the owner (best-effort serialization is additive, not a behaviour change).
+        with transaction.atomic():
+            found = find_by_librenms_id(Device, 4242, server_key="default", select_for_update=True)
+        assert found is not None and found.pk == device.pk
 
 
 class TestNetboxResolvesModuleTokenPerLeaf:

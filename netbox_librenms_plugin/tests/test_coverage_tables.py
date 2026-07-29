@@ -239,6 +239,19 @@ class TestDeviceImportTableSortData:
         # Should not raise
         table._sort_data()
 
+    @pytest.mark.django_db
+    def test_construction_time_order_by_sorts_case_insensitively(self):
+        """order_by passed to the constructor must apply _sort_data's case-insensitive sort — the import list view wires request.GET["sort"] straight into DeviceImportTable(...). django_tables2's native ordering also sorts on construction but case-SENSITIVELY ("Zulu" < "alpha"), so this catches the __init__ sort block going dead (the direct _sort_data tests above bypass __init__ and cannot)."""
+        from netbox_librenms_plugin.tables.device_status import DeviceImportTable
+
+        data = [
+            {"device_id": 1, "hostname": "Zulu"},
+            {"device_id": 2, "hostname": "alpha"},
+            {"device_id": 3, "hostname": "Mango"},
+        ]
+        table = DeviceImportTable(data=data, order_by="hostname")
+        assert [row["hostname"] for row in table.data.data] == ["alpha", "Mango", "Zulu"]
+
     def test_sort_by_hostname_ascending(self):
         data = [
             {"hostname": "zebra", "sysName": "z"},
@@ -513,6 +526,56 @@ class TestDeviceImportTableRenderNetboxCluster:
             result = str(table.render_netbox_cluster(value=5, record=record))
 
         assert "enable_vc_detection=true" in result
+
+
+class TestDeviceImportTableRowSelectsServerKey:
+    """The role/cluster/rack row selects must post the import page's server_key.
+
+    Their hx-posts reach DeviceRole/Cluster/RackUpdateView, which rebind to the POSTed
+    server_key; without an hx-vals carrying it the rebind falls back to the GLOBAL
+    selected server and re-validates/caches the wrong server's device for the row.
+    """
+
+    def _table(self, server_key="secondary"):
+        from netbox_librenms_plugin.tables.device_status import DeviceImportTable
+
+        t = object.__new__(DeviceImportTable)
+        t._cached_clusters = []
+        t._cached_roles = []
+        t.server_key = server_key
+        return t
+
+    def _record(self):
+        rack = MagicMock()
+        rack.pk = 3
+        rack.name = "R1"
+        rack.location = None
+        return {
+            "device_id": 5,
+            "_validation": {
+                "existing_device": None,
+                "import_as_vm": False,
+                "cluster": {"found": False, "cluster": None},
+                "device_role": {"found": False, "role": None},
+                "site": {"found": True},
+                "rack": {"rack": None, "available_racks": [rack]},
+            },
+        }
+
+    @pytest.mark.parametrize("renderer", ["render_netbox_cluster", "render_netbox_role", "render_netbox_rack"])
+    def test_select_carries_server_key_hx_vals(self, renderer):
+        table = self._table()
+        with patch("django.urls.reverse", return_value="/row-update/5/"):
+            result = str(getattr(table, renderer)(value=5, record=self._record()))
+        assert "hx-vals=" in result and "server_key" in result and "secondary" in result, result
+
+    @pytest.mark.parametrize("renderer", ["render_netbox_cluster", "render_netbox_role", "render_netbox_rack"])
+    def test_no_server_key_renders_no_hx_vals(self, renderer):
+        """Single-server pages (no server_key threaded) keep the select unchanged."""
+        table = self._table(server_key=None)
+        with patch("django.urls.reverse", return_value="/row-update/5/"):
+            result = str(getattr(table, renderer)(value=5, record=self._record()))
+        assert "hx-vals" not in result
 
 
 # ===========================================================================
@@ -970,6 +1033,42 @@ class TestDeviceImportTableRenderActions:
 
         assert "View Device in NetBox" in result
 
+    def test_validation_details_url_carries_server_key(self):
+        from dcim.models import Device
+        from virtualization.models import VirtualMachine
+
+        table = self._table()
+        table.server_key = "secondary"  # the server the import page was rendered against
+
+        existing = MagicMock(spec=Device)
+        existing.__class__ = Device
+        existing.pk = 55
+
+        record = {
+            "device_id": 2,
+            "_validation": {
+                "existing_device": existing,
+                "is_ready": False,
+                "can_import": False,
+                "existing_match_type": "librenms_id",
+                "serial_action": None,
+                "device_type_mismatch": False,
+                "name_sync_available": False,
+                "librenms_id_needs_migration": False,
+                "virtual_chassis": None,
+            },
+        }
+
+        with (
+            patch("netbox_librenms_plugin.tables.device_status.VirtualMachine", VirtualMachine),
+            patch("netbox_librenms_plugin.tables.device_status.reverse", side_effect=self._fake_reverse),
+        ):
+            result = str(table.render_actions(value=2, record=record))
+
+        # The validation-details modal hx-get must carry the rendered server_key so the
+        # modal-open GET fetches from the import's server, not the global selected_server.
+        assert "server_key=secondary" in result
+
     def test_existing_device_type_mismatch_shows_conflict_danger(self):
         from dcim.models import Device
         from virtualization.models import VirtualMachine
@@ -1070,6 +1169,41 @@ class TestDeviceImportTableRenderActions:
 
         assert "btn-outline-warning" in result
         assert "Conflict" in result
+
+    def test_existing_serial_match_oob_already_linked_is_informational_not_conflict(self):
+        from dcim.models import Device
+        from virtualization.models import VirtualMachine
+
+        table = self._table()
+
+        existing = MagicMock(spec=Device)
+        existing.__class__ = Device
+        existing.pk = 55
+
+        record = {
+            "device_id": 2,
+            "_validation": {
+                "existing_device": existing,
+                "is_ready": False,
+                "can_import": False,
+                "existing_match_type": "serial",
+                "serial_action": "oob_already_linked",
+                "device_type_mismatch": False,
+                "name_sync_available": False,
+                "librenms_id_needs_migration": False,
+                "virtual_chassis": None,
+            },
+        }
+
+        with (
+            patch("netbox_librenms_plugin.tables.device_status.VirtualMachine", VirtualMachine),
+            patch("netbox_librenms_plugin.tables.device_status.reverse", side_effect=self._fake_reverse),
+        ):
+            result = str(table.render_actions(value=2, record=record))
+
+        # Informational state (re-import updates the existing OOB entry) — not a warning "Conflict".
+        assert "btn-outline-warning" not in result
+        assert "btn-outline-success" in result
 
     def test_existing_name_sync_shows_details_warning(self):
         from dcim.models import Device
@@ -1273,6 +1407,271 @@ class TestDeviceImportTableRenderActions:
         assert "btn-outline-warning" in result
         assert "Details" in result
 
+    def test_existing_oob_candidate_shows_add_as_oob_button(self):
+        """serial_action == 'oob_candidate' renders the purple "Add as OOB controller" button."""
+        from dcim.models import Device
+        from virtualization.models import VirtualMachine
+
+        table = self._table()
+
+        existing = MagicMock(spec=Device)
+        existing.__class__ = Device
+        existing.pk = 55
+
+        record = {
+            "device_id": 2,
+            "_validation": {
+                "existing_device": existing,
+                "is_ready": False,
+                "can_import": False,
+                "existing_match_type": "serial",
+                "serial_action": "oob_candidate",
+                "device_type_mismatch": False,
+                "name_sync_available": False,
+                "librenms_id_needs_migration": False,
+                "virtual_chassis": None,
+            },
+        }
+
+        with (
+            patch("netbox_librenms_plugin.tables.device_status.VirtualMachine", VirtualMachine),
+            patch("netbox_librenms_plugin.tables.device_status.reverse", side_effect=self._fake_reverse),
+        ):
+            result = str(table.render_actions(value=2, record=record))
+
+        assert "btn-outline-purple" in result
+        assert "mdi-chip" in result
+        assert "Add as OOB controller" in result
+
+    def test_existing_oob_linked_shows_linked_oob_button_with_paired_host(self):
+        """existing_match_type == 'librenms_oob' renders the info "Linked as OOB controller" button and surfaces the paired host id in the title."""
+        from dcim.models import Device
+        from virtualization.models import VirtualMachine
+
+        table = self._table()
+
+        existing = MagicMock(spec=Device)
+        existing.__class__ = Device
+        existing.pk = 55
+
+        record = {
+            "device_id": 2,
+            "_validation": {
+                "existing_device": existing,
+                "is_ready": False,
+                "can_import": False,
+                "existing_match_type": "librenms_oob",
+                "serial_action": None,
+                "device_type_mismatch": False,
+                "name_sync_available": False,
+                "librenms_id_needs_migration": False,
+                "existing_librenms_link": {"host_id": 42},
+                "virtual_chassis": None,
+            },
+        }
+
+        with (
+            patch("netbox_librenms_plugin.tables.device_status.VirtualMachine", VirtualMachine),
+            patch("netbox_librenms_plugin.tables.device_status.reverse", side_effect=self._fake_reverse),
+        ):
+            result = str(table.render_actions(value=2, record=record))
+
+        assert "btn-outline-info" in result
+        assert "mdi-chip" in result
+        assert "Linked as OOB controller (paired host: LibreNMS #42)" in result
+
+    def test_existing_oob_linked_malformed_paired_host_id_omitted(self):
+        """A malformed paired host_id (bool/float) must use the strict coercion the host-half branch uses, not int(): a boolean True must NOT render a bogus 'LibreNMS #1' — the title falls back to the plain 'Linked as OOB controller'."""
+        from dcim.models import Device
+        from virtualization.models import VirtualMachine
+
+        table = self._table()
+
+        existing = MagicMock(spec=Device)
+        existing.__class__ = Device
+        existing.pk = 55
+
+        record = {
+            "device_id": 2,
+            "_validation": {
+                "existing_device": existing,
+                "is_ready": False,
+                "can_import": False,
+                "existing_match_type": "librenms_oob",
+                "serial_action": None,
+                "device_type_mismatch": False,
+                "name_sync_available": False,
+                "librenms_id_needs_migration": False,
+                "existing_librenms_link": {"host_id": True},  # malformed (bool) — int() would give 1
+                "virtual_chassis": None,
+            },
+        }
+
+        with (
+            patch("netbox_librenms_plugin.tables.device_status.VirtualMachine", VirtualMachine),
+            patch("netbox_librenms_plugin.tables.device_status.reverse", side_effect=self._fake_reverse),
+        ):
+            result = str(table.render_actions(value=2, record=record))
+
+        assert "Linked as OOB controller" in result
+        # The malformed id must NOT surface as a paired host number.
+        assert "paired host: LibreNMS #" not in result
+
+    def test_existing_librenms_link_non_dict_does_not_crash_render(self):
+        """A malformed ``existing_librenms_link`` that isn't a dict (e.g."""
+        from dcim.models import Device
+        from virtualization.models import VirtualMachine
+
+        table = self._table()
+
+        existing = MagicMock(spec=Device)
+        existing.__class__ = Device
+        existing.pk = 55
+
+        record = {
+            "device_id": 2,
+            "_validation": {
+                "existing_device": existing,
+                "is_ready": False,
+                "can_import": False,
+                "existing_match_type": "librenms_oob",
+                "serial_action": None,
+                "device_type_mismatch": False,
+                "name_sync_available": False,
+                "librenms_id_needs_migration": False,
+                "existing_librenms_link": "garbage-not-a-dict",  # malformed payload
+                "virtual_chassis": None,
+            },
+        }
+
+        with (
+            patch("netbox_librenms_plugin.tables.device_status.VirtualMachine", VirtualMachine),
+            patch("netbox_librenms_plugin.tables.device_status.reverse", side_effect=self._fake_reverse),
+        ):
+            result = str(table.render_actions(value=2, record=record))
+
+        assert "Linked as OOB controller" in result
+        assert "paired host: LibreNMS #" not in result
+
+    def test_existing_paired_host_shows_host_button(self):
+        """A librenms_id match whose link carries an oob_id distinct from the host id renders the info "Host" button (the host half of a host/OOB pair), escaping the oob type."""
+        from dcim.models import Device
+        from virtualization.models import VirtualMachine
+
+        table = self._table()
+
+        existing = MagicMock(spec=Device)
+        existing.__class__ = Device
+        existing.pk = 55
+
+        record = {
+            "device_id": 2,
+            "_validation": {
+                "existing_device": existing,
+                "is_ready": False,
+                "can_import": False,
+                "existing_match_type": "librenms_id",
+                "serial_action": None,
+                "device_type_mismatch": False,
+                "name_sync_available": False,
+                "librenms_id_needs_migration": False,
+                # oob_type comes from a user-editable custom field — use a value that REQUIRES
+                # escaping so the assertion below actually proves render_actions() escapes it.
+                "existing_librenms_link": {"host_id": 42, "oob_id": 99, "oob_type": "<idrac>"},
+                "virtual_chassis": None,
+            },
+        }
+
+        with (
+            patch("netbox_librenms_plugin.tables.device_status.VirtualMachine", VirtualMachine),
+            patch("netbox_librenms_plugin.tables.device_status.reverse", side_effect=self._fake_reverse),
+        ):
+            result = str(table.render_actions(value=2, record=record))
+
+        assert "btn-outline-info" in result
+        assert "mdi-server-network" in result
+        # The oob_type must be HTML-escaped in the title; the raw value must not leak through.
+        assert "Linked as host (paired OOB: LibreNMS #99, &lt;idrac&gt;)" in result
+        assert "<idrac>" not in result
+
+    def test_malformed_paired_oob_id_does_not_render_host_state(self):
+        """A malformed paired oob_id coerces to None and must NOT render the paired-host state with a bogus 'LibreNMS #bad' title — it should fall through to the generic details button."""
+        from dcim.models import Device
+        from virtualization.models import VirtualMachine
+
+        table = self._table()
+
+        existing = MagicMock(spec=Device)
+        existing.__class__ = Device
+        existing.pk = 56
+
+        record = {
+            "device_id": 3,
+            "_validation": {
+                "existing_device": existing,
+                "is_ready": False,
+                "can_import": False,
+                "existing_match_type": "librenms_id",
+                "serial_action": None,
+                "device_type_mismatch": False,
+                "name_sync_available": False,
+                "librenms_id_needs_migration": False,
+                "existing_librenms_link": {"host_id": 42, "oob_id": "bad", "oob_type": "idrac"},
+                "virtual_chassis": None,
+            },
+        }
+
+        with (
+            patch("netbox_librenms_plugin.tables.device_status.VirtualMachine", VirtualMachine),
+            patch("netbox_librenms_plugin.tables.device_status.reverse", side_effect=self._fake_reverse),
+        ):
+            result = str(table.render_actions(value=3, record=record))
+
+        assert "Linked as host" not in result
+        assert "#bad" not in result
+        # Positive assertion: it actually fell through to the generic details button (the
+        # btn-outline-success "View details" fallback), not an unintended/empty state that
+        # would also pass the negative checks above.
+        assert "btn-outline-success" in result
+        assert 'title="View details"' in result
+
+    def test_oob_id_without_host_id_does_not_render_host_state(self):
+        """A librenms_id link carrying an oob_id but NO readable host_id (corrupt/partial CF) must not render the 'Linked as host' badge — there's no host id, so oob_id != None must not satisfy the host-pair branch; it falls through to the generic details button."""
+        from dcim.models import Device
+        from virtualization.models import VirtualMachine
+
+        table = self._table()
+
+        existing = MagicMock(spec=Device)
+        existing.__class__ = Device
+        existing.pk = 57
+
+        record = {
+            "device_id": 4,
+            "_validation": {
+                "existing_device": existing,
+                "is_ready": False,
+                "can_import": False,
+                "existing_match_type": "librenms_id",
+                "serial_action": None,
+                "device_type_mismatch": False,
+                "name_sync_available": False,
+                "librenms_id_needs_migration": False,
+                "existing_librenms_link": {"oob_id": 99, "oob_type": "idrac"},  # no host_id
+                "virtual_chassis": None,
+            },
+        }
+
+        with (
+            patch("netbox_librenms_plugin.tables.device_status.VirtualMachine", VirtualMachine),
+            patch("netbox_librenms_plugin.tables.device_status.reverse", side_effect=self._fake_reverse),
+        ):
+            result = str(table.render_actions(value=4, record=record))
+
+        assert "Linked as host" not in result
+        assert "btn-outline-success" in result
+        assert 'title="View details"' in result
+
 
 # ===========================================================================
 # DeviceImportTable._build_validation_details_url tests
@@ -1282,11 +1681,13 @@ class TestDeviceImportTableRenderActions:
 class TestBuildValidationDetailsUrl:
     """Tests for DeviceImportTable._build_validation_details_url()."""
 
-    def _call(self, device_id, validation):
+    def _call(self, device_id, validation, server_key=None):
         from netbox_librenms_plugin.tables.device_status import DeviceImportTable
 
+        table = object.__new__(DeviceImportTable)
+        table.server_key = server_key
         with patch("netbox_librenms_plugin.tables.device_status.reverse", return_value="/validation/"):
-            return DeviceImportTable._build_validation_details_url(device_id, validation)
+            return table._build_validation_details_url(device_id, validation)
 
     def test_no_params_returns_plain_url(self):
         url = self._call(1, {})
@@ -1437,6 +1838,14 @@ class TestLibreNMSInterfaceTableInit:
 
         assert table.tab == "interfaces"
         assert table.prefix == "interfaces_"
+
+    def test_ipaddress_table_sets_tab_and_prefix(self):
+        """The IP table must set tab='ipaddresses' so the paginator links (?tab={{ table.tab }}) keep the user on the IP Addresses tab, and prefix='ipaddresses_' so its per-page param is namespaced (configure() passes self.prefix to get_table_paginate_count) rather than shared with the generic one."""
+        from netbox_librenms_plugin.tables.ipaddresses import IPAddressTable
+
+        table = IPAddressTable([])
+        assert table.tab == "ipaddresses"
+        assert table.prefix == "ipaddresses_"
 
     def test_server_key_stored(self):
         from netbox_librenms_plugin.tables.interfaces import LibreNMSInterfaceTable
@@ -2342,6 +2751,72 @@ class TestFormatInterfaceData:
             # render_description is called with "" (cleared alias)
             mock_desc.assert_called_once_with("", port_data)
 
+    def test_oob_row_never_binds_to_host_interface_by_name(self):
+        """An OOB-controller row (shared-LOM 'eth0') must stay unmatched on row re-render, mirroring the interfaces-tab guard — otherwise the VC-dropdown re-render flips it to green 'matched' against an unrelated host interface."""
+        table = self._table()
+        device = MagicMock()
+        host_iface = MagicMock()  # a host interface named eth0 exists
+        device.interfaces.filter.return_value.first.return_value = host_iface
+
+        port_data = {
+            "_source": "oob",
+            "ifName": "eth0",
+            "ifType": "ethernetCsmacd",
+            "ifSpeed": 0,
+            "ifPhysAddress": "",
+            "ifMtu": 1500,
+            "ifAdminStatus": "up",
+            "ifAlias": "",
+            "ifDescr": "eth0",
+        }
+
+        with (
+            patch.object(table, "render_name", return_value=""),
+            patch.object(table, "render_type", return_value=""),
+            patch.object(table, "render_speed", return_value=""),
+            patch.object(table, "render_mac_address", return_value=""),
+            patch.object(table, "render_mtu", return_value=""),
+            patch.object(table, "render_enabled", return_value=""),
+            patch.object(table, "render_description", return_value=""),
+        ):
+            table.format_interface_data(port_data, device)
+
+        assert port_data["netbox_interface"] is None
+        assert port_data["exists_in_netbox"] is False
+
+    def test_main_row_still_binds_by_name(self):
+        """The guard is OOB-specific: a main-source row keeps the name binding."""
+        table = self._table()
+        device = MagicMock()
+        host_iface = MagicMock()
+        device.interfaces.filter.return_value.first.return_value = host_iface
+
+        port_data = {
+            "_source": "main",
+            "ifName": "eth0",
+            "ifType": "ethernetCsmacd",
+            "ifSpeed": 0,
+            "ifPhysAddress": "",
+            "ifMtu": 1500,
+            "ifAdminStatus": "up",
+            "ifAlias": "",
+            "ifDescr": "eth0",
+        }
+
+        with (
+            patch.object(table, "render_name", return_value=""),
+            patch.object(table, "render_type", return_value=""),
+            patch.object(table, "render_speed", return_value=""),
+            patch.object(table, "render_mac_address", return_value=""),
+            patch.object(table, "render_mtu", return_value=""),
+            patch.object(table, "render_enabled", return_value=""),
+            patch.object(table, "render_description", return_value=""),
+        ):
+            table.format_interface_data(port_data, device)
+
+        assert port_data["netbox_interface"] is host_iface
+        assert port_data["exists_in_netbox"] is True
+
 
 # ===========================================================================
 # LibreNMSInterfaceTable configure tests
@@ -2766,5 +3241,33 @@ class TestRenderDeviceSelectionEscape:
         html = str(table.render_device_selection(None, {"local_port": "eth0", "local_port_id": "42"}))
 
         # The raw <script> tag must NOT appear — it should be escaped.
+        assert "<script>" not in html
+        assert "&lt;script&gt;" in html
+
+    def test_interface_table_member_name_is_escaped(self):
+        """The VC interface table dropdown must escape member names just like the cable table."""
+        from dcim.models import VirtualChassis
+
+        from netbox_librenms_plugin.tables.interfaces import VCInterfaceTable
+        from netbox_librenms_plugin.tests.conftest import make_device
+
+        master = make_device("vc-if-master-xss")
+        # create() bypasses full_clean(), so the hostile name persists verbatim; the render is what
+        # must neutralise it. The real ORM member list is iterated by render_device_selection().
+        evil = make_device('<script>alert("xss")</script>')
+        vc = VirtualChassis.objects.create(name="vc-if-xss")
+        for pos, dev in enumerate((master, evil), start=1):
+            dev.virtual_chassis = vc
+            dev.vc_position = pos
+            dev.save()
+
+        table = VCInterfaceTable(data=[], device=master, interface_name_field="ifName")
+        table.device = master
+        # Non-ethernet row → selected member is the device itself (no get_virtual_chassis_member
+        # lookup), so the assertion isolates the option-label escaping.
+        record = {"ifName": "Vlan100", "ifType": "l3ipvlan"}
+        html = str(table.render_device_selection(None, record))
+
+        # The raw <script> tag must NOT appear — it must be escaped, matching the cable table.
         assert "<script>" not in html
         assert "&lt;script&gt;" in html

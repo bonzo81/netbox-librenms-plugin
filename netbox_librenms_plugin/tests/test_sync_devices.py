@@ -129,9 +129,11 @@ class TestUpdateDeviceLocationView:
 
         view = object.__new__(UpdateDeviceLocationView)
         view._librenms_api = MagicMock()
+        view._librenms_api.server_key = "default"  # blank-POST rebind reuses the cached client
         view._librenms_api.get_librenms_id.return_value = 42
         view._librenms_api.update_device_field.return_value = (True, "ok")
         view.request = MagicMock()
+        view.request.POST.get.return_value = None  # no posted server_key -> session/default
 
         device = MagicMock()
         device.site = MagicMock()
@@ -139,7 +141,7 @@ class TestUpdateDeviceLocationView:
         device.get_absolute_url.return_value = "/dcim/devices/1/"
 
         with patch("netbox_librenms_plugin.views.sync.devices.get_object_or_404", return_value=device):
-            with patch("netbox_librenms_plugin.views.sync.devices.redirect"):
+            with patch("netbox_librenms_plugin.views.sync.devices._device_sync_redirect"):
                 with patch("netbox_librenms_plugin.views.sync.devices.messages") as mock_msg:
                     view.post(view.request, pk=1)
 
@@ -154,15 +156,17 @@ class TestUpdateDeviceLocationView:
 
         view = object.__new__(UpdateDeviceLocationView)
         view._librenms_api = MagicMock()
+        view._librenms_api.server_key = "default"  # blank-POST rebind reuses the cached client
         view._librenms_api.get_librenms_id.return_value = 42
         view.request = MagicMock()
+        view.request.POST.get.return_value = None  # no posted server_key -> session/default
 
         device = MagicMock()
         device.site = None
         device.pk = 1
 
         with patch("netbox_librenms_plugin.views.sync.devices.get_object_or_404", return_value=device):
-            with patch("netbox_librenms_plugin.views.sync.devices.redirect"):
+            with patch("netbox_librenms_plugin.views.sync.devices._device_sync_redirect"):
                 with patch("netbox_librenms_plugin.views.sync.devices.messages") as mock_msg:
                     view.post(view.request, pk=1)
 

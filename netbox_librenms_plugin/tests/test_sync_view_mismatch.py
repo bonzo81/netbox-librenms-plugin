@@ -10,6 +10,8 @@ primary IP, DNS name) matches ANY LibreNMS identity (sysName, hostname, ip).
 
 from unittest.mock import MagicMock, patch
 
+from django.test import RequestFactory
+
 
 def _make_view(librenms_id, device_info, librenms_url="https://librenms.example.com"):
     """Create a minimal BaseLibreNMSSyncView instance with mocked dependencies."""
@@ -344,6 +346,40 @@ class TestBuildAllServerMappings:
         result = BaseLibreNMSSyncView._build_all_server_mappings(mock_netbox_device, "production")
         assert result is None
 
+    def test_dict_form_entry_uses_host_id(self, mock_netbox_device, mock_plugins_config_single_server):
+        """New {server_key: {"id": N, "oob": {...}}} shape must still produce a row."""
+        from unittest.mock import patch
+
+        from netbox_librenms_plugin.views.base.librenms_sync_view import BaseLibreNMSSyncView
+
+        mock_netbox_device.custom_field_data = {
+            "librenms_id": {"production": {"id": 42, "oob": {"id": 99, "type": "drac"}}}
+        }
+        with patch("netbox_librenms_plugin.views.base.librenms_sync_view.django_settings") as mock_settings:
+            mock_settings.PLUGINS_CONFIG = mock_plugins_config_single_server
+            result = BaseLibreNMSSyncView._build_all_server_mappings(mock_netbox_device, "production")
+
+        assert result is not None and len(result) == 1
+        assert result[0]["server_key"] == "production"
+        assert result[0]["device_id"] == 42  # host id extracted from the dict form
+
+    def test_migrated_only_entry_is_skipped(self, mock_netbox_device, mock_plugins_config_single_server):
+        """A {server_key: {"_migrated_to": ...}} entry has no host id → no row."""
+        from unittest.mock import patch
+
+        from netbox_librenms_plugin.views.base.librenms_sync_view import BaseLibreNMSSyncView
+
+        mock_netbox_device.custom_field_data = {
+            "librenms_id": {"production": {"_migrated_to": {"device_id": 7, "server_key": "production"}}}
+        }
+        with patch("netbox_librenms_plugin.views.base.librenms_sync_view.django_settings") as mock_settings:
+            mock_settings.PLUGINS_CONFIG = mock_plugins_config_single_server
+            result = BaseLibreNMSSyncView._build_all_server_mappings(mock_netbox_device, "production")
+
+        # Pin the "no mappings => None" contract (matches the sibling tests in this
+        # class); `assert not result` would also pass on a [] regression.
+        assert result is None  # no mapping row for a migrated-only entry
+
     def test_single_configured_server(self, mock_netbox_device, mock_plugins_config_single_server):
         from unittest.mock import patch
 
@@ -482,7 +518,10 @@ class TestVCLookupDelegation:
         view.get_context_data = MagicMock(return_value={})
         mock_render.return_value = MagicMock()
 
-        request = MagicMock()
+        # Real request with no ?server_key: resolve_get_render_server_key falls back to the bound
+        # default server (unresolved=False), so VC delegation runs. A MagicMock() request would make
+        # ?server_key a truthy mock that fails to resolve, spuriously tripping the fail-closed path.
+        request = RequestFactory().get("/")
         view.get(request, pk=1)
 
         # get_librenms_sync_device must be called unconditionally for VC members
@@ -515,7 +554,7 @@ class TestVCLookupDelegation:
         view.get_context_data = MagicMock(return_value={})
         mock_render.return_value = MagicMock()
 
-        request = MagicMock()
+        request = RequestFactory().get("/")
         view.get(request, pk=1)
 
         mock_sync_device.assert_not_called()

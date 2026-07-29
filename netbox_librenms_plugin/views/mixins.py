@@ -1,10 +1,12 @@
 import json
+from urllib.parse import quote_plus
 
 from django.contrib import messages
 from django.contrib.auth.mixins import PermissionRequiredMixin
 from django.core.cache import cache
 from django.http import HttpResponse, JsonResponse
 from django.shortcuts import get_object_or_404, redirect
+from django.urls import get_script_prefix
 from django.utils.http import url_has_allowed_host_and_scheme
 from utilities.permissions import get_permission_for_model
 
@@ -71,7 +73,13 @@ def _get_safe_redirect_url(request):
         require_https=request.is_secure(),
     ):
         return referrer
-    return getattr(request, "path", "/")
+    # No usable Referer. On a non-GET request, request.path is often a POST-only
+    # action endpoint, so redirecting the browser there would 405 — fall back to a
+    # GET-safe app root instead. Use the deployment script prefix (e.g. "/netbox/")
+    # so a prefixed install doesn't bounce to the domain root. GET requests reload path.
+    if getattr(request, "method", "GET") != "GET":
+        return get_script_prefix()
+    return getattr(request, "path", get_script_prefix())
 
 
 def _safe_redirect_response(request):
@@ -100,9 +108,40 @@ def _safe_redirect_response(request):
             return HttpResponse("", headers={"HX-Redirect": target})
         return redirect(target)
 
+    app_root = get_script_prefix()
     if is_htmx:
-        return HttpResponse("", headers={"HX-Redirect": "/"})
-    return redirect("/")
+        return HttpResponse("", headers={"HX-Redirect": app_root})
+    return redirect(app_root)
+
+
+def redirect_with_server_key(request, url, server_key):
+    """
+    Redirect to *url*, appending a validated ``?server_key`` query param when one is given.
+
+    Shared by the sync-tab redirect helpers (``device_fields._sync_redirect`` /
+    ``interfaces_view._failure_redirect``) so the server_key-preserving redirect is written once.
+    The candidate URL is gated by Django's ``url_has_allowed_host_and_scheme`` with the ``redirect``
+    sink inside the validated branch — the open-redirect barrier for py/url-redirection (CWE-601).
+    Callers own how *server_key* is sourced (a raw POST value, or one re-matched against the
+    configured servers); a blank/None one redirects to the bare *url* (a trusted ``reverse()`` path).
+
+    Args:
+        request: The current HTTP request (host allowlist + scheme for the barrier).
+        url (str): The already-reversed redirect target.
+        server_key (str | None): The server key to carry on the redirect; blank/None → bare *url*.
+
+    Returns:
+        HttpResponseRedirect: Redirect to *url*, with the validated ``server_key`` query param when
+            it passes the open-redirect barrier.
+    """
+    if server_key:
+        sep = "&" if "?" in url else "?"
+        candidate = f"{url}{sep}server_key={quote_plus(server_key)}"
+        if url_has_allowed_host_and_scheme(
+            candidate, allowed_hosts={request.get_host()}, require_https=request.is_secure()
+        ):
+            return redirect(candidate)
+    return redirect(url)
 
 
 class LibreNMSPermissionMixin(PermissionRequiredMixin):
@@ -118,7 +157,8 @@ class LibreNMSPermissionMixin(PermissionRequiredMixin):
 
     def has_write_permission(self):
         """Check if user can perform write actions."""
-        return self.request.user.has_perm(PERM_CHANGE_PLUGIN)
+        user = getattr(getattr(self, "request", None), "user", None)
+        return bool(user and user.has_perm(PERM_CHANGE_PLUGIN))
 
     def require_write_permission(self, error_message=None):
         """
@@ -132,6 +172,8 @@ class LibreNMSPermissionMixin(PermissionRequiredMixin):
             None if permitted, or appropriate response if denied
         """
         if not self.has_write_permission():
+            if getattr(self, "request", None) is None:
+                return HttpResponse(status=403)
             msg = error_message or "You do not have permission to perform this action."
             messages.error(self.request, msg)
 
@@ -197,13 +239,16 @@ class NetBoxObjectPermissionMixin:
             tuple: (has_all: bool, missing: list[str])
         """
         requirements = self.required_object_permissions.get(method, [])
-        missing = []
+        missing = [get_permission_for_model(model, action) for action, model in requirements]
 
-        for action, model in requirements:
-            perm = get_permission_for_model(model, action)
-            if not self.request.user.has_perm(perm):
-                missing.append(perm)
+        # Fail closed if there's no usable request/user (e.g. the view was invoked outside
+        # dispatch()): return the required perms as "missing" so callers get a deterministic
+        # permission denial instead of an AttributeError on self.request.user.
+        user = getattr(getattr(self, "request", None), "user", None)
+        if user is None:
+            return (not missing, missing)
 
+        missing = [perm for perm in missing if not user.has_perm(perm)]
         return (len(missing) == 0, missing)
 
     def require_object_permissions(self, method):
@@ -219,6 +264,8 @@ class NetBoxObjectPermissionMixin:
         """
         has_perms, missing = self.check_object_permissions(method)
         if not has_perms:
+            if getattr(self, "request", None) is None:
+                return HttpResponse(status=403)
             missing_str = ", ".join(missing)
             msg = f"Missing permissions: {missing_str}"
             messages.error(self.request, msg)
@@ -428,6 +475,88 @@ class LibreNMSAPIMixin:
             tuple[bool, dict | None]: ``(success, device_info)`` from ``get_device_info``.
         """
         return self.librenms_api.get_device_info(librenms_id, use_cache=False)
+
+    def rebind_api_for_server(self, server_key):
+        """
+        Rebind ``self.librenms_api`` to the POST-scoped *server_key*.
+
+        Base refresh views run live LibreNMS lookups through ``self.librenms_api``; in a multi-server
+        setup the active session server can differ from the tab the user is acting on, so the client
+        must be re-scoped to the POSTed key — otherwise data fetched from the session/default server
+        is cached under the posted key (wrong cable/VLAN/inventory set). Mirrors
+        :meth:`SyncIPAddressesView.post`.
+
+        Args:
+            server_key (str | None): The server key from the POST; blank/None falls back to the
+                session/default server.
+
+        Returns:
+            str | None: The resolved server key, or None when the posted key is
+                unknown/misconfigured (stale page or tampered request) so the caller can surface a
+                fragment error instead of an unhandled 500.
+        """
+        from netbox_librenms_plugin.librenms_api import build_librenms_api
+
+        server_key = (server_key or "").strip()
+        if not server_key:
+            # No posted key: fall back to the session/default server. Reuse an already-built
+            # client if present; otherwise build the default via build_librenms_api(None),
+            # which returns None on a misconfigured/missing default rather than raising. Going
+            # through self.librenms_api here would construct LibreNMSAPI() directly and could
+            # raise KeyError/ValueError, defeating this helper's fail-closed None contract.
+            cached_api = getattr(self, "_librenms_api", None)
+            if cached_api is not None:
+                return cached_api.server_key
+            api = build_librenms_api(None)
+            if api is None:
+                return None
+            self._librenms_api = api
+            return api.server_key
+
+        api = build_librenms_api(server_key)
+        if api is None:
+            return None
+        self._librenms_api = api
+        # Return the *resolved* key (build_librenms_api may normalize e.g. "default"
+        # to a configured name); downstream cache/OOB scoping must use api.server_key
+        # so live fetches and cache writes target the same server.
+        return api.server_key
+
+    def resolve_get_render_server_key(self, request):
+        """
+        Resolve and rebind ``self.librenms_api`` for a GET-render cache read.
+
+        On a full page render the orchestrator delegates to each tab's ``get_context_data``
+        without a ``server_key`` and never rebinds the client, so every sync tab must rebind
+        itself to the request's ``?server_key`` — otherwise it reads the *default* server's
+        cache and renders an empty table right after a successful refresh on another server. A
+        blank/absent query falls back to the session/default server, so single-server and
+        default-server renders are unchanged.
+
+        Args:
+            request: The current request; ``?server_key`` is read from its GET params.
+
+        Returns:
+            tuple[str | None, bool]: ``(scoped_key, unresolved)``. ``scoped_key`` is the key
+                to scope the cache read to. ``unresolved`` is True when ``?server_key`` named a
+                non-blank server that no longer resolves (deleted/misconfigured); a caller that
+                wants to short-circuit can render an empty table scoped to ``scoped_key`` rather
+                than fall back to the default server's cached data.
+        """
+        requested = (request.GET.get("server_key") or "").strip()
+        resolved = self.rebind_api_for_server(requested)
+        if requested and resolved is None:
+            return requested, True
+        # Blank/missing key with a None resolve means the rebind declined the default
+        # (no cached client + misconfigured default). Read the bound client's key directly
+        # instead of going through the lazy ``librenms_api`` property, which would reconstruct
+        # ``LibreNMSAPI()`` and can re-raise the very misconfiguration the rebind just avoided.
+        scoped = (
+            resolved
+            if resolved is not None
+            else (requested or getattr(getattr(self, "_librenms_api", None), "server_key", None))
+        )
+        return scoped, False
 
     def get_server_info(self):
         """

@@ -260,6 +260,11 @@ class SingleModuleVerifyView(
         # Shallow-copy the request so the child view can mutate request.GET /
         # request.POST without affecting this request object.
         module_table_view.request = copy.copy(request)
+        # Thread the POST-resolved server_key through the row builder. _build_member_contexts
+        # falls back to librenms_api.server_key (the default server) when _active_server_key is
+        # unset, so without this the verify row's interface-binding / can_update_interface_binding
+        # would be recomputed against the wrong server and disagree with the main modules tab.
+        module_table_view._active_server_key = server_key
 
         from netbox_librenms_plugin.utils import (
             get_enabled_ignore_rules,

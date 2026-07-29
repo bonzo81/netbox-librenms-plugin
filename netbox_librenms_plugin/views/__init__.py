@@ -110,8 +110,11 @@ from .mapping_views import (  # noqa: F401
     PlatformMappingListView,
     PlatformMappingView,
 )
-from .imports.actions import AddDeviceTypeMappingView  # noqa: F401
-from .imports.actions import AddPlatformMappingView  # noqa: F401
+from .imports.actions import (  # noqa: F401
+    AddAsOOBView,
+    AddDeviceTypeMappingView,
+    AddPlatformMappingView,
+)
 from .object_sync import (  # noqa: F401
     DeviceCableTableView,
     DeviceInterfaceTableView,

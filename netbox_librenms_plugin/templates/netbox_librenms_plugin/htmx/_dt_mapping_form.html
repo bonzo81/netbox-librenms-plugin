@@ -59,10 +59,9 @@ Optional context:
       var seq = requestSeq;
       if (q.length < 2) { dropdownEl.style.display = "none"; dropdownEl.innerHTML = ""; return; }
       timer = setTimeout(function () {
-        var csrfToken = (document.querySelector('[name=csrfmiddlewaretoken]') || {}).value || "";
-        fetch("{% url 'dcim-api:devicetype-list' %}?q=" + encodeURIComponent(q) + "&limit=20", {
-          headers: { "X-CSRFToken": csrfToken }
-        })
+        // Read-only GET to a DRF endpoint — no CSRF token needed (CSRF applies to
+        // state-changing methods only).
+        fetch("{% url 'dcim-api:devicetype-list' %}?q=" + encodeURIComponent(q) + "&limit=20")
           .then(function (r) {
             if (!r.ok) { throw new Error("HTTP " + r.status); }
             return r.json();
@@ -92,7 +91,7 @@ Optional context:
           })
           .catch(function (error) {
             if (seq !== requestSeq) return;
-            console.debug("Device type lookup failed:", error.message);
+            console.warn("Device type lookup failed:", error.message);
             dropdownEl.style.display = "none";
           });
       }, 300);

@@ -7,6 +7,7 @@ from netbox.tables.columns import BooleanColumn, ToggleColumn
 from utilities.paginator import EnhancedPaginator
 from utilities.templatetags.helpers import humanize_speed
 
+from netbox_librenms_plugin.constants import OOB_BADGE_HTML
 from netbox_librenms_plugin.models import InterfaceTypeMapping
 from netbox_librenms_plugin.utils import (
     check_vlan_group_matches,
@@ -313,7 +314,15 @@ class LibreNMSInterfaceTable(tables.Table):
 
     def render_name(self, value, record):
         """Render interface name with appropriate styling based on comparison with NetBox"""
-        return self._render_field(value, record, self.interface_name_field, "name")
+        rendered = self._render_field(value, record, self.interface_name_field, "name")
+        badges = ""
+        if record.get("_source") == "oob":
+            badges += OOB_BADGE_HTML
+        if record.get("_dedup_conflict"):
+            badges += '<span class="badge bg-warning text-dark ms-1" title="Same MAC seen on both main and OOB">Shared LOM</span>'
+        if badges:
+            return format_html("{}{}", rendered, mark_safe(badges))
+        return rendered
 
     def _get_interface_status_display(self, enabled, record):
         """
@@ -501,7 +510,16 @@ class LibreNMSInterfaceTable(tables.Table):
         # Add NetBox interface data
         interface_name = port_data.get(self.interface_name_field)
 
-        port_data["netbox_interface"] = device.interfaces.filter(name=interface_name).first()
+        # OOB-controller rows live on a SEPARATE LibreNMS device — mirror the
+        # interfaces-tab guard (BaseInterfaceTableView.get_context_data): never bind
+        # one to a host interface by name. Otherwise a row-level re-render (the VC
+        # member dropdown via SingleInterfaceVerifyView) flips a deliberately-unmatched
+        # shared-LOM row to green "matched", comparing speed/MTU/MAC against an
+        # unrelated host interface and inviting a sync the server then silently skips.
+        if port_data.get("_source") == "oob":
+            port_data["netbox_interface"] = None
+        else:
+            port_data["netbox_interface"] = device.interfaces.filter(name=interface_name).first()
         port_data["exists_in_netbox"] = bool(port_data["netbox_interface"])
 
         # Clear description if it matches interface name
@@ -574,7 +592,7 @@ class VCInterfaceTable(LibreNMSInterfaceTable):
         base_id = f"device_selection_{interface_name}_{hash(interface_name)}"
 
         options = [
-            f'<option value="{member.id}"{" selected" if member.id == selected_member_id else ""}>{member.name}</option>'
+            f'<option value="{member.id}"{" selected" if member.id == selected_member_id else ""}>{escape(member.name)}</option>'
             for member in members
         ]
 

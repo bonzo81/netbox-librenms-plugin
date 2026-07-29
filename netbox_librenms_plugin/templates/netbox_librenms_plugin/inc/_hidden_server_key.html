@@ -1,0 +1,8 @@
+{% comment %}
+Hidden server_key input shared by the sync-page action forms: carries the tab's
+server scope on the POST so the handling view rebinds to it rather than the GLOBAL
+selected server (with overlapping device_ids across servers, a fallback would fetch
+and cache the WRONG server's device). Renders nothing when server_key is absent so
+single-server deployments keep posting without it.
+{% endcomment %}
+{% if server_key %}<input type="hidden" name="server_key" value="{{ server_key }}">{% endif %}
