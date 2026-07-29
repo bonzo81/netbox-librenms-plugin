@@ -1558,15 +1558,19 @@ class DeviceConflictActionView(
         else:
             existing_model = Device
 
-        try:
-            existing_device = existing_model.objects.get(pk=int(existing_device_id))
-        except (existing_model.DoesNotExist, ValueError):
-            return _htmx_error_response("Existing device not found")
-
-        # Object-level change permission for the specific model being mutated.
+        # Object-level change permission for the specific model being mutated. Runs BEFORE the
+        # lookup so an unauthorized caller can't probe pks, and so a caller holding no change
+        # perm at all still gets the named-permission error rather than a bare "not found".
         self.required_object_permissions = {"POST": [("change", existing_model)]}
         if error := self.require_object_permissions("POST"):
             return error
+
+        try:
+            # Scope by "change": the gate above only asks the model-level perm, so a constrained
+            # grant would otherwise mutate any object by raw pk.
+            existing_device = self.restricted_queryset(existing_model, "change").get(pk=int(existing_device_id))
+        except (existing_model.DoesNotExist, ValueError):
+            return _htmx_error_response("Existing device not found")
 
         libre_device, validation, selections = self.get_validated_device_with_selections(device_id, request)
         if not libre_device:
@@ -2461,14 +2465,16 @@ class AddAsOOBView(
         if err := _rebind_or_htmx_error(self, request):
             return err
 
-        try:
-            existing_device = Device.objects.get(pk=int(existing_device_id))
-        except (Device.DoesNotExist, ValueError):
-            return _htmx_error_response("Existing device not found")
-
+        # Gate before the lookup (see DeviceConflictActionView.post).
         self.required_object_permissions = {"POST": [("change", Device)]}
         if error := self.require_object_permissions("POST"):
             return error
+
+        try:
+            # Scope by "change" so a constrained grant can't attach an OOB link by raw pk.
+            existing_device = self.restricted_queryset(Device, "change").get(pk=int(existing_device_id))
+        except (Device.DoesNotExist, ValueError):
+            return _htmx_error_response("Existing device not found")
 
         libre_device, validation, selections = self.get_validated_device_with_selections(device_id, request)
         if not libre_device:

@@ -1270,6 +1270,7 @@ class TestDeviceConflictActionView:
 
         view = object.__new__(DeviceConflictActionView)
         view._librenms_api = _make_api()
+        view.request = MagicMock()
         view.require_write_permission = MagicMock(return_value=None)
         view.require_object_permissions = MagicMock(return_value=None)
         return view
@@ -1691,7 +1692,7 @@ class TestDeviceConflictActionViewVMGuard:
                 MockAPI.get_available_servers.return_value = {"secondary": "Secondary"}
                 with patch("dcim.models.Device") as MockDevice:
                     mock_device_obj = MagicMock()
-                    MockDevice.objects.get.return_value = mock_device_obj
+                    MockDevice.objects.restrict.return_value.get.return_value = mock_device_obj
                     MockDevice.DoesNotExist = Exception
                     with patch("netbox_librenms_plugin.views.imports.actions.cache"):
                         with patch.object(
@@ -2176,7 +2177,7 @@ class TestDeviceConflictActionMissingExisting:
                     pass
 
                 MockDevice.DoesNotExist = _DeviceDoesNotExist
-                MockDevice.objects.get.side_effect = _DeviceDoesNotExist("Not found")
+                MockDevice.objects.restrict.return_value.get.side_effect = _DeviceDoesNotExist("Not found")
                 response = view.post(request, device_id=1)
 
         assert response.status_code == 200
@@ -2221,7 +2222,7 @@ class TestDeviceConflictActionMorePaths:
 
         with patch.object(view, "require_all_permissions", return_value=None):
             with patch("dcim.models.Device") as MockDevice:
-                MockDevice.objects.get.return_value = mock_existing
+                MockDevice.objects.restrict.return_value.get.return_value = mock_existing
                 MockDevice.DoesNotExist = Exception
                 with patch.object(view, "require_object_permissions", return_value=None):
                     with patch.object(
@@ -2253,7 +2254,7 @@ class TestDeviceConflictActionMorePaths:
 
         with patch.object(view, "require_all_permissions", return_value=None):
             with patch("dcim.models.Device") as MockDevice:
-                MockDevice.objects.get.return_value = mock_existing
+                MockDevice.objects.restrict.return_value.get.return_value = mock_existing
                 MockDevice.DoesNotExist = Exception
                 with patch.object(view, "require_object_permissions", return_value=None):
                     with patch.object(
@@ -2289,7 +2290,7 @@ class TestDeviceConflictActionMorePaths:
 
         with patch.object(view, "require_all_permissions", return_value=None):
             with patch("dcim.models.Device") as MockDevice:
-                MockDevice.objects.get.return_value = mock_existing
+                MockDevice.objects.restrict.return_value.get.return_value = mock_existing
                 MockDevice.DoesNotExist = Exception
                 with patch.object(view, "require_object_permissions", return_value=None):
                     with patch.object(
@@ -2322,7 +2323,7 @@ class TestDeviceConflictActionMorePaths:
 
         with patch.object(view, "require_all_permissions", return_value=None):
             with patch("dcim.models.Device") as MockDevice:
-                MockDevice.objects.get.return_value = mock_existing
+                MockDevice.objects.restrict.return_value.get.return_value = mock_existing
                 MockDevice.DoesNotExist = Exception
                 with patch.object(view, "require_object_permissions", return_value=None):
                     with patch.object(
@@ -2351,7 +2352,7 @@ class TestDeviceConflictActionMorePaths:
 
         with patch.object(view, "require_all_permissions", return_value=None):
             with patch("dcim.models.Device") as MockDevice:
-                MockDevice.objects.get.return_value = mock_existing
+                MockDevice.objects.restrict.return_value.get.return_value = mock_existing
                 MockDevice.DoesNotExist = Exception
                 with patch.object(view, "require_object_permissions", return_value=perm_error):
                     response = view.post(request, device_id=1)
@@ -2380,7 +2381,7 @@ class TestDeviceConflictActionMorePaths:
 
         with patch.object(view, "require_all_permissions", return_value=None):
             with patch("dcim.models.Device") as MockDevice:
-                MockDevice.objects.get.return_value = mock_existing
+                MockDevice.objects.restrict.return_value.get.return_value = mock_existing
                 MockDevice.DoesNotExist = Exception
                 with patch.object(view, "require_object_permissions", return_value=None):
                     with patch.object(
@@ -2415,7 +2416,7 @@ class TestDeviceConflictActionMorePaths:
 
         with patch.object(view, "require_all_permissions", return_value=None):
             with patch("dcim.models.Device") as MockDevice:
-                MockDevice.objects.get.return_value = mock_existing
+                MockDevice.objects.restrict.return_value.get.return_value = mock_existing
                 MockDevice.DoesNotExist = Exception
                 with patch.object(view, "require_object_permissions", return_value=None):
                     with patch.object(
@@ -2450,7 +2451,7 @@ class TestDeviceConflictActionMorePaths:
 
         with patch.object(view, "require_all_permissions", return_value=None):
             with patch("dcim.models.Device") as MockDevice:
-                MockDevice.objects.get.return_value = mock_existing
+                MockDevice.objects.restrict.return_value.get.return_value = mock_existing
                 MockDevice.DoesNotExist = Exception
                 with patch.object(view, "require_object_permissions", return_value=None):
                     with patch.object(
@@ -2483,7 +2484,7 @@ class TestDeviceConflictActionMorePaths:
 
         with patch.object(view, "require_all_permissions", return_value=None):
             with patch("dcim.models.Device") as MockDevice:
-                MockDevice.objects.get.return_value = mock_existing
+                MockDevice.objects.restrict.return_value.get.return_value = mock_existing
                 MockDevice.DoesNotExist = Exception
                 with patch.object(view, "require_object_permissions", return_value=None):
                     with patch.object(
@@ -2520,7 +2521,7 @@ class TestDeviceConflictActionMorePaths:
 
         with patch.object(view, "require_all_permissions", return_value=None):
             with patch("dcim.models.Device") as MockDevice:
-                MockDevice.objects.get.return_value = mock_existing
+                MockDevice.objects.restrict.return_value.get.return_value = mock_existing
                 MockDevice.DoesNotExist = Exception
                 with patch.object(view, "require_object_permissions", return_value=None):
                     with patch.object(
@@ -2553,7 +2554,7 @@ class TestDeviceConflictActionMorePaths:
 
         with patch.object(view, "require_all_permissions", return_value=None):
             with patch("dcim.models.Device") as MockDevice:
-                MockDevice.objects.get.return_value = mock_existing
+                MockDevice.objects.restrict.return_value.get.return_value = mock_existing
                 MockDevice.DoesNotExist = Exception
                 with patch.object(view, "require_object_permissions", return_value=None):
                     with patch.object(
@@ -2685,7 +2686,7 @@ class TestDeviceConflictActionBoolAndInvalidId:
 
         with patch.object(view, "require_all_permissions", return_value=None):
             with patch("dcim.models.Device") as MockDevice:
-                MockDevice.objects.get.return_value = mock_existing
+                MockDevice.objects.restrict.return_value.get.return_value = mock_existing
                 MockDevice.DoesNotExist = Exception
                 with patch.object(view, "require_object_permissions", return_value=None):
                     with patch.object(
@@ -2717,7 +2718,7 @@ class TestDeviceConflictActionBoolAndInvalidId:
 
         with patch.object(view, "require_all_permissions", return_value=None):
             with patch("dcim.models.Device") as MockDevice:
-                MockDevice.objects.get.return_value = mock_existing
+                MockDevice.objects.restrict.return_value.get.return_value = mock_existing
                 MockDevice.DoesNotExist = Exception
                 with patch.object(view, "require_object_permissions", return_value=None):
                     with patch.object(
@@ -2766,7 +2767,7 @@ class TestDeviceConflictLinkIdConflict:
 
         with patch.object(view, "require_all_permissions", return_value=None):
             with patch("dcim.models.Device") as MockDevice:
-                MockDevice.objects.get.return_value = mock_existing
+                MockDevice.objects.restrict.return_value.get.return_value = mock_existing
                 MockDevice.objects.select_for_update.return_value.get.return_value = mock_existing
                 MockDevice.DoesNotExist = Exception
                 with patch.object(view, "require_object_permissions", return_value=None):
@@ -2982,7 +2983,7 @@ class TestDeviceConflictSelectForUpdateDoesNotExist:
 
         with patch.object(view, "require_all_permissions", return_value=None):
             with patch("dcim.models.Device") as MockDevice:
-                MockDevice.objects.get.return_value = mock_existing
+                MockDevice.objects.restrict.return_value.get.return_value = mock_existing
                 # select_for_update().get() raises DoesNotExist
                 MockDevice.objects.select_for_update.return_value.get.side_effect = DoesNotExistExc("gone")
                 MockDevice.DoesNotExist = DoesNotExistExc
@@ -3047,7 +3048,7 @@ class TestMigrateLibreNMSIdMorePaths:
 
         with patch.object(view, "require_all_permissions", return_value=None):
             with patch("dcim.models.Device") as MockDevice:
-                MockDevice.objects.get.return_value = mock_existing
+                MockDevice.objects.restrict.return_value.get.return_value = mock_existing
                 MockDevice.DoesNotExist = Exception
                 with patch.object(view, "require_object_permissions", return_value=None):
                     with patch.object(
@@ -3087,7 +3088,7 @@ class TestMigrateLibreNMSIdMorePaths:
 
         with patch.object(view, "require_all_permissions", return_value=None):
             with patch("dcim.models.Device") as MockDevice:
-                MockDevice.objects.get.return_value = mock_existing
+                MockDevice.objects.restrict.return_value.get.return_value = mock_existing
                 MockDevice.DoesNotExist = DoesNotExistExc
                 with patch.object(view, "require_object_permissions", return_value=None):
                     with patch.object(
@@ -3100,7 +3101,7 @@ class TestMigrateLibreNMSIdMorePaths:
                                 # This inner patch shadows the outer one for the in-function
                                 # `from dcim.models import Device`, so it must serve BOTH the
                                 # pre-lock existing_device lookup and the locked re-read.
-                                MockDevice2.objects.get.return_value = mock_existing
+                                MockDevice2.objects.restrict.return_value.get.return_value = mock_existing
                                 MockDevice2.objects.select_for_update.return_value.get.return_value = locked_device
                                 MockDevice2.DoesNotExist = DoesNotExistExc
                                 with patch("netbox_librenms_plugin.utils.find_by_librenms_id", return_value=None):
@@ -3177,7 +3178,7 @@ class TestDeviceConflictMoreActions:
         stack.enter_context(patch.object(view, "require_all_permissions", return_value=None))
 
         MockDevice = MagicMock()
-        MockDevice.objects.get.return_value = mock_existing
+        MockDevice.objects.restrict.return_value.get.return_value = mock_existing
         MockDevice.objects.select_for_update.return_value.get.return_value = mock_existing
         MockDevice.objects.filter.return_value.exclude.return_value.first.return_value = None
         MockDevice.DoesNotExist = DoesNotExistExc
@@ -3385,7 +3386,7 @@ class TestMoreSaveErrorPaths:
 
         DoesNotExistExc = type("DoesNotExist", (Exception,), {})
         MockDevice = MagicMock()
-        MockDevice.objects.get.return_value = mock_existing
+        MockDevice.objects.restrict.return_value.get.return_value = mock_existing
         MockDevice.objects.select_for_update.return_value.get.return_value = mock_existing
         MockDevice.objects.filter.return_value.exclude.return_value.first.return_value = None
         MockDevice.DoesNotExist = DoesNotExistExc
@@ -3615,7 +3616,7 @@ class TestUpdateAndSerialSaveErrors:
 
         DoesNotExistExc = type("DoesNotExist", (Exception,), {})
         MockDevice = MagicMock()
-        MockDevice.objects.get.return_value = mock_existing
+        MockDevice.objects.restrict.return_value.get.return_value = mock_existing
         MockDevice.objects.select_for_update.return_value.get.return_value = mock_existing
         MockDevice.objects.filter.return_value.exclude.return_value.first.return_value = None
         MockDevice.DoesNotExist = DoesNotExistExc
@@ -3693,7 +3694,7 @@ class TestSyncSerialMorePaths:
 
         DoesNotExistExc = type("DoesNotExist", (Exception,), {})
         MockDevice = MagicMock()
-        MockDevice.objects.get.return_value = mock_existing
+        MockDevice.objects.restrict.return_value.get.return_value = mock_existing
         MockDevice.DoesNotExist = DoesNotExistExc
         mock_tx = MagicMock()
         mock_tx.atomic.return_value.__enter__ = MagicMock(return_value=None)
@@ -3896,7 +3897,7 @@ class TestMigrateLibreNMSIdTransactionPaths:
         locked_device.name = "router01"
 
         MockDevice = MagicMock()
-        MockDevice.objects.get.return_value = mock_existing
+        MockDevice.objects.restrict.return_value.get.return_value = mock_existing
         MockDevice.objects.select_for_update.return_value.get.return_value = locked_device
         MockDevice.DoesNotExist = DoesNotExistExc
 
@@ -5497,6 +5498,7 @@ class TestAddAsOOBViewPost:
         view = object.__new__(AddAsOOBView)
         view.kwargs = {}
         view._librenms_api = _make_api()
+        view.request = MagicMock()
 
         # Default: write permission granted
         view.require_write_permission = MagicMock(return_value=None)
@@ -5543,7 +5545,7 @@ class TestAddAsOOBViewPost:
         assert b"Existing device not found" in response.content
         assert response["HX-Reswap"] == "none"
         # The malformed id is rejected before any DB lookup.
-        mock_device.objects.get.assert_not_called()
+        mock_device.objects.restrict.return_value.get.assert_not_called()
 
     def test_device_does_not_exist_returns_htmx_error(self):
         """POST with an existing_device_id that isn't in the DB returns HTMX error — driven by a real ORM miss on an absent pk, not a stubbed manager raising DoesNotExist."""
@@ -5786,7 +5788,7 @@ class TestAddAsOOBViewPost:
             patch("netbox_librenms_plugin.utils.find_by_librenms_id", return_value=None) as mock_find,
         ):
             mock_device.DoesNotExist = Exception
-            mock_device.objects.get.return_value = existing_device
+            mock_device.objects.restrict.return_value.get.return_value = existing_device
             mock_device.objects.select_for_update.return_value.get.return_value = locked_device
             response = view.post(request, device_id=17)
 
@@ -6901,3 +6903,157 @@ class TestSerialActionsNormalizeAndLock:
         sqls = [q["sql"] for q in ctx.captured_queries]
         assert any("pg_advisory_xact_lock" in s for s in sqls)
         assert [s for s in sqls if "FOR UPDATE" in s and '."serial" = ' in s.split("WHERE", 1)[-1]] == []
+
+
+@pytest.mark.django_db
+class TestConflictActionsObjectScope:
+    """The conflict/OOB mutation endpoints must resolve the POSTed existing_device_id object-scoped.
+
+    require_object_permissions only asks ``user.has_perm("dcim.change_device")`` with no instance, so a
+    pk-constrained grant clears the gate. Without a restricted lookup the endpoint would then mutate any
+    device by raw pk.
+    """
+
+    @staticmethod
+    def _scoped_writer(in_scope_device, username):
+        """A real non-superuser with plugin write access and a pk-constrained change_device grant."""
+        from core.models import ObjectType
+        from dcim.models import Device
+        from django.apps import apps
+        from django.contrib.auth import get_user_model
+        from users.models import ObjectPermission
+
+        # Resolve via the app registry: the autouse config fixtures patch the models module during
+        # the full suite, so a plain import could hand get_for_model() a mock class.
+        LibreNMSSettings = apps.get_model("netbox_librenms_plugin", "LibreNMSSettings")
+
+        user = get_user_model().objects.create_user(username=username, password="x")
+        write = ObjectPermission.objects.create(name=f"{username}-plugin-write", actions=["change"])
+        write.object_types.set([ObjectType.objects.get_for_model(LibreNMSSettings)])
+        write.users.set([user])
+
+        scoped = ObjectPermission.objects.create(
+            name=f"{username}-scoped-change-device", actions=["change"], constraints={"pk": in_scope_device.pk}
+        )
+        scoped.object_types.set([ObjectType.objects.get_for_model(Device)])
+        scoped.users.set([user])
+
+        return get_user_model().objects.get(pk=user.pk)  # clear the per-request perm cache
+
+    def _post_conflict(self, user, target, action="link"):
+        """Drive the real DeviceConflictActionView.post against *target* with only the LibreNMS seams patched."""
+        from django.http import HttpResponse
+
+        from netbox_librenms_plugin.views.imports.actions import DeviceConflictActionView
+
+        view = DeviceConflictActionView()
+        view._librenms_api = _make_api()
+        libre_device = {"device_id": 4242, "hostname": target.name, "sysName": target.name, "serial": "-"}
+        validation = {"existing_device": target, "device_type_mismatch": False}
+        request = RequestFactory().post(
+            "/conflict-action/",
+            {"action": action, "existing_device_id": str(target.pk), "server_key": "default"},
+        )
+        request.user = user
+        view.request = request
+        with (
+            patch.object(
+                DeviceConflictActionView,
+                "get_validated_device_with_selections",
+                return_value=(libre_device, validation, {}),
+            ),
+            patch.object(DeviceConflictActionView, "render_device_row", return_value=HttpResponse(b"row-ok")),
+            patch.object(DeviceConflictActionView, "rebind_api_for_server", return_value=view._librenms_api),
+            patch(
+                "netbox_librenms_plugin.views.imports.actions._get_hostname_for_action",
+                return_value=target.name,
+            ),
+        ):
+            return view.post(request, device_id=4242)
+
+    def _post_add_as_oob(self, user, target):
+        """Drive the real AddAsOOBView.post against *target* with only the LibreNMS seams patched."""
+        from django.http import HttpResponse
+
+        from netbox_librenms_plugin.views.imports.actions import AddAsOOBView
+
+        view = AddAsOOBView()
+        view.kwargs = {}
+        view._librenms_api = _make_api()
+        libre_device = {"device_id": 4343, "hostname": f"{target.name}-oob", "sysName": f"{target.name}-oob"}
+        validation = {"oob_candidate": {"device": target, "type": "idrac", "ip": None}}
+        request = RequestFactory().post("/add-as-oob/", {"existing_device_id": str(target.pk), "server_key": "default"})
+        request.user = user
+        view.request = request
+        with (
+            patch.object(
+                AddAsOOBView,
+                "get_validated_device_with_selections",
+                return_value=(libre_device, validation, {}),
+            ),
+            patch.object(AddAsOOBView, "render_device_row", return_value=HttpResponse(b"row-ok")),
+            patch.object(AddAsOOBView, "rebind_api_for_server", return_value=view._librenms_api),
+        ):
+            return view.post(request, device_id=4343)
+
+    def test_conflict_action_cannot_link_an_out_of_scope_device(self):
+        """A pk-constrained change_device grant clears the model-level gate but must not link a device outside its scope."""
+        from dcim.models import Device
+
+        in_scope = make_device("scope-conflict-in")
+        out_of_scope = make_device("scope-conflict-out")
+        user = self._scoped_writer(in_scope, "scoped-conflict-writer")
+
+        response = self._post_conflict(user, out_of_scope)
+
+        assert b"Existing device not found" in response.content
+        assert "librenms_id" not in Device.objects.get(pk=out_of_scope.pk).custom_field_data
+
+    def test_conflict_action_still_links_the_in_scope_device(self):
+        """The device the grant DOES cover resolves through the restricted lookup (no over-block)."""
+        from dcim.models import Device
+
+        in_scope = make_device("scope-conflict-in-2")
+        user = self._scoped_writer(in_scope, "scoped-conflict-writer-2")
+
+        response = self._post_conflict(user, in_scope)
+
+        assert b"Existing device not found" not in response.content
+        assert Device.objects.get(pk=in_scope.pk).custom_field_data["librenms_id"]["default"] == 4242
+
+    def test_add_as_oob_cannot_attach_to_an_out_of_scope_device(self):
+        """AddAsOOB must object-scope its target too: a constrained grant cannot attach an OOB link elsewhere."""
+        from dcim.models import Device
+
+        in_scope = make_device("scope-oob-in")
+        out_of_scope = make_device("scope-oob-out")
+        user = self._scoped_writer(in_scope, "scoped-oob-writer")
+
+        response = self._post_add_as_oob(user, out_of_scope)
+
+        assert b"Existing device not found" in response.content
+        assert "librenms_id" not in Device.objects.get(pk=out_of_scope.pk).custom_field_data
+
+    def test_add_as_oob_still_attaches_to_the_in_scope_device(self):
+        """The in-scope device still resolves and receives the OOB link."""
+        from dcim.models import Device
+
+        in_scope = make_device("scope-oob-in-2")
+        user = self._scoped_writer(in_scope, "scoped-oob-writer-2")
+
+        response = self._post_add_as_oob(user, in_scope)
+
+        assert b"Existing device not found" not in response.content
+        stored = Device.objects.get(pk=in_scope.pk).custom_field_data["librenms_id"]["default"]
+        assert stored["oob"]["id"] == 4343
+
+    def test_superuser_is_unaffected_by_the_restricted_lookup(self):
+        """A superuser keeps the unrestricted queryset, so every device still resolves."""
+        from dcim.models import Device
+
+        target = make_device("scope-conflict-su")
+
+        response = self._post_conflict(make_superuser(), target)
+
+        assert b"Existing device not found" not in response.content
+        assert Device.objects.get(pk=target.pk).custom_field_data["librenms_id"]["default"] == 4242
