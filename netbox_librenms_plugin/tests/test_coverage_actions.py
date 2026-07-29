@@ -967,6 +967,20 @@ class TestBuildSyncInfo:
         result = build_sync_info(libre_device, existing)
         assert result["serial_synced"] is False
 
+    def test_padded_incoming_serial_counts_as_synced(self):
+        """A whitespace-padded LibreNMS serial equal to the stored trimmed value must not report drift."""
+        build_sync_info = self._get_method()
+        libre_device = {"serial": " SN001 ", "os": "ios", "hardware": "-"}
+        existing = MagicMock()
+        existing.serial = "SN001"
+        existing.platform = None
+        existing.device_type = None
+
+        with patch("netbox_librenms_plugin.utils.find_matching_platform", return_value={"found": False}):
+            result = build_sync_info(libre_device, existing)
+
+        assert result["serial_synced"] is True
+
     def test_platform_synced_when_matching(self):
         build_sync_info = self._get_method()
         libre_device = {"serial": "-", "os": "ios", "hardware": "-"}
@@ -3120,6 +3134,12 @@ class TestMigrateLibreNMSIdMorePaths:
 class TestDeviceConflictMoreActions:
     """Tests for many more action paths in DeviceConflictActionView."""
 
+    @pytest.fixture(autouse=True)
+    def _no_advisory_lock(self):
+        """The serial guard's pg_advisory_xact_lock needs a real connection these mock tests don't have."""
+        with patch("netbox_librenms_plugin.views.imports.actions._acquire_serial_assignment_lock"):
+            yield
+
     def _make_view(self):
         from netbox_librenms_plugin.views.imports.actions import DeviceConflictActionView
 
@@ -3159,7 +3179,7 @@ class TestDeviceConflictMoreActions:
         MockDevice = MagicMock()
         MockDevice.objects.get.return_value = mock_existing
         MockDevice.objects.select_for_update.return_value.get.return_value = mock_existing
-        MockDevice.objects.select_for_update.return_value.filter.return_value.exclude.return_value.first.return_value = None
+        MockDevice.objects.filter.return_value.exclude.return_value.first.return_value = None
         MockDevice.DoesNotExist = DoesNotExistExc
 
         stack.enter_context(patch("dcim.models.Device", MockDevice))
@@ -3211,7 +3231,7 @@ class TestDeviceConflictMoreActions:
 
         stack, MockDevice = self._common_patches(view, mock_existing, libre_device, validation)
         with stack:
-            MockDevice.objects.select_for_update.return_value.filter.return_value.exclude.return_value.first.return_value = conflict_device
+            MockDevice.objects.filter.return_value.exclude.return_value.first.return_value = conflict_device
             with patch("netbox_librenms_plugin.views.imports.actions._save_device", return_value=None):
                 response = view.post(request, device_id=42)
 
@@ -3328,6 +3348,12 @@ class TestDeviceConflictMoreActions:
 class TestMoreSaveErrorPaths:
     """Tests for save error paths in actions (lines 1108, 1116, 1119, 1146, 1149, 1168, 1182-1183, 1196-1210, 1222, 1238)."""
 
+    @pytest.fixture(autouse=True)
+    def _no_advisory_lock(self):
+        """The serial guard's pg_advisory_xact_lock needs a real connection these mock tests don't have."""
+        with patch("netbox_librenms_plugin.views.imports.actions._acquire_serial_assignment_lock"):
+            yield
+
     def _make_view(self):
         from netbox_librenms_plugin.views.imports.actions import DeviceConflictActionView
 
@@ -3361,7 +3387,7 @@ class TestMoreSaveErrorPaths:
         MockDevice = MagicMock()
         MockDevice.objects.get.return_value = mock_existing
         MockDevice.objects.select_for_update.return_value.get.return_value = mock_existing
-        MockDevice.objects.select_for_update.return_value.filter.return_value.exclude.return_value.first.return_value = None
+        MockDevice.objects.filter.return_value.exclude.return_value.first.return_value = None
         MockDevice.DoesNotExist = DoesNotExistExc
 
         mock_tx = MagicMock()
@@ -3405,7 +3431,7 @@ class TestMoreSaveErrorPaths:
 
         stack, MockDevice = self._setup_common(view, mock_existing, libre_device, validation, save_return=None)
         with stack:
-            MockDevice.objects.select_for_update.return_value.filter.return_value.exclude.return_value.first.return_value = conflict
+            MockDevice.objects.filter.return_value.exclude.return_value.first.return_value = conflict
             response = view.post(request, device_id=42)
 
         assert response.status_code == 200
@@ -3560,6 +3586,12 @@ class TestSyncSerialAction:
 class TestUpdateAndSerialSaveErrors:
     """Tests for update/update_serial _save_device error paths (lines 1119, 1149)."""
 
+    @pytest.fixture(autouse=True)
+    def _no_advisory_lock(self):
+        """The serial guard's pg_advisory_xact_lock needs a real connection these mock tests don't have."""
+        with patch("netbox_librenms_plugin.views.imports.actions._acquire_serial_assignment_lock"):
+            yield
+
     def _make_view(self):
         from netbox_librenms_plugin.views.imports.actions import DeviceConflictActionView
 
@@ -3585,7 +3617,7 @@ class TestUpdateAndSerialSaveErrors:
         MockDevice = MagicMock()
         MockDevice.objects.get.return_value = mock_existing
         MockDevice.objects.select_for_update.return_value.get.return_value = mock_existing
-        MockDevice.objects.select_for_update.return_value.filter.return_value.exclude.return_value.first.return_value = None
+        MockDevice.objects.filter.return_value.exclude.return_value.first.return_value = None
         MockDevice.DoesNotExist = DoesNotExistExc
         mock_tx = MagicMock()
         mock_tx.atomic.return_value.__enter__ = MagicMock(return_value=None)
@@ -3641,6 +3673,12 @@ class TestUpdateAndSerialSaveErrors:
 
 class TestSyncSerialMorePaths:
     """Tests for sync_serial action edge cases (lines 1182-1200, 1207)."""
+
+    @pytest.fixture(autouse=True)
+    def _no_advisory_lock(self):
+        """The serial guard's pg_advisory_xact_lock needs a real connection these mock tests don't have."""
+        with patch("netbox_librenms_plugin.views.imports.actions._acquire_serial_assignment_lock"):
+            yield
 
     def _make_view(self):
         from netbox_librenms_plugin.views.imports.actions import DeviceConflictActionView
@@ -3715,7 +3753,7 @@ class TestSyncSerialMorePaths:
         with stack:
             MockDevice.objects.select_for_update.return_value.get.return_value = locked_device
             # The conflict lookup runs under select_for_update() too (row lock on the conflicting device).
-            MockDevice.objects.select_for_update.return_value.filter.return_value.exclude.return_value.first.return_value = conflict_device
+            MockDevice.objects.filter.return_value.exclude.return_value.first.return_value = conflict_device
             response = view.post(request, device_id=42)
 
         assert response.status_code == 200
@@ -3744,23 +3782,23 @@ class TestSyncSerialMorePaths:
         with stack:
             MockDevice.objects.select_for_update.return_value.get.return_value = locked_device
             # The conflict lookup runs under select_for_update() too (row lock on the conflicting device).
-            MockDevice.objects.select_for_update.return_value.filter.return_value.exclude.return_value.first.return_value = None
+            MockDevice.objects.filter.return_value.exclude.return_value.first.return_value = None
             with patch("netbox_librenms_plugin.views.imports.actions._save_device", return_value=err):
                 response = view.post(request, device_id=42)
 
         assert response.status_code == 400
 
 
-class TestSyncSerialConflictRowLock:
-    """Real-DB check that the sync_serial conflict lookup locks the conflicting row.
+class TestSyncSerialConflictGuard:
+    """Real-DB check of the sync_serial conflict guard under an actual conflict.
 
-    The link/update/update_serial actions all select_for_update() the conflicting-serial
-    row; sync_serial's guard must do the same so a concurrent action re-pointing that
-    row's serial serializes against this check instead of racing it.
+    Writers of the same serial serialize on a transaction-scoped advisory lock keyed by
+    the serial value; the conflict lookup itself must NOT take a second row lock — with
+    own-device rows already held, two swap-direction requests would deadlock (A→B / B→A).
     """
 
     @pytest.mark.django_db
-    def test_sync_serial_conflict_lookup_runs_under_row_lock(self):
+    def test_sync_serial_conflict_guard_uses_advisory_lock_not_row_lock(self):
         from dcim.models import Device, DeviceRole, DeviceType, Manufacturer, Site
         from django.contrib.auth import get_user_model
         from django.db import connection
@@ -3812,9 +3850,12 @@ class TestSyncSerialConflictRowLock:
             if "dcim_device" in q["sql"] and "SN-LOCK-CONF" in q["sql"] and q["sql"].lstrip().startswith("SELECT")
         ]
         assert conflict_lookups, "conflicting-serial lookup was not captured"
-        assert all("FOR UPDATE" in sql for sql in conflict_lookups), (
-            "sync_serial conflict lookup must lock the conflicting row "
-            f"(unlocked queries: {[s for s in conflict_lookups if 'FOR UPDATE' not in s]})"
+        assert all("FOR UPDATE" not in sql for sql in conflict_lookups), (
+            "sync_serial conflict lookup must not row-lock the conflicting row "
+            f"(locked queries: {[s for s in conflict_lookups if 'FOR UPDATE' in s]})"
+        )
+        assert any("pg_advisory_xact_lock" in q["sql"] for q in ctx.captured_queries), (
+            "advisory lock on the serial value was not taken"
         )
         # The pre-check must not have been broken by the lock: the conflicting row still owns the serial.
         conflict.refresh_from_db()
@@ -6774,3 +6815,89 @@ class TestRebindOrHtmxErrorHelper:
         ):
             assert _rebind_or_htmx_error(view, request) is None
         assert view._librenms_api.server_key == "prod"
+
+
+@pytest.mark.django_db
+class TestSerialActionsNormalizeAndLock:
+    """Serial-writing actions must persist/compare the TRIMMED serial and guard conflicts without a second row lock."""
+
+    def _post_action(self, action, target, serial, monkey=()):
+        """Drive DeviceConflictActionView.post for *action* against real device *target* with only the API/cache seams patched."""
+        from django.http import HttpResponse
+
+        from netbox_librenms_plugin.views.imports.actions import DeviceConflictActionView
+
+        view = DeviceConflictActionView()
+        view._librenms_api = _make_api()
+        libre_device = {
+            "device_id": 10,
+            "hostname": target.name,
+            "sysName": target.name,
+            "serial": serial,
+        }
+        validation = {"can_import": False, "existing_device": target}
+        request = RequestFactory().post(
+            "/conflict-action/",
+            {"action": action, "existing_device_id": str(target.pk), "server_key": "default"},
+        )
+        request.user = make_superuser()
+        view.request = request
+        with (
+            patch.object(
+                DeviceConflictActionView,
+                "get_validated_device_with_selections",
+                return_value=(libre_device, validation, {}),
+            ),
+            patch.object(DeviceConflictActionView, "render_device_row", return_value=HttpResponse(b"row-ok")),
+            patch.object(DeviceConflictActionView, "rebind_api_for_server", return_value=view._librenms_api),
+        ):
+            return view.post(request, device_id=10)
+
+    def test_update_serial_persists_trimmed_serial(self):
+        """A padded LibreNMS serial is stored TRIMMED so the next import's trimmed filter(serial=...) still matches."""
+        target = make_device("ser-act-upd")
+        self._post_action("update_serial", target, " SN-42 ")
+        target.refresh_from_db()
+        assert target.serial == "SN-42"
+
+    def test_sync_serial_persists_trimmed_serial(self):
+        """sync_serial stores the trimmed serial, consistent with validate/import normalization."""
+        target = make_device("ser-act-sync")
+        self._post_action("sync_serial", target, " SN-43 ")
+        target.refresh_from_db()
+        assert target.serial == "SN-43"
+
+    def test_update_serial_detects_conflict_against_trimmed_stored_serial(self):
+        """A padded incoming serial must still hit the conflict guard when another device stored the trimmed value."""
+        make_device("ser-act-owner", serial="SN-7")
+        target = make_device("ser-act-loser")
+        resp = self._post_action("update_serial", target, " SN-7 ")
+        assert b"Serial conflict" in resp.content
+        target.refresh_from_db()
+        assert target.serial == ""  # nothing persisted
+
+    def test_sync_serial_uses_advisory_lock_not_conflict_row_lock(self):
+        """The conflict guard serializes on an advisory lock keyed by the serial value; a second row lock would deadlock two swap-direction requests (A then B vs B then A)."""
+        from django.db import connection
+        from django.test.utils import CaptureQueriesContext
+
+        target = make_device("ser-act-lock")
+        with CaptureQueriesContext(connection) as ctx:
+            self._post_action("sync_serial", target, "SN-77")
+        sqls = [q["sql"] for q in ctx.captured_queries]
+        assert any("pg_advisory_xact_lock" in s for s in sqls), "advisory lock on the serial value not taken"
+        # The own-row lock (WHERE "id" = ...) is expected; a conflict-row lock filters on serial.
+        conflict_row_locks = [s for s in sqls if "FOR UPDATE" in s and '."serial" = ' in s.split("WHERE", 1)[-1]]
+        assert conflict_row_locks == [], f"conflict lookup still takes a row lock: {conflict_row_locks}"
+
+    def test_update_action_serializes_on_the_serial_advisory_lock(self):
+        """The update action's serial write takes the same advisory lock (same deadlock shape as sync_serial)."""
+        from django.db import connection
+        from django.test.utils import CaptureQueriesContext
+
+        target = make_device("ser-act-upd-lock")
+        with CaptureQueriesContext(connection) as ctx:
+            self._post_action("update", target, "SN-88")
+        sqls = [q["sql"] for q in ctx.captured_queries]
+        assert any("pg_advisory_xact_lock" in s for s in sqls)
+        assert [s for s in sqls if "FOR UPDATE" in s and '."serial" = ' in s.split("WHERE", 1)[-1]] == []

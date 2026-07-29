@@ -221,6 +221,26 @@ def _rebind_or_htmx_error(view, request) -> HttpResponse | None:
     return None
 
 
+def _acquire_serial_assignment_lock(serial: str) -> None:
+    """
+    Serialize serial-assignment guards on the serial value (transaction-scoped advisory lock).
+
+    Concurrent writers of the SAME serial contend on one lock, and the second writer's
+    conflict check then sees the first one's committed row — closing the both-pass race a
+    conflict-row lock never covered (it locks nothing while the serial is unassigned).
+    It also replaces that second row lock: with own-row locks already held, two
+    swap-direction requests locking each other's conflict row deadlock (A→B / B→A).
+    Must be called inside ``transaction.atomic()``; the lock releases on commit/rollback.
+
+    Args:
+        serial: The trimmed serial being assigned.
+    """
+    from django.db import connection
+
+    with connection.cursor() as cursor:
+        cursor.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", [serial])
+
+
 def _platform_device_type_mismatch(device) -> HttpResponse | None:
     """
     Mirror NetBox Device.clean()'s platform/device-type manufacturer rule for save paths.
@@ -1341,7 +1361,8 @@ class DeviceValidationDetailsView(LibreNMSPermissionMixin, LibreNMSAPIMixin, Dev
     @staticmethod
     def _build_sync_info(libre_device, existing_device):
         """Build sync comparison data between LibreNMS device and existing NetBox device."""
-        librenms_serial = libre_device.get("serial") or "-"
+        # Trimmed so a padded LibreNMS serial doesn't report drift against the stored trimmed value.
+        librenms_serial = str(libre_device.get("serial") or "").strip() or "-"
         librenms_os = libre_device.get("os") or "-"
         librenms_hardware = libre_device.get("hardware") or "-"
 
@@ -1636,17 +1657,17 @@ class DeviceConflictActionView(
                 elif action == "update":
                     # Update hostname, serial, and link to LibreNMS
                     hostname = _get_hostname_for_action(request, validation, libre_device)
-                    incoming_serial = libre_device.get("serial") or ""
+                    # Trimmed like validate/import_single_device, so the stored value and the
+                    # conflict lookup can't disagree with the match paths on whitespace.
+                    incoming_serial = str(libre_device.get("serial") or "").strip()
                     fields = ["custom_field_data", "name"]
                     if incoming_serial and incoming_serial != "-":
-                        # Lock any conflicting device under the same transaction to reduce
-                        # the serial-assignment race window (best-effort; a DB unique
-                        # constraint on serial would give full protection).
+                        # Advisory lock on the serial VALUE, not a conflict-row lock: two
+                        # swap-direction requests each holding their own device row would
+                        # deadlock on each other's conflict row (A→B / B→A).
+                        _acquire_serial_assignment_lock(incoming_serial)
                         conflict_device = (
-                            Device.objects.select_for_update()
-                            .filter(serial=incoming_serial)
-                            .exclude(pk=existing_device.pk)
-                            .first()
+                            Device.objects.filter(serial=incoming_serial).exclude(pk=existing_device.pk).first()
                         )
                         if conflict_device:
                             return _htmx_error_response(
@@ -1669,17 +1690,14 @@ class DeviceConflictActionView(
 
                 elif action == "update_serial":
                     # Update only the serial and link to LibreNMS
-                    incoming_serial = libre_device.get("serial") or ""
+                    # Trimmed like validate/import_single_device (see the update branch above).
+                    incoming_serial = str(libre_device.get("serial") or "").strip()
                     fields = ["custom_field_data"]
                     if incoming_serial and incoming_serial != "-":
-                        # Lock any conflicting device under the same transaction to reduce
-                        # the serial-assignment race window (best-effort; a DB unique
-                        # constraint on serial would give full protection).
+                        # Advisory lock, not a conflict-row lock — see the update branch above.
+                        _acquire_serial_assignment_lock(incoming_serial)
                         conflict_device = (
-                            Device.objects.select_for_update()
-                            .filter(serial=incoming_serial)
-                            .exclude(pk=existing_device.pk)
-                            .first()
+                            Device.objects.filter(serial=incoming_serial).exclude(pk=existing_device.pk).first()
                         )
                         if conflict_device:
                             return _htmx_error_response(
@@ -1721,29 +1739,23 @@ class DeviceConflictActionView(
             # Sync serial number from LibreNMS.
             # Wrap conflict-check-and-write in a transaction with a row lock so
             # concurrent requests cannot both pass the serial uniqueness guard.
-            incoming_serial = libre_device.get("serial") or ""
+            # Trimmed like validate/import_single_device (see the update branch above).
+            incoming_serial = str(libre_device.get("serial") or "").strip()
             if incoming_serial and incoming_serial != "-":
                 with transaction.atomic():
                     try:
                         locked_device = Device.objects.select_for_update().get(pk=existing_device.pk)
                     except Device.DoesNotExist:
                         return _htmx_error_response("Device no longer exists; it may have been deleted concurrently.")
-                    # Re-check for serial ownership conflict under lock.
+                    # Re-check for serial ownership conflict under the locks.
                     # Note: We intentionally do NOT enforce a DB-level uniqueness constraint on
                     # Device.serial. During device moves/replacements, multiple devices may
                     # temporarily share a serial (old record gets updated later). A unique
-                    # constraint would block those valid workflows. Instead, we rely on this
-                    # in-transaction row-lock check to guard concurrent sync of the SAME serial,
-                    # and flag conflicts via a 409 response for the user to resolve manually.
-                    # Lock the conflicting row too (like the link/update/update_serial checks):
-                    # a concurrent action re-pointing that row's serial then serializes against
-                    # this check instead of racing it.
-                    conflict_device = (
-                        Device.objects.select_for_update()
-                        .filter(serial=incoming_serial)
-                        .exclude(pk=locked_device.pk)
-                        .first()
-                    )
+                    # constraint would block those valid workflows. Instead, concurrent writers
+                    # of the same serial serialize on the advisory lock, and conflicts surface
+                    # as an error response for the user to resolve manually.
+                    _acquire_serial_assignment_lock(incoming_serial)
+                    conflict_device = Device.objects.filter(serial=incoming_serial).exclude(pk=locked_device.pk).first()
                     if conflict_device:
                         logger.warning(
                             f"Serial sync blocked: '{incoming_serial}' already assigned to "
