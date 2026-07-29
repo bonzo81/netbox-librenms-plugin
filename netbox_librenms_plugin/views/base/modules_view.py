@@ -1333,7 +1333,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
             model = (txr.get("model") or "").strip()
             if model.lower() in _PLACEHOLDER_VALUES:
                 model = ""
-            serial = (txr.get("serial") or "").strip()
+            serial = str(txr.get("serial") or "").strip()
             if serial.lower() in _PLACEHOLDER_VALUES:
                 serial = ""
             txr_type = (txr.get("type") or "").strip()

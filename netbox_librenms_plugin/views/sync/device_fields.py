@@ -946,7 +946,7 @@ class ConvertLegacyLibreNMSIdView(LibreNMSPermissionMixin, NetBoxObjectPermissio
             messages.error(request, "Could not retrieve device info from LibreNMS to verify serial.")
             return self._sync_url(object_type, pk)
 
-        librenms_serial = (device_info.get("serial") or "").strip()
+        librenms_serial = str(device_info.get("serial") or "").strip()
         netbox_serial = (getattr(obj, "serial", None) or "").strip()
         # VMs have no serial field in NetBox; skip the serial gate for them.
         is_vm = object_type == "vm"

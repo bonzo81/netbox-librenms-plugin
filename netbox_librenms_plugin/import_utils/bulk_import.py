@@ -789,7 +789,7 @@ def _refresh_existing_device(validation: dict, libre_device: dict = None, server
             # binding to whichever row sorts first would render the wrong device as the existing
             # match, so flag the row ambiguous and block instead of picking arbitrarily.
             ambiguous_fallback = False
-            serial = (libre_device.get("serial") or "").strip()
+            serial = str(libre_device.get("serial") or "").strip()
             if serial and serial != "-":
                 serial_matches = list(_Device.objects.filter(serial=serial)[:2])
                 if len(serial_matches) > 1:

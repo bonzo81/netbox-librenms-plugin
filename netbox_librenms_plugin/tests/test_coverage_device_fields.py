@@ -2164,6 +2164,38 @@ class TestConvertLegacyLibreNMSIdViewPost:
         # The serial gate must read live info (use_cache=False), not a stale sync-tab cache snapshot.
         assert view._librenms_api.get_device_info.call_args.kwargs.get("use_cache") is False
 
+    def test_numeric_librenms_serial_passes_the_serial_gate(self):
+        """An all-digit LibreNMS serial can arrive as an int; the gate must coerce it before stripping, not raise."""
+        view = self._view()
+        mock_obj = MagicMock()
+        mock_obj.custom_field_data = {"librenms_id": "42"}
+        mock_obj.serial = "987654"
+        view._librenms_api.get_device_info.return_value = (True, {"serial": 987654})
+
+        DoesNotExist = type("DoesNotExist", (Exception,), {})
+        mock_locked = MagicMock()
+        mock_locked.custom_field_data = {"librenms_id": "42"}
+        mock_locked.serial = "987654"
+        mock_dev_cls = MagicMock()
+        mock_dev_cls.DoesNotExist = DoesNotExist
+        mock_dev_cls.objects.select_for_update.return_value.get.return_value = mock_locked
+
+        with (
+            patch("netbox_librenms_plugin.views.sync.device_fields.get_object_or_404", return_value=mock_obj),
+            patch("netbox_librenms_plugin.views.sync.device_fields.Device", mock_dev_cls),
+            patch("netbox_librenms_plugin.views.sync.device_fields.find_by_librenms_id", return_value=None),
+            patch(
+                "netbox_librenms_plugin.views.sync.device_fields.migrate_legacy_librenms_id", return_value=True
+            ) as mock_migrate,
+            patch("netbox_librenms_plugin.views.sync.device_fields.transaction"),
+            patch("netbox_librenms_plugin.views.sync.device_fields.messages") as mock_msg,
+            patch("netbox_librenms_plugin.views.sync.device_fields.redirect"),
+        ):
+            view.post(_make_request({"object_type": "device"}), pk=1)
+
+        mock_migrate.assert_called_once()
+        assert not any("Serial number mismatch" in str(c) for c in mock_msg.error.call_args_list)
+
     def test_permission_denied(self):
         view = self._view()
         err = MagicMock()

@@ -128,6 +128,22 @@ class TestMergeTransceiverDataPortIdentity:
         assert item["_librenms_port_id"] == 99
         assert item["_librenms_ifname"] == "Eth2/1"
 
+    def test_numeric_transceiver_serial_is_coerced_to_a_string(self):
+        """An all-digit transceiver serial can arrive as an int; the merge must coerce it before stripping instead of raising."""
+        view = _make_view()
+        view.librenms_id = 104
+        view._librenms_api.get_device_transceivers.return_value = (
+            True,
+            [{"entity_physical_index": 400, "model": "SFP-10G-SR", "serial": 987654, "type": "SFP", "port_id": 8}],
+        )
+        view._librenms_api.get_ports.return_value = (True, {"ports": [{"port_id": 8, "ifName": "Eth4/1"}]})
+
+        inventory, error = view._merge_transceiver_data([])
+
+        assert error is None
+        assert len(inventory) == 1
+        assert inventory[0]["entPhysicalSerialNum"] == "987654"
+
     def test_string_index_matches_int_transceiver_index_no_duplicate(self):
         # LibreNMS may report the ENTITY index as a string ("300") while the transceiver API
         # returns it as an int (300). Without normalization the merge misses the existing ENTITY

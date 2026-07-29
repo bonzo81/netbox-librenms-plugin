@@ -1399,6 +1399,28 @@ class TestValidateDeviceForImportEdgeCases:
         assert validation.get("existing_match_type") == "primary_ip"
         assert validation.get("existing_device") is not None and validation["existing_device"].pk == dev_a.pk
 
+    def test_refresh_serial_fallback_accepts_a_numeric_serial(self):
+        """The refresh serial fallback must coerce an int serial before stripping it, or the whole refresh raises AttributeError instead of rebinding the row."""
+        from netbox_librenms_plugin.import_utils.bulk_import import _refresh_existing_device
+        from netbox_librenms_plugin.tests.conftest import make_device
+
+        dev = make_device("refresh-numeric-serial", serial="555777")
+        libre_device = {
+            "device_id": 92,
+            "hostname": "refresh-numeric-row",  # matches no device name → falls to the serial fallback
+            "sysName": "refresh-numeric-row",
+            "hardware": "-",
+            "serial": 555777,  # int, not str
+            "os": "-",
+            "location": "-",
+        }
+        validation = {"existing_device": None, "issues": [], "warnings": []}
+
+        _refresh_existing_device(validation, libre_device=libre_device, server_key="default")
+
+        assert validation.get("existing_match_type") == "serial"
+        assert validation.get("existing_device") is not None and validation["existing_device"].pk == dev.pk
+
     def test_no_hostname_adds_issue(self):
         """Empty hostname/sysName → _determine_device_name falls back to 'device-{id}'."""
         libre_device = {
@@ -1951,6 +1973,9 @@ class TestValidateSerialMatchStripsWhitespace:
 
         assert result["existing_device"] is not None, "numeric serial was not matched (crash swallowed by validator)"
         assert result["existing_device"].pk == device.pk
+        # The later duplicate/merge stages read the serial again; an uncast read raises AttributeError
+        # there and validate_device_for_import swallows it into a generic "Validation error" issue.
+        assert not any("Validation error" in i for i in result.get("issues", [])), result.get("issues")
 
 
 @pytest.mark.django_db
@@ -2474,6 +2499,29 @@ class TestOOBDetection:
         assert result["merge_candidates"]["oob_named"]["librenms_link"]["host_id"] == 99
         assert result["can_import"] is False
 
+    def test_merge_candidates_detected_for_a_numeric_serial(self):
+        """An all-digit serial arriving as an int must still pair the hostname- and serial-matched devices; the pairing stage reads the serial again and would otherwise raise into the silent merge-detection catch."""
+        from netbox_librenms_plugin.tests.conftest import make_device
+
+        host = make_device("eve-ng-num", serial="123456", librenms_cf={"default": {"id": 42}})
+        oob = make_device("idrac-num", serial="123456", librenms_cf={"default": {"id": 99}})
+        libre_device = {
+            "device_id": 7,
+            "hostname": "eve-ng-num",
+            "sysName": "eve-ng-num",
+            "hardware": "Dell PowerEdge R770",
+            "serial": 123456,  # int, not str
+            "os": "linux",
+            "ip": "10.0.0.11",
+            "version": "",
+            "location": "",
+        }
+        result = self._validate(libre_device)
+
+        assert result["merge_candidates"] is not None
+        assert result["merge_candidates"]["host_named"]["pk"] == host.pk
+        assert result["merge_candidates"]["oob_named"]["pk"] == oob.pk
+
     def test_merge_candidates_skipped_when_neither_device_has_librenms_link(self):
         """Two devices share serial but neither has a LibreNMS link → conservative skip."""
         from netbox_librenms_plugin.tests.conftest import make_device
@@ -2770,7 +2818,7 @@ class TestDetectSerialMatchRole:
         )
 
         existing_link = _describe_existing_librenms_link(existing_device, server_key)
-        serial = (libre_device.get("serial") or "").strip()
+        serial = str(libre_device.get("serial") or "").strip()
         return _detect_serial_match_role(existing_device, existing_link, hostname, serial, libre_device, server_key)
 
     def test_oob_candidate_default_when_incoming_is_oob_and_name_differs(self):

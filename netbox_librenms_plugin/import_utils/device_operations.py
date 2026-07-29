@@ -914,7 +914,7 @@ def validate_device_for_import(
             # the Stage-2 merge-candidate detection below both run the identical UNIQUE [:2] query
             # for the matched type, so share the result instead of issuing it twice per device.
             _match_type = result.get("existing_match_type")
-            _serial_now = (libre_device.get("serial") or "").strip()
+            _serial_now = str(libre_device.get("serial") or "").strip()
             _dup_eligible = (
                 not import_as_vm and result.get("existing_device") is not None and _match_type in ("hostname", "serial")
             )
@@ -984,7 +984,7 @@ def validate_device_for_import(
             # physical box (host + OOB) imported as separate entries. Surface
             # this as a merge action instead of silently picking one.
             try:
-                _serial_for_pair = (libre_device.get("serial") or "").strip()
+                _serial_for_pair = str(libre_device.get("serial") or "").strip()
                 if (
                     _serial_for_pair
                     and _serial_for_pair != "-"
