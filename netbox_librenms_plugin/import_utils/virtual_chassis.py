@@ -405,8 +405,8 @@ def _safe_pos(value) -> int | None:
 
 
 def _norm_serial(s) -> str:
-    """Normalize serial: strip whitespace; treat '-' as absent."""
-    s = str(s or "").strip()
+    """Normalize serial via normalize_serial (only None means missing); additionally treat '-' as absent."""
+    s = normalize_serial(s)
     return "" if s == "-" else s
 
 

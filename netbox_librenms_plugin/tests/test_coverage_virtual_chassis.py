@@ -380,3 +380,24 @@ class TestGenerateVcMemberName:
 
     def test_default_pattern(self):
         assert self._call("switch01", 2, pattern="-M{position}") == "switch01-M2"
+
+
+class TestNormSerial:
+    """_norm_serial(): only None/blank/'-' means missing — a JSON-number serial 0 is real."""
+
+    def test_zero_serial_is_preserved(self):
+        from netbox_librenms_plugin.import_utils.virtual_chassis import _norm_serial
+
+        assert _norm_serial(0) == "0"
+
+    def test_numeric_serial_is_coerced(self):
+        from netbox_librenms_plugin.import_utils.virtual_chassis import _norm_serial
+
+        assert _norm_serial(123456) == "123456"
+
+    def test_none_dash_and_padding(self):
+        from netbox_librenms_plugin.import_utils.virtual_chassis import _norm_serial
+
+        assert _norm_serial(None) == ""
+        assert _norm_serial("-") == ""
+        assert _norm_serial("  SN-1  ") == "SN-1"
