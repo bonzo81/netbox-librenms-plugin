@@ -15,6 +15,7 @@ from virtualization.models import VirtualMachine
 from netbox_librenms_plugin.utils import (
     get_librenms_device_id,
     get_virtual_chassis_members,
+    ip_family,
     resolve_set_primary_ip,
     same_host,
 )
@@ -296,7 +297,9 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
         Returns:
             bool: True if the primary IP changed, False if it was already set.
         """
-        field = "primary_ip6" if ip_obj.family == 6 else "primary_ip4"
+        # ip_family(), not ip_obj.family: NetBox 4.4's property raises AttributeError on the
+        # in-memory str address of a freshly created IPAddress, failing the whole IP sync row.
+        field = "primary_ip6" if ip_family(ip_obj) == 6 else "primary_ip4"
         if getattr(obj, f"{field}_id") == ip_obj.pk:
             return False
         setattr(obj, field, ip_obj)

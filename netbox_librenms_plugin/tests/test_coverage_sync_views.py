@@ -2798,6 +2798,25 @@ class TestSyncIPAddressesViewSetPrimaryIp:
         obj.refresh_from_db()
         assert obj.primary_ip6_id == ip_obj.pk
 
+    @pytest.mark.django_db
+    def test_set_primary_ip_survives_netbox44_family_property(self):
+        """_set_primary_ip must not read IPAddress.family: on NetBox 4.4 the property raises AttributeError on the in-memory str address of a freshly created IPAddress (forced)."""
+        from ipam.models import IPAddress
+
+        from netbox_librenms_plugin.tests.conftest import make_device, make_interface, make_ip
+        from netbox_librenms_plugin.views.sync.ip_addresses import SyncIPAddressesView as V
+
+        obj = make_device("setprimary-nb44")
+        iface = make_interface(obj, "eth0")
+        ip_obj = make_ip("2001:db8::44/64", assigned_object=iface)
+        ip_obj.address = "2001:db8::44/64"  # in-memory str, as after IPAddress.objects.create()
+        # NetBox 4.4's family property verbatim — 4.5+ added a str-tolerant branch.
+        netbox44_family = property(lambda self: self.address.version if self.address else None)
+        with patch.object(IPAddress, "family", netbox44_family):
+            assert V._set_primary_ip(obj, ip_obj) is True
+        obj.refresh_from_db()
+        assert obj.primary_ip6_id == ip_obj.pk
+
     def _run_process(self, view, cached, *, mgmt_ip, set_primary=True):
         """Drive process_ip_sync against a REAL Device + interface so _build_interface_maps() takes the production Device branch."""
         from netbox_librenms_plugin.tests.conftest import make_device, make_interface

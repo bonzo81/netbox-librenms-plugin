@@ -1576,6 +1576,52 @@ class TestSetDeviceIpFkFamily:
         device.refresh_from_db()
         assert device.oob_ip_id == v6.pk
 
+    def test_families_accepted_with_netbox44_family_property(self):
+        """The guard must not read IPAddress.family: on NetBox 4.4 the property raises on an in-memory str address and getattr's default turns that into a bogus refusal (forced)."""
+        from unittest.mock import patch
+
+        from ipam.models import IPAddress
+
+        from netbox_librenms_plugin.tests.conftest import ip_on, make_device
+        from netbox_librenms_plugin.utils import set_device_ip_fk
+
+        device = make_device("fam-nb44dev")
+        v4 = ip_on(device, "10.0.0.4/24", "eth0")
+        v4.address = "10.0.0.4/24"  # in-memory str, as after IPAddress.objects.create()
+        # NetBox 4.4's family property verbatim — 4.5+ added a str-tolerant branch.
+        netbox44_family = property(lambda self: self.address.version if self.address else None)
+        with patch.object(IPAddress, "family", netbox44_family):
+            set_device_ip_fk(device, "primary_ip4", v4)
+        device.refresh_from_db()
+        assert device.primary_ip4_id == v4.pk
+
+
+class TestIpFamily:
+    """ip_family(): family read that works on NetBox 4.4, whose IPAddress.family lacks the 4.5+ str-address branch."""
+
+    def test_str_address(self):
+        from ipam.models import IPAddress
+
+        from netbox_librenms_plugin.utils import ip_family
+
+        assert ip_family(IPAddress(address="10.0.0.1/24")) == 4
+        assert ip_family(IPAddress(address="2001:db8::1/64")) == 6
+
+    def test_ipnetwork_address(self):
+        import netaddr
+        from ipam.models import IPAddress
+
+        from netbox_librenms_plugin.utils import ip_family
+
+        assert ip_family(IPAddress(address=netaddr.IPNetwork("10.0.0.1/24"))) == 4
+
+    def test_empty_address_is_none(self):
+        from ipam.models import IPAddress
+
+        from netbox_librenms_plugin.utils import ip_family
+
+        assert ip_family(IPAddress()) is None
+
 
 @pytest.mark.django_db
 class TestGetVirtualChassisMemberNoneName:
