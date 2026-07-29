@@ -241,6 +241,43 @@ def _acquire_serial_assignment_lock(serial: str) -> None:
         cursor.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", [serial])
 
 
+def _apply_conflict_checked_serial(device, incoming_serial: str) -> HttpResponse | None:
+    """
+    Assign *incoming_serial* to *device* under the serial advisory lock, or report the conflict.
+
+    Shared by the conflict view's update / update_serial / sync_serial actions so the three can't
+    drift on the lock, the ownership guard, or the message. Must be called inside
+    ``transaction.atomic()`` — the advisory lock is transaction-scoped, so the read-then-write is
+    only serialized while the caller's transaction is open.
+
+    NetBox deliberately has no DB-level uniqueness on ``Device.serial``: during moves and
+    replacements two devices may temporarily share one. Conflicts therefore surface as an error
+    for the user to resolve rather than a constraint violation.
+
+    Args:
+        device: The Device to mutate. ``serial`` is set in memory only; the caller persists it.
+        incoming_serial: The already-trimmed serial from LibreNMS.
+
+    Returns:
+        HttpResponse | None: An HTMX error toast when another device owns the serial, else None.
+    """
+    from dcim.models import Device
+
+    _acquire_serial_assignment_lock(incoming_serial)
+    conflict_device = Device.objects.filter(serial=incoming_serial).exclude(pk=device.pk).first()
+    if conflict_device:
+        logger.warning(
+            f"Serial assignment blocked: '{incoming_serial}' already assigned to "
+            f"'{conflict_device.name}' (pk={conflict_device.pk})"
+        )
+        return _htmx_error_response(
+            f"Serial conflict: '{incoming_serial}' is already assigned to device "
+            f"'{conflict_device.name}' (ID: {conflict_device.pk})"
+        )
+    device.serial = incoming_serial
+    return None
+
+
 def _platform_device_type_mismatch(device) -> HttpResponse | None:
     """
     Mirror NetBox Device.clean()'s platform/device-type manufacturer rule for save paths.
@@ -1666,19 +1703,8 @@ class DeviceConflictActionView(
                     incoming_serial = str(libre_device.get("serial") or "").strip()
                     fields = ["custom_field_data", "name"]
                     if incoming_serial and incoming_serial != "-":
-                        # Advisory lock on the serial VALUE, not a conflict-row lock: two
-                        # swap-direction requests each holding their own device row would
-                        # deadlock on each other's conflict row (A→B / B→A).
-                        _acquire_serial_assignment_lock(incoming_serial)
-                        conflict_device = (
-                            Device.objects.filter(serial=incoming_serial).exclude(pk=existing_device.pk).first()
-                        )
-                        if conflict_device:
-                            return _htmx_error_response(
-                                f"Serial conflict: '{incoming_serial}' is already assigned to device "
-                                f"'{conflict_device.name}' (ID: {conflict_device.pk})"
-                            )
-                        existing_device.serial = incoming_serial
+                        if err := _apply_conflict_checked_serial(existing_device, incoming_serial):
+                            return err
                         fields.append("serial")
                     existing_device.name = hostname
                     if librenms_device_type:
@@ -1698,17 +1724,8 @@ class DeviceConflictActionView(
                     incoming_serial = str(libre_device.get("serial") or "").strip()
                     fields = ["custom_field_data"]
                     if incoming_serial and incoming_serial != "-":
-                        # Advisory lock, not a conflict-row lock — see the update branch above.
-                        _acquire_serial_assignment_lock(incoming_serial)
-                        conflict_device = (
-                            Device.objects.filter(serial=incoming_serial).exclude(pk=existing_device.pk).first()
-                        )
-                        if conflict_device:
-                            return _htmx_error_response(
-                                f"Serial conflict: '{incoming_serial}' is already assigned to device "
-                                f"'{conflict_device.name}' (ID: {conflict_device.pk})"
-                            )
-                        existing_device.serial = incoming_serial
+                        if err := _apply_conflict_checked_serial(existing_device, incoming_serial):
+                            return err
                         fields.append("serial")
                     if librenms_device_type:
                         existing_device.device_type = librenms_device_type
@@ -1751,25 +1768,9 @@ class DeviceConflictActionView(
                         locked_device = Device.objects.select_for_update().get(pk=existing_device.pk)
                     except Device.DoesNotExist:
                         return _htmx_error_response("Device no longer exists; it may have been deleted concurrently.")
-                    # Re-check for serial ownership conflict under the locks.
-                    # Note: We intentionally do NOT enforce a DB-level uniqueness constraint on
-                    # Device.serial. During device moves/replacements, multiple devices may
-                    # temporarily share a serial (old record gets updated later). A unique
-                    # constraint would block those valid workflows. Instead, concurrent writers
-                    # of the same serial serialize on the advisory lock, and conflicts surface
-                    # as an error response for the user to resolve manually.
-                    _acquire_serial_assignment_lock(incoming_serial)
-                    conflict_device = Device.objects.filter(serial=incoming_serial).exclude(pk=locked_device.pk).first()
-                    if conflict_device:
-                        logger.warning(
-                            f"Serial sync blocked: '{incoming_serial}' already assigned to "
-                            f"'{conflict_device.name}' (pk={conflict_device.pk})"
-                        )
-                        return _htmx_error_response(
-                            f"Serial conflict: '{incoming_serial}' is already assigned to device "
-                            f"'{conflict_device.name}' (ID: {conflict_device.pk})"
-                        )
-                    locked_device.serial = incoming_serial
+                    # Re-check for serial ownership conflict under the locks, on the LOCKED row.
+                    if err := _apply_conflict_checked_serial(locked_device, incoming_serial):
+                        return err
                     if err := _save_device(locked_device, update_fields=["serial"], request=request):
                         return err
                     logger.info(f"Synced serial on '{locked_device.name}' to {incoming_serial}")
