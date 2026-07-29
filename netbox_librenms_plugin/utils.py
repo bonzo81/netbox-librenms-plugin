@@ -1150,6 +1150,21 @@ def check_vlan_group_matches(
     return True
 
 
+def normalize_serial(value) -> str:
+    """
+    Return the trimmed str form of a LibreNMS serial; only None means missing.
+
+    LibreNMS returns all-digit serials as JSON numbers, so the value must be
+    coerced before stripping — and ``str(value or "")`` would silently drop the
+    real-but-falsey serial ``0``. Call sites keep their own ``"-"`` placeholder
+    guards.
+
+    Args:
+        value: The raw serial as returned by LibreNMS (str, number, or None).
+    """
+    return "" if value is None else str(value).strip()
+
+
 def coerce_librenms_id(value) -> int | None:
     """
     Coerce a raw LibreNMS ID value (int or string-digit) to int, or None.

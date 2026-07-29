@@ -21,6 +21,7 @@ from ..utils import (
     get_librenms_oob,
     is_legacy_librenms_id,
     match_librenms_hardware_to_device_type,
+    normalize_serial,
     set_librenms_device_id,
 )
 from ..constants import normalize_oob_type
@@ -727,7 +728,7 @@ def validate_device_for_import(
 
                 # Check if name matches resolved name (VC-aware: compare against VC member name)
                 if hostname and existing_device.virtual_chassis and existing_device.vc_position:
-                    incoming_serial = str(libre_device.get("serial") or "").strip()
+                    incoming_serial = normalize_serial(libre_device.get("serial"))
                     if incoming_serial == "-":
                         incoming_serial = ""
                     vc_expected_name = _generate_vc_member_name(
@@ -750,7 +751,7 @@ def validate_device_for_import(
                 # OOB sub-key (existing_match_type == "librenms_oob"): the incoming payload is the
                 # OOB controller's, so comparing it against the host record's serial would surface
                 # bogus replacement/conflict warnings on a row that is already correctly linked.
-                incoming_serial = str(libre_device.get("serial") or "").strip()
+                incoming_serial = normalize_serial(libre_device.get("serial"))
                 if result["existing_match_type"] != "librenms_oob" and incoming_serial and incoming_serial != "-":
                     if existing_device.serial and existing_device.serial == incoming_serial:
                         result["serial_confirmed"] = True
@@ -821,7 +822,7 @@ def validate_device_for_import(
                 result["existing_librenms_link"] = _describe_existing_librenms_link(existing_device, server_key)
 
                 # Check for serial conflict on hostname-matched device
-                incoming_serial = str(libre_device.get("serial") or "").strip()
+                incoming_serial = normalize_serial(libre_device.get("serial"))
                 if incoming_serial and incoming_serial != "-" and existing_device.serial != incoming_serial:
                     serial_conflict = (
                         Device.objects.filter(serial=incoming_serial).exclude(pk=existing_device.pk).first()
@@ -855,7 +856,7 @@ def validate_device_for_import(
                 # device that stored the trimmed value and mint a duplicate. The serial is stripped
                 # consistently across the drift checks above and the persisted value (import_single_device),
                 # so a match, a comparison, and the stored serial can't disagree on whitespace.
-                serial = str(libre_device.get("serial") or "").strip()
+                serial = normalize_serial(libre_device.get("serial"))
                 if serial and serial != "-" and not import_as_vm:
                     # Serial is not unique in NetBox, so .first() would bind an arbitrary row
                     # and the downstream serial/OOB/merge flow would derive its guidance from a
@@ -914,7 +915,7 @@ def validate_device_for_import(
             # the Stage-2 merge-candidate detection below both run the identical UNIQUE [:2] query
             # for the matched type, so share the result instead of issuing it twice per device.
             _match_type = result.get("existing_match_type")
-            _serial_now = str(libre_device.get("serial") or "").strip()
+            _serial_now = normalize_serial(libre_device.get("serial"))
             _dup_eligible = (
                 not import_as_vm and result.get("existing_device") is not None and _match_type in ("hostname", "serial")
             )
@@ -984,7 +985,7 @@ def validate_device_for_import(
             # physical box (host + OOB) imported as separate entries. Surface
             # this as a merge action instead of silently picking one.
             try:
-                _serial_for_pair = str(libre_device.get("serial") or "").strip()
+                _serial_for_pair = normalize_serial(libre_device.get("serial"))
                 if (
                     _serial_for_pair
                     and _serial_for_pair != "-"
@@ -1615,7 +1616,7 @@ def import_single_device(
             # Persist the serial TRIMMED (LibreNMS/SNMP serials often carry surrounding whitespace):
             # storing it padded would make the next import's trimmed ``filter(serial=...)`` miss this
             # device and mint a duplicate. Keeps the stored value consistent with the match lookups.
-            serial = str(libre_device.get("serial") or "").strip()
+            serial = normalize_serial(libre_device.get("serial"))
             if serial and serial != "-":
                 device_data["serial"] = serial
 

@@ -43,6 +43,7 @@ from netbox_librenms_plugin.utils import (
     coerce_librenms_id,
     get_librenms_sync_device,
     is_legacy_librenms_id,
+    normalize_serial,
     resolve_naming_preferences,
     resolve_server_mapping_display_id,
     same_host,
@@ -1399,7 +1400,7 @@ class DeviceValidationDetailsView(LibreNMSPermissionMixin, LibreNMSAPIMixin, Dev
     def _build_sync_info(libre_device, existing_device):
         """Build sync comparison data between LibreNMS device and existing NetBox device."""
         # Trimmed so a padded LibreNMS serial doesn't report drift against the stored trimmed value.
-        librenms_serial = str(libre_device.get("serial") or "").strip() or "-"
+        librenms_serial = normalize_serial(libre_device.get("serial")) or "-"
         librenms_os = libre_device.get("os") or "-"
         librenms_hardware = libre_device.get("hardware") or "-"
 
@@ -1700,7 +1701,7 @@ class DeviceConflictActionView(
                     hostname = _get_hostname_for_action(request, validation, libre_device)
                     # Trimmed like validate/import_single_device, so the stored value and the
                     # conflict lookup can't disagree with the match paths on whitespace.
-                    incoming_serial = str(libre_device.get("serial") or "").strip()
+                    incoming_serial = normalize_serial(libre_device.get("serial"))
                     fields = ["custom_field_data", "name"]
                     if incoming_serial and incoming_serial != "-":
                         if err := _apply_conflict_checked_serial(existing_device, incoming_serial):
@@ -1721,7 +1722,7 @@ class DeviceConflictActionView(
                 elif action == "update_serial":
                     # Update only the serial and link to LibreNMS
                     # Trimmed like validate/import_single_device (see the update branch above).
-                    incoming_serial = str(libre_device.get("serial") or "").strip()
+                    incoming_serial = normalize_serial(libre_device.get("serial"))
                     fields = ["custom_field_data"]
                     if incoming_serial and incoming_serial != "-":
                         if err := _apply_conflict_checked_serial(existing_device, incoming_serial):
@@ -1761,7 +1762,7 @@ class DeviceConflictActionView(
             # Wrap conflict-check-and-write in a transaction with a row lock so
             # concurrent requests cannot both pass the serial uniqueness guard.
             # Trimmed like validate/import_single_device (see the update branch above).
-            incoming_serial = str(libre_device.get("serial") or "").strip()
+            incoming_serial = normalize_serial(libre_device.get("serial"))
             if incoming_serial and incoming_serial != "-":
                 with transaction.atomic():
                     try:

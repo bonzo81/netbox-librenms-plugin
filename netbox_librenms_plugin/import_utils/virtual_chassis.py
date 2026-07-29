@@ -8,6 +8,7 @@ from django.core.cache import cache
 from django.db import transaction
 
 from ..librenms_api import LibreNMSAPI
+from ..utils import normalize_serial
 
 logger = logging.getLogger(__name__)
 
@@ -523,7 +524,7 @@ def create_virtual_chassis_with_members(
                 # Normalize serial and position up front so all skip-checks and
                 # downstream logic use consistent values (strips whitespace and
                 # treats the sentinel "-" as "no serial").
-                serial = str(member.get("serial") or "").strip()
+                serial = normalize_serial(member.get("serial"))
                 if serial == "-":
                     serial = ""
                 member_pos = _safe_pos(member.get("position"))

@@ -1980,6 +1980,27 @@ class TestValidateSerialMatchStripsWhitespace:
         # there and validate_device_for_import swallows it into a generic "Validation error" issue.
         assert not any("Validation error" in i for i in result.get("issues", [])), result.get("issues")
 
+    def test_zero_serial_still_matches_existing_device(self):
+        """A serial of JSON number 0 is real (only None means missing) and must still match a device stored as "0"."""
+        from netbox_librenms_plugin.import_utils.device_operations import validate_device_for_import
+
+        device = self._make_device("zero-serial-host", serial="0")
+        libre_device = {
+            "device_id": 8815,
+            "hostname": "zero-import-row",
+            "sysName": "zero-import-row",
+            "serial": 0,  # falsey but real — `str(x or "")` would silently drop it
+            "hardware": "-",
+            "os": "-",
+            "location": "-",
+        }
+
+        result = validate_device_for_import(libre_device, api=None, server_key="default", include_vc_detection=False)
+
+        assert result["existing_device"] is not None, "zero serial was dropped as falsey instead of matched"
+        assert result["existing_device"].pk == device.pk
+        assert not any("Validation error" in i for i in result.get("issues", [])), result.get("issues")
+
 
 @pytest.mark.django_db
 class TestImportPersistsTrimmedSerial:

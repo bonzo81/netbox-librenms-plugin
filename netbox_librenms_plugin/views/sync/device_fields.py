@@ -24,6 +24,7 @@ from netbox_librenms_plugin.utils import (
     is_legacy_librenms_id,
     match_librenms_hardware_to_device_type,
     migrate_legacy_librenms_id,
+    normalize_serial,
     resolve_naming_preferences,
 )
 from netbox_librenms_plugin.views.mixins import (
@@ -946,7 +947,7 @@ class ConvertLegacyLibreNMSIdView(LibreNMSPermissionMixin, NetBoxObjectPermissio
             messages.error(request, "Could not retrieve device info from LibreNMS to verify serial.")
             return self._sync_url(object_type, pk)
 
-        librenms_serial = str(device_info.get("serial") or "").strip()
+        librenms_serial = normalize_serial(device_info.get("serial"))
         netbox_serial = (getattr(obj, "serial", None) or "").strip()
         # VMs have no serial field in NetBox; skip the serial gate for them.
         is_vm = object_type == "vm"

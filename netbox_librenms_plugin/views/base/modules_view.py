@@ -16,6 +16,7 @@ from netbox_librenms_plugin.utils import (
     get_module_template_interface_names,
     is_valid_ports_payload,
     normalize_librenms_port_id,
+    normalize_serial,
 )
 from netbox_librenms_plugin.views.mixins import (
     CacheMixin,
@@ -1333,7 +1334,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
             model = (txr.get("model") or "").strip()
             if model.lower() in _PLACEHOLDER_VALUES:
                 model = ""
-            serial = str(txr.get("serial") or "").strip()
+            serial = normalize_serial(txr.get("serial"))
             if serial.lower() in _PLACEHOLDER_VALUES:
                 serial = ""
             txr_type = (txr.get("type") or "").strip()
