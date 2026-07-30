@@ -6599,6 +6599,16 @@ class TestMergeNetBoxDevicesViewVCSyncDevice:
         # The raw selected member (m2) never held a link; nothing is planted on it.
         assert "id" not in self._entry(m2)
 
+    def test_legacy_id_on_donor_sync_sibling_gets_convert_first_message(self):
+        """A legacy link on the donor's sync sibling gets the friendly convert-first message."""
+        _vc, _sync_member, selected_member = _two_member_vc("mrg-vc-legacy", m1_cf=30, m2_cf=None)
+        winner = make_device("mrg-vc-legacy-winner", librenms_cf={"default": {"id": 50}})
+
+        response = self._run_merge(winner=winner, donor=selected_member)
+
+        assert b"Donor device has a legacy bare-integer librenms_id" in response.content
+        assert b"Convert mapping" in response.content
+
     def test_merge_locks_every_vc_member_before_resolving_the_sync_device(self):
         """The merge must lock every VC member (incl. bystanders) before resolving the sync device."""
         import re
@@ -7954,7 +7964,7 @@ class TestConflictActionsObjectScope:
 
 @pytest.mark.django_db
 class TestMergeNetBoxDevicesViewDonorDerivation:
-    """The merge view derives the donor from winner_pk + merge_candidates and ignores the client-posted donor_pk, which a stale/failed inline sync script could otherwise leave equal to winner_pk (a self-merge of moving data)."""
+    """The merge derives the donor from winner_pk + merge_candidates and ignores posted donor_pk."""
 
     def _make_view(self):
         from netbox_librenms_plugin.views.imports.actions import MergeNetBoxDevicesView
@@ -7975,7 +7985,7 @@ class TestMergeNetBoxDevicesViewDonorDerivation:
         winner = make_device("merge-w", librenms_cf={"default": {"id": 20}})
         donor = make_device("merge-d", librenms_cf={"default": {"id": 10}})
 
-        # Bogus client state: donor_pk == winner_pk (inline sync script never ran).
+        # Tampered client state: donor_pk == winner_pk must not turn this into a self-merge.
         request = _make_request(post={"winner_pk": str(winner.pk), "donor_pk": str(winner.pk)})
 
         validation = {"merge_candidates": {"host_named": {"pk": winner.pk}, "oob_named": {"pk": donor.pk}}}
@@ -8010,7 +8020,7 @@ class TestPromoteAndMergeObjectScope:
     any device.
     """
 
-    def _post_promote(self, user, target):
+    def _post_promote(self, user, target, **overrides):
         """Drive the real PromoteToHostView.post against *target* with only the LibreNMS seams patched."""
         from django.http import HttpResponse
 
@@ -8023,9 +8033,8 @@ class TestPromoteAndMergeObjectScope:
             "existing_device": target,
             "promote_to_host": {"existing_libre_id": 10, "existing_oob_type": "idrac"},
         }
-        request = RequestFactory().post(
-            "/promote-to-host/", {"existing_device_id": str(target.pk), "server_key": "default"}
-        )
+        post_data = {"existing_device_id": str(target.pk), "server_key": "default", **overrides}
+        request = RequestFactory().post("/promote-to-host/", post_data)
         request.user = user
         view.request = request
         with (
@@ -8090,6 +8099,40 @@ class TestPromoteAndMergeObjectScope:
         entry = Device.objects.get(pk=in_scope.pk).custom_field_data["librenms_id"]["default"]
         assert entry["id"] == 55
         assert entry["oob"]["id"] == 10
+
+    def test_promote_rejects_an_unviewable_device_type_override(self):
+        """A catalog ID outside the user's view scope cannot change the promoted device type."""
+        from dcim.models import Device, DeviceType
+
+        target = make_device("promote-hidden-dt", librenms_cf={"default": {"id": 10}})
+        hidden_type = DeviceType.objects.create(
+            manufacturer=target.device_type.manufacturer,
+            model="Hidden Promote Type",
+            slug="hidden-promote-type",
+        )
+        user = _scoped_device_writer(target, "scoped-promote-hidden-dt")
+
+        response = self._post_promote(user, target, override_device_type_id=str(hidden_type.pk))
+
+        assert b"Invalid override_device_type_id" in response.content
+        assert Device.objects.get(pk=target.pk).device_type_id == target.device_type_id
+
+    def test_promote_rejects_an_unviewable_platform_override(self):
+        """A catalog ID outside the user's view scope cannot change the promoted platform."""
+        from dcim.models import Device, Platform
+
+        target = make_device("promote-hidden-platform", librenms_cf={"default": {"id": 10}})
+        hidden_platform = Platform.objects.create(
+            name="Hidden Promote Platform",
+            slug="hidden-promote-platform",
+            manufacturer=target.device_type.manufacturer,
+        )
+        user = _scoped_device_writer(target, "scoped-promote-hidden-platform")
+
+        response = self._post_promote(user, target, override_platform_id=str(hidden_platform.pk))
+
+        assert b"Invalid override_platform_id" in response.content
+        assert Device.objects.get(pk=target.pk).platform_id is None
 
     def test_merge_cannot_absorb_an_out_of_scope_donor(self):
         """The donor is derived server-side but still resolved by pk, so an out-of-scope donor must not be merged away."""

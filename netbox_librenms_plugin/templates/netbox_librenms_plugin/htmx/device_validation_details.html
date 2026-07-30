@@ -434,9 +434,6 @@
         hx-include="#use-sysname-toggle, #strip-domain-toggle">
         {% csrf_token %}
         {% include "netbox_librenms_plugin/inc/_hidden_server_key.html" %}
-        {# Default to the host-named winner's donor (oob) so a JS failure still posts a valid donor. #}
-        <input type="hidden" name="donor_pk" id="merge-donor-{{ libre_device.device_id }}"
-               value="{{ validation.merge_candidates.oob_named.pk }}">
         <div class="mb-3">
           <div class="text-muted small mb-2">Choose the winner (kept). The other becomes the donor (absorbed):</div>
           {% with host=validation.merge_candidates.host_named oob=validation.merge_candidates.oob_named %}
@@ -444,7 +441,6 @@
             <input class="form-check-input merge-winner-radio" type="radio" name="winner_pk"
                    id="merge-winner-host-{{ libre_device.device_id }}"
                    value="{{ host.pk }}"
-                   data-donor-pk="{{ oob.pk }}"
                    checked>
             <label class="form-check-label" for="merge-winner-host-{{ libre_device.device_id }}">
               <span class="badge bg-primary-lt me-1">Host name match</span>
@@ -455,8 +451,7 @@
           <div class="form-check mb-1">
             <input class="form-check-input merge-winner-radio" type="radio" name="winner_pk"
                    id="merge-winner-oob-{{ libre_device.device_id }}"
-                   value="{{ oob.pk }}"
-                   data-donor-pk="{{ host.pk }}">
+                   value="{{ oob.pk }}">
             <label class="form-check-label" for="merge-winner-oob-{{ libre_device.device_id }}">
               <span class="badge bg-purple text-white me-1">Serial match (OOB)</span>
               <strong>{{ oob.name }}</strong>
@@ -469,24 +464,6 @@
           <i class="mdi mdi-merge"></i> Merge donor into selected winner
         </button>
       </form>
-      <script>
-        (function() {
-          var donorInput = document.getElementById("merge-donor-{{ libre_device.device_id }}");
-          if (!donorInput) return;
-          // Scope to THIS form: a document-wide query would pick up merge-winner radios from
-          // another validation fragment left in the DOM and write the wrong donor_pk, merging
-          // the wrong NetBox device.
-          var form = donorInput.closest("form");
-          var radios = form ? form.querySelectorAll('input.merge-winner-radio[name="winner_pk"]') : [];
-          function syncDonor() {
-            radios.forEach(function(r) {
-              if (r.checked) { donorInput.value = r.dataset.donorPk || ""; }
-            });
-          }
-          radios.forEach(function(r) { r.addEventListener("change", syncDonor); });
-          syncDonor();
-        })();
-      </script>
 
     {% elif validation.existing_match_type == 'librenms_id' %}
       <div class="alert alert-info py-2 mb-3 d-flex flex-wrap align-items-center gap-1">

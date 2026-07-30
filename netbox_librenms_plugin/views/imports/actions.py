@@ -3101,7 +3101,7 @@ class PromoteToHostView(
             from dcim.models import DeviceType
 
             try:
-                override_device_type = DeviceType.objects.get(pk=int(override_dt_id))
+                override_device_type = self.restricted_queryset(DeviceType, "view").get(pk=int(override_dt_id))
             except (DeviceType.DoesNotExist, ValueError, TypeError):
                 return _htmx_error_response("Invalid override_device_type_id")
 
@@ -3110,7 +3110,7 @@ class PromoteToHostView(
             from dcim.models import Platform
 
             try:
-                override_platform = Platform.objects.get(pk=int(override_platform_id))
+                override_platform = self.restricted_queryset(Platform, "view").get(pk=int(override_platform_id))
             except (Platform.DoesNotExist, ValueError, TypeError):
                 return _htmx_error_response("Invalid override_platform_id")
 
@@ -3336,12 +3336,9 @@ class MergeNetBoxDevicesView(
             (merge_candidates.get("oob_named") or {}).get("pk"),
         }
         candidate_pks.discard(None)
-        # Derive the donor from the selected winner instead of trusting the client-posted
-        # donor_pk. The donor hidden field is kept in sync with the winner radio by inline JS;
-        # if that JS fails to run, the form would post winner_pk as its own donor (a no-op /
-        # self-merge) or a stale donor. The merge is always between this fixed pair of
-        # candidates, so the donor is unambiguously the *other* candidate — no client state
-        # needed. This also enforces that the winner is one of the two merge candidates.
+        # Derive the donor from the selected winner. The merge is always between this fixed pair
+        # of candidates, so the donor is unambiguously the other candidate and no client-supplied
+        # donor state is needed. This also enforces that the winner is one of the two candidates.
         if winner_pk not in candidate_pks or len(candidate_pks) != 2:
             return _htmx_error_response("winner_pk does not match the validation result's merge candidates")
         donor_pk = next(pk for pk in candidate_pks if pk != winner_pk)
@@ -3359,15 +3356,6 @@ class MergeNetBoxDevicesView(
             donor = changeable.get(pk=donor_pk)
         except Device.DoesNotExist:
             return _htmx_error_response("Winner or donor device not found")
-
-        # Reject legacy bare-int librenms_id form on either side. The merge
-        # helpers refuse to operate on legacy data to prevent silent migration.
-        for label, obj in (("winner", winner), ("donor", donor)):
-            if is_legacy_librenms_id(obj.custom_field_data.get("librenms_id")):
-                return _htmx_error_response(
-                    f"{label.capitalize()} device has a legacy bare-integer librenms_id; "
-                    "use 'Convert mapping' to migrate before merging."
-                )
 
         server_key = self.librenms_api.server_key
 
@@ -3418,6 +3406,15 @@ class MergeNetBoxDevicesView(
             sync_pks = {winner_sync.pk, donor_sync.pk}
             if set(changeable.filter(pk__in=sync_pks).values_list("pk", flat=True)) != sync_pks:
                 return _htmx_error_response("Winner or donor device not found")
+            # Gate the link-holding sync devices, not merely the selected VC members. The merge
+            # helpers reject legacy data either way; checking here preserves the actionable
+            # convert-first message when the legacy link lives on a sibling.
+            for label, obj in (("winner", winner_sync), ("donor", donor_sync)):
+                if is_legacy_librenms_id(obj.custom_field_data.get("librenms_id")):
+                    return _htmx_error_response(
+                        f"{label.capitalize()} device has a legacy bare-integer librenms_id; "
+                        "use 'Convert mapping' to migrate before merging."
+                    )
             if winner_sync.pk == donor_sync.pk:
                 # Both candidates belong to the same virtual chassis (one sync device); merging its
                 # LibreNMS link into itself would read and write the same CF entry. Fail closed.

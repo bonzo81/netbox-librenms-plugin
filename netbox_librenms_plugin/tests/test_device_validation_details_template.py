@@ -76,13 +76,13 @@ class TestDeviceValidationDetailsMergeBadge:
         assert "the IP is already on a winner interface" in html
         assert "(only if the winner has no OOB IP yet)" not in html
 
-    def test_merge_donor_sync_script_is_scoped_to_its_form(self):
-        """The donor-sync script must scope its winner-radio lookup to the current form, not the whole document."""
+    def test_merge_derives_donor_without_client_state(self):
+        """The merge form posts only the winner because the server derives the donor."""
         html = self._render()
-        # Form-scoped lookup present...
-        assert 'closest("form")' in html
-        # ...and the fragile document-wide winner-radio query is gone.
-        assert "document.querySelectorAll('input.merge-winner-radio" not in html
+        assert 'name="winner_pk"' in html
+        assert 'name="donor_pk"' not in html
+        assert "data-donor-pk" not in html
+        assert "syncDonor" not in html
 
     def test_merge_candidate_oob_only_link_is_not_labelled_unlinked(self):
         """A merge candidate linked as OOB-only (oob_id set, host_id empty) must be labelled as OOB-linked, not mislabelled 'not linked to LibreNMS'."""
@@ -144,12 +144,12 @@ class TestDeviceValidationDetailsMergeBadge:
         assert "not linked to LibreNMS" not in html  # non-vacuous: must NOT also render the unlinked label
 
         # The merge POST must carry the naming toggles (use_sysname / strip_domain) so a
-        # user-selected naming mode survives the revalidation the merge triggers. The merge form
-        # is the one carrying the donor_pk input; check its opening tag has the hx-include.
-        merge_chunks = [c for c in html.split("<form") if 'name="donor_pk"' in c]
+        # user-selected naming mode survives the revalidation the merge triggers.
+        merge_chunks = [c for c in html.split("<form") if 'name="winner_pk"' in c]
         assert merge_chunks, "merge form was not rendered"
         merge_tag = merge_chunks[0].split(">", 1)[0]
         assert "use-sysname-toggle" in merge_tag and "strip-domain-toggle" in merge_tag
+        assert 'name="donor_pk"' not in html
 
 
 @pytest.mark.django_db
