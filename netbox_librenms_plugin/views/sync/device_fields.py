@@ -182,7 +182,7 @@ class UpdateDeviceSerialView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixi
             messages.error(request, "Failed to retrieve device info from LibreNMS")
             return _device_sync_redirect(request, pk, server_key)
 
-        serial = device_info.get("serial")
+        serial = normalize_serial(device_info.get("serial"))
 
         if not serial or serial == "-":
             messages.warning(request, "No serial number available in LibreNMS")
@@ -684,7 +684,7 @@ class AssignVCSerialView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, L
 
         counter = 1
         while f"serial_{counter}" in request.POST:
-            serial = request.POST.get(f"serial_{counter}")
+            serial = normalize_serial(request.POST.get(f"serial_{counter}"))
             member_id = request.POST.get(f"member_id_{counter}")
 
             if not member_id:

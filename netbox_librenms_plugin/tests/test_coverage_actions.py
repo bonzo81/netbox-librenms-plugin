@@ -6,7 +6,6 @@ import pytest
 from django.test import RequestFactory
 
 from netbox_librenms_plugin.tests.conftest import (
-    collapse_queryset_chain,
     make_device,
     make_interface,
     make_ip,
@@ -3006,7 +3005,6 @@ class TestDeviceConflictSelectForUpdateDoesNotExist:
                 # select_for_update().get() raises DoesNotExist
                 MockDevice.objects.select_for_update.return_value.get.side_effect = DoesNotExistExc("gone")
                 MockDevice.DoesNotExist = DoesNotExistExc
-                collapse_queryset_chain(MockDevice)
                 with patch.object(view, "require_object_permissions", return_value=None):
                     with patch.object(
                         view, "get_validated_device_with_selections", return_value=(libre_device, validation, {})
@@ -3110,7 +3108,6 @@ class TestMigrateLibreNMSIdMorePaths:
             with patch("dcim.models.Device") as MockDevice:
                 MockDevice.objects.restrict.return_value.get.return_value = mock_existing
                 MockDevice.DoesNotExist = DoesNotExistExc
-                collapse_queryset_chain(MockDevice)
                 with patch.object(view, "require_object_permissions", return_value=None):
                     with patch.object(
                         view, "get_validated_device_with_selections", return_value=(libre_device, validation, {})
@@ -3203,7 +3200,6 @@ class TestDeviceConflictMoreActions:
         MockDevice.objects.select_for_update.return_value.get.return_value = mock_existing
         MockDevice.objects.filter.return_value.exclude.return_value.first.return_value = None
         MockDevice.DoesNotExist = DoesNotExistExc
-        collapse_queryset_chain(MockDevice)
 
         stack.enter_context(patch("dcim.models.Device", MockDevice))
         stack.enter_context(patch.object(view, "require_object_permissions", return_value=None))
@@ -3412,7 +3408,6 @@ class TestMoreSaveErrorPaths:
         MockDevice.objects.select_for_update.return_value.get.return_value = mock_existing
         MockDevice.objects.filter.return_value.exclude.return_value.first.return_value = None
         MockDevice.DoesNotExist = DoesNotExistExc
-        collapse_queryset_chain(MockDevice)
 
         mock_tx = MagicMock()
         mock_tx.atomic.return_value.__enter__ = MagicMock(return_value=None)
@@ -3643,7 +3638,6 @@ class TestUpdateAndSerialSaveErrors:
         MockDevice.objects.select_for_update.return_value.get.return_value = mock_existing
         MockDevice.objects.filter.return_value.exclude.return_value.first.return_value = None
         MockDevice.DoesNotExist = DoesNotExistExc
-        collapse_queryset_chain(MockDevice)
         mock_tx = MagicMock()
         mock_tx.atomic.return_value.__enter__ = MagicMock(return_value=None)
         mock_tx.atomic.return_value.__exit__ = MagicMock(return_value=False)
@@ -3720,7 +3714,6 @@ class TestSyncSerialMorePaths:
         MockDevice = MagicMock()
         MockDevice.objects.restrict.return_value.get.return_value = mock_existing
         MockDevice.DoesNotExist = DoesNotExistExc
-        collapse_queryset_chain(MockDevice)
         mock_tx = MagicMock()
         mock_tx.atomic.return_value.__enter__ = MagicMock(return_value=None)
         mock_tx.atomic.return_value.__exit__ = MagicMock(return_value=False)
@@ -3875,9 +3868,10 @@ class TestSyncSerialConflictGuard:
         conflict_lookups = [
             q["sql"]
             for q in ctx.captured_queries
-            if "dcim_device" in q["sql"] and "SN-LOCK-CONF" in q["sql"] and q["sql"].lstrip().startswith("SELECT")
+            if "dcim_device" in q["sql"] and '."serial" = ' in q["sql"] and q["sql"].lstrip().startswith("SELECT")
         ]
         assert conflict_lookups, "conflicting-serial lookup was not captured"
+        assert all("TRIM(" not in sql for sql in conflict_lookups)
         assert all("FOR UPDATE" not in sql for sql in conflict_lookups), (
             "sync_serial conflict lookup must not row-lock the conflicting row "
             f"(locked queries: {[s for s in conflict_lookups if 'FOR UPDATE' in s]})"
@@ -3927,7 +3921,6 @@ class TestMigrateLibreNMSIdTransactionPaths:
         MockDevice.objects.restrict.return_value.get.return_value = mock_existing
         MockDevice.objects.select_for_update.return_value.get.return_value = locked_device
         MockDevice.DoesNotExist = DoesNotExistExc
-        collapse_queryset_chain(MockDevice)
 
         mock_tx = MagicMock()
         mock_tx.atomic.return_value.__enter__ = MagicMock(return_value=None)
@@ -6851,7 +6844,7 @@ class TestRebindOrHtmxErrorHelper:
 class TestSerialActionsNormalizeAndLock:
     """Serial-writing actions must persist/compare the TRIMMED serial and guard conflicts without a second row lock."""
 
-    def _post_action(self, action, target, serial, monkey=()):
+    def _post_action(self, action, target, serial):
         """Drive DeviceConflictActionView.post for *action* against real device *target* with only the API/cache seams patched."""
         from django.http import HttpResponse
 
@@ -6883,8 +6876,21 @@ class TestSerialActionsNormalizeAndLock:
         ):
             return view.post(request, device_id=10)
 
+    @staticmethod
+    def _serial_row_locks(sqls):
+        """Return FOR UPDATE queries whose WHERE clause filters by serial."""
+        serial_row_locks = []
+        for sql in sqls:
+            if "FOR UPDATE" not in sql:
+                continue
+            _, separator, where_clause = sql.partition(" WHERE ")
+            assert separator, f"FOR UPDATE query has no WHERE clause: {sql}"
+            if '."serial" = ' in where_clause:
+                serial_row_locks.append(sql)
+        return serial_row_locks
+
     def test_update_serial_persists_trimmed_serial(self):
-        """A padded LibreNMS serial is stored TRIMMED so the next import's trimmed filter(serial=...) still matches."""
+        """A padded LibreNMS serial is stored trimmed so the next exact lookup still matches."""
         target = make_device("ser-act-upd")
         self._post_action("update_serial", target, " SN-42 ")
         target.refresh_from_db()
@@ -6917,7 +6923,7 @@ class TestSerialActionsNormalizeAndLock:
         sqls = [q["sql"] for q in ctx.captured_queries]
         assert any("pg_advisory_xact_lock" in s for s in sqls), "advisory lock on the serial value not taken"
         # The own-row lock (WHERE "id" = ...) is expected; a conflict-row lock filters on serial.
-        conflict_row_locks = [s for s in sqls if "FOR UPDATE" in s and '."serial" = ' in s.split("WHERE", 1)[-1]]
+        conflict_row_locks = self._serial_row_locks(sqls)
         assert conflict_row_locks == [], f"conflict lookup still takes a row lock: {conflict_row_locks}"
 
     def test_serial_lock_refuses_to_run_in_autocommit(self):
@@ -6941,7 +6947,7 @@ class TestSerialActionsNormalizeAndLock:
             self._post_action("update", target, "SN-88")
         sqls = [q["sql"] for q in ctx.captured_queries]
         assert any("pg_advisory_xact_lock" in s for s in sqls)
-        assert [s for s in sqls if "FOR UPDATE" in s and '."serial" = ' in s.split("WHERE", 1)[-1]] == []
+        assert self._serial_row_locks(sqls) == []
 
     def test_conflict_toast_escapes_the_conflicting_device_name(self):
         """_htmx_error_response substitutes the message via format_html('{}', ...), so a marked-up conflicting device name renders escaped — adding escape() at the call site would double-escape."""
@@ -6953,8 +6959,18 @@ class TestSerialActionsNormalizeAndLock:
         assert b"&lt;script&gt;" in resp.content
 
     def test_conflict_detected_against_legacy_padded_stored_serial(self):
-        """A conflict row imported before serial normalization may store a padded serial; the trimmed conflict lookup must still find it."""
-        make_device("ser-act-legacy-owner", serial=" SN-LEG-9 ")
+        """The migration canonicalizes a legacy owner before the exact conflict lookup runs."""
+        import importlib
+        from types import SimpleNamespace
+
+        from django.apps import apps
+        from django.db import connection
+
+        owner = make_device("ser-act-legacy-owner", serial=" SN-LEG-9 ")
+        migration = importlib.import_module("netbox_librenms_plugin.migrations.0012_normalize_device_serials")
+        migration.normalize_device_serials(apps, SimpleNamespace(connection=connection))
+        owner.refresh_from_db()
+        assert owner.serial == "SN-LEG-9"
         target = make_device("ser-act-legacy-loser")
         resp = self._post_action("update_serial", target, "SN-LEG-9")
         assert b"Serial conflict" in resp.content

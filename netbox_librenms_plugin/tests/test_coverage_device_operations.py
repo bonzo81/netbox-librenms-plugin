@@ -2002,10 +2002,20 @@ class TestValidateSerialMatchStripsWhitespace:
         assert not any("Validation error" in i for i in result.get("issues", [])), result.get("issues")
 
     def test_legacy_padded_stored_serial_still_matches(self):
-        """A device row imported before serial normalization may store a padded serial; the trimmed identity match must still bind it instead of minting a duplicate."""
+        """The data migration canonicalizes a legacy padded row before exact identity matching."""
+        import importlib
+        from types import SimpleNamespace
+
+        from django.apps import apps
+        from django.db import connection
+
         from netbox_librenms_plugin.import_utils.device_operations import validate_device_for_import
 
         device = self._make_device("legacy-padded-host", serial=" SN-LEG-7 ")
+        migration = importlib.import_module("netbox_librenms_plugin.migrations.0012_normalize_device_serials")
+        migration.normalize_device_serials(apps, SimpleNamespace(connection=connection))
+        device.refresh_from_db()
+        assert device.serial == "SN-LEG-7"
         libre_device = {
             "device_id": 8816,
             "hostname": "legacy-import-row",
@@ -2018,7 +2028,7 @@ class TestValidateSerialMatchStripsWhitespace:
 
         result = validate_device_for_import(libre_device, api=None, server_key="default", include_vc_detection=False)
 
-        assert result["existing_device"] is not None, "legacy padded stored serial was not matched"
+        assert result["existing_device"] is not None, "migrated serial was not matched exactly"
         assert result["existing_device"].pk == device.pk
 
     def test_padded_stored_serial_on_linked_device_is_confirmed_not_drift(self):
@@ -2104,7 +2114,7 @@ class TestValidateSerialMatchStripsWhitespace:
 
 @pytest.mark.django_db
 class TestImportPersistsTrimmedSerial:
-    """import_single_device must persist a whitespace-trimmed serial, so the next import's trimmed filter(serial=...) matches it instead of minting a duplicate (real DB, real Device.save())."""
+    """import_single_device persists a trimmed serial so the next exact lookup finds it."""
 
     def test_padded_incoming_serial_is_stored_trimmed(self):
         from unittest.mock import patch
@@ -2940,10 +2950,29 @@ class TestDetectSerialMatchRole:
             _describe_existing_librenms_link,
             _detect_serial_match_role,
         )
+        from netbox_librenms_plugin.utils import normalize_serial
 
         existing_link = _describe_existing_librenms_link(existing_device, server_key)
-        serial = str(libre_device.get("serial") or "").strip()
+        serial = normalize_serial(libre_device.get("serial"))
         return _detect_serial_match_role(existing_device, existing_link, hostname, serial, libre_device, server_key)
+
+    def test_zero_serial_is_preserved_in_hostname_difference_warning(self):
+        """The test helper follows production normalization, where numeric zero is a real serial."""
+        from netbox_librenms_plugin.tests.conftest import make_device
+
+        device = make_device("zero-warning-old")
+        libre_device = {
+            "device_id": 7,
+            "os": "linux",
+            "hardware": "server",
+            "hostname": "zero-warning-new",
+            "serial": 0,
+        }
+
+        out = self._role(device, "zero-warning-new", libre_device)
+
+        assert out["serial_action"] == "hostname_differs"
+        assert any("same serial (0)" in warning for warning in out["warnings"])
 
     def test_oob_candidate_default_when_incoming_is_oob_and_name_differs(self):
         # Existing unlinked host; incoming LibreNMS row is clearly an iDRAC whose hostname
@@ -3268,10 +3297,10 @@ class TestValidateDedupsSerialDuplicateQuery:
 
         # The duplicate-detection serial lookup (serial[:2], no .exclude) must run exactly once,
         # not once per stage. The .first() match query is LIMIT 1; the cross-side query has NOT.
-        # filter_by_trimmed_serial() compares TRIM(serial), so match the trimmed predicate.
         serial_dup_queries = [
             q["sql"]
             for q in ctx.captured_queries
-            if 'serial") =' in q["sql"].lower() and "limit 2" in q["sql"].lower() and "not" not in q["sql"].lower()
+            if '."serial" =' in q["sql"].lower() and "limit 2" in q["sql"].lower() and "not" not in q["sql"].lower()
         ]
         assert len(serial_dup_queries) == 1
+        assert all("trim(" not in sql.lower() for sql in serial_dup_queries)

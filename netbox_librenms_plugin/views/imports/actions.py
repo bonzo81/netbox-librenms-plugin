@@ -43,7 +43,6 @@ from netbox_librenms_plugin.utils import (
     coerce_librenms_id,
     get_librenms_sync_device,
     is_legacy_librenms_id,
-    filter_by_trimmed_serial,
     normalize_serial,
     resolve_naming_preferences,
     resolve_server_mapping_display_id,
@@ -271,7 +270,7 @@ def _apply_conflict_checked_serial(device, incoming_serial: str) -> HttpResponse
     from dcim.models import Device
 
     _acquire_serial_assignment_lock(incoming_serial)
-    conflict_device = filter_by_trimmed_serial(Device.objects.all(), incoming_serial).exclude(pk=device.pk).first()
+    conflict_device = Device.objects.filter(serial=incoming_serial).exclude(pk=device.pk).first()
     if conflict_device:
         logger.warning(
             f"Serial assignment blocked: '{incoming_serial}' already assigned to "

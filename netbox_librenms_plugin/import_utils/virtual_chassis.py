@@ -8,7 +8,7 @@ from django.core.cache import cache
 from django.db import transaction
 
 from ..librenms_api import LibreNMSAPI
-from ..utils import filter_by_trimmed_serial, normalize_serial
+from ..utils import normalize_serial
 
 logger = logging.getLogger(__name__)
 
@@ -549,7 +549,7 @@ def create_virtual_chassis_with_members(
                 )
 
                 # Check for duplicate serial
-                if serial and filter_by_trimmed_serial(Device.objects.all(), serial).exists():
+                if serial and Device.objects.filter(serial=serial).exists():
                     logger.warning(f"Device with serial '{serial}' already exists, skipping VC member creation")
                     continue
 

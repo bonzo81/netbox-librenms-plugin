@@ -1446,6 +1446,52 @@ class TestRenormalizeDeviceTypeMappingsMigration:
         assert not DeviceTypeMapping.objects.filter(librenms_hardware="beta").exists()
 
 
+# =============================================================================
+# Device serial canonicalization data migration (0012)
+# =============================================================================
+@pytest.mark.django_db
+class TestNormalizeDeviceSerialsMigration:
+    """The 0012 migration canonicalizes legacy Device serials and indexes exact lookups."""
+
+    @staticmethod
+    def _run_migration():
+        import importlib
+        from types import SimpleNamespace
+
+        from django.apps import apps
+        from django.db import connection
+
+        module = importlib.import_module("netbox_librenms_plugin.migrations.0012_normalize_device_serials")
+        module.normalize_device_serials(apps, SimpleNamespace(connection=connection))
+
+    def test_all_surrounding_whitespace_is_trimmed_and_blank_serials_are_canonicalized(self):
+        """Python strip semantics remove tabs/newlines/Unicode whitespace, including whitespace-only values."""
+        from dcim.models import Device
+
+        from netbox_librenms_plugin.tests.conftest import make_device
+
+        padded = make_device("serial-migration-padded", serial="\t SN-MIG-1 \n")
+        blank = make_device("serial-migration-blank", serial="\u2003\t\n")
+        unchanged = make_device("serial-migration-clean", serial="SN-MIG-2")
+
+        self._run_migration()
+
+        assert Device.objects.get(pk=padded.pk).serial == "SN-MIG-1"
+        assert Device.objects.get(pk=blank.pk).serial == ""
+        assert Device.objects.get(pk=unchanged.pk).serial == "SN-MIG-2"
+
+    def test_plain_serial_index_exists(self):
+        """The migration adds the ordinary B-tree index used by exact serial equality lookups."""
+        from django.db import connection
+
+        with connection.cursor() as cursor:
+            constraints = connection.introspection.get_constraints(cursor, "dcim_device")
+
+        index = constraints["nblp_dcim_device_serial_idx"]
+        assert index["index"] is True
+        assert index["columns"] == ["serial"]
+
+
 class TestCacheRemainingTtl:
     """cache_remaining_ttl reads .ttl on django-redis and degrades to None on backends without it."""
 

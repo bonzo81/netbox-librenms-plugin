@@ -5,8 +5,6 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from netbox_librenms_plugin.tests.conftest import collapse_queryset_chain
-
 
 def _make_master_device(serial="MASTER001"):
     """Build a mock master Device for VC creation tests."""
@@ -61,7 +59,6 @@ class TestCreateVirtualChassisWithMembersPositionConflict:
         mock_filter.exists.return_value = False
         mock_filter.exclude.return_value = mock_filter
         mock_Device.objects.filter.return_value = mock_filter
-        collapse_queryset_chain(mock_Device)
         mock_Device.objects.create.return_value = MagicMock()
 
         # Members: first at position 2, second ALSO at position 2 (conflict)
@@ -112,7 +109,6 @@ class TestCreateVirtualChassisWithMembersPositionConflict:
         mock_filter.exists.return_value = False
         mock_filter.exclude.return_value = mock_filter
         mock_Device.objects.filter.return_value = mock_filter
-        collapse_queryset_chain(mock_Device)
         mock_Device.objects.create.return_value = MagicMock()
 
         # Member A explicitly at position 2
@@ -159,7 +155,6 @@ class TestCreateVirtualChassisWithMembersPositionConflict:
         mock_filter.exists.return_value = False
         mock_filter.exclude.return_value = mock_filter
         mock_Device.objects.filter.return_value = mock_filter
-        collapse_queryset_chain(mock_Device)
         mock_Device.objects.create.return_value = MagicMock()
 
         # Members at positions 2 and 3; then one with no position → should get 4
@@ -204,7 +199,6 @@ class TestCreateVirtualChassisWithMembersPositionConflict:
         mock_filter.exists.return_value = False
         mock_filter.exclude.return_value = mock_filter
         mock_Device.objects.filter.return_value = mock_filter
-        collapse_queryset_chain(mock_Device)
         mock_Device.objects.create.return_value = MagicMock()
 
         members_info = [
@@ -250,7 +244,6 @@ class TestCreateVirtualChassisServerKeyDomain:
         mock_filter.exists.return_value = False
         mock_filter.exclude.return_value = mock_filter
         mock_Device.objects.filter.return_value = mock_filter
-        collapse_queryset_chain(mock_Device)
         mock_Device.objects.create.return_value = MagicMock()
 
         libre_device = {"device_id": 42}
@@ -289,7 +282,6 @@ class TestCreateVirtualChassisServerKeyDomain:
         mock_filter.exists.return_value = False
         mock_filter.exclude.return_value = mock_filter
         mock_Device.objects.filter.return_value = mock_filter
-        collapse_queryset_chain(mock_Device)
         mock_Device.objects.create.return_value = MagicMock()
 
         libre_device = {"device_id": 99}
