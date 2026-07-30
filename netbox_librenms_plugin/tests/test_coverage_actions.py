@@ -5764,14 +5764,14 @@ class TestBulkImportDevicesViewCollisionGate:
     def test_unfetchable_id_is_skipped_rest_imports(self):
         """A selected id whose LibreNMS info can't be fetched (not cached + get_device_info fails) is SKIPPED, not a whole-batch block: the fetchable rows still import and the skipped row is surfaced. Restores the per-device resilience the old fail-closed block removed."""
         view = self._make_view()
+        make_device("gate-unresolved-host")
+        libre = {1: {"device_id": 1, "sysName": "gate-unresolved-host", "hostname": "gate-unresolved-host"}}
         # id 2 isn't cached and its info fetch fails → it can't be collision-checked → skipped.
         view._librenms_api.get_device_info = lambda did, *a, **k: (True, libre[did]) if did in libre else (False, None)
         request = _make_request(post={"select": ["1", "2"]}, headers={"HX-Request": "true"})
         request.POST.getlist = MagicMock(return_value=["1", "2"])
         request.user = _import_authorized_user()
 
-        make_device("gate-unresolved-host")
-        libre = {1: {"device_id": 1, "sysName": "gate-unresolved-host", "hostname": "gate-unresolved-host"}}
         import_result = {"success": [], "failed": [], "skipped": [], "virtual_chassis_created": 0}
         with (
             patch.object(view, "require_write_permission", return_value=None),
@@ -8843,6 +8843,118 @@ class TestBulkImportPermGateRunsBeforeEnqueue:
         write.object_types.set([ObjectType.objects.get_for_model(LibreNMSSettings)])
         write.users.set([user])
         return get_user_model().objects.get(pk=user.pk)  # clear the per-request perm cache
+
+    @staticmethod
+    def _plugin_writer_with_device_perms(username):
+        """A real plugin writer with only the Device add/change permissions."""
+        from core.models import ObjectType
+        from dcim.models import Device
+        from django.contrib.auth import get_user_model
+        from users.models import ObjectPermission
+
+        user = TestBulkImportPermGateRunsBeforeEnqueue._plugin_writer_without_import_perms(username)
+        device_write = ObjectPermission.objects.create(
+            name=f"{username}-device-import",
+            actions=["add", "change"],
+        )
+        device_write.object_types.set([ObjectType.objects.get_for_model(Device)])
+        device_write.users.set([user])
+        return get_user_model().objects.get(pk=user.pk)  # clear the per-request perm cache
+
+    @staticmethod
+    def _request_for(user, data):
+        """Build a real POST request with session-backed message storage."""
+        from django.contrib.messages.storage.fallback import FallbackStorage
+        from django.contrib.sessions.middleware import SessionMiddleware
+        from django.test import RequestFactory
+
+        request = RequestFactory().post("/device-import/bulk/", data=data)
+        request.user = user
+        SessionMiddleware(lambda req: None).process_request(request)
+        request.session.save()
+        request._messages = FallbackStorage(request)
+        return request
+
+    def test_plain_device_background_batch_does_not_require_vm_permission(self):
+        """Device add/change grants reach enqueue without add_virtualmachine."""
+        view = self._make_view()
+        user = self._plugin_writer_with_device_perms("bulk-device-only-perms")
+        request = self._request_for(user, {"select": ["1"]})
+        view.request = request
+
+        assert user.has_perm("dcim.add_device")
+        assert user.has_perm("dcim.change_device")
+        assert not user.has_perm("virtualization.add_virtualmachine")
+
+        with (
+            patch.object(type(view), "should_use_background_job_for_import", return_value=True, create=False),
+            patch("utilities.rqworker.get_workers_for_queue", return_value=1),
+            patch(
+                "netbox_librenms_plugin.jobs.ImportDevicesJob.enqueue",
+                return_value=MagicMock(pk=4331, job_id="job-4331"),
+            ) as mock_enqueue,
+        ):
+            response = view.post(request)
+
+        mock_enqueue.assert_called_once()
+        assert mock_enqueue.call_args.kwargs["device_ids"] == [1]
+        assert mock_enqueue.call_args.kwargs["vm_imports"] == {}
+        messages_sent = [str(m) for m in request._messages]
+        assert not any("do not have permission to import" in m for m in messages_sent), messages_sent
+        assert response.status_code in (301, 302)
+
+    def test_explicit_vm_background_batch_still_requires_vm_permission(self):
+        """An explicit VM row is denied before enqueue without add_virtualmachine."""
+        view = self._make_view()
+        user = self._plugin_writer_with_device_perms("bulk-explicit-vm-no-perm")
+        request = self._request_for(user, {"select": ["1"], "cluster_1": "1"})
+        view.request = request
+
+        with (
+            patch.object(type(view), "should_use_background_job_for_import", return_value=True, create=False),
+            patch("utilities.rqworker.get_workers_for_queue", return_value=1),
+            patch("netbox_librenms_plugin.jobs.ImportDevicesJob.enqueue") as mock_enqueue,
+        ):
+            response = view.post(request)
+
+        mock_enqueue.assert_not_called()
+        messages_sent = [str(m) for m in request._messages]
+        assert any("virtualization.add_virtualmachine" in m for m in messages_sent), messages_sent
+        assert response.status_code in (301, 302)
+
+    def test_device_row_flipped_to_vm_fails_without_vm_permission(self):
+        """A validation-time Device→VM flip fails per-row without creating a VM."""
+        from virtualization.models import VirtualMachine
+
+        from netbox_librenms_plugin.import_utils import bulk_import_devices_shared
+
+        user = self._plugin_writer_with_device_perms("bulk-flipped-vm-no-perm")
+        existing_vm = make_vm("bulk-flipped-vm")
+        vm_count = VirtualMachine.objects.count()
+        libre_device = {
+            "device_id": 13,
+            "hostname": existing_vm.name,
+            "sysName": existing_vm.name,
+            "serial": "",
+            "hardware": "",
+            "os": "",
+        }
+        api = MagicMock(server_key="default", cache_timeout=300)
+
+        with patch("netbox_librenms_plugin.import_utils.bulk_import.LibreNMSAPI", return_value=api):
+            result = bulk_import_devices_shared(
+                device_ids=[13],
+                server_key="default",
+                libre_devices_cache={13: libre_device},
+                user=user,
+            )
+
+        assert VirtualMachine.objects.count() == vm_count
+        assert result["success"] == []
+        assert result["skipped"] == []
+        assert len(result["failed"]) == 1
+        assert result["failed"][0]["device_id"] == 13
+        assert "virtualization.add_virtualmachine" in result["failed"][0]["error"]
 
     def test_unauthorized_background_import_is_denied_without_enqueueing(self):
         """A plugin-writer without dcim.add_device is denied and no ImportDevicesJob is enqueued."""

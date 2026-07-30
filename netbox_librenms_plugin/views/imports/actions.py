@@ -1049,8 +1049,7 @@ class BulkImportDevicesView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
         # every import, before either path starts.
         required_import_perms = set()
         if device_ids_to_import:
-            # Any device row may be flagged import_as_vm during validation; VC updates need change.
-            required_import_perms.update({"dcim.add_device", "dcim.change_device", "virtualization.add_virtualmachine"})
+            required_import_perms.update({"dcim.add_device", "dcim.change_device"})
         if vm_imports:
             required_import_perms.add("virtualization.add_virtualmachine")
         missing_import_perms = [p for p in sorted(required_import_perms) if not request.user.has_perm(p)]

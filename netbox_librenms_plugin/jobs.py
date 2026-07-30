@@ -207,9 +207,7 @@ class ImportDevicesJob(JobRunner):
         # here, with the same standalone helper and perm sets the import paths enforce.
         required_permissions = set()
         if device_ids:
-            # Mirrors bulk_import_devices_shared: any device row may be flagged
-            # import_as_vm during validation, and VC master/member updates need change.
-            required_permissions.update({"dcim.add_device", "dcim.change_device", "virtualization.add_virtualmachine"})
+            required_permissions.update({"dcim.add_device", "dcim.change_device"})
         if vm_imports:
             required_permissions.add("virtualization.add_virtualmachine")
         if required_permissions:
@@ -237,6 +235,7 @@ class ImportDevicesJob(JobRunner):
         # The shared block/skip decision (classify_bulk_precheck); None until the pre-check runs and
         # consulted by the VM section below so devices and VMs apply the SAME skip set.
         precheck_outcome = None
+        skipped_id_set = set()
         if collision_check_ids:
             # Defense-in-depth: block a batch where two LibreNMS rows resolve to the same NetBox
             # device, mirroring the confirm-preview/sync-view gate so the async path can't import a
@@ -276,6 +275,7 @@ class ImportDevicesJob(JobRunner):
                 # batch; rows that couldn't be collision-checked are SKIPPED (not a whole-batch
                 # block) so a transient miss on one row doesn't drop the entire import.
                 precheck_outcome = classify_bulk_precheck(collisions, unresolved, device_ids, vm_imports)
+                skipped_id_set = set(precheck_outcome.skipped_ids)
                 if precheck_outcome.blocked:
                     self.logger.error(precheck_outcome.block_message)
                     device_result["failed"] = [
@@ -296,7 +296,7 @@ class ImportDevicesJob(JobRunner):
                             job=self,  # Pass job context for logging and cancellation
                             user=self.job.user,  # Pass user for permission checks
                         )
-                    skipped_device_ids = [d for d in device_ids if d in set(precheck_outcome.skipped_ids)]
+                    skipped_device_ids = [d for d in device_ids if d in skipped_id_set]
                     if skipped_device_ids:
                         self.logger.warning(precheck_outcome.skip_message)
                         device_result.setdefault("failed", []).extend(
@@ -316,9 +316,7 @@ class ImportDevicesJob(JobRunner):
                 # Apply the same skip set to VMs: import the collision-checked VM rows, skip the
                 # unresolved ones (surfaced as failures with the shared message).
                 importable_vm_imports = precheck_outcome.importable_vm_imports if precheck_outcome else vm_imports
-                skipped_vm_ids = (
-                    [d for d in vm_imports if d in set(precheck_outcome.skipped_ids)] if precheck_outcome else []
-                )
+                skipped_vm_ids = [d for d in vm_imports if d in skipped_id_set] if precheck_outcome else []
                 if importable_vm_imports:
                     self.logger.info(f"Importing {len(importable_vm_imports)} VMs...")
                     from netbox_librenms_plugin.import_utils import bulk_import_vms

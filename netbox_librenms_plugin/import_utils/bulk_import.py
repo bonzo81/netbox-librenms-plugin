@@ -360,13 +360,10 @@ def bulk_import_devices_shared(
     if user is None and job is not None:
         user = getattr(job.job, "user", None)
 
-    # Check permissions at start of bulk operation — device and VM add perms are
-    # required because any device may be flagged as import_as_vm during validation.
     # change_device is needed for VC master/member updates.
     required_perms = [
         "dcim.add_device",
         "dcim.change_device",
-        "virtualization.add_virtualmachine",
     ]
     require_permissions(user, required_perms, "import devices")
 
@@ -445,6 +442,20 @@ def bulk_import_devices_shared(
                 include_vc_detection=True,
                 preloaded_device_type_rules=device_type_norm_rules,
             )
+
+            if validation.get("import_as_vm"):
+                has_vm_perm, _ = check_user_permissions(user, ["virtualization.add_virtualmachine"])
+                if not has_vm_perm:
+                    error_msg = (
+                        f"Cannot import device row {device_id} as a VM: "
+                        "missing permission virtualization.add_virtualmachine"
+                    )
+                    failed_list.append({"device_id": device_id, "error": error_msg})
+                    if job and job.logger:
+                        job.logger.error(error_msg)
+                    else:
+                        logger.error(error_msg)
+                    continue
 
             vc_data = validation.get("virtual_chassis", {})
             if vc_data.get("is_stack", False):

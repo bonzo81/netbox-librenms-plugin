@@ -486,12 +486,12 @@ class TestImportDevicesJob:
     @patch("netbox_librenms_plugin.import_utils.bulk_import_devices_shared")
     @patch("netbox_librenms_plugin.librenms_api.LibreNMSAPI")
     def test_run_vm_only_batch_is_collision_gated(self, mock_api_class, mock_bulk_devices, mock_bulk_vms):
-        """A VM-only batch goes through the same fail-closed gate, so unverifiable ids block the VM import."""
+        """A VM-only batch skips unverifiable rows through the shared collision pre-check."""
         from netbox_librenms_plugin.jobs import ImportDevicesJob
 
         mock_api_class.return_value = MagicMock(server_key="default")
         # get_device_info fails for the VM ids → they can't be collision-checked → the batch-wide
-        # gate must fail closed and skip the VM import (before the fix the gate only saw device_ids,
+        # pre-check must skip those rows and the VM import (before the fix it only saw device_ids,
         # so a VM-only batch bypassed it entirely and bulk_import_vms ran unchecked).
         mock_api_class.return_value.get_device_info.side_effect = lambda did: (False, None)
 
@@ -503,7 +503,7 @@ class TestImportDevicesJob:
             server_key="default",
         )
 
-        # The VM import must NOT run — the batch is blocked closed.
+        # The VM import must NOT run because every submitted row was skipped.
         mock_bulk_vms.assert_not_called()
         mock_bulk_devices.assert_not_called()
         assert job.job.data["failed_count"] == 2
@@ -1036,7 +1036,7 @@ class TestImportDevicesJob:
     def test_run_device_batch_rejected_with_only_the_vm_permission(
         self, mock_api_class, mock_bulk_devices, mock_bulk_vms
     ):
-        """A device batch needs the Device perm set (add/change device + add VM, mirroring bulk_import_devices_shared) — the VM permission alone must not open the pre-check."""
+        """A device batch needs add/change Device permissions; the VM permission alone must not open the pre-check."""
         from django.core.exceptions import PermissionDenied
 
         from netbox_librenms_plugin.jobs import ImportDevicesJob
@@ -1051,6 +1051,35 @@ class TestImportDevicesJob:
 
         mock_api_class.assert_not_called()
         mock_bulk_devices.assert_not_called()
+
+    @pytest.mark.django_db
+    @patch("netbox_librenms_plugin.import_utils.bulk_import_vms")
+    @patch("netbox_librenms_plugin.import_utils.bulk_import_devices_shared")
+    @patch("netbox_librenms_plugin.librenms_api.LibreNMSAPI")
+    def test_run_device_batch_passes_without_vm_permission(self, mock_api_class, mock_bulk_devices, mock_bulk_vms):
+        """A device-only batch reaches the importer with add/change Device permissions."""
+        from netbox_librenms_plugin.jobs import ImportDevicesJob
+
+        mock_api_class.return_value = MagicMock(server_key="default")
+        mock_bulk_devices.return_value = {
+            "success": [],
+            "failed": [],
+            "skipped": [],
+            "virtual_chassis_created": 0,
+        }
+
+        job = create_mock_job_runner(ImportDevicesJob, job_pk=806)
+        job.job.user = self._real_user(
+            "import-device-without-vm",
+            ("dcim", "device", "add"),
+            ("dcim", "device", "change"),
+        )
+
+        job.run(device_ids=[1], vm_imports={}, server_key="default")
+
+        mock_api_class.assert_called_once()
+        mock_bulk_devices.assert_called_once()
+        mock_bulk_vms.assert_not_called()
 
     @pytest.mark.django_db
     @patch("netbox_librenms_plugin.import_utils.bulk_import_vms")
