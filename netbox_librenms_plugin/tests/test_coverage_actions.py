@@ -55,8 +55,8 @@ def _make_api():
     return api
 
 
-def _scoped_device_writer(in_scope_device, username):
-    """A real non-superuser with plugin write access and a pk-constrained change_device grant."""
+def _constrained_device_writer(constraints, username):
+    """A real non-superuser with plugin write access and a ``constraints``-scoped change_device grant."""
     from core.models import ObjectType
     from dcim.models import Device
     from django.apps import apps
@@ -73,12 +73,17 @@ def _scoped_device_writer(in_scope_device, username):
     write.users.set([user])
 
     scoped = ObjectPermission.objects.create(
-        name=f"{username}-scoped-change-device", actions=["change"], constraints={"pk": in_scope_device.pk}
+        name=f"{username}-scoped-change-device", actions=["change"], constraints=constraints
     )
     scoped.object_types.set([ObjectType.objects.get_for_model(Device)])
     scoped.users.set([user])
 
     return get_user_model().objects.get(pk=user.pk)  # clear the per-request perm cache
+
+
+def _scoped_device_writer(in_scope_device, username):
+    """A real non-superuser whose change_device grant covers only *in_scope_device*."""
+    return _constrained_device_writer({"pk": in_scope_device.pk}, username)
 
 
 class TestSaveDevice:
@@ -8112,3 +8117,36 @@ class TestPromoteAndMergeObjectScope:
         assert b"Winner or donor device not found" not in response.content
         donor_entry = Device.objects.get(pk=donor.pk).custom_field_data["librenms_id"]["default"]
         assert donor_entry["_migrated_to"]["device_id"] == winner.pk
+
+    def test_merge_cannot_write_an_out_of_scope_vc_sync_device(self):
+        """The donor's VC sync sibling holds the link the merge clears and stamps, so an out-of-scope sibling must block the merge."""
+        from dcim.models import Device
+
+        _vc, m1, m2 = _two_member_vc("mrg-scope-vc", m1_cf={"default": {"id": 30}}, m2_cf=None)
+        winner = make_device("mrg-scope-winner", librenms_cf={"default": {"id": 50}})
+        # Covers the selected winner and the selected donor member, but NOT the sync sibling m1.
+        user = _constrained_device_writer({"pk__in": [winner.pk, m2.pk]}, "scoped-merge-vc-sync")
+
+        response = self._post_merge(user, winner, m2)
+
+        assert b"Winner or donor device not found" in response.content
+        sync_entry = Device.objects.get(pk=m1.pk).custom_field_data["librenms_id"]["default"]
+        assert sync_entry["id"] == 30  # link not cleared
+        assert "_migrated_to" not in sync_entry  # not stamped
+        assert "oob" not in Device.objects.get(pk=winner.pk).custom_field_data["librenms_id"]["default"]
+
+    def test_merge_runs_when_the_vc_sync_device_is_also_in_scope(self):
+        """Widening the grant to the sync sibling lets the same merge through (no over-block)."""
+        from dcim.models import Device
+
+        _vc, m1, m2 = _two_member_vc("mrg-scope-vc-ok", m1_cf={"default": {"id": 30}}, m2_cf=None)
+        winner = make_device("mrg-scope-winner-ok", librenms_cf={"default": {"id": 50}})
+        user = _constrained_device_writer({"pk__in": [winner.pk, m1.pk, m2.pk]}, "scoped-merge-vc-sync-ok")
+
+        response = self._post_merge(user, winner, m2)
+
+        assert b"Winner or donor device not found" not in response.content
+        sync_entry = Device.objects.get(pk=m1.pk).custom_field_data["librenms_id"]["default"]
+        assert "id" not in sync_entry
+        assert sync_entry["_migrated_to"]["device_id"] == winner.pk
+        assert Device.objects.get(pk=winner.pk).custom_field_data["librenms_id"]["default"]["oob"]["id"] == 30

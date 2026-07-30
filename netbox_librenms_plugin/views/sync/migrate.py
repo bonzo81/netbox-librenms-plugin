@@ -392,6 +392,20 @@ class _BaseMoveToWinnerView(LibreNMSAPIMixin, LibreNMSPermissionMixin, NetBoxObj
             return None, self._fail(request, "Donor device is not marked as migrated.", status=409)
         if winner is None:
             return None, _fail_winner_unavailable(self, request, donor, marker)
+        # Both device rows are DERIVED — the donor from the moved interface/IP, the winner from the
+        # donor's marker — and every move writes device-level IP FKs on both. The model-level gate
+        # can't see them, so authorize each against the restricted change queryset before any write.
+        device_pks = {donor.pk, winner.pk}
+        authorized = set(
+            self.restricted_queryset(Device, "change").filter(pk__in=device_pks).values_list("pk", flat=True)
+        )
+        if authorized != device_pks:
+            return None, self._fail(
+                request,
+                "You do not have permission to change every device this move touches "
+                "(the donor and its migration winner).",
+                status=403,
+            )
         return winner, None
 
     def _lock_donor_winner_and_reverify(self, request, donor, winner, server_key):
@@ -553,6 +567,22 @@ class MoveInterfaceToWinnerView(_BaseMoveToWinnerView):
             # peers) in the same transaction. Pre-check ALL their names on the winner
             # before anything is saved, so the family either moves whole or not at all.
             dependents = _donor_side_dependents(interface, donor)
+            # The family is DERIVED from the moved row, not the scoped pk, and every member is
+            # saved below. The move is all-or-nothing, so refuse unless the grant covers all of it.
+            if dependents:
+                dependent_pks = {dep.pk for dep in dependents}
+                authorized = set(
+                    self.restricted_queryset(Interface, "change")
+                    .filter(pk__in=dependent_pks)
+                    .values_list("pk", flat=True)
+                )
+                if authorized != dependent_pks:
+                    return self._fail(
+                        request,
+                        f"Interface '{interface.name}' has attached interface(s) that must move with "
+                        "it, and you do not have permission to change all of them.",
+                        status=403,
+                    )
             colliding = sorted(
                 Interface.objects.filter(device=winner, name__in=[dep.name for dep in dependents]).values_list(
                     "name", flat=True

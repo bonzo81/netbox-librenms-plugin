@@ -23,6 +23,7 @@ from netbox_librenms_plugin.tests.conftest import (
     make_device,
     make_interface,
     make_ip,
+    make_superuser,
     make_vm,
 )
 
@@ -1737,13 +1738,18 @@ class TestMoveToWinnerConcurrencyHelpers:
 
         view = object.__new__(MoveInterfaceToWinnerView)
         view._fallback_url = "/x/"
+        # restrict() reads self.request.user; Django binds it in dispatch(), which these
+        # direct-helper calls skip.
+        view.request = self._req()
         return view
 
     def _req(self):
         from django.test import RequestFactory
 
         # HX-Request → _fail returns an HTMX toast response (no messages middleware needed).
-        return RequestFactory().post("/x/", HTTP_HX_REQUEST="true")
+        request = RequestFactory().post("/x/", HTTP_HX_REQUEST="true")
+        request.user = make_superuser()
+        return request
 
     def _migrated_donor_and_winner(self):
         donor = make_device("mv-helper-donor")
@@ -1826,8 +1832,13 @@ class TestMoveEndpointsObjectScope:
         """A real HTMX POST request bound to *user* so the gate and restrict() both run for real."""
         from django.test import RequestFactory
 
+        from django.contrib.messages.storage.fallback import FallbackStorage
+
         request = RequestFactory().post("/move/", {"server_key": "default"}, HTTP_HX_REQUEST="true")
         request.user = user
+        # The success path calls messages.add_message(); RequestFactory skips MessageMiddleware.
+        request.session = {}
+        request._messages = FallbackStorage(request)
         return request
 
     def _drive(self, view_cls, user, **kwargs):
@@ -1908,3 +1919,135 @@ class TestMoveEndpointsObjectScope:
 
         donor.refresh_from_db()
         assert donor.primary_ip4_id == donor_ip.pk  # not transferred
+
+    @staticmethod
+    def _mark(donor, winner):
+        """Write a real ``_migrated_to`` marker so the views resolve *winner* from the donor's cf."""
+        from netbox_librenms_plugin.utils import mark_librenms_migrated
+
+        mark_librenms_migrated(donor, winner.pk, "default")
+        donor.save()
+
+    def test_interface_move_denied_when_a_family_member_is_out_of_scope(self):
+        """The carried lag/parent/bridge family is saved too, so one out-of-scope member must block the whole move."""
+        from dcim.models import Device, Interface
+
+        from netbox_librenms_plugin.views.sync.migrate import MoveInterfaceToWinnerView
+
+        donor = make_device("scope-fam-donor")
+        winner = make_device("scope-fam-winner")
+        master = make_interface(donor, "Eth0")
+        child = Interface.objects.create(device=donor, name="Eth0.100", type="virtual", parent=master)
+        self._mark(donor, winner)
+        # The grant covers the interface the user clicked, but not the child that must move with it.
+        user = self._writer("scoped-family-partial", [(Interface, {"pk": master.pk}), (Device, None)])
+
+        response = self._drive(MoveInterfaceToWinnerView, user, pk=master.pk)
+
+        assert response.headers.get("HX-Refresh") is None  # not the success path
+        master.refresh_from_db()
+        child.refresh_from_db()
+        assert master.device_id == donor.pk  # nothing moved
+        assert child.device_id == donor.pk
+
+    def test_interface_move_carries_the_family_when_all_of_it_is_in_scope(self):
+        """Widening the grant to the whole family lets the move through (no over-block)."""
+        from dcim.models import Device, Interface
+
+        from netbox_librenms_plugin.views.sync.migrate import MoveInterfaceToWinnerView
+
+        donor = make_device("scope-fam-ok-donor")
+        winner = make_device("scope-fam-ok-winner")
+        master = make_interface(donor, "Eth0")
+        child = Interface.objects.create(device=donor, name="Eth0.100", type="virtual", parent=master)
+        self._mark(donor, winner)
+        user = self._writer("scoped-family-whole", [(Interface, {"pk__in": [master.pk, child.pk]}), (Device, None)])
+
+        self._drive(MoveInterfaceToWinnerView, user, pk=master.pk)
+
+        master.refresh_from_db()
+        child.refresh_from_db()
+        assert master.device_id == winner.pk
+        assert child.device_id == winner.pk
+
+    def test_interface_move_denied_when_the_winner_device_is_out_of_scope(self):
+        """The move writes onto the winner device, so a change_device grant that excludes it must block."""
+        from dcim.models import Device, Interface
+
+        from netbox_librenms_plugin.views.sync.migrate import MoveInterfaceToWinnerView
+
+        donor = make_device("scope-win-mi-donor")
+        winner = make_device("scope-win-mi-winner")
+        iface = make_interface(donor, "Eth0")
+        self._mark(donor, winner)
+        user = self._writer("scoped-move-iface-winner", [(Interface, None), (Device, {"pk": donor.pk})])
+
+        response = self._drive(MoveInterfaceToWinnerView, user, pk=iface.pk)
+
+        assert response.headers.get("HX-Refresh") is None
+        iface.refresh_from_db()
+        assert iface.device_id == donor.pk  # not moved onto an unauthorized device
+
+    def test_ip_move_denied_when_the_winner_device_is_out_of_scope(self):
+        """The IP move reconciles both devices' IP FKs, so an out-of-scope winner must block it."""
+        from dcim.models import Device
+        from ipam.models import IPAddress
+
+        from netbox_librenms_plugin.views.sync.migrate import MoveIPAddressToWinnerView
+
+        donor = make_device("scope-win-ip-donor")
+        winner = make_device("scope-win-ip-winner")
+        ip = ip_on(donor, "10.63.0.1/24", "eth0")
+        make_interface(winner, "eth0")
+        self._mark(donor, winner)
+        user = self._writer("scoped-move-ip-winner", [(IPAddress, None), (Device, {"pk": donor.pk})])
+
+        response = self._drive(MoveIPAddressToWinnerView, user, pk=ip.pk)
+
+        assert response.headers.get("HX-Refresh") is None
+        ip.refresh_from_db()
+        assert ip.assigned_object.device_id == donor.pk  # not moved
+
+    def test_device_ip_transfer_denied_when_the_winner_is_out_of_scope(self):
+        """The transfer claims the winner's primary-IP FK, so a donor-only change_device grant must block it."""
+        from dcim.models import Device
+
+        from netbox_librenms_plugin.views.sync.migrate import TransferDeviceIPView
+
+        donor = make_device("scope-xfer-win-donor")
+        winner = make_device("scope-xfer-win-winner")
+        # The address already sits on a winner-owned interface — the state this transfer exists for.
+        ip = ip_on(winner, "10.64.0.1/24", "eth0")
+        Device.objects.filter(pk=donor.pk).update(primary_ip4=ip)
+        donor.refresh_from_db()
+        self._mark(donor, winner)
+        user = self._writer("scoped-xfer-winner", [(Device, {"pk": donor.pk})])
+
+        response = self._drive(TransferDeviceIPView, user, pk=donor.pk, ip_kind="primary4")
+
+        assert response.headers.get("HX-Refresh") is None
+        donor.refresh_from_db()
+        winner.refresh_from_db()
+        assert donor.primary_ip4_id == ip.pk  # donor FK not released
+        assert winner.primary_ip4_id is None  # winner FK not claimed
+
+    def test_device_ip_transfer_runs_when_both_devices_are_in_scope(self):
+        """Widening the grant to the winner lets the same transfer through (no over-block)."""
+        from dcim.models import Device
+
+        from netbox_librenms_plugin.views.sync.migrate import TransferDeviceIPView
+
+        donor = make_device("scope-xfer-ok-donor")
+        winner = make_device("scope-xfer-ok-winner")
+        ip = ip_on(winner, "10.65.0.1/24", "eth0")
+        Device.objects.filter(pk=donor.pk).update(primary_ip4=ip)
+        donor.refresh_from_db()
+        self._mark(donor, winner)
+        user = self._writer("scoped-xfer-both", [(Device, {"pk__in": [donor.pk, winner.pk]})])
+
+        self._drive(TransferDeviceIPView, user, pk=donor.pk, ip_kind="primary4")
+
+        donor.refresh_from_db()
+        winner.refresh_from_db()
+        assert donor.primary_ip4_id is None
+        assert winner.primary_ip4_id == ip.pk

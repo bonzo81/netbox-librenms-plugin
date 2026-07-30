@@ -3412,6 +3412,12 @@ class MergeNetBoxDevicesView(
                 return _htmx_error_response("Virtual chassis membership changed during the merge; please retry.")
             winner_sync = locked_by_pk[winner_sync.pk]
             donor_sync = locked_by_pk[donor_sync.pk]
+            # The sync devices are DERIVED (a VC sibling of the selected winner/donor), not the pks
+            # scoped above, and the save block below writes their custom_field_data. Authorize them
+            # too, or a grant covering only the selected pair mutates the link-holding sibling.
+            sync_pks = {winner_sync.pk, donor_sync.pk}
+            if set(changeable.filter(pk__in=sync_pks).values_list("pk", flat=True)) != sync_pks:
+                return _htmx_error_response("Winner or donor device not found")
             if winner_sync.pk == donor_sync.pk:
                 # Both candidates belong to the same virtual chassis (one sync device); merging its
                 # LibreNMS link into itself would read and write the same CF entry. Fail closed.
