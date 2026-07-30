@@ -1491,6 +1491,26 @@ class TestNormalizeDeviceSerialsMigration:
         assert index["index"] is True
         assert index["columns"] == ["serial"]
 
+    def test_preexisting_valid_serial_index_is_reused(self):
+        """Retrying 0012 accepts an already-valid index without rebuilding it."""
+        import importlib
+
+        from django.apps import apps
+        from django.db import connection
+
+        module = importlib.import_module("netbox_librenms_plugin.migrations.0012_normalize_device_serials")
+
+        with connection.cursor() as cursor:
+            cursor.execute("SELECT to_regclass(%s)::oid", ["nblp_dcim_device_serial_idx"])
+            original_oid = cursor.fetchone()[0]
+
+        with connection.schema_editor(atomic=False) as schema_editor:
+            module.ensure_device_serial_index(apps, schema_editor)
+
+        with connection.cursor() as cursor:
+            cursor.execute("SELECT to_regclass(%s)::oid", ["nblp_dcim_device_serial_idx"])
+            assert cursor.fetchone()[0] == original_oid
+
 
 class TestCacheRemainingTtl:
     """cache_remaining_ttl reads .ttl on django-redis and degrades to None on backends without it."""
