@@ -526,7 +526,14 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMix
             # snapshot may still be cached, but the failed rebind left self.librenms_api bound to the
             # DEFAULT server; render an empty table scoped to the requested key rather than that
             # stale server's cached IPs (mirrors modules_view.get_context_data's unresolved guard).
-            return {"table": None, "object": obj, "cache_expiry": None, "server_key": scoped}
+            return {
+                "table": None,
+                "object": obj,
+                "cache_expiry": None,
+                "server_key": scoped,
+                "set_primary_ip": resolve_set_primary_ip(request),
+                "movable_ips": self._movable_ips_for_migration(obj, scoped),
+            }
         context = self._prepare_context(request, obj, interface_name_field, fetch_fresh=False, server_key=scoped)
         if context is None:
             # No data found; return context with empty table (still surface migrated move actions).
@@ -535,6 +542,7 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMix
                 "object": obj,
                 "cache_expiry": None,
                 "server_key": scoped,
+                "set_primary_ip": resolve_set_primary_ip(request),
                 "movable_ips": self._movable_ips_for_migration(obj, scoped),
             }
         return context

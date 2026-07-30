@@ -263,6 +263,21 @@ class TestUnresolvedServerKeyRendersEmpty:
         finally:
             real_cache.delete(default_key)
 
+    def test_ip_tab_unresolved_key_preserves_action_context(self):
+        """An unresolved IP render keeps the move candidates and set-primary preference."""
+        from netbox_librenms_plugin.views.object_sync.devices import DeviceIPAddressTableView
+
+        device = make_device("ghost-ip-actions")
+        view = DeviceIPAddressTableView()
+        view._librenms_api = MagicMock(server_key="default")
+        view.request = self._ghost_request()
+
+        with patch("netbox_librenms_plugin.librenms_api.build_librenms_api", return_value=None):
+            ctx = view.get_context_data(view.request, device)
+
+        assert ctx["movable_ips"] == []
+        assert ctx["set_primary_ip"] is False
+
     # The two tests above seed the DEFAULT-server cache and prove the request doesn't fall back to
     # it — but they pass even unfixed, because the read is already scoped to the requested key so
     # default's cache never surfaces. The real regression is subtler: when the UNRESOLVED requested

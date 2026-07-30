@@ -1326,3 +1326,12 @@ class TestRenderServerKeyDegradation:
 
         assert BaseIPAddressTableView._render_server_key is LibreNMSAPIMixin._render_server_key
         assert BaseCableTableView._render_server_key is LibreNMSAPIMixin._render_server_key
+
+    def test_sync_page_subclass_keeps_render_server_key_method_callable(self):
+        """A real sync-page subclass must not shadow the mixin's render-key resolver."""
+        from netbox_librenms_plugin.views.object_sync.devices import DeviceLibreNMSSyncView
+
+        view = DeviceLibreNMSSyncView()
+        view._librenms_api = MagicMock(server_key="active")
+
+        assert view._render_server_key() == "active"

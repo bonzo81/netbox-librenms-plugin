@@ -33,7 +33,7 @@ class BaseLibreNMSSyncView(LibreNMSPermissionMixin, LibreNMSAPIMixin, generic.Ob
     template_name = "netbox_librenms_plugin/librenms_sync_base.html"
     # Render server key resolved in get(); read by get_context_data for the migrated-mode banner.
     # None until get() runs (e.g. a direct get_context_data() call), then active_server_key is used.
-    _render_server_key = None
+    _scoped_render_server_key = None
 
     def get(self, request, pk, context=None):
         """Handle GET request for the LibreNMS sync view."""
@@ -50,7 +50,7 @@ class BaseLibreNMSSyncView(LibreNMSPermissionMixin, LibreNMSAPIMixin, generic.Ob
         # rebind declines and self.librenms_api.server_key falls back to "default" — using that for
         # the marker lookup would hide a real migration (marker under the requested server) or show
         # a spurious one (unrelated "default" marker). _scoped_key keeps the page self-consistent.
-        self._render_server_key = _scoped_key
+        self._scoped_render_server_key = _scoped_key
 
         # The resolve can decline WITHOUT binding a client: a blank/absent key with a
         # misconfigured default (build_librenms_api(None) → None), or an unresolved
@@ -218,7 +218,7 @@ class BaseLibreNMSSyncView(LibreNMSPermissionMixin, LibreNMSAPIMixin, generic.Ob
                 # misconfigured default no client is bound, so the property would reconstruct
                 # LibreNMSAPI() and 500 the degraded render; the render key also keeps the page's
                 # forms scoped to the requested (gone) server so they fail closed server-side.
-                "server_key": self._render_server_key or self.active_server_key,
+                "server_key": self._scoped_render_server_key or self.active_server_key,
                 "v1v2form": AddToLIbreSNMPV1V2(prefix="v1v2"),
                 "v3form": AddToLIbreSNMPV3(prefix="v3"),
                 "librenms_device_id": self.librenms_id,
@@ -232,7 +232,7 @@ class BaseLibreNMSSyncView(LibreNMSPermissionMixin, LibreNMSAPIMixin, generic.Ob
                 "manufacturers": manufacturers,
                 # Same safe accessor as "server_key" above — only the is_active highlight needs it.
                 "all_server_mappings": self._build_all_server_mappings(
-                    _lookup_device, self._render_server_key or self.active_server_key
+                    _lookup_device, self._scoped_render_server_key or self.active_server_key
                 ),
                 "librenms_id_is_legacy": librenms_id_is_legacy,
                 "librenms_id_serial_confirmed": librenms_id_serial_confirmed,
@@ -251,7 +251,7 @@ class BaseLibreNMSSyncView(LibreNMSPermissionMixin, LibreNMSAPIMixin, generic.Ob
                 # on the sync sibling, whose sync page is where its migrated controls surface.
                 # Use the resolved render key (not the lazy librenms_api property, which re-derives
                 # the global default and mis-namespaces the marker on the stale-?server_key path).
-                **self._build_migrated_context(obj, self._render_server_key or self.active_server_key),
+                **self._build_migrated_context(obj, self._scoped_render_server_key or self.active_server_key),
             }
         )
 

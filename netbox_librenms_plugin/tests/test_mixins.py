@@ -265,6 +265,16 @@ class TestResolveConfiguredServerKey:
         ):
             assert resolve_configured_server_key("ghost") is None
 
+    def test_returns_none_for_a_non_string_key(self):
+        """A non-string configured key is rejected before the server allowlist lookup."""
+        from netbox_librenms_plugin.views.mixins import resolve_configured_server_key
+
+        with patch(
+            "netbox_librenms_plugin.librenms_api.LibreNMSAPI.get_available_servers",
+            return_value={"siteB": "Site B"},
+        ):
+            assert resolve_configured_server_key(["siteB"]) is None
+
     def test_blank_or_none_short_circuits_before_touching_config(self):
         from netbox_librenms_plugin.views.mixins import resolve_configured_server_key
 

@@ -145,7 +145,7 @@ def resolve_configured_server_key(server_key):
     """
     from netbox_librenms_plugin.librenms_api import LibreNMSAPI
 
-    if not server_key:
+    if not isinstance(server_key, str) or not server_key:
         return None
     return server_key if server_key in LibreNMSAPI.get_available_servers() else None
 

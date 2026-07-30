@@ -250,7 +250,7 @@ class TestSyncPageMisconfiguredDefaultDegrades:
         # ...and the page is NOT the minimal early-return render the *blank*-key branch produces
         # (the unresolved path must still render the tabbed page scoped to the requested key).
         assert view._server_key_unresolved is True
-        assert view._render_server_key == "gone-server"
+        assert view._scoped_render_server_key == "gone-server"
         assert view.librenms_id is None  # failed closed: no default-server mapping attributed
 
 
