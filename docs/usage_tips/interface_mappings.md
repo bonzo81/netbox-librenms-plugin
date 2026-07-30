@@ -24,8 +24,8 @@ Example:
 
 ![Interface Mappings Page](../img/interface_mappings/interfacemappings_menu.png){ width="250" }
 
-* From the main menu, navigate to the Plugins section
-* Under Netbox Librenms Plugin, select "Mappings" — Interface Mappings is the first tab
+* From the main menu, navigate to the LibreNMS section
+* Select "Mappings" — Interface Mappings is the first tab
 
 #### Creating a New Mapping:
 
