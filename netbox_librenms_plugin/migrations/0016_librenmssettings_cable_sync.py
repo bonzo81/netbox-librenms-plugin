@@ -5,7 +5,7 @@ import utilities.fields
 
 class Migration(migrations.Migration):
     dependencies = [
-        ("netbox_librenms_plugin", "0014_serialsensortypepattern"),
+        ("netbox_librenms_plugin", "0015_serialsensortypepattern"),
     ]
 
     operations = [
