@@ -524,9 +524,7 @@ def create_virtual_chassis_with_members(
                 # Normalize serial and position up front so all skip-checks and
                 # downstream logic use consistent values (strips whitespace and
                 # treats the sentinel "-" as "no serial").
-                serial = normalize_serial(member.get("serial"))
-                if serial == "-":
-                    serial = ""
+                serial = _norm_serial(member.get("serial"))
                 member_pos = _safe_pos(member.get("position"))
 
                 # Skip the master member — identified by is_master flag, serial match,

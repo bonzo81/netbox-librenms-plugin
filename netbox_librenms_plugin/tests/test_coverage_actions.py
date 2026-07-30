@@ -988,6 +988,18 @@ class TestBuildSyncInfo:
 
         assert result["serial_synced"] is True
 
+    @pytest.mark.django_db
+    def test_padded_stored_serial_counts_as_synced(self):
+        """A real device whose STORED serial is legacy-padded must not report serial drift in the details modal."""
+        build_sync_info = self._get_method()
+        existing = make_device("sync-info-padded-serial", serial=" SN-STORED-1 ")
+        libre_device = {"serial": "SN-STORED-1", "os": "-", "hardware": "-"}
+
+        result = build_sync_info(libre_device, existing)
+
+        assert result["serial_synced"] is True, "padded stored serial reported as drift"
+        assert result["all_synced"] is True
+
     def test_platform_synced_when_matching(self):
         build_sync_info = self._get_method()
         libre_device = {"serial": "-", "os": "ios", "hardware": "-"}

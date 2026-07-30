@@ -2021,6 +2021,86 @@ class TestValidateSerialMatchStripsWhitespace:
         assert result["existing_device"] is not None, "legacy padded stored serial was not matched"
         assert result["existing_device"].pk == device.pk
 
+    def test_padded_stored_serial_on_linked_device_is_confirmed_not_drift(self):
+        """A librenms_id-matched device whose STORED serial is padded must report serial_confirmed, not "hardware may have been replaced"."""
+        from netbox_librenms_plugin.import_utils.device_operations import validate_device_for_import
+
+        device = self._make_device("linked-padded-host", serial=" SN-PAD-1 ")
+        device.custom_field_data["librenms_id"] = {"default": 8817}
+        device.save()
+        libre_device = {
+            "device_id": 8817,
+            "hostname": "linked-padded-host",
+            "sysName": "linked-padded-host",
+            "serial": "SN-PAD-1",  # same serial, only the STORED side carries legacy padding
+            "hardware": "-",
+            "os": "-",
+            "location": "-",
+        }
+
+        result = validate_device_for_import(libre_device, api=None, server_key="default", include_vc_detection=False)
+
+        assert result["existing_match_type"] == "librenms_id"
+        assert result["existing_device"].pk == device.pk
+        assert result["serial_confirmed"] is True, "padded stored serial reported as drift"
+        assert result.get("serial_action") is None
+        assert not any("replaced" in w for w in result.get("warnings", [])), result.get("warnings")
+
+    def test_padded_stored_serial_on_hostname_match_is_not_drift(self):
+        """A hostname-matched device whose STORED serial is padded must not report a serial difference."""
+        from netbox_librenms_plugin.import_utils.device_operations import validate_device_for_import
+
+        device = self._make_device("hostname-padded-host", serial=" SN-PAD-2 ")
+        libre_device = {
+            "device_id": 8818,
+            "hostname": "hostname-padded-host",
+            "sysName": "hostname-padded-host",
+            "serial": "SN-PAD-2",
+            "hardware": "-",
+            "os": "-",
+            "location": "-",
+        }
+
+        result = validate_device_for_import(libre_device, api=None, server_key="default", include_vc_detection=False)
+
+        assert result["existing_match_type"] == "hostname"
+        assert result["existing_device"].pk == device.pk
+        assert result.get("serial_action") is None, "whitespace-only stored/incoming diff flagged as drift"
+        assert not any("differs" in w for w in result.get("warnings", [])), result.get("warnings")
+
+    def test_padded_stored_serial_does_not_leak_into_the_vc_member_name(self):
+        """The stored-serial fallback for the VC member name must be trimmed, or a padded serial suggests a renamed device."""
+        from dcim.models import VirtualChassis
+
+        from netbox_librenms_plugin.import_utils.device_operations import validate_device_for_import
+        from netbox_librenms_plugin.models import LibreNMSSettings
+
+        settings_row = LibreNMSSettings.objects.order_by("pk").first() or LibreNMSSettings()
+        settings_row.vc_member_name_pattern = "-{serial}"
+        settings_row.save()
+
+        device = self._make_device("stack-master-SN-VC-3", serial=" SN-VC-3 ")
+        device.custom_field_data["librenms_id"] = {"default": 8819}
+        vc = VirtualChassis.objects.create(name="vc-padded-serial")
+        device.virtual_chassis = vc
+        device.vc_position = 2
+        device.save()
+
+        libre_device = {
+            "device_id": 8819,
+            "hostname": "stack-master",
+            "sysName": "stack-master",
+            "serial": "-",  # placeholder → the name falls back to the STORED serial
+            "hardware": "-",
+            "os": "-",
+            "location": "-",
+        }
+
+        result = validate_device_for_import(libre_device, api=None, server_key="default", include_vc_detection=False)
+
+        assert result["suggested_name"] is None, result["suggested_name"]
+        assert result["name_matches"] is True, "padded stored serial produced a bogus VC member name"
+
 
 @pytest.mark.django_db
 class TestImportPersistsTrimmedSerial:

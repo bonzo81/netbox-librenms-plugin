@@ -1405,8 +1405,9 @@ class DeviceValidationDetailsView(LibreNMSPermissionMixin, LibreNMSAPIMixin, Dev
         librenms_os = libre_device.get("os") or "-"
         librenms_hardware = libre_device.get("hardware") or "-"
 
-        # Serial comparison (VMs may not have serial in all NetBox versions)
-        netbox_serial = getattr(existing_device, "serial", None) or ""
+        # Serial comparison (VMs may not have serial in all NetBox versions). The stored side
+        # is normalized too, so a legacy padded serial doesn't render as drift.
+        netbox_serial = normalize_serial(getattr(existing_device, "serial", None))
         serial_synced = netbox_serial == librenms_serial or librenms_serial == "-"
 
         # Platform comparison

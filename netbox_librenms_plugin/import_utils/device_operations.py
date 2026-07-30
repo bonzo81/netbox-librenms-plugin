@@ -735,7 +735,8 @@ def validate_device_for_import(
                     vc_expected_name = _generate_vc_member_name(
                         hostname,
                         existing_device.vc_position,
-                        serial=incoming_serial or existing_device.serial or "",
+                        # Trim the stored fallback too, or a padded serial mints a bogus name.
+                        serial=incoming_serial or normalize_serial(existing_device.serial),
                     )
                     if existing_device.name == vc_expected_name:
                         result["name_matches"] = True
@@ -753,10 +754,12 @@ def validate_device_for_import(
                 # OOB controller's, so comparing it against the host record's serial would surface
                 # bogus replacement/conflict warnings on a row that is already correctly linked.
                 incoming_serial = normalize_serial(libre_device.get("serial"))
+                # Normalize the stored side too: a legacy padded serial equals the incoming one.
+                stored_serial = normalize_serial(existing_device.serial)
                 if result["existing_match_type"] != "librenms_oob" and incoming_serial and incoming_serial != "-":
-                    if existing_device.serial and existing_device.serial == incoming_serial:
+                    if stored_serial and stored_serial == incoming_serial:
                         result["serial_confirmed"] = True
-                    elif existing_device.serial and existing_device.serial != incoming_serial:
+                    elif stored_serial and stored_serial != incoming_serial:
                         serial_conflict = (
                             filter_by_trimmed_serial(Device.objects.all(), incoming_serial)
                             .exclude(pk=existing_device.pk)
@@ -824,9 +827,11 @@ def validate_device_for_import(
                 # is already linked to LibreNMS isn't mislabelled as "not linked".
                 result["existing_librenms_link"] = _describe_existing_librenms_link(existing_device, server_key)
 
-                # Check for serial conflict on hostname-matched device
+                # Check for serial conflict on hostname-matched device. Both sides are
+                # normalized so a legacy padded stored serial isn't read as drift.
                 incoming_serial = normalize_serial(libre_device.get("serial"))
-                if incoming_serial and incoming_serial != "-" and existing_device.serial != incoming_serial:
+                stored_serial = normalize_serial(existing_device.serial)
+                if incoming_serial and incoming_serial != "-" and stored_serial != incoming_serial:
                     serial_conflict = (
                         filter_by_trimmed_serial(Device.objects.all(), incoming_serial)
                         .exclude(pk=existing_device.pk)

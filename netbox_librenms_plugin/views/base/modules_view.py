@@ -57,6 +57,23 @@ _SKIP_TRANSCEIVER_TYPES = {"Port Container", "Port", ""}
 _NON_HARDWARE_CLASSES = {"sensor", "backplane", "stack"}
 
 
+def _clean_librenms_value(value) -> str:
+    """
+    Return a LibreNMS model/serial/type value trimmed, with placeholders blanked.
+
+    Coerces through ``normalize_serial`` because all-digit values arrive as JSON
+    numbers, which a bare ``.strip()`` would crash on (and ``or ""`` would drop 0).
+
+    Args:
+        value: The raw value as returned by LibreNMS.
+
+    Returns:
+        The cleaned string, or "" for a missing/placeholder value.
+    """
+    text = normalize_serial(value)
+    return "" if text.lower() in _PLACEHOLDER_VALUES else text
+
+
 def _oob_item_offsettable(item: dict) -> bool:
     """
     Return True if an OOB inventory item's index fields can be offset arithmetically.
@@ -216,10 +233,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
     @staticmethod
     def _normalize_serial(value):
         """Normalize serial values for reliable cross-source comparison."""
-        serial = (value or "").strip()
-        if serial.lower() in _PLACEHOLDER_VALUES:
-            return ""
-        return serial
+        return _clean_librenms_value(value)
 
     def _get_interface_port_id(self, interface):
         """
@@ -1306,11 +1320,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
         inv_by_index = {
             idx: item for item in inventory_data if (idx := _coerce_idx(item.get("entPhysicalIndex"))) is not None
         }
-        inv_serials = {
-            s
-            for item in inventory_data
-            if (s := (item.get("entPhysicalSerialNum") or "").strip()) and s.lower() not in _PLACEHOLDER_VALUES
-        }
+        inv_serials = {s for item in inventory_data if (s := _clean_librenms_value(item.get("entPhysicalSerialNum")))}
 
         # Build port_id → interface label lookup for better synthetic item naming
         port_name_map = self._build_port_name_map(transceivers, ports_data=ports_data)
@@ -1331,15 +1341,9 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
             ifname = (port_meta.get("ifName") or "").strip() or None
             ifdescr = (port_meta.get("ifDescr") or "").strip() or None
 
-            model = (txr.get("model") or "").strip()
-            if model.lower() in _PLACEHOLDER_VALUES:
-                model = ""
-            serial = normalize_serial(txr.get("serial"))
-            if serial.lower() in _PLACEHOLDER_VALUES:
-                serial = ""
-            txr_type = (txr.get("type") or "").strip()
-            if txr_type.lower() in _PLACEHOLDER_VALUES:
-                txr_type = ""
+            model = _clean_librenms_value(txr.get("model"))
+            serial = _clean_librenms_value(txr.get("serial"))
+            txr_type = _clean_librenms_value(txr.get("type"))
 
             # Skip containers and entries with no useful data
             if txr_type in _SKIP_TRANSCEIVER_TYPES and not model and not serial:
@@ -1351,13 +1355,11 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
             if ent_idx in inv_by_index:
                 # Supplement existing inventory item if model/serial is missing or a placeholder
                 existing = inv_by_index[ent_idx]
-                existing_model = (existing.get("entPhysicalModelName") or "").strip()
-                if (
-                    existing_model.lower() in _PLACEHOLDER_VALUES or existing_model.lower() == "builtin"
-                ) and display_model:
+                existing_model = _clean_librenms_value(existing.get("entPhysicalModelName"))
+                if (not existing_model or existing_model.lower() == "builtin") and display_model:
                     existing["entPhysicalModelName"] = display_model
-                existing_serial = (existing.get("entPhysicalSerialNum") or "").strip()
-                if (existing_serial.lower() in _PLACEHOLDER_VALUES or existing_serial.lower() == "builtin") and serial:
+                existing_serial = _clean_librenms_value(existing.get("entPhysicalSerialNum"))
+                if (not existing_serial or existing_serial.lower() == "builtin") and serial:
                     existing["entPhysicalSerialNum"] = serial
                     inv_serials.add(serial)
                 if port_id:
