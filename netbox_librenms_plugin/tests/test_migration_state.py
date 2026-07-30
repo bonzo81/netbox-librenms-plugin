@@ -8,7 +8,7 @@ def test_migration_0011_field_help_text_matches_model():
     from netbox_librenms_plugin.models import PortStackLagPattern
 
     # Migration modules start with a digit (not a valid identifier), so import by string.
-    mod = importlib.import_module("netbox_librenms_plugin.migrations.0012_portstacklagpattern")
+    mod = importlib.import_module("netbox_librenms_plugin.migrations.0013_portstacklagpattern")
     create_op = next(
         op
         for op in mod.Migration.operations
@@ -27,7 +27,7 @@ def test_migration_0012_librenms_os_help_text_matches_model():
     """Migration 0012 re-declares librenms_os via AlterField, so 0012 (not 0011's CreateModel) is the authoritative migration state makemigrations compares librenms_os against — its help_text must match the model too."""
     from netbox_librenms_plugin.models import PortStackLagPattern
 
-    mod = importlib.import_module("netbox_librenms_plugin.migrations.0013_portstacklagpattern_ci_unique")
+    mod = importlib.import_module("netbox_librenms_plugin.migrations.0014_portstacklagpattern_ci_unique")
     alter_op = next(
         op
         for op in mod.Migration.operations

@@ -19,7 +19,7 @@ def normalize_librenms_os_case(apps, schema_editor):
     Lower()-only rewrite would leave the surrounding whitespace behind the new constraint.
 
     All reads and writes are pinned to the migration's database alias (like sibling migrations
-    0012/0014): unrouted ``objects.all()`` would consult the default router, so
+    0013/0015): unrouted ``objects.all()`` would consult the default router, so
     ``migrate --database=other`` would normalize rows on the wrong database and leave the target
     database to fail the AddConstraint with an opaque IntegrityError.
     """
@@ -53,12 +53,12 @@ def normalize_librenms_os_case(apps, schema_editor):
 
 
 class Migration(migrations.Migration):
-    # Depend only on 0012_portstacklagpattern (which already pins extras to 0122 for the
+    # Depend only on 0013_portstacklagpattern (which already pins extras to 0122 for the
     # supported NetBox 4.2+ range). makemigrations tried to bump the extras dependency to a
     # 4.3-era tip, but this migration adds nothing that needs a newer field, so keep it minimal
-    # — same rationale as the dependency note in 0012_portstacklagpattern.
+    # — same rationale as the dependency note in 0013_portstacklagpattern.
     dependencies = [
-        ("netbox_librenms_plugin", "0012_portstacklagpattern"),
+        ("netbox_librenms_plugin", "0013_portstacklagpattern"),
     ]
 
     operations = [

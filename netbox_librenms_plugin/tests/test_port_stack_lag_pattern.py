@@ -192,7 +192,7 @@ class TestMigration0012Preflight:
     def _preflight():
         import importlib
 
-        mig = importlib.import_module("netbox_librenms_plugin.migrations.0013_portstacklagpattern_ci_unique")
+        mig = importlib.import_module("netbox_librenms_plugin.migrations.0014_portstacklagpattern_ci_unique")
         return mig.normalize_librenms_os_case
 
     @staticmethod
@@ -259,7 +259,7 @@ class TestMigration0012Preflight:
         # way the test can tell a Lower()-only rewrite (leaves " zzws ") from .strip().lower() ("zzws").
         historical_apps = (
             MigrationExecutor(connection)
-            .loader.project_state(("netbox_librenms_plugin", "0012_portstacklagpattern"))
+            .loader.project_state(("netbox_librenms_plugin", "0013_portstacklagpattern"))
             .apps
         )
         historical_model = historical_apps.get_model("netbox_librenms_plugin", "portstacklagpattern")
@@ -292,7 +292,7 @@ class TestMigration0012Preflight:
 
         historical_apps = (
             MigrationExecutor(connection)
-            .loader.project_state(("netbox_librenms_plugin", "0012_portstacklagpattern"))
+            .loader.project_state(("netbox_librenms_plugin", "0013_portstacklagpattern"))
             .apps
         )
 
@@ -309,7 +309,7 @@ class TestMigration0012Preflight:
                 if model._meta.model_name != "portstacklagpattern":
                     return
                 frames = traceback.extract_stack()
-                in_migration = any("0013_portstacklagpattern_ci_unique" in f.filename for f in frames)
+                in_migration = any("0014_portstacklagpattern_ci_unique" in f.filename for f in frames)
                 from_full_clean = any(f.name == "full_clean" for f in frames)
                 if in_migration and not from_full_clean:
                     unpinned.append(kind)
