@@ -236,9 +236,14 @@ def _acquire_serial_assignment_lock(serial: str) -> None:
 
     Args:
         serial: The trimmed serial being assigned.
+
+    Raises:
+        RuntimeError: When called in autocommit — the lock would release immediately.
     """
     from django.db import connection
 
+    if not connection.in_atomic_block:
+        raise RuntimeError("_acquire_serial_assignment_lock() requires an open transaction")
     with connection.cursor() as cursor:
         cursor.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", [serial])
 

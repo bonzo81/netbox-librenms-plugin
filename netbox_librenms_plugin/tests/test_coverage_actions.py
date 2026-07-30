@@ -6920,6 +6920,17 @@ class TestSerialActionsNormalizeAndLock:
         conflict_row_locks = [s for s in sqls if "FOR UPDATE" in s and '."serial" = ' in s.split("WHERE", 1)[-1]]
         assert conflict_row_locks == [], f"conflict lookup still takes a row lock: {conflict_row_locks}"
 
+    def test_serial_lock_refuses_to_run_in_autocommit(self):
+        """pg_advisory_xact_lock is transaction-scoped, so taking it outside a transaction locks nothing and must fail loudly."""
+        from django.db import connection
+
+        from netbox_librenms_plugin.views.imports.actions import _acquire_serial_assignment_lock
+
+        # django_db wraps the test in a transaction, so autocommit has to be simulated on the
+        # connection flag itself — the guard reads exactly that flag.
+        with patch.object(connection, "in_atomic_block", False), pytest.raises(RuntimeError):
+            _acquire_serial_assignment_lock("SN-NO-TX")
+
     def test_update_action_serializes_on_the_serial_advisory_lock(self):
         """The update action's serial write takes the same advisory lock (same deadlock shape as sync_serial)."""
         from django.db import connection
