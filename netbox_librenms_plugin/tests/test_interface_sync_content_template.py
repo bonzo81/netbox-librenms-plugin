@@ -24,6 +24,7 @@ class TestInterfaceSyncContentTemplateMigratedMode:
         netbox_only=(),
         winner=None,
         has_write=False,
+        relationship_incomplete=False,
     ):
         from django.contrib.auth.models import AnonymousUser
         from django.template.loader import render_to_string
@@ -49,6 +50,7 @@ class TestInterfaceSyncContentTemplateMigratedMode:
             "virtual_chassis_members": [],
             "cache_expiry": None,
             "oob_incomplete": False,
+            "relationship_data_incomplete": relationship_incomplete,
         }
         ctx = {
             "interface_sync": interface_sync,
@@ -105,6 +107,14 @@ class TestInterfaceSyncContentTemplateMigratedMode:
         html = self._render(migrated=None, netbox_only=[{"id": 1, "name": "eth-only"}])
         assert "Click to view and delete NetBox-only interfaces" in html
         assert "Click to view and move NetBox-only interfaces" not in html
+
+    def test_relationship_incomplete_renders_persistent_banner(self):
+        html = self._render(migrated=None, relationship_incomplete=True)
+        assert "LAG / sub-interface relationship data could not be fetched" in html
+
+    def test_no_relationship_banner_when_complete(self):
+        html = self._render(migrated=None, relationship_incomplete=False)
+        assert "LAG / sub-interface relationship data could not be fetched" not in html
 
     def test_migrated_mode_hides_destructive_delete_controls(self):
         # Migrated mode is move-only: the donor-side bulk-delete UI (select-all + per-row

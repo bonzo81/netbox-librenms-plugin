@@ -583,6 +583,13 @@ class BaseInterfaceTableView(
         # snapshot (via an inline banner) so the missing OOB rows are never silently absent.
         oob_incomplete = bool(cached_data.get("oob_incomplete")) if isinstance(cached_data, dict) else False
 
+        # The refresh path tags a cached snapshot when its port_stack request fails. Keep that
+        # warning attached to the snapshot so later cached renders do not silently show an
+        # incomplete Parent / LAG column after the one-shot Django message has disappeared.
+        relationship_data_incomplete = (
+            bool(cached_data.get("relationship_data_incomplete")) if isinstance(cached_data, dict) else False
+        )
+
         # Get VLAN groups for dropdown
         vlan_groups = self.get_vlan_groups_for_device(obj)
         lookup_maps = self._build_vlan_lookup_maps(vlan_groups)
@@ -767,6 +774,7 @@ class BaseInterfaceTableView(
             "netbox_only_interfaces": netbox_only_interfaces,
             "server_key": server_key,
             "oob_incomplete": oob_incomplete,
+            "relationship_data_incomplete": relationship_data_incomplete,
         }
 
     def _add_vlan_group_selection(self, port, lookup_maps, device, vlan_group_overrides=None):
