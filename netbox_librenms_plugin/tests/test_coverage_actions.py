@@ -5,7 +5,14 @@ from unittest.mock import MagicMock, patch
 import pytest
 from django.test import RequestFactory
 
-from netbox_librenms_plugin.tests.conftest import make_device, make_interface, make_ip, make_superuser, make_vm
+from netbox_librenms_plugin.tests.conftest import (
+    collapse_queryset_chain,
+    make_device,
+    make_interface,
+    make_ip,
+    make_superuser,
+    make_vm,
+)
 
 
 def _make_request(post=None, get=None, headers=None, user_is_superuser=False):
@@ -2987,6 +2994,7 @@ class TestDeviceConflictSelectForUpdateDoesNotExist:
                 # select_for_update().get() raises DoesNotExist
                 MockDevice.objects.select_for_update.return_value.get.side_effect = DoesNotExistExc("gone")
                 MockDevice.DoesNotExist = DoesNotExistExc
+                collapse_queryset_chain(MockDevice)
                 with patch.object(view, "require_object_permissions", return_value=None):
                     with patch.object(
                         view, "get_validated_device_with_selections", return_value=(libre_device, validation, {})
@@ -3090,6 +3098,7 @@ class TestMigrateLibreNMSIdMorePaths:
             with patch("dcim.models.Device") as MockDevice:
                 MockDevice.objects.restrict.return_value.get.return_value = mock_existing
                 MockDevice.DoesNotExist = DoesNotExistExc
+                collapse_queryset_chain(MockDevice)
                 with patch.object(view, "require_object_permissions", return_value=None):
                     with patch.object(
                         view, "get_validated_device_with_selections", return_value=(libre_device, validation, {})
@@ -3182,6 +3191,7 @@ class TestDeviceConflictMoreActions:
         MockDevice.objects.select_for_update.return_value.get.return_value = mock_existing
         MockDevice.objects.filter.return_value.exclude.return_value.first.return_value = None
         MockDevice.DoesNotExist = DoesNotExistExc
+        collapse_queryset_chain(MockDevice)
 
         stack.enter_context(patch("dcim.models.Device", MockDevice))
         stack.enter_context(patch.object(view, "require_object_permissions", return_value=None))
@@ -3390,6 +3400,7 @@ class TestMoreSaveErrorPaths:
         MockDevice.objects.select_for_update.return_value.get.return_value = mock_existing
         MockDevice.objects.filter.return_value.exclude.return_value.first.return_value = None
         MockDevice.DoesNotExist = DoesNotExistExc
+        collapse_queryset_chain(MockDevice)
 
         mock_tx = MagicMock()
         mock_tx.atomic.return_value.__enter__ = MagicMock(return_value=None)
@@ -3620,6 +3631,7 @@ class TestUpdateAndSerialSaveErrors:
         MockDevice.objects.select_for_update.return_value.get.return_value = mock_existing
         MockDevice.objects.filter.return_value.exclude.return_value.first.return_value = None
         MockDevice.DoesNotExist = DoesNotExistExc
+        collapse_queryset_chain(MockDevice)
         mock_tx = MagicMock()
         mock_tx.atomic.return_value.__enter__ = MagicMock(return_value=None)
         mock_tx.atomic.return_value.__exit__ = MagicMock(return_value=False)
@@ -3696,6 +3708,7 @@ class TestSyncSerialMorePaths:
         MockDevice = MagicMock()
         MockDevice.objects.restrict.return_value.get.return_value = mock_existing
         MockDevice.DoesNotExist = DoesNotExistExc
+        collapse_queryset_chain(MockDevice)
         mock_tx = MagicMock()
         mock_tx.atomic.return_value.__enter__ = MagicMock(return_value=None)
         mock_tx.atomic.return_value.__exit__ = MagicMock(return_value=False)
@@ -3902,6 +3915,7 @@ class TestMigrateLibreNMSIdTransactionPaths:
         MockDevice.objects.restrict.return_value.get.return_value = mock_existing
         MockDevice.objects.select_for_update.return_value.get.return_value = locked_device
         MockDevice.DoesNotExist = DoesNotExistExc
+        collapse_queryset_chain(MockDevice)
 
         mock_tx = MagicMock()
         mock_tx.atomic.return_value.__enter__ = MagicMock(return_value=None)

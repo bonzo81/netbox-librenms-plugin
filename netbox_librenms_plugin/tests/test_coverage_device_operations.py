@@ -3188,9 +3188,10 @@ class TestValidateDedupsSerialDuplicateQuery:
 
         # The duplicate-detection serial lookup (serial[:2], no .exclude) must run exactly once,
         # not once per stage. The .first() match query is LIMIT 1; the cross-side query has NOT.
+        # filter_by_trimmed_serial() compares TRIM(serial), so match the trimmed predicate.
         serial_dup_queries = [
             q["sql"]
             for q in ctx.captured_queries
-            if 'serial" =' in q["sql"].lower() and "limit 2" in q["sql"].lower() and "not" not in q["sql"].lower()
+            if 'serial") =' in q["sql"].lower() and "limit 2" in q["sql"].lower() and "not" not in q["sql"].lower()
         ]
         assert len(serial_dup_queries) == 1

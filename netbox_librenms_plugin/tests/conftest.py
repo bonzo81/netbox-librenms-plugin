@@ -198,6 +198,18 @@ def delete_keeping_pk(obj):
     type(obj).objects.filter(pk=obj.pk).delete()
 
 
+def collapse_queryset_chain(mock_model):
+    """Fold ``.all()``/``.annotate()`` back onto a mocked manager.
+
+    ``filter_by_trimmed_serial()`` wraps a plain ``.filter()`` in ``.all().annotate()``,
+    which on a MagicMock forks a fresh auto-mock instead of reaching the test's ``filter``
+    pins — so a no-conflict test sees a truthy row. Real querysets clone and return, so
+    folding both calls back onto the manager keeps every existing pin on the trimmed path.
+    """
+    mock_model.objects.all.return_value = mock_model.objects
+    mock_model.objects.annotate.return_value = mock_model.objects
+
+
 def make_superuser(username="review-su"):
     """Return an ACTUAL active superuser for permission-sensitive view tests.
 

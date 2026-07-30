@@ -9,6 +9,8 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from netbox_librenms_plugin.tests.conftest import collapse_queryset_chain
+
 
 def _matchable_filter_result():
     """Return a mock queryset whose ``[:2]`` slice derives from ``.first.return_value``.
@@ -23,6 +25,15 @@ def _matchable_filter_result():
         [result.first.return_value] if result.first.return_value is not None else []
     )
     return result
+
+
+def _is_serial_lookup(kwargs):
+    """True for the Device serial lookup in either form.
+
+    filter_by_trimmed_serial() compares a TRIM(serial) annotation, so the lookup arrives
+    as ``_serial_trimmed=`` rather than ``serial=``.
+    """
+    return {"serial", "_serial_trimmed"} & set(kwargs)
 
 
 # =============================================================================
@@ -1772,6 +1783,7 @@ class TestSerialNumberMatching:
             self.mock_device,
             self.mock_vm,
         ) = mocks
+        collapse_queryset_chain(self.mock_device)
         self.mock_device_type.objects.all.return_value = []
 
     def _stop_patches(self):
@@ -1797,7 +1809,7 @@ class TestSerialNumberMatching:
 
         def device_filter(*args, **kwargs):
             result = _matchable_filter_result()
-            if "serial" in kwargs:
+            if _is_serial_lookup(kwargs):
                 result.first.return_value = existing
             else:
                 result.first.return_value = None
@@ -1824,7 +1836,7 @@ class TestSerialNumberMatching:
 
         def device_filter(*args, **kwargs):
             result = _matchable_filter_result()
-            if "serial" in kwargs:
+            if _is_serial_lookup(kwargs):
                 result.first.return_value = existing
             else:
                 result.first.return_value = None
@@ -1858,7 +1870,7 @@ class TestSerialNumberMatching:
             result = _matchable_filter_result()
             if "name__iexact" in kwargs:
                 result.first.return_value = existing
-            elif "serial" in kwargs:
+            elif _is_serial_lookup(kwargs):
                 result.first.return_value = None
                 result.exclude.return_value.first.return_value = None
             else:
@@ -1938,7 +1950,7 @@ class TestSerialNumberMatching:
             result = _matchable_filter_result()
             if "name__iexact" in kwargs:
                 result.first.return_value = hostname_device
-            elif "serial" in kwargs:
+            elif _is_serial_lookup(kwargs):
                 result.exclude.return_value.first.return_value = serial_conflict_device
             else:
                 result.first.return_value = None
@@ -2021,7 +2033,7 @@ class TestSerialNumberMatching:
                 result.first.return_value = existing
                 # find_by_librenms_id consumes the queryset via list(qs[:2]).
                 result.__getitem__.return_value = [existing]
-            elif "serial" in kwargs:
+            elif _is_serial_lookup(kwargs):
                 result.first.return_value = None
                 result.__getitem__.return_value = []
                 result.exclude.return_value.first.return_value = None
@@ -2114,7 +2126,7 @@ class TestSerialNumberMatching:
 
         def device_filter(*args, **kwargs):
             result = _matchable_filter_result()
-            if "serial" in kwargs:
+            if _is_serial_lookup(kwargs):
                 result.first.return_value = existing
             else:
                 result.first.return_value = None
@@ -2167,7 +2179,7 @@ class TestSerialNumberMatching:
 
         def device_filter(*args, **kwargs):
             result = _matchable_filter_result()
-            if "serial" in kwargs:
+            if _is_serial_lookup(kwargs):
                 result.first.return_value = existing
             else:
                 result.first.return_value = None
@@ -2218,7 +2230,7 @@ class TestSerialNumberMatching:
 
         def device_filter(*args, **kwargs):
             result = _matchable_filter_result()
-            if "serial" in kwargs:
+            if _is_serial_lookup(kwargs):
                 result.first.return_value = existing
             else:
                 result.first.return_value = None
@@ -2280,6 +2292,7 @@ class TestNameMatchesWithNamingPreferences:
             self.mock_device,
             self.mock_vm,
         ) = mocks
+        collapse_queryset_chain(self.mock_device)
         self.mock_device_type.objects.all.return_value = []
         self.mock_vm.objects.filter.return_value.first.return_value = None
         self.mock_find_site.return_value = {
@@ -2791,6 +2804,7 @@ class TestDeviceConflictActionView:
         ):
             mock_tx.atomic.return_value = MagicMock()
             mock_device_cls.objects.restrict.return_value.get.return_value = existing_device
+            collapse_queryset_chain(mock_device_cls)
             mock_device_cls.objects.select_for_update.return_value.get.return_value = existing_device
             mock_device_cls.objects.filter.return_value.exclude.return_value.first.return_value = None
             mock_device_cls.objects.filter.return_value.first.return_value = None
@@ -2838,6 +2852,7 @@ class TestDeviceConflictActionView:
         ):
             mock_tx.atomic.return_value = MagicMock()
             mock_device_cls.objects.restrict.return_value.get.return_value = existing_device
+            collapse_queryset_chain(mock_device_cls)
             mock_device_cls.objects.select_for_update.return_value.get.return_value = existing_device
             mock_device_cls.objects.filter.return_value.first.return_value = None
             mock_device_cls.objects.filter.return_value.exclude.return_value.first.return_value = None
@@ -2882,6 +2897,7 @@ class TestDeviceConflictActionView:
         ):
             mock_tx.atomic.return_value = MagicMock()
             mock_device_cls.objects.restrict.return_value.get.return_value = existing_device
+            collapse_queryset_chain(mock_device_cls)
             mock_device_cls.objects.select_for_update.return_value.get.return_value = existing_device
             mock_device_cls.objects.filter.return_value.exclude.return_value.first.return_value = None
             mock_device_cls.objects.filter.return_value.first.return_value = None
@@ -2933,6 +2949,7 @@ class TestDeviceConflictActionView:
         ):
             mock_tx.atomic.return_value = MagicMock()
             mock_device_cls.objects.restrict.return_value.get.return_value = existing_device
+            collapse_queryset_chain(mock_device_cls)
             mock_device_cls.objects.select_for_update.return_value.get.return_value = existing_device
             mock_device_cls.objects.filter.return_value.exclude.return_value.first.return_value = None
             mock_device_cls.objects.filter.return_value.first.return_value = None
@@ -2973,6 +2990,7 @@ class TestDeviceConflictActionView:
         ):
             mock_tx.atomic.return_value = MagicMock()
             mock_device_cls.objects.restrict.return_value.get.return_value = existing_device
+            collapse_queryset_chain(mock_device_cls)
             mock_device_cls.objects.select_for_update.return_value.get.return_value = existing_device
             mock_device_cls.objects.filter.return_value.exclude.return_value.first.return_value = None
             mock_device_cls.objects.filter.return_value.first.return_value = None
@@ -3017,6 +3035,7 @@ class TestDeviceConflictActionView:
         ):
             mock_tx.atomic.return_value = MagicMock()
             mock_device_cls.objects.restrict.return_value.get.return_value = existing_device
+            collapse_queryset_chain(mock_device_cls)
             mock_device_cls.objects.select_for_update.return_value.get.return_value = existing_device
             mock_device_cls.objects.filter.return_value.exclude.return_value.first.return_value = None
             mock_device_cls.objects.filter.return_value.exclude.return_value.exists.return_value = False
@@ -3058,6 +3077,7 @@ class TestDeviceConflictActionView:
             patch("dcim.models.Device") as mock_device_cls,
         ):
             mock_device_cls.objects.restrict.return_value.get.return_value = existing_device
+            collapse_queryset_chain(mock_device_cls)
             mock_device_cls.objects.select_for_update.return_value.get.return_value = existing_device
             mock_device_cls.objects.filter.return_value.exclude.return_value.first.return_value = None
             # Include existing_device so the validated-conflict-target guard passes;
@@ -3099,6 +3119,7 @@ class TestDeviceConflictActionView:
             patch("dcim.models.Device") as mock_device_cls,
         ):
             mock_device_cls.objects.restrict.return_value.get.return_value = existing_device
+            collapse_queryset_chain(mock_device_cls)
             mock_device_cls.objects.select_for_update.return_value.get.return_value = existing_device
             mock_device_cls.objects.filter.return_value.exclude.return_value.first.return_value = None
             mock_validate.return_value = (libre_device, validation, selections)
@@ -3133,6 +3154,7 @@ class TestDeviceConflictActionView:
             patch("dcim.models.Device") as mock_device_cls,
         ):
             mock_device_cls.objects.restrict.return_value.get.return_value = existing_device
+            collapse_queryset_chain(mock_device_cls)
             mock_device_cls.objects.select_for_update.return_value.get.return_value = existing_device
             mock_device_cls.objects.filter.return_value.exclude.return_value.first.return_value = None
             mock_validate.return_value = (libre_device, validation, selections)
@@ -3176,6 +3198,7 @@ class TestDeviceConflictActionView:
         ):
             mock_tx.atomic.return_value = MagicMock()
             mock_device_cls.objects.restrict.return_value.get.return_value = existing_device
+            collapse_queryset_chain(mock_device_cls)
             mock_device_cls.objects.select_for_update.return_value.get.return_value = existing_device
             mock_device_cls.objects.filter.return_value.exclude.return_value.first.return_value = None
             mock_device_cls.objects.filter.return_value.first.return_value = None
@@ -3231,6 +3254,7 @@ class TestDeviceConflictActionView:
         ):
             mock_tx.atomic.return_value = MagicMock()
             mock_device_cls.objects.restrict.return_value.get.return_value = existing_device
+            collapse_queryset_chain(mock_device_cls)
             mock_device_cls.objects.select_for_update.return_value.get.return_value = existing_device
             mock_device_cls.objects.filter.return_value.exclude.return_value.first.return_value = None
             mock_device_cls.objects.filter.return_value.first.return_value = None
@@ -3286,6 +3310,7 @@ class TestDeviceConflictActionView:
             patch("dcim.models.Device") as mock_device_cls,
         ):
             mock_device_cls.objects.restrict.return_value.get.return_value = existing_device
+            collapse_queryset_chain(mock_device_cls)
             mock_device_cls.objects.select_for_update.return_value.get.return_value = existing_device
             mock_device_cls.objects.filter.return_value.exclude.return_value.first.return_value = None
             mock_validate.return_value = (libre_device, validation, selections)
@@ -3321,6 +3346,7 @@ class TestDeviceConflictActionView:
         ):
             mock_tx.atomic.return_value = MagicMock()
             mock_device_cls.objects.restrict.return_value.get.return_value = existing_device
+            collapse_queryset_chain(mock_device_cls)
             mock_device_cls.objects.select_for_update.return_value.get.return_value = existing_device
             mock_device_cls.objects.filter.return_value.exclude.return_value.first.return_value = None
             mock_device_cls.objects.filter.return_value.first.return_value = None
@@ -3361,6 +3387,7 @@ class TestDeviceConflictActionView:
             patch("netbox_librenms_plugin.utils.find_matching_platform") as mock_find_platform,
         ):
             mock_device_cls.objects.restrict.return_value.get.return_value = existing_device
+            collapse_queryset_chain(mock_device_cls)
             mock_device_cls.objects.select_for_update.return_value.get.return_value = existing_device
             mock_device_cls.objects.filter.return_value.exclude.return_value.first.return_value = None
             mock_find_platform.return_value = {"found": True, "platform": mock_platform, "match_type": "exact"}
@@ -3397,6 +3424,7 @@ class TestDeviceConflictActionView:
             patch("netbox_librenms_plugin.utils.match_librenms_hardware_to_device_type") as mock_hw_match,
         ):
             mock_device_cls.objects.restrict.return_value.get.return_value = existing_device
+            collapse_queryset_chain(mock_device_cls)
             mock_device_cls.objects.select_for_update.return_value.get.return_value = existing_device
             mock_device_cls.objects.filter.return_value.exclude.return_value.first.return_value = None
             mock_hw_match.return_value = {"matched": True, "device_type": new_device_type}
@@ -5989,6 +6017,7 @@ class TestVirtualChassisEdgeBranches:
             ),
         ):
             mock_device_cls.objects.filter.side_effect = _filter_exists
+            collapse_queryset_chain(mock_device_cls)
             mock_vc_cls.objects.create.return_value = mock_vc
 
             members_info = [{"serial": "DUP-SERIAL", "position": 2, "name": "sw1-2"}]
@@ -6044,6 +6073,7 @@ class TestVirtualChassisEdgeBranches:
             ),
         ):
             mock_device_cls.objects.filter.side_effect = _filter_side_effect
+            collapse_queryset_chain(mock_device_cls)
             mock_vc_cls.objects.create.return_value = mock_vc
 
             members_info = [{"serial": "NEW-SERIAL", "position": 2, "name": "sw1-2"}]
@@ -6098,6 +6128,7 @@ class TestVirtualChassisEdgeBranches:
             patch("netbox_librenms_plugin.import_utils.virtual_chassis.logger") as mock_logger,
         ):
             mock_device_cls.objects.filter.side_effect = _filter_side_effect
+            collapse_queryset_chain(mock_device_cls)
             mock_vc_cls.objects.create.return_value = mock_vc
 
             # 2 members expected, both skipped → warning
@@ -6164,6 +6195,7 @@ class TestVirtualChassisEdgeBranches:
             ),
         ):
             mock_device_cls.objects.filter.side_effect = _filter_side_effect
+            collapse_queryset_chain(mock_device_cls)
             mock_vc_cls.objects.create.return_value = mock_vc
 
             # position=0 → discovered_pos normalized to None; serial present but name conflicts
@@ -6227,6 +6259,7 @@ class TestVirtualChassisEdgeBranches:
             ),
         ):
             mock_device_cls.objects.filter.side_effect = _filter_side_effect
+            collapse_queryset_chain(mock_device_cls)
             mock_device_cls.objects.create.side_effect = _capture_create
             mock_vc_cls.objects.create.return_value = mock_vc
 
