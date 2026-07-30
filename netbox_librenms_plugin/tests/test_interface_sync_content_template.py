@@ -252,12 +252,13 @@ class TestInterfaceSyncContentTemplateMigratedMode:
         winner = make_device("iface-tmpl-winner")
         # Alphanumeric key so escapejs leaves it intact (it escapes e.g. '-' to -); the
         # guard behaviour, not escapejs, is what this test pins.
-        html = self._render(
-            migrated={"server_key": "edgelondon", "device_id": 1, "at": "now"},
-            winner=winner,
-            netbox_only=[{"id": 1, "name": "eth-only"}],
-            has_write=True,
-        )
+        with self._patch_move_url_reverse(resolve=True):
+            html = self._render(
+                migrated={"server_key": "edgelondon", "device_id": 1, "at": "now"},
+                winner=winner,
+                netbox_only=[{"id": 1, "name": "eth-only"}],
+                has_write=True,
+            )
         # The Move button renders for the NetBox-only row and carries the server_key. Scope the
         # hx-vals assertion to the Move button's own tag (mirroring the fallback test) so a
         # different element carrying the key can't mask the button dropping its hx-vals.
@@ -275,12 +276,13 @@ class TestInterfaceSyncContentTemplateMigratedMode:
         from netbox_librenms_plugin.tests.conftest import make_device
 
         winner = make_device("iface-tmpl-winner-nokey")
-        html = self._render(
-            migrated={"device_id": 1, "at": "now"},  # marker has NO server_key
-            winner=winner,
-            netbox_only=[{"id": 1, "name": "eth-only"}],
-            has_write=True,
-        )
+        with self._patch_move_url_reverse(resolve=True):
+            html = self._render(
+                migrated={"device_id": 1, "at": "now"},  # marker has NO server_key
+                winner=winner,
+                netbox_only=[{"id": 1, "name": "eth-only"}],
+                has_write=True,
+            )
         # The Move button still renders, and never with an empty server_key payload.
         assert "mdi-transfer-right" in html
         assert 'hx-vals=\'{"server_key": ""}\'' not in html

@@ -19,7 +19,8 @@ def extract_enclosing_tag(html, marker, tag="<button"):
 def patch_move_url_reverse(viewname_suffix, *, resolve):
     """Patch ``django.urls.reverse`` so a move-to-winner viewname looks registered or not.
 
-    ``resolve=True`` makes any viewname ending in ``viewname_suffix`` resolve to a fake path;
+    ``resolve=True`` makes any viewname ending in ``viewname_suffix`` resolve to a fake path
+    carrying the requested pk;
     ``resolve=False`` raises ``NoReverseMatch`` for it. Every other viewname resolves for real.
     The move URLs are only registered up-stack, so forcing the state here keeps the guard tests
     branch-independent. ``django.urls.reverse`` is the correct target because ``{% url %}``
@@ -34,7 +35,14 @@ def patch_move_url_reverse(viewname_suffix, *, resolve):
     def _reverse(viewname, *args, **kwargs):
         if str(viewname).endswith(viewname_suffix):
             if resolve:
-                return f"/fake/{viewname_suffix}/1/"
+                route_kwargs = kwargs.get("kwargs") or {}
+                route_args = kwargs.get("args") or ()
+                pk = route_kwargs.get("pk")
+                if pk is None and route_args:
+                    pk = route_args[-1]
+                if pk is None:
+                    raise NoReverseMatch(viewname)
+                return f"/fake/{viewname_suffix}/{pk}/"
             raise NoReverseMatch(viewname)
         return real_reverse(viewname, *args, **kwargs)
 

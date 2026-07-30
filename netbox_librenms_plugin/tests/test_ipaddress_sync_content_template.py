@@ -50,20 +50,19 @@ class TestIpAddressSyncContentTemplateMigratedMode:
 
     def test_migrated_mode_renders_move_button_targeting_the_ip_view(self):
         """A write-permitted migrated donor shows a Move button posting to ipaddress_move_to_winner for the IP's pk."""
-        from django.urls import reverse
-
+        from netbox_librenms_plugin.tests._html_helpers import patch_move_url_reverse
         from netbox_librenms_plugin.tests.conftest import make_device
 
         winner = make_device("ip-tmpl-winner")
         movable = [{"id": 4321, "address": "10.0.0.5/24", "interface_name": "eth0"}]
-        html = self._render(
-            migrated={"server_key": "default", "device_id": winner.pk, "at": "now"},
-            movable=movable,
-            winner=winner,
-            has_write=True,
-        )
-        move_url = reverse("plugins:netbox_librenms_plugin:ipaddress_move_to_winner", kwargs={"pk": 4321})
-        assert move_url in html  # the button posts to the real move view for this IP's pk
+        with patch_move_url_reverse("ipaddress_move_to_winner", resolve=True):
+            html = self._render(
+                migrated={"server_key": "default", "device_id": winner.pk, "at": "now"},
+                movable=movable,
+                winner=winner,
+                has_write=True,
+            )
+        assert "/fake/ipaddress_move_to_winner/4321/" in html
         assert "10.0.0.5/24" in html
         assert f"to {winner.name}" in html  # the card header names the winner
 

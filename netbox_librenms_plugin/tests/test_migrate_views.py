@@ -620,6 +620,44 @@ class TestMoveInterfaceToWinnerView:
         interface.refresh_from_db()
         assert interface.device_id == donor.pk
 
+    def test_real_unique_violation_at_save_rolls_back_and_reports_409(self):
+        """A real save-time unique violation reports 409 and rolls back the move."""
+        from dcim.models import Interface
+
+        view = self._setup_view()
+        donor = make_device("mi-realie-donor")
+        winner = make_device("mi-realie-winner")  # no "Eth0" -> pre-check, re-check and full_clean pass
+        self._mark(donor, winner)
+        interface = make_interface(donor, "Eth0")
+        req = _hx_request({"server_key": "default"})
+
+        # Land the winner-side row AFTER full_clean() and BEFORE save(), which is the only window
+        # the IntegrityError handler exists for. Unlike patching save() to raise, the violation
+        # here is the real DB constraint, so the connection really is poisoned afterwards.
+        real_full_clean = Interface.full_clean
+        state = {"raced": False}
+
+        def racing_full_clean(iface, *args, **kwargs):
+            result = real_full_clean(iface, *args, **kwargs)
+            if iface.pk == interface.pk and not state["raced"]:
+                state["raced"] = True
+                Interface.objects.create(device=winner, name=interface.name, type="1000base-t")
+            return result
+
+        with patch.object(Interface, "full_clean", racing_full_clean):
+            resp = view.post(req, pk=interface.pk)
+
+        assert state["raced"]
+        assert resp.status_code == 200
+        assert b"already has an interface named" in resp.content
+        assert resp.headers.get("HX-Reswap") == "none"
+        assert resp.headers.get("HX-Refresh") is None
+        # Everything the transaction touched is gone: the interface never moved and the
+        # racing winner-side row was rolled back with it.
+        interface.refresh_from_db()
+        assert interface.device_id == donor.pk
+        assert not Interface.objects.filter(device=winner, name="Eth0").exists()
+
     def test_marker_repointed_under_lock_is_rejected(self):
         """If the donor's _migrated_to is repointed between the unlocked resolve and the under-lock re-resolve, the move aborts instead of targeting the stale winner."""
         import netbox_librenms_plugin.views.sync.migrate as migrate_mod
