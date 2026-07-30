@@ -7091,3 +7091,56 @@ class TestConflictActionsObjectScope:
 
         assert b"Existing device not found" not in response.content
         assert Device.objects.get(pk=target.pk).custom_field_data["librenms_id"]["default"] == 4242
+
+    @staticmethod
+    def _vc_pair(name, *, sync_cf):
+        """A real 2-member VirtualChassis whose m1 holds ``sync_cf`` (so it is the sync device)."""
+        from dcim.models import VirtualChassis
+
+        vc = VirtualChassis.objects.create(name=name)
+        m1 = make_device(f"{name}-m1", librenms_cf=sync_cf)
+        m1.virtual_chassis = vc
+        m1.vc_position = 1
+        m1.save()
+        m2 = make_device(f"{name}-m2")
+        m2.virtual_chassis = vc
+        m2.vc_position = 2
+        m2.save()
+        return m1, m2
+
+    def test_add_as_oob_cannot_write_an_out_of_scope_vc_sync_device(self):
+        """The OOB link lands on the VC sync sibling, so a grant covering only the selected member must not attach it."""
+        from dcim.models import Device
+
+        sync, selected = self._vc_pair("scope-oob-vc", sync_cf={"default": {"id": 30}})
+        user = self._scoped_writer(selected, "scoped-oob-vc-writer")  # excludes the sync sibling
+
+        response = self._post_add_as_oob(user, selected)
+
+        assert b"Existing device not found" in response.content
+        sync_entry = Device.objects.get(pk=sync.pk).custom_field_data["librenms_id"]["default"]
+        assert sync_entry == {"id": 30}  # no OOB half written onto the unauthorized sibling
+        assert "librenms_id" not in Device.objects.get(pk=selected.pk).custom_field_data
+
+    def test_add_as_oob_writes_the_vc_sync_device_when_it_is_in_scope(self):
+        """Widening the grant to the sync sibling lets the same attach through (no over-block)."""
+        from core.models import ObjectType
+        from dcim.models import Device
+        from django.contrib.auth import get_user_model
+        from users.models import ObjectPermission
+
+        sync, selected = self._vc_pair("scope-oob-vc-ok", sync_cf={"default": {"id": 30}})
+        user = self._scoped_writer(selected, "scoped-oob-vc-writer-ok")
+        extra = ObjectPermission.objects.create(
+            name="scoped-oob-vc-sync", actions=["change"], constraints={"pk": sync.pk}
+        )
+        extra.object_types.set([ObjectType.objects.get_for_model(Device)])
+        extra.users.set([user])
+        user = get_user_model().objects.get(pk=user.pk)  # clear the per-request perm cache
+
+        response = self._post_add_as_oob(user, selected)
+
+        assert b"Existing device not found" not in response.content
+        sync_entry = Device.objects.get(pk=sync.pk).custom_field_data["librenms_id"]["default"]
+        assert sync_entry["id"] == 30
+        assert sync_entry["oob"]["id"] == 4343

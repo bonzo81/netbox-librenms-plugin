@@ -2503,6 +2503,14 @@ class AddAsOOBView(
         # row, so the common path is unchanged. The candidate-match check above stays on the
         # user-selected existing_device (it validates the POST, not the linkage target).
         sync_device = get_librenms_sync_device(existing_device, server_key=server_key) or existing_device
+        # The sync device is DERIVED (a VC sibling of the scoped existing_device), and the block
+        # below locks and saves it. Authorize it too, or a grant covering only the selected member
+        # writes the OOB link onto a sibling it cannot see. Skipped when they are the same row.
+        if (
+            sync_device.pk != existing_device.pk
+            and not self.restricted_queryset(Device, "change").filter(pk=sync_device.pk).exists()
+        ):
+            return _htmx_error_response("Existing device not found")
 
         # coerce_librenms_id centralizes the bool/int/str/positive checks (rejects bools,
         # non-numeric strings, zero/negatives) in one place.
