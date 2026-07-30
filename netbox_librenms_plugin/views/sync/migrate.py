@@ -636,6 +636,9 @@ class MoveInterfaceToWinnerView(_BaseMoveToWinnerView):
             try:
                 interface.save()
             except IntegrityError:
+                # IntegrityError already marks this atomic block rollback-only; keep the
+                # rollback explicit here to match the non-database failure handlers below.
+                transaction.set_rollback(True)
                 # A concurrent rename/create on the winner side can still trip a DB unique
                 # constraint between our name re-check and this save. Surface it as the same
                 # 409 the collision check uses rather than letting it bubble up as a 500.
