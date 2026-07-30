@@ -1440,7 +1440,7 @@ class UpdateModuleInterfaceView(
             module_id = int(request.POST.get("module_id"))
         except (TypeError, ValueError):
             messages.error(request, "Missing or invalid module ID.")
-            return _modules_redirect_response(request, sync_url)
+            return _modules_redirect_response(request, sync_url, server_key)
 
         module = get_object_or_404(Module, pk=module_id, device=target_device)
 
@@ -1534,7 +1534,7 @@ class UpdateModuleInterfaceView(
                 f"Could not update interface association: {bind_result.get('reason', 'unknown reason')}",
             )
 
-        return _modules_redirect_response(request, sync_url)
+        return _modules_redirect_response(request, sync_url, server_key)
 
 
 class ModuleMismatchPreviewView(

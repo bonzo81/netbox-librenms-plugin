@@ -2927,6 +2927,7 @@ class TestInstallViewsDoNotDeleteCache:
 
         view = object.__new__(InstallBranchView)
         view.required_object_permissions = {}
+        view._librenms_api = MagicMock(server_key="default")
         device = _make_device()
 
         request = _make_request("POST", data={"parent_index": "100", "server_key": "default"})
@@ -2972,6 +2973,7 @@ class TestInstallViewsDoNotDeleteCache:
 
         view = object.__new__(InstallSelectedView)
         view.required_object_permissions = {}
+        view._librenms_api = MagicMock(server_key="default")
         device = _make_device()
 
         request = _make_request("POST", data={"server_key": "default"})
@@ -3020,6 +3022,7 @@ class TestInstallViewsDoNotDeleteCache:
 
         view = object.__new__(InstallBranchView)
         view.required_object_permissions = {}
+        view._librenms_api = MagicMock(server_key="default")
         device = _make_device()
 
         request = _make_request("POST", data={"parent_index": "100", "server_key": "default"})
@@ -3047,6 +3050,7 @@ class TestInstallViewsDoNotDeleteCache:
 
         view = object.__new__(InstallSelectedView)
         view.required_object_permissions = {}
+        view._librenms_api = MagicMock(server_key="default")
         device = _make_device()
 
         request = _make_request("POST", data={"server_key": "default"})
@@ -3078,6 +3082,7 @@ class TestInstallViewsDoNotDeleteCache:
 
         view = object.__new__(InstallBranchView)
         view.required_object_permissions = {}
+        view._librenms_api = MagicMock(server_key="default")
         device = _make_device()
 
         request = _make_request("POST", data={"parent_index": "100", "server_key": "default"})
@@ -3121,6 +3126,7 @@ class TestInstallViewsDoNotDeleteCache:
 
         view = object.__new__(InstallSelectedView)
         view.required_object_permissions = {}
+        view._librenms_api = MagicMock(server_key="default")
         device = _make_device()
 
         request = _make_request("POST", data={"server_key": "default"})
@@ -3168,6 +3174,7 @@ class TestInstallViewsDoNotDeleteCache:
 
         view = object.__new__(InstallBranchView)
         view.required_object_permissions = {}
+        view._librenms_api = MagicMock(server_key="default")
         device = _make_device()
 
         request = _make_request("POST", data={"parent_index": "100", "server_key": "default"})
@@ -3220,6 +3227,7 @@ class TestInstallViewsDoNotDeleteCache:
 
         view = object.__new__(InstallSelectedView)
         view.required_object_permissions = {}
+        view._librenms_api = MagicMock(server_key="default")
         device = _make_device()
 
         request = _make_request("POST", data={"server_key": "default"})
@@ -5841,3 +5849,79 @@ class TestReplaceModuleRedirectServerKey:
         # Pre-fix the redirect dropped the computed fallback (POST had no server_key); now it
         # carries server_key=prod so the action stays on the active server's modules tab.
         assert "server_key=prod" in resp["HX-Redirect"]
+
+
+class TestUpdateModuleInterfaceRedirectServerKey:
+    """UpdateModuleInterfaceView must redirect under its resolved active server scope."""
+
+    @staticmethod
+    def _view():
+        from netbox_librenms_plugin.views.sync.modules import UpdateModuleInterfaceView
+
+        view = object.__new__(UpdateModuleInterfaceView)
+        view.required_object_permissions = {}
+        view._librenms_api = MagicMock(server_key="prod")
+        return view
+
+    @staticmethod
+    def _request(data):
+        from django.test import RequestFactory
+
+        return RequestFactory().post("/update-interface/", data, HTTP_HX_REQUEST="true")
+
+    def test_invalid_module_id_redirect_preserves_fallback_server_key(self):
+        view = self._view()
+        request = self._request({"ent_index": "77"})
+        device = _make_device()
+
+        with (
+            patch.object(view, "require_all_permissions", return_value=None),
+            patch("netbox_librenms_plugin.views.sync.modules.get_object_or_404", return_value=device),
+            patch(
+                "netbox_librenms_plugin.views.sync.modules._resolve_target_device_with_validation",
+                return_value=(device, False),
+            ),
+            patch(
+                "netbox_librenms_plugin.views.sync.modules._resolve_single_install_binding_item",
+                return_value=None,
+            ),
+            patch("netbox_librenms_plugin.views.sync.modules.reverse", return_value="/sync/url/"),
+            patch("netbox_librenms_plugin.views.sync.modules.messages"),
+        ):
+            response = view.post(request, pk=device.pk)
+
+        assert "server_key=prod" in response["HX-Redirect"]
+
+    def test_success_redirect_preserves_fallback_server_key(self):
+        view = self._view()
+        request = self._request({"module_id": "321", "ent_index": "77"})
+        device = _make_device()
+        module = MagicMock()
+        module.pk = 321
+        module.module_type.model = "SFP-10G-SR"
+        module.module_bay.name = "SFP 1"
+
+        with (
+            patch.object(view, "require_all_permissions", return_value=None),
+            patch(
+                "netbox_librenms_plugin.views.sync.modules.get_object_or_404",
+                side_effect=[device, module],
+            ),
+            patch(
+                "netbox_librenms_plugin.views.sync.modules._resolve_target_device_with_validation",
+                return_value=(device, False),
+            ),
+            patch(
+                "netbox_librenms_plugin.views.sync.modules._resolve_single_install_binding_item",
+                return_value=None,
+            ),
+            patch(
+                "netbox_librenms_plugin.views.sync.modules._adopt_existing_template_interfaces",
+                return_value={"status": "bound", "adopted_count": 0},
+            ),
+            patch("netbox_librenms_plugin.views.sync.modules.reverse", return_value="/sync/url/"),
+            patch("netbox_librenms_plugin.views.sync.modules.messages"),
+        ):
+            response = view.post(request, pk=device.pk)
+
+        assert "server_key=prod" in response["HX-Redirect"]

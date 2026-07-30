@@ -2402,8 +2402,8 @@ class TestBaseInterfaceTableViewGetContextData:
 
         assert ctx["oob_incomplete"] is True
 
-    def test_relationship_data_incomplete_flag_surfaced_from_cache(self):
-        """A cached snapshot tagged relationship_data_incomplete surfaces the flag in context so the template can persistently warn that the Parent / LAG column may be incomplete."""
+    def test_unowned_relationship_cache_metadata_is_not_surfaced(self):
+        """PR 315 must not expose warning state owned by the later parent/LAG feature."""
         view = self._make_view()
         obj = _mock_obj()
         obj.virtual_chassis = None
@@ -2439,45 +2439,7 @@ class TestBaseInterfaceTableViewGetContextData:
             mock_tz.timedelta.return_value = MagicMock()
             ctx = view.get_context_data(request, obj, "ifName")
 
-        assert ctx["relationship_data_incomplete"] is True
-
-    def test_relationship_data_incomplete_defaults_false(self):
-        """A snapshot without the flag leaves relationship_data_incomplete False (no spurious banner)."""
-        view = self._make_view()
-        obj = _mock_obj()
-        obj.virtual_chassis = None
-        request = _mock_request()
-
-        cached_data = {
-            "ports": [{"port_id": 1, "ifName": "Gi0/0", "ifAdminStatus": "up", "ifAlias": None, "ifDescr": "Gi0/0"}],
-        }
-
-        mock_iface = MagicMock()
-        mock_iface.name = "Gi0/0"
-        mock_ifaces_qs = MagicMock()
-        mock_ifaces_qs.select_related.return_value.prefetch_related.return_value = [mock_iface]
-
-        with (
-            patch.object(view, "get_cache_key", return_value="key"),
-            patch.object(view, "get_last_fetched_key", return_value="last-key"),
-            patch.object(view, "get_vlan_overrides_key", return_value="overrides-key"),
-            patch.object(view, "get_vlan_groups_for_device", return_value=[]),
-            patch.object(view, "_build_vlan_lookup_maps", return_value={"vid_to_groups": {}, "vid_to_vlans": {}}),
-            patch.object(view, "get_interfaces", return_value=mock_ifaces_qs),
-            patch.object(view, "_add_vlan_group_selection"),
-            patch.object(view, "_add_missing_vlans_info"),
-            patch.object(view, "get_table", return_value=MagicMock()),
-            patch("netbox_librenms_plugin.views.base.interfaces_view.get_interface_name_field", return_value="ifName"),
-            patch("netbox_librenms_plugin.views.base.interfaces_view.cache") as mock_cache,
-            patch("netbox_librenms_plugin.views.base.interfaces_view.timezone") as mock_tz,
-        ):
-            mock_cache.get.side_effect = lambda key: cached_data if key == "key" else None
-            mock_cache.ttl.return_value = 300
-            mock_tz.now.return_value = MagicMock()
-            mock_tz.timedelta.return_value = MagicMock()
-            ctx = view.get_context_data(request, obj, "ifName")
-
-        assert ctx["relationship_data_incomplete"] is False
+        assert "relationship_data_incomplete" not in ctx
 
     def test_cache_hit_with_vc_uses_vc_members(self):
         """Cached data with VC queries each chassis member's interfaces."""
@@ -3954,8 +3916,11 @@ class TestRenderSyncPartialInjectsWritePermission:
     """
 
     def _ip_view(self, *, superuser):
-        from django.contrib.auth.models import AnonymousUser
+        from core.models import ObjectType
+        from django.apps import apps
+        from django.contrib.auth import get_user_model
         from django.test import RequestFactory
+        from users.models import ObjectPermission
 
         from netbox_librenms_plugin.tests.conftest import make_superuser
         from netbox_librenms_plugin.views.object_sync.devices import DeviceIPAddressTableView
@@ -3963,7 +3928,15 @@ class TestRenderSyncPartialInjectsWritePermission:
         view = object.__new__(DeviceIPAddressTableView)
         view._librenms_api = MagicMock(server_key="default")
         request = RequestFactory().post("/x/")
-        request.user = make_superuser() if superuser else AnonymousUser()
+        if superuser:
+            request.user = make_superuser()
+        else:
+            settings_model = apps.get_model("netbox_librenms_plugin", "LibreNMSSettings")
+            user = get_user_model().objects.create_user(username="rsp-perm-viewer", password="x")
+            view_permission = ObjectPermission.objects.create(name="rsp-perm-plugin-view", actions=["view"])
+            view_permission.object_types.set([ObjectType.objects.get_for_model(settings_model)])
+            view_permission.users.set([user])
+            request.user = get_user_model().objects.get(pk=user.pk)
         view.request = request
         return view, request
 
@@ -4013,11 +3986,15 @@ class TestRenderSyncPartialInjectsWritePermission:
     def test_read_only_user_gets_read_only_text_not_a_button(self):
         from django.urls import reverse
 
+        from netbox_librenms_plugin.constants import PERM_CHANGE_PLUGIN, PERM_VIEW_PLUGIN
+
         view, request = self._ip_view(superuser=False)
+        assert request.user.has_perm(PERM_VIEW_PLUGIN)
+        assert not request.user.has_perm(PERM_CHANGE_PLUGIN)
         donor, _winner, ip = self._migrated_donor_with_movable_ip()
         resp = view.render_sync_partial(request, donor, "default", self._ip_sync_ctx(donor, ip))
         html = resp.content.decode()
         move_url = reverse("plugins:netbox_librenms_plugin:ipaddress_move_to_winner", kwargs={"pk": ip.pk})
-        # The injected flag reflects the anonymous user → muted text, no live mutating button.
+        # A genuine view-only plugin user gets muted text, not a live mutating button.
         assert "read-only" in html
         assert move_url not in html

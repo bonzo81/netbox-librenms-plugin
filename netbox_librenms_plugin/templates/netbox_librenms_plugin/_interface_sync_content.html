@@ -11,13 +11,6 @@
 </div>
 {% endif %}
 
-{% if interface_sync.relationship_data_incomplete %}
-<div class="alert alert-warning d-flex align-items-center noprint" role="alert">
-    <i class="mdi mdi-alert me-2"></i>
-    <div>LAG / sub-interface relationship data could not be fetched from LibreNMS on the last refresh, so the Parent / LAG column may be incomplete. Refresh again to retry.</div>
-</div>
-{% endif %}
-
 {# Migrated donors must not sync: hiding only the button leaves the POST form live (Enter in a filter still submits), so drop the form in migrated mode. #}
 {% with model_name=interface_sync.object|meta:"model_name" %}
 {% if migrated_to_marker %}
