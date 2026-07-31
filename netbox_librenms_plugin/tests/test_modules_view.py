@@ -1771,6 +1771,27 @@ class TestCollectDescendants:
         depths = [d for d, _ in results]
         assert depths == [1, 2], f"Expected [1, 2] but got {depths}"
 
+    def test_numeric_model_child_is_collected(self):
+        """An all-digit descendant model decoded as an int remains a real hardware row."""
+        child = {
+            "entPhysicalIndex": 1,
+            "entPhysicalModelName": 123456,
+            "entPhysicalContainedIn": 0,
+        }
+        view = self._view()
+        results = []
+
+        view._collect_descendants(
+            0,
+            {0: [child]},
+            {1: child},
+            ignore_rules=[],
+            depth=1,
+            results=results,
+        )
+
+        assert results == [(1, child)]
+
 
 class TestDetermineStatus:
     """Tests for _determine_status logic."""
@@ -4238,6 +4259,27 @@ class TestFindIntegratingAncestor:
 
         assert BaseModuleTableView._find_integrating_ancestor(mda, self._index([xiom, mda])) is xiom
 
+    def test_numeric_model_finds_integrating_ancestor(self):
+        """Numeric ENTITY models are normalized on both sides of the integrated-card comparison."""
+        from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
+
+        xiom = {
+            "entPhysicalIndex": 100,
+            "entPhysicalClass": "xioModule",
+            "entPhysicalSerialNum": "NS241462069",
+            "entPhysicalModelName": 123456,
+            "entPhysicalContainedIn": 0,
+        }
+        mda = {
+            "entPhysicalIndex": 200,
+            "entPhysicalClass": "mdaModule",
+            "entPhysicalSerialNum": "NS241462069",
+            "entPhysicalModelName": 123456,
+            "entPhysicalContainedIn": 100,
+        }
+
+        assert BaseModuleTableView._find_integrating_ancestor(mda, self._index([xiom, mda])) is xiom
+
     def test_returns_none_when_serial_differs(self):
         from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
 
@@ -4367,6 +4409,31 @@ class TestFindIntegratingAncestor:
 
 class TestBuildRowIntegratedDedupe:
     """_build_row short-circuits to status='Integrated' when an integrating ancestor exists."""
+
+    def test_numeric_model_reaches_the_integrated_row_path(self):
+        """The production row builder normalizes numeric models before ancestor matching."""
+        view = _make_view()
+        xiom = {
+            "entPhysicalIndex": 100,
+            "entPhysicalName": "XIOM 2/x1",
+            "entPhysicalClass": "xioModule",
+            "entPhysicalSerialNum": "NS241462069",
+            "entPhysicalModelName": 123456,
+            "entPhysicalContainedIn": 0,
+        }
+        mda = {
+            "entPhysicalIndex": 200,
+            "entPhysicalName": "MDA 2/x1/1",
+            "entPhysicalClass": "mdaModule",
+            "entPhysicalSerialNum": "NS241462069",
+            "entPhysicalModelName": 123456,
+            "entPhysicalContainedIn": 100,
+        }
+
+        row = view._build_row(mda, {100: xiom, 200: mda}, {}, {})
+
+        assert row["status"] == "Integrated"
+        assert row["model"] == "123456"
 
     def test_mda_under_xiom_becomes_integrated(self):
         view = _make_view()

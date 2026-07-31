@@ -2788,6 +2788,36 @@ class TestAncestorWalkGenericContainerModel:
         assert 1 in indices
         assert 2 not in indices, "Child module under real parent must remain a descendant"
 
+    def test_numeric_models_are_classified_without_crashing(self):
+        """Numeric child and ancestor models still participate in top-level classification."""
+        parent = {
+            "entPhysicalIndex": 1,
+            "entPhysicalClass": "module",
+            "entPhysicalModelName": 123456,
+            "entPhysicalContainedIn": 0,
+        }
+        child = {
+            "entPhysicalIndex": 2,
+            "entPhysicalClass": "module",
+            "entPhysicalModelName": 654321,
+            "entPhysicalContainedIn": 1,
+        }
+
+        top = self._run_top_items([parent, child])
+
+        assert top == [parent]
+
+    def test_unknown_model_remains_visible_for_no_type_diagnosis(self):
+        """Placeholder policy stays unchanged: Unknown is not a generic container model."""
+        item = {
+            "entPhysicalIndex": 1,
+            "entPhysicalClass": "module",
+            "entPhysicalModelName": "Unknown",
+            "entPhysicalContainedIn": 0,
+        }
+
+        assert self._run_top_items([item]) == [item]
+
 
 # ---------------------------------------------------------------------------
 # Regression: parent_row_idx (table index) must not alias entPhysicalIndex
