@@ -3,7 +3,7 @@ import re
 
 from django.contrib import messages
 from django.core.cache import cache
-from django.shortcuts import get_object_or_404, render
+from django.shortcuts import get_object_or_404
 from django.utils import timezone
 from django.views import View
 
@@ -136,9 +136,7 @@ def _check_ignore_rules(
         Traversal stops at the first non-empty serial encountered to avoid false
         positives deeper in the tree.
     """
-    item_serial = (item.get("entPhysicalSerialNum") or "").strip()
-    if item_serial.lower() in _PLACEHOLDER_VALUES:
-        item_serial = ""
+    item_serial = _clean_librenms_value(item.get("entPhysicalSerialNum"))
     if device_serial.lower() in _PLACEHOLDER_VALUES:
         device_serial = ""
     name = (item.get("entPhysicalName") or "").strip()
@@ -176,9 +174,7 @@ def _check_ignore_rules(
                 if current_idx in visited:
                     break
                 visited.add(current_idx)
-            ancestor_serial = (current.get("entPhysicalSerialNum") or "").strip()
-            if ancestor_serial.lower() in _PLACEHOLDER_VALUES:
-                ancestor_serial = ""
+            ancestor_serial = _clean_librenms_value(current.get("entPhysicalSerialNum"))
             if ancestor_serial:
                 if ancestor_serial == item_serial:
                     return rule.action
@@ -347,13 +343,18 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
         server_key = self.rebind_api_for_server(request.POST.get("server_key"))
         if server_key is None:
             messages.error(request, "Selected LibreNMS server is no longer configured.")
-            return render(
+            # rebind_api_for_server() returned None to avoid building a missing/misconfigured
+            # default client; reading the lazy `librenms_api` property here would reconstruct it
+            # and can raise (a 500 on this HTMX error path). Use the already-cached client's key.
+            active_server_key = self.active_server_key
+            # render_sync_partial injects the donor-mode flags, resolved under the session/active
+            # key — NOT the POSTed key, which failed to rebind and would miss the marker and
+            # re-enable a donor's sync controls.
+            return self.render_sync_partial(
                 request,
-                self.partial_template_name,
-                {
-                    "module_sync": {"object": obj, "table": None, "cache_expiry": None, "server_key": None},
-                    "has_write_permission": self.has_write_permission(),
-                },
+                obj,
+                active_server_key,
+                {"module_sync": {"object": obj, "table": None, "cache_expiry": None, "server_key": None}},
             )
         sync_device = self._get_sync_device(obj, server_key=server_key)
 
@@ -364,18 +365,11 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
         if self.librenms_id is None:
             cache.delete(self.get_cache_key(sync_device, "inventory", server_key=server_key))
             messages.error(request, "Device not found in LibreNMS.")
-            return render(
+            return self.render_sync_partial(
                 request,
-                self.partial_template_name,
-                {
-                    "module_sync": {
-                        "object": obj,
-                        "table": None,
-                        "cache_expiry": None,
-                        "server_key": server_key,
-                    },
-                    "has_write_permission": self.has_write_permission(),
-                },
+                obj,
+                server_key,
+                {"module_sync": {"object": obj, "table": None, "cache_expiry": None, "server_key": server_key}},
             )
 
         success, inventory_data = self.librenms_api.get_device_inventory(self.librenms_id)
@@ -392,18 +386,11 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
             cache.delete(self.get_cache_key(sync_device, "inventory", server_key=server_key))
             logger.error("Failed to fetch inventory from LibreNMS for device %s: %s", self.librenms_id, inventory_data)
             messages.error(request, "Failed to fetch inventory from LibreNMS; see server logs for details.")
-            return render(
+            return self.render_sync_partial(
                 request,
-                self.partial_template_name,
-                {
-                    "module_sync": {
-                        "object": obj,
-                        "table": None,
-                        "cache_expiry": None,
-                        "server_key": server_key,
-                    },
-                    "has_write_permission": self.has_write_permission(),
-                },
+                obj,
+                server_key,
+                {"module_sync": {"object": obj, "table": None, "cache_expiry": None, "server_key": server_key}},
             )
 
         for item in inventory_data:
@@ -535,13 +522,11 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
             )
         if not txr_error and not oob_failed and not ports_error:
             messages.success(request, "Inventory data refreshed successfully.")
-        return render(
+        return self.render_sync_partial(
             request,
-            self.partial_template_name,
-            {
-                "module_sync": context,
-                "has_write_permission": self.has_write_permission(),
-            },
+            obj,
+            server_key,
+            {"module_sync": context},
         )
 
     def get_context_data(self, request, obj):
@@ -583,8 +568,12 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
             return {"table": None, "object": obj, "cache_expiry": None, "server_key": scoped_server}
         # Validate that the cached inventory was built for the same LibreNMS device.
         # If the object has been remapped to a different device, discard stale inventory.
-        current_librenms_id = self.librenms_api.get_librenms_id(sync_device)
-        if cached_payload.get("librenms_id") != current_librenms_id:
+        # Coerce like post() does: a raw compare both accepts a poisoned bool (True == 1 in
+        # Python, serving a snapshot post() would fail closed on) and rejects a string-backed
+        # id ("10" != 10, emptying the table until a manual refresh). None (unlinked or
+        # uncoercible) never matches — post() can't cache without a valid id.
+        current_librenms_id = coerce_librenms_id(self.librenms_api.get_librenms_id(sync_device))
+        if current_librenms_id is None or cached_payload.get("librenms_id") != current_librenms_id:
             cache.delete(cache_key)
             return {"table": None, "object": obj, "cache_expiry": None, "server_key": scoped_server}
         # Same for the linked OOB controller: a re-link (or unlink) to a different
@@ -596,6 +585,12 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
         # stale on every GET and the module table renders empty until a manual refresh. The write
         # side (post()) now caches the coerced value, so this matches it.
         current_oob_id = coerce_librenms_id(current_oob.get("id")) if isinstance(current_oob, dict) else None
+        # A linked-but-corrupt OOB id must not collapse to the no-OOB fingerprint: post()
+        # takes the partial-outcome path (never caches) for this state, so the GET compare
+        # can't quietly serve a prior no-OOB snapshot while an OOB controller is linked.
+        if current_oob and current_oob_id is None:
+            cache.delete(cache_key)
+            return {"table": None, "object": obj, "cache_expiry": None, "server_key": scoped_server}
         if cached_payload.get("oob_librenms_id") != current_oob_id:
             cache.delete(cache_key)
             return {"table": None, "object": obj, "cache_expiry": None, "server_key": scoped_server}
@@ -2358,7 +2353,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
         )
 
         model_name = (item.get("entPhysicalModelName", "") or "").strip()
-        serial = (item.get("entPhysicalSerialNum", "") or "").strip()
+        serial = _clean_librenms_value(item.get("entPhysicalSerialNum"))
         phys_class = item.get("entPhysicalClass", "")
         name = item.get("entPhysicalName", "") or "-"
         description = item.get("entPhysicalDescr", "") or ""
@@ -3182,8 +3177,8 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
         item_class = (item.get("entPhysicalClass") or "").strip()
         if item_class not in INVENTORY_CLASSES or item_class in {"container", "powerSupply", "fan"}:
             return None
-        item_serial = (item.get("entPhysicalSerialNum") or "").strip()
-        if not item_serial or item_serial.lower() in _PLACEHOLDER_VALUES:
+        item_serial = _clean_librenms_value(item.get("entPhysicalSerialNum"))
+        if not item_serial:
             return None
         item_model = (item.get("entPhysicalModelName") or "").strip().lower()
         if not item_model or item_model in _PLACEHOLDER_VALUES:
@@ -3201,15 +3196,9 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
             if anc_class == "chassis":
                 return None
             if anc_class in INVENTORY_CLASSES and anc_class not in {"container", "powerSupply", "fan"}:
-                anc_serial = (ancestor.get("entPhysicalSerialNum") or "").strip()
+                anc_serial = _clean_librenms_value(ancestor.get("entPhysicalSerialNum"))
                 anc_model = (ancestor.get("entPhysicalModelName") or "").strip().lower()
-                if (
-                    anc_serial
-                    and anc_serial.lower() not in _PLACEHOLDER_VALUES
-                    and anc_serial == item_serial
-                    and anc_model
-                    and anc_model == item_model
-                ):
+                if anc_serial and anc_serial == item_serial and anc_model and anc_model == item_model:
                     return ancestor
             current_idx = ancestor.get("entPhysicalContainedIn", 0)
         return None

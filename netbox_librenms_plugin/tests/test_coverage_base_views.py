@@ -359,7 +359,7 @@ class TestBaseCableTableViewGetLinksData:
         assert result is not None
 
     def test_get_links_data_malformed_port_rows_skipped(self):
-        """Non-dict rows in the ports payload (e.g."""
+        """Non-dict rows in the ports payload (e.g. strings or None) are skipped, not .get()'d."""
         view = self._make_view()
 
         links_data = {"links": [{"local_port_id": 10, "remote_hostname": "sw", "remote_port": "Gi0/1"}]}
@@ -736,6 +736,23 @@ class TestBaseCableTableViewEnrichLocalPort:
         view.enrich_local_port(link, obj)
         assert "local_port_url" not in link
 
+    def test_oob_row_never_binds_a_host_interface(self):
+        """A merged OOB LLDP row (context-only) must not resolve against the HOST device.
+
+        Its local port lives on the OOB CONTROLLER; a shared name (or colliding stored
+        librenms_id) would otherwise bind a host interface and render a wrong
+        local_port_url + cable state — even though sync and actions already refuse OOB rows.
+        """
+        view = self._make_view()
+        obj = make_device("cable-dev-oob-collide")
+        make_interface(obj, "eth0")  # host interface sharing the OOB controller's port name
+
+        link = {"local_port": "eth0", "_source": "oob"}
+        view.enrich_local_port(link, obj)
+
+        assert "local_port_url" not in link
+        assert "netbox_local_interface_id" not in link
+
     def test_interface_found_by_librenms_id_adds_url(self):
         """The librenms_id match wins even when the local_port name differs from the iface name."""
         view = self._make_view()
@@ -764,7 +781,7 @@ class TestBaseCableTableViewEnrichLocalPort:
         assert link["local_port_url"].endswith(f"/dcim/interfaces/{iface.pk}/")
 
     def test_name_fallback_matches_alternate_interface_name_field(self):
-        """Issue #88: when the NetBox interface name matches the *non-selected* LibreNMS field (e.g."""
+        """Issue #88: when the NetBox interface name matches the *non-selected* LibreNMS field (e.g. ifDescr while ifName is selected), the name fallback still resolves it."""
         view = self._make_view()
         obj = make_device("cable-dev-altname")
         iface = make_interface(obj, "GigabitEthernet0/1")  # named from ifDescr, no librenms_id
@@ -1204,7 +1221,7 @@ class TestBaseCableTableViewPost:
             patch.object(view, "get_object", return_value=obj),
             patch.object(view, "_prepare_context", return_value=None),
             patch("netbox_librenms_plugin.views.base.cables_view.messages") as mock_messages,
-            patch("netbox_librenms_plugin.views.base.cables_view.render") as mock_render,
+            patch("netbox_librenms_plugin.views.mixins.render") as mock_render,
         ):
             mock_render.return_value = MagicMock()
             view.post(request, pk=1)
@@ -1223,7 +1240,7 @@ class TestBaseCableTableViewPost:
             patch.object(view, "get_object", return_value=obj),
             patch.object(view, "_prepare_context", return_value=fake_context),
             patch("netbox_librenms_plugin.views.base.cables_view.messages") as mock_messages,
-            patch("netbox_librenms_plugin.views.base.cables_view.render") as mock_render,
+            patch("netbox_librenms_plugin.views.mixins.render") as mock_render,
         ):
             mock_render.return_value = MagicMock()
             view.post(request, pk=1)
@@ -1351,8 +1368,8 @@ class TestBaseInterfaceTableViewBasics:
         # A real failure redirect came back (the rebound client has no host id).
         assert result.status_code == 302
 
-    def test_post_stale_server_key_renders_partial_without_session_fallback(self):
-        """A posted server_key that no longer resolves (build returns None) → error + fragment render, not an unhandled 500 — and the session client is never queried."""
+    def test_post_stale_server_key_renders_migrated_context(self):
+        """A posted server_key that no longer resolves (build returns None) → error + partial render with migrated context under the session key (NOT a redirect, which an HTMX swap would mishandle and which would drop migrated-donor suppression)."""
         from unittest.mock import patch
 
         from netbox_librenms_plugin.views.base.interfaces_view import BaseInterfaceTableView
@@ -1373,15 +1390,62 @@ class TestBaseInterfaceTableViewBasics:
             patch("netbox_librenms_plugin.librenms_api.build_librenms_api", return_value=None),
             patch("netbox_librenms_plugin.views.base.interfaces_view.get_interface_name_field", return_value="name"),
             patch("netbox_librenms_plugin.views.base.interfaces_view.messages") as mock_messages,
-            patch("netbox_librenms_plugin.views.base.interfaces_view.render", return_value="fragment") as mock_render,
+            patch(
+                "netbox_librenms_plugin.utils.build_migrated_context",
+                return_value={"migrated_to_marker": {"device_id": 7}},
+            ) as mock_migrated,
+            patch("netbox_librenms_plugin.views.mixins.render", return_value="rendered") as mock_render,
         ):
             result = view.post(req, pk=1)
 
-        # Never reached the live id lookup; surfaced an error and rendered the fragment in place.
+        # Never reached the live id lookup; surfaced an error and rendered the partial.
         session_api.get_librenms_id.assert_not_called()
         mock_messages.error.assert_called_once()
-        assert result == "fragment"
-        mock_render.assert_called_once()
+        assert result == "rendered"
+        # Migrated context resolved under the session/active key — NOT the stale POSTed "ghost".
+        mock_migrated.assert_called_once_with(obj, "default")
+        ctx = mock_render.call_args.args[2]
+        assert ctx["migrated_to_marker"] == {"device_id": 7}
+        # The stale-key render must also disable live sync state: interface_sync.server_key is None.
+        assert ctx["interface_sync"]["server_key"] is None
+
+    def test_ip_post_stale_server_key_keeps_migrated_context(self):
+        """IP sync's stale-server branch must include build_migrated_context so a migrated donor keeps its suppressed sync form/button — a stale server_key must not silently re-enable IP sync."""
+        from unittest.mock import patch
+
+        from netbox_librenms_plugin.views.base.ip_addresses_view import BaseIPAddressTableView
+
+        view = object.__new__(BaseIPAddressTableView)
+        view._librenms_api = MagicMock(server_key="session-key")
+        obj = MagicMock(pk=1)
+        view.get_object = MagicMock(return_value=obj)
+        view.rebind_api_for_server = MagicMock(return_value=None)  # stale key → rebind fails
+
+        req = MagicMock()
+        req.POST.get.side_effect = lambda k, d=None: {"server_key": "ghost"}.get(k, d)
+
+        with (
+            patch("netbox_librenms_plugin.views.base.ip_addresses_view.get_interface_name_field", return_value="name"),
+            patch("netbox_librenms_plugin.views.base.ip_addresses_view.messages") as mock_messages,
+            patch(
+                "netbox_librenms_plugin.utils.build_migrated_context",
+                return_value={"migrated_to_marker": {"device_id": 7}},
+            ) as mock_migrated,
+            patch("netbox_librenms_plugin.views.mixins.render", return_value="rendered") as mock_render,
+        ):
+            result = view.post(req, pk=1)
+
+        mock_messages.error.assert_called_once()
+        # Migrated context resolved under the session/active key — NOT the stale POSTed "ghost"
+        # (which failed to rebind and would miss the marker, re-enabling the donor's sync controls).
+        mock_migrated.assert_called_once_with(obj, "session-key")
+        ctx = mock_render.call_args.args[2]
+        assert ctx["migrated_to_marker"] == {"device_id": 7}
+        # The stale-key render must also disable live IP sync state: ip_sync.server_key is None
+        # so the template can't expose the stale key back to the live-sync controls. Without this
+        # the test would pass even if a stale key leaked into the live-sync context.
+        assert ctx["ip_sync"]["server_key"] is None
+        assert result == "rendered"
 
     def test_get_select_related_field_for_vm(self):
         """Returns 'virtual_machine' for VirtualMachine model."""
@@ -1662,7 +1726,7 @@ class TestBaseInterfaceTableViewPost:
             patch("netbox_librenms_plugin.views.base.interfaces_view.get_interface_name_field", return_value="ifName"),
             patch("netbox_librenms_plugin.views.base.interfaces_view.get_librenms_sync_device", return_value=obj),
             patch("netbox_librenms_plugin.views.base.interfaces_view.messages"),
-            patch("netbox_librenms_plugin.views.base.interfaces_view.render") as mock_render,
+            patch("netbox_librenms_plugin.views.mixins.render") as mock_render,
             patch("netbox_librenms_plugin.views.base.interfaces_view.cache") as mock_cache,
             patch("netbox_librenms_plugin.views.base.interfaces_view.timezone"),
         ):
@@ -1701,7 +1765,7 @@ class TestBaseInterfaceTableViewPost:
             patch("netbox_librenms_plugin.views.base.interfaces_view.get_librenms_sync_device", return_value=obj),
             patch("netbox_librenms_plugin.views.base.interfaces_view.get_librenms_oob", return_value={"id": 99}),
             patch("netbox_librenms_plugin.views.base.interfaces_view.messages") as mock_messages,
-            patch("netbox_librenms_plugin.views.base.interfaces_view.render") as mock_render,
+            patch("netbox_librenms_plugin.views.mixins.render") as mock_render,
             patch("netbox_librenms_plugin.views.base.interfaces_view.cache") as mock_cache,
             patch("netbox_librenms_plugin.views.base.interfaces_view.timezone"),
         ):
@@ -1744,7 +1808,7 @@ class TestBaseInterfaceTableViewPost:
             patch("netbox_librenms_plugin.views.base.interfaces_view.get_librenms_sync_device", return_value=obj),
             patch("netbox_librenms_plugin.views.base.interfaces_view.get_librenms_oob", return_value={"id": 99}),
             patch("netbox_librenms_plugin.views.base.interfaces_view.messages") as mock_messages,
-            patch("netbox_librenms_plugin.views.base.interfaces_view.render") as mock_render,
+            patch("netbox_librenms_plugin.views.mixins.render") as mock_render,
             patch("netbox_librenms_plugin.views.base.interfaces_view.cache") as mock_cache,
             patch("netbox_librenms_plugin.views.base.interfaces_view.timezone"),
         ):
@@ -1782,7 +1846,7 @@ class TestBaseInterfaceTableViewPost:
             patch("netbox_librenms_plugin.views.base.interfaces_view.get_librenms_sync_device", return_value=obj),
             patch("netbox_librenms_plugin.views.base.interfaces_view.get_librenms_oob", return_value={"id": 99}),
             patch("netbox_librenms_plugin.views.base.interfaces_view.messages"),
-            patch("netbox_librenms_plugin.views.base.interfaces_view.render") as mock_render,
+            patch("netbox_librenms_plugin.views.mixins.render") as mock_render,
             patch("netbox_librenms_plugin.views.base.interfaces_view.cache") as mock_cache,
             patch("netbox_librenms_plugin.views.base.interfaces_view.timezone"),
         ):
@@ -1838,7 +1902,7 @@ class TestBaseInterfaceTableViewPost:
             patch("netbox_librenms_plugin.views.base.interfaces_view.get_librenms_sync_device", return_value=obj),
             patch("netbox_librenms_plugin.views.base.interfaces_view.get_librenms_oob", return_value={"id": 99}),
             patch("netbox_librenms_plugin.views.base.interfaces_view.messages"),
-            patch("netbox_librenms_plugin.views.base.interfaces_view.render") as mock_render,
+            patch("netbox_librenms_plugin.views.mixins.render") as mock_render,
             patch("netbox_librenms_plugin.views.base.interfaces_view.cache") as mock_cache,
             patch("netbox_librenms_plugin.views.base.interfaces_view.timezone"),
         ):
@@ -1880,7 +1944,7 @@ class TestBaseInterfaceTableViewPost:
             patch("netbox_librenms_plugin.views.base.interfaces_view.get_librenms_sync_device", return_value=obj),
             patch("netbox_librenms_plugin.views.base.interfaces_view.get_librenms_oob", return_value={"id": 99}),
             patch("netbox_librenms_plugin.views.base.interfaces_view.messages") as mock_messages,
-            patch("netbox_librenms_plugin.views.base.interfaces_view.render") as mock_render,
+            patch("netbox_librenms_plugin.views.mixins.render") as mock_render,
             patch("netbox_librenms_plugin.views.base.interfaces_view.cache"),
             patch("netbox_librenms_plugin.views.base.interfaces_view.timezone"),
         ):
@@ -1921,7 +1985,7 @@ class TestBaseInterfaceTableViewPost:
                 return_value={"id": "not-a-number"},
             ),
             patch("netbox_librenms_plugin.views.base.interfaces_view.messages") as mock_messages,
-            patch("netbox_librenms_plugin.views.base.interfaces_view.render") as mock_render,
+            patch("netbox_librenms_plugin.views.mixins.render") as mock_render,
             patch("netbox_librenms_plugin.views.base.interfaces_view.cache") as mock_cache,
             patch("netbox_librenms_plugin.views.base.interfaces_view.timezone"),
         ):
@@ -1962,7 +2026,7 @@ class TestBaseInterfaceTableViewPost:
             # isn't entangled with VC-routing (cache_device == obj for non-VC anyway).
             patch("netbox_librenms_plugin.views.base.interfaces_view.get_librenms_sync_device", return_value=obj),
             patch("netbox_librenms_plugin.views.base.interfaces_view.messages") as mock_messages,
-            patch("netbox_librenms_plugin.views.base.interfaces_view.render") as mock_render,
+            patch("netbox_librenms_plugin.views.mixins.render") as mock_render,
             patch("netbox_librenms_plugin.views.base.interfaces_view.cache") as mock_cache,
             patch("netbox_librenms_plugin.views.base.interfaces_view.timezone"),
         ):
@@ -2337,6 +2401,45 @@ class TestBaseInterfaceTableViewGetContextData:
             ctx = view.get_context_data(request, obj, "ifName")
 
         assert ctx["oob_incomplete"] is True
+
+    def test_unowned_relationship_cache_metadata_is_not_surfaced(self):
+        """PR 315 must not expose warning state owned by the later parent/LAG feature."""
+        view = self._make_view()
+        obj = _mock_obj()
+        obj.virtual_chassis = None
+        request = _mock_request()
+
+        cached_data = {
+            "ports": [{"port_id": 1, "ifName": "Gi0/0", "ifAdminStatus": "up", "ifAlias": None, "ifDescr": "Gi0/0"}],
+            "relationship_data_incomplete": True,
+        }
+
+        mock_iface = MagicMock()
+        mock_iface.name = "Gi0/0"
+        mock_ifaces_qs = MagicMock()
+        mock_ifaces_qs.select_related.return_value.prefetch_related.return_value = [mock_iface]
+
+        with (
+            patch.object(view, "get_cache_key", return_value="key"),
+            patch.object(view, "get_last_fetched_key", return_value="last-key"),
+            patch.object(view, "get_vlan_overrides_key", return_value="overrides-key"),
+            patch.object(view, "get_vlan_groups_for_device", return_value=[]),
+            patch.object(view, "_build_vlan_lookup_maps", return_value={"vid_to_groups": {}, "vid_to_vlans": {}}),
+            patch.object(view, "get_interfaces", return_value=mock_ifaces_qs),
+            patch.object(view, "_add_vlan_group_selection"),
+            patch.object(view, "_add_missing_vlans_info"),
+            patch.object(view, "get_table", return_value=MagicMock()),
+            patch("netbox_librenms_plugin.views.base.interfaces_view.get_interface_name_field", return_value="ifName"),
+            patch("netbox_librenms_plugin.views.base.interfaces_view.cache") as mock_cache,
+            patch("netbox_librenms_plugin.views.base.interfaces_view.timezone") as mock_tz,
+        ):
+            mock_cache.get.side_effect = lambda key: cached_data if key == "key" else None
+            mock_cache.ttl.return_value = 300
+            mock_tz.now.return_value = MagicMock()
+            mock_tz.timedelta.return_value = MagicMock()
+            ctx = view.get_context_data(request, obj, "ifName")
+
+        assert "relationship_data_incomplete" not in ctx
 
     def test_cache_hit_with_vc_uses_vc_members(self):
         """Cached data with VC queries each chassis member's interfaces."""
@@ -3212,7 +3315,7 @@ class TestBaseIPAddressTableViewPost:
                 return_value="ifName",
             ),
             patch("netbox_librenms_plugin.views.base.ip_addresses_view.messages") as mock_messages,
-            patch("netbox_librenms_plugin.views.base.ip_addresses_view.render") as mock_render,
+            patch("netbox_librenms_plugin.views.mixins.render") as mock_render,
         ):
             mock_render.return_value = MagicMock()
             view.post(request, pk=1)
@@ -3235,7 +3338,7 @@ class TestBaseIPAddressTableViewPost:
                 return_value="ifName",
             ),
             patch("netbox_librenms_plugin.views.base.ip_addresses_view.messages") as mock_messages,
-            patch("netbox_librenms_plugin.views.base.ip_addresses_view.render") as mock_render,
+            patch("netbox_librenms_plugin.views.mixins.render") as mock_render,
         ):
             mock_render.return_value = MagicMock()
             view.post(request, pk=1)
@@ -3599,7 +3702,7 @@ class TestBaseIPAddressTableViewFlagManagementIp:
         assert view._resolve_management_ip() == ""
 
     def test_resolve_blank_when_mgmt_ip_not_a_string(self):
-        """A malformed-but-dict-shaped payload (e.g."""
+        """A malformed-but-dict-shaped payload (e.g. a non-string ip value) resolves to an empty string."""
         view = self._make_view()
         view._librenms_api.get_device_info.return_value = (True, {"ip": 123})
         assert view._resolve_management_ip() == ""
@@ -3691,3 +3794,207 @@ class TestCableLinksDataCoercesLibreNMSId:
         api.get_device_links.assert_not_called()
         api.get_ports.assert_not_called()
         assert result is None
+
+
+@pytest.mark.django_db
+class TestIPSyncFetchFailureKeepsMoveCard:
+    """On a LibreNMS fetch failure the IP-sync error re-render still surfaces movable_ips.
+
+    The per-row "Move IP addresses to <winner>" moves are pure NetBox operations, so a migrated
+    donor must keep the move card when LibreNMS is briefly unreachable — the card is gated on
+    ip_sync.movable_ips, which every other exit provides.
+    """
+
+    def _view(self):
+        from netbox_librenms_plugin.views.object_sync.devices import DeviceIPAddressTableView
+
+        view = object.__new__(DeviceIPAddressTableView)
+        view._librenms_api = MagicMock(server_key="default")
+        return view
+
+    def test_fetch_failure_context_includes_movable_ips(self):
+        from django.http import HttpResponse
+        from django.test import RequestFactory
+
+        donor = make_device("ipsync-donor-mig")
+        # Migrated donor: _migrated_to marker under the server sub-block, no live id.
+        donor.custom_field_data["librenms_id"] = {
+            "default": {"_migrated_to": {"device_id": 7, "server_key": "default"}}
+        }
+        donor.save()
+        iface = make_interface(donor, "Gi0/1")
+        make_ip("10.0.0.5/24", assigned_object=iface)
+
+        view = self._view()
+        request = RequestFactory().post("/x/", data={"server_key": "default"})
+
+        captured = {}
+
+        def fake_render(req, obj, server_key, ctx):
+            captured["ctx"] = ctx
+            return HttpResponse("x")
+
+        with (
+            patch.object(view, "get_object", return_value=donor),
+            patch.object(view, "rebind_api_for_server", return_value="default"),
+            # A valid server whose live IP fetch fails → _prepare_context(fetch_fresh=True) is None.
+            patch.object(view, "_prepare_context", return_value=None),
+            patch.object(view, "render_sync_partial", side_effect=fake_render),
+            patch("netbox_librenms_plugin.views.base.ip_addresses_view.messages"),
+        ):
+            view.post(request, pk=donor.pk)
+
+        ip_sync = captured["ctx"]["ip_sync"]
+        assert ip_sync["movable_ips"], "Move-IP card context lost on fetch failure"
+        assert any(m["address"].startswith("10.0.0.5") for m in ip_sync["movable_ips"])
+
+
+@pytest.mark.django_db
+class TestIPSyncRebindFailureKeepsMoveCard:
+    """On a stale/unconfigured POSTed server_key the IP-sync rebind-failure re-render must still surface movable_ips — the same move card the fetch-failure and success branches keep.
+
+    The card is gated on ip_sync.movable_ips; omitting it (as this branch did) made a migrated
+    donor's "Move IP addresses to <winner>" card vanish whenever the POSTed server_key went stale.
+    """
+
+    def _view(self):
+        from netbox_librenms_plugin.views.object_sync.devices import DeviceIPAddressTableView
+
+        view = object.__new__(DeviceIPAddressTableView)
+        # active_server_key resolves from the cached client; the branch renders against it.
+        view._librenms_api = MagicMock(server_key="default")
+        return view
+
+    def test_rebind_failure_context_includes_movable_ips(self):
+        from django.http import HttpResponse
+        from django.test import RequestFactory
+
+        donor = make_device("ipsync-rebind-donor")
+        # Migrated donor: _migrated_to marker under the "default" sub-block, no live id.
+        donor.custom_field_data["librenms_id"] = {
+            "default": {"_migrated_to": {"device_id": 7, "server_key": "default"}}
+        }
+        donor.save()
+        iface = make_interface(donor, "Gi0/1")
+        make_ip("10.0.0.5/24", assigned_object=iface)
+
+        view = self._view()
+        request = RequestFactory().post("/x/", data={"server_key": "ghost-unconfigured"})
+
+        captured = {}
+
+        def fake_render(req, obj, server_key, ctx):
+            captured["ctx"] = ctx
+            captured["server_key"] = server_key
+            return HttpResponse("x")
+
+        with (
+            patch.object(view, "get_object", return_value=donor),
+            # A stale/unconfigured POSTed key → rebind returns None → the rebind-failure branch runs.
+            patch.object(view, "rebind_api_for_server", return_value=None),
+            patch.object(view, "render_sync_partial", side_effect=fake_render),
+            patch("netbox_librenms_plugin.views.base.ip_addresses_view.messages"),
+        ):
+            view.post(request, pk=donor.pk)
+
+        # The branch renders migrated context + movable_ips against active_server_key ("default"),
+        # not the known-invalid POSTed key (which is not echoed back into ip_sync.server_key).
+        assert captured["server_key"] == "default"
+        ip_sync = captured["ctx"]["ip_sync"]
+        assert ip_sync["server_key"] is None
+        assert ip_sync["movable_ips"], "Move-IP card context lost on rebind failure"
+        assert any(m["address"].startswith("10.0.0.5") for m in ip_sync["movable_ips"])
+
+
+@pytest.mark.django_db
+class TestRenderSyncPartialInjectsWritePermission:
+    """render_sync_partial injects has_write_permission from the request user at the shared chokepoint, so a migrated donor's 'Move to winner' controls render on every HTMX re-render, not just a full page reload.
+
+    Only modules_view (which renders directly) passed the flag; the interface/IP branches route
+    through render_sync_partial and omitted it, silently collapsing every move button to the
+    disabled read-only branch even for a user with change permission.
+    """
+
+    def _ip_view(self, *, superuser):
+        from core.models import ObjectType
+        from django.apps import apps
+        from django.contrib.auth import get_user_model
+        from django.test import RequestFactory
+        from users.models import ObjectPermission
+
+        from netbox_librenms_plugin.tests.conftest import make_superuser
+        from netbox_librenms_plugin.views.object_sync.devices import DeviceIPAddressTableView
+
+        view = object.__new__(DeviceIPAddressTableView)
+        view._librenms_api = MagicMock(server_key="default")
+        request = RequestFactory().post("/x/")
+        if superuser:
+            request.user = make_superuser()
+        else:
+            settings_model = apps.get_model("netbox_librenms_plugin", "LibreNMSSettings")
+            user = get_user_model().objects.create_user(username="rsp-perm-viewer", password="x")
+            view_permission = ObjectPermission.objects.create(name="rsp-perm-plugin-view", actions=["view"])
+            view_permission.object_types.set([ObjectType.objects.get_for_model(settings_model)])
+            view_permission.users.set([user])
+            request.user = get_user_model().objects.get(pk=user.pk)
+        view.request = request
+        return view, request
+
+    def _migrated_donor_with_movable_ip(self):
+        from netbox_librenms_plugin.tests.conftest import ip_on
+        from netbox_librenms_plugin.utils import mark_librenms_migrated
+
+        winner = make_device("rsp-perm-winner")
+        donor = make_device("rsp-perm-donor")
+        ip = ip_on(donor, "10.0.0.5/24", "eth0")  # IP on a donor interface → a move-to-winner candidate
+        mark_librenms_migrated(donor, winner.pk, "default")
+        donor.save()
+        return donor, winner, ip
+
+    def _ip_sync_ctx(self, donor, ip):
+        """Build the ip_sync context WITHOUT has_write_permission, exactly as the view branches do."""
+        from django.test import RequestFactory
+        from django_tables2 import RequestConfig
+
+        from netbox_librenms_plugin.tables.ipaddresses import IPAddressTable
+
+        table = IPAddressTable([])
+        RequestConfig(RequestFactory().get("/")).configure(table)
+        return {
+            "ip_sync": {
+                "object": donor,
+                "table": table,
+                "server_key": "default",
+                "set_primary_ip": False,
+                "cache_expiry": None,
+                "movable_ips": [{"id": ip.pk, "address": "10.0.0.5/24", "interface_name": "eth0"}],
+            },
+        }
+
+    def test_write_permitted_user_gets_a_live_move_button(self):
+        from django.urls import reverse
+
+        view, request = self._ip_view(superuser=True)
+        donor, _winner, ip = self._migrated_donor_with_movable_ip()
+        resp = view.render_sync_partial(request, donor, "default", self._ip_sync_ctx(donor, ip))
+        html = resp.content.decode()
+        move_url = reverse("plugins:netbox_librenms_plugin:ipaddress_move_to_winner", kwargs={"pk": ip.pk})
+        # has_write_permission=True (injected by the chokepoint) reached _migrate_move_button.html.
+        assert move_url in html
+        assert "read-only" not in html
+
+    def test_read_only_user_gets_read_only_text_not_a_button(self):
+        from django.urls import reverse
+
+        from netbox_librenms_plugin.constants import PERM_CHANGE_PLUGIN, PERM_VIEW_PLUGIN
+
+        view, request = self._ip_view(superuser=False)
+        assert request.user.has_perm(PERM_VIEW_PLUGIN)
+        assert not request.user.has_perm(PERM_CHANGE_PLUGIN)
+        donor, _winner, ip = self._migrated_donor_with_movable_ip()
+        resp = view.render_sync_partial(request, donor, "default", self._ip_sync_ctx(donor, ip))
+        html = resp.content.decode()
+        move_url = reverse("plugins:netbox_librenms_plugin:ipaddress_move_to_winner", kwargs={"pk": ip.pk})
+        # A genuine view-only plugin user gets muted text, not a live mutating button.
+        assert "read-only" in html
+        assert move_url not in html

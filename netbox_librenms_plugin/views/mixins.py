@@ -5,7 +5,7 @@ from django.contrib import messages
 from django.contrib.auth.mixins import PermissionRequiredMixin
 from django.core.cache import cache
 from django.http import HttpResponse, JsonResponse
-from django.shortcuts import get_object_or_404, redirect
+from django.shortcuts import get_object_or_404, redirect, render
 from django.urls import get_script_prefix
 from django.utils.http import url_has_allowed_host_and_scheme
 from utilities.permissions import get_permission_for_model
@@ -59,12 +59,14 @@ def extract_cached_ports(cached, cache_key=None):
     return cached
 
 
-def _get_safe_redirect_url(request):
+def validated_referer(request):
     """
-    Return a validated redirect URL from the HTTP Referer header.
+    Return the request's ``Referer`` when it passes the open-redirect barrier, else None.
 
-    Validates the Referer against allowed hosts and schemes to prevent
-    open-redirect attacks. Falls back to the current request path or "/".
+    The single home for the CWE-601 Referer check (``url_has_allowed_host_and_scheme`` against the
+    current host/scheme) so every redirect helper that trusts the Referer — ``_get_safe_redirect_url``
+    here and ``migrate._safe_referer`` — validates it identically and can't drift. Callers own their
+    own fallback when this returns None.
     """
     referrer = request.META.get("HTTP_REFERER")
     if referrer and url_has_allowed_host_and_scheme(
@@ -72,6 +74,18 @@ def _get_safe_redirect_url(request):
         allowed_hosts={request.get_host()},
         require_https=request.is_secure(),
     ):
+        return referrer
+    return None
+
+
+def _get_safe_redirect_url(request):
+    """
+    Return a validated redirect URL from the HTTP Referer header.
+
+    Validates the Referer against allowed hosts and schemes to prevent
+    open-redirect attacks. Falls back to the current request path or "/".
+    """
+    if referrer := validated_referer(request):
         return referrer
     # No usable Referer. On a non-GET request, request.path is often a POST-only
     # action endpoint, so redirecting the browser there would 405 — fall back to a
@@ -112,6 +126,26 @@ def _safe_redirect_response(request):
     if is_htmx:
         return HttpResponse("", headers={"HX-Redirect": app_root})
     return redirect(app_root)
+
+
+def resolve_configured_server_key(server_key):
+    """
+    Return *server_key* iff it matches a currently-configured LibreNMS server, else None.
+
+    Centralises the "re-source the key from trusted config, never echo a raw/stale POST value"
+    allowlist shared by the sync-tab redirect (:func:`device_fields._sync_redirect`) and the
+    non-HTMX fallback URL builder (:func:`migrate._sync_tab_url`), so a stale or tampered
+    ``server_key`` is dropped by the same rule in both places. A blank/None key resolves to None.
+
+    Args:
+        server_key (str | None): The candidate server key (typically a raw POST value).
+
+    Returns:
+        str | None: *server_key* when it names a configured server, otherwise None.
+    """
+    if not isinstance(server_key, str) or not server_key:
+        return None
+    return server_key if server_key in LibreNMSAPI.get_available_servers() else None
 
 
 def redirect_with_server_key(request, url, server_key):
@@ -476,6 +510,57 @@ class LibreNMSAPIMixin:
         """
         return self.librenms_api.get_device_info(librenms_id, use_cache=False)
 
+    @property
+    def active_server_key(self):
+        """
+        The server key of the currently-bound API client, or ``"default"``.
+
+        Reads ``self._librenms_api.server_key`` WITHOUT going through the lazy
+        :attr:`librenms_api` property — used on rebind-failure render paths where the
+        rebind already returned None and constructing a fresh default client (which the
+        property would do, and which can raise on a misconfigured default) is exactly
+        what must be avoided. Falls back to ``"default"`` when no client is bound yet.
+
+        Returns:
+            str: The bound client's resolved server key, or ``"default"``.
+        """
+        return getattr(getattr(self, "_librenms_api", None), "server_key", None) or "default"
+
+    def render_sync_partial(self, request, obj, server_key, context):
+        """
+        Render the view's ``partial_template_name`` with migrated-context flags always merged in.
+
+        Every partial-render exit of the sync tab views needs the ``_migrated_to`` marker
+        context (``migrated_to_marker`` / ``migrated_to_winner``) so a migrated donor keeps its
+        migration controls and doesn't re-expose ordinary sync buttons. Routing all exits through
+        this one chokepoint makes the spread impossible to forget on a new error/success branch.
+
+        ``build_migrated_context`` returns ``migrated_to_winner`` as a lazy proxy, so the
+        cable/module/VLAN partials (which render only the marker banner, never the winner) don't
+        pay the winner ``Device`` lookup on every HTMX refresh.
+
+        Args:
+            request: The current HTTP request.
+            obj: The device/VM whose migration marker is resolved.
+            server_key (str): The server key the marker is namespaced under (use
+                :attr:`active_server_key` on the rebind-failure path).
+            context (dict): The view-specific partial context (e.g. ``{"vlan_sync": ...}``).
+
+        Returns:
+            HttpResponse: The rendered partial.
+        """
+        from netbox_librenms_plugin.utils import build_migrated_context
+
+        # has_write_permission gates the migrated-donor "Move to winner" controls in the shared
+        # inc/_migrate_move_button.html include. Inject it at this chokepoint so EVERY partial
+        # render exit (interface/IP/cable/module/VLAN success + error branches) carries it — a
+        # caller that omitted it silently collapsed every move button to the disabled read-only
+        # branch on an HTMX re-render, even for a user with change permission. Callers therefore
+        # don't need to pass it themselves; the `**context` spread comes last only so that if one
+        # ever does set it explicitly, that value still wins (defensive — no caller relies on it).
+        merged = {"has_write_permission": self.has_write_permission(), **context}
+        return render(request, self.partial_template_name, {**merged, **build_migrated_context(obj, server_key)})
+
     def rebind_api_for_server(self, server_key):
         """
         Rebind ``self.librenms_api`` to the POST-scoped *server_key*.
@@ -551,11 +636,10 @@ class LibreNMSAPIMixin:
         # (no cached client + misconfigured default). Read the bound client's key directly
         # instead of going through the lazy ``librenms_api`` property, which would reconstruct
         # ``LibreNMSAPI()`` and can re-raise the very misconfiguration the rebind just avoided.
-        scoped = (
-            resolved
-            if resolved is not None
-            else (requested or getattr(getattr(self, "_librenms_api", None), "server_key", None))
-        )
+        # ``requested`` is necessarily blank on this branch (a non-blank ``requested`` with
+        # ``resolved is None`` already returned above), so the bound client's key is the only
+        # reachable fallback.
+        scoped = resolved if resolved is not None else getattr(getattr(self, "_librenms_api", None), "server_key", None)
         return scoped, False
 
     def get_server_info(self):
@@ -592,7 +676,11 @@ class LibreNMSAPIMixin:
                     "is_legacy": True,
                     "server_key": "default",
                 }
-        except (KeyError, AttributeError, ImportError):
+        except (KeyError, AttributeError, ImportError, ValueError):
+            # ValueError: reading self.librenms_api with no client bound reconstructs
+            # LibreNMSAPI(), which raises on a misconfigured default. That happens on the
+            # degraded render paths (stale ?server_key + broken default), where the header
+            # must show the configuration error rather than 500 the page.
             return {
                 "display_name": "Unknown Server",
                 "url": "Configuration error",

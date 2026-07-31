@@ -144,3 +144,48 @@
     </div>
 </div>
 {% endif %}
+
+{% comment %}
+Migrated donor: per-row "Move IP to winner" actions. Re-homes an interface-assigned IP to the
+winner's same-named interface (the backend validates and fails closed via an OOB toast). Mirrors
+the interface move-to-winner control in _interface_sync_content.html.
+{% endcomment %}
+{% if migrated_to_marker and ip_sync.movable_ips %}
+<div class="card mt-3">
+    <div class="card-header">
+        <i class="mdi mdi-transfer-right"></i>
+        Move IP addresses{% if migrated_to_winner %} to {{ migrated_to_winner.name }}{% endif %}
+    </div>
+    <div class="card-body">
+        {% if not migrated_to_winner %}
+        <div class="alert alert-warning py-2" role="alert">
+            The migration winner is unavailable. Restore the winner device before moving these IP addresses.
+        </div>
+        {% endif %}
+        <p class="text-muted small mb-2">
+            Re-home a donor interface-assigned IP to the winner's same-named interface
+            (move the interface first if it doesn't exist on the winner yet).
+        </p>
+        <table class="table table-hover" id="librenms-ipaddress-migrate-table">
+            <thead>
+                <tr>
+                    <th>IP Address</th>
+                    <th>Interface</th>
+                    <th class="text-end">Migrate</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for ip in ip_sync.movable_ips %}
+                <tr>
+                    <td>{{ ip.address }}</td>
+                    <td>{{ ip.interface_name|default:"-" }}</td>
+                    <td class="text-end">
+                        {% include "netbox_librenms_plugin/inc/_migrate_move_button.html" with move_url_name="plugins:netbox_librenms_plugin:ipaddress_move_to_winner" obj_id=ip.id obj_label=ip.address entity_word="IP" obj_interface_name=ip.interface_name winner=migrated_to_winner server_key=migrated_to_marker.server_key|default:ip_sync.server_key %}
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</div>
+{% endif %}

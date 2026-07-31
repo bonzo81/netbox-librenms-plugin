@@ -32,7 +32,7 @@
     form-submit action input is form-only, so it stays gated.
     {% endcomment %}
     {% csrf_token %}
-    {% if vlan_sync.server_key %}<input type="hidden" name="server_key" value="{{ vlan_sync.server_key }}">{% endif %}
+    {% include "netbox_librenms_plugin/inc/_hidden_server_key.html" with server_key=vlan_sync.server_key %}
     {% if not migrated_to_marker %}
     <input type="hidden" name="action" value="create_vlans">
     {% endif %}

@@ -25,7 +25,11 @@ from ..utils import (
     set_librenms_device_id,
 )
 from ..constants import normalize_oob_type
-from ..import_validation_helpers import apply_merge_candidates, apply_oob_detection_result
+from ..import_validation_helpers import (
+    apply_merge_candidates,
+    apply_oob_detection_result,
+    clear_match_derived_action_fields,
+)
 from .cache import get_import_device_cache_key
 from .virtual_chassis import (
     _generate_vc_member_name,
@@ -503,12 +507,36 @@ def validate_device_for_import(
         strip_domain: If True, strip domain suffix from device name
 
     Returns:
-        dict: Validation result with structure:
+        dict: Validation result with structure (the key set is pinned by
+        ``test_validation_result_key_contract``; extend both together):
             {
                 'is_ready': bool,  # Can import without user intervention
                 'can_import': bool,  # Can import (possibly after configuration)
-                'import_as_vm': bool,  # Whether importing as VM
+                'import_as_vm': bool,  # Whether importing as VM (may be flipped True by a VM hostname match)
+                'resolved_name': str or None,  # Final device name after applying naming preferences
                 'existing_device': Device or VirtualMachine or None,
+                'existing_match_type': str or None,  # How it matched: 'librenms_id', 'librenms_oob',
+                    # 'hostname', 'serial', 'primary_ip', or the terminal blockers
+                    # 'ambiguous_librenms_id' / 'ambiguous_hostname_or_serial'
+                'ambiguous_librenms_id': bool,  # librenms_id matches >1 NetBox object (import blocked)
+                'existing_librenms_link': dict or None,  # {host_id, oob_id, oob_type} current linkage
+                    # of the matched object (devices; VMs get a host_id-only variant)
+                'serial_action': str or None,  # None, 'link', 'conflict', 'update_serial',
+                    # 'hostname_differs', 'oob_candidate', 'promote_to_host', 'merge_netbox_devices'
+                'serial_confirmed': bool,  # librenms_id match and serial matches
+                'serial_duplicate': bool,  # Incoming serial already on a different device
+                'serial_role_choice_available': bool,  # Both oob_candidate and promote_to_host valid
+                'oob_candidate': dict or None,  # {device, type, version, ip} when detected (devices only)
+                # 'promote_to_host': dict — CONDITIONAL, present only when host promotion is available
+                'merge_candidates': dict or None,  # {host_named: {...}, oob_named: {...}} when two
+                    # NetBox devices look like the same physical box (devices only)
+                'librenms_id_needs_migration': bool,  # Existing object carries a legacy bare-int id
+                'name_matches': bool,  # Existing object's name matches the resolved name
+                'name_sync_available': bool,  # Existing object's name differs (sync offered)
+                'suggested_name': str or None,  # Name to suggest when name_sync_available
+                'device_type_mismatch': bool,  # Existing device's type differs from LibreNMS (devices only)
+                'naming_criteria': dict or None,  # How resolved_name was derived (use_sysname/strip_domain)
+                'virtual_chassis': dict,  # VC detection state, empty_virtual_chassis_data() shape
                 'issues': List[str],  # Blocking issues
                 'warnings': List[str],  # Non-blocking warnings
                 'site': {  # Only for devices
@@ -537,6 +565,11 @@ def validate_device_for_import(
                     'found': bool,
                     'platform': Platform or None,
                     'match_type': str  # 'exact' or None
+                },
+                'rack': {  # Only for devices
+                    'found': bool,
+                    'rack': Rack or None,
+                    'available_racks': List[Rack]
                 }
             }
 
@@ -796,6 +829,28 @@ def validate_device_for_import(
                     f"Both a VM and Device exist with hostname '{hostname}' in NetBox. "
                     f"Cannot determine which to match. Please set the librenms_id custom field on the correct object."
                 )
+                # Fail closed when EITHER side ALSO has same-model duplicates. Nothing binds in
+                # this branch, so the Stage-1 duplicate guard below (keyed on a bound
+                # existing_device) never sees them — without this, two Devices plus one VM on a
+                # hostname would sail through as a new import, i.e. the VM's presence would
+                # RELAX the terminal protection the 2-Devices-no-VM case gets. Mirrors that
+                # guard's terminal state (message keeps the "hostname/serial" substring the
+                # refresh-path blocker cleanup keys on), including its early return: a
+                # hostname-bound duplicate never falls through to serial/IP re-binding either.
+                _device_peers = list(Device.objects.filter(name__iexact=hostname)[:2])
+                _vm_peers = list(VirtualMachine.objects.filter(name__iexact=hostname)[:2])
+                if len(_device_peers) > 1 or len(_vm_peers) > 1:
+                    _dup_kind = "devices" if len(_device_peers) > 1 else "virtual machines"
+                    _dup_msg = (
+                        f"Multiple NetBox {_dup_kind} share this device's hostname/serial; resolve the "
+                        "duplicate before importing or linking."
+                    )
+                    if _dup_msg not in result.setdefault("issues", []):
+                        result["issues"].append(_dup_msg)
+                    result["existing_match_type"] = "ambiguous_hostname_or_serial"
+                    result["can_import"] = False
+                    result["is_ready"] = False
+                    return result
                 # Don't set existing_device, don't block import - let user proceed as new
                 # This allows them to import and then resolve the conflict manually
             elif existing_vm:
@@ -919,11 +974,18 @@ def validate_device_for_import(
             # for the matched type, so share the result instead of issuing it twice per device.
             _match_type = result.get("existing_match_type")
             _serial_now = normalize_serial(libre_device.get("serial"))
-            _dup_eligible = (
-                not import_as_vm and result.get("existing_device") is not None and _match_type in ("hostname", "serial")
-            )
+            _dup_eligible = result.get("existing_device") is not None and _match_type in ("hostname", "serial")
+            # VM matches are just as vulnerable: NetBox only enforces VM-name uniqueness per
+            # cluster, so the VM hostname match above binds .first() among cross-cluster
+            # duplicates. Pick the peer model from the object that ACTUALLY matched, not from
+            # import_as_vm: the hostname fallback can bind a Device even when the caller requested
+            # a VM import (import_as_vm=True passed by vm_operations), so keying on import_as_vm
+            # would query the wrong table and miss same-name duplicates on the matched side. The
+            # serial path is device-only.
+            _matched_is_vm = isinstance(result.get("existing_device"), VirtualMachine)
+            _PeerModel = VirtualMachine if _matched_is_vm else Device
             _hostname_peers = (
-                list(Device.objects.filter(name__iexact=hostname)[:2])
+                list(_PeerModel.objects.filter(name__iexact=hostname)[:2])
                 if _dup_eligible and _match_type == "hostname" and hostname
                 else []
             )
@@ -952,24 +1014,19 @@ def validate_device_for_import(
                     # wrong device. Only existing_match_type carries the ambiguity forward.
                     result["existing_device"] = None
                     result["existing_librenms_link"] = None
-                    result["name_matches"] = False
-                    result["name_sync_available"] = False
-                    result["suggested_name"] = None
-                    result["serial_confirmed"] = False
-                    result["serial_duplicate"] = False
+                    clear_match_derived_action_fields(result)
                     # Demote the match_type off "hostname"/"serial" so neither the device_status
                     # table (has_actions) nor device_validation_details.html renders a "Link to
                     # LibreNMS" action — otherwise the arbitrary row could be linked to the wrong
                     # NetBox device. Mirrors the "ambiguous_librenms_id" terminal-state pattern.
                     result["existing_match_type"] = "ambiguous_hostname_or_serial"
-                    result["serial_action"] = None
-                    result["oob_candidate"] = None
-                    result.pop("promote_to_host", None)
-                    result["serial_role_choice_available"] = False
                     result["can_import"] = False
                     result["is_ready"] = False
+                    # Both wordings keep the "hostname/serial" substring the refresh-path
+                    # blocker cleanup keys on (_AMBIGUOUS_SERIAL_IP_MARKERS in bulk_import).
+                    _dup_kind = "virtual machines" if _matched_is_vm else "devices"
                     _dup_msg = (
-                        "Multiple NetBox devices share this device's hostname/serial; resolve the "
+                        f"Multiple NetBox {_dup_kind} share this device's hostname/serial; resolve the "
                         "duplicate before importing or linking."
                     )
                     if _dup_msg not in result.setdefault("issues", []):

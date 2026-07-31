@@ -6,6 +6,8 @@ themes (measured ~1.2–2.3:1). ``bg-warning text-dark`` clears WCAG AA in both.
 real template guards against a regression to the bare class.
 """
 
+import re
+
 import pytest
 
 
@@ -65,6 +67,91 @@ class TestDeviceValidationDetailsMergeBadge:
             r'class="(?=[^"]*\bbadge\b)(?=[^"]*\bbg-warning\b)(?=[^"]*\btext-dark\b)[^"]*"',
             html,
         ), "merge badge must pair bg-warning with text-dark on one element"
+
+    def test_oob_ip_move_copy_states_the_real_condition(self):
+        """The 'Moved to winner' copy must state the OOB IP only moves when the winner has no OOB IP AND the IP is already on a winner interface — the old copy over-promised the move."""
+        html = self._render()
+        # Both halves of the real condition must be stated, not just one. Pinning only the
+        # "winner interface" clause would still pass if the "winner has no OOB IP" requirement
+        # were dropped again (the original over-promise this copy fixed).
+        assert "the winner has no OOB IP" in html
+        assert "the IP is already on a winner interface" in html
+        assert "(only if the winner has no OOB IP yet)" not in html
+
+    def test_merge_derives_donor_without_client_state(self):
+        """The merge form posts only the winner because the server derives the donor."""
+        html = self._render()
+        assert 'name="winner_pk"' in html
+        assert 'name="donor_pk"' not in html
+        assert "data-donor-pk" not in html
+        assert "syncDonor" not in html
+
+    def test_merge_candidate_oob_only_link_is_not_labelled_unlinked(self):
+        """A merge candidate linked as OOB-only (oob_id set, host_id empty) must be labelled as OOB-linked, not mislabelled 'not linked to LibreNMS'."""
+        from django.contrib.auth.models import AnonymousUser
+        from django.template.loader import render_to_string
+        from django.test import RequestFactory
+
+        from netbox_librenms_plugin.tests.conftest import make_device
+
+        winner = make_device("merge-oob-winner")
+        donor = make_device("merge-oob-donor")
+        request = RequestFactory().get("/")
+        request.user = AnonymousUser()
+        ctx = {
+            "validation": {
+                "existing_device": winner,
+                "serial_action": "merge_netbox_devices",
+                "merge_candidates": {
+                    # host_named is linked to LibreNMS only as an OOB controller (no host_id).
+                    "host_named": {
+                        "pk": winner.pk,
+                        "name": winner.name,
+                        "librenms_link": {"host_id": None, "oob_id": 77, "oob_type": "iDRAC"},
+                    },
+                    # The other candidate is host-linked, so NEITHER candidate is genuinely
+                    # unlinked — any "not linked" text would therefore be a mislabel of the
+                    # OOB-only candidate above (the bug this test guards against).
+                    "oob_named": {
+                        "pk": donor.pk,
+                        "name": donor.name,
+                        "librenms_link": {"host_id": 99, "oob_id": None},
+                    },
+                },
+            },
+            "libre_device": {
+                "device_id": 5,
+                "sysName": "merge-oob-winner",
+                "hostname": "merge-oob-winner",
+                "serial": "ABC123",
+                "hardware": "Model-X",
+                "os": "ios",
+                "ip": "10.0.0.1",
+                "location": "lab",
+                "status": True,
+            },
+            "server_key": "default",
+            "existing_device_model_name": "device",
+            "existing_device_url": winner.get_absolute_url(),
+            "sync_info": {},
+            "existing_id_servers": [],
+            "use_sysname": True,
+            "strip_domain": False,
+        }
+        html = render_to_string("netbox_librenms_plugin/htmx/device_validation_details.html", ctx, request=request)
+
+        # The OOB-only candidate must surface its OOB linkage, not fall through to "not linked".
+        assert "currently linked to LibreNMS as OOB #77" in html
+        assert "(iDRAC)" in html
+        assert "not linked to LibreNMS" not in html  # non-vacuous: must NOT also render the unlinked label
+
+        # The merge POST must carry the naming toggles (use_sysname / strip_domain) so a
+        # user-selected naming mode survives the revalidation the merge triggers.
+        merge_chunks = [c for c in html.split("<form") if 'name="winner_pk"' in c]
+        assert merge_chunks, "merge form was not rendered"
+        merge_tag = merge_chunks[0].split(">", 1)[0]
+        assert "use-sysname-toggle" in merge_tag and "strip-domain-toggle" in merge_tag
+        assert 'name="donor_pk"' not in html
 
 
 @pytest.mark.django_db
@@ -237,6 +324,53 @@ class TestSerialMatchFormServerKey:
 
 
 @pytest.mark.django_db
+class TestAddAsOOBFormPanes:
+    """Both OOB-candidate panes (serial match and primary_ip match) must render the shared Add-as-OOB form."""
+
+    def _render(self, *, match_type, serial_action):
+        from django.contrib.auth.models import AnonymousUser
+        from django.template.loader import render_to_string
+        from django.test import RequestFactory
+
+        from netbox_librenms_plugin.tests.conftest import make_device
+
+        existing = make_device(f"oob-pane-{match_type}")
+        request = RequestFactory().get("/")
+        request.user = AnonymousUser()
+        ctx = {
+            "validation": {
+                "existing_device": existing,
+                "existing_match_type": match_type,
+                "serial_action": serial_action,
+                "oob_candidate": {"type": "idrac", "ip": "10.9.9.9"},
+                "device_type_mismatch": False,
+                "warnings": [],
+            },
+            "libre_device": {"device_id": 7, "sysName": "oob-pane", "hostname": "oob-pane", "ip": "10.9.9.9"},
+            "server_key": "prod",
+            "existing_device_model_name": "device",
+            "existing_device_url": existing.get_absolute_url(),
+            "sync_info": {},
+            "existing_id_servers": [],
+            "use_sysname": True,
+            "strip_domain": False,
+        }
+        return render_to_string("netbox_librenms_plugin/htmx/device_validation_details.html", ctx, request=request)
+
+    def test_serial_match_pane_renders_add_as_oob_form(self):
+        html = self._render(match_type="serial", serial_action="oob_candidate")
+        assert "device-import/add-as-oob/7/" in html
+        assert "Add as OOB to" in html
+        assert 'name="server_key" value="prod"' in html
+
+    def test_primary_ip_match_pane_renders_add_as_oob_form(self):
+        html = self._render(match_type="primary_ip", serial_action="oob_candidate")
+        assert "device-import/add-as-oob/7/" in html
+        assert "Add as OOB to" in html
+        assert 'name="server_key" value="prod"' in html
+
+
+@pytest.mark.django_db
 class TestPromoteToHostFallbackPane:
     """A promote_to_host-classified row must render an ACTIONABLE Host pane on this branch.
 
@@ -248,14 +382,11 @@ class TestPromoteToHostFallbackPane:
     """
 
     def _render(self, *, patch_promote_url_absent=False, choice_available=False):
-        from unittest.mock import patch
-
         from django.contrib.auth.models import AnonymousUser
         from django.template.loader import render_to_string
         from django.test import RequestFactory
-        from django.urls import NoReverseMatch
-        from django.urls import reverse as real_reverse
 
+        from netbox_librenms_plugin.tests._html_helpers import patch_move_url_reverse
         from netbox_librenms_plugin.tests.conftest import make_device
 
         existing = make_device("promote-fallback-host")
@@ -291,12 +422,7 @@ class TestPromoteToHostFallbackPane:
             # device_promote_to_host, which would flip a plain absence assertion. Force the
             # URL absent so the fallback path stays testable on every branch (Django's
             # {% url %} resolves reverse from django.urls at render time).
-            def fake_reverse(viewname, *args, **kwargs):
-                if "device_promote_to_host" in str(viewname):
-                    raise NoReverseMatch(viewname)
-                return real_reverse(viewname, *args, **kwargs)
-
-            with patch("django.urls.reverse", side_effect=fake_reverse):
+            with patch_move_url_reverse("device_promote_to_host", resolve=False):
                 return render_to_string(
                     "netbox_librenms_plugin/htmx/device_validation_details.html", ctx, request=request
                 )
@@ -332,3 +458,183 @@ class TestPromoteToHostFallbackPane:
         """Branch-agnostic: whether the fallback or the real promote pane renders, the row must offer an action inside the Host div."""
         html = self._render()
         assert 'id="serial-role-host-5"' in html
+
+
+def test_promote_override_handler_clears_hidden_when_switching_back_to_keep():
+    """The override JS must set the hidden from the 'new' radio's own checked state.
+
+    The old handler only cleared the hidden when a radio carrying data-override-target had
+    value 'keep' — but the Keep radio has no data-override-target, so switching back to Keep
+    left the previous override value posted. Assert against the shipped template source.
+    """
+    from pathlib import Path
+
+    import netbox_librenms_plugin
+
+    source = (
+        Path(netbox_librenms_plugin.__file__).parent
+        / "templates"
+        / "netbox_librenms_plugin"
+        / "htmx"
+        / "device_validation_details.html"
+    ).read_text()
+
+    # The fixed handler keys off the new radio's checked state (clears when unchecked).
+    assert "hidden.value = r.checked ?" in source
+    # The buggy keep-branch (which never fired, since Keep has no data-override-target) is gone.
+    assert 'r.value === "keep"' not in source
+
+
+def test_promote_form_reset_is_wired_to_both_close_paths():
+    """The promote reset binds hidden.bs.modal and the dismiss-button click unconditionally, so a Bootstrap backdrop dismiss can't leave the form sticky on reopen."""
+    from pathlib import Path
+
+    import netbox_librenms_plugin
+
+    source = (
+        Path(netbox_librenms_plugin.__file__).parent
+        / "templates"
+        / "netbox_librenms_plugin"
+        / "htmx"
+        / "device_validation_details.html"
+    ).read_text()
+
+    # Isolate the complete one-time binding guard.
+    start = source.index('modal.dataset.promoteResetBound = "1"')
+    end = source.index("\n              }\n            })();", start)
+    block = source[start:end]
+
+    # hidden.bs.modal fires for EVERY Bootstrap close, including the backdrop click that the
+    # dismiss-button handler never catches; the dismiss-button click covers the no-Bootstrap
+    # fallback where hidden.bs.modal never fires.
+    assert 'modal.addEventListener("hidden.bs.modal", resetPromoteForm)' in block
+    assert 'btn.addEventListener("click", resetPromoteForm)' in block
+    assert 'modal.addEventListener("change"' in block
+    # Both are now bound unconditionally: the old render-time if/else picked exactly ONE path,
+    # so a Bootstrap backdrop dismiss (fires only hidden.bs.modal) was unhandled whenever the
+    # fallback branch had been taken at render. That either/or is gone.
+    assert "} else {" not in block
+
+
+@pytest.mark.django_db
+class TestPromoteModalAccessibility:
+    """The promote modal must carry aria-labelledby pointing at its titled heading (screen readers)."""
+
+    def _render(self):
+        from django.contrib.auth.models import AnonymousUser
+        from django.template.loader import render_to_string
+        from django.test import RequestFactory
+
+        from netbox_librenms_plugin.tests.conftest import make_device
+
+        existing = make_device("promote-a11y")
+        request = RequestFactory().get("/")
+        request.user = AnonymousUser()
+        ctx = {
+            "validation": {
+                "existing_device": existing,
+                "existing_match_type": "serial",
+                "serial_action": "promote_to_host",
+                "promote_to_host": {"existing_libre_id": 88, "existing_oob_type": "idrac"},
+                "warnings": [],
+            },
+            "libre_device": {"device_id": 12, "sysName": "promote-a11y", "hostname": "promote-a11y"},
+            "server_key": "default",
+            "existing_device_model_name": "device",
+            "existing_device_url": existing.get_absolute_url(),
+            "sync_info": {},
+            "existing_id_servers": [],
+            "use_sysname": True,
+            "strip_domain": False,
+        }
+        return render_to_string("netbox_librenms_plugin/htmx/device_validation_details.html", ctx, request=request)
+
+    def test_promote_modal_labelledby_targets_its_title_id(self):
+        """The modal's aria-labelledby id matches the id on its modal-title heading (real linkage)."""
+        html = self._render()
+        # Precondition: the promote modal rendered for this context.
+        assert 'id="promote-modal-12"' in html
+        # The modal references its heading, and the heading actually carries that id.
+        assert 'aria-labelledby="promote-modal-label-12"' in html
+        assert re.search(
+            r'<h\d(?=[^>]*\bid="promote-modal-label-12")(?=[^>]*\bclass="[^"]*\bmodal-title\b)[^>]*>',
+            html,
+        )
+
+
+@pytest.mark.django_db
+class TestMergePromoteFormsShareServerKeyInclude:
+    """The merge and promote POST forms carry server_key via the shared include.
+
+    Every other action form in this template routes the hidden input through
+    inc/_hidden_server_key.html, which renders NOTHING when the context has no
+    server_key. The merge/promote forms were the last two with a raw
+    <input value="{{ server_key }}">, which posts server_key="" on a keyless
+    render instead of omitting the field like their sibling forms.
+    """
+
+    def _render(self, server_key, pane):
+        from django.contrib.auth.models import AnonymousUser
+        from django.template.loader import render_to_string
+        from django.test import RequestFactory
+
+        from netbox_librenms_plugin.tests.conftest import make_device
+
+        existing = make_device(f"srvkey-{pane}-winner")
+        donor = make_device(f"srvkey-{pane}-donor")
+        request = RequestFactory().get("/")
+        request.user = AnonymousUser()
+        validation = {
+            "existing_device": existing,
+            "existing_match_type": "serial",
+            "warnings": [],
+        }
+        if pane == "merge":
+            validation["serial_action"] = "merge_netbox_devices"
+            validation["merge_candidates"] = {
+                "host_named": {"pk": existing.pk, "name": existing.name},
+                "oob_named": {"pk": donor.pk, "name": donor.name},
+            }
+        else:
+            validation["serial_action"] = "promote_to_host"
+            validation["promote_to_host"] = {"existing_libre_id": 88, "existing_oob_type": "idrac"}
+        ctx = {
+            "validation": validation,
+            "libre_device": {"device_id": 12, "sysName": "srvkey-forms", "hostname": "srvkey-forms"},
+            "existing_device_model_name": "device",
+            "existing_device_url": existing.get_absolute_url(),
+            "sync_info": {},
+            "existing_id_servers": [],
+            "use_sysname": True,
+            "strip_domain": False,
+        }
+        if server_key is not None:
+            ctx["server_key"] = server_key
+        return render_to_string("netbox_librenms_plugin/htmx/device_validation_details.html", ctx, request=request)
+
+    @staticmethod
+    def _form_containing(html, url_marker):
+        import re
+
+        for match in re.finditer(r"<form\b.*?</form>", html, flags=re.DOTALL):
+            if url_marker in match.group(0):
+                return match.group(0)
+        raise AssertionError(f"no rendered <form> posts to {url_marker}")
+
+    @pytest.mark.parametrize(
+        ("pane", "marker"),
+        [("merge", "merge-netbox-devices"), ("promote", "promote-to-host")],
+    )
+    def test_form_carries_the_scoped_server_key(self, pane, marker):
+        html = self._render(server_key="tab-scope-key", pane=pane)
+        form = self._form_containing(html, marker)
+        assert 'name="server_key" value="tab-scope-key"' in form
+
+    @pytest.mark.parametrize(
+        ("pane", "marker"),
+        [("merge", "merge-netbox-devices"), ("promote", "promote-to-host")],
+    )
+    def test_keyless_render_omits_the_input_instead_of_posting_blank(self, pane, marker):
+        html = self._render(server_key=None, pane=pane)
+        form = self._form_containing(html, marker)
+        assert 'name="server_key"' not in form

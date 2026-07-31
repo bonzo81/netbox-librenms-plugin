@@ -1518,7 +1518,7 @@ class TestDeviceImportTableRenderActions:
         assert "paired host: LibreNMS #" not in result
 
     def test_existing_librenms_link_non_dict_does_not_crash_render(self):
-        """A malformed ``existing_librenms_link`` that isn't a dict (e.g."""
+        """A malformed ``existing_librenms_link`` that isn't a dict (e.g. a legacy bare int) must not crash the actions render."""
         from dcim.models import Device
         from virtualization.models import VirtualMachine
 
@@ -3271,3 +3271,62 @@ class TestRenderDeviceSelectionEscape:
         # The raw <script> tag must NOT appear — it must be escaped, matching the cable table.
         assert "<script>" not in html
         assert "&lt;script&gt;" in html
+
+
+# ===========================================================================
+# OOB badge wiring — the shared utils.oob_badge_html helper in each table
+# ===========================================================================
+
+
+class TestOobBadgeWiring:
+    """Each table render that shows the OOB badge must go through utils.oob_badge_html."""
+
+    def _interface_table(self):
+        from netbox_librenms_plugin.tables.interfaces import LibreNMSInterfaceTable
+
+        table = object.__new__(LibreNMSInterfaceTable)
+        table.interface_name_field = "ifName"
+        return table
+
+    def test_interface_render_name_badges_an_oob_row(self):
+        table = self._interface_table()
+        # exists_in_netbox falsy → _render_field short-circuits; the render is real end-to-end.
+        html = str(table.render_name("mgmt0", {"ifName": "mgmt0", "_source": "oob"}))
+        assert 'title="From OOB controller"' in html
+        assert "mgmt0" in html
+
+    def test_interface_render_name_plain_row_has_no_badge(self):
+        table = self._interface_table()
+        html = str(table.render_name("eth0", {"ifName": "eth0", "_source": "main"}))
+        assert "From OOB controller" not in html
+
+    def test_module_render_name_badges_an_oob_row(self):
+        from netbox_librenms_plugin.tables.modules import LibreNMSModuleTable
+
+        table = object.__new__(LibreNMSModuleTable)
+        html = str(table.render_name("PSU 1", {"_source": "oob", "depth": 0}))
+        assert 'title="From OOB controller"' in html
+        assert "PSU 1" in html
+
+    def test_module_render_name_plain_row_has_no_badge(self):
+        from netbox_librenms_plugin.tables.modules import LibreNMSModuleTable
+
+        table = object.__new__(LibreNMSModuleTable)
+        html = str(table.render_name("PSU 1", {"depth": 0}))
+        assert "From OOB controller" not in html
+
+    def test_cable_render_local_port_badges_an_oob_row_after_the_name(self):
+        from netbox_librenms_plugin.tables.cables import LibreNMSCableTable
+
+        table = object.__new__(LibreNMSCableTable)
+        html = str(table.render_local_port("Gi0/1", {"_source": "oob"}))
+        # Leading space: the badge follows the port name.
+        assert html.startswith("Gi0/1 <span")
+        assert 'title="From OOB controller"' in html
+
+    def test_cable_render_local_port_plain_row_has_no_badge(self):
+        from netbox_librenms_plugin.tables.cables import LibreNMSCableTable
+
+        table = object.__new__(LibreNMSCableTable)
+        html = str(table.render_local_port("Gi0/1", {"_source": "main"}))
+        assert "From OOB controller" not in html

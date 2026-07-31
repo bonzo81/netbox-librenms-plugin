@@ -23,6 +23,14 @@
     auto-submits, so it doesn't reintroduce the live-form problem flagged above.
     {% endcomment %}
     <input type="hidden" name="csrfmiddlewaretoken" value="{{ csrf_token }}">
+    {% comment %}
+    Prefer the marker-scoped server_key (the server the donor was migrated under), falling back
+    to the active interface_sync.server_key — the same precedence the migrated Move button uses,
+    so JS handlers reading this input target the right LibreNMS server in either case.
+    {% endcomment %}
+    {% with effective_server_key=migrated_to_marker.server_key|default:interface_sync.server_key %}
+    {% include "netbox_librenms_plugin/inc/_hidden_server_key.html" with server_key=effective_server_key %}
+    {% endwith %}
 {% else %}
 <form method="post"
     action="{% url 'plugins:netbox_librenms_plugin:sync_selected_interfaces' object_type=model_name object_id=interface_sync.object.pk %}?interface_name_field={{ interface_name_field }}">
@@ -40,7 +48,8 @@
                 <span>Sync Selected Interfaces</span>
             </button>
             {% endif %}
-            <a href="#" class="m-2" data-bs-toggle="modal" data-bs-target="#interfaceTypeHelpModal">
+            <a href="#" class="m-2"
+                onclick="event.preventDefault(); showModal(document.getElementById('interfaceTypeHelpModal'))">
                 <i class="mdi mdi-help-circle"></i> info
             </a>
         </div>
@@ -321,9 +330,15 @@
                 <div class="alert alert-warning">
                     <i class="mdi mdi-alert me-2"></i>
                     {% if migrated_to_marker %}
+                    {% if migrated_to_winner %}
                     <strong>Warning:</strong> The following interfaces exist on the migrated donor but are not found in
                     the LibreNMS data. Moving an interface reassigns it, along with related cables/IPs/MACs, to the
                     migration winner.
+                    {% else %}
+                    <strong>Warning:</strong> The following interfaces exist on the migrated donor but are not found in
+                    the LibreNMS data. The migration winner is unavailable, so these interfaces can't be moved until the
+                    stale marker is resolved.
+                    {% endif %}
                     {% else %}
                     <strong>Warning:</strong> The following interfaces exist in NetBox but are not found in the LibreNMS
                     data.
@@ -376,7 +391,7 @@
                                     <td>{{ interface.description|default:"-" }}</td>
                                     {% if migrated_to_marker %}
                                     <td class="text-end">
-                                        {% include "netbox_librenms_plugin/inc/_migrate_move_button.html" with move_url_name="plugins:netbox_librenms_plugin:interface_move_to_winner" obj_id=interface.id obj_label=interface.name entity_word="interface" winner=migrated_to_winner server_key=migrated_to_marker.server_key %}
+                                        {% include "netbox_librenms_plugin/inc/_migrate_move_button.html" with move_url_name="plugins:netbox_librenms_plugin:interface_move_to_winner" obj_id=interface.id obj_label=interface.name entity_word="interface" winner=migrated_to_winner server_key=migrated_to_marker.server_key|default:interface_sync.server_key %}
                                     </td>
                                     {% endif %}
                                 </tr>

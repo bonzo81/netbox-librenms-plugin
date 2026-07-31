@@ -6,7 +6,7 @@ from dcim.models import Device
 from django.contrib import messages
 from django.core.cache import cache
 from django.http import Http404, JsonResponse
-from django.shortcuts import get_object_or_404, render
+from django.shortcuts import get_object_or_404
 from django.utils import timezone
 from django.views import View
 from ipam.models import VRF, IPAddress
@@ -479,7 +479,38 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMix
             "cache_expiry": cache_expiry,
             "server_key": server_key,
             "set_primary_ip": resolve_set_primary_ip(request),
+            # Donor "Move IP to winner" candidates (empty unless this device carries a
+            # _migrated_to marker for server_key); drives the migrated-mode action card.
+            "movable_ips": self._movable_ips_for_migration(obj, server_key),
         }
+
+    @staticmethod
+    def _movable_ips_for_migration(obj, server_key):
+        """
+        List the donor's interface-assigned IPs as Move-to-winner candidates (empty unless migrated).
+
+        Only NetBox Device ``Interface`` assignments are listed: MoveIPAddressToWinnerView re-homes an
+        IP from a donor interface to the winner's same-named interface and rejects non-Interface (e.g.
+        VMInterface) assignments, so VM-owned IPs are intentionally excluded. Gated on the marker so a
+        non-migrated device pays no extra query.
+        """
+        from dcim.models import Device, Interface
+        from django.contrib.contenttypes.models import ContentType
+
+        from netbox_librenms_plugin.utils import get_migrated_to_marker
+
+        if not isinstance(obj, Device) or not get_migrated_to_marker(obj, server_key):
+            return []
+        name_by_id = {iface.pk: iface.name for iface in obj.interfaces.all()}
+        if not name_by_id:
+            return []
+        iface_ct = ContentType.objects.get_for_model(Interface)
+        return [
+            {"id": ip.pk, "address": str(ip.address), "interface_name": name_by_id.get(ip.assigned_object_id, "")}
+            for ip in IPAddress.objects.filter(
+                assigned_object_type=iface_ct, assigned_object_id__in=list(name_by_id)
+            ).order_by("address")
+        ]
 
     def get_context_data(self, request, obj):
         """Get the context data for the IP address sync view."""
@@ -495,11 +526,25 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMix
             # snapshot may still be cached, but the failed rebind left self.librenms_api bound to the
             # DEFAULT server; render an empty table scoped to the requested key rather than that
             # stale server's cached IPs (mirrors modules_view.get_context_data's unresolved guard).
-            return {"table": None, "object": obj, "cache_expiry": None, "server_key": scoped}
+            return {
+                "table": None,
+                "object": obj,
+                "cache_expiry": None,
+                "server_key": scoped,
+                "set_primary_ip": resolve_set_primary_ip(request),
+                "movable_ips": self._movable_ips_for_migration(obj, scoped),
+            }
         context = self._prepare_context(request, obj, interface_name_field, fetch_fresh=False, server_key=scoped)
         if context is None:
-            # No data found; return context with empty table
-            context = {"table": None, "object": obj, "cache_expiry": None, "server_key": scoped}
+            # No data found; return context with empty table (still surface migrated move actions).
+            context = {
+                "table": None,
+                "object": obj,
+                "cache_expiry": None,
+                "server_key": scoped,
+                "set_primary_ip": resolve_set_primary_ip(request),
+                "movable_ips": self._movable_ips_for_migration(obj, scoped),
+            }
         return context
 
     def post(self, request, pk):
@@ -512,11 +557,35 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMix
         server_key = self.rebind_api_for_server(posted_server_key)
         if server_key is None:
             messages.error(request, "Selected LibreNMS server is no longer configured.")
-            return render(
+            # rebind_api_for_server() returned None to avoid building a missing/misconfigured
+            # default client; reading the lazy `librenms_api` property here would reconstruct it
+            # and can raise (a 500 on this HTMX error path). Use the already-cached client's key.
+            active_server_key = self.active_server_key
+            # render_sync_partial injects the migrated-donor context (resolved from the active
+            # session key, since the POSTed key is now known-invalid) so a stale server_key can't
+            # silently re-enable IP sync on a migrated donor.
+            return self.render_sync_partial(
                 request,
-                self.partial_template_name,
+                obj,
+                active_server_key,
                 {
-                    "ip_sync": {"object": obj, "table": None, "cache_expiry": None, "server_key": None},
+                    "ip_sync": {
+                        "object": obj,
+                        "table": None,
+                        "cache_expiry": None,
+                        "server_key": None,
+                        # Preserve the user's set-primary-IP preference: the template binds the
+                        # checkbox to ip_sync.set_primary_ip, so omitting it silently unchecks it
+                        # on this error re-render.
+                        "set_primary_ip": resolve_set_primary_ip(request),
+                        # Keep the "Move IP addresses to <winner>" card on this error re-render too:
+                        # the per-row moves are pure NetBox operations, and the template gates the
+                        # card on ip_sync.movable_ips — omitting it (as the fetch-failure and success
+                        # branches do not) would make a migrated donor's move card vanish just
+                        # because the POSTed server_key was stale. Resolved against active_server_key,
+                        # matching the migrated context rendered on this branch.
+                        "movable_ips": self._movable_ips_for_migration(obj, active_server_key),
+                    },
                 },
             )
         context = self._prepare_context(request, obj, interface_name_field, fetch_fresh=True, server_key=server_key)
@@ -526,25 +595,31 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMix
             # LibreNMS fetch failed (a genuine empty result yields a context with an
             # empty table). Report the failure rather than a misleading "no data".
             messages.error(request, "Failed to fetch IP addresses from LibreNMS; see server logs for details.")
-            return render(
+            return self.render_sync_partial(
                 request,
-                self.partial_template_name,
+                obj,
+                server_key,
                 {
                     "ip_sync": {
                         "object": obj,
                         "table": None,
                         "cache_expiry": None,
                         "server_key": server_key,
+                        # Preserve the set-primary-IP checkbox state across a failed refresh
+                        # (the template binds it to ip_sync.set_primary_ip).
+                        "set_primary_ip": resolve_set_primary_ip(request),
+                        # Keep the "Move IP addresses to <winner>" card available on a LibreNMS
+                        # fetch failure: the per-row moves (MoveIPAddressToWinnerView) are pure
+                        # NetBox operations that don't touch LibreNMS, and every other exit surfaces
+                        # movable_ips — omitting it here would make a migrated donor's move card
+                        # vanish just because LibreNMS was briefly unreachable.
+                        "movable_ips": self._movable_ips_for_migration(obj, server_key),
                     },
                 },
             )
 
         messages.success(request, "IP address data refreshed successfully.")
-        return render(
-            request,
-            self.partial_template_name,
-            {"ip_sync": context},
-        )
+        return self.render_sync_partial(request, obj, server_key, {"ip_sync": context})
 
 
 class SingleIPAddressVerifyView(NetBoxObjectPermissionMixin, LibreNMSPermissionMixin, CacheMixin, View):

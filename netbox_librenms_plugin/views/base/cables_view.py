@@ -8,13 +8,12 @@ from django.core.exceptions import MultipleObjectsReturned
 from django.db.models import Q
 from django.http import JsonResponse
 from django.middleware.csrf import get_token
-from django.shortcuts import get_object_or_404, render
+from django.shortcuts import get_object_or_404
 from django.urls import reverse
 from django.utils import timezone
 from django.utils.html import escape
 from django.views import View
 
-from netbox_librenms_plugin.constants import OOB_BADGE_HTML
 from netbox_librenms_plugin.utils import (
     cache_remaining_ttl,
     build_librenms_id_qs,
@@ -23,6 +22,7 @@ from netbox_librenms_plugin.utils import (
     get_librenms_oob,
     get_librenms_sync_device,
     get_virtual_chassis_member,
+    oob_badge_html,
 )
 from netbox_librenms_plugin.views.mixins import (
     CacheMixin,
@@ -110,6 +110,35 @@ def _extract_cached_links(cached, cache_key=None):
             cache.delete(cache_key)
         return None
     return links
+
+
+def _resolve_local_interface(device, server_key, local_port_id, name_candidates):
+    """
+    Resolve a link row's local Interface on *device*: stable librenms_id first, then name.
+
+    The id-beats-name precedence and the dual ifName/ifDescr candidate fallback (issue #88)
+    are the drift-prone core shared by ``enrich_local_port`` and ``SingleCableVerifyView``'s
+    re-resolution — one implementation so a fix in one path can't miss the other again (the
+    issue #88 fallback and the OOB skip were each patched in both copies separately before
+    this was extracted). VC-member selection and the OOB skip stay at the call sites: the two
+    paths deliberately differ there (the initial render leaves a VC row unresolved when the
+    member lookup fails; verify falls back to the selected device).
+
+    Args:
+        device: The NetBox device (or VC member) whose interfaces are searched.
+        server_key (str): LibreNMS server key scoping the librenms_id match.
+        local_port_id: The LibreNMS port_id; falsy skips the id match.
+        name_candidates (list): Interface names for the fallback; empty skips the name match.
+
+    Returns:
+        Interface | None: The resolved interface, or None when neither match hits.
+    """
+    interface = None
+    if local_port_id:
+        interface = device.interfaces.filter(_librenms_id_q(server_key, local_port_id)).first()
+    if not interface and name_candidates:
+        interface = device.interfaces.filter(name__in=name_candidates).first()
+    return interface
 
 
 # The raw (un-enriched) link fields a cached/replayed link is stripped down to before
@@ -454,6 +483,13 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin, 
 
     def enrich_local_port(self, link, obj, server_key=None):
         """Add local port URL if interface exists in NetBox"""
+        # Merged OOB-controller rows are context-only: their local port lives on the
+        # CONTROLLER, not the host, so a shared name (or colliding stored librenms_id)
+        # must not bind a host interface — that would render a wrong local_port_url and
+        # cable state. Sync and the actions column already refuse OOB rows; leave the
+        # local end unresolved here too.
+        if link.get("_source") == "oob":
+            return
         if local_port := link.get("local_port"):
             interface = None
             local_port_id = link.get("local_port_id")
@@ -473,21 +509,9 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin, 
                 chassis_member = get_virtual_chassis_member(obj, local_port)
 
                 if chassis_member:
-                    # First try to find interface by librenms_id
-                    if local_port_id:
-                        interface = chassis_member.interfaces.filter(_librenms_id_q(server_key, local_port_id)).first()
-
-                    # Only if librenms_id match fails, try matching by name
-                    if not interface:
-                        interface = chassis_member.interfaces.filter(name__in=name_candidates).first()
+                    interface = _resolve_local_interface(chassis_member, server_key, local_port_id, name_candidates)
             else:
-                # First try to find interface by librenms_id
-                if local_port_id:
-                    interface = obj.interfaces.filter(_librenms_id_q(server_key, local_port_id)).first()
-
-                # Only if librenms_id match fails, try matching by name
-                if not interface:
-                    interface = obj.interfaces.filter(name__in=name_candidates).first()
+                interface = _resolve_local_interface(obj, server_key, local_port_id, name_candidates)
 
             if interface:
                 link["local_port_url"] = reverse("dcim:interface", args=[interface.pk])
@@ -501,32 +525,24 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin, 
             if server_key is None:
                 server_key = self._render_server_key()
 
-            # Handle virtual chassis case
+            # Same id-beats-name resolution as the local end — reuse the shared resolver so a fix
+            # in one path can't miss the other again (the drift risk _resolve_local_interface was
+            # extracted to close). VC-member selection stays here because the remote side leaves the
+            # interface unresolved when the member lookup fails.
             if hasattr(device, "virtual_chassis") and device.virtual_chassis:
-                # Get the appropriate chassis member based on the port name
-                chassis_member = get_virtual_chassis_member(device, remote_port)
-
+                chassis_member = get_virtual_chassis_member(
+                    device,
+                    remote_port,
+                    return_device_on_failure=False,
+                )
                 if chassis_member:
-                    # First try to find interface by librenms_id
-                    if librenms_remote_port_id:
-                        netbox_remote_interface = chassis_member.interfaces.filter(
-                            _librenms_id_q(server_key, librenms_remote_port_id)
-                        ).first()
-
-                    # If not found by librenms_id, fall back to name matching on the correct chassis member
-                    if not netbox_remote_interface:
-                        netbox_remote_interface = chassis_member.interfaces.filter(name=remote_port).first()
+                    netbox_remote_interface = _resolve_local_interface(
+                        chassis_member, server_key, librenms_remote_port_id, [remote_port]
+                    )
             else:
-                # Non-virtual chassis case
-                # First try to find interface by librenms_id
-                if librenms_remote_port_id:
-                    netbox_remote_interface = device.interfaces.filter(
-                        _librenms_id_q(server_key, librenms_remote_port_id)
-                    ).first()
-
-                # If not found by librenms_id, fall back to name matching
-                if not netbox_remote_interface:
-                    netbox_remote_interface = device.interfaces.filter(name=remote_port).first()
+                netbox_remote_interface = _resolve_local_interface(
+                    device, server_key, librenms_remote_port_id, [remote_port]
+                )
 
             if netbox_remote_interface:
                 link["remote_port_url"] = reverse("dcim:interface", args=[netbox_remote_interface.pk])
@@ -741,12 +757,18 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin, 
         server_key = self.rebind_api_for_server(posted_server_key)
         if server_key is None:
             messages.error(request, "Selected LibreNMS server is no longer configured.")
-            return render(
+            # rebind_api_for_server() returned None to avoid building a missing/misconfigured
+            # default client; reading the lazy `librenms_api` property here would reconstruct it
+            # and can raise (a 500 on this HTMX error path). Use the already-cached client's key.
+            active_server_key = self.active_server_key
+            # render_sync_partial injects the migrated-donor context (resolved from the active
+            # session key, since the POSTed key is now known-invalid) so a stale server_key can't
+            # silently re-enable cable sync on a migrated donor.
+            return self.render_sync_partial(
                 request,
-                self.partial_template_name,
-                {
-                    "cable_sync": {"object": obj, "table": None, "cache_expiry": None, "server_key": None},
-                },
+                obj,
+                active_server_key,
+                {"cable_sync": {"object": obj, "table": None, "cache_expiry": None, "server_key": None}},
             )
         context = self._prepare_context(request, obj, fetch_fresh=True, server_key=server_key)
 
@@ -757,17 +779,11 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin, 
                 messages.error(request, f"Failed to fetch links from LibreNMS: {self._links_fetch_error}")
             else:
                 messages.error(request, "No links found in LibreNMS")
-            return render(
+            return self.render_sync_partial(
                 request,
-                self.partial_template_name,
-                {
-                    "cable_sync": {
-                        "object": obj,
-                        "table": None,
-                        "cache_expiry": None,
-                        "server_key": server_key,
-                    },
-                },
+                obj,
+                server_key,
+                {"cable_sync": {"object": obj, "table": None, "cache_expiry": None, "server_key": server_key}},
             )
 
         messages.success(request, "Cable data refreshed successfully.")
@@ -792,11 +808,7 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin, 
                 "Cables refreshed, but OOB controller links fetch failed; "
                 "showing host cables only. See server logs for details.",
             )
-        return render(
-            request,
-            self.partial_template_name,
-            {"cable_sync": context},
-        )
+        return self.render_sync_partial(request, obj, server_key, {"cable_sync": context})
 
 
 class SingleCableVerifyView(NetBoxObjectPermissionMixin, BaseCableTableView):
@@ -883,13 +895,9 @@ class SingleCableVerifyView(NetBoxObjectPermissionMixin, BaseCableTableView):
                     # The verify response returns formatted_row HTML directly (it does not pass
                     # through LibreNMSCableTable.render_local_port), so re-apply the OOB badge
                     # here to match the initial render — otherwise a verified OOB cable row loses
-                    # the badge and looks like a plain host-port row. Markup mirrors
-                    # tables/cables.py render_local_port.
-                    oob_badge = (
-                        " " + OOB_BADGE_HTML  # leading space: it follows the port name
-                        if link_data.get("_source") == "oob"
-                        else ""
-                    )
+                    # the badge and looks like a plain host-port row. Same helper as the table
+                    # render, so the two can't drift.
+                    oob_badge = oob_badge_html(link_data, leading_space=True)
 
                     # Re-enrich remote side from current NetBox state
                     remote_hostname = link_data.get("remote_device", "")
@@ -898,32 +906,33 @@ class SingleCableVerifyView(NetBoxObjectPermissionMixin, BaseCableTableView):
                             link_data, remote_hostname, link_data.get("remote_device_id"), server_key=server_key
                         )
 
-                    # Normalize None → "" (link_data.get(..., "") still returns None when the key
-                    # is present-but-None, e.g. an OOB row whose port name couldn't be resolved).
-                    # Otherwise the unmatched-interface branch renders escape(None) == "None" as the
-                    # port label — the same defect tables/cables.py render_local_port was fixed for.
+                    # `or ""` (not a .get default): the OOB-merge path stores local_port=None when
+                    # the port name can't be resolved, and a present-but-None value would otherwise
+                    # render the literal string "None" via escape() below.
                     local_port = link_data.get("local_port") or ""
                     formatted_row["local_port"] = local_port
 
-                    # First try to find interface by librenms_id (handle VC members)
-                    _sk = server_key
+                    # Resolve the local interface (handle VC members)
                     interface = None
                     lookup_device = selected_device
-                    if local_port and hasattr(selected_device, "virtual_chassis") and selected_device.virtual_chassis:
-                        chassis_member = get_virtual_chassis_member(selected_device, local_port)
-                        if chassis_member:
-                            lookup_device = chassis_member
-                    if local_port_id:
-                        interface = lookup_device.interfaces.filter(_librenms_id_q(_sk, local_port_id)).first()
-
-                    # If not found by librenms_id, try the displayed name or the alternate
-                    # LibreNMS field (issue #88) — mirror enrich_local_port's dual-name fallback
-                    # so verify resolves a row whose NetBox interface is named from the field the
-                    # user isn't currently displaying (ifName vs ifDescr).
-                    if not interface:
+                    # Merged OOB-controller rows are context-only: their local port lives on the
+                    # CONTROLLER, so a shared name (or colliding stored librenms_id) must not bind
+                    # a HOST interface here — mirrors enrich_local_port's guard on the initial
+                    # render. Left unresolved, the row takes the labelled, badge-carrying
+                    # unresolved branch below instead of linking the wrong interface.
+                    if link_data.get("_source") != "oob":
+                        if (
+                            local_port
+                            and hasattr(selected_device, "virtual_chassis")
+                            and selected_device.virtual_chassis
+                        ):
+                            chassis_member = get_virtual_chassis_member(selected_device, local_port)
+                            if chassis_member:
+                                lookup_device = chassis_member
+                        # Shared id→dual-name resolution core (issue #88 fallback included), so
+                        # this path can't drift from enrich_local_port's again.
                         name_candidates = [n for n in (local_port, link_data.get("local_port_alt")) if n]
-                        if name_candidates:
-                            interface = lookup_device.interfaces.filter(name__in=name_candidates).first()
+                        interface = _resolve_local_interface(lookup_device, server_key, local_port_id, name_candidates)
 
                     if interface:
                         link_data["netbox_local_interface_id"] = interface.pk
@@ -934,7 +943,7 @@ class SingleCableVerifyView(NetBoxObjectPermissionMixin, BaseCableTableView):
 
                         # Escape LibreNMS-sourced labels to prevent XSS
                         safe_local_port = escape(local_port)
-                        remote_port_name = link_data.get("remote_port_name", link_data.get("remote_port", ""))
+                        remote_port_name = link_data.get("remote_port_name") or link_data.get("remote_port") or ""
                         safe_remote_port = escape(remote_port_name)
                         remote_device_name = link_data.get("remote_device", "")
                         safe_remote_device = escape(remote_device_name)
@@ -977,7 +986,7 @@ class SingleCableVerifyView(NetBoxObjectPermissionMixin, BaseCableTableView):
                     else:
                         formatted_row["local_port"] = f"{escape(local_port)}{oob_badge}"
                         # Keep remote port name visible, add URL if available
-                        remote_port_name = link_data.get("remote_port_name", link_data.get("remote_port", ""))
+                        remote_port_name = link_data.get("remote_port_name") or link_data.get("remote_port") or ""
                         safe_remote_port = escape(remote_port_name)
                         formatted_row["remote_port"] = (
                             f'<a href="{link_data["remote_port_url"]}">{safe_remote_port}</a>'

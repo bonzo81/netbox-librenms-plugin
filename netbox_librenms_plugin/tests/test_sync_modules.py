@@ -2030,6 +2030,55 @@ class TestSingleInstallInterfaceBinding:
         mock_messages.success.assert_called_once()
         assert response is not None
 
+    def test_update_module_interface_view_reports_when_no_bind_or_adoption_is_needed(self):
+        """A duplicate request still gets the helper's explicit no-op success message."""
+        from netbox_librenms_plugin.views.sync.modules import UpdateModuleInterfaceView
+
+        view = object.__new__(UpdateModuleInterfaceView)
+        view.required_object_permissions = {}
+        view._librenms_api = MagicMock(server_key="production")
+        device = _make_device()
+
+        module = MagicMock()
+        module.pk = 322
+        module.module_type.model = "SFP-10G-SR"
+        module.module_bay.name = "SFP 2"
+        request = _make_request(
+            "POST",
+            data={"module_id": "322", "server_key": "production", "ent_index": "78"},
+        )
+
+        with (
+            patch.object(view, "require_all_permissions", return_value=None),
+            patch(
+                "netbox_librenms_plugin.views.sync.modules.get_object_or_404",
+                side_effect=[device, module],
+            ),
+            patch("netbox_librenms_plugin.views.sync.modules.reverse", return_value="/sync/"),
+            patch.object(view, "get_cache_key", return_value="inv-key"),
+            patch("netbox_librenms_plugin.views.sync.modules.cache") as mock_cache,
+            patch("netbox_librenms_plugin.views.sync.modules.get_librenms_device_id", return_value=999),
+            patch(
+                "netbox_librenms_plugin.views.sync.modules._bind_interface_librenms_id",
+                return_value=None,
+            ),
+            patch(
+                "netbox_librenms_plugin.views.sync.modules._adopt_existing_template_interfaces",
+                return_value={"status": "bound", "adopted_count": 0, "interfaces": []},
+            ),
+            patch("netbox_librenms_plugin.views.sync.modules.messages") as mock_messages,
+            patch("netbox_librenms_plugin.views.sync.modules._modules_redirect_response", return_value="redirected"),
+        ):
+            mock_cache.get.return_value = {
+                "inventory": [{"entPhysicalIndex": 78, "_librenms_port_id": 43, "_librenms_ifname": "Te1/1/2"}],
+                "librenms_id": 999,
+            }
+            response = view.post(request, pk=24)
+
+        mock_messages.success.assert_called_once()
+        assert "No interface changes were needed" in mock_messages.success.call_args.args[1]
+        assert response == "redirected"
+
     def test_update_module_interface_view_adopts_template_interfaces_when_no_port_binding_exists(self):
         from netbox_librenms_plugin.views.sync.modules import UpdateModuleInterfaceView
 
@@ -2251,7 +2300,7 @@ class TestSingleInstallInterfaceBinding:
         assert response is not None
 
     def test_update_module_interface_view_skips_adoption_on_bind_conflict(self):
-        """A hard bind conflict must NOT trigger template adoption — we don't mutate past an unresolved problem (e.g."""
+        """A hard bind conflict must NOT trigger template adoption — we don't mutate past an unresolved problem (e.g. an interface bound to another module)."""
         from netbox_librenms_plugin.views.sync.modules import UpdateModuleInterfaceView
 
         view = object.__new__(UpdateModuleInterfaceView)
@@ -2927,6 +2976,7 @@ class TestInstallViewsDoNotDeleteCache:
 
         view = object.__new__(InstallBranchView)
         view.required_object_permissions = {}
+        view._librenms_api = MagicMock(server_key="default")
         device = _make_device()
 
         request = _make_request("POST", data={"parent_index": "100", "server_key": "default"})
@@ -2972,6 +3022,7 @@ class TestInstallViewsDoNotDeleteCache:
 
         view = object.__new__(InstallSelectedView)
         view.required_object_permissions = {}
+        view._librenms_api = MagicMock(server_key="default")
         device = _make_device()
 
         request = _make_request("POST", data={"server_key": "default"})
@@ -3020,6 +3071,7 @@ class TestInstallViewsDoNotDeleteCache:
 
         view = object.__new__(InstallBranchView)
         view.required_object_permissions = {}
+        view._librenms_api = MagicMock(server_key="default")
         device = _make_device()
 
         request = _make_request("POST", data={"parent_index": "100", "server_key": "default"})
@@ -3047,6 +3099,7 @@ class TestInstallViewsDoNotDeleteCache:
 
         view = object.__new__(InstallSelectedView)
         view.required_object_permissions = {}
+        view._librenms_api = MagicMock(server_key="default")
         device = _make_device()
 
         request = _make_request("POST", data={"server_key": "default"})
@@ -3078,6 +3131,7 @@ class TestInstallViewsDoNotDeleteCache:
 
         view = object.__new__(InstallBranchView)
         view.required_object_permissions = {}
+        view._librenms_api = MagicMock(server_key="default")
         device = _make_device()
 
         request = _make_request("POST", data={"parent_index": "100", "server_key": "default"})
@@ -3121,6 +3175,7 @@ class TestInstallViewsDoNotDeleteCache:
 
         view = object.__new__(InstallSelectedView)
         view.required_object_permissions = {}
+        view._librenms_api = MagicMock(server_key="default")
         device = _make_device()
 
         request = _make_request("POST", data={"server_key": "default"})
@@ -3168,6 +3223,7 @@ class TestInstallViewsDoNotDeleteCache:
 
         view = object.__new__(InstallBranchView)
         view.required_object_permissions = {}
+        view._librenms_api = MagicMock(server_key="default")
         device = _make_device()
 
         request = _make_request("POST", data={"parent_index": "100", "server_key": "default"})
@@ -3220,6 +3276,7 @@ class TestInstallViewsDoNotDeleteCache:
 
         view = object.__new__(InstallSelectedView)
         view.required_object_permissions = {}
+        view._librenms_api = MagicMock(server_key="default")
         device = _make_device()
 
         request = _make_request("POST", data={"server_key": "default"})
@@ -5799,6 +5856,26 @@ class TestModuleInterfaceUpdateMessage:
         msg = self._msg({"status": "bound", "interface": "Et1/1", "adopted_count": 0})
         assert msg == "Updated interface Et1/1 for QSFP-100G in Bay 1."
 
+    def test_no_bind_no_adopt_is_a_clean_no_op_message(self):
+        # Pure-adoption path where a concurrent/duplicate request already adopted the interfaces:
+        # neither an interface name nor a positive adopted_count is present. The message must NOT
+        # fall through to "Updated interface None for ...".
+        msg = self._msg({"status": "bound", "adopted_count": 0})
+        assert "None" not in msg
+        assert msg == "No interface changes were needed for QSFP-100G in Bay 1."
+
+    def test_unchanged_interface_bind_is_a_clean_no_op_message(self):
+        msg = self._msg(
+            {
+                "status": "bound",
+                "interface": "Et1/1",
+                "port_id": 42,
+                "changed": False,
+                "adopted_count": 0,
+            }
+        )
+        assert msg == "No interface changes were needed for QSFP-100G in Bay 1."
+
 
 class TestReplaceModuleRedirectServerKey:
     """ReplaceModuleView computes `server_key = POST or self.librenms_api.server_key`, so its redirects must pass that computed key — otherwise the helper falls back to POST/GET only and drops the active-server context when the POST field is absent, landing on a blank/default modules tab and reading/mutating a different cache namespace."""
@@ -5833,3 +5910,79 @@ class TestReplaceModuleRedirectServerKey:
         # Pre-fix the redirect dropped the computed fallback (POST had no server_key); now it
         # carries server_key=prod so the action stays on the active server's modules tab.
         assert "server_key=prod" in resp["HX-Redirect"]
+
+
+class TestUpdateModuleInterfaceRedirectServerKey:
+    """UpdateModuleInterfaceView must redirect under its resolved active server scope."""
+
+    @staticmethod
+    def _view():
+        from netbox_librenms_plugin.views.sync.modules import UpdateModuleInterfaceView
+
+        view = object.__new__(UpdateModuleInterfaceView)
+        view.required_object_permissions = {}
+        view._librenms_api = MagicMock(server_key="prod")
+        return view
+
+    @staticmethod
+    def _request(data):
+        from django.test import RequestFactory
+
+        return RequestFactory().post("/update-interface/", data, HTTP_HX_REQUEST="true")
+
+    def test_invalid_module_id_redirect_preserves_fallback_server_key(self):
+        view = self._view()
+        request = self._request({"ent_index": "77"})
+        device = _make_device()
+
+        with (
+            patch.object(view, "require_all_permissions", return_value=None),
+            patch("netbox_librenms_plugin.views.sync.modules.get_object_or_404", return_value=device),
+            patch(
+                "netbox_librenms_plugin.views.sync.modules._resolve_target_device_with_validation",
+                return_value=(device, False),
+            ),
+            patch(
+                "netbox_librenms_plugin.views.sync.modules._resolve_single_install_binding_item",
+                return_value=None,
+            ),
+            patch("netbox_librenms_plugin.views.sync.modules.reverse", return_value="/sync/url/"),
+            patch("netbox_librenms_plugin.views.sync.modules.messages"),
+        ):
+            response = view.post(request, pk=device.pk)
+
+        assert "server_key=prod" in response["HX-Redirect"]
+
+    def test_success_redirect_preserves_fallback_server_key(self):
+        view = self._view()
+        request = self._request({"module_id": "321", "ent_index": "77"})
+        device = _make_device()
+        module = MagicMock()
+        module.pk = 321
+        module.module_type.model = "SFP-10G-SR"
+        module.module_bay.name = "SFP 1"
+
+        with (
+            patch.object(view, "require_all_permissions", return_value=None),
+            patch(
+                "netbox_librenms_plugin.views.sync.modules.get_object_or_404",
+                side_effect=[device, module],
+            ),
+            patch(
+                "netbox_librenms_plugin.views.sync.modules._resolve_target_device_with_validation",
+                return_value=(device, False),
+            ),
+            patch(
+                "netbox_librenms_plugin.views.sync.modules._resolve_single_install_binding_item",
+                return_value=None,
+            ),
+            patch(
+                "netbox_librenms_plugin.views.sync.modules._adopt_existing_template_interfaces",
+                return_value={"status": "bound", "adopted_count": 0},
+            ),
+            patch("netbox_librenms_plugin.views.sync.modules.reverse", return_value="/sync/url/"),
+            patch("netbox_librenms_plugin.views.sync.modules.messages"),
+        ):
+            response = view.post(request, pk=device.pk)
+
+        assert "server_key=prod" in response["HX-Redirect"]

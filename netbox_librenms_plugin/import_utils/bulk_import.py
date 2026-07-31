@@ -9,6 +9,7 @@ from django.core.cache import cache
 from ..import_validation_helpers import (
     apply_cluster_to_validation,
     apply_role_to_validation,
+    clear_match_derived_action_fields,
     recalculate_validation_status,
     remove_validation_issue,
 )
@@ -53,6 +54,12 @@ _AMBIGUOUS_SERIAL_IP_MARKERS = (
     "serial or management IP",
     "hostname/serial",
 )
+# Stable fragment of the cross-model (VM + Device share the name) warning. Shared by the
+# writer (the both-models name branch in _refresh_existing_device, wording-matched to
+# validate_device_for_import's hostname branch) and the pre-lookup cleaner, so a refresh
+# neither stacks a duplicate copy on a persisting collision nor leaves a stale warning
+# behind once the collision is resolved.
+_CROSS_MODEL_HOSTNAME_MARKER = "Both a VM and Device exist with hostname"
 
 
 def _is_job_cancelled(job) -> bool:
@@ -446,22 +453,52 @@ def _clear_existing_match_derived_fields(validation: dict) -> None:
     Returns:
         None
     """
-    validation["serial_action"] = None
-    validation["oob_candidate"] = None
-    validation["serial_confirmed"] = False
-    validation["serial_duplicate"] = False
-    validation["serial_role_choice_available"] = False
-    # Name-sync / migration / device-type state is also derived from the (now dropped) match;
+    clear_match_derived_action_fields(validation)
+    # Migration / device-type state is also derived from the (now dropped) match;
     # leaving it set would render a migrate/name-sync action for the old object. The fresh
-    # lookup below re-derives these only on a re-match, so reset them here.
+    # lookup below re-derives these only on a re-match, so reset them here (they are
+    # refresh-specific, so they stay out of the shared helper).
     validation["librenms_id_needs_migration"] = False
-    validation["name_matches"] = False
-    validation["name_sync_available"] = False
-    validation["suggested_name"] = None
     validation["device_type_mismatch"] = False
-    # promote_to_host follows the "absent otherwise" contract (see apply_oob_detection_result).
-    validation.pop("promote_to_host", None)
-    validation.pop("merge_candidates", None)
+
+
+def _reset_device_role(validation: dict) -> None:
+    """
+    Reset the row's role selection to "not found", preserving available_roles.
+
+    One shape shared by every refresh branch that drops a device match (deleted device,
+    vanished link, late cross-model rebind), so the copies can't drift on a future edit.
+
+    Args:
+        validation (dict): The import-row validation dict, mutated in place.
+
+    Returns:
+        None
+    """
+    validation["device_role"] = {
+        "found": False,
+        "role": None,
+        "available_roles": validation.get("device_role", {}).get("available_roles", []),
+    }
+
+
+def _reset_cluster(validation: dict) -> None:
+    """
+    Reset the row's cluster selection to "not found", preserving available_clusters.
+
+    The VM twin of :func:`_reset_device_role` — VM rows are gated on cluster, not role.
+
+    Args:
+        validation (dict): The import-row validation dict, mutated in place.
+
+    Returns:
+        None
+    """
+    validation["cluster"] = {
+        "found": False,
+        "cluster": None,
+        "available_clusters": validation.get("cluster", {}).get("available_clusters", []),
+    }
 
 
 def _reassert_new_import_blockers(validation: dict) -> None:
@@ -534,21 +571,13 @@ def _refresh_existing_device(validation: dict, libre_device: dict = None, server
                     validation["existing_librenms_link"] = None
                     _clear_existing_match_derived_fields(validation)
                     if not validation.get("import_as_vm"):
-                        validation["device_role"] = {
-                            "found": False,
-                            "role": None,
-                            "available_roles": validation.get("device_role", {}).get("available_roles", []),
-                        }
+                        _reset_device_role(validation)
                     else:
                         # VM rows are gated on cluster, not role: a dropped match must also clear
                         # the stale cluster selection (preserving available_clusters), or
                         # _reassert_new_import_blockers() sees found/cluster still set and lets
                         # the row re-enter the new-import path without a fresh cluster choice.
-                        validation["cluster"] = {
-                            "found": False,
-                            "cluster": None,
-                            "available_clusters": validation.get("cluster", {}).get("available_clusters", []),
-                        }
+                        _reset_cluster(validation)
                     # Fail-closed: this branch drops the vanished-link match and recomputes
                     # readiness, then falls through to the fresh lookup that would normally re-add
                     # the create-time role/cluster blocker. But the fresh lookup early-returns when
@@ -560,11 +589,7 @@ def _refresh_existing_device(validation: dict, libre_device: dict = None, server
                     if hasattr(refreshed, "role") and refreshed.role:
                         apply_role_to_validation(validation, refreshed.role, is_vm=bool(validation.get("import_as_vm")))
                     elif not validation.get("import_as_vm"):
-                        validation["device_role"] = {
-                            "found": False,
-                            "role": None,
-                            "available_roles": validation.get("device_role", {}).get("available_roles", []),
-                        }
+                        _reset_device_role(validation)
                         remove_validation_issue(validation, "role")
                     recalculate_validation_status(validation, is_vm=bool(validation.get("import_as_vm")))
                     # Re-assert non-importable state: recalculate bases can_import on
@@ -586,20 +611,12 @@ def _refresh_existing_device(validation: dict, libre_device: dict = None, server
                 # Guard: VMs don't use device_role for readiness, so preserve any
                 # user-selected role rather than silently dropping it.
                 if not validation.get("import_as_vm"):
-                    validation["device_role"] = {
-                        "found": False,
-                        "role": None,
-                        "available_roles": validation.get("device_role", {}).get("available_roles", []),
-                    }
+                    _reset_device_role(validation)
                 else:
                     # Mirror the stale-match branch: a deleted cached VM match must drop the
                     # stale cluster selection (keeping available_clusters) so the row returns to
                     # the same create-time state as a brand-new VM import row.
-                    validation["cluster"] = {
-                        "found": False,
-                        "cluster": None,
-                        "available_clusters": validation.get("cluster", {}).get("available_clusters", []),
-                    }
+                    _reset_cluster(validation)
                 # Same fail-closed reasoning as the vanished-link branch above: re-assert the
                 # create-time blocker before recompute so a deleted-match row can't stay importable
                 # if the fresh lookup early-returns (libre_device None) or its except swallows.
@@ -662,38 +679,32 @@ def _refresh_existing_device(validation: dict, libre_device: dict = None, server
                         if not (isinstance(m, str) and any(marker in m for marker in _AMBIGUOUS_SERIAL_IP_MARKERS))
                     ]
 
+        # Same for the cross-model (VM + Device) name warning: the both-models branch below
+        # re-adds it while the collision persists, so stripping it here both prevents a
+        # duplicate copy per refresh and drops the stale warning once the collision is
+        # resolved. Unconditional (no match_type gate) — this warning never binds a match.
+        msgs = validation.get("warnings")
+        if isinstance(msgs, list):
+            validation["warnings"] = [m for m in msgs if not (isinstance(m, str) and _CROSS_MODEL_HOSTNAME_MARKER in m)]
+
         new_device = None
         match_type = None
         found_as_cross_model = False
 
-        def _lookup_in_model(m):
+        def _lookup_value(m, value):
             """
-            Return (device, match_type, ambiguous) by NAME for model m.
-
-            The librenms_id match is resolved up-front by the cross-model collision check below
-            and short-circuits (sets ``new_device``) before this is ever reached, so re-running
-            ``find_by_librenms_id(m, ...)`` here would just repeat that query for no result. This
-            does only the name/hostname/sysName fallbacks.
+            Return (device, ambiguous) for the single NAME *value* in model m.
 
             NetBox device names are unique only per-site, so a name can resolve to MORE THAN ONE
             device. Fail closed exactly like the serial/IP fallback below (and the full
-            validate_device_for_import() path): when a name matches >1 device, return
-            ``(None, None, True)`` so the caller blocks the row instead of binding ``.first()``
-            to an arbitrary one.
+            validate_device_for_import() path): when a value matches >1 object, return
+            ``(None, True)`` so the caller blocks the row instead of binding ``.first()`` to an
+            arbitrary one.
             """
-            for value, mt in (
-                (validation.get("resolved_name"), "resolved_name"),
-                (hostname, "hostname"),
-                (sys_name, "sysname"),
-            ):
-                if not value:
-                    continue
-                matches = list(m.objects.filter(name__iexact=value)[:2])
-                if len(matches) > 1:
-                    return None, None, True
-                if matches:
-                    return matches[0], mt, False
-            return None, None, False
+            matches = list(m.objects.filter(name__iexact=value)[:2])
+            if len(matches) > 1:
+                return None, True
+            return (matches[0] if matches else None), False
 
         # Fail closed on a CROSS-MODEL librenms_id collision before selecting a match — i.e.
         # the same (server_key, librenms_id) bound to BOTH a Device and a VirtualMachine. A
@@ -726,38 +737,54 @@ def _refresh_existing_device(validation: dict, libre_device: dict = None, server
 
         name_ambiguous = False
         if not new_device:
-            # Look up BOTH models by name, not preferred-first. The old code returned on the
-            # first Model name hit and never consulted CrossModel, so a cached row whose
-            # resolved name/hostname/sysName exists as BOTH a Device and a VirtualMachine was
-            # pinned to the preferred model. validate_device_for_import()'s hostname path treats
-            # that cross-model case as ambiguous and binds NEITHER (it warns and lets the user
-            # import as new, then set librenms_id on the correct object), so the refresh re-check
-            # must do the same or it drifts and renders/links the wrong target.
-            model_match, model_mt, model_amb = _lookup_in_model(Model)
-            cross_match, cross_mt, cross_amb = _lookup_in_model(CrossModel)
-            if model_amb or cross_amb:
-                # >1 match within a single model — terminal ambiguity, fail closed below.
-                name_ambiguous = True
-            elif model_match and cross_match:
-                # Same name resolves in BOTH models: warn and leave unmatched (do NOT block),
-                # exactly like the validator's cross-model hostname branch. A serial/IP match can
-                # still bind below (a stronger identity), mirroring the validator's fall-through.
-                # setdefault (not a plain get + isinstance guard) so the warning is surfaced even
-                # when the caller built a minimal validation dict without "warnings", matching the
-                # AmbiguousLibreNMSIdError handler below.
-                validation.setdefault("warnings", []).append(
-                    f"Both a VM and Device exist with hostname '{hostname}' in NetBox. Cannot "
-                    "determine which to match. Please set the librenms_id custom field on the "
-                    "correct object."
-                )
-            elif model_match:
-                new_device, match_type = model_match, model_mt
-            elif cross_match:
-                # Cross-model import that happened after the cache was built (e.g. a LibreNMS
-                # device imported as a VM): the preferred model has no name match, the opposite
-                # one does.
-                new_device, match_type = cross_match, cross_mt
-                found_as_cross_model = True
+            # Compare BOTH models against the SAME name candidate before advancing to the next
+            # fallback. Two INDEPENDENT per-model searches (the old _lookup_in_model, which returned
+            # on the first hit within each model) could match a Device by one candidate (e.g.
+            # resolved_name) and an UNRELATED VM by a *different* one (e.g. raw hostname), then
+            # treat that as a cross-model collision — leaving the real preferred-name match unbound
+            # and letting a duplicate import slip through. Iterate the candidates in priority order
+            # and, per value, query both models: a same-value hit in BOTH is the genuine cross-model
+            # ambiguity (warn + leave unmatched, exactly like validate_device_for_import()'s
+            # hostname path); a single-model hit binds and wins over any lower-priority candidate.
+            # The librenms_id match above already short-circuited, so this only does the
+            # name/hostname/sysName fallbacks.
+            for value, mt in (
+                (validation.get("resolved_name"), "resolved_name"),
+                (hostname, "hostname"),
+                (sys_name, "sysname"),
+            ):
+                if not value:
+                    continue
+                model_match, model_amb = _lookup_value(Model, value)
+                cross_match, cross_amb = _lookup_value(CrossModel, value)
+                if model_amb or cross_amb:
+                    # >1 match within a single model for this value — terminal ambiguity, fail
+                    # closed below.
+                    name_ambiguous = True
+                    break
+                if model_match and cross_match:
+                    # Same value resolves in BOTH models: warn and leave unmatched (do NOT block),
+                    # exactly like the validator's cross-model hostname branch. A serial/IP match
+                    # can still bind below (a stronger identity), mirroring the validator's
+                    # fall-through. setdefault (not a plain get + isinstance guard) so the warning
+                    # is surfaced even when the caller built a minimal validation dict without
+                    # "warnings", matching the AmbiguousLibreNMSIdError handler below.
+                    validation.setdefault("warnings", []).append(
+                        f"Both a VM and Device exist with hostname '{value}' in NetBox. Cannot "
+                        "determine which to match. Please set the librenms_id custom field on the "
+                        "correct object."
+                    )
+                    break
+                if model_match:
+                    new_device, match_type = model_match, mt
+                    break
+                if cross_match:
+                    # Cross-model import that happened after the cache was built (e.g. a LibreNMS
+                    # device imported as a VM): the preferred model has no match on this value, the
+                    # opposite one does.
+                    new_device, match_type = cross_match, mt
+                    found_as_cross_model = True
+                    break
 
         if not new_device and name_ambiguous:
             # A hostname/sysName resolved to MORE THAN ONE NetBox device (names are unique only
@@ -774,6 +801,11 @@ def _refresh_existing_device(validation: dict, libre_device: dict = None, server
             validation["existing_match_type"] = "ambiguous_hostname_or_serial"
             validation["can_import"] = False
             validation["is_ready"] = False
+            # Terminal: this row is blocked pending duplicate resolution. Return before the
+            # no-match `else` below re-adds create-time role/cluster blockers via
+            # _reassert_new_import_blockers — the cached row must show ONLY the
+            # duplicate-resolution blocker, not stale new-import ones.
+            return
 
         if not new_device and not name_ambiguous and not import_as_vm:
             # Serial- and IP-based matches: validate_device_for_import() catches these, so the
@@ -823,8 +855,21 @@ def _refresh_existing_device(validation: dict, libre_device: dict = None, server
                 validation["existing_match_type"] = "ambiguous_hostname_or_serial"
                 validation["can_import"] = False
                 validation["is_ready"] = False
+                # Terminal, same as the name-ambiguous branch above: block on the serial/IP
+                # duplicate and return before the no-match `else` re-adds create-time
+                # role/cluster blockers.
+                return
 
         if new_device:
+            # A stronger identity (serial / management IP) uniquely bound this row after the
+            # name fallback flagged a cross-model (VM + Device) hostname collision. That warning
+            # said "cannot determine which to match" — now moot, since new_device IS the match.
+            # Drop it so the resolved row doesn't keep showing a stale "ambiguous" warning.
+            msgs = validation.get("warnings")
+            if isinstance(msgs, list):
+                validation["warnings"] = [
+                    m for m in msgs if not (isinstance(m, str) and _CROSS_MODEL_HOSTNAME_MARKER in m)
+                ]
             validation["existing_device"] = new_device
             validation["existing_match_type"] = match_type
             # Re-derive linkage so a librenms_id match is correctly shown as the
@@ -854,21 +899,13 @@ def _refresh_existing_device(validation: dict, libre_device: dict = None, server
             if not actual_is_vm and hasattr(new_device, "role") and new_device.role:
                 apply_role_to_validation(validation, new_device.role, is_vm=False)
             elif not actual_is_vm:
-                validation["device_role"] = {
-                    "found": False,
-                    "role": None,
-                    "available_roles": validation.get("device_role", {}).get("available_roles", []),
-                }
+                _reset_device_role(validation)
             elif hasattr(new_device, "cluster") and new_device.cluster:
                 # VM match: mirror the device-role display above — show the matched
                 # VM's actual cluster rather than leaving the cached selection stale.
                 apply_cluster_to_validation(validation, new_device.cluster)
             else:
-                validation["cluster"] = {
-                    "found": False,
-                    "cluster": None,
-                    "available_clusters": validation.get("cluster", {}).get("available_clusters", []),
-                }
+                _reset_cluster(validation)
             recalculate_validation_status(validation, is_vm=actual_is_vm)
             # Re-assert non-importable: recalculate sets can_import from issues list,
             # but a late-found existing match must never be import-ready.

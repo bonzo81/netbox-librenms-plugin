@@ -7,7 +7,6 @@ from netbox.tables.columns import BooleanColumn, ToggleColumn
 from utilities.paginator import EnhancedPaginator
 from utilities.templatetags.helpers import humanize_speed
 
-from netbox_librenms_plugin.constants import OOB_BADGE_HTML
 from netbox_librenms_plugin.models import InterfaceTypeMapping
 from netbox_librenms_plugin.utils import (
     check_vlan_group_matches,
@@ -20,6 +19,8 @@ from netbox_librenms_plugin.utils import (
     get_tagged_vlan_css_class,
     get_untagged_vlan_css_class,
     get_virtual_chassis_member,
+    oob_badge_html,
+    render_vc_member_options,
 )
 
 
@@ -315,9 +316,7 @@ class LibreNMSInterfaceTable(tables.Table):
     def render_name(self, value, record):
         """Render interface name with appropriate styling based on comparison with NetBox"""
         rendered = self._render_field(value, record, self.interface_name_field, "name")
-        badges = ""
-        if record.get("_source") == "oob":
-            badges += OOB_BADGE_HTML
+        badges = oob_badge_html(record)
         if record.get("_dedup_conflict"):
             badges += '<span class="badge bg-warning text-dark ms-1" title="Same MAC seen on both main and OOB">Shared LOM</span>'
         if badges:
@@ -591,16 +590,11 @@ class VCInterfaceTable(LibreNMSInterfaceTable):
         # Create unique base ID for TomSelect components
         base_id = f"device_selection_{interface_name}_{hash(interface_name)}"
 
-        options = [
-            f'<option value="{member.id}"{" selected" if member.id == selected_member_id else ""}>{escape(member.name)}</option>'
-            for member in members
-        ]
-
         return format_html(
             '<select name="device_selection_{0}" id="{1}" class="form-select vc-member-select" data-interface="{0}" data-row-id="{0}">{2}</select>',
             interface_name,
             base_id,
-            mark_safe("".join(options)),
+            render_vc_member_options(members, selected_member_id),
         )
 
     def format_interface_data(self, port_data, device):

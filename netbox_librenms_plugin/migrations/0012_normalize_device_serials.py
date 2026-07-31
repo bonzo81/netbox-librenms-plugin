@@ -101,8 +101,8 @@ def drop_device_serial_index(apps, schema_editor):
 
 
 class Migration(migrations.Migration):
-    # CREATE INDEX CONCURRENTLY cannot run inside a transaction. Keep the data rewrite
-    # atomic via RunPython.atomic while leaving the index operation outside it.
+    # CREATE INDEX CONCURRENTLY cannot run inside a transaction. Leave both operations
+    # non-atomic so every rewrite batch commits independently before the concurrent DDL.
     atomic = False
 
     dependencies = [
@@ -114,7 +114,7 @@ class Migration(migrations.Migration):
         migrations.RunPython(
             normalize_device_serials,
             migrations.RunPython.noop,
-            atomic=True,
+            atomic=False,
         ),
         # Device is owned by NetBox's dcim app, so the plugin cannot declare this index
         # through its model state. NetBox does not otherwise index Device.serial.

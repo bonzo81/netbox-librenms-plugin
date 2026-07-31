@@ -2,7 +2,7 @@ import logging
 
 from django.contrib import messages
 from django.core.cache import cache
-from django.shortcuts import get_object_or_404, render
+from django.shortcuts import get_object_or_404
 from django.utils import timezone
 from django.views import View
 
@@ -156,24 +156,22 @@ class BaseInterfaceTableView(VlanAssignmentMixin, LibreNMSAPIMixin, LibreNMSPerm
         post_server_key = self.rebind_api_for_server(request.POST.get("server_key"))
         if post_server_key is None:
             messages.error(request, "Selected LibreNMS server is no longer configured.")
-            # Render the fragment with the message (like the cables/ip/modules/vlan
-            # failed-rebind branches) — a redirect here points at this same POST-only URL,
-            # which the hx-post XHR transparently follows with a GET: 405, no swap, a dead
-            # button, and the queued error only surfacing on a later full page load.
-            return render(
+            # This POST is HTMX (the success path swaps in the partial), so a bare redirect would
+            # swap a full page into the partial target AND drop the migrated-donor context —
+            # re-enabling sync controls on a migrated donor. Render the partial with migrated
+            # context resolved under the active session key (the POSTed key is now known-invalid),
+            # mirroring the ip/cables/modules/vlan stale-key error paths.
+            # rebind_api_for_server() returned None precisely to avoid constructing a missing/
+            # misconfigured default client, so don't touch the lazy `librenms_api` property here —
+            # it could raise and turn this HTMX error path back into a 500. Read the already-cached
+            # client's key (else "default").
+            active_server_key = self.active_server_key
+            return self.render_sync_partial(
                 request,
-                self.partial_template_name,
+                obj,
+                active_server_key,
                 {
-                    "interface_sync": {
-                        "table": None,
-                        "object": obj,
-                        "cache_expiry": None,
-                        "last_fetched": None,
-                        # Explicit None so the fragment doesn't silently fall back to the
-                        # session/default server for the next retry (mirrors vlan_table_view's
-                        # stale-server branch).
-                        "server_key": None,
-                    },
+                    "interface_sync": {"object": obj, "table": None, "cache_expiry": None, "server_key": None},
                     "interface_name_field": interface_name_field,
                 },
             )
@@ -358,8 +356,9 @@ class BaseInterfaceTableView(VlanAssignmentMixin, LibreNMSAPIMixin, LibreNMSPerm
         )
         context = {"interface_sync": context}
         context["interface_name_field"] = interface_name_field
-
-        return render(request, self.partial_template_name, context)
+        # render_sync_partial injects the migrated-donor flags (hidden sync button + Migrate
+        # column) so the HTMX tab refresh stays consistent with the full page.
+        return self.render_sync_partial(request, obj, _server_key, context)
 
     def _enrich_ports_with_vlan_data(self, ports, interface_name_field):
         """

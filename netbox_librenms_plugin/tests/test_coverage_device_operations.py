@@ -194,6 +194,7 @@ class TestDetermineDeviceName:
         assert result == "router.example.com"
 
 
+@pytest.mark.django_db
 class TestValidateDeviceStateMachine:
     """Tests for validate_device_for_import is_ready / can_import state transitions."""
 
@@ -210,9 +211,8 @@ class TestValidateDeviceStateMachine:
         mock_device.objects.filter.return_value.first.return_value = None
         mock_device.objects.filter.return_value.exclude.return_value.first.return_value = None
 
-        mock_vm = MagicMock()
-        mock_vm.objects.filter.return_value.first.return_value = None
-
+        # VirtualMachine is left REAL (unpatched) so isinstance(existing, VirtualMachine) works in
+        # validate_device_for_import; against the empty test DB the hostname VM lookup finds nothing.
         mock_cluster = MagicMock()
         mock_cluster.objects.all.return_value = []
 
@@ -246,7 +246,6 @@ class TestValidateDeviceStateMachine:
             patch("netbox_librenms_plugin.import_utils.device_operations.Site", MagicMock()),
             patch("netbox_librenms_plugin.import_utils.device_operations.find_by_librenms_id", return_value=None),
             patch("netbox_librenms_plugin.import_utils.device_operations.cache"),
-            patch("virtualization.models.VirtualMachine", mock_vm),
         ]
         if patches_overrides:
             base_patches.extend(patches_overrides)
@@ -641,6 +640,59 @@ class TestValidateDeviceForImport:
         assert "is_ready" in result
         assert result["existing_device"] is None
 
+    def test_validation_result_key_contract(self):
+        """Pin the result-dict key set to the documented Returns schema.
+
+        validate_device_for_import is a cross-module contract (bulk_import.py, actions.py and
+        jobs.py all read these fields). Extend this set and the docstring's Returns block
+        together — a key added to one without the other is exactly the drift this guards.
+        (promote_to_host is deliberately absent: it's conditional, present only when host
+        promotion is available.)
+        """
+        libre_device = {
+            "device_id": 2,
+            "hostname": "contract-host",
+            "sysName": "contract-host",
+            "hardware": "-",
+            "serial": "-",
+            "os": "-",
+            "location": "-",
+            "type": "network",
+        }
+        result = self._validate(libre_device)
+
+        assert set(result.keys()) == {
+            "is_ready",
+            "can_import",
+            "import_as_vm",
+            "resolved_name",
+            "existing_device",
+            "existing_match_type",
+            "ambiguous_librenms_id",
+            "serial_action",
+            "serial_confirmed",
+            "serial_duplicate",
+            "serial_role_choice_available",
+            "librenms_id_needs_migration",
+            "oob_candidate",
+            "existing_librenms_link",
+            "merge_candidates",
+            "name_matches",
+            "name_sync_available",
+            "suggested_name",
+            "device_type_mismatch",
+            "naming_criteria",
+            "virtual_chassis",
+            "issues",
+            "warnings",
+            "site",
+            "device_type",
+            "device_role",
+            "cluster",
+            "platform",
+            "rack",
+        }
+
     def test_vm_import_uses_correct_model(self):
         """import_as_vm=True matches a VirtualMachine by hostname (uses the VM model, not Device)."""
         from netbox_librenms_plugin.tests.conftest import make_vm
@@ -993,6 +1045,126 @@ class TestValidateDeviceForImportEdgeCases:
         assert result["serial_confirmed"] is False
         assert result["serial_duplicate"] is False
 
+    def test_duplicate_device_hostname_fails_closed_even_when_import_as_vm(self):
+        """import_as_vm=True but the hostname fallback binds a DEVICE (no VM shares the name): the
+        ambiguity guard must query the matched side (Device), not VirtualMachine. Keying the peer
+        model off import_as_vm queries VMs, finds no peers, and lets an arbitrary cross-site
+        duplicate-device .first() match through. Regression for the _PeerModel-from-import_as_vm bug.
+        """
+        from dcim.models import Device, DeviceRole, DeviceType, Manufacturer, Site
+
+        mfr, _ = Manufacturer.objects.get_or_create(name="ACME-vm997", slug="acme-vm997")
+        dt, _ = DeviceType.objects.get_or_create(manufacturer=mfr, model="DT-vm997", slug="dt-vm997")
+        role, _ = DeviceRole.objects.get_or_create(name="Role-vm997", slug="role-vm997")
+        site_a, _ = Site.objects.get_or_create(name="Site-vm997a", slug="site-vm997a")
+        site_b, _ = Site.objects.get_or_create(name="Site-vm997b", slug="site-vm997b")
+
+        # Two DEVICES (not VMs) share the hostname across sites. No VM has this name, so the
+        # hostname fallback binds a Device even though the caller requested a VM import.
+        Device.objects.create(name="dup-dev-asvm", device_type=dt, role=role, site=site_a, status="active")
+        Device.objects.create(name="dup-dev-asvm", device_type=dt, role=role, site=site_b, status="active")
+
+        libre_device = {
+            "device_id": 997,
+            "hostname": "dup-dev-asvm",
+            "sysName": "dup-dev-asvm",
+            "serial": "-",
+            "hardware": "Model-X",
+            "os": "linux",
+        }
+        result = self._validate(libre_device, import_as_vm=True)
+
+        # Must fail closed exactly like the import_as_vm=False device-duplicate case.
+        assert result["can_import"] is False
+        assert result["existing_device"] is None
+        assert result["existing_match_type"] == "ambiguous_hostname_or_serial"
+        # The object-typed wording must follow the MATCHED side (devices), not import_as_vm (VMs).
+        assert any("Multiple NetBox devices share" in i for i in result["issues"])
+
+    def test_cross_model_hostname_with_duplicate_devices_fails_closed(self):
+        """Two Devices + one VM share the hostname: the same-model duplicate must stay terminal.
+
+        The cross-model branch binds neither object, so the Stage-1 duplicate guard (keyed on a
+        bound existing_device) never sees the two Devices — pre-fix the row sailed through as a
+        new import, i.e. ADDING a VM relaxed the protection the 2-Devices-no-VM case gets.
+        """
+        from netbox_librenms_plugin.tests.conftest import make_device, make_vm
+
+        from dcim.models import DeviceRole, DeviceType, Manufacturer, Site
+
+        dev_a = make_device("dup-both-host")
+        # Second same-named Device needs a different site (names are unique per site).
+        site_b, _ = Site.objects.get_or_create(name="Site-xmodel-b", slug="site-xmodel-b")
+        mfr, _ = Manufacturer.objects.get_or_create(name="TestMfr", slug="test-mfr")
+        dt, _ = DeviceType.objects.get_or_create(model="TestDT", slug="test-dt", defaults={"manufacturer": mfr})
+        role, _ = DeviceRole.objects.get_or_create(name="TestRole", slug="test-role", defaults={"color": "00ff00"})
+        type(dev_a).objects.create(name="dup-both-host", device_type=dt, role=role, site=site_b, status="active")
+        make_vm("dup-both-host")
+
+        libre_device = {
+            "device_id": 996,
+            "hostname": "dup-both-host",
+            "sysName": "dup-both-host",
+            "serial": "-",
+            "hardware": "-",
+            "os": "-",
+        }
+        result = self._validate(libre_device)
+
+        assert result["can_import"] is False
+        assert result["is_ready"] is False
+        assert result["existing_device"] is None
+        assert result["existing_match_type"] == "ambiguous_hostname_or_serial"
+        # Wording keeps the "hostname/serial" substring the refresh-path blocker cleanup keys on.
+        assert any("Multiple NetBox devices share" in i for i in result["issues"])
+        # The cross-model warning still explains the VM/Device split.
+        assert any("Both a VM and Device exist with hostname" in w for w in result["warnings"])
+
+    def test_cross_model_hostname_with_duplicate_vms_fails_closed(self):
+        """One Device + two VMs (cross-cluster same name): terminal ambiguity, VM-typed wording."""
+        from netbox_librenms_plugin.tests.conftest import make_cluster, make_device, make_vm
+
+        make_device("dup-both-vms")
+        make_vm("dup-both-vms")
+        make_vm("dup-both-vms", cluster=make_cluster("xmodel-cluster-2"))
+
+        libre_device = {
+            "device_id": 995,
+            "hostname": "dup-both-vms",
+            "sysName": "dup-both-vms",
+            "serial": "-",
+            "hardware": "-",
+            "os": "-",
+        }
+        result = self._validate(libre_device)
+
+        assert result["can_import"] is False
+        assert result["existing_device"] is None
+        assert result["existing_match_type"] == "ambiguous_hostname_or_serial"
+        assert any("Multiple NetBox virtual machines share" in i for i in result["issues"])
+
+    def test_cross_model_hostname_single_each_still_proceeds_as_new(self):
+        """Exactly one Device + one VM: the deliberate warn-and-proceed-as-new contract is unchanged."""
+        from netbox_librenms_plugin.tests.conftest import make_device, make_vm
+
+        make_device("single-both-host")
+        make_vm("single-both-host")
+
+        libre_device = {
+            "device_id": 994,
+            "hostname": "single-both-host",
+            "sysName": "single-both-host",
+            "serial": "-",
+            "hardware": "-",
+            "os": "-",
+        }
+        result = self._validate(libre_device)
+
+        assert result["existing_device"] is None
+        assert result["existing_match_type"] != "ambiguous_hostname_or_serial"
+        assert not any("resolve the duplicate" in i for i in result["issues"])
+        assert any("Both a VM and Device exist with hostname" in w for w in result["warnings"])
+
     def test_oob_ip_match_without_os_token_still_oob_candidate(self):
         """An incoming IP equal to device.oob_ip is still an OOB candidate when no os token classifies a type."""
         from netbox_librenms_plugin.tests.conftest import make_device, make_ip
@@ -1058,6 +1230,30 @@ class TestValidateDeviceForImportEdgeCases:
         assert result["can_import"] is False
         assert any("resolve the duplicate" in i for i in result["issues"])
         assert result["existing_match_type"] == "ambiguous_hostname_or_serial"
+
+    def test_duplicate_vm_hostname_fails_closed(self):
+        """Two same-named VMs (NetBox VM names are unique only per cluster) must fail closed as ambiguous, not bind .first()."""
+        from netbox_librenms_plugin.tests.conftest import make_cluster, make_vm
+
+        make_vm("dup-vm-host", cluster=make_cluster("cl-dupvm-a"))
+        make_vm("dup-vm-host", cluster=make_cluster("cl-dupvm-b"))
+
+        libre_device = {
+            "device_id": 998,
+            "hostname": "dup-vm-host",
+            "sysName": "dup-vm-host",
+            "serial": "-",
+            "hardware": "Model-X",
+            "os": "linux",
+        }
+        result = self._validate(libre_device)
+
+        # Fail closed exactly like the device-side duplicate guard: the arbitrary .first() VM
+        # must be dropped and the row blocked, not linked/imported against a random cluster's VM.
+        assert result["can_import"] is False
+        assert result["existing_device"] is None
+        assert result["existing_match_type"] == "ambiguous_hostname_or_serial"
+        assert any("resolve the duplicate" in i for i in result["issues"])
 
     def test_duplicate_hostname_with_primary_ip_match_stays_terminal(self):
         """A duplicate-hostname row whose management IP resolves to a SINGLE device must stay
@@ -1696,6 +1892,7 @@ class TestImportSingleDeviceMoreEdgeCases:
         assert Device.objects.get(pk=result["device"].pk).rack_id == rack.pk
 
 
+@pytest.mark.django_db
 class TestValidateDeviceExistingVMGuard:
     """Test that existing VMs skip device-specific validations (g06 fix)."""
 
@@ -1710,10 +1907,11 @@ class TestValidateDeviceExistingVMGuard:
         When import_as_vm=True and existing_device is set, site/device_type/device_role
         are marked found=True without running device-specific validation logic."""
         from netbox_librenms_plugin.import_utils.device_operations import validate_device_for_import
+        from netbox_librenms_plugin.tests.conftest import make_vm
 
-        existing_vm = MagicMock()
-        existing_vm.name = "vm01"
-        existing_vm.custom_field_data = {}
+        # Real VM (left unpatched so isinstance(existing, VirtualMachine) works); it is matched by
+        # hostname against the real test DB. find_by_librenms_id is stubbed to None below.
+        existing_vm = make_vm("vm01")
 
         libre_device = {
             "device_id": 1,
@@ -1725,9 +1923,6 @@ class TestValidateDeviceExistingVMGuard:
             "location": "unknown-location",
         }
         api = self._make_api()
-
-        mock_vm_model = MagicMock()
-        mock_vm_model.objects.filter.return_value.first.return_value = existing_vm
 
         mock_device_model = MagicMock()
         mock_device_model.objects.filter.return_value.first.return_value = None
@@ -1741,7 +1936,6 @@ class TestValidateDeviceExistingVMGuard:
             patch("netbox_librenms_plugin.import_utils.device_operations.Device", new=mock_device_model),
             patch("netbox_librenms_plugin.import_utils.device_operations.Cluster"),
             patch("netbox_librenms_plugin.import_utils.device_operations.cache"),
-            patch("virtualization.models.VirtualMachine", new=mock_vm_model),
             patch("ipam.models.IPAddress"),
             patch("netbox_librenms_plugin.import_utils.device_operations.find_by_librenms_id", return_value=None),
             patch(
@@ -1751,6 +1945,9 @@ class TestValidateDeviceExistingVMGuard:
         ):
             result = validate_device_for_import(libre_device, import_as_vm=True, api=api)
 
+        # The real VM was matched (by hostname) and forced VM mode.
+        assert result["existing_device"] == existing_vm
+        assert result["import_as_vm"] is True
         # find_matching_site and match_librenms_hardware_to_device_type should NOT be called for VMs
         mock_site.assert_not_called()
         mock_match.assert_not_called()
@@ -1762,6 +1959,7 @@ class TestValidateDeviceExistingVMGuard:
         assert not any("Cluster must be" in i for i in result.get("issues", []))
 
 
+@pytest.mark.django_db
 class TestValidateDeviceChassisMatch:
     """Test chassis match path (line 539) in validate_device_for_import."""
 
@@ -1789,9 +1987,8 @@ class TestValidateDeviceChassisMatch:
         chassis_dt.model = "Catalyst 9300"
         chassis_match = {"matched": True, "device_type": chassis_dt, "match_type": "chassis_inventory"}
 
-        vm_no_match = MagicMock()
-        vm_no_match.objects.filter.return_value.first.return_value = None  # no hostname collision
-
+        # VirtualMachine is left REAL so isinstance(existing, VirtualMachine) works; "sw01" matches
+        # no VM against the empty test DB, so validation still falls through to the chassis path.
         device_patch = patch("netbox_librenms_plugin.import_utils.device_operations.Device")
         mock_device_cls = device_patch.start()
         mock_device_cls.objects.filter.return_value.first.return_value = None
@@ -1802,7 +1999,6 @@ class TestValidateDeviceChassisMatch:
             patch("netbox_librenms_plugin.import_utils.device_operations.DeviceType"),
             patch("netbox_librenms_plugin.import_utils.device_operations.DeviceRole"),
             patch("netbox_librenms_plugin.import_utils.device_operations.cache"),
-            patch("virtualization.models.VirtualMachine", new=vm_no_match),
             patch("ipam.models.IPAddress"),
             patch("netbox_librenms_plugin.import_utils.device_operations.find_by_librenms_id", return_value=None),
             patch(

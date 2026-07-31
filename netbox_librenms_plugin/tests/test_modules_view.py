@@ -360,7 +360,7 @@ class TestMergeTransceiverDataPortIdentity:
         with (
             patch("netbox_librenms_plugin.views.base.modules_view.cache"),
             patch("netbox_librenms_plugin.views.base.modules_view.messages"),
-            patch("netbox_librenms_plugin.views.base.modules_view.render", return_value=MagicMock()),
+            patch("netbox_librenms_plugin.views.mixins.render", return_value=MagicMock()),
             patch.object(view, "_merge_transceiver_data", wraps=view._merge_transceiver_data) as mock_merge,
             patch.object(
                 view, "_enrich_inventory_port_identity", wraps=view._enrich_inventory_port_identity
@@ -373,7 +373,7 @@ class TestMergeTransceiverDataPortIdentity:
         assert mock_enrich.call_args.kwargs.get("ports_data") == ports_payload
 
     def test_post_treats_non_list_inventory_as_fetch_failure(self):
-        """get_device_inventory is an external boundary: a success flag with a non-list payload (e.g."""
+        """get_device_inventory is an external boundary: a success flag with a non-list payload (e.g. an error dict) is treated as a fetch failure."""
         view = _make_view()
         view.model = MagicMock()
         obj = MagicMock()
@@ -389,7 +389,8 @@ class TestMergeTransceiverDataPortIdentity:
         with (
             patch("netbox_librenms_plugin.views.base.modules_view.cache") as mock_cache,
             patch("netbox_librenms_plugin.views.base.modules_view.messages") as mock_messages,
-            patch("netbox_librenms_plugin.views.base.modules_view.render", return_value=MagicMock()),
+            patch("netbox_librenms_plugin.views.mixins.render", return_value=MagicMock()),
+            patch("netbox_librenms_plugin.utils.build_migrated_context", return_value={}),
         ):
             view.post(request, pk=1)
 
@@ -401,8 +402,34 @@ class TestMergeTransceiverDataPortIdentity:
         mock_cache.delete.assert_called_once_with("test_cache_key")
         view._librenms_api.get_ports.assert_not_called()
 
+    def test_post_stale_server_key_resolves_migrated_context_with_session_key(self):
+        """When the POSTed server_key is stale (rebind fails), the migrated context must resolve under the session/active key — NOT the stale posted key (which would miss the marker and re-enable a donor's sync controls)."""
+        view = _make_view()
+        obj = MagicMock()
+        request = MagicMock()
+        # A NON-EMPTY but stale/unconfigured key is posted (rebind returns None for it).
+        request.POST.get.side_effect = lambda key, default=None: {"server_key": "ghost-server"}.get(key, default)
+        view.get_object = MagicMock(return_value=obj)
+        view.rebind_api_for_server = MagicMock(return_value=None)  # stale key → rebind fails
+        view.has_write_permission = MagicMock(return_value=False)
+        view.partial_template_name = "x.html"
+
+        with (
+            patch("netbox_librenms_plugin.views.base.modules_view.messages"),
+            patch(
+                "netbox_librenms_plugin.utils.build_migrated_context",
+                return_value={"migrated_to_marker": None},
+            ) as mock_migrated,
+            patch("netbox_librenms_plugin.views.mixins.render", return_value="rendered"),
+        ):
+            result = view.post(request, pk=1)
+
+        # Resolved under the session/active server key ("test-server"), NOT the stale "ghost-server".
+        mock_migrated.assert_called_once_with(obj, "test-server")
+        assert result == "rendered"
+
     def test_post_treats_non_dict_inventory_entry_as_fetch_failure(self):
-        """A list payload that carries non-dict entries (e.g."""
+        """A list payload that carries non-dict entries (e.g. None) is treated as a fetch failure."""
         view = _make_view()
         view.model = MagicMock()
         obj = MagicMock()
@@ -418,7 +445,8 @@ class TestMergeTransceiverDataPortIdentity:
         with (
             patch("netbox_librenms_plugin.views.base.modules_view.cache") as mock_cache,
             patch("netbox_librenms_plugin.views.base.modules_view.messages") as mock_messages,
-            patch("netbox_librenms_plugin.views.base.modules_view.render", return_value=MagicMock()),
+            patch("netbox_librenms_plugin.views.mixins.render", return_value=MagicMock()),
+            patch("netbox_librenms_plugin.utils.build_migrated_context", return_value={}),
         ):
             view.post(request, pk=1)
 
@@ -527,7 +555,7 @@ class TestMergeTransceiverDataPortIdentity:
         with (
             patch("netbox_librenms_plugin.views.base.modules_view.cache"),
             patch("netbox_librenms_plugin.views.base.modules_view.messages") as mock_messages,
-            patch("netbox_librenms_plugin.views.base.modules_view.render", return_value=MagicMock()),
+            patch("netbox_librenms_plugin.views.mixins.render", return_value=MagicMock()),
         ):
             view.post(request, pk=1)
 
@@ -561,7 +589,7 @@ class TestMergeTransceiverDataPortIdentity:
         with (
             patch("netbox_librenms_plugin.views.base.modules_view.cache") as mock_cache,
             patch("netbox_librenms_plugin.views.base.modules_view.messages") as mock_messages,
-            patch("netbox_librenms_plugin.views.base.modules_view.render", return_value=MagicMock()),
+            patch("netbox_librenms_plugin.views.mixins.render", return_value=MagicMock()),
             patch("netbox_librenms_plugin.views.base.modules_view.get_librenms_oob", return_value=None),
         ):
             view.post(request, pk=1)
@@ -601,7 +629,7 @@ class TestMergeTransceiverDataPortIdentity:
         with (
             patch("netbox_librenms_plugin.views.base.modules_view.cache") as mock_cache,
             patch("netbox_librenms_plugin.views.base.modules_view.messages") as mock_messages,
-            patch("netbox_librenms_plugin.views.base.modules_view.render", return_value=MagicMock()),
+            patch("netbox_librenms_plugin.views.mixins.render", return_value=MagicMock()),
             patch("netbox_librenms_plugin.views.base.modules_view.get_librenms_oob", return_value={"id": 999}),
         ):
             view.post(request, pk=1)
@@ -616,7 +644,7 @@ class TestMergeTransceiverDataPortIdentity:
         assert "777" not in warn_msg and "999" not in warn_msg and "OOB id" not in warn_msg
 
     def test_post_treats_non_dict_oob_inventory_entry_as_fetch_failure(self):
-        """The OOB inventory merge offsets indices and sets item["_source"] on every entry, so a success flag with non-dict elements (e.g."""
+        """The OOB inventory merge offsets indices and sets item["_source"] on every entry, so a success flag with non-dict elements (e.g. None) is treated as a fetch failure."""
         view = _make_view()
         view.model = MagicMock()
         obj = MagicMock()
@@ -641,7 +669,7 @@ class TestMergeTransceiverDataPortIdentity:
         with (
             patch("netbox_librenms_plugin.views.base.modules_view.cache") as mock_cache,
             patch("netbox_librenms_plugin.views.base.modules_view.messages") as mock_messages,
-            patch("netbox_librenms_plugin.views.base.modules_view.render", return_value=MagicMock()),
+            patch("netbox_librenms_plugin.views.mixins.render", return_value=MagicMock()),
             patch("netbox_librenms_plugin.views.base.modules_view.get_librenms_oob", return_value={"id": 999}),
         ):
             view.post(request, pk=1)
@@ -822,7 +850,7 @@ class TestMergeTransceiverDataPortIdentity:
         with (
             patch("netbox_librenms_plugin.views.base.modules_view.cache") as mock_cache,
             patch("netbox_librenms_plugin.views.base.modules_view.messages"),
-            patch("netbox_librenms_plugin.views.base.modules_view.render", return_value=MagicMock()),
+            patch("netbox_librenms_plugin.views.mixins.render", return_value=MagicMock()),
             patch("netbox_librenms_plugin.views.base.modules_view.get_librenms_oob", return_value=None),
         ):
             view.post(request, pk=1)
@@ -1812,6 +1840,17 @@ class TestBuildRowSerialMismatch:
             "entPhysicalIndex": 100,
         }
 
+    @pytest.mark.parametrize(("raw_serial", "expected"), [(123456, "123456"), (0, "0")])
+    def test_numeric_inventory_serial_is_preserved_as_text(self, raw_serial, expected):
+        """LibreNMS JSON may decode all-digit serials as numbers; row construction must not crash or discard zero."""
+        view = self._view()
+        item = self._make_item(serial=raw_serial)
+        item["_source"] = "oob"  # the real informational-row path needs no bay/type fixtures
+
+        row = view._build_row(item, {}, {}, {})
+
+        assert row["serial"] == expected
+
     def test_serial_match_sets_installed_status(self):
         """When ENTITY-MIB serial matches NetBox serial, status is Installed."""
         view = self._view()
@@ -2482,6 +2521,13 @@ class TestCheckIgnoreRules:
         rule = self._rule(match_type="serial_matches_device", pattern="", action="skip")
         item = {"entPhysicalName": "0/RP0/CPU0", "entPhysicalSerialNum": "FOC2418NHRK"}
         assert self._check(item, None, [rule], device_serial="FOC2418NHRK") == "skip"
+
+    def test_numeric_serial_matches_device_after_normalization(self):
+        """Numeric ENTITY serials use the same text normalization as the device serial."""
+        rule = self._rule(match_type="serial_matches_device", pattern="", action="transparent")
+        item = {"entPhysicalName": "0/RP0/CPU0", "entPhysicalSerialNum": 123456}
+
+        assert self._check(item, None, [rule], device_serial="123456") == "transparent"
 
     def test_serial_matches_device_no_match(self):
         """serial_matches_device: item serial differs from device serial → no match."""
@@ -4171,6 +4217,27 @@ class TestFindIntegratingAncestor:
         ancestor = BaseModuleTableView._find_integrating_ancestor(mda, idx)
         assert ancestor is xiom
 
+    def test_numeric_serial_finds_integrating_ancestor(self):
+        """Numeric ENTITY serials are normalized before integrated parent/child comparison."""
+        from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
+
+        xiom = {
+            "entPhysicalIndex": 100,
+            "entPhysicalClass": "xioModule",
+            "entPhysicalSerialNum": 123456,
+            "entPhysicalModelName": "3HE18883AARB01",
+            "entPhysicalContainedIn": 0,
+        }
+        mda = {
+            "entPhysicalIndex": 200,
+            "entPhysicalClass": "mdaModule",
+            "entPhysicalSerialNum": 123456,
+            "entPhysicalModelName": "3HE18883AARB01",
+            "entPhysicalContainedIn": 100,
+        }
+
+        assert BaseModuleTableView._find_integrating_ancestor(mda, self._index([xiom, mda])) is xiom
+
     def test_returns_none_when_serial_differs(self):
         from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
 
@@ -4993,6 +5060,82 @@ class TestGetContextDataOOBCacheFingerprint:
 
         mock_cache.delete.assert_called_once_with("test_cache_key")
         assert ctx["table"] is None
+
+    def test_invalidates_when_main_id_poisoned_bool(self):
+        """A poisoned True custom-field id must not pass the fingerprint (True == 1 in Python).
+
+        post() coerces and fails closed on this exact state; the GET compare must mirror it
+        instead of serving the id-1 snapshot for a linkage post() would refuse.
+        """
+        from unittest.mock import MagicMock, patch
+
+        view = _make_view()
+        obj = MagicMock(pk=1)
+        view._get_sync_device = MagicMock(return_value=obj)
+        view._librenms_api.get_librenms_id = MagicMock(return_value=True)
+        view._build_context = MagicMock()
+        cached = {"inventory": [{"x": 1}], "librenms_id": 1, "oob_librenms_id": None}
+        with (
+            patch("netbox_librenms_plugin.views.base.modules_view.cache") as mock_cache,
+            patch("netbox_librenms_plugin.views.base.modules_view.get_librenms_oob", return_value=None),
+        ):
+            mock_cache.get.return_value = cached
+            ctx = view.get_context_data(MagicMock(GET={}), obj)
+
+        mock_cache.delete.assert_called_once_with("test_cache_key")
+        assert ctx["table"] is None
+        view._build_context.assert_not_called()
+
+    def test_keeps_cache_when_main_id_stored_as_string(self):
+        """A string-backed custom-field id ("10") must fingerprint-match the cached int 10.
+
+        Same normalization the OOB side already does — without it every GET wrongly treats
+        the snapshot as stale and the module table renders empty until a manual refresh.
+        """
+        from unittest.mock import MagicMock, patch
+
+        view = _make_view()
+        obj = MagicMock(pk=1)
+        view._get_sync_device = MagicMock(return_value=obj)
+        view._librenms_api.get_librenms_id = MagicMock(return_value="10")
+        view._build_context = MagicMock(return_value={"built": True})
+        cached = {"inventory": [{"x": 1}], "librenms_id": 10, "oob_librenms_id": None}
+        request = MagicMock(GET={})
+        with (
+            patch("netbox_librenms_plugin.views.base.modules_view.cache") as mock_cache,
+            patch("netbox_librenms_plugin.views.base.modules_view.get_librenms_oob", return_value=None),
+        ):
+            mock_cache.get.return_value = cached
+            ctx = view.get_context_data(request, obj)
+
+        assert ctx == {"built": True}
+        mock_cache.delete.assert_not_called()
+
+    def test_invalidates_when_oob_link_corrupt(self):
+        """A linked-but-corrupt OOB id must invalidate, not collapse to the no-OOB fingerprint.
+
+        post() takes the partial-outcome path (never caches) for this state; the GET compare
+        must not quietly serve a prior no-OOB snapshot while the device nominally has an OOB
+        controller linked.
+        """
+        from unittest.mock import MagicMock, patch
+
+        view = _make_view()
+        obj = MagicMock(pk=1)
+        view._get_sync_device = MagicMock(return_value=obj)
+        view._librenms_api.get_librenms_id = MagicMock(return_value=10)
+        view._build_context = MagicMock()
+        cached = {"inventory": [{"x": 1}], "librenms_id": 10, "oob_librenms_id": None}
+        with (
+            patch("netbox_librenms_plugin.views.base.modules_view.cache") as mock_cache,
+            patch("netbox_librenms_plugin.views.base.modules_view.get_librenms_oob", return_value={"id": "garbage"}),
+        ):
+            mock_cache.get.return_value = cached
+            ctx = view.get_context_data(MagicMock(GET={}), obj)
+
+        mock_cache.delete.assert_called_once_with("test_cache_key")
+        assert ctx["table"] is None
+        view._build_context.assert_not_called()
 
     def test_keeps_cache_when_oob_unchanged(self):
         from unittest.mock import MagicMock, patch

@@ -329,8 +329,6 @@ class TestSingleInterfaceVerifyView:
     def test_checks_permission_before_resolving_device(self):
         """The object-view gate must run BEFORE get_object_or_404 so an unauthorized caller can't probe arbitrary device IDs (existence via 404). Exercises the REAL require_object_permissions_json (only request.user.has_perm is mocked) — mocking the gate itself would mask a missing NetBoxObjectPermissionMixin base (AttributeError/500 in production)."""
         import json
-        from unittest.mock import patch
-
         from netbox_librenms_plugin.views.object_sync.devices import SingleInterfaceVerifyView
 
         view = object.__new__(SingleInterfaceVerifyView)
@@ -340,12 +338,12 @@ class TestSingleInterfaceVerifyView:
         request.body = json.dumps({"device_id": 999, "interface_name": "eth0"}).encode()
         request.user.has_perm.return_value = False  # unauthorized → real gate returns 403
         view.request = request  # check_object_permissions reads self.request.user
+        view.restrict_object_or_404 = MagicMock()
 
-        with patch("netbox_librenms_plugin.views.object_sync.devices.get_object_or_404") as mock_get_obj:
-            response = view.post(request)
+        response = view.post(request)
 
         assert response.status_code == 403
-        mock_get_obj.assert_not_called()  # device never resolved → no arbitrary-ID probing
+        view.restrict_object_or_404.assert_not_called()  # device never resolved → no arbitrary-ID probing
 
     @pytest.mark.django_db
     def test_returns_404_when_no_cached_data(self):
@@ -496,8 +494,6 @@ class TestSingleModuleVerifyView:
     def test_checks_permission_before_resolving_device(self):
         """The object-view gate must run BEFORE get_object_or_404 so an unauthorized caller can't probe arbitrary device IDs (existence via 404). Exercises the real require_object_permissions_json (only request.user.has_perm is mocked)."""
         import json
-        from unittest.mock import patch
-
         from netbox_librenms_plugin.views.object_sync.devices import SingleModuleVerifyView
 
         view = object.__new__(SingleModuleVerifyView)
@@ -507,12 +503,12 @@ class TestSingleModuleVerifyView:
         request.body = json.dumps({"device_id": 999, "ent_physical_index": 10}).encode()
         request.user.has_perm.return_value = False  # unauthorized → real gate returns 403
         view.request = request  # check_object_permissions reads self.request.user
+        view.restrict_object_or_404 = MagicMock()
 
-        with patch("netbox_librenms_plugin.views.object_sync.devices.get_object_or_404") as mock_get_obj:
-            response = view.post(request)
+        response = view.post(request)
 
         assert response.status_code == 403
-        mock_get_obj.assert_not_called()  # device never resolved → no arbitrary-ID probing
+        view.restrict_object_or_404.assert_not_called()  # device never resolved → no arbitrary-ID probing
 
     @pytest.mark.django_db
     def test_success_propagates_can_change_interface_to_verify_table(self):
@@ -1355,8 +1351,11 @@ class TestIpCachedSnapshotMgmtIpBackfill:
         real_cache.set(key, {"ip_addresses": [], "ports_by_id": {"7": {}}}, timeout=300)
         try:
             view._prepare_context(request, device, "ifName", fetch_fresh=False, server_key="default")
-            # The missing key triggered a one-time live resolve of the management IP.
+            # The missing key triggered a one-time live resolve of the management IP...
             api.get_device_info.assert_called_once_with(7)
+            # ...and the resolved VALUE was backfilled into the re-cached snapshot, so
+            # subsequent cached renders read it without another live call.
+            assert real_cache.get(key)["mgmt_ip"] == "10.0.0.9"
         finally:
             real_cache.delete(key)
 

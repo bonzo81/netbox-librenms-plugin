@@ -311,6 +311,8 @@ def _module_interface_update_message(bind_result, location):
     """
     interface_name = bind_result.get("interface")
     adopted_count = bind_result.get("adopted_count") or 0
+    if bind_result.get("changed") is False and not adopted_count:
+        return f"No interface changes were needed for {location}."
     if interface_name and adopted_count:
         return (
             f"Updated interface {interface_name} for {location} and "
@@ -318,6 +320,11 @@ def _module_interface_update_message(bind_result, location):
         )
     if adopted_count:
         return f"Updated interfaces for {location}: adopted {adopted_count} existing standalone interface(s)."
+    if not interface_name:
+        # Pure-adoption path (bind_item is None) where a concurrent/duplicate request already
+        # adopted the interfaces, so adopted_count is 0 too: neither branch above fired. Without
+        # this guard the fall-through renders "Updated interface None for ..." to the user.
+        return f"No interface changes were needed for {location}."
     return f"Updated interface {interface_name} for {location}."
 
 
@@ -1435,7 +1442,7 @@ class UpdateModuleInterfaceView(
             module_id = int(request.POST.get("module_id"))
         except (TypeError, ValueError):
             messages.error(request, "Missing or invalid module ID.")
-            return _modules_redirect_response(request, sync_url)
+            return _modules_redirect_response(request, sync_url, server_key)
 
         module = get_object_or_404(Module, pk=module_id, device=target_device)
 
@@ -1518,18 +1525,14 @@ class UpdateModuleInterfaceView(
             messages.error(request, "No LibreNMS interface identity is available for this row.")
         elif bind_result.get("status") == "bound":
             location = f"{module.module_type.model} in {module.module_bay.name}"
-            # Only announce an update that actually changed something: a no-op rebind returns
-            # changed=False (nothing written). Gate on changed (or an adoption tally) so a no-op
-            # click doesn't tell the user an interface was updated when it wasn't.
-            if bind_result.get("changed") or bind_result.get("adopted_count"):
-                messages.success(request, _module_interface_update_message(bind_result, location))
+            messages.success(request, _module_interface_update_message(bind_result, location))
         else:
             messages.warning(
                 request,
                 f"Could not update interface association: {bind_result.get('reason', 'unknown reason')}",
             )
 
-        return _modules_redirect_response(request, sync_url)
+        return _modules_redirect_response(request, sync_url, server_key)
 
 
 class ModuleMismatchPreviewView(

@@ -1,5 +1,6 @@
 """HTMX endpoints and POST handlers for importing LibreNMS devices."""
 
+import hashlib
 import json
 import logging
 import re
@@ -86,13 +87,24 @@ def _attach_messages_oob(response, request):
     storage = messages.get_messages(request)
     if not list(storage):
         return response
-    storage.used = False
+    # ``get_messages`` returns a bare ``list`` (no ``.used``) when no message-storage
+    # middleware ran (e.g. RequestFactory requests); a real request always has a storage
+    # backend. Guard so re-marking the storage unconsumed can't AttributeError.
+    if hasattr(storage, "used"):
+        storage.used = False
     try:
         rendered = render_to_string("inc/messages.html", request=request)
     except Exception:  # pragma: no cover - defensive: don't break HTMX response on render error
         logger.debug("Failed to render inc/messages.html for OOB toast attach", exc_info=True)
         return response
-    response.content = response.content + rendered.encode("utf-8")
+    # Compose the two trusted HTML fragments (existing response bytes + the rendered
+    # inc/messages.html) through format_html()/mark_safe() — the repo's CodeQL-safe HTML
+    # envelope — rather than concatenating raw bytes.
+    response.content = format_html(
+        "{}{}",
+        mark_safe(response.content.decode(response.charset)),
+        mark_safe(rendered),
+    ).encode(response.charset)
     return response
 
 
@@ -243,8 +255,16 @@ def _acquire_serial_assignment_lock(serial: str) -> None:
 
     if not connection.in_atomic_block:
         raise RuntimeError("_acquire_serial_assignment_lock() requires an open transaction")
+    lock_key = int.from_bytes(
+        hashlib.blake2b(
+            f"netbox-librenms-plugin:device-serial:{serial}".encode(),
+            digest_size=8,
+        ).digest(),
+        byteorder="big",
+        signed=True,
+    )
     with connection.cursor() as cursor:
-        cursor.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", [serial])
+        cursor.execute("SELECT pg_advisory_xact_lock(%s)", [lock_key])
 
 
 def _apply_conflict_checked_serial(device, incoming_serial: str) -> HttpResponse | None:
@@ -478,7 +498,9 @@ def _get_hostname_for_action(request, validation: dict, libre_device: dict) -> s
 class DeviceImportHelperMixin:
     """Mixin providing common validation and rendering helpers for device import views."""
 
-    def get_validated_device_with_selections(self, device_id: int, request) -> tuple[dict | None, dict | None, dict]:
+    def get_validated_device_with_selections(
+        self, device_id: int, request, *, libre_device: dict | None = None
+    ) -> tuple[dict | None, dict | None, dict]:
         """
         Get LibreNMS device, validate it, and apply user selections.
 
@@ -487,13 +509,20 @@ class DeviceImportHelperMixin:
         Args:
             device_id: LibreNMS device ID
             request: Django request object
+            libre_device: Optional pre-fetched LibreNMS device data. The LibreNMS side is
+                invariant within a single request, so the post-commit re-validation after a
+                promote/merge can pass the device fetched earlier to skip a redundant
+                ``fetch_device_with_cache`` call. The NetBox-side ``validate_device_for_import``
+                is still re-run so the refreshed row reflects the just-committed state.
 
         Returns:
             Tuple of (libre_device, validation, selections)
             Returns (None, None, selections) if device not found
         """
-        # Try to use cached device data from table load (eliminates redundant API calls)
-        libre_device = fetch_device_with_cache(device_id, self.librenms_api)
+        # Reuse a caller-supplied device, else use cached device data from the table load
+        # (both eliminate redundant API calls).
+        if libre_device is None:
+            libre_device = fetch_device_with_cache(device_id, self.librenms_api)
 
         if not libre_device:
             return None, None, extract_device_selections(request, device_id)
@@ -1073,9 +1102,12 @@ class BulkImportDevicesView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
                 # page is HTMX, and without an htmx_toasts entry the user's background-import
                 # request silently blocks for the whole synchronous run with no explanation
                 # (only Django messages were queued, which the HTMX path never renders).
+                # Outcome-neutral wording: the per-row summary toasts below report the actual
+                # successes / failures / skips, so this banner must not claim every selected row
+                # was imported when the synchronous run may have failed or skipped some.
                 sync_fallback_msg = (
-                    f"Background job requested but no workers available. "
-                    f"Imported {total_import_count} devices synchronously."
+                    "Background job requested but no workers are available. "
+                    f"The request ran synchronously for {total_import_count} selected row(s)."
                 )
                 if not is_htmx:
                     messages.warning(
@@ -2597,8 +2629,7 @@ class AddAsOOBView(
                 )
             if oob_conflict is not None and oob_conflict.pk != sync_device.pk:
                 return _htmx_error_response(
-                    f"LibreNMS device #{librenms_id} is already linked to '{escape(oob_conflict.name)}'; "
-                    "refresh and retry."
+                    f"LibreNMS device #{librenms_id} is already linked to '{oob_conflict.name}'; refresh and retry."
                 )
 
             try:
@@ -2609,7 +2640,7 @@ class AddAsOOBView(
                     oob_type=oob_type,
                 )
             except ValueError as exc:
-                return _htmx_error_response(f"Invalid OOB data: {escape(str(exc))}")
+                return _htmx_error_response(f"Invalid OOB data: {exc}")
 
             update_fields = ["custom_field_data"]
 
@@ -3025,6 +3056,526 @@ class AddAsOOBView(
                 )
         except IntegrityError:
             return None, "conflict"
+
+
+class PromoteToHostView(
+    LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreNMSAPIMixin, DeviceImportHelperMixin, View
+):
+    """
+    Promote an incoming LibreNMS host device to be the *primary* link of an existing
+    NetBox device whose current LibreNMS link is the OOB controller.
+
+    The existing NetBox device's current ``librenms_id.{server_key}.id`` is moved into
+    the ``oob`` slot (preserving its bare-int → dict-form transition), and the incoming
+    LibreNMS device id becomes the new host id.  No new NetBox device is created — this
+    is a reassignment, not an import.
+    """
+
+    def post(self, request, device_id):
+        if error := self.require_write_permission():
+            return error
+
+        from dcim.models import Device
+
+        existing_device_id = request.POST.get("existing_device_id")
+        if not existing_device_id:
+            return _htmx_error_response("Missing existing_device_id")
+
+        # Fail closed on a blank/unknown/misconfigured key (the mixin validates the default too)
+        # so a broken default can't 500 via the lazy self.librenms_api property later.
+        if self.rebind_api_for_server(request.POST.get("server_key")) is None:
+            return _htmx_error_response("Selected LibreNMS server is no longer configured.")
+
+        # Gate before the lookup (see DeviceConflictActionView.post).
+        self.required_object_permissions = {"POST": [("change", Device)]}
+        if error := self.require_object_permissions("POST"):
+            return error
+
+        try:
+            # Scope by "change" so a constrained grant can't re-point another device's linkage.
+            existing_device = self.restricted_queryset(Device, "change").get(pk=int(existing_device_id))
+        except (Device.DoesNotExist, ValueError):
+            return _htmx_error_response("Existing device not found")
+
+        # Optional per-field overrides from the pre-promote pick modal.
+        # All three default to "keep current"; only applied when the POST
+        # carries an explicit non-empty value.
+        override_name = (request.POST.get("override_name") or "").strip() or None
+        override_dt_id = (request.POST.get("override_device_type_id") or "").strip() or None
+        override_platform_id = (request.POST.get("override_platform_id") or "").strip() or None
+
+        override_device_type = None
+        if override_dt_id:
+            from dcim.models import DeviceType
+
+            try:
+                override_device_type = self.restricted_queryset(DeviceType, "view").get(pk=int(override_dt_id))
+            except (DeviceType.DoesNotExist, ValueError, TypeError):
+                return _htmx_error_response("Invalid override_device_type_id")
+
+        override_platform = None
+        if override_platform_id:
+            from dcim.models import Platform
+
+            try:
+                override_platform = self.restricted_queryset(Platform, "view").get(pk=int(override_platform_id))
+            except (Platform.DoesNotExist, ValueError, TypeError):
+                return _htmx_error_response("Invalid override_platform_id")
+
+        libre_device, validation, selections = self.get_validated_device_with_selections(device_id, request)
+        if not libre_device:
+            return _htmx_error_response("LibreNMS device not found")
+
+        promote = validation.get("promote_to_host") if validation else None
+        if not promote:
+            return _htmx_error_response("Promotion is not applicable for this device")
+        validated_existing = validation.get("existing_device")
+        if validated_existing is None:
+            return _htmx_error_response("Missing validated conflict target for promotion")
+        if validated_existing.pk != existing_device.pk:
+            return _htmx_error_response("Device ID mismatch: existing_device_id does not match validation result")
+
+        from netbox_librenms_plugin.utils import coerce_librenms_id
+
+        # coerce_librenms_id centralizes the bool/int/str/positive checks (rejects bools,
+        # non-numeric strings, zero/negatives) in one place — same guard used elsewhere.
+        new_host_id = coerce_librenms_id(libre_device.get("device_id"))
+        if new_host_id is None:
+            return _htmx_error_response("Invalid or missing LibreNMS device_id")
+
+        # Use coerce_librenms_id (not int()) so a boolean True/False in the JSON CF can't be
+        # coerced to 1/0 and treated as a real device id — mirrors the new_host_id guard above.
+        existing_libre_id = coerce_librenms_id(promote.get("existing_libre_id"))
+        if existing_libre_id is None:
+            return _htmx_error_response("Invalid existing LibreNMS id in promotion data")
+        if existing_libre_id == new_host_id:
+            return _htmx_error_response("Existing link already points at this LibreNMS device")
+
+        oob_type = promote.get("existing_oob_type") or ""
+        if not oob_type:
+            return _htmx_error_response("Cannot determine OOB type for promotion")
+
+        from netbox_librenms_plugin.utils import set_librenms_device_id, set_librenms_oob
+
+        server_key = self.librenms_api.server_key
+
+        # Reject legacy bare-int librenms_id form (caller should migrate first).
+        if is_legacy_librenms_id(existing_device.custom_field_data.get("librenms_id")):
+            return _htmx_error_response(
+                "Device has a legacy bare-integer librenms_id; use 'Convert mapping' to migrate first."
+            )
+
+        from netbox_librenms_plugin.utils import (
+            AmbiguousLibreNMSIdError,
+            find_by_librenms_id,
+            get_librenms_device_id,
+            get_librenms_oob,
+        )
+
+        # Pre-resolve any device already linked to new_host_id WITHOUT locking, so the
+        # transaction can lock every row it touches in one deterministic pk order (mirrors the
+        # merge flow). Locking existing_device first and the conflict second would let two
+        # concurrent opposite-direction promotions each hold one row and block on the other
+        # (lock-order deadlock).
+        try:
+            pre_conflict = find_by_librenms_id(Device, new_host_id, server_key)
+        except AmbiguousLibreNMSIdError:
+            return _htmx_error_response(
+                f"LibreNMS device #{new_host_id} is ambiguous — it matches more than one NetBox "
+                "device. Resolve the duplicate assignment before promoting."
+            )
+        lock_pks = {existing_device.pk}
+        if pre_conflict is not None:
+            lock_pks.add(pre_conflict.pk)
+
+        with transaction.atomic():
+            locked = {d.pk: d for d in Device.objects.select_for_update().filter(pk__in=lock_pks).order_by("pk")}
+            existing_device = locked.get(existing_device.pk)
+            if existing_device is None:
+                return _htmx_error_response("Device no longer exists; it may have been deleted concurrently.")
+            if is_legacy_librenms_id(existing_device.custom_field_data.get("librenms_id")):
+                return _htmx_error_response(
+                    "Device has a legacy bare-integer librenms_id; use 'Convert mapping' to migrate first."
+                )
+
+            current_host_id = get_librenms_device_id(existing_device, server_key=server_key, auto_save=False)
+            current_oob = get_librenms_oob(existing_device, server_key=server_key)
+            if coerce_librenms_id(current_host_id) != coerce_librenms_id(existing_libre_id):
+                return _htmx_error_response("LibreNMS host link changed concurrently; refresh and retry.")
+            if current_oob:
+                return _htmx_error_response(
+                    "OOB link already set; this device may have been promoted by a concurrent request."
+                )
+            # Re-verify the conflict under lock (TOCTOU): a device could have gained or lost
+            # new_host_id between the unlocked pre-lookup and acquiring the row locks. The rows
+            # in lock_pks are already locked in pk order, so this re-check doesn't reorder locks.
+            try:
+                host_conflict = find_by_librenms_id(Device, new_host_id, server_key, select_for_update=True)
+            except AmbiguousLibreNMSIdError:
+                return _htmx_error_response(
+                    f"LibreNMS device #{new_host_id} is ambiguous — it matches more than one NetBox "
+                    "device. Resolve the duplicate assignment before promoting."
+                )
+            if host_conflict is not None and host_conflict.pk != existing_device.pk:
+                return _htmx_error_response(
+                    f"LibreNMS device #{new_host_id} is already linked to '{host_conflict.name}'; refresh and retry."
+                )
+
+            try:
+                # First, swap the host id to the incoming LibreNMS device id.
+                # set_librenms_device_id preserves any existing OOB sub-object.
+                set_librenms_device_id(
+                    existing_device,
+                    new_host_id,
+                    server_key=server_key,
+                )
+                # Then attach the previously-linked LibreNMS id as the OOB controller.
+                set_librenms_oob(
+                    existing_device,
+                    existing_libre_id,
+                    server_key,
+                    oob_type=oob_type,
+                )
+            except ValueError as exc:
+                return _htmx_error_response(f"Invalid promotion data: {exc}")
+
+            # Promotion re-points the LibreNMS host/OOB linkage only. NetBox
+            # requires primary_ip4/6 and oob_ip to be assigned to one of the
+            # device's interfaces, so those relationships are set from the
+            # interface-assigned IP-sync flow — not from auto-created global
+            # records here.
+            update_fields = ["custom_field_data"]
+
+            # Apply any explicit per-field overrides chosen in the pre-promote modal.
+            # Default behaviour (no overrides) keeps the existing device's name, type
+            # and platform — matching the original promote semantics.
+            if override_name and override_name != existing_device.name:
+                existing_device.name = override_name
+                update_fields.append("name")
+            if override_device_type and existing_device.device_type_id != override_device_type.pk:
+                existing_device.device_type = override_device_type
+                update_fields.append("device_type")
+            if override_platform and existing_device.platform_id != override_platform.pk:
+                existing_device.platform = override_platform
+                update_fields.append("platform")
+
+            # _save_device() persists via update_fields (skipping full_clean()) but re-runs the
+            # platform/device_type manufacturer invariant via _platform_device_type_mismatch()
+            # whenever those columns are written, so an incompatible override is rejected there —
+            # no inline duplicate (which would only drift in wording from the shared check).
+            if err := _save_device(existing_device, update_fields=update_fields, request=request):
+                return err
+
+        logger.info(
+            "Promoted LibreNMS host (id %d) to '%s' on server %s; demoted previous link (id %d, type %s) to OOB slot",
+            new_host_id,
+            existing_device.name,
+            server_key,
+            existing_libre_id,
+            oob_type,
+        )
+
+        cache_key = get_import_device_cache_key(device_id, server_key)
+        cache.delete(cache_key)
+
+        # Reuse the LibreNMS device already fetched above (invariant within this request); only the
+        # NetBox-side validation needs to re-run to reflect the just-committed promotion/merge.
+        libre_device, validation, selections = self.get_validated_device_with_selections(
+            device_id, request, libre_device=libre_device
+        )
+        if not libre_device:
+            # Promotion already committed; a post-commit reload miss must not report failure.
+            return self.post_commit_refresh_fallback(
+                request, json.dumps({"validationRefresh": {"deviceId": device_id}})
+            )
+
+        response = self.render_device_row(request, libre_device, validation, selections)
+        # Keep the underlying validation modal open and re-fetch its content so
+        # the user can see the device's new link state (host id + OOB slot)
+        # without losing context. The JS handler in librenms_import.js fires a
+        # fresh GET to the validation URL using the row's existing details
+        # button.
+        response["HX-Trigger"] = json.dumps({"validationRefresh": {"deviceId": device_id}})
+        return response
+
+
+class MergeNetBoxDevicesView(
+    LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreNMSAPIMixin, DeviceImportHelperMixin, View
+):
+    """
+    Merge two existing NetBox devices that represent the same physical box.
+
+    The user (via radio buttons in the validation modal) picks which device is
+    the **winner** (kept) and which is the **donor** (absorbed). The donor's
+    LibreNMS link state under the active ``server_key`` is merged into the
+    winner; the donor's active link is then cleared and a ``_migrated_to``
+    marker is written.  Interfaces, cables and primary IPs are NOT moved —
+    those stay on the donor for the user to re-home incrementally via the
+    Stage-2b "Migrated to X" tab.
+    """
+
+    def post(self, request, device_id):
+        if error := self.require_write_permission():
+            return error
+
+        from dcim.models import Device
+        from netbox_librenms_plugin.utils import (
+            mark_librenms_migrated,
+            merge_librenms_links,
+        )
+
+        # Fail closed on a blank/unknown/misconfigured key (the mixin validates the default too)
+        # so a broken default can't 500 via the lazy self.librenms_api property later.
+        if self.rebind_api_for_server(request.POST.get("server_key")) is None:
+            return _htmx_error_response("Selected LibreNMS server is no longer configured.")
+
+        winner_pk_raw = request.POST.get("winner_pk")
+        if not winner_pk_raw:
+            return _htmx_error_response("Missing winner_pk")
+        try:
+            winner_pk = int(winner_pk_raw)
+        except (TypeError, ValueError):
+            return _htmx_error_response("Invalid winner_pk")
+
+        libre_device, validation, selections = self.get_validated_device_with_selections(device_id, request)
+        if not libre_device:
+            return _htmx_error_response("LibreNMS device not found")
+
+        merge_candidates = (validation or {}).get("merge_candidates") or {}
+        candidate_pks = {
+            (merge_candidates.get("host_named") or {}).get("pk"),
+            (merge_candidates.get("oob_named") or {}).get("pk"),
+        }
+        candidate_pks.discard(None)
+        # Derive the donor from the selected winner. The merge is always between this fixed pair
+        # of candidates, so the donor is unambiguously the other candidate and no client-supplied
+        # donor state is needed. This also enforces that the winner is one of the two candidates.
+        if winner_pk not in candidate_pks or len(candidate_pks) != 2:
+            return _htmx_error_response("winner_pk does not match the validation result's merge candidates")
+        donor_pk = next(pk for pk in candidate_pks if pk != winner_pk)
+
+        # Permission gate: user must be able to change BOTH devices. Model-level first, then
+        # object-scoped: the gate below passes for a constrained grant, so both sides must be
+        # resolved through the restricted queryset or the merge could absorb an unseen device.
+        self.required_object_permissions = {"POST": [("change", Device)]}
+        if error := self.require_object_permissions("POST"):
+            return error
+
+        changeable = self.restricted_queryset(Device, "change")
+        try:
+            winner = changeable.get(pk=winner_pk)
+            donor = changeable.get(pk=donor_pk)
+        except Device.DoesNotExist:
+            return _htmx_error_response("Winner or donor device not found")
+
+        server_key = self.librenms_api.server_key
+
+        def _database_failure_response():
+            logger.exception(
+                "MergeNetBoxDevicesView: database failure merging winner=%s donor=%s",
+                winner.pk,
+                donor.pk,
+            )
+            transaction.set_rollback(True)
+            return _htmx_error_response("Cannot merge because the database operation failed. Please retry.")
+
+        # LibreNMS treats a Virtual Chassis as one logical device, so the host/OOB link lives on the
+        # single sync member (get_librenms_sync_device) — which may differ from the winner/donor the
+        # user selected when a candidate matched a NON-sync VC member by serial/hostname. Merge the
+        # link state on the sync devices: writing it to a non-sync member would either split-brain a
+        # VC that already has a linked member, or leave the donor's real link (on its sync sibling)
+        # uncleared where every reader still resolves and finds it. For non-VC devices these resolve
+        # back to the same rows, so the common path is unchanged. The oob_ip transfer and the
+        # candidate-match check deliberately stay on the user-selected winner/donor: oob_ip is a
+        # per-device FK on those rows, not a VC link.
+        with transaction.atomic():
+            # Lock the selected winner/donor AND every current member of their virtual chassis, in
+            # deterministic pk order to avoid deadlocks, BEFORE resolving the sync device:
+            # get_librenms_sync_device scans every VC member's librenms_id custom field, so resolving
+            # it from unlocked rows would let a concurrent VC edit (a member joining/leaving, or the
+            # id moving between members) shift the sync member to a row we never locked — splitting
+            # the link across the VC. Non-VC merges add no members, so they lock the same two rows.
+            try:
+                lock_pks = {winner.pk, donor.pk}
+                for candidate in (winner, donor):
+                    vc = getattr(candidate, "virtual_chassis", None)
+                    if vc:
+                        lock_pks.update(vc.members.values_list("pk", flat=True))
+                lock_pks = sorted(lock_pks)
+                locked = list(Device.objects.select_for_update().filter(pk__in=lock_pks).order_by("pk"))
+            except DatabaseError:
+                return _database_failure_response()
+            if len(locked) != len(lock_pks):
+                return _htmx_error_response(
+                    "One of the devices no longer exists; it may have been deleted concurrently."
+                )
+            locked_by_pk = {d.pk: d for d in locked}
+            winner = locked_by_pk[winner.pk]
+            donor = locked_by_pk[donor.pk]
+
+            # Resolve the sync devices from the now-locked, current state.
+            try:
+                winner_sync = get_librenms_sync_device(winner, server_key=server_key) or winner
+                donor_sync = get_librenms_sync_device(donor, server_key=server_key) or donor
+            except DatabaseError:
+                return _database_failure_response()
+            # Fail closed if a concurrent VC change added a member after we snapshotted lock_pks and
+            # the resolved sync device wasn't among the locked rows — never write the link to an
+            # unlocked row; the operator can retry.
+            if winner_sync.pk not in locked_by_pk or donor_sync.pk not in locked_by_pk:
+                return _htmx_error_response("Virtual chassis membership changed during the merge; please retry.")
+            winner_sync = locked_by_pk[winner_sync.pk]
+            donor_sync = locked_by_pk[donor_sync.pk]
+            # The sync devices are DERIVED (a VC sibling of the selected winner/donor), not the pks
+            # scoped above, and the save block below writes their custom_field_data. Authorize them
+            # too, or a grant covering only the selected pair mutates the link-holding sibling.
+            sync_pks = {winner_sync.pk, donor_sync.pk}
+            try:
+                changeable_sync_pks = set(changeable.filter(pk__in=sync_pks).values_list("pk", flat=True))
+            except DatabaseError:
+                return _database_failure_response()
+            if changeable_sync_pks != sync_pks:
+                return _htmx_error_response("Winner or donor device not found")
+            # Gate the link-holding sync devices, not merely the selected VC members. The merge
+            # helpers reject legacy data either way; checking here preserves the actionable
+            # convert-first message when the legacy link lives on a sibling.
+            for label, obj in (("winner", winner_sync), ("donor", donor_sync)):
+                if is_legacy_librenms_id(obj.custom_field_data.get("librenms_id")):
+                    return _htmx_error_response(
+                        f"{label.capitalize()} device has a legacy bare-integer librenms_id; "
+                        "use 'Convert mapping' to migrate before merging."
+                    )
+            if winner_sync.pk == donor_sync.pk:
+                # Both candidates belong to the same virtual chassis (one sync device); merging its
+                # LibreNMS link into itself would read and write the same CF entry. Fail closed.
+                return _htmx_error_response(
+                    "Winner and donor resolve to the same LibreNMS sync device "
+                    "(they are members of the same virtual chassis); there is nothing to merge."
+                )
+
+            # merge_librenms_links(), set_device_ip_fk() and mark_librenms_migrated() all raise
+            # ValueError on corrupt link shapes or an ownership violation. The locked OOB-IP reads
+            # can also raise DatabaseError (for example, a lock timeout). Guard the whole group:
+            # none of it persists anything (the save block is below), so every failure must return
+            # a safe toast and roll back rather than bubbling up as a 500.
+            try:
+                summary = merge_librenms_links(winner_sync, donor_sync, server_key=server_key)
+
+                # Transfer OOB IP relationship if winner has none and donor has one — but
+                # only when the underlying IP already sits on a winner-owned interface.
+                # NetBox requires Device.oob_ip be assigned to one of that device's own
+                # interfaces, and this merge intentionally leaves interfaces on the donor.
+                # Since the persist below uses save(update_fields=...) which skips
+                # full_clean(), blindly moving oob_ip would silently leave the winner
+                # pointing at a donor interface. Leave it on the donor until the IP/interface
+                # is re-homed (via the migrate "move IP/interface" actions).
+                oob_ip_transferred = False
+                if donor.oob_ip_id and not winner.oob_ip_id:
+                    # Lock the IP row AND its owning interface before reading the assignment and
+                    # transferring. The Device-row lock above does NOT stabilize the interface's
+                    # device_id, so without these locks a concurrent interface move between the
+                    # check and commit could leave winner.oob_ip pointing at an interface no longer
+                    # on the winner — the invalid state set_device_ip_fk()'s contract requires the
+                    # caller to lock against, exactly as migrate._reconcile_donor_device_ip_fks does.
+                    from dcim.models import Interface
+                    from ipam.models import IPAddress
+
+                    locked_oob_ip = IPAddress.objects.select_for_update().filter(pk=donor.oob_ip_id).first()
+                    oob_assigned = locked_oob_ip.assigned_object if locked_oob_ip is not None else None
+                    if isinstance(oob_assigned, Interface):
+                        locked_iface = Interface.objects.select_for_update().filter(pk=oob_assigned.pk).first()
+                        if locked_iface is not None and locked_iface.device_id == winner.pk:
+                            # set_device_ip_fk() re-checks the address is on a winner interface
+                            # (verified above under lock) and assigns without saving — the batched
+                            # donor-then-winner save below preserves the release-before-claim
+                            # ordering the UNIQUE oob_ip FK requires.
+                            set_device_ip_fk(winner, "oob_ip", locked_oob_ip, save=False)
+                            set_device_ip_fk(donor, "oob_ip", None, save=False)
+                            oob_ip_transferred = True
+
+                # Clear the donor sync device's active link and stamp the migration marker there —
+                # the marker is a sibling key of id/oob in the same librenms_id entry, so it must
+                # live wherever the link it supersedes lives (the sync device), not the raw member.
+                mark_librenms_migrated(donor_sync, winner_sync.pk, server_key=server_key)
+            except ValueError as exc:
+                # Nothing was persisted yet, but locks were taken under this atomic block — roll
+                # back defensively before returning the fail-closed toast.
+                transaction.set_rollback(True)
+                return _htmx_error_response(f"Cannot merge: {exc}")
+            except DatabaseError:
+                return _database_failure_response()
+
+            # Persist only the fields we actually touched. Calling ``full_clean()`` here (or calling
+            # ``_save_device`` without update_fields) would re-validate every field on the device —
+            # undesirable when the rows hold pre-existing inconsistencies (e.g. ``face`` set without
+            # ``rack``) that are unrelated to this merge. See issue surfaced during eve-ng-02 merge.
+            # Persist only the fields we actually touched, per row. The LibreNMS link merge +
+            # migration marker land on the sync devices (custom_field_data); the oob_ip transfer
+            # lands on the selected winner/donor. When a selected device IS its own sync device
+            # (the non-VC common case) these collapse onto one row, saved once with both fields —
+            # never twice with different update_fields, which would drop one change.
+            fields_by_pk = {}
+
+            def _touch(dev, field):
+                fields_by_pk.setdefault(dev.pk, set()).add(field)
+
+            _touch(winner_sync, "custom_field_data")
+            _touch(donor_sync, "custom_field_data")
+            if oob_ip_transferred:
+                _touch(winner, "oob_ip")
+                _touch(donor, "oob_ip")
+
+            # The donor side must release the OneToOne ``oob_ip`` (set to None) before the winner
+            # side claims it, or two devices momentarily point at the same IP and violate the unique
+            # constraint on ``Device.oob_ip``. The sync devices only carry custom_field_data (no
+            # unique field), so their order is free; save the donor group first and the selected
+            # winner last. A sync device can't cross-coincide with the other side's selected row
+            # (guaranteed by the winner_sync != donor_sync guard above), so grouping is unambiguous.
+            donor_extra = [donor_sync] if donor_sync.pk != donor.pk else []
+            winner_extra = [winner_sync] if winner_sync.pk != winner.pk else []
+            save_order = [donor, *donor_extra, *winner_extra, winner]
+            saved = set()
+            for dev in save_order:
+                if dev.pk in saved:
+                    continue
+                saved.add(dev.pk)
+                fields = fields_by_pk.get(dev.pk)
+                if fields and (error := _save_device(dev, update_fields=sorted(fields), request=request)):
+                    logger.error(
+                        "MergeNetBoxDevicesView: failed to persist merge winner=%s donor=%s",
+                        winner.pk,
+                        donor.pk,
+                    )
+                    transaction.set_rollback(True)
+                    return error
+
+        logger.info(
+            "Merged NetBox device '%s' (pk=%d) into '%s' (pk=%d) on server %s. Summary: %s; oob_ip_transferred=%s",
+            donor.name,
+            donor.pk,
+            winner.name,
+            winner.pk,
+            server_key,
+            summary,
+            oob_ip_transferred,
+        )
+
+        cache_key = get_import_device_cache_key(device_id, server_key)
+        cache.delete(cache_key)
+
+        # Reuse the LibreNMS device already fetched above (invariant within this request); only the
+        # NetBox-side validation needs to re-run to reflect the just-committed promotion/merge.
+        libre_device, validation, selections = self.get_validated_device_with_selections(
+            device_id, request, libre_device=libre_device
+        )
+        if not libre_device:
+            # Merge already committed; a post-commit reload miss must not report failure
+            # (the donor is already absorbed — a retry would target stale/invalid state).
+            return self.post_commit_refresh_fallback(request, "closeModal")
+
+        response = self.render_device_row(request, libre_device, validation, selections)
+        response["HX-Trigger"] = "closeModal"
+        return response
 
 
 class SaveUserPrefView(LibreNMSPermissionMixin, View):

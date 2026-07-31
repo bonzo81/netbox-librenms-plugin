@@ -25,11 +25,6 @@ def _matchable_filter_result():
     return result
 
 
-def _is_serial_lookup(kwargs):
-    """True for the exact Device serial lookup."""
-    return "serial" in kwargs
-
-
 # =============================================================================
 # TestCacheKeyGeneration - 4 tests
 # =============================================================================
@@ -345,37 +340,21 @@ class TestDeviceRetrieval:
 # =============================================================================
 
 
+@pytest.mark.django_db
 class TestDeviceValidation:
     """Test device validation for import."""
 
-    @patch("virtualization.models.VirtualMachine")
-    @patch("netbox_librenms_plugin.import_utils.device_operations.Device")
     @patch("netbox_librenms_plugin.import_utils.device_operations.find_matching_site")
     @patch("netbox_librenms_plugin.import_utils.device_operations.find_matching_platform")
     @patch("netbox_librenms_plugin.import_utils.device_operations.match_librenms_hardware_to_device_type")
-    @patch("netbox_librenms_plugin.import_utils.device_operations.DeviceRole")
-    @patch("netbox_librenms_plugin.import_utils.device_operations.Cluster")
-    @patch("netbox_librenms_plugin.import_utils.device_operations.Rack")
-    @patch("netbox_librenms_plugin.import_utils.device_operations.Site")
-    def test_validate_device_site_match_found(
-        self,
-        mock_site_model,
-        mock_rack,
-        mock_cluster,
-        mock_role,
-        mock_match_type,
-        mock_find_platform,
-        mock_find_site,
-        mock_device,
-        mock_vm,
-    ):
+    def test_validate_device_site_match_found(self, mock_match_type, mock_find_platform, mock_find_site):
         """Site matched successfully."""
-        mock_vm.objects.filter.return_value.first.return_value = None
-        mock_device.objects.filter.return_value.first.return_value = None
-        mock_site = MagicMock(id=1, name="DC1")
+        from dcim.models import Site
+
+        site, _ = Site.objects.get_or_create(name="DC1", slug="dc1")
         mock_find_site.return_value = {
             "found": True,
-            "site": mock_site,
+            "site": site,
             "match_type": "exact",
             "confidence": 1.0,
         }
@@ -389,9 +368,6 @@ class TestDeviceValidation:
             "device_type": None,
             "match_type": None,
         }
-        mock_role.objects.all.return_value = []
-        mock_cluster.objects.all.return_value = []
-        mock_site_model.objects.all.return_value = [mock_site]
 
         from netbox_librenms_plugin.import_utils import validate_device_for_import
 
@@ -404,32 +380,13 @@ class TestDeviceValidation:
         result = validate_device_for_import(device_data, include_vc_detection=False)
 
         assert result["site"]["found"] is True
-        assert result["site"]["site"] == mock_site
+        assert result["site"]["site"] == site
 
-    @patch("virtualization.models.VirtualMachine")
-    @patch("netbox_librenms_plugin.import_utils.device_operations.Device")
     @patch("netbox_librenms_plugin.import_utils.device_operations.find_matching_site")
     @patch("netbox_librenms_plugin.import_utils.device_operations.find_matching_platform")
     @patch("netbox_librenms_plugin.import_utils.device_operations.match_librenms_hardware_to_device_type")
-    @patch("netbox_librenms_plugin.import_utils.device_operations.DeviceRole")
-    @patch("netbox_librenms_plugin.import_utils.device_operations.Cluster")
-    @patch("netbox_librenms_plugin.import_utils.device_operations.Rack")
-    @patch("netbox_librenms_plugin.import_utils.device_operations.Site")
-    def test_validate_device_site_not_found(
-        self,
-        mock_site_model,
-        mock_rack,
-        mock_cluster,
-        mock_role,
-        mock_match_type,
-        mock_find_platform,
-        mock_find_site,
-        mock_device,
-        mock_vm,
-    ):
+    def test_validate_device_site_not_found(self, mock_match_type, mock_find_platform, mock_find_site):
         """Site not found adds validation issue."""
-        mock_vm.objects.filter.return_value.first.return_value = None
-        mock_device.objects.filter.return_value.first.return_value = None
         mock_find_site.return_value = {
             "found": False,
             "site": None,
@@ -446,9 +403,6 @@ class TestDeviceValidation:
             "device_type": None,
             "match_type": None,
         }
-        mock_role.objects.all.return_value = []
-        mock_cluster.objects.all.return_value = []
-        mock_site_model.objects.all.return_value = []
 
         from netbox_librenms_plugin.import_utils import validate_device_for_import
 
@@ -463,33 +417,11 @@ class TestDeviceValidation:
         assert result["site"]["found"] is False
         assert any("site" in issue.lower() for issue in result["issues"])
 
-    @patch("virtualization.models.VirtualMachine")
-    @patch("netbox_librenms_plugin.import_utils.device_operations.Device")
     @patch("netbox_librenms_plugin.import_utils.device_operations.find_matching_site")
     @patch("netbox_librenms_plugin.import_utils.device_operations.find_matching_platform")
     @patch("netbox_librenms_plugin.import_utils.device_operations.match_librenms_hardware_to_device_type")
-    @patch("netbox_librenms_plugin.import_utils.device_operations.DeviceRole")
-    @patch("netbox_librenms_plugin.import_utils.device_operations.Cluster")
-    @patch("netbox_librenms_plugin.import_utils.device_operations.Rack")
-    @patch("netbox_librenms_plugin.import_utils.device_operations.Site")
-    @patch("netbox_librenms_plugin.import_utils.device_operations.DeviceType")
-    def test_validate_device_platform_match_found(
-        self,
-        mock_device_type,
-        mock_site_model,
-        mock_rack,
-        mock_cluster,
-        mock_role,
-        mock_match_type,
-        mock_find_platform,
-        mock_find_site,
-        mock_device,
-        mock_vm,
-    ):
+    def test_validate_device_platform_match_found(self, mock_match_type, mock_find_platform, mock_find_site):
         """Platform matched successfully."""
-        mock_vm.objects.filter.return_value.first.return_value = None
-        mock_device.objects.filter.return_value.first.return_value = None
-        mock_device_type.objects.all.return_value = []
         mock_find_site.return_value = {
             "found": False,
             "site": None,
@@ -507,9 +439,6 @@ class TestDeviceValidation:
             "device_type": None,
             "match_type": None,
         }
-        mock_role.objects.all.return_value = []
-        mock_cluster.objects.all.return_value = []
-        mock_site_model.objects.all.return_value = []
 
         from netbox_librenms_plugin.import_utils import validate_device_for_import
 
@@ -524,30 +453,11 @@ class TestDeviceValidation:
         assert result["platform"]["found"] is True
         assert result["platform"]["platform"] == mock_platform
 
-    @patch("virtualization.models.VirtualMachine")
-    @patch("netbox_librenms_plugin.import_utils.device_operations.Device")
     @patch("netbox_librenms_plugin.import_utils.device_operations.find_matching_site")
     @patch("netbox_librenms_plugin.import_utils.device_operations.find_matching_platform")
     @patch("netbox_librenms_plugin.import_utils.device_operations.match_librenms_hardware_to_device_type")
-    @patch("netbox_librenms_plugin.import_utils.device_operations.DeviceRole")
-    @patch("netbox_librenms_plugin.import_utils.device_operations.Cluster")
-    @patch("netbox_librenms_plugin.import_utils.device_operations.Rack")
-    @patch("netbox_librenms_plugin.import_utils.device_operations.Site")
-    def test_validate_device_platform_not_found(
-        self,
-        mock_site_model,
-        mock_rack,
-        mock_cluster,
-        mock_role,
-        mock_match_type,
-        mock_find_platform,
-        mock_find_site,
-        mock_device,
-        mock_vm,
-    ):
+    def test_validate_device_platform_not_found(self, mock_match_type, mock_find_platform, mock_find_site):
         """Platform not found adds warning (not blocking)."""
-        mock_vm.objects.filter.return_value.first.return_value = None
-        mock_device.objects.filter.return_value.first.return_value = None
         mock_find_site.return_value = {
             "found": False,
             "site": None,
@@ -564,9 +474,6 @@ class TestDeviceValidation:
             "device_type": None,
             "match_type": None,
         }
-        mock_role.objects.all.return_value = []
-        mock_cluster.objects.all.return_value = []
-        mock_site_model.objects.all.return_value = []
 
         from netbox_librenms_plugin.import_utils import validate_device_for_import
 
@@ -580,30 +487,11 @@ class TestDeviceValidation:
 
         assert result["platform"]["found"] is False
 
-    @patch("virtualization.models.VirtualMachine")
-    @patch("netbox_librenms_plugin.import_utils.device_operations.Device")
     @patch("netbox_librenms_plugin.import_utils.device_operations.find_matching_site")
     @patch("netbox_librenms_plugin.import_utils.device_operations.find_matching_platform")
     @patch("netbox_librenms_plugin.import_utils.device_operations.match_librenms_hardware_to_device_type")
-    @patch("netbox_librenms_plugin.import_utils.device_operations.DeviceRole")
-    @patch("netbox_librenms_plugin.import_utils.device_operations.Cluster")
-    @patch("netbox_librenms_plugin.import_utils.device_operations.Rack")
-    @patch("netbox_librenms_plugin.import_utils.device_operations.Site")
-    def test_validate_device_type_match_found(
-        self,
-        mock_site_model,
-        mock_rack,
-        mock_cluster,
-        mock_role,
-        mock_match_type,
-        mock_find_platform,
-        mock_find_site,
-        mock_device,
-        mock_vm,
-    ):
+    def test_validate_device_type_match_found(self, mock_match_type, mock_find_platform, mock_find_site):
         """Device type matched successfully."""
-        mock_vm.objects.filter.return_value.first.return_value = None
-        mock_device.objects.filter.return_value.first.return_value = None
         mock_find_site.return_value = {
             "found": False,
             "site": None,
@@ -621,9 +509,6 @@ class TestDeviceValidation:
             "device_type": mock_dt,
             "match_type": "exact",
         }
-        mock_role.objects.all.return_value = []
-        mock_cluster.objects.all.return_value = []
-        mock_site_model.objects.all.return_value = []
 
         from netbox_librenms_plugin.import_utils import validate_device_for_import
 
@@ -638,33 +523,11 @@ class TestDeviceValidation:
         assert result["device_type"]["found"] is True
         assert result["device_type"]["device_type"] == mock_dt
 
-    @patch("virtualization.models.VirtualMachine")
-    @patch("netbox_librenms_plugin.import_utils.device_operations.Device")
     @patch("netbox_librenms_plugin.import_utils.device_operations.find_matching_site")
     @patch("netbox_librenms_plugin.import_utils.device_operations.find_matching_platform")
     @patch("netbox_librenms_plugin.import_utils.device_operations.match_librenms_hardware_to_device_type")
-    @patch("netbox_librenms_plugin.import_utils.device_operations.DeviceRole")
-    @patch("netbox_librenms_plugin.import_utils.device_operations.Cluster")
-    @patch("netbox_librenms_plugin.import_utils.device_operations.Rack")
-    @patch("netbox_librenms_plugin.import_utils.device_operations.Site")
-    @patch("netbox_librenms_plugin.import_utils.device_operations.DeviceType")
-    def test_validate_device_type_not_found(
-        self,
-        mock_device_type,
-        mock_site_model,
-        mock_rack,
-        mock_cluster,
-        mock_role,
-        mock_match_type,
-        mock_find_platform,
-        mock_find_site,
-        mock_device,
-        mock_vm,
-    ):
+    def test_validate_device_type_not_found(self, mock_match_type, mock_find_platform, mock_find_site):
         """Device type not found adds validation issue."""
-        mock_vm.objects.filter.return_value.first.return_value = None
-        mock_device.objects.filter.return_value.first.return_value = None
-        mock_device_type.objects.all.return_value = []
         mock_find_site.return_value = {
             "found": False,
             "site": None,
@@ -681,9 +544,6 @@ class TestDeviceValidation:
             "device_type": None,
             "match_type": None,
         }
-        mock_role.objects.all.return_value = []
-        mock_cluster.objects.all.return_value = []
-        mock_site_model.objects.all.return_value = []
 
         from netbox_librenms_plugin.import_utils import validate_device_for_import
 
@@ -698,34 +558,17 @@ class TestDeviceValidation:
         assert result["device_type"]["found"] is False
         assert any("device type" in issue.lower() for issue in result["issues"])
 
-    @patch("virtualization.models.VirtualMachine")
-    @patch("netbox_librenms_plugin.import_utils.device_operations.Device")
     @patch("netbox_librenms_plugin.import_utils.device_operations.find_matching_site")
     @patch("netbox_librenms_plugin.import_utils.device_operations.find_matching_platform")
     @patch("netbox_librenms_plugin.import_utils.device_operations.match_librenms_hardware_to_device_type")
-    @patch("netbox_librenms_plugin.import_utils.device_operations.DeviceRole")
-    @patch("netbox_librenms_plugin.import_utils.device_operations.Cluster")
-    @patch("netbox_librenms_plugin.import_utils.device_operations.Rack")
-    @patch("netbox_librenms_plugin.import_utils.device_operations.Site")
-    def test_validate_device_role_required(
-        self,
-        mock_site_model,
-        mock_rack,
-        mock_cluster,
-        mock_role,
-        mock_match_type,
-        mock_find_platform,
-        mock_find_site,
-        mock_device,
-        mock_vm,
-    ):
+    def test_validate_device_role_required(self, mock_match_type, mock_find_platform, mock_find_site):
         """Missing role flagged as required."""
-        mock_vm.objects.filter.return_value.first.return_value = None
-        mock_device.objects.filter.return_value.first.return_value = None
-        mock_site = MagicMock(id=1, name="DC1")
+        from dcim.models import Site
+
+        site, _ = Site.objects.get_or_create(name="DC1", slug="dc1")
         mock_find_site.return_value = {
             "found": True,
-            "site": mock_site,
+            "site": site,
             "match_type": "exact",
             "confidence": 1.0,
         }
@@ -740,9 +583,6 @@ class TestDeviceValidation:
             "device_type": mock_dt,
             "match_type": "exact",
         }
-        mock_role.objects.all.return_value = [MagicMock(id=1, name="Access Switch")]
-        mock_cluster.objects.all.return_value = []
-        mock_site_model.objects.all.return_value = [mock_site]
 
         from netbox_librenms_plugin.import_utils import validate_device_for_import
 
@@ -758,30 +598,11 @@ class TestDeviceValidation:
         assert result["device_role"]["found"] is False
         assert any("role" in issue.lower() for issue in result["issues"])
 
-    @patch("virtualization.models.VirtualMachine")
-    @patch("netbox_librenms_plugin.import_utils.device_operations.Device")
     @patch("netbox_librenms_plugin.import_utils.device_operations.find_matching_site")
     @patch("netbox_librenms_plugin.import_utils.device_operations.find_matching_platform")
     @patch("netbox_librenms_plugin.import_utils.device_operations.match_librenms_hardware_to_device_type")
-    @patch("netbox_librenms_plugin.import_utils.device_operations.DeviceRole")
-    @patch("netbox_librenms_plugin.import_utils.device_operations.Cluster")
-    @patch("netbox_librenms_plugin.import_utils.device_operations.Rack")
-    @patch("netbox_librenms_plugin.import_utils.device_operations.Site")
-    def test_validate_device_handles_empty_location(
-        self,
-        mock_site_model,
-        mock_rack,
-        mock_cluster,
-        mock_role,
-        mock_match_type,
-        mock_find_platform,
-        mock_find_site,
-        mock_device,
-        mock_vm,
-    ):
+    def test_validate_device_handles_empty_location(self, mock_match_type, mock_find_platform, mock_find_site):
         """Empty location handled gracefully."""
-        mock_vm.objects.filter.return_value.first.return_value = None
-        mock_device.objects.filter.return_value.first.return_value = None
         mock_find_site.return_value = {
             "found": False,
             "site": None,
@@ -798,9 +619,6 @@ class TestDeviceValidation:
             "device_type": None,
             "match_type": None,
         }
-        mock_role.objects.all.return_value = []
-        mock_cluster.objects.all.return_value = []
-        mock_site_model.objects.all.return_value = []
 
         from netbox_librenms_plugin.import_utils import validate_device_for_import
 
@@ -816,30 +634,11 @@ class TestDeviceValidation:
         assert result is not None
         assert result["site"]["found"] is False
 
-    @patch("virtualization.models.VirtualMachine")
-    @patch("netbox_librenms_plugin.import_utils.device_operations.Device")
     @patch("netbox_librenms_plugin.import_utils.device_operations.find_matching_site")
     @patch("netbox_librenms_plugin.import_utils.device_operations.find_matching_platform")
     @patch("netbox_librenms_plugin.import_utils.device_operations.match_librenms_hardware_to_device_type")
-    @patch("netbox_librenms_plugin.import_utils.device_operations.DeviceRole")
-    @patch("netbox_librenms_plugin.import_utils.device_operations.Cluster")
-    @patch("netbox_librenms_plugin.import_utils.device_operations.Rack")
-    @patch("netbox_librenms_plugin.import_utils.device_operations.Site")
-    def test_validate_device_handles_empty_os(
-        self,
-        mock_site_model,
-        mock_rack,
-        mock_cluster,
-        mock_role,
-        mock_match_type,
-        mock_find_platform,
-        mock_find_site,
-        mock_device,
-        mock_vm,
-    ):
+    def test_validate_device_handles_empty_os(self, mock_match_type, mock_find_platform, mock_find_site):
         """Empty OS handled gracefully."""
-        mock_vm.objects.filter.return_value.first.return_value = None
-        mock_device.objects.filter.return_value.first.return_value = None
         mock_find_site.return_value = {
             "found": False,
             "site": None,
@@ -856,9 +655,6 @@ class TestDeviceValidation:
             "device_type": None,
             "match_type": None,
         }
-        mock_role.objects.all.return_value = []
-        mock_cluster.objects.all.return_value = []
-        mock_site_model.objects.all.return_value = []
 
         from netbox_librenms_plugin.import_utils import validate_device_for_import
 
@@ -873,33 +669,11 @@ class TestDeviceValidation:
         assert result is not None
         assert result["platform"]["found"] is False
 
-    @patch("virtualization.models.VirtualMachine")
-    @patch("netbox_librenms_plugin.import_utils.device_operations.Device")
     @patch("netbox_librenms_plugin.import_utils.device_operations.find_matching_site")
     @patch("netbox_librenms_plugin.import_utils.device_operations.find_matching_platform")
     @patch("netbox_librenms_plugin.import_utils.device_operations.match_librenms_hardware_to_device_type")
-    @patch("netbox_librenms_plugin.import_utils.device_operations.DeviceRole")
-    @patch("netbox_librenms_plugin.import_utils.device_operations.Cluster")
-    @patch("netbox_librenms_plugin.import_utils.device_operations.Rack")
-    @patch("netbox_librenms_plugin.import_utils.device_operations.Site")
-    @patch("netbox_librenms_plugin.import_utils.device_operations.DeviceType")
-    def test_validate_device_handles_empty_hardware(
-        self,
-        mock_device_type,
-        mock_site_model,
-        mock_rack,
-        mock_cluster,
-        mock_role,
-        mock_match_type,
-        mock_find_platform,
-        mock_find_site,
-        mock_device,
-        mock_vm,
-    ):
+    def test_validate_device_handles_empty_hardware(self, mock_match_type, mock_find_platform, mock_find_site):
         """Empty hardware handled gracefully."""
-        mock_vm.objects.filter.return_value.first.return_value = None
-        mock_device.objects.filter.return_value.first.return_value = None
-        mock_device_type.objects.all.return_value = []
         mock_find_site.return_value = {
             "found": False,
             "site": None,
@@ -916,9 +690,6 @@ class TestDeviceValidation:
             "device_type": None,
             "match_type": None,
         }
-        mock_role.objects.all.return_value = []
-        mock_cluster.objects.all.return_value = []
-        mock_site_model.objects.all.return_value = []
 
         from netbox_librenms_plugin.import_utils import validate_device_for_import
 
@@ -933,69 +704,13 @@ class TestDeviceValidation:
         assert result is not None
         assert result["device_type"]["found"] is False
 
-    @patch("virtualization.models.VirtualMachine")
-    @patch("netbox_librenms_plugin.import_utils.device_operations.Device")
     @patch("netbox_librenms_plugin.import_utils.device_operations.find_matching_site")
     @patch("netbox_librenms_plugin.import_utils.device_operations.find_matching_platform")
     @patch("netbox_librenms_plugin.import_utils.device_operations.match_librenms_hardware_to_device_type")
-    @patch("netbox_librenms_plugin.import_utils.device_operations.DeviceRole")
-    @patch("netbox_librenms_plugin.import_utils.device_operations.Cluster")
-    @patch("netbox_librenms_plugin.import_utils.device_operations.Rack")
-    @patch("netbox_librenms_plugin.import_utils.device_operations.Site")
-    def test_validate_device_duplicate_detection(
-        self,
-        mock_site_model,
-        mock_rack,
-        mock_cluster,
-        mock_role,
-        mock_match_type,
-        mock_find_platform,
-        mock_find_site,
-        mock_device,
-        mock_vm,
-    ):
+    def test_validate_device_duplicate_detection(self, mock_match_type, mock_find_platform, mock_find_site):
         """Existing device detected."""
-        existing_device = MagicMock()
-        existing_device.name = "switch-01"
-        mock_vm.objects.filter.return_value.first.return_value = None
-        mock_device.objects.filter.return_value.first.return_value = existing_device
+        from netbox_librenms_plugin.tests.conftest import make_device
 
-        from netbox_librenms_plugin.import_utils import validate_device_for_import
-
-        device_data = {
-            "device_id": 1,
-            "hostname": "switch-01",
-        }
-
-        result = validate_device_for_import(device_data, include_vc_detection=False)
-
-        assert result["existing_device"] == existing_device
-        assert result["can_import"] is False
-
-    @patch("virtualization.models.VirtualMachine")
-    @patch("netbox_librenms_plugin.import_utils.device_operations.Device")
-    @patch("netbox_librenms_plugin.import_utils.device_operations.find_matching_site")
-    @patch("netbox_librenms_plugin.import_utils.device_operations.find_matching_platform")
-    @patch("netbox_librenms_plugin.import_utils.device_operations.match_librenms_hardware_to_device_type")
-    @patch("netbox_librenms_plugin.import_utils.device_operations.DeviceRole")
-    @patch("netbox_librenms_plugin.import_utils.device_operations.Cluster")
-    @patch("netbox_librenms_plugin.import_utils.device_operations.Rack")
-    @patch("netbox_librenms_plugin.import_utils.device_operations.Site")
-    def test_validate_device_returns_complete_state(
-        self,
-        mock_site_model,
-        mock_rack,
-        mock_cluster,
-        mock_role,
-        mock_match_type,
-        mock_find_platform,
-        mock_find_site,
-        mock_device,
-        mock_vm,
-    ):
-        """All expected fields in result."""
-        mock_vm.objects.filter.return_value.first.return_value = None
-        mock_device.objects.filter.return_value.first.return_value = None
         mock_find_site.return_value = {
             "found": False,
             "site": None,
@@ -1012,9 +727,42 @@ class TestDeviceValidation:
             "device_type": None,
             "match_type": None,
         }
-        mock_role.objects.all.return_value = []
-        mock_cluster.objects.all.return_value = []
-        mock_site_model.objects.all.return_value = []
+
+        existing_device = make_device("switch-01")
+
+        from netbox_librenms_plugin.import_utils import validate_device_for_import
+
+        device_data = {
+            "device_id": 1,
+            "hostname": "switch-01",
+        }
+
+        result = validate_device_for_import(device_data, include_vc_detection=False)
+
+        assert result["existing_device"] == existing_device
+        assert result["can_import"] is False
+
+    @patch("netbox_librenms_plugin.import_utils.device_operations.find_matching_site")
+    @patch("netbox_librenms_plugin.import_utils.device_operations.find_matching_platform")
+    @patch("netbox_librenms_plugin.import_utils.device_operations.match_librenms_hardware_to_device_type")
+    def test_validate_device_returns_complete_state(self, mock_match_type, mock_find_platform, mock_find_site):
+        """All expected fields in result."""
+        mock_find_site.return_value = {
+            "found": False,
+            "site": None,
+            "match_type": None,
+            "confidence": 0.0,
+        }
+        mock_find_platform.return_value = {
+            "found": False,
+            "platform": None,
+            "match_type": None,
+        }
+        mock_match_type.return_value = {
+            "matched": False,
+            "device_type": None,
+            "match_type": None,
+        }
 
         from netbox_librenms_plugin.import_utils import validate_device_for_import
 
@@ -1039,31 +787,13 @@ class TestDeviceValidation:
         assert "platform" in result
 
     @patch("netbox_librenms_plugin.import_utils.device_operations.cache")
-    @patch("virtualization.models.VirtualMachine")
-    @patch("netbox_librenms_plugin.import_utils.device_operations.Device")
     @patch("netbox_librenms_plugin.import_utils.device_operations.find_matching_site")
     @patch("netbox_librenms_plugin.import_utils.device_operations.find_matching_platform")
     @patch("netbox_librenms_plugin.import_utils.device_operations.match_librenms_hardware_to_device_type")
-    @patch("netbox_librenms_plugin.import_utils.device_operations.DeviceRole")
-    @patch("netbox_librenms_plugin.import_utils.device_operations.Cluster")
-    @patch("netbox_librenms_plugin.import_utils.device_operations.Rack")
-    @patch("netbox_librenms_plugin.import_utils.device_operations.Site")
-    def test_validate_device_import_as_vm(
-        self,
-        mock_site_model,
-        mock_rack,
-        mock_cluster,
-        mock_role,
-        mock_match_type,
-        mock_find_platform,
-        mock_find_site,
-        mock_device,
-        mock_vm,
-        mock_cache,
-    ):
+    def test_validate_device_import_as_vm(self, mock_match_type, mock_find_platform, mock_find_site, mock_cache):
         """Import as VM mode uses cluster instead of site/device_type."""
-        mock_vm.objects.filter.return_value.first.return_value = None
-        mock_device.objects.filter.return_value.first.return_value = None
+        from netbox_librenms_plugin.tests.conftest import make_cluster
+
         mock_find_site.return_value = {
             "found": False,
             "site": None,
@@ -1080,11 +810,9 @@ class TestDeviceValidation:
             "device_type": None,
             "match_type": None,
         }
-        mock_role.objects.all.return_value = []
-        mock_clusters = [MagicMock(id=1, name="VMware Cluster")]
-        mock_cluster.objects.all.return_value = mock_clusters
         mock_cache.get.return_value = None  # Force cache miss to trigger Cluster.objects.all()
-        mock_site_model.objects.all.return_value = []
+
+        cluster = make_cluster("VMware Cluster")
 
         from netbox_librenms_plugin.import_utils import validate_device_for_import
 
@@ -1096,34 +824,33 @@ class TestDeviceValidation:
         result = validate_device_for_import(device_data, import_as_vm=True, include_vc_detection=False)
 
         assert result["import_as_vm"] is True
-        assert result["cluster"]["available_clusters"] == mock_clusters
+        assert cluster in result["cluster"]["available_clusters"]
 
-    @patch("virtualization.models.VirtualMachine")
-    @patch("netbox_librenms_plugin.import_utils.device_operations.Device")
     @patch("netbox_librenms_plugin.import_utils.device_operations.find_matching_site")
     @patch("netbox_librenms_plugin.import_utils.device_operations.find_matching_platform")
     @patch("netbox_librenms_plugin.import_utils.device_operations.match_librenms_hardware_to_device_type")
-    @patch("netbox_librenms_plugin.import_utils.device_operations.DeviceRole")
-    @patch("netbox_librenms_plugin.import_utils.device_operations.Cluster")
-    @patch("netbox_librenms_plugin.import_utils.device_operations.Rack")
-    @patch("netbox_librenms_plugin.import_utils.device_operations.Site")
-    def test_validate_device_existing_vm_blocks_import(
-        self,
-        mock_site_model,
-        mock_rack,
-        mock_cluster,
-        mock_role,
-        mock_match_type,
-        mock_find_platform,
-        mock_find_site,
-        mock_device,
-        mock_vm,
-    ):
+    def test_validate_device_existing_vm_blocks_import(self, mock_match_type, mock_find_platform, mock_find_site):
         """Existing VM detection blocks import."""
-        existing_vm = MagicMock()
-        existing_vm.name = "vm-01"
-        mock_vm.objects.filter.return_value.first.return_value = existing_vm
-        mock_device.objects.filter.return_value.first.return_value = None
+        from netbox_librenms_plugin.tests.conftest import make_vm
+
+        mock_find_site.return_value = {
+            "found": False,
+            "site": None,
+            "match_type": None,
+            "confidence": 0.0,
+        }
+        mock_find_platform.return_value = {
+            "found": False,
+            "platform": None,
+            "match_type": None,
+        }
+        mock_match_type.return_value = {
+            "matched": False,
+            "device_type": None,
+            "match_type": None,
+        }
+
+        existing_vm = make_vm("vm-01")
 
         from netbox_librenms_plugin.import_utils import validate_device_for_import
 
@@ -1141,27 +868,13 @@ class TestDeviceValidation:
         # UI doesn't render the VM as unlinked.
         assert result["existing_librenms_link"] is not None
 
-    @patch("virtualization.models.VirtualMachine")
-    @patch("netbox_librenms_plugin.import_utils.device_operations.Device")
-    @patch("netbox_librenms_plugin.import_utils.device_operations.find_matching_site")
-    @patch("netbox_librenms_plugin.import_utils.device_operations.find_matching_platform")
-    @patch("netbox_librenms_plugin.import_utils.device_operations.match_librenms_hardware_to_device_type")
-    @patch("netbox_librenms_plugin.import_utils.device_operations.DeviceRole")
-    @patch("netbox_librenms_plugin.import_utils.device_operations.Cluster")
-    @patch("netbox_librenms_plugin.import_utils.device_operations.Rack")
-    @patch("netbox_librenms_plugin.import_utils.device_operations.Site")
-    def test_librenms_id_matched_vm_populates_link(self, *mocks):
+    def test_librenms_id_matched_vm_populates_link(self):
         """A VM matched by librenms_id surfaces its LibreNMS linkage so it isn't shown as unlinked."""
-        mock_vm = mocks[-1]
-        mock_device = mocks[-2]
-        existing_vm = MagicMock()
-        existing_vm.name = "vm-01"
-        existing_vm.custom_field_data = {"librenms_id": {"default": 42}}
-        existing_vm.cf = existing_vm.custom_field_data
-        # find_by_librenms_id consumes the queryset via list(qs[:2]); make the VM lookup match.
-        mock_vm.objects.filter.return_value.__getitem__.return_value = [existing_vm]
-        mock_device.objects.filter.return_value.__getitem__.return_value = []
-        mock_device.objects.filter.return_value.first.return_value = None
+        from netbox_librenms_plugin.tests.conftest import make_vm
+
+        existing_vm = make_vm("vm-01")
+        existing_vm.custom_field_data["librenms_id"] = {"default": 42}
+        existing_vm.save()
 
         from netbox_librenms_plugin.import_utils import validate_device_for_import
 
@@ -1745,39 +1458,30 @@ class TestSerialNumberMatchingRealDB:
         assert result["existing_match_type"] == "serial"
 
 
+@pytest.mark.django_db
 class TestSerialNumberMatching:
-    """Test serial number matching in device validation."""
+    """Test serial number matching in device validation, against real Device/VM rows."""
 
+    # Only the matcher helpers stay mocked (input-controlling boundaries); the ORM is real so
+    # isinstance(existing, VirtualMachine) works in validate_device_for_import.
     SERIAL_PATCHES = [
-        "netbox_librenms_plugin.import_utils.device_operations.Site",
-        "netbox_librenms_plugin.import_utils.device_operations.Rack",
-        "netbox_librenms_plugin.import_utils.device_operations.Cluster",
-        "netbox_librenms_plugin.import_utils.device_operations.DeviceRole",
-        "netbox_librenms_plugin.import_utils.device_operations.DeviceType",
         "netbox_librenms_plugin.import_utils.device_operations.match_librenms_hardware_to_device_type",
         "netbox_librenms_plugin.import_utils.device_operations.find_matching_platform",
         "netbox_librenms_plugin.import_utils.device_operations.find_matching_site",
-        "netbox_librenms_plugin.import_utils.device_operations.Device",
-        "virtualization.models.VirtualMachine",
     ]
 
     def _start_patches(self):
-        """Start all common patches and return mocks in standard order."""
+        """Start the matcher patches and seed safe not-found defaults (the ORM stays real)."""
         self._patchers = [patch(p) for p in self.SERIAL_PATCHES]
         mocks = [p.start() for p in self._patchers]
         (
-            self.mock_site_model,
-            self.mock_rack,
-            self.mock_cluster,
-            self.mock_role,
-            self.mock_device_type,
             self.mock_match_type,
             self.mock_find_platform,
             self.mock_find_site,
-            self.mock_device,
-            self.mock_vm,
         ) = mocks
-        self.mock_device_type.objects.all.return_value = []
+        self.mock_find_site.return_value = {"found": False, "site": None, "match_type": None, "confidence": 0}
+        self.mock_find_platform.return_value = {"found": False, "platform": None, "match_type": None}
+        self.mock_match_type.return_value = {"matched": False, "device_type": None, "match_type": None}
 
     def _stop_patches(self):
         """Stop all patches."""
@@ -1793,22 +1497,10 @@ class TestSerialNumberMatching:
         self._stop_patches()
 
     def test_serial_match_blocks_import(self):
-        """Device with matching serial blocks import."""
-        existing = MagicMock()
-        existing.name = "existing-device"
-        existing.serial = "ABC123"
+        """Device with matching serial (but a different hostname) blocks import via the serial branch."""
+        from netbox_librenms_plugin.tests.conftest import make_device
 
-        self.mock_vm.objects.filter.return_value.first.return_value = None
-
-        def device_filter(*args, **kwargs):
-            result = _matchable_filter_result()
-            if _is_serial_lookup(kwargs):
-                result.first.return_value = existing
-            else:
-                result.first.return_value = None
-            return result
-
-        self.mock_device.objects.filter.side_effect = device_filter
+        existing = make_device("existing-device", serial="ABC123")
 
         from netbox_librenms_plugin.import_utils import validate_device_for_import
 
@@ -1820,30 +1512,24 @@ class TestSerialNumberMatching:
         assert result["existing_device"] == existing
 
     def test_serial_match_same_hostname_offers_link(self):
-        """Serial + hostname match offers link action."""
-        existing = MagicMock()
-        existing.name = "switch-01"
-        existing.serial = "ABC123"
+        """A device whose name AND serial both match is found (by hostname) and shown as linkable.
 
-        self.mock_vm.objects.filter.return_value.first.return_value = None
+        With real rows the hostname match fires first (a device named "switch-01" is found by name),
+        so the match_type is "hostname"; the equal serial produces no conflict and the row is
+        surfaced as an unlinked, linkable existing device. (The pure serial-branch "link" decision
+        is covered against real rows by TestDetectSerialMatchRole.test_plain_link_when_names_match_and_unlinked.)
+        """
+        from netbox_librenms_plugin.tests.conftest import make_device
 
-        def device_filter(*args, **kwargs):
-            result = _matchable_filter_result()
-            if _is_serial_lookup(kwargs):
-                result.first.return_value = existing
-            else:
-                result.first.return_value = None
-            return result
-
-        self.mock_device.objects.filter.side_effect = device_filter
+        existing = make_device("switch-01", serial="ABC123")
 
         from netbox_librenms_plugin.import_utils import validate_device_for_import
 
         device_data = {"device_id": 1, "hostname": "switch-01", "serial": "ABC123"}
         result = validate_device_for_import(device_data, include_vc_detection=False)
 
-        assert result["serial_action"] == "link"
-        assert result["existing_match_type"] == "serial"
+        assert result["existing_device"] == existing
+        assert result["existing_match_type"] == "hostname"
         assert "not linked to LibreNMS" in result["warnings"][0]
 
     # The serial-match-reinstall case (differing hostname, no OOB signal, no link → hostname_differs)
@@ -1853,24 +1539,9 @@ class TestSerialNumberMatching:
 
     def test_hostname_match_diff_serial_offers_update(self):
         """Hostname matches but serial differs offers update_serial action."""
-        existing = MagicMock()
-        existing.name = "switch-01"
-        existing.serial = "OLD_SERIAL"
+        from netbox_librenms_plugin.tests.conftest import make_device
 
-        self.mock_vm.objects.filter.return_value.first.return_value = None
-
-        def device_filter(*args, **kwargs):
-            result = _matchable_filter_result()
-            if "name__iexact" in kwargs:
-                result.first.return_value = existing
-            elif _is_serial_lookup(kwargs):
-                result.first.return_value = None
-                result.exclude.return_value.first.return_value = None
-            else:
-                result.first.return_value = None
-            return result
-
-        self.mock_device.objects.filter.side_effect = device_filter
+        make_device("switch-01", serial="OLD_SERIAL")
 
         from netbox_librenms_plugin.import_utils import validate_device_for_import
 
@@ -1881,21 +1552,8 @@ class TestSerialNumberMatching:
         assert result["existing_match_type"] == "hostname"
         assert "Hardware may have been replaced" in result["warnings"][0]
 
-    def _setup_no_match_mocks(self):
-        """Configure mocks for tests where no device match is expected."""
-        self.mock_vm.objects.filter.return_value.first.return_value = None
-        self.mock_device.objects.filter.return_value.first.return_value = None
-        self.mock_find_site.return_value = {"found": False, "site": None, "match_type": None, "confidence": 0}
-        self.mock_find_platform.return_value = {"found": False, "platform": None, "match_type": None}
-        self.mock_match_type.return_value = {"matched": False, "device_type": None, "match_type": None}
-        self.mock_role.objects.all.return_value = []
-        self.mock_cluster.objects.all.return_value = []
-        self.mock_site_model.objects.all.return_value = []
-
     def test_serial_dash_ignored(self):
-        """Serial '-' is not treated as a match."""
-        self._setup_no_match_mocks()
-
+        """Serial '-' is not treated as a match (empty DB → nothing matches)."""
         from netbox_librenms_plugin.import_utils import validate_device_for_import
 
         device_data = {"device_id": 1, "hostname": "switch-01", "serial": "-"}
@@ -1906,8 +1564,6 @@ class TestSerialNumberMatching:
 
     def test_serial_empty_ignored(self):
         """Empty serial skips serial matching."""
-        self._setup_no_match_mocks()
-
         from netbox_librenms_plugin.import_utils import validate_device_for_import
 
         device_data = {"device_id": 1, "hostname": "switch-01", "serial": ""}
@@ -1918,8 +1574,6 @@ class TestSerialNumberMatching:
 
     def test_serial_none_ignored(self):
         """None serial skips serial matching."""
-        self._setup_no_match_mocks()
-
         from netbox_librenms_plugin.import_utils import validate_device_for_import
 
         device_data = {"device_id": 1, "hostname": "switch-01", "serial": None}
@@ -1930,26 +1584,10 @@ class TestSerialNumberMatching:
 
     def test_hostname_match_serial_conflict_warns(self):
         """Hostname matches, incoming serial already on another device warns about conflict."""
-        hostname_device = MagicMock()
-        hostname_device.name = "switch-01"
-        hostname_device.serial = "OLD_SERIAL"
+        from netbox_librenms_plugin.tests.conftest import make_device
 
-        serial_conflict_device = MagicMock()
-        serial_conflict_device.name = "other-device"
-
-        self.mock_vm.objects.filter.return_value.first.return_value = None
-
-        def device_filter(*args, **kwargs):
-            result = _matchable_filter_result()
-            if "name__iexact" in kwargs:
-                result.first.return_value = hostname_device
-            elif _is_serial_lookup(kwargs):
-                result.exclude.return_value.first.return_value = serial_conflict_device
-            else:
-                result.first.return_value = None
-            return result
-
-        self.mock_device.objects.filter.side_effect = device_filter
+        make_device("switch-01", serial="OLD_SERIAL")
+        make_device("other-device", serial="CONFLICTING_SERIAL")
 
         from netbox_librenms_plugin.import_utils import validate_device_for_import
 
@@ -1962,40 +1600,9 @@ class TestSerialNumberMatching:
 
     def test_librenms_id_match_shows_serial_confirmed(self):
         """librenms_id match with matching serial shows confirmation."""
-        existing = MagicMock()
-        existing.name = "switch-01"
-        existing.serial = "ABC123"
-        existing.virtual_chassis = None  # Not a VC member → use plain hostname comparison
-        existing.vc_position = None
+        from netbox_librenms_plugin.tests.conftest import make_device
 
-        self.mock_vm.objects.filter.return_value.first.return_value = None
-
-        def device_filter(*args, **kwargs):
-            result = _matchable_filter_result()
-            q_has_librenms = any("librenms_id" in str(arg) for arg in args) or any(
-                k.startswith("custom_field_data__librenms_id") for k in kwargs
-            )
-            if q_has_librenms:
-                result.first.return_value = existing
-                # find_by_librenms_id consumes the queryset via list(qs[:2]).
-                result.__getitem__.return_value = [existing]
-            else:
-                result.first.return_value = None
-                result.__getitem__.return_value = []
-            return result
-
-        self.mock_device.objects.filter.side_effect = device_filter
-        self.mock_find_site.return_value = {
-            "found": True,
-            "site": MagicMock(),
-            "match_type": "exact",
-            "confidence": 1.0,
-        }
-        self.mock_find_platform.return_value = {"found": False, "platform": None, "match_type": None}
-        self.mock_match_type.return_value = {"matched": False, "device_type": None, "match_type": None}
-        self.mock_role.objects.all.return_value = []
-        self.mock_cluster.objects.all.return_value = []
-        self.mock_site_model.objects.all.return_value = []
+        make_device("switch-01", serial="ABC123", librenms_cf={"default": {"id": 1}})
 
         from netbox_librenms_plugin.import_utils import validate_device_for_import
 
@@ -2009,44 +1616,9 @@ class TestSerialNumberMatching:
 
     def test_librenms_id_match_detects_serial_drift(self):
         """librenms_id match with different serial warns about drift."""
-        existing = MagicMock()
-        existing.name = "switch-01"
-        existing.serial = "OLD_SERIAL"
-        existing.virtual_chassis = None
-        existing.vc_position = None
+        from netbox_librenms_plugin.tests.conftest import make_device
 
-        self.mock_vm.objects.filter.return_value.first.return_value = None
-
-        def device_filter(*args, **kwargs):
-            result = _matchable_filter_result()
-            q_has_librenms = any("librenms_id" in str(arg) for arg in args) or any(
-                k.startswith("custom_field_data__librenms_id") for k in kwargs
-            )
-            if q_has_librenms:
-                result.first.return_value = existing
-                # find_by_librenms_id consumes the queryset via list(qs[:2]).
-                result.__getitem__.return_value = [existing]
-            elif _is_serial_lookup(kwargs):
-                result.first.return_value = None
-                result.__getitem__.return_value = []
-                result.exclude.return_value.first.return_value = None
-            else:
-                result.first.return_value = None
-                result.__getitem__.return_value = []
-            return result
-
-        self.mock_device.objects.filter.side_effect = device_filter
-        self.mock_find_site.return_value = {
-            "found": True,
-            "site": MagicMock(),
-            "match_type": "exact",
-            "confidence": 1.0,
-        }
-        self.mock_find_platform.return_value = {"found": False, "platform": None, "match_type": None}
-        self.mock_match_type.return_value = {"matched": False, "device_type": None, "match_type": None}
-        self.mock_role.objects.all.return_value = []
-        self.mock_cluster.objects.all.return_value = []
-        self.mock_site_model.objects.all.return_value = []
+        make_device("switch-01", serial="OLD_SERIAL", librenms_cf={"default": {"id": 1}})
 
         from netbox_librenms_plugin.import_utils import validate_device_for_import
 
@@ -2059,37 +1631,15 @@ class TestSerialNumberMatching:
 
     def test_librenms_id_match_still_validates_site(self):
         """librenms_id match continues to populate site/type validation."""
-        existing = MagicMock()
-        existing.name = "switch-01"
-        existing.serial = ""
-        existing.virtual_chassis = None
-        existing.vc_position = None
+        from dcim.models import Site
 
-        self.mock_vm.objects.filter.return_value.first.return_value = None
+        from netbox_librenms_plugin.tests.conftest import make_device
 
-        def device_filter(*args, **kwargs):
-            result = _matchable_filter_result()
-            q_has_librenms = any("librenms_id" in str(arg) for arg in args) or any(
-                k.startswith("custom_field_data__librenms_id") for k in kwargs
-            )
-            if q_has_librenms:
-                result.first.return_value = existing
-                # find_by_librenms_id consumes the queryset via list(qs[:2]).
-                result.__getitem__.return_value = [existing]
-            else:
-                result.first.return_value = None
-                result.__getitem__.return_value = []
-            return result
-
-        self.mock_device.objects.filter.side_effect = device_filter
-        mock_site = MagicMock(id=1, name="DC1")
-        self.mock_find_site.return_value = {"found": True, "site": mock_site, "match_type": "exact", "confidence": 1.0}
-        self.mock_find_platform.return_value = {"found": False, "platform": None, "match_type": None}
+        make_device("switch-01", serial="", librenms_cf={"default": {"id": 1}})
+        site, _ = Site.objects.get_or_create(name="DC1", slug="dc1")
+        self.mock_find_site.return_value = {"found": True, "site": site, "match_type": "exact", "confidence": 1.0}
         mock_dt = MagicMock()
         self.mock_match_type.return_value = {"matched": True, "device_type": mock_dt, "match_type": "exact"}
-        self.mock_role.objects.all.return_value = []
-        self.mock_cluster.objects.all.return_value = []
-        self.mock_site_model.objects.all.return_value = []
 
         from netbox_librenms_plugin.import_utils import validate_device_for_import
 
@@ -2101,37 +1651,14 @@ class TestSerialNumberMatching:
         assert result["is_ready"] is False
         # Site and device_type should still be populated
         assert result["site"]["found"] is True
-        assert result["site"]["site"] == mock_site
+        assert result["site"]["site"] == site
         assert result["device_type"]["found"] is True
 
     def test_existing_device_role_populated(self):
         """Existing device's role should be shown in validation details."""
-        existing = MagicMock()
-        existing.name = "switch-01"
-        existing.serial = "ABC123"
-        existing.virtual_chassis = None
-        existing.vc_position = None
-        mock_existing_role = MagicMock()
-        mock_existing_role.name = "Access Switch"
-        existing.role = mock_existing_role
+        from netbox_librenms_plugin.tests.conftest import make_device
 
-        self.mock_vm.objects.filter.return_value.first.return_value = None
-
-        def device_filter(*args, **kwargs):
-            result = _matchable_filter_result()
-            if _is_serial_lookup(kwargs):
-                result.first.return_value = existing
-            else:
-                result.first.return_value = None
-            return result
-
-        self.mock_device.objects.filter.side_effect = device_filter
-        self.mock_find_site.return_value = {"found": False, "site": None, "match_type": None, "confidence": 0}
-        self.mock_find_platform.return_value = {"found": False, "platform": None, "match_type": None}
-        self.mock_match_type.return_value = {"matched": True, "device_type": MagicMock(), "match_type": "exact"}
-        self.mock_role.objects.all.return_value = [mock_existing_role]
-        self.mock_cluster.objects.all.return_value = []
-        self.mock_site_model.objects.all.return_value = []
+        existing = make_device("switch-01", serial="ABC123")
 
         with patch("netbox_librenms_plugin.import_utils.device_operations.cache") as mock_cache:
             mock_cache.get.return_value = None
@@ -2149,46 +1676,24 @@ class TestSerialNumberMatching:
 
         assert result["existing_device"] == existing
         assert result["device_role"]["found"] is True
-        assert result["device_role"]["role"] == mock_existing_role
+        assert result["device_role"]["role"] == existing.role
 
     def test_device_type_mismatch_flagged(self):
         """Device type mismatch between existing device and LibreNMS should be flagged."""
-        existing = MagicMock()
-        existing.name = "switch-01"
-        existing.serial = "ABC123"
-        existing.virtual_chassis = None
-        existing.vc_position = None
-        existing_device_type = MagicMock()
-        existing_device_type.pk = 1
-        existing_device_type.__str__ = lambda self: "Old Type"
-        existing.device_type = existing_device_type
-        existing.role = MagicMock()
+        from dcim.models import DeviceType, Manufacturer
 
-        librenms_device_type = MagicMock()
-        librenms_device_type.pk = 2
-        librenms_device_type.__str__ = lambda self: "New Type"
+        from netbox_librenms_plugin.tests.conftest import make_device
 
-        self.mock_vm.objects.filter.return_value.first.return_value = None
-
-        def device_filter(*args, **kwargs):
-            result = _matchable_filter_result()
-            if _is_serial_lookup(kwargs):
-                result.first.return_value = existing
-            else:
-                result.first.return_value = None
-            return result
-
-        self.mock_device.objects.filter.side_effect = device_filter
-        self.mock_find_site.return_value = {"found": False, "site": None, "match_type": None, "confidence": 0}
-        self.mock_find_platform.return_value = {"found": False, "platform": None, "match_type": None}
+        existing = make_device("switch-01", serial="ABC123")
+        mfr, _ = Manufacturer.objects.get_or_create(name="MismatchMfr", slug="mismatch-mfr")
+        librenms_device_type, _ = DeviceType.objects.get_or_create(manufacturer=mfr, model="New Type", slug="new-type")
+        # The incoming LibreNMS hardware resolves to a DIFFERENT device type than the existing row's.
+        assert librenms_device_type.pk != existing.device_type.pk
         self.mock_match_type.return_value = {
             "matched": True,
             "device_type": librenms_device_type,
             "match_type": "exact",
         }
-        self.mock_role.objects.all.return_value = []
-        self.mock_cluster.objects.all.return_value = []
-        self.mock_site_model.objects.all.return_value = []
 
         with patch("netbox_librenms_plugin.import_utils.device_operations.cache") as mock_cache:
             mock_cache.get.return_value = None
@@ -2209,33 +1714,15 @@ class TestSerialNumberMatching:
 
     def test_no_device_type_mismatch_when_types_match(self):
         """No mismatch flag when existing device type matches LibreNMS."""
-        existing = MagicMock()
-        existing.name = "switch-01"
-        existing.serial = "ABC123"
-        existing.virtual_chassis = None
-        existing.vc_position = None
-        same_device_type = MagicMock()
-        same_device_type.pk = 1
-        existing.device_type = same_device_type
-        existing.role = MagicMock()
+        from netbox_librenms_plugin.tests.conftest import make_device
 
-        self.mock_vm.objects.filter.return_value.first.return_value = None
-
-        def device_filter(*args, **kwargs):
-            result = _matchable_filter_result()
-            if _is_serial_lookup(kwargs):
-                result.first.return_value = existing
-            else:
-                result.first.return_value = None
-            return result
-
-        self.mock_device.objects.filter.side_effect = device_filter
-        self.mock_find_site.return_value = {"found": False, "site": None, "match_type": None, "confidence": 0}
-        self.mock_find_platform.return_value = {"found": False, "platform": None, "match_type": None}
-        self.mock_match_type.return_value = {"matched": True, "device_type": same_device_type, "match_type": "exact"}
-        self.mock_role.objects.all.return_value = []
-        self.mock_cluster.objects.all.return_value = []
-        self.mock_site_model.objects.all.return_value = []
+        existing = make_device("switch-01", serial="ABC123")
+        # LibreNMS resolves to the SAME device type the existing NetBox row already has.
+        self.mock_match_type.return_value = {
+            "matched": True,
+            "device_type": existing.device_type,
+            "match_type": "exact",
+        }
 
         with patch("netbox_librenms_plugin.import_utils.device_operations.cache") as mock_cache:
             mock_cache.get.return_value = None
@@ -5502,6 +4989,123 @@ class TestRefreshExistingDeviceCrossModelIdWins:
         assert validation["existing_device"] is None
         assert validation["existing_device"] != device
         assert any("Both a VM and Device exist with hostname" in w for w in validation.get("warnings", []))
+
+    def test_cross_model_warning_not_duplicated_across_refreshes(self):
+        """The cached validation dict is refreshed in place: the cross-model warning must not stack up.
+
+        Mirrors the stale ambiguous-id / hostname-serial blocker cleanup at the top of
+        _refresh_existing_device — pre-fix every refresh appended another copy.
+        """
+        from netbox_librenms_plugin.import_utils.bulk_import import _refresh_existing_device
+        from netbox_librenms_plugin.tests.conftest import make_device, make_vm
+
+        make_device("stack-warn-host")
+        make_vm("stack-warn-host")
+        libre_device = {"device_id": 4243, "hostname": "stack-warn-host", "sysName": "stack-warn-host"}
+        validation = {
+            "existing_device": None,
+            "existing_vm": None,
+            "import_as_vm": False,
+            "is_ready": False,
+            "can_import": False,
+            "issues": [],
+            "warnings": [],
+        }
+
+        _refresh_existing_device(validation, libre_device=libre_device, server_key="default")
+        _refresh_existing_device(validation, libre_device=libre_device, server_key="default")
+
+        cross_model = [w for w in validation["warnings"] if "Both a VM and Device exist with hostname" in w]
+        assert len(cross_model) == 1
+
+    def test_cross_model_warning_cleared_once_collision_resolved(self):
+        """Resolving the VM/Device name collision must drop the cached warning on the next refresh."""
+        from netbox_librenms_plugin.import_utils.bulk_import import _refresh_existing_device
+        from netbox_librenms_plugin.tests.conftest import make_device, make_vm
+
+        device = make_device("resolved-warn-host")
+        vm = make_vm("resolved-warn-host")
+        libre_device = {"device_id": 4244, "hostname": "resolved-warn-host", "sysName": "resolved-warn-host"}
+        validation = {
+            "existing_device": None,
+            "existing_vm": None,
+            "import_as_vm": False,
+            "is_ready": False,
+            "can_import": False,
+            "issues": [],
+            "warnings": [],
+        }
+
+        _refresh_existing_device(validation, libre_device=libre_device, server_key="default")
+        assert any("Both a VM and Device exist with hostname" in w for w in validation["warnings"])
+
+        vm.delete()
+        _refresh_existing_device(validation, libre_device=libre_device, server_key="default")
+
+        # The collision is gone: the stale warning must not survive the refresh, and the
+        # remaining Device binds by name as usual.
+        assert not any("Both a VM and Device exist with hostname" in w for w in validation["warnings"])
+        assert validation["existing_device"] == device
+
+    def test_vm_fresh_match_populates_cluster_display(self):
+        """A late-found VM match must show the matched VM's actual cluster, mirroring the
+        device path's role display — device_validation_details.html renders
+        validation.cluster.cluster for existing VM rows."""
+        from netbox_librenms_plugin.import_utils.bulk_import import _refresh_existing_device
+        from netbox_librenms_plugin.tests.conftest import make_cluster, make_vm
+
+        cluster = make_cluster("fresh-vm-cluster")
+        vm = make_vm("fresh-vm-clustered", cluster=cluster)
+        validation = {
+            "existing_device": None,
+            "existing_vm": None,
+            "import_as_vm": True,  # Model=VirtualMachine
+            "is_ready": False,
+            "can_import": False,
+            "issues": [],
+            "warnings": [],
+            "cluster": {"found": False, "cluster": None, "available_clusters": []},
+        }
+
+        _refresh_existing_device(
+            validation, libre_device={"device_id": 4245, "hostname": "fresh-vm-clustered"}, server_key="default"
+        )
+
+        assert validation["existing_device"] == vm
+        assert validation["cluster"]["found"] is True
+        assert validation["cluster"]["cluster"] == cluster
+        # Existing-match gating stays force-blocked either way.
+        assert validation["can_import"] is False
+        assert validation["is_ready"] is False
+
+    def test_vm_fresh_match_without_cluster_resets_stale_display(self):
+        """A matched clusterless VM must drop a stale cached cluster selection (keeping
+        available_clusters), not keep rendering the old choice."""
+        from virtualization.models import VirtualMachine
+
+        from netbox_librenms_plugin.import_utils.bulk_import import _refresh_existing_device
+
+        vm = VirtualMachine.objects.create(name="fresh-vm-clusterless")
+        stale = object()
+        validation = {
+            "existing_device": None,
+            "existing_vm": None,
+            "import_as_vm": True,
+            "is_ready": False,
+            "can_import": False,
+            "issues": [],
+            "warnings": [],
+            "cluster": {"found": True, "cluster": stale, "available_clusters": ["keep-me"]},
+        }
+
+        _refresh_existing_device(
+            validation, libre_device={"device_id": 4246, "hostname": "fresh-vm-clusterless"}, server_key="default"
+        )
+
+        assert validation["existing_device"] == vm
+        assert validation["cluster"]["found"] is False
+        assert validation["cluster"]["cluster"] is None
+        assert validation["cluster"]["available_clusters"] == ["keep-me"]
 
     def test_serial_fallback_ambiguity_fails_closed(self):
         """When the serial fallback resolves more than one NetBox device, the refresh re-check must fail closed (ambiguous match + can_import False), not bind to an arbitrary duplicate."""

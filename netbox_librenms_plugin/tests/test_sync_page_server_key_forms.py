@@ -193,6 +193,66 @@ class TestSyncPageMisconfiguredDefaultDegrades:
         assert response.status_code == 200
         assert "not configured correctly" in response.content.decode()
 
+    def test_get_with_stale_server_key_and_broken_default_renders_degraded_page(self):
+        """A stale ?server_key combined with a broken default must also degrade, not 500.
+
+        The unresolved path deliberately skips get()'s degraded-render return (the page
+        must still render, e.g. the migrated banner scoped to the requested key), so it
+        reaches get_context_data() with NO client bound. Every server_key read there must
+        use the resolved render key / active_server_key fallback — a lazy librenms_api
+        touch reconstructs LibreNMSAPI() and re-raises the misconfiguration as a 500.
+        """
+        from django.contrib.auth import get_user_model
+        from django.contrib.messages.storage.fallback import FallbackStorage
+
+        from netbox_librenms_plugin.views.object_sync.devices import DeviceLibreNMSSyncView
+
+        device = make_device("sync-page-degraded-stale")
+        user = get_user_model().objects.create_superuser(username="sync-degraded-stale-su")
+
+        assert "gone-server" not in TWO_SERVERS  # the key really is stale under the pinned config
+
+        request = RequestFactory().get("/x/", {"server_key": "gone-server"})
+        request.user = user
+        request.htmx = False
+        request.session = {}
+        request._messages = FallbackStorage(request)
+
+        view = DeviceLibreNMSSyncView()
+        view.setup(request, pk=device.pk)
+
+        with (
+            # Pin the configured servers (as _render_sync_page does) so "gone-server" is stale
+            # against a real two-server config rather than an unconfigured plugin.
+            patch(
+                "netbox_librenms_plugin.librenms_api.get_plugin_config",
+                side_effect=lambda _plugin, key, default=None: TWO_SERVERS if key == "servers" else default,
+            ),
+            # Neither the requested key nor the default can build a client...
+            patch("netbox_librenms_plugin.librenms_api.build_librenms_api", return_value=None) as mock_build,
+            # ...so any lazy LibreNMSAPI() reconstruction would raise, as in production.
+            patch(
+                "netbox_librenms_plugin.views.mixins.LibreNMSAPI",
+                side_effect=ValueError("LibreNMS URL or API token is not configured"),
+            ),
+        ):
+            response = view.get(request, pk=device.pk)
+
+        # The stale key was routed to the factory (so the unresolved branch is the one taken),
+        # and the broken default was then tried as the fallback bind.
+        build_keys = [c.args[0] for c in mock_build.call_args_list]
+        assert "gone-server" in build_keys
+        assert None in build_keys
+        assert response.status_code == 200
+        # The header's server-info block degrades to the configuration-error display
+        # (get_server_info's fail-soft branch) instead of the page 500ing...
+        assert "Configuration error" in response.content.decode()
+        # ...and the page is NOT the minimal early-return render the *blank*-key branch produces
+        # (the unresolved path must still render the tabbed page scoped to the requested key).
+        assert view._server_key_unresolved is True
+        assert view._scoped_render_server_key == "gone-server"
+        assert view.librenms_id is None  # failed closed: no default-server mapping attributed
+
 
 class TestUpdateDeviceLocationRebindsServer:
     """UpdateDeviceLocationView must write to the POSTed server, not the global default."""

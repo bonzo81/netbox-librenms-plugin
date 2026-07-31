@@ -3,12 +3,11 @@ from urllib.parse import urlencode, urlparse
 
 import django_tables2 as tables
 from django.urls import reverse
-from django.utils.html import escape, format_html, mark_safe
+from django.utils.html import format_html, mark_safe
 from netbox.tables.columns import ToggleColumn
 from utilities.paginator import EnhancedPaginator
 
-from netbox_librenms_plugin.constants import OOB_BADGE_HTML
-from netbox_librenms_plugin.utils import get_table_paginate_count
+from netbox_librenms_plugin.utils import get_table_paginate_count, oob_badge_html, render_vc_member_options
 
 
 class LibreNMSModuleTable(tables.Table):
@@ -182,13 +181,7 @@ class LibreNMSModuleTable(tables.Table):
             rendered_name = display_name
 
         depth = record.get("depth", 0)
-        # Static trusted markup — use mark_safe, not format_html (which requires
-        # interpolation args and raises TypeError when given a bare string).
-        oob_badge = (
-            mark_safe(OOB_BADGE_HTML)  # noqa: S308
-            if record.get("_source") == "oob"
-            else ""
-        )
+        oob_badge = oob_badge_html(record)
         if depth == 0:
             return format_html("{}{}", rendered_name, oob_badge)
         # Build visual tree prefix based on nesting depth
@@ -966,21 +959,11 @@ class VCModuleTable(LibreNMSModuleTable):
         selected_device_id = record.get("selected_device_id") or self.device.id
         ent_index = record.get("ent_physical_index", "")
 
-        options = [
-            (
-                f'<option value="{member.id}"'
-                f"{' selected' if str(member.id) == str(selected_device_id) else ''}>"
-                f"{escape(member.name)}"
-                "</option>"
-            )
-            for member in self._vc_members
-        ]
-
         return format_html(
             '<select name="device_selection_{0}" id="device_selection_{0}" '
             'class="form-select vc-member-select" data-module="{0}" data-row-id="{0}">{1}</select>',
             ent_index,
-            mark_safe("".join(options)),
+            render_vc_member_options(self._vc_members, selected_device_id),
         )
 
     def format_module_data(self, record):

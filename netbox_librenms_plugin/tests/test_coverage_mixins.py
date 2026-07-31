@@ -44,6 +44,122 @@ class TestCacheRemainingTtl:
 # =============================================================================
 
 
+class TestLibreNMSAPIMixinActiveServerKey:
+    """LibreNMSAPIMixin.active_server_key: the bound client's key or 'default', never building a client."""
+
+    def _mixin(self):
+        from netbox_librenms_plugin.views.mixins import LibreNMSAPIMixin
+
+        return object.__new__(LibreNMSAPIMixin)
+
+    def test_returns_bound_client_server_key(self):
+        m = self._mixin()
+        m._librenms_api = MagicMock(server_key="prod")
+        assert m.active_server_key == "prod"
+
+    def test_returns_default_without_building_client_when_unbound(self):
+        """On the rebind-fail render path no client is bound; the property must return 'default' WITHOUT constructing a LibreNMSAPI (the lazy librenms_api property would, and can raise on a misconfigured default)."""
+        m = self._mixin()
+        m._librenms_api = None
+        with patch("netbox_librenms_plugin.views.mixins.LibreNMSAPI") as mock_api_cls:
+            assert m.active_server_key == "default"
+        mock_api_cls.assert_not_called()
+
+
+@pytest.mark.django_db
+class TestRenderSyncPartial:
+    """render_sync_partial: the chokepoint that injects migrated-context into every partial render."""
+
+    def test_merges_real_migrated_context_and_write_permission_into_view_context(self):
+        """A real migrated donor's marker + winner + the request user's has_write_permission are merged into the partial context (real build_migrated_context, not a stub re-asserting the dict merge)."""
+        from django.test import RequestFactory
+
+        from netbox_librenms_plugin.tests.conftest import make_device, make_superuser
+        from netbox_librenms_plugin.utils import mark_librenms_migrated
+        from netbox_librenms_plugin.views.mixins import LibreNMSAPIMixin, LibreNMSPermissionMixin
+
+        winner = make_device("rsp-winner")
+        donor = make_device("rsp-donor")
+        mark_librenms_migrated(donor, winner.pk, "prod")  # real _migrated_to marker under "prod"
+        donor.save()
+
+        # Real sync views combine both mixins (BaseLibreNMSSyncView / BaseIPAddressTableView); build a
+        # matching self so render_sync_partial can resolve has_write_permission from the request user.
+        class _SyncView(LibreNMSPermissionMixin, LibreNMSAPIMixin):
+            partial_template_name = "tmpl.html"
+
+        m = object.__new__(_SyncView)
+        request = RequestFactory().post("/")
+        request.user = make_superuser()
+        m.request = request
+        # Only render is stubbed (it needs a full request + template machinery); build_migrated_context
+        # resolves the donor's real marker against the real winner row.
+        with patch("netbox_librenms_plugin.views.mixins.render") as mock_render:
+            m.render_sync_partial(request, donor, "prod", {"vlan_sync": "X"})
+
+        _req, template, context = mock_render.call_args.args
+        assert template == "tmpl.html"
+        # The view's payload, the real migration flags, AND has_write_permission are present — a
+        # partial-render exit routed through here can never silently drop the migration controls or
+        # the write-permission flag the "Move to winner" buttons gate on.
+        assert context["vlan_sync"] == "X"
+        assert context["migrated_to_marker"]["device_id"] == winner.pk
+        assert context["migrated_to_winner"].pk == winner.pk
+        assert context["has_write_permission"] is True
+
+
+@pytest.mark.django_db
+class TestBuildMigratedContextLazyWinner:
+    """build_migrated_context defers the winner Device lookup to a lazy proxy (cable/module/VLAN partials never read it)."""
+
+    @staticmethod
+    def _winner_lookups(cap, pk):
+        return [q["sql"] for q in cap.captured_queries if "dcim_device" in q["sql"] and f"= {pk}" in q["sql"]]
+
+    def test_winner_lookup_deferred_until_the_proxy_is_read(self):
+        from django.db import connection
+        from django.test.utils import CaptureQueriesContext
+
+        from netbox_librenms_plugin.tests.conftest import make_device
+        from netbox_librenms_plugin.utils import build_migrated_context, mark_librenms_migrated
+
+        winner = make_device("bmc-winner")
+        donor = make_device("bmc-donor")
+        mark_librenms_migrated(donor, winner.pk, "default")
+        donor.save()
+
+        # Building the context must NOT fetch the winner row (the boolean-only partials never read it).
+        with CaptureQueriesContext(connection) as cap_build:
+            ctx = build_migrated_context(donor, "default")
+        assert ctx["migrated_to_marker"]["device_id"] == winner.pk  # banner boolean present
+        assert self._winner_lookups(cap_build, winner.pk) == []  # winner Device not fetched yet
+
+        # Reading the proxy (the interface/IP partials do) resolves the real Device — one query.
+        with CaptureQueriesContext(connection) as cap_access:
+            assert ctx["migrated_to_winner"].pk == winner.pk
+        assert self._winner_lookups(cap_access, winner.pk)  # the deferred lookup fired on access
+
+    def test_self_pointing_marker_suppressed_without_a_winner_query(self):
+        from django.db import connection
+        from django.test.utils import CaptureQueriesContext
+
+        from netbox_librenms_plugin.tests.conftest import make_device
+        from netbox_librenms_plugin.utils import build_migrated_context
+
+        donor = make_device("bmc-self")
+        # A self-pointing marker (device_id == donor.pk) is corrupt: it must not flip the donor into
+        # migrated mode, and the suppression happens in memory — no winner Device fetch.
+        donor.custom_field_data["librenms_id"] = {
+            "default": {"_migrated_to": {"device_id": donor.pk, "server_key": "default", "at": "x"}}
+        }
+        donor.save()
+        with CaptureQueriesContext(connection) as cap:
+            ctx = build_migrated_context(donor, "default")
+        assert ctx["migrated_to_marker"] is None
+        assert ctx["migrated_to_winner"] is None
+        assert self._winner_lookups(cap, donor.pk) == []  # suppression is in-memory
+
+
 class TestLibreNMSAPIMixinRebindApiForServer:
     """LibreNMSAPIMixin.rebind_api_for_server: POST-scoped API client for base views."""
 
@@ -72,7 +188,7 @@ class TestLibreNMSAPIMixinRebindApiForServer:
         assert m._librenms_api is new_api  # rebound
 
     def test_returns_resolved_key_not_raw_post_value(self):
-        """build_librenms_api may normalize the posted key (e.g."""
+        """build_librenms_api may normalize the posted key (e.g. resolve an alias); the mixin must return the resolved key, not the raw POST value."""
         m = self._mixin("default")
         resolved_api = MagicMock(server_key="primary")
         with patch("netbox_librenms_plugin.librenms_api.build_librenms_api", return_value=resolved_api):
@@ -1210,3 +1326,12 @@ class TestRenderServerKeyDegradation:
 
         assert BaseIPAddressTableView._render_server_key is LibreNMSAPIMixin._render_server_key
         assert BaseCableTableView._render_server_key is LibreNMSAPIMixin._render_server_key
+
+    def test_sync_page_subclass_keeps_render_server_key_method_callable(self):
+        """A real sync-page subclass must not shadow the mixin's render-key resolver."""
+        from netbox_librenms_plugin.views.object_sync.devices import DeviceLibreNMSSyncView
+
+        view = DeviceLibreNMSSyncView()
+        view._librenms_api = MagicMock(server_key="active")
+
+        assert view._render_server_key() == "active"

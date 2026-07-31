@@ -31,6 +31,9 @@ class BaseLibreNMSSyncView(LibreNMSPermissionMixin, LibreNMSAPIMixin, generic.Ob
     model = None  # Will be set in subclasses
     tab = None  # Will be set in subclasses
     template_name = "netbox_librenms_plugin/librenms_sync_base.html"
+    # Render server key resolved in get(); read by get_context_data for the migrated-mode banner.
+    # None until get() runs (e.g. a direct get_context_data() call), then active_server_key is used.
+    _scoped_render_server_key = None
 
     def get(self, request, pk, context=None):
         """Handle GET request for the LibreNMS sync view."""
@@ -42,6 +45,12 @@ class BaseLibreNMSSyncView(LibreNMSPermissionMixin, LibreNMSAPIMixin, generic.Ob
         # — an internally inconsistent page. A blank/absent key keeps the session/default client, so
         # single-server and default renders are unchanged.
         _scoped_key, unresolved = self.resolve_get_render_server_key(request)
+        # Stash the resolved render key so get_context_data builds the migrated-mode banner under
+        # the SAME namespace as the header/tabs. On the unresolved (stale ?server_key) path the
+        # rebind declines and self.librenms_api.server_key falls back to "default" — using that for
+        # the marker lookup would hide a real migration (marker under the requested server) or show
+        # a spurious one (unrelated "default" marker). _scoped_key keeps the page self-consistent.
+        self._scoped_render_server_key = _scoped_key
 
         # The resolve can decline WITHOUT binding a client: a blank/absent key with a
         # misconfigured default (build_librenms_api(None) → None), or an unresolved
@@ -204,8 +213,12 @@ class BaseLibreNMSSyncView(LibreNMSPermissionMixin, LibreNMSAPIMixin, generic.Ob
                 # Active server key, so the create-platform modal (included without `only`, hence
                 # inheriting this context) forwards it as a hidden field — otherwise
                 # CreateAndAssignPlatformView redirects back to the default-server tab, dropping
-                # the non-default server context the user was acting on.
-                "server_key": self.librenms_api.server_key,
+                # the non-default server context the user was acting on. Use the resolved render
+                # key, NOT the lazy librenms_api property: on the stale-?server_key path with a
+                # misconfigured default no client is bound, so the property would reconstruct
+                # LibreNMSAPI() and 500 the degraded render; the render key also keeps the page's
+                # forms scoped to the requested (gone) server so they fail closed server-side.
+                "server_key": self._scoped_render_server_key or self.active_server_key,
                 "v1v2form": AddToLIbreSNMPV1V2(prefix="v1v2"),
                 "v3form": AddToLIbreSNMPV3(prefix="v3"),
                 "librenms_device_id": self.librenms_id,
@@ -217,7 +230,10 @@ class BaseLibreNMSSyncView(LibreNMSPermissionMixin, LibreNMSAPIMixin, generic.Ob
                 "platform_info": platform_info,
                 "vc_inventory_serials": librenms_info["librenms_device_details"].get("vc_inventory_serials", []),
                 "manufacturers": manufacturers,
-                "all_server_mappings": self._build_all_server_mappings(_lookup_device, self.librenms_api.server_key),
+                # Same safe accessor as "server_key" above — only the is_active highlight needs it.
+                "all_server_mappings": self._build_all_server_mappings(
+                    _lookup_device, self._scoped_render_server_key or self.active_server_key
+                ),
                 "librenms_id_is_legacy": librenms_id_is_legacy,
                 "librenms_id_serial_confirmed": librenms_id_serial_confirmed,
                 # Lookup device may differ from object (e.g. VC master vs member).
@@ -227,10 +243,42 @@ class BaseLibreNMSSyncView(LibreNMSPermissionMixin, LibreNMSAPIMixin, generic.Ob
                     _lookup_device._meta.model_name if _lookup_device else obj._meta.model_name
                 ),
                 "object_model_name": obj._meta.model_name,
+                # Build migrated mode from obj (the viewed device), NOT a re-resolved sync/lookup
+                # device, so the full page and the HTMX tab partials — which also pass obj — stay
+                # consistent. The merge stamps the _migrated_to marker on whichever device holds the
+                # LibreNMS link (get_librenms_sync_device): that IS obj for a non-VC device or the
+                # link-holding VC member (the common case); for a non-sync VC member the marker lands
+                # on the sync sibling, whose sync page is where its migrated controls surface.
+                # Use the resolved render key (not the lazy librenms_api property, which re-derives
+                # the global default and mis-namespaces the marker on the stale-?server_key path).
+                **self._build_migrated_context(obj, self._scoped_render_server_key or self.active_server_key),
             }
         )
 
         return context
+
+    @staticmethod
+    def _build_migrated_context(obj, server_key):
+        """
+        Build Stage 2b "donor migrated mode" context.
+
+        When ``migrated_to_marker`` is set, all sync action buttons should be hidden
+        and per-row "Move to winner" actions should be shown instead. Delegates to
+        :func:`utils.build_migrated_context` so the full page and the HTMX tab partials
+        share one implementation.
+
+        Args:
+            obj: The donor device to build migrated-mode context for.
+            server_key: The LibreNMS server key the marker is namespaced under.
+
+        Returns:
+            dict: ``{migrated_to_marker, migrated_to_winner}`` — the marker dict
+                ``{device_id, server_key, at}`` (or None), and the winner
+                :class:`Device` (or None if deleted since the marker was written).
+        """
+        from netbox_librenms_plugin.utils import build_migrated_context
+
+        return build_migrated_context(obj, server_key)
 
     @staticmethod
     def _build_all_server_mappings(obj, active_server_key):

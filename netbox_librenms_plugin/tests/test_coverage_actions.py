@@ -55,6 +55,37 @@ def _make_api():
     return api
 
 
+def _constrained_device_writer(constraints, username):
+    """A real non-superuser with plugin write access and a ``constraints``-scoped change_device grant."""
+    from core.models import ObjectType
+    from dcim.models import Device
+    from django.apps import apps
+    from django.contrib.auth import get_user_model
+    from users.models import ObjectPermission
+
+    # Resolve via the app registry: the autouse config fixtures patch the models module during
+    # the full suite, so a plain import could hand get_for_model() a mock class.
+    LibreNMSSettings = apps.get_model("netbox_librenms_plugin", "LibreNMSSettings")
+
+    user = get_user_model().objects.create_user(username=username, password="x")
+    write = ObjectPermission.objects.create(name=f"{username}-plugin-write", actions=["change"])
+    write.object_types.set([ObjectType.objects.get_for_model(LibreNMSSettings)])
+    write.users.set([user])
+
+    scoped = ObjectPermission.objects.create(
+        name=f"{username}-scoped-change-device", actions=["change"], constraints=constraints
+    )
+    scoped.object_types.set([ObjectType.objects.get_for_model(Device)])
+    scoped.users.set([user])
+
+    return get_user_model().objects.get(pk=user.pk)  # clear the per-request perm cache
+
+
+def _scoped_device_writer(in_scope_device, username):
+    """A real non-superuser whose change_device grant covers only *in_scope_device*."""
+    return _constrained_device_writer({"pk": in_scope_device.pk}, username)
+
+
 class TestSaveDevice:
     """Tests for _save_device (lines 44-56)."""
 
@@ -631,7 +662,11 @@ class TestBulkImportDevicesViewPost:
             response = view.post(request)
 
         assert response.status_code == 200
-        assert b"no workers available" in response.content
+        # Outcome-neutral wording: the fallback banner must NOT claim every selected row was
+        # "Imported" — the per-row summary toasts report the actual successes/failures/skips.
+        assert b"no workers are available" in response.content
+        assert b"ran synchronously" in response.content
+        assert b"devices synchronously" not in response.content
 
 
 class TestDeviceImportHelperMixin:
@@ -779,6 +814,9 @@ class TestAttachMessagesOob:
         mock_render.assert_called_once()
         assert b'<div id="django-messages"' in result.content
         assert result.content.startswith(b"<tr>row html</tr>")
+        # The CodeQL-safe format_html() composition produces exactly the concatenation of the
+        # original response bytes and the rendered (trusted) fragment — no escaping of either.
+        assert result.content == b"<tr>row html</tr>" + b'<div id="django-messages" hx-swap-oob="true"></div>'
 
     def test_skips_oob_swap_when_no_messages_queued(self):
         """No pending messages → don't append an empty OOB container that would wipe toasts already visible from an earlier action."""
@@ -5940,7 +5978,7 @@ class TestAddAsOOBViewPost:
         view = self._make_view()
         existing_device = make_device("host-a", librenms_cf={"default": {"id": 10}})
         # A *different* real device already owns LibreNMS id 17 (e.g. imported standalone).
-        make_device("the-idrac", librenms_cf={"default": {"id": 17}})
+        make_device("<script>the-idrac</script>", librenms_cf={"default": {"id": 17}})
         request = _make_request(post={"existing_device_id": str(existing_device.pk)})
 
         libre_device = {"device_id": 17}
@@ -5952,7 +5990,8 @@ class TestAddAsOOBViewPost:
         # HTMX error toast (200 + HX-Reswap:none) naming the conflicting device.
         assert response.status_code == 200
         assert response["HX-Reswap"] == "none"
-        assert b"already linked to &#x27;the-idrac&#x27;" in response.content
+        assert b"already linked to &#x27;&lt;script&gt;the-idrac&lt;/script&gt;&#x27;" in response.content
+        assert b"&amp;lt;script&amp;gt;" not in response.content
         # Nothing attached: the host device's entry gained no oob sub-block.
         assert "oob" not in Device.objects.get(pk=existing_device.pk).custom_field_data["librenms_id"]["default"]
 
@@ -6003,6 +6042,764 @@ class TestAddAsOOBViewPost:
         # The stored type is preserved (not overwritten with the stale modal's "idrac").
         oob = Device.objects.get(pk=existing_device.pk).custom_field_data["librenms_id"]["default"]["oob"]
         assert oob == {"id": 17, "type": "ilo"}
+
+
+@pytest.mark.django_db
+class TestGetValidatedDeviceLibreDeviceReuse:
+    """get_validated_device_with_selections reuses a supplied libre_device (the post-commit refresh path)."""
+
+    def test_supplied_libre_device_skips_the_fetch(self):
+        from netbox_librenms_plugin.views.imports.actions import PromoteToHostView
+
+        view = object.__new__(PromoteToHostView)
+        view._librenms_api = _make_api()
+        view.request = MagicMock()
+        request = _make_request(post={})
+        supplied = {"device_id": 4242, "hostname": "reuse-host", "sysName": "reuse-host"}
+
+        def _boom(*a, **k):
+            raise AssertionError("fetch_device_with_cache must not run when libre_device is supplied")
+
+        with (
+            patch("netbox_librenms_plugin.views.imports.actions.fetch_device_with_cache", side_effect=_boom),
+            patch(
+                "netbox_librenms_plugin.views.imports.actions.validate_device_for_import",
+                return_value={"import_as_vm": False},
+            ),
+        ):
+            libre_device, validation, _selections = view.get_validated_device_with_selections(
+                4242, request, libre_device=supplied
+            )
+
+        # The supplied device flowed through and validate_device_for_import still ran for real.
+        assert libre_device is supplied
+        assert validation is not None
+
+    def test_without_libre_device_still_fetches(self):
+        from netbox_librenms_plugin.views.imports.actions import PromoteToHostView
+
+        view = object.__new__(PromoteToHostView)
+        view._librenms_api = _make_api()
+        view.request = MagicMock()
+        request = _make_request(post={})
+
+        with (
+            patch(
+                "netbox_librenms_plugin.views.imports.actions.fetch_device_with_cache",
+                return_value={"device_id": 7},
+            ) as mock_fetch,
+            patch(
+                "netbox_librenms_plugin.views.imports.actions.validate_device_for_import",
+                return_value={"import_as_vm": False},
+            ),
+        ):
+            view.get_validated_device_with_selections(7, request)
+
+        mock_fetch.assert_called_once()
+
+
+@pytest.mark.django_db
+class TestPostActionRebindFailsClosed:
+    """PromoteToHost/Merge POST views are consolidated onto the fail-closed mixin rebind.
+
+    A blank server_key with a misconfigured default must surface a fragment error here instead of
+    leaving the lazy default client in place and 500ing on the first self.librenms_api access.
+    """
+
+    def test_blank_key_with_misconfigured_default_returns_error(self):
+        from netbox_librenms_plugin.views.imports.actions import PromoteToHostView
+
+        view = object.__new__(PromoteToHostView)
+        view.kwargs = {}
+        view.request = MagicMock()
+        view.require_write_permission = MagicMock(return_value=None)
+        view.require_object_permissions = MagicMock(return_value=None)
+        # No session client bound + a default that won't build → the mixin must fail closed on the
+        # blank key, where the old per-view helper left the default in place and validated nothing.
+        request = _make_request(post={"existing_device_id": "5"})
+        with patch("netbox_librenms_plugin.librenms_api.build_librenms_api", return_value=None):
+            response = view.post(request, device_id=17)
+
+        assert response.status_code == 200
+        assert b"no longer configured" in response.content
+        assert response["HX-Reswap"] == "none"
+
+
+@pytest.mark.django_db
+class TestPromoteToHostViewPost:
+    """View-level tests for PromoteToHostView.post() — HTTP interface + OOB sentinel regression."""
+
+    def _make_view(self):
+        from netbox_librenms_plugin.views.imports.actions import PromoteToHostView
+
+        view = object.__new__(PromoteToHostView)
+        view.kwargs = {}
+        view.request = MagicMock()
+        view._librenms_api = _make_api()
+        view.require_write_permission = MagicMock(return_value=None)
+        view.require_object_permissions = MagicMock(return_value=None)
+        return view
+
+    def test_missing_existing_device_id_returns_htmx_error(self):
+        """POST without existing_device_id returns an HTMX error before any ORM lookup."""
+        view = self._make_view()
+        request = _make_request(post={})
+
+        response = view.post(request, device_id=1)
+
+        assert response.status_code == 200
+        assert b"Missing existing_device_id" in response.content
+        assert response["HX-Reswap"] == "none"
+
+    def test_write_permission_denied_returns_error(self):
+        """When write permission is denied, the view returns that error immediately."""
+        from django.http import HttpResponse
+
+        view = self._make_view()
+        perm_error = HttpResponse("Forbidden", status=403)
+        view.require_write_permission = MagicMock(return_value=perm_error)
+
+        request = _make_request(post={"existing_device_id": "1"})
+        response = view.post(request, device_id=1)
+
+        assert response.status_code == 403
+
+    def test_no_promote_candidate_returns_htmx_error(self):
+        """When validation has no promote_to_host, the endpoint reports promotion N/A."""
+        view = self._make_view()
+        existing_device = make_device("promote-nocand")
+        request = _make_request(post={"existing_device_id": str(existing_device.pk)})
+
+        view.get_validated_device_with_selections = MagicMock(
+            return_value=({"device_id": 17}, {"promote_to_host": None}, {})
+        )
+        response = view.post(request, device_id=17)
+
+        assert response.status_code == 200
+        assert b"Promotion is not applicable" in response.content
+        assert response["HX-Reswap"] == "none"
+
+    def test_device_id_mismatch_returns_htmx_error(self):
+        """When the validation's existing_device pk does not match the posted existing_device_id, the view rejects the stale modal."""
+        view = self._make_view()
+        existing_device = make_device("promote-existing", librenms_cf={"default": {"id": 10}})
+        other_device = make_device("promote-other")
+        request = _make_request(post={"existing_device_id": str(existing_device.pk)})
+
+        promote = {"existing_libre_id": 10, "existing_oob_type": "oob"}
+        validation = {"promote_to_host": promote, "existing_device": other_device}
+        view.get_validated_device_with_selections = MagicMock(return_value=({"device_id": 17}, validation, {}))
+        response = view.post(request, device_id=17)
+
+        assert response.status_code == 200
+        assert b"mismatch" in response.content.lower()
+        assert response["HX-Reswap"] == "none"
+
+    def test_legacy_librenms_id_returns_htmx_error(self):
+        """A device with a legacy bare-int librenms_id is rejected with a convert-first message."""
+        view = self._make_view()
+        existing_device = make_device("promote-legacy", librenms_cf=42)
+        request = _make_request(post={"existing_device_id": str(existing_device.pk)})
+
+        # existing_libre_id matches the legacy host id (42) so earlier guards pass and the
+        # legacy-form check is the failure point.
+        promote = {"existing_libre_id": 42, "existing_oob_type": "oob"}
+        validation = {"promote_to_host": promote, "existing_device": existing_device}
+        view.get_validated_device_with_selections = MagicMock(return_value=({"device_id": 17}, validation, {}))
+        response = view.post(request, device_id=17)
+
+        assert response.status_code == 200
+        assert b"legacy" in response.content.lower()
+        assert response["HX-Reswap"] == "none"
+
+    def test_boolean_existing_libre_id_rejected(self):
+        """A boolean existing_libre_id (corrupt CF) must fail closed, not coerce to 1/0 via int()."""
+        view = self._make_view()
+        existing_device = make_device("promote-bool", librenms_cf={"default": {"id": 10}})
+        request = _make_request(post={"existing_device_id": str(existing_device.pk)})
+
+        promote = {"existing_libre_id": True, "existing_oob_type": "oob"}
+        validation = {"promote_to_host": promote, "existing_device": existing_device}
+        view.get_validated_device_with_selections = MagicMock(return_value=({"device_id": 17}, validation, {}))
+        response = view.post(request, device_id=17)
+
+        assert response.status_code == 200
+        assert b"Invalid existing LibreNMS id" in response.content
+
+    def test_promote_rejected_when_new_host_id_already_linked_elsewhere(self):
+        """When another device already owns the incoming host id, promotion aborts (exercises the deterministic-order conflict lock)."""
+        view = self._make_view()
+        existing_device = make_device("promote-src", librenms_cf={"default": {"id": 10}})
+        # Another NetBox device already linked to the incoming host id 17.
+        make_device("<script>promote-conflict</script>", librenms_cf={"default": {"id": 17}})
+        request = _make_request(post={"existing_device_id": str(existing_device.pk)})
+
+        promote = {"existing_libre_id": 10, "existing_oob_type": "oob"}
+        validation = {"promote_to_host": promote, "existing_device": existing_device}
+        view.get_validated_device_with_selections = MagicMock(return_value=({"device_id": 17}, validation, {}))
+        response = view.post(request, device_id=17)
+
+        assert response.status_code == 200
+        assert b"already linked to" in response.content
+        assert b"&lt;script&gt;promote-conflict&lt;/script&gt;" in response.content
+        assert b"&amp;lt;script&amp;gt;" not in response.content
+        # The source device must be left unchanged (still host id 10, no OOB).
+        existing_device.refresh_from_db()
+        assert existing_device.custom_field_data["librenms_id"]["default"] == {"id": 10}
+
+    def test_failed_oob_attach_after_host_swap_leaves_db_untouched(self):
+        """A ValueError raised AFTER set_librenms_device_id already ran must not commit a partial swap.
+
+        set_librenms_device_id()/set_librenms_oob() mutate custom_field_data in memory only;
+        the transaction's single DB write is _save_device() at the end of the atomic block, so
+        the early error return commits nothing. Pins the no-partial-commit contract of the
+        promote flow (an invalid OOB type is the in-transaction ValueError source).
+        """
+        view = self._make_view()
+        existing_device = make_device("promote-badoob", librenms_cf={"default": {"id": 10}})
+        request = _make_request(post={"existing_device_id": str(existing_device.pk)})
+
+        # No OOB keyword substring (OOB_TYPE_PATTERN) and not the "oob" sentinel, so
+        # set_librenms_oob raises ValueError inside the transaction — after the host swap.
+        promote = {"existing_libre_id": 10, "existing_oob_type": "management-card"}
+        validation = {"promote_to_host": promote, "existing_device": existing_device}
+        view.get_validated_device_with_selections = MagicMock(return_value=({"device_id": 17}, validation, {}))
+        response = view.post(request, device_id=17)
+
+        assert response.status_code == 200
+        assert b"Invalid promotion data" in response.content
+        # The in-memory host swap (10 -> 17) must NOT have been persisted: the row still
+        # holds the original host id and gained no oob sub-object.
+        existing_device.refresh_from_db()
+        assert existing_device.custom_field_data["librenms_id"]["default"] == {"id": 10}
+
+    def test_existing_link_already_points_at_incoming_device_returns_error(self):
+        """If the existing link already equals the incoming LibreNMS id there is nothing to promote — the view must say so rather than self-demoting the same id into OOB."""
+        view = self._make_view()
+        existing_device = make_device("promote-noop", librenms_cf={"default": {"id": 17}})
+        request = _make_request(post={"existing_device_id": str(existing_device.pk)})
+
+        promote = {"existing_libre_id": 17, "existing_oob_type": "oob"}
+        validation = {"promote_to_host": promote, "existing_device": existing_device}
+        view.get_validated_device_with_selections = MagicMock(return_value=({"device_id": 17}, validation, {}))
+        response = view.post(request, device_id=17)
+
+        assert response.status_code == 200
+        assert b"already points at this LibreNMS device" in response.content
+        assert response["HX-Reswap"] == "none"
+
+    def test_happy_path_generic_oob_sentinel_promotes_and_demotes_link(self):
+        """End-to-end VIEW-level regression for issue #89: POST to PromoteToHostView with the generic 'oob' sentinel as the existing controller type."""
+        from dcim.models import Device
+        from django.http import HttpResponse
+
+        view = self._make_view()
+        # Existing device is currently linked to LibreNMS id 10 (the controller, occupying the
+        # host slot pre-promote); the incoming real host is id 17.
+        existing_device = make_device("promote-happy", librenms_cf={"default": {"id": 10}})
+        request = _make_request(post={"existing_device_id": str(existing_device.pk)})
+
+        libre_device = {"device_id": 17}
+        promote = {"existing_libre_id": 10, "existing_oob_type": "oob"}
+        validation = {"promote_to_host": promote, "existing_device": existing_device}
+        view.get_validated_device_with_selections = MagicMock(return_value=(libre_device, validation, {}))
+        view.render_device_row = MagicMock(return_value=HttpResponse("row"))
+
+        response = view.post(request, device_id=17)
+
+        # Success path: validation modal refresh, no error swap.
+        assert response.status_code == 200
+        assert "validationRefresh" in response.get("HX-Trigger", "")
+        view.render_device_row.assert_called_once()
+
+        # Reload from the DB: host id swapped to 17, previous link (10) demoted to the OOB
+        # slot with the generic sentinel type.
+        entry = Device.objects.get(pk=existing_device.pk).custom_field_data["librenms_id"]["default"]
+        assert entry["id"] == 17
+        assert entry["oob"] == {"id": 10, "type": "oob"}
+
+    def test_override_platform_manufacturer_mismatch_rejected(self):
+        """An override platform whose manufacturer differs from the device type's is rejected (update_fields skips full_clean, so the cross-field invariant is enforced explicitly), and nothing is committed."""
+        from dcim.models import Device, Manufacturer, Platform
+        from django.http import HttpResponse
+
+        view = self._make_view()
+        existing_device = make_device("promote-badplat", librenms_cf={"default": {"id": 10}})
+        # A platform under a DIFFERENT manufacturer than the device's device_type.
+        other_mfr, _ = Manufacturer.objects.get_or_create(name="OtherMfr-3001", slug="othermfr-3001")
+        bad_platform, _ = Platform.objects.get_or_create(
+            name="BadPlat-3001", slug="badplat-3001", defaults={"manufacturer": other_mfr}
+        )
+        assert bad_platform.manufacturer_id != existing_device.device_type.manufacturer_id
+
+        request = _make_request(
+            post={"existing_device_id": str(existing_device.pk), "override_platform_id": str(bad_platform.pk)}
+        )
+        libre_device = {"device_id": 17}
+        promote = {"existing_libre_id": 10, "existing_oob_type": "oob"}
+        validation = {"promote_to_host": promote, "existing_device": existing_device}
+        view.get_validated_device_with_selections = MagicMock(return_value=(libre_device, validation, {}))
+        view.render_device_row = MagicMock(return_value=HttpResponse("row"))
+
+        response = view.post(request, device_id=17)
+
+        # Rejected by the SHARED _platform_device_type_mismatch() check inside _save_device()
+        # (not a now-removed inline duplicate); the promote is not committed.
+        assert response.status_code == 200
+        assert response["HX-Reswap"] == "none"
+        assert b"update the platform first" in response.content
+        reloaded = Device.objects.get(pk=existing_device.pk)
+        assert reloaded.platform_id is None  # the bad override was never persisted
+        assert reloaded.custom_field_data["librenms_id"]["default"] == {"id": 10}  # host swap not committed
+
+    def test_aborts_when_incoming_host_id_owned_by_another_device(self):
+        """The incoming host id must not already belong to another NetBox device."""
+        from dcim.models import Device
+        from django.http import HttpResponse
+
+        view = self._make_view()
+        existing_device = make_device("promote-host", librenms_cf={"default": {"id": 10}})
+        # A different real device already owns LibreNMS id 17.
+        make_device("promote-thief", librenms_cf={"default": {"id": 17}})
+        request = _make_request(post={"existing_device_id": str(existing_device.pk)})
+
+        libre_device = {"device_id": 17}
+        promote = {"existing_libre_id": 10, "existing_oob_type": "oob"}
+        validation = {"promote_to_host": promote, "existing_device": existing_device}
+        view.get_validated_device_with_selections = MagicMock(return_value=(libre_device, validation, {}))
+        view.render_device_row = MagicMock(return_value=HttpResponse("row"))
+
+        response = view.post(request, device_id=17)
+
+        assert response.status_code == 200
+        assert response["HX-Reswap"] == "none"
+        assert b"already linked to &#x27;promote-thief&#x27;" in response.content
+        # Nothing committed: the host slot is unchanged and no OOB slot was written.
+        entry = Device.objects.get(pk=existing_device.pk).custom_field_data["librenms_id"]["default"]
+        assert entry == {"id": 10}
+
+
+@pytest.mark.django_db
+class TestMergeNetBoxDevicesViewOOBTransfer:
+    """MergeNetBoxDevicesView.post: oob_ip may only move to the winner when its underlying IP already sits on a winner interface (the merge does not move interfaces, and the save skips full_clean())."""
+
+    def _make_view(self):
+        from netbox_librenms_plugin.views.imports.actions import MergeNetBoxDevicesView
+
+        view = object.__new__(MergeNetBoxDevicesView)
+        view._librenms_api = _make_api()
+        view.request = MagicMock()
+        view.require_write_permission = MagicMock(return_value=None)
+        view.require_object_permissions = MagicMock(return_value=None)
+        return view
+
+    def _run(self, *, oob_on_winner):
+        """Drive a merge where the donor's oob_ip sits on an interface owned by the winner (``oob_on_winner=True``) or by the donor (``False``)."""
+        from dcim.models import Device
+        from django.http import HttpResponse
+
+        from netbox_librenms_plugin.tests.conftest import ip_on
+
+        view = self._make_view()
+
+        winner = make_device("merge-winner", librenms_cf={"default": {"id": 20}})
+        donor = make_device("merge-donor", librenms_cf={"default": {"id": 10}})
+
+        # The donor carries an oob_ip whose underlying IP is assigned to an interface
+        # owned by whichever device the scenario dictates. save() (not full_clean) lets
+        # us seed the winner-interface case the view is designed to resolve.
+        oob_host = winner if oob_on_winner else donor
+        oob_ip = ip_on(oob_host, "192.0.2.7/32", "mgmt0")
+        donor.oob_ip = oob_ip
+        donor.save()
+
+        request = _make_request(post={"winner_pk": str(winner.pk), "donor_pk": str(donor.pk)})
+        validation = {"merge_candidates": {"host_named": {"pk": winner.pk}, "oob_named": {"pk": donor.pk}}}
+        view.get_validated_device_with_selections = MagicMock(return_value=({"device_id": 99}, validation, {}))
+        view.render_device_row = MagicMock(return_value=HttpResponse("row"))
+
+        resp = view.post(request, device_id=99)
+        assert resp.status_code == 200
+        return Device.objects.get(pk=winner.pk), Device.objects.get(pk=donor.pk), oob_ip
+
+    def test_transfers_when_oob_ip_on_winner_interface(self):
+        winner, donor, oob_ip = self._run(oob_on_winner=True)
+        # The transfer actually persisted: winner now owns the oob_ip, donor cleared.
+        assert winner.oob_ip_id == oob_ip.pk
+        assert donor.oob_ip_id is None
+
+    def test_skips_when_oob_ip_on_donor_interface(self):
+        winner, donor, oob_ip = self._run(oob_on_winner=False)
+        # Left on the donor (its interface owns the IP); winner not given a donor-owned IP.
+        assert donor.oob_ip_id == oob_ip.pk
+        assert winner.oob_ip_id is None
+
+    def test_oob_ip_and_owning_interface_locked_for_update(self):
+        """The oob_ip transfer must SELECT ... FOR UPDATE the IPAddress and its owning interface so a concurrent interface move can't leave winner.oob_ip on an interface no longer on the winner."""
+        from django.db import connection
+        from django.http import HttpResponse
+        from django.test.utils import CaptureQueriesContext
+
+        from netbox_librenms_plugin.tests.conftest import ip_on
+
+        view = self._make_view()
+        winner = make_device("merge-winner-lock", librenms_cf={"default": {"id": 20}})
+        donor = make_device("merge-donor-lock", librenms_cf={"default": {"id": 10}})
+        oob_ip = ip_on(winner, "192.0.2.9/32", "mgmt0")  # IP on a WINNER interface → transfer path runs
+        donor.oob_ip = oob_ip
+        donor.save()
+
+        request = _make_request(post={"winner_pk": str(winner.pk), "donor_pk": str(donor.pk)})
+        validation = {"merge_candidates": {"host_named": {"pk": winner.pk}, "oob_named": {"pk": donor.pk}}}
+        view.get_validated_device_with_selections = MagicMock(return_value=({"device_id": 99}, validation, {}))
+        view.render_device_row = MagicMock(return_value=HttpResponse("row"))
+
+        with CaptureQueriesContext(connection) as ctx:
+            resp = view.post(request, device_id=99)
+        assert resp.status_code == 200
+
+        def _locked(table):
+            return any(table in q["sql"].lower() and "for update" in q["sql"].lower() for q in ctx.captured_queries)
+
+        assert _locked("ipam_ipaddress"), "the transferred oob_ip must be SELECT ... FOR UPDATE"
+        assert _locked("dcim_interface"), "the oob_ip's owning interface must be SELECT ... FOR UPDATE"
+        # And the transfer still completes.
+        winner.refresh_from_db()
+        donor.refresh_from_db()
+        assert winner.oob_ip_id == oob_ip.pk
+        assert donor.oob_ip_id is None
+
+    def test_save_failure_rolls_back_donor_oob_release_and_marker(self):
+        """Forced persist failure mid-merge must roll back the donor's already-executed save."""
+        from dcim.models import Device
+        from django.db import IntegrityError
+        from django.http import HttpResponse
+
+        from netbox_librenms_plugin.tests.conftest import ip_on
+
+        view = self._make_view()
+        winner = make_device("merge-winner-fail", librenms_cf={"default": {"id": 20}})
+        donor = make_device("merge-donor-fail", librenms_cf={"default": {"id": 10}})
+        # oob_ip on a winner-owned interface → the transfer path runs (oob_ip in update_fields).
+        oob_ip = ip_on(winner, "192.0.2.8/32", "mgmt0")
+        donor.oob_ip = oob_ip
+        donor.save()
+
+        request = _make_request(post={"winner_pk": str(winner.pk), "donor_pk": str(donor.pk)})
+        validation = {"merge_candidates": {"host_named": {"pk": winner.pk}, "oob_named": {"pk": donor.pk}}}
+        view.get_validated_device_with_selections = MagicMock(return_value=({"device_id": 99}, validation, {}))
+        view.render_device_row = MagicMock(return_value=HttpResponse("row"))
+
+        # Force the SECOND Device.save (the winner's, per the donor-then-winner order) to fail,
+        # so the donor's release is already written inside the savepoint when rollback fires.
+        real_save = Device.save
+        save_calls = []
+
+        def flaky_save(self, *args, **kwargs):
+            save_calls.append(self.pk)
+            if len(save_calls) == 2:
+                raise IntegrityError("forced winner save failure")
+            return real_save(self, *args, **kwargs)
+
+        with patch.object(Device, "save", flaky_save):
+            resp = view.post(request, device_id=99)
+
+        # Surfaced as the HTMX OOB error toast (200 + HX-Reswap:none), not a 500.
+        assert resp.status_code == 200
+        assert resp["HX-Reswap"] == "none"
+        assert b"database integrity constraint was violated" in resp.content
+        assert b"forced winner save failure" not in resp.content
+        # The donor's save (release + marker) was rolled back: it still owns the oob_ip, the
+        # winner never claimed it, and no migration marker was stamped.
+        donor.refresh_from_db()
+        winner.refresh_from_db()
+        assert donor.oob_ip_id == oob_ip.pk
+        assert winner.oob_ip_id is None
+        entry = donor.custom_field_data["librenms_id"]["default"]
+        assert entry == {"id": 10}
+        assert "_migrated_to" not in entry
+
+
+def _two_member_vc(name, *, m1_cf=None, m2_cf=None):
+    """Create a real 2-member VirtualChassis (positions 1, 2). m1 becomes the sync device when it is the member holding the ``librenms_id``."""
+    from dcim.models import VirtualChassis
+
+    vc = VirtualChassis.objects.create(name=name)
+    m1 = make_device(f"{name}-m1", librenms_cf=m1_cf)
+    m1.virtual_chassis = vc
+    m1.vc_position = 1
+    m1.save()
+    m2 = make_device(f"{name}-m2", librenms_cf=m2_cf)
+    m2.virtual_chassis = vc
+    m2.vc_position = 2
+    m2.save()
+    return vc, m1, m2
+
+
+@pytest.mark.django_db
+class TestMergeNetBoxDevicesViewVCSyncDevice:
+    """MergeNetBoxDevicesView.post: when a merge candidate is a Virtual Chassis member, the LibreNMS link (host id / OOB) and the ``_migrated_to`` marker must be merged on the VC's sync device (``get_librenms_sync_device``), not the raw selected member. Writing to a non-sync member either split-brains a VC that already has a linked member, or leaves the donor's real link (on its sync sibling) uncleared."""
+
+    def _make_view(self):
+        from netbox_librenms_plugin.views.imports.actions import MergeNetBoxDevicesView
+
+        view = object.__new__(MergeNetBoxDevicesView)
+        view._librenms_api = _make_api()
+        view.request = MagicMock()
+        view.require_write_permission = MagicMock(return_value=None)
+        view.require_object_permissions = MagicMock(return_value=None)
+        return view
+
+    def _run_merge(self, *, winner, donor):
+        from django.http import HttpResponse
+
+        view = self._make_view()
+        request = _make_request(post={"winner_pk": str(winner.pk), "donor_pk": str(donor.pk)})
+        validation = {"merge_candidates": {"host_named": {"pk": winner.pk}, "oob_named": {"pk": donor.pk}}}
+        view.get_validated_device_with_selections = MagicMock(return_value=({"device_id": 99}, validation, {}))
+        view.render_device_row = MagicMock(return_value=HttpResponse("row"))
+        resp = view.post(request, device_id=99)
+        assert resp.status_code == 200
+        return resp
+
+    @staticmethod
+    def _entry(device):
+        device.refresh_from_db()
+        return (device.custom_field_data.get("librenms_id") or {}).get("default") or {}
+
+    def test_winner_is_non_sync_vc_member_link_lands_on_sync_device(self):
+        """Winner is a non-sync VC member whose sync sibling already holds a host id; the donor's id must merge onto the sync sibling (into its OOB half) and NEVER onto the raw winner member — otherwise two members of one chassis hold ``librenms_id`` (split brain)."""
+        _vc, m1, m2 = _two_member_vc("mrg-vc-win", m1_cf={"default": {"id": 30}}, m2_cf=None)
+        donor = make_device("mrg-vc-win-donor", librenms_cf={"default": {"id": 40}})
+
+        self._run_merge(winner=m2, donor=donor)
+
+        # The raw non-sync winner member must stay clean — no host id planted on it.
+        assert "id" not in self._entry(m2), "non-sync VC member must not receive the merged host id (split brain)"
+        # The VC's sync device keeps its own id and absorbs the donor's id into its OOB slot.
+        m1_entry = self._entry(m1)
+        assert m1_entry.get("id") == 30
+        assert (m1_entry.get("oob") or {}).get("id") == 40, "donor id should merge onto the sync device's OOB slot"
+        # Donor cleared + marked migrated toward the sync device (the real link holder).
+        donor_entry = self._entry(donor)
+        assert "id" not in donor_entry
+        assert donor_entry.get("_migrated_to", {}).get("device_id") == m1.pk
+
+    def test_donor_is_non_sync_vc_member_clears_link_on_sync_device(self):
+        """Donor is a non-sync VC member; its real link lives on the sync sibling. The merge must read + clear that sibling's link (and mark IT migrated), not the empty selected member — otherwise the source VC stays linked to LibreNMS."""
+        _vc, m1, m2 = _two_member_vc("mrg-vc-don", m1_cf={"default": {"id": 30}}, m2_cf=None)
+        winner = make_device("mrg-vc-don-winner", librenms_cf={"default": {"id": 50}})
+
+        self._run_merge(winner=winner, donor=m2)
+
+        # The donor VC's sync sibling holds the real link: it must be absorbed and cleared + marked.
+        m1_entry = self._entry(m1)
+        assert "id" not in m1_entry, "the donor VC's sync device must be cleared, not left linked to LibreNMS"
+        assert m1_entry.get("_migrated_to", {}).get("device_id") == winner.pk
+        # Winner absorbed the sync sibling's id into its OOB slot (winner already had a host id).
+        winner_entry = self._entry(winner)
+        assert winner_entry.get("id") == 50
+        assert (winner_entry.get("oob") or {}).get("id") == 30
+        # The raw selected member (m2) never held a link; nothing is planted on it.
+        assert "id" not in self._entry(m2)
+
+    def test_legacy_id_on_donor_sync_sibling_gets_convert_first_message(self):
+        """A legacy link on the donor's sync sibling gets the friendly convert-first message."""
+        _vc, _sync_member, selected_member = _two_member_vc("mrg-vc-legacy", m1_cf=30, m2_cf=None)
+        winner = make_device("mrg-vc-legacy-winner", librenms_cf={"default": {"id": 50}})
+
+        response = self._run_merge(winner=winner, donor=selected_member)
+
+        assert b"Donor device has a legacy bare-integer librenms_id" in response.content
+        assert b"Convert mapping" in response.content
+
+    def test_merge_locks_every_vc_member_before_resolving_the_sync_device(self):
+        """The merge must lock every VC member (incl. bystanders) before resolving the sync device."""
+        import re
+
+        from django.db import connection
+        from django.test.utils import CaptureQueriesContext
+
+        vc, m1, m2 = _two_member_vc("mrg-vc-lock", m1_cf={"default": {"id": 30}}, m2_cf=None)
+        # A bystander member: not the selected winner (m2) and not the sync device (m1).
+        m3 = make_device("mrg-vc-lock-m3", librenms_cf=None)
+        m3.virtual_chassis = vc
+        m3.vc_position = 3
+        m3.save()
+        donor = make_device("mrg-vc-lock-donor", librenms_cf={"default": {"id": 40}})
+
+        with CaptureQueriesContext(connection) as ctx:
+            self._run_merge(winner=m2, donor=donor)
+
+        locked_pks = set()
+        for q in ctx.captured_queries:
+            sql = q["sql"]
+            if "dcim_device" in sql and "FOR UPDATE" in sql:
+                match = re.search(r"IN \(([\d, ]+)\)", sql)
+                if match:
+                    locked_pks.update(int(p) for p in match.group(1).split(","))
+        # The whole chassis (m1 sync + m2 winner + m3 bystander) plus the donor must be locked. m3
+        # missing means the sync device was resolved from unlocked rows — the bug this guards.
+        assert {m1.pk, m2.pk, m3.pk, donor.pk} <= locked_pks, (
+            f"expected every VC member locked before sync-device resolution; locked={locked_pks}, "
+            f"bystander m3={m3.pk} missing"
+        )
+
+
+@pytest.mark.django_db
+class TestMergeNetBoxDevicesViewFailClosed:
+    """Merge preparation failures must return a toast and leave the donor unmigrated."""
+
+    def _make_view(self):
+        from netbox_librenms_plugin.views.imports.actions import MergeNetBoxDevicesView
+
+        view = object.__new__(MergeNetBoxDevicesView)
+        view._librenms_api = _make_api()
+        view.request = MagicMock()
+        view.require_write_permission = MagicMock(return_value=None)
+        view.require_object_permissions = MagicMock(return_value=None)
+        return view
+
+    def _post_merge(self, view, winner, donor):
+        from django.http import HttpResponse
+
+        request = _make_request(post={"winner_pk": str(winner.pk), "donor_pk": str(donor.pk)})
+        validation = {"merge_candidates": {"host_named": {"pk": winner.pk}, "oob_named": {"pk": donor.pk}}}
+        view.get_validated_device_with_selections = MagicMock(return_value=({"device_id": 99}, validation, {}))
+        view.render_device_row = MagicMock(return_value=HttpResponse("row"))
+        return view.post(request, device_id=99)
+
+    def test_orphan_host_id_merge_fails_closed_and_leaves_donor_unmigrated(self):
+        """A winner holding both host id + oob and a donor with a distinct host-id-only link fails closed."""
+        winner = make_device(
+            "merge-orphan-winner",
+            librenms_cf={"default": {"id": 100, "oob": {"id": 50, "type": "idrac"}}},
+        )
+        donor = make_device("<script>merge-orphan-donor</script>", librenms_cf={"default": {"id": 200}})
+
+        resp = self._post_merge(self._make_view(), winner, donor)
+
+        assert resp.status_code == 200
+        assert resp["HX-Reswap"] == "none"
+        assert b"Cannot merge" in resp.content
+        assert b"&lt;script&gt;merge-orphan-donor&lt;/script&gt;" in resp.content
+        assert b"&amp;lt;script&amp;gt;" not in resp.content
+        # Donor's link is preserved and it was NOT marked migrated (no orphaned LibreNMS host).
+        donor.refresh_from_db()
+        entry = donor.custom_field_data["librenms_id"]["default"]
+        assert entry == {"id": 200}
+        assert "_migrated_to" not in entry
+
+    def test_corrupt_donor_oob_id_with_winner_oob_fails_closed_not_500(self):
+        """A donor oob id merge_librenms_links skipped (winner already has an oob) fails closed at the marker, not a 500."""
+        winner = make_device(
+            "merge-f2-winner",
+            librenms_cf={"default": {"id": 5, "oob": {"id": 9, "type": "idrac"}}},
+        )
+        # Same host id (so the orphan guard doesn't fire) but a corrupt donor oob id. Because the
+        # winner already holds an oob, merge_librenms_links() skips validating the donor oob id —
+        # mark_librenms_migrated() is the one that rejects it, and that call must be guarded too.
+        donor = make_device("merge-f2-donor", librenms_cf={"default": {"id": 5, "oob": {"id": "abc"}}})
+
+        resp = self._post_merge(self._make_view(), winner, donor)
+
+        assert resp.status_code == 200
+        assert resp["HX-Reswap"] == "none"
+        assert b"Cannot merge" in resp.content
+        donor.refresh_from_db()
+        entry = donor.custom_field_data["librenms_id"]["default"]
+        assert entry == {"id": 5, "oob": {"id": "abc"}}
+        assert "_migrated_to" not in entry
+
+    def test_oob_transfer_valueerror_fails_closed_and_rolls_back(self):
+        """A ValueError from the oob_ip transfer (the TOCTOU race the lock guards) fails closed with rollback, not a 500."""
+        import netbox_librenms_plugin.views.imports.actions as actions_mod
+        from netbox_librenms_plugin.tests.conftest import ip_on
+
+        winner = make_device("merge-f5-winner", librenms_cf={"default": {"id": 20}})
+        donor = make_device("merge-f5-donor", librenms_cf={"default": {"id": 10}})
+        oob_ip = ip_on(winner, "192.0.2.11/32", "mgmt0")  # IP on a WINNER interface → transfer path runs
+        donor.oob_ip = oob_ip
+        donor.save()
+
+        # The pre-check (locked_iface.device_id == winner.pk) passes, but set_device_ip_fk re-reads
+        # a now-stale cached assignment and raises — the concurrency race the lock exists to catch.
+        # Patch the exact boundary (the race is not deterministically reproducible single-threaded).
+        real = actions_mod.set_device_ip_fk
+
+        def racy(device, field, ip, *, save=True):
+            if field == "oob_ip" and ip is not None:
+                raise ValueError("set_device_ip_fk: address is not assigned to an interface on that device")
+            return real(device, field, ip, save=save)
+
+        with patch.object(actions_mod, "set_device_ip_fk", racy):
+            resp = self._post_merge(self._make_view(), winner, donor)
+
+        assert resp.status_code == 200
+        assert resp["HX-Reswap"] == "none"
+        assert b"Cannot merge" in resp.content
+        # Rolled back: donor keeps its oob_ip and link, winner never claimed it, no marker stamped.
+        donor.refresh_from_db()
+        winner.refresh_from_db()
+        assert donor.oob_ip_id == oob_ip.pk
+        assert winner.oob_ip_id is None
+        entry = donor.custom_field_data["librenms_id"]["default"]
+        assert entry == {"id": 10}
+        assert "_migrated_to" not in entry
+
+    def test_oob_ip_lock_database_error_fails_closed_without_leaking_backend_text(self):
+        """A DB failure while acquiring the OOB-IP lock returns a safe toast and rolls back."""
+        from django.db import DatabaseError
+
+        from ipam.models import IPAddress
+        from netbox_librenms_plugin.tests.conftest import ip_on
+
+        winner = make_device("merge-db-lock-winner", librenms_cf={"default": {"id": 20}})
+        donor = make_device("merge-db-lock-donor", librenms_cf={"default": {"id": 10}})
+        oob_ip = ip_on(winner, "192.0.2.12/32", "mgmt0")
+        donor.oob_ip = oob_ip
+        donor.save()
+
+        with patch.object(
+            IPAddress.objects,
+            "select_for_update",
+            side_effect=DatabaseError("forced lock timeout with backend detail"),
+        ):
+            resp = self._post_merge(self._make_view(), winner, donor)
+
+        assert resp.status_code == 200
+        assert resp["HX-Reswap"] == "none"
+        assert b"database operation failed" in resp.content
+        assert b"forced lock timeout" not in resp.content
+        donor.refresh_from_db()
+        winner.refresh_from_db()
+        assert donor.oob_ip_id == oob_ip.pk
+        assert winner.oob_ip_id is None
+        assert donor.custom_field_data["librenms_id"]["default"] == {"id": 10}
+
+    def test_device_lock_database_error_fails_closed_without_leaking_backend_text(self):
+        """A DB failure while locking the merge pair returns a safe retry toast, not a 500."""
+        from dcim.models import Device
+        from django.db import DatabaseError
+
+        winner = make_device("merge-device-lock-winner", librenms_cf={"default": {"id": 20}})
+        donor = make_device("merge-device-lock-donor", librenms_cf={"default": {"id": 10}})
+
+        with patch.object(
+            Device.objects,
+            "select_for_update",
+            side_effect=DatabaseError("forced primary lock timeout with backend detail"),
+        ):
+            resp = self._post_merge(self._make_view(), winner, donor)
+
+        assert resp.status_code == 200
+        assert resp["HX-Reswap"] == "none"
+        assert b"database operation failed" in resp.content
+        assert b"forced primary lock timeout" not in resp.content
+        donor.refresh_from_db()
+        winner.refresh_from_db()
+        assert donor.custom_field_data["librenms_id"]["default"] == {"id": 10}
+        assert winner.custom_field_data["librenms_id"]["default"] == {"id": 20}
 
 
 @pytest.mark.django_db
@@ -6547,6 +7344,70 @@ class TestCreatePlatformFromImportManufacturer:
         mock_platform.assert_not_called()
         mock_platform.objects.create.assert_not_called()
 
+    @pytest.mark.django_db
+    def test_device_platform_manufacturer_mismatch_surfaced_platform_kept(self):
+        """A new Platform whose manufacturer conflicts with the target Device's device-type manufacturer fails to assign; the failure is surfaced to the user and the device is left unassigned, but the just-created Platform is intentionally kept (aec0360a1: the platform create is the primary action and the assignment runs in its own transaction)."""
+        from dcim.models import Manufacturer, Platform
+
+        device = make_device("plat-assign-mismatch")  # device_type under manufacturer TestMfr
+        other_mfr, _ = Manufacturer.objects.get_or_create(name="PlatAssignOther", slug="platassign-other")
+        assert other_mfr.pk != device.device_type.manufacturer_id
+
+        view = self._view()
+        req = _make_request(
+            post={"platform_name": "Mismatch-OS", "manufacturer": str(other_mfr.pk)},
+            headers={"HX-Request": "true"},
+        )
+
+        with (
+            patch.object(view, "require_write_permission", return_value=None),
+            patch.object(view, "require_object_permissions", return_value=None),
+            patch.object(
+                view,
+                "get_validated_device_with_selections",
+                return_value=(None, {"existing_device": device}, {}),
+            ),
+        ):
+            resp = view.post(req, device_id=device.pk)
+
+        # The platform create is the primary action: the manufacturer-mismatch assignment failure is
+        # surfaced to the user (error toast) and the device is left unassigned, but the just-created
+        # Platform is intentionally NOT rolled back.
+        assert resp is not None
+        assert Platform.objects.filter(name="Mismatch-OS").exists()
+        assert b"could not be assigned" in resp.content
+        device.refresh_from_db()
+        assert device.platform_id is None
+
+    @pytest.mark.django_db
+    def test_device_platform_manufacturer_match_assigns(self):
+        """The consistent case still assigns: a Platform under the device-type's manufacturer is persisted onto the Device."""
+        from dcim.models import Manufacturer, Platform
+
+        device = make_device("plat-assign-ok")
+        mfr = Manufacturer.objects.get(slug="test-mfr")  # make_device's device_type manufacturer
+
+        view = self._view()
+        req = _make_request(
+            post={"platform_name": "Match-OS", "manufacturer": str(mfr.pk)},
+            headers={"HX-Request": "true"},
+        )
+
+        with (
+            patch.object(view, "require_write_permission", return_value=None),
+            patch.object(view, "require_object_permissions", return_value=None),
+            patch.object(
+                view,
+                "get_validated_device_with_selections",
+                return_value=(None, {"existing_device": device}, {}),
+            ),
+        ):
+            view.post(req, device_id=device.pk)
+
+        platform = Platform.objects.get(name="Match-OS")
+        device.refresh_from_db()
+        assert device.platform_id == platform.pk
+
 
 class TestOOBInterfaceSelectTemplate:
     """The OOB interface picker toggles the "new name" input via a script block (extracted from an inline onchange) so it works under CSP and is maintainable."""
@@ -6575,7 +7436,7 @@ class TestOOBInterfaceSelectTemplate:
         assert 'getElementById("oob-iface-7")' in html
 
     def test_initializes_create_state_on_load(self):
-        """The script must sync the "new name" input once on load (not only on change), so the input matches the rendered selection even if it differs from the server-side display logic (e.g."""
+        """The script must sync the "new name" input once on load (not only on change), so the input matches the rendered selection even if it differs from the server-side display logic (e.g. a browser-restored form value)."""
         html = self._render()
         assert "function syncCreateState()" in html
         # Bound to change AND invoked immediately so initial state is authoritative.
@@ -6840,6 +7701,17 @@ class TestRebindOrHtmxErrorHelper:
         assert view._librenms_api.server_key == "prod"
 
 
+class TestHtmxErrorResponse:
+    def test_plain_dynamic_message_is_html_escaped_once(self):
+        from netbox_librenms_plugin.views.imports.actions import _htmx_error_response
+
+        response = _htmx_error_response("Conflict with '<script>alert(1)</script>'.")
+
+        assert b"<script>" not in response.content
+        assert b"&lt;script&gt;alert(1)&lt;/script&gt;" in response.content
+        assert b"&amp;lt;script&amp;gt;" not in response.content
+
+
 @pytest.mark.django_db
 class TestSerialActionsNormalizeAndLock:
     """Serial-writing actions must persist/compare the TRIMMED serial and guard conflicts without a second row lock."""
@@ -6926,6 +7798,25 @@ class TestSerialActionsNormalizeAndLock:
         conflict_row_locks = self._serial_row_locks(sqls)
         assert conflict_row_locks == [], f"conflict lookup still takes a row lock: {conflict_row_locks}"
 
+    def test_serial_advisory_lock_uses_a_stable_application_key(self):
+        """Equal serials use one stable application key while distinct serials use different keys."""
+        from django.db import connection, transaction
+        from django.test.utils import CaptureQueriesContext
+
+        from netbox_librenms_plugin.views.imports.actions import _acquire_serial_assignment_lock
+
+        with transaction.atomic(), CaptureQueriesContext(connection) as ctx:
+            _acquire_serial_assignment_lock("SN-STABLE")
+            _acquire_serial_assignment_lock("SN-STABLE")
+            _acquire_serial_assignment_lock("SN-DIFFERENT")
+
+        lock_sqls = [q["sql"] for q in ctx.captured_queries if "pg_advisory_xact_lock" in q["sql"]]
+        assert len(lock_sqls) == 3
+        assert lock_sqls[0] == lock_sqls[1]
+        assert lock_sqls[0] != lock_sqls[2]
+        assert "3935087803272606537" in lock_sqls[0]
+        assert all("hashtext" not in sql.lower() for sql in lock_sqls)
+
     def test_serial_lock_refuses_to_run_in_autocommit(self):
         """pg_advisory_xact_lock is transaction-scoped, so taking it outside a transaction locks nothing and must fail loudly."""
         from django.db import connection
@@ -6987,31 +7878,7 @@ class TestConflictActionsObjectScope:
     device by raw pk.
     """
 
-    @staticmethod
-    def _scoped_writer(in_scope_device, username):
-        """A real non-superuser with plugin write access and a pk-constrained change_device grant."""
-        from core.models import ObjectType
-        from dcim.models import Device
-        from django.apps import apps
-        from django.contrib.auth import get_user_model
-        from users.models import ObjectPermission
-
-        # Resolve via the app registry: the autouse config fixtures patch the models module during
-        # the full suite, so a plain import could hand get_for_model() a mock class.
-        LibreNMSSettings = apps.get_model("netbox_librenms_plugin", "LibreNMSSettings")
-
-        user = get_user_model().objects.create_user(username=username, password="x")
-        write = ObjectPermission.objects.create(name=f"{username}-plugin-write", actions=["change"])
-        write.object_types.set([ObjectType.objects.get_for_model(LibreNMSSettings)])
-        write.users.set([user])
-
-        scoped = ObjectPermission.objects.create(
-            name=f"{username}-scoped-change-device", actions=["change"], constraints={"pk": in_scope_device.pk}
-        )
-        scoped.object_types.set([ObjectType.objects.get_for_model(Device)])
-        scoped.users.set([user])
-
-        return get_user_model().objects.get(pk=user.pk)  # clear the per-request perm cache
+    _scoped_writer = staticmethod(_scoped_device_writer)
 
     def _post_conflict(self, user, target, action="link"):
         """Drive the real DeviceConflictActionView.post against *target* with only the LibreNMS seams patched."""
@@ -7183,3 +8050,260 @@ class TestConflictActionsObjectScope:
         sync_entry = Device.objects.get(pk=sync.pk).custom_field_data["librenms_id"]["default"]
         assert sync_entry["id"] == 30
         assert sync_entry["oob"]["id"] == 4343
+
+
+@pytest.mark.django_db
+class TestMergeNetBoxDevicesViewDonorDerivation:
+    """The merge derives the donor from winner_pk + merge_candidates and ignores posted donor_pk."""
+
+    def _make_view(self):
+        from netbox_librenms_plugin.views.imports.actions import MergeNetBoxDevicesView
+
+        view = object.__new__(MergeNetBoxDevicesView)
+        view._librenms_api = _make_api()
+        view.request = MagicMock()
+        view.require_write_permission = MagicMock(return_value=None)
+        view.require_object_permissions = MagicMock(return_value=None)
+        return view
+
+    def test_ignores_posted_donor_pk_equal_to_winner(self):
+        from dcim.models import Device
+        from django.http import HttpResponse
+
+        view = self._make_view()
+
+        winner = make_device("merge-w", librenms_cf={"default": {"id": 20}})
+        donor = make_device("merge-d", librenms_cf={"default": {"id": 10}})
+
+        # Tampered client state: donor_pk == winner_pk must not turn this into a self-merge.
+        request = _make_request(post={"winner_pk": str(winner.pk), "donor_pk": str(winner.pk)})
+
+        validation = {"merge_candidates": {"host_named": {"pk": winner.pk}, "oob_named": {"pk": donor.pk}}}
+        view.get_validated_device_with_selections = MagicMock(return_value=({"device_id": 99}, validation, {}))
+        view.render_device_row = MagicMock(return_value=HttpResponse("row"))
+
+        resp = view.post(request, device_id=99)
+        assert resp.status_code == 200
+
+        winner = Device.objects.get(pk=winner.pk)
+        donor = Device.objects.get(pk=donor.pk)
+        # The donor is the *other* merge candidate, never the posted self-pk: it is the
+        # one whose active link was cleared and stamped with a _migrated_to marker
+        # pointing at the winner.
+        donor_entry = donor.custom_field_data["librenms_id"]["default"]
+        assert donor_entry.get("_migrated_to", {}).get("device_id") == winner.pk
+        assert donor_entry.get("id") is None
+        # The winner absorbed the merge and is NOT itself marked migrated; it keeps its
+        # own host id (winner-wins), with the donor's id demoted into the oob slot.
+        winner_entry = winner.custom_field_data["librenms_id"]["default"]
+        assert "_migrated_to" not in winner_entry
+        assert winner_entry["id"] == 20
+        assert winner_entry["oob"]["id"] == 10
+
+
+@pytest.mark.django_db
+class TestPromoteAndMergeObjectScope:
+    """Promote and merge resolve client-supplied pks, so both must go through a restricted queryset.
+
+    ``require_object_permissions`` only asks the model-level ``dcim.change_device``, which a
+    pk-constrained grant satisfies; a raw lookup would then let it re-point the LibreNMS linkage of
+    any device.
+    """
+
+    def _post_promote(self, user, target, **overrides):
+        """Drive the real PromoteToHostView.post against *target* with only the LibreNMS seams patched."""
+        from django.http import HttpResponse
+
+        from netbox_librenms_plugin.views.imports.actions import PromoteToHostView
+
+        view = PromoteToHostView()
+        view._librenms_api = _make_api()
+        libre_device = {"device_id": 55, "hostname": target.name, "sysName": target.name}
+        validation = {
+            "existing_device": target,
+            "promote_to_host": {"existing_libre_id": 10, "existing_oob_type": "idrac"},
+        }
+        post_data = {"existing_device_id": str(target.pk), "server_key": "default", **overrides}
+        request = RequestFactory().post("/promote-to-host/", post_data)
+        request.user = user
+        view.request = request
+        with (
+            patch.object(
+                PromoteToHostView,
+                "get_validated_device_with_selections",
+                return_value=(libre_device, validation, {}),
+            ),
+            patch.object(PromoteToHostView, "render_device_row", return_value=HttpResponse(b"row-ok")),
+            patch.object(PromoteToHostView, "rebind_api_for_server", return_value="default"),
+        ):
+            return view.post(request, device_id=55)
+
+    def _post_merge(self, user, winner, donor):
+        """Drive the real MergeNetBoxDevicesView.post with *winner* kept and *donor* absorbed."""
+        from django.http import HttpResponse
+
+        from netbox_librenms_plugin.views.imports.actions import MergeNetBoxDevicesView
+
+        view = MergeNetBoxDevicesView()
+        view._librenms_api = _make_api()
+        validation = {"merge_candidates": {"host_named": {"pk": winner.pk}, "oob_named": {"pk": donor.pk}}}
+        request = RequestFactory().post("/merge-devices/", {"winner_pk": str(winner.pk), "server_key": "default"})
+        request.user = user
+        view.request = request
+        with (
+            patch.object(
+                MergeNetBoxDevicesView,
+                "get_validated_device_with_selections",
+                return_value=({"device_id": 99}, validation, {}),
+            ),
+            patch.object(MergeNetBoxDevicesView, "render_device_row", return_value=HttpResponse(b"row-ok")),
+            patch.object(MergeNetBoxDevicesView, "rebind_api_for_server", return_value="default"),
+        ):
+            return view.post(request, device_id=99)
+
+    def test_promote_cannot_repoint_an_out_of_scope_device(self):
+        """A pk-constrained change_device grant clears the model-level gate but must not promote a device outside its scope."""
+        from dcim.models import Device
+
+        in_scope = make_device("promote-scope-in")
+        out_of_scope = make_device("promote-scope-out", librenms_cf={"default": {"id": 10}})
+        user = _scoped_device_writer(in_scope, "scoped-promote-writer")
+
+        response = self._post_promote(user, out_of_scope)
+
+        assert b"Existing device not found" in response.content
+        entry = Device.objects.get(pk=out_of_scope.pk).custom_field_data["librenms_id"]["default"]
+        assert entry["id"] == 10  # untouched: no host swap, no OOB demotion
+        assert "oob" not in entry
+
+    def test_promote_still_works_for_the_in_scope_device(self):
+        """The device the grant DOES cover promotes normally (no over-block)."""
+        from dcim.models import Device
+
+        in_scope = make_device("promote-scope-in-2", librenms_cf={"default": {"id": 10}})
+        user = _scoped_device_writer(in_scope, "scoped-promote-writer-2")
+
+        response = self._post_promote(user, in_scope)
+
+        assert b"Existing device not found" not in response.content
+        entry = Device.objects.get(pk=in_scope.pk).custom_field_data["librenms_id"]["default"]
+        assert entry["id"] == 55
+        assert entry["oob"]["id"] == 10
+
+    def test_promote_rechecks_legacy_mapping_after_lock(self):
+        """A concurrent legacy write between validation and row lock must fail closed without partially promoting."""
+        from dcim.models import Device
+
+        target = make_device("promote-legacy-race", librenms_cf={"default": {"id": 10}})
+        user = _scoped_device_writer(target, "scoped-promote-legacy-race")
+        calls = 0
+
+        def concurrent_legacy_write(*args, **kwargs):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                Device.objects.filter(pk=target.pk).update(custom_field_data={"librenms_id": 10})
+            return None
+
+        with patch(
+            "netbox_librenms_plugin.utils.find_by_librenms_id",
+            side_effect=concurrent_legacy_write,
+        ):
+            response = self._post_promote(user, target)
+
+        assert b"Convert mapping" in response.content
+        assert Device.objects.get(pk=target.pk).custom_field_data["librenms_id"] == 10
+
+    def test_promote_rejects_an_unviewable_device_type_override(self):
+        """A catalog ID outside the user's view scope cannot change the promoted device type."""
+        from dcim.models import Device, DeviceType
+
+        target = make_device("promote-hidden-dt", librenms_cf={"default": {"id": 10}})
+        hidden_type = DeviceType.objects.create(
+            manufacturer=target.device_type.manufacturer,
+            model="Hidden Promote Type",
+            slug="hidden-promote-type",
+        )
+        user = _scoped_device_writer(target, "scoped-promote-hidden-dt")
+
+        response = self._post_promote(user, target, override_device_type_id=str(hidden_type.pk))
+
+        assert b"Invalid override_device_type_id" in response.content
+        assert Device.objects.get(pk=target.pk).device_type_id == target.device_type_id
+
+    def test_promote_rejects_an_unviewable_platform_override(self):
+        """A catalog ID outside the user's view scope cannot change the promoted platform."""
+        from dcim.models import Device, Platform
+
+        target = make_device("promote-hidden-platform", librenms_cf={"default": {"id": 10}})
+        hidden_platform = Platform.objects.create(
+            name="Hidden Promote Platform",
+            slug="hidden-promote-platform",
+            manufacturer=target.device_type.manufacturer,
+        )
+        user = _scoped_device_writer(target, "scoped-promote-hidden-platform")
+
+        response = self._post_promote(user, target, override_platform_id=str(hidden_platform.pk))
+
+        assert b"Invalid override_platform_id" in response.content
+        assert Device.objects.get(pk=target.pk).platform_id is None
+
+    def test_merge_cannot_absorb_an_out_of_scope_donor(self):
+        """The donor is derived server-side but still resolved by pk, so an out-of-scope donor must not be merged away."""
+        from dcim.models import Device
+
+        winner = make_device("merge-scope-winner", librenms_cf={"default": {"id": 20}})
+        donor = make_device("merge-scope-donor", librenms_cf={"default": {"id": 10}})
+        user = _scoped_device_writer(winner, "scoped-merge-writer")  # scoped to the winner only
+
+        response = self._post_merge(user, winner, donor)
+
+        assert b"Winner or donor device not found" in response.content
+        assert "_migrated_to" not in Device.objects.get(pk=donor.pk).custom_field_data["librenms_id"]["default"]
+        assert "oob" not in Device.objects.get(pk=winner.pk).custom_field_data["librenms_id"]["default"]
+
+    def test_merge_succeeds_when_both_sides_are_in_scope(self):
+        """A superuser (unrestricted queryset) still merges both candidates."""
+        from dcim.models import Device
+
+        winner = make_device("merge-scope-winner-2", librenms_cf={"default": {"id": 20}})
+        donor = make_device("merge-scope-donor-2", librenms_cf={"default": {"id": 10}})
+
+        response = self._post_merge(make_superuser(), winner, donor)
+
+        assert b"Winner or donor device not found" not in response.content
+        donor_entry = Device.objects.get(pk=donor.pk).custom_field_data["librenms_id"]["default"]
+        assert donor_entry["_migrated_to"]["device_id"] == winner.pk
+
+    def test_merge_cannot_write_an_out_of_scope_vc_sync_device(self):
+        """The donor's VC sync sibling holds the link the merge clears and stamps, so an out-of-scope sibling must block the merge."""
+        from dcim.models import Device
+
+        _vc, m1, m2 = _two_member_vc("mrg-scope-vc", m1_cf={"default": {"id": 30}}, m2_cf=None)
+        winner = make_device("mrg-scope-winner", librenms_cf={"default": {"id": 50}})
+        # Covers the selected winner and the selected donor member, but NOT the sync sibling m1.
+        user = _constrained_device_writer({"pk__in": [winner.pk, m2.pk]}, "scoped-merge-vc-sync")
+
+        response = self._post_merge(user, winner, m2)
+
+        assert b"Winner or donor device not found" in response.content
+        sync_entry = Device.objects.get(pk=m1.pk).custom_field_data["librenms_id"]["default"]
+        assert sync_entry["id"] == 30  # link not cleared
+        assert "_migrated_to" not in sync_entry  # not stamped
+        assert "oob" not in Device.objects.get(pk=winner.pk).custom_field_data["librenms_id"]["default"]
+
+    def test_merge_runs_when_the_vc_sync_device_is_also_in_scope(self):
+        """Widening the grant to the sync sibling lets the same merge through (no over-block)."""
+        from dcim.models import Device
+
+        _vc, m1, m2 = _two_member_vc("mrg-scope-vc-ok", m1_cf={"default": {"id": 30}}, m2_cf=None)
+        winner = make_device("mrg-scope-winner-ok", librenms_cf={"default": {"id": 50}})
+        user = _constrained_device_writer({"pk__in": [winner.pk, m1.pk, m2.pk]}, "scoped-merge-vc-sync-ok")
+
+        response = self._post_merge(user, winner, m2)
+
+        assert b"Winner or donor device not found" not in response.content
+        sync_entry = Device.objects.get(pk=m1.pk).custom_field_data["librenms_id"]["default"]
+        assert "id" not in sync_entry
+        assert sync_entry["_migrated_to"]["device_id"] == winner.pk
+        assert Device.objects.get(pk=winner.pk).custom_field_data["librenms_id"]["default"]["oob"]["id"] == 30
