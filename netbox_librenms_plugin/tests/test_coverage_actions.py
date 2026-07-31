@@ -7728,16 +7728,22 @@ class TestSerialActionsNormalizeAndLock:
         assert conflict_row_locks == [], f"conflict lookup still takes a row lock: {conflict_row_locks}"
 
     def test_serial_advisory_lock_uses_a_stable_application_key(self):
-        """The advisory key is derived in application code, not PostgreSQL's undocumented hashtext()."""
-        from django.db import connection
+        """Equal serials use one stable application key while distinct serials use different keys."""
+        from django.db import connection, transaction
         from django.test.utils import CaptureQueriesContext
 
-        target = make_device("ser-act-stable-lock")
-        with CaptureQueriesContext(connection) as ctx:
-            self._post_action("sync_serial", target, "SN-STABLE")
+        from netbox_librenms_plugin.views.imports.actions import _acquire_serial_assignment_lock
 
-        lock_sql = next(q["sql"] for q in ctx.captured_queries if "pg_advisory_xact_lock" in q["sql"])
-        assert "hashtext" not in lock_sql.lower()
+        with transaction.atomic(), CaptureQueriesContext(connection) as ctx:
+            _acquire_serial_assignment_lock("SN-STABLE")
+            _acquire_serial_assignment_lock("SN-STABLE")
+            _acquire_serial_assignment_lock("SN-DIFFERENT")
+
+        lock_sqls = [q["sql"] for q in ctx.captured_queries if "pg_advisory_xact_lock" in q["sql"]]
+        assert len(lock_sqls) == 3
+        assert lock_sqls[0] == lock_sqls[1]
+        assert lock_sqls[0] != lock_sqls[2]
+        assert all("hashtext" not in sql.lower() for sql in lock_sqls)
 
     def test_serial_lock_refuses_to_run_in_autocommit(self):
         """pg_advisory_xact_lock is transaction-scoped, so taking it outside a transaction locks nothing and must fail loudly."""
