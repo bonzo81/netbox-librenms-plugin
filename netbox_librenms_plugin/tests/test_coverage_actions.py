@@ -7743,6 +7743,7 @@ class TestSerialActionsNormalizeAndLock:
         assert len(lock_sqls) == 3
         assert lock_sqls[0] == lock_sqls[1]
         assert lock_sqls[0] != lock_sqls[2]
+        assert "3935087803272606537" in lock_sqls[0]
         assert all("hashtext" not in sql.lower() for sql in lock_sqls)
 
     def test_serial_lock_refuses_to_run_in_autocommit(self):
