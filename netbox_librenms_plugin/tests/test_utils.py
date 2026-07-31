@@ -1513,6 +1513,7 @@ class TestNormalizeDeviceSerialsMigration:
         with connection.cursor() as cursor:
             cursor.execute("SELECT to_regclass(%s)::oid", ["nblp_dcim_device_serial_idx"])
             original_oid = cursor.fetchone()[0]
+        assert original_oid is not None, "0012 must have created nblp_dcim_device_serial_idx"
 
         with connection.schema_editor(atomic=False) as schema_editor:
             module.ensure_device_serial_index(apps, schema_editor)

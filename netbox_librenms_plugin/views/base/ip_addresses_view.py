@@ -499,7 +499,7 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMix
 
         from netbox_librenms_plugin.utils import get_migrated_to_marker
 
-        if not isinstance(obj, Device) or not get_migrated_to_marker(obj, server_key):
+        if not isinstance(obj, Device) or not get_migrated_to_marker(obj, server_key or "default"):
             return []
         name_by_id = {iface.pk: iface.name for iface in obj.interfaces.all()}
         if not name_by_id:

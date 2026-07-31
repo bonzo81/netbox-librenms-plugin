@@ -719,9 +719,7 @@ class TestSingleVlanGroupVerifyView:
         request.user.has_perm.return_value = False  # unauthorized → real gate returns 403
         view.request = request
 
-        with patch(
-            "netbox_librenms_plugin.views.mixins.NetBoxObjectPermissionMixin.restrict_object_or_404"
-        ) as mock_get_obj:
+        with patch.object(view, "restrict_object_or_404") as mock_get_obj:
             response = view.post(request)
 
         assert response.status_code == 403

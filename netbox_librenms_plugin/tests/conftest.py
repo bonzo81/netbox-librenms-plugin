@@ -214,7 +214,11 @@ def install_module(device, bay_name, model, *, serial="", child_bays=(), manufac
 def ip_on(device, address, ifname, *, iface_type="1000base-t"):
     """Create an Interface on *device* and assign a real IPAddress to it."""
     iface = make_interface(device, ifname, iface_type=iface_type)
-    return make_ip(address, assigned_object=iface)
+    ip = make_ip(address, assigned_object=iface)
+    # NetBox 4.4's IP pre-delete receiver reads address.version. Coerce the string passed to
+    # objects.create() through the model field before returning so every caller can delete safely.
+    ip.refresh_from_db()
+    return ip
 
 
 def delete_keeping_pk(obj):

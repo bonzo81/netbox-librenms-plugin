@@ -1714,6 +1714,18 @@ class TestMovableIpsForMigration:
         assert result[0]["address"] == "10.10.0.5/24"
         assert result[0]["interface_name"] == "eth0"
 
+    def test_none_server_key_uses_the_default_marker_scope(self):
+        """A degraded render with no bound key still finds a marker stored in default scope."""
+        from netbox_librenms_plugin.utils import mark_librenms_migrated
+
+        winner = make_device("mv-winner-none-key")
+        donor = make_device("mv-donor-none-key")
+        ip_on(donor, "10.10.0.8/24", "eth0")
+        mark_librenms_migrated(donor, winner.pk, "default")
+        donor.save()
+
+        assert len(self._movable(donor, None)) == 1
+
     def test_excludes_unassigned_ip(self):
         from netbox_librenms_plugin.tests.conftest import make_ip
         from netbox_librenms_plugin.utils import mark_librenms_migrated

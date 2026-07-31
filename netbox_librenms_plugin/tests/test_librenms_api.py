@@ -1364,7 +1364,7 @@ class TestLibreNMSAPIPortsAndInventory:
         response.raise_for_status.side_effect = error
         response.json.return_value = {
             "status": "error",
-            "message": "Device 123 does not have any IP addresses",
+            "message": "The device does not have any IP addresses",
         }
 
         from netbox_librenms_plugin.librenms_api import LibreNMSAPI

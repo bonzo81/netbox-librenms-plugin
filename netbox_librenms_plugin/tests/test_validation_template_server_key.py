@@ -55,5 +55,8 @@ def test_mapping_writing_conflict_forms_include_server_key():
     mapping_forms = [f for f in forms if _form_actions(f) & MAPPING_ACTIONS]
     assert mapping_forms, "expected mapping-writing device_conflict_action forms in the template"
 
-    missing = [sorted(_form_actions(f)) for f in mapping_forms if 'name="server_key"' not in f]
+    hidden_include = '{% include "netbox_librenms_plugin/inc/_hidden_server_key.html" %}'
+    missing = [
+        sorted(_form_actions(f)) for f in mapping_forms if 'name="server_key"' not in f and hidden_include not in f
+    ]
     assert not missing, f"mapping-writing forms missing a server_key hidden input: {missing}"

@@ -1625,10 +1625,8 @@ class TestValidateDeviceForImportEdgeCases:
         assert validation.get("existing_match_type") == "ambiguous_hostname_or_serial"
         assert any("serial or management IP" in i for i in validation.get("issues", []))
 
-        # Resolve the duplicate: dev_b no longer carries the shared host address. Refresh first so
-        # `address` is an IPNetwork, not the str it was constructed with — NetBox 4.4's pre_delete
-        # `clear_primary_ip` reads `instance.family`, which dereferences `.version` unguarded there.
-        ip_b.refresh_from_db()
+        # Resolve the duplicate: dev_b no longer carries the shared host address. The shared
+        # builder must return a DB-coerced address so NetBox's pre-delete receiver can inspect it.
         ip_b.delete()
 
         _refresh_existing_device(validation, libre_device=libre_device, server_key="default")
@@ -3538,7 +3536,10 @@ class TestValidateDedupsSerialDuplicateQuery:
         serial_dup_queries = [
             q["sql"]
             for q in ctx.captured_queries
-            if '."serial" =' in q["sql"].lower() and "limit 2" in q["sql"].lower() and "not" not in q["sql"].lower()
+            if '."serial" =' in (sql := q["sql"].lower())
+            and "limit 2" in sql
+            # Cross-side lookups exclude a peer ID; the duplicate lookup's WHERE clause does not.
+            and '."id"' not in sql.partition(" where ")[2].partition(" order by ")[0]
         ]
         assert len(serial_dup_queries) == 1
         # A TRIM-wrapped comparison would not match the exact-serial filter above, so check

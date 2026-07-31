@@ -563,14 +563,15 @@ class TestPromoteModalAccessibility:
 
 
 @pytest.mark.django_db
-class TestMergePromoteFormsShareServerKeyInclude:
-    """The merge and promote POST forms carry server_key via the shared include.
+class TestMappingFormsShareServerKeyInclude:
+    """Mapping-writing POST forms carry server_key once via the shared include.
 
     Every other action form in this template routes the hidden input through
     inc/_hidden_server_key.html, which renders NOTHING when the context has no
-    server_key. The merge/promote forms were the last two with a raw
+    server_key. The merge/promote forms were the first two converted from a raw
     <input value="{{ server_key }}">, which posts server_key="" on a keyless
-    render instead of omitting the field like their sibling forms.
+    render instead of omitting the field like their sibling forms. Link/update shares the same
+    contract and must not combine a raw input with the include.
     """
 
     def _render(self, server_key, pane):
@@ -595,9 +596,11 @@ class TestMergePromoteFormsShareServerKeyInclude:
                 "host_named": {"pk": existing.pk, "name": existing.name},
                 "oob_named": {"pk": donor.pk, "name": donor.name},
             }
-        else:
+        elif pane == "promote":
             validation["serial_action"] = "promote_to_host"
             validation["promote_to_host"] = {"existing_libre_id": 88, "existing_oob_type": "idrac"}
+        else:
+            validation["serial_action"] = "link"
         ctx = {
             "validation": validation,
             "libre_device": {"device_id": 12, "sysName": "srvkey-forms", "hostname": "srvkey-forms"},
@@ -623,16 +626,25 @@ class TestMergePromoteFormsShareServerKeyInclude:
 
     @pytest.mark.parametrize(
         ("pane", "marker"),
-        [("merge", "merge-netbox-devices"), ("promote", "promote-to-host")],
+        [
+            ("merge", "merge-netbox-devices"),
+            ("promote", "promote-to-host"),
+            ("link", 'name="action" value="link"'),
+        ],
     )
     def test_form_carries_the_scoped_server_key(self, pane, marker):
         html = self._render(server_key="tab-scope-key", pane=pane)
         form = self._form_containing(html, marker)
         assert 'name="server_key" value="tab-scope-key"' in form
+        assert form.count('name="server_key"') == 1
 
     @pytest.mark.parametrize(
         ("pane", "marker"),
-        [("merge", "merge-netbox-devices"), ("promote", "promote-to-host")],
+        [
+            ("merge", "merge-netbox-devices"),
+            ("promote", "promote-to-host"),
+            ("link", 'name="action" value="link"'),
+        ],
     )
     def test_keyless_render_omits_the_input_instead_of_posting_blank(self, pane, marker):
         html = self._render(server_key=None, pane=pane)
