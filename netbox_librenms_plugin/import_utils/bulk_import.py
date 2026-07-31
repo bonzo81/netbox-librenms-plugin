@@ -6,13 +6,19 @@ from typing import List
 
 from django.core.cache import cache
 
-from ..import_validation_helpers import apply_role_to_validation, recalculate_validation_status, remove_validation_issue
+from ..import_validation_helpers import (
+    apply_cluster_to_validation,
+    apply_role_to_validation,
+    recalculate_validation_status,
+    remove_validation_issue,
+)
 from ..librenms_api import LibreNMSAPI
 from ..utils import (
     AmbiguousLibreNMSIdError,
     coerce_librenms_id,
     find_by_librenms_id,
     get_librenms_oob,
+    normalize_serial,
     preload_normalization_rules,
 )
 from .cache import get_cache_metadata_key, get_import_device_cache_key, get_validated_device_cache_key
@@ -257,7 +263,7 @@ def bulk_import_devices_shared(
                     member_serials = sorted(
                         serial
                         for m in vc_data.get("members", [])
-                        if (serial := str(m.get("serial") or "").strip()) and serial != "-"
+                        if (serial := normalize_serial(m.get("serial"))) and serial != "-"
                     )
                     if member_serials:
                         vc_domain = f"librenms-stack-{','.join(member_serials)}"
@@ -784,7 +790,7 @@ def _refresh_existing_device(validation: dict, libre_device: dict = None, server
             # binding to whichever row sorts first would render the wrong device as the existing
             # match, so flag the row ambiguous and block instead of picking arbitrarily.
             ambiguous_fallback = False
-            serial = (libre_device.get("serial") or "").strip()
+            serial = normalize_serial(libre_device.get("serial"))
             if serial and serial != "-":
                 serial_matches = list(_Device.objects.filter(serial=serial)[:2])
                 if len(serial_matches) > 1:
@@ -853,6 +859,16 @@ def _refresh_existing_device(validation: dict, libre_device: dict = None, server
                     "role": None,
                     "available_roles": validation.get("device_role", {}).get("available_roles", []),
                 }
+            elif hasattr(new_device, "cluster") and new_device.cluster:
+                # VM match: mirror the device-role display above — show the matched
+                # VM's actual cluster rather than leaving the cached selection stale.
+                apply_cluster_to_validation(validation, new_device.cluster)
+            else:
+                validation["cluster"] = {
+                    "found": False,
+                    "cluster": None,
+                    "available_clusters": validation.get("cluster", {}).get("available_clusters", []),
+                }
             recalculate_validation_status(validation, is_vm=actual_is_vm)
             # Re-assert non-importable: recalculate sets can_import from issues list,
             # but a late-found existing match must never be import-ready.
@@ -886,6 +902,19 @@ def _refresh_existing_device(validation: dict, libre_device: dict = None, server
             validation["issues"].append(message)
     except Exception as e:
         logger.error(f"Failed to check for newly imported device: {e}")
+        # Fail closed: this recheck exists to catch duplicates that appeared after the cache
+        # was built, so a transient failure (e.g. a DB error mid-lookup) must not leave a
+        # previously-cached "importable" row importable — that would let a duplicate import
+        # slip through exactly when the duplicate check couldn't run. Matches the fail-closed
+        # behaviour of every other failure branch in this function.
+        validation["can_import"] = False
+        validation["is_ready"] = False
+        message = "Duplicate re-check failed (transient lookup error); import blocked. Refresh to retry."
+        # Append to issues (not just a warning) — a later recalculate_validation_status()
+        # recomputes can_import from the issues list, so anything weaker would be silently
+        # re-enabled. Dedup so repeated refreshes don't stack the same message.
+        if message not in validation.setdefault("issues", []):
+            validation["issues"].append(message)
 
 
 def _empty_return(return_cache_status: bool):

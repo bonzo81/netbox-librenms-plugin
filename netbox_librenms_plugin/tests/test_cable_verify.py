@@ -643,3 +643,50 @@ class TestSingleCableVerifyServerKeyRouting:
         # No cross-server bleed: the 'production' lookup misses → the default Missing-Ports row.
         assert row["local_port"] == ""
         assert row["cable_status"] == "Missing Ports"
+
+
+@pytest.mark.django_db
+class TestEnrichRemotePortEmptyPort:
+    """A resolvable remote device with no advertised remote port must not crash the Cables tab."""
+
+    def _make_device(self, name):
+        from dcim.models import Device, DeviceRole, DeviceType, Manufacturer, Site
+
+        site, _ = Site.objects.get_or_create(name="erp-site", slug="erp-site")
+        mfr, _ = Manufacturer.objects.get_or_create(name="erp-mfr", slug="erp-mfr")
+        dtype, _ = DeviceType.objects.get_or_create(manufacturer=mfr, model="erp-dt", slug="erp-dt")
+        role, _ = DeviceRole.objects.get_or_create(name="erp-role", slug="erp-role")
+        return Device.objects.create(name=name, site=site, device_type=dtype, role=role)
+
+    def _make_view(self):
+        from netbox_librenms_plugin.views.base.cables_view import SingleCableVerifyView
+
+        view = object.__new__(SingleCableVerifyView)
+        view._librenms_api = MagicMock()
+        view._librenms_api.server_key = "default"
+        view.request = MagicMock()
+        return view
+
+    def test_enrich_links_data_survives_remote_device_without_port(self):
+        """LLDP neighbor advertising a resolvable device but no remote port: enrich_links_data must not crash (regression: enrich_remote_port returned None → link.get() AttributeError)."""
+        obj = self._make_device("erp-local-sw")
+        remote = self._make_device("erp-remote-sw")
+        view = self._make_view()
+
+        # remote_device resolves by name; remote_port empty (no port advertised)
+        links = [{"remote_device": "erp-remote-sw", "remote_port": "", "remote_port_id": None}]
+
+        result = view.enrich_links_data(links, obj, server_key="default")  # must NOT raise AttributeError
+
+        assert result[0]["netbox_remote_device_id"] == remote.pk
+        assert result[0]["device_id"] == obj.id
+
+    def test_enrich_remote_port_returns_link_when_remote_port_empty(self):
+        """enrich_remote_port returns the link (never None) when remote_port is empty, so callers that reassign link don't NoneType-crash."""
+        remote = self._make_device("erp-remote-sw2")
+        view = self._make_view()
+
+        link = {"remote_port": ""}
+        result = view.enrich_remote_port(link, remote, server_key="default")
+
+        assert result is link

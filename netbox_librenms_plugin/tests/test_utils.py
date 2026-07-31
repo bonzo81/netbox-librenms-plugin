@@ -1446,6 +1446,72 @@ class TestRenormalizeDeviceTypeMappingsMigration:
         assert not DeviceTypeMapping.objects.filter(librenms_hardware="beta").exists()
 
 
+# =============================================================================
+# Device serial canonicalization data migration (0012)
+# =============================================================================
+@pytest.mark.django_db
+class TestNormalizeDeviceSerialsMigration:
+    """The 0012 migration canonicalizes legacy Device serials and indexes exact lookups."""
+
+    @staticmethod
+    def _run_migration():
+        import importlib
+        from types import SimpleNamespace
+
+        from django.apps import apps
+        from django.db import connection
+
+        module = importlib.import_module("netbox_librenms_plugin.migrations.0012_normalize_device_serials")
+        module.normalize_device_serials(apps, SimpleNamespace(connection=connection))
+
+    def test_all_surrounding_whitespace_is_trimmed_and_blank_serials_are_canonicalized(self):
+        """Python strip semantics remove tabs/newlines/Unicode whitespace, including whitespace-only values."""
+        from dcim.models import Device
+
+        from netbox_librenms_plugin.tests.conftest import make_device
+
+        padded = make_device("serial-migration-padded", serial="\t SN-MIG-1 \n")
+        blank = make_device("serial-migration-blank", serial="\u2003\t\n")
+        unchanged = make_device("serial-migration-clean", serial="SN-MIG-2")
+
+        self._run_migration()
+
+        assert Device.objects.get(pk=padded.pk).serial == "SN-MIG-1"
+        assert Device.objects.get(pk=blank.pk).serial == ""
+        assert Device.objects.get(pk=unchanged.pk).serial == "SN-MIG-2"
+
+    def test_plain_serial_index_exists(self):
+        """The migration adds the ordinary B-tree index used by exact serial equality lookups."""
+        from django.db import connection
+
+        with connection.cursor() as cursor:
+            constraints = connection.introspection.get_constraints(cursor, "dcim_device")
+
+        index = constraints["nblp_dcim_device_serial_idx"]
+        assert index["index"] is True
+        assert index["columns"] == ["serial"]
+
+    def test_preexisting_valid_serial_index_is_reused(self):
+        """Retrying 0012 accepts an already-valid index without rebuilding it."""
+        import importlib
+
+        from django.apps import apps
+        from django.db import connection
+
+        module = importlib.import_module("netbox_librenms_plugin.migrations.0012_normalize_device_serials")
+
+        with connection.cursor() as cursor:
+            cursor.execute("SELECT to_regclass(%s)::oid", ["nblp_dcim_device_serial_idx"])
+            original_oid = cursor.fetchone()[0]
+
+        with connection.schema_editor(atomic=False) as schema_editor:
+            module.ensure_device_serial_index(apps, schema_editor)
+
+        with connection.cursor() as cursor:
+            cursor.execute("SELECT to_regclass(%s)::oid", ["nblp_dcim_device_serial_idx"])
+            assert cursor.fetchone()[0] == original_oid
+
+
 class TestCacheRemainingTtl:
     """cache_remaining_ttl reads .ttl on django-redis and degrades to None on backends without it."""
 
@@ -1575,3 +1641,71 @@ class TestSetDeviceIpFkFamily:
         set_device_ip_fk(device, "oob_ip", v6)
         device.refresh_from_db()
         assert device.oob_ip_id == v6.pk
+
+    def test_families_accepted_with_netbox44_family_property(self):
+        """The guard must not read IPAddress.family: on NetBox 4.4 the property raises on an in-memory str address and getattr's default turns that into a bogus refusal (forced)."""
+        from unittest.mock import patch
+
+        from ipam.models import IPAddress
+
+        from netbox_librenms_plugin.tests.conftest import ip_on, make_device
+        from netbox_librenms_plugin.utils import set_device_ip_fk
+
+        device = make_device("fam-nb44dev")
+        v4 = ip_on(device, "10.0.0.4/24", "eth0")
+        v4.address = "10.0.0.4/24"  # in-memory str, as after IPAddress.objects.create()
+        # NetBox 4.4's family property verbatim — 4.5+ added a str-tolerant branch.
+        netbox44_family = property(lambda self: self.address.version if self.address else None)
+        with patch.object(IPAddress, "family", netbox44_family):
+            set_device_ip_fk(device, "primary_ip4", v4)
+        device.refresh_from_db()
+        assert device.primary_ip4_id == v4.pk
+
+
+class TestIpFamily:
+    """ip_family(): family read that works on NetBox 4.4, whose IPAddress.family lacks the 4.5+ str-address branch."""
+
+    def test_str_address(self):
+        from ipam.models import IPAddress
+
+        from netbox_librenms_plugin.utils import ip_family
+
+        assert ip_family(IPAddress(address="10.0.0.1/24")) == 4
+        assert ip_family(IPAddress(address="2001:db8::1/64")) == 6
+
+    def test_ipnetwork_address(self):
+        import netaddr
+        from ipam.models import IPAddress
+
+        from netbox_librenms_plugin.utils import ip_family
+
+        assert ip_family(IPAddress(address=netaddr.IPNetwork("10.0.0.1/24"))) == 4
+
+    def test_empty_address_is_none(self):
+        from ipam.models import IPAddress
+
+        from netbox_librenms_plugin.utils import ip_family
+
+        assert ip_family(IPAddress()) is None
+
+
+@pytest.mark.django_db
+class TestGetVirtualChassisMemberNoneName:
+    """A LibreNMS port row can lack the selected name field entirely (port.get(...) -> None)."""
+
+    def test_none_port_name_returns_device_instead_of_typeerror(self):
+        """A None port name falls back to the viewed device instead of raising TypeError (was a 500)."""
+        from dcim.models import Device, DeviceRole, DeviceType, Manufacturer, Site, VirtualChassis
+
+        from netbox_librenms_plugin.utils import get_virtual_chassis_member
+
+        site = Site.objects.create(name="vc-none-site", slug="vc-none-site")
+        mfr = Manufacturer.objects.create(name="vc-none-mfr", slug="vc-none-mfr")
+        dtype = DeviceType.objects.create(manufacturer=mfr, model="vc-none-dt", slug="vc-none-dt")
+        role = DeviceRole.objects.create(name="vc-none-role", slug="vc-none-role")
+        dev = Device.objects.create(name="vc-none-dev", site=site, device_type=dtype, role=role)
+        vc = VirtualChassis.objects.create(name="vc-none", master=dev)
+        Device.objects.filter(pk=dev.pk).update(virtual_chassis=vc, vc_position=1)
+        dev.refresh_from_db()
+
+        assert get_virtual_chassis_member(dev, None) is dev

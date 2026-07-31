@@ -788,12 +788,15 @@ class TestEnrichRemotePort:
 
         assert result["netbox_remote_interface_id"] == iface.pk
 
-    def test_no_remote_port_key_returns_none(self):
-        """When link has no 'remote_port', method falls through and returns None."""
+    def test_no_remote_port_key_returns_link_unchanged(self):
+        """When link has no 'remote_port', enrichment is skipped but the link is returned (never None) so reassigning callers don't NoneType-crash."""
         view = self._make_view()
         device = make_device("erp-nokey")
-        result = view.enrich_remote_port({}, device)
-        assert result is None
+        link = {}  # No remote_port key
+
+        result = view.enrich_remote_port(link, device)
+        assert result is link
+        assert "remote_port_url" not in result
 
     def test_interface_not_found_does_not_set_url(self):
         """When no remote interface matches by id or name, url/id keys are not set."""

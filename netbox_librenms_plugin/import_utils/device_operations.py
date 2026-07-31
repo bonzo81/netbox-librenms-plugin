@@ -21,6 +21,7 @@ from ..utils import (
     get_librenms_oob,
     is_legacy_librenms_id,
     match_librenms_hardware_to_device_type,
+    normalize_serial,
     set_librenms_device_id,
 )
 from ..constants import normalize_oob_type
@@ -727,13 +728,14 @@ def validate_device_for_import(
 
                 # Check if name matches resolved name (VC-aware: compare against VC member name)
                 if hostname and existing_device.virtual_chassis and existing_device.vc_position:
-                    incoming_serial = libre_device.get("serial") or ""
+                    incoming_serial = normalize_serial(libre_device.get("serial"))
                     if incoming_serial == "-":
                         incoming_serial = ""
                     vc_expected_name = _generate_vc_member_name(
                         hostname,
                         existing_device.vc_position,
-                        serial=incoming_serial or existing_device.serial or "",
+                        # Trim the stored fallback too, or a padded serial mints a bogus name.
+                        serial=incoming_serial or normalize_serial(existing_device.serial),
                     )
                     if existing_device.name == vc_expected_name:
                         result["name_matches"] = True
@@ -750,11 +752,13 @@ def validate_device_for_import(
                 # OOB sub-key (existing_match_type == "librenms_oob"): the incoming payload is the
                 # OOB controller's, so comparing it against the host record's serial would surface
                 # bogus replacement/conflict warnings on a row that is already correctly linked.
-                incoming_serial = libre_device.get("serial") or ""
+                incoming_serial = normalize_serial(libre_device.get("serial"))
+                # Normalize the stored side too: a legacy padded serial equals the incoming one.
+                stored_serial = normalize_serial(existing_device.serial)
                 if result["existing_match_type"] != "librenms_oob" and incoming_serial and incoming_serial != "-":
-                    if existing_device.serial and existing_device.serial == incoming_serial:
+                    if stored_serial and stored_serial == incoming_serial:
                         result["serial_confirmed"] = True
-                    elif existing_device.serial and existing_device.serial != incoming_serial:
+                    elif stored_serial and stored_serial != incoming_serial:
                         serial_conflict = (
                             Device.objects.filter(serial=incoming_serial).exclude(pk=existing_device.pk).first()
                         )
@@ -820,9 +824,11 @@ def validate_device_for_import(
                 # is already linked to LibreNMS isn't mislabelled as "not linked".
                 result["existing_librenms_link"] = _describe_existing_librenms_link(existing_device, server_key)
 
-                # Check for serial conflict on hostname-matched device
-                incoming_serial = libre_device.get("serial") or ""
-                if incoming_serial and incoming_serial != "-" and existing_device.serial != incoming_serial:
+                # Check for serial conflict on hostname-matched device. Both sides are
+                # normalized so a legacy padded stored serial isn't read as drift.
+                incoming_serial = normalize_serial(libre_device.get("serial"))
+                stored_serial = normalize_serial(existing_device.serial)
+                if incoming_serial and incoming_serial != "-" and stored_serial != incoming_serial:
                     serial_conflict = (
                         Device.objects.filter(serial=incoming_serial).exclude(pk=existing_device.pk).first()
                     )
@@ -850,7 +856,10 @@ def validate_device_for_import(
 
             # Check by serial number (strong physical match - hardware identity)
             if not result["existing_device"]:
-                serial = libre_device.get("serial") or ""
+                # Normalize the incoming serial before the exact indexed lookup. Migration 0012
+                # canonicalizes legacy Device rows, and every plugin write path stores this same
+                # normalized form, so matching and persistence share one representation.
+                serial = normalize_serial(libre_device.get("serial"))
                 if serial and serial != "-" and not import_as_vm:
                     # Serial is not unique in NetBox, so .first() would bind an arbitrary row
                     # and the downstream serial/OOB/merge flow would derive its guidance from a
@@ -909,7 +918,7 @@ def validate_device_for_import(
             # the Stage-2 merge-candidate detection below both run the identical UNIQUE [:2] query
             # for the matched type, so share the result instead of issuing it twice per device.
             _match_type = result.get("existing_match_type")
-            _serial_now = (libre_device.get("serial") or "").strip()
+            _serial_now = normalize_serial(libre_device.get("serial"))
             _dup_eligible = (
                 not import_as_vm and result.get("existing_device") is not None and _match_type in ("hostname", "serial")
             )
@@ -979,7 +988,7 @@ def validate_device_for_import(
             # physical box (host + OOB) imported as separate entries. Surface
             # this as a merge action instead of silently picking one.
             try:
-                _serial_for_pair = (libre_device.get("serial") or "").strip()
+                _serial_for_pair = normalize_serial(libre_device.get("serial"))
                 if (
                     _serial_for_pair
                     and _serial_for_pair != "-"
@@ -1607,7 +1616,8 @@ def import_single_device(
             if rack:
                 device_data["rack"] = rack
 
-            serial = libre_device.get("serial", "")
+            # Persist the canonical serial used by the exact indexed match lookups.
+            serial = normalize_serial(libre_device.get("serial"))
             if serial and serial != "-":
                 device_data["serial"] = serial
 

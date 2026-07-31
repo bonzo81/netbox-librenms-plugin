@@ -845,3 +845,44 @@ class TestSaveVlanGroupOverridesObjectScope:
             assert isinstance(response, JsonResponse)
         finally:
             real_cache.delete(view.get_vlan_overrides_key(in_scope, self.SERVER_KEY))
+
+
+# ---------------------------------------------------------------------------
+# SingleModuleVerifyView — object-permission ordering (device enumeration guard)
+# ---------------------------------------------------------------------------
+@pytest.mark.django_db
+class TestSingleModuleVerifyPermissionOrder:
+    """SingleModuleVerifyView.post() must reject a caller lacking dcim.view_device before resolving the device (no 404-vs-403 enumeration)."""
+
+    def _view_for(self, user):
+        from django.test import RequestFactory
+
+        from netbox_librenms_plugin.views.object_sync.devices import SingleModuleVerifyView
+
+        request = RequestFactory().post(
+            "/verify-module/",
+            data=json.dumps({"device_id": 999_999_999, "ent_physical_index": 1, "server_key": "default"}),
+            content_type="application/json",
+        )
+        request.user = user
+        view = SingleModuleVerifyView()
+        view.request = request
+        return view, request
+
+    def test_missing_view_device_perm_returns_403_not_404_for_absent_device(self):
+        """A real user without dcim.view_device POSTing a non-existent device_id gets 403, not 404 (real ObjectPermissionBackend decides has_perm)."""
+        from django.contrib.auth import get_user_model
+        from django.http import Http404
+
+        user = get_user_model().objects.create_user("no-view-device")  # non-superuser, no object perms
+        view, request = self._view_for(user)
+
+        try:
+            response = view.post(request)
+        except Http404:
+            pytest.fail(
+                "get_object_or_404(Device) ran before the permission check: a caller without "
+                "dcim.view_device can enumerate devices by observing 404-vs-403."
+            )
+        assert response.status_code == 403
+        assert "view_device" in json.loads(response.content)["error"]

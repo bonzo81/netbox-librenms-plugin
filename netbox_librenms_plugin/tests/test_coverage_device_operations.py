@@ -1387,7 +1387,10 @@ class TestValidateDeviceForImportEdgeCases:
         assert validation.get("existing_match_type") == "ambiguous_hostname_or_serial"
         assert any("serial or management IP" in i for i in validation.get("issues", []))
 
-        # Resolve the duplicate: dev_b no longer carries the shared host address.
+        # Resolve the duplicate: dev_b no longer carries the shared host address. Refresh first so
+        # `address` is an IPNetwork, not the str it was constructed with — NetBox 4.4's pre_delete
+        # `clear_primary_ip` reads `instance.family`, which dereferences `.version` unguarded there.
+        ip_b.refresh_from_db()
         ip_b.delete()
 
         _refresh_existing_device(validation, libre_device=libre_device, server_key="default")
@@ -1398,6 +1401,28 @@ class TestValidateDeviceForImportEdgeCases:
         assert not any("serial or management IP" in i for i in validation.get("issues", []))
         assert validation.get("existing_match_type") == "primary_ip"
         assert validation.get("existing_device") is not None and validation["existing_device"].pk == dev_a.pk
+
+    def test_refresh_serial_fallback_accepts_a_numeric_serial(self):
+        """The refresh serial fallback must coerce an int serial before stripping it, or the whole refresh raises AttributeError instead of rebinding the row."""
+        from netbox_librenms_plugin.import_utils.bulk_import import _refresh_existing_device
+        from netbox_librenms_plugin.tests.conftest import make_device
+
+        dev = make_device("refresh-numeric-serial", serial="555777")
+        libre_device = {
+            "device_id": 92,
+            "hostname": "refresh-numeric-row",  # matches no device name → falls to the serial fallback
+            "sysName": "refresh-numeric-row",
+            "hardware": "-",
+            "serial": 555777,  # int, not str
+            "os": "-",
+            "location": "-",
+        }
+        validation = {"existing_device": None, "issues": [], "warnings": []}
+
+        _refresh_existing_device(validation, libre_device=libre_device, server_key="default")
+
+        assert validation.get("existing_match_type") == "serial"
+        assert validation.get("existing_device") is not None and validation["existing_device"].pk == dev.pk
 
     def test_no_hostname_adds_issue(self):
         """Empty hostname/sysName → _determine_device_name falls back to 'device-{id}'."""
@@ -1878,6 +1903,273 @@ class TestValidateForcesDeviceModeRealDB:
 
 
 @pytest.mark.django_db
+class TestValidateSerialMatchStripsWhitespace:
+    """A whitespace-padded incoming serial (common from SNMP) must still match an existing device by serial, so import doesn't mint a duplicate (real DB)."""
+
+    def _make_device(self, name, serial):
+        from dcim.models import Device, DeviceRole, DeviceType, Manufacturer, Site
+
+        mfr, _ = Manufacturer.objects.get_or_create(name="ACME-serialws", slug="acme-serialws")
+        dt, _ = DeviceType.objects.get_or_create(manufacturer=mfr, model="DT-serialws", slug="dt-serialws")
+        role, _ = DeviceRole.objects.get_or_create(name="Role-serialws", slug="role-serialws")
+        site, _ = Site.objects.get_or_create(name="Site-serialws", slug="site-serialws")
+        return Device.objects.create(name=name, device_type=dt, role=role, site=site, status="active", serial=serial)
+
+    def test_whitespace_padded_incoming_serial_matches_existing(self):
+        """An incoming serial with surrounding whitespace resolves to the existing device, not a new duplicate."""
+        from netbox_librenms_plugin.import_utils.device_operations import validate_device_for_import
+
+        device = self._make_device("serial-ws-existing", serial="SN-WS-4242")
+        libre_device = {
+            "device_id": 7777,
+            # Hostname matches no device, so the identity search falls through to the serial match.
+            "hostname": "serial-ws-importrow",
+            "sysName": "serial-ws-importrow",
+            "serial": " SN-WS-4242 ",  # SNMP-style whitespace padding around the real serial
+            "hardware": "-",
+            "os": "-",
+            "location": "-",
+        }
+
+        result = validate_device_for_import(libre_device, api=None, server_key="default", include_vc_detection=False)
+
+        assert result["existing_device"] is not None, "whitespace-padded serial was not matched (duplicate risk)"
+        assert result["existing_device"].pk == device.pk
+
+    def test_whitespace_only_serial_difference_is_not_a_drift_conflict(self):
+        """A hostname-matched device whose stored serial equals the incoming serial modulo whitespace must not be reported as a serial difference/conflict (the drift check compares the trimmed value)."""
+        from netbox_librenms_plugin.import_utils.device_operations import validate_device_for_import
+
+        device = self._make_device("serial-drift-host", serial="SN-DRIFT-7")
+        libre_device = {
+            "device_id": 8812,
+            "hostname": "serial-drift-host",  # hostname-matches the existing device
+            "sysName": "serial-drift-host",
+            "serial": " SN-DRIFT-7 ",  # same serial, only SNMP whitespace differs
+            "hardware": "-",
+            "os": "-",
+            "location": "-",
+        }
+
+        result = validate_device_for_import(libre_device, api=None, server_key="default", include_vc_detection=False)
+
+        assert result["existing_device"].pk == device.pk
+        assert result.get("serial_action") is None, "whitespace-only serial diff wrongly flagged as drift"
+        assert not any("differs" in w for w in result.get("warnings", [])), result.get("warnings")
+
+    def test_numeric_serial_is_coerced_not_crashed(self):
+        """A numeric serial (an int, e.g. an all-digit serial parsed from JSON) must be coerced to a string before .strip(), not raise AttributeError, and still match an existing device stored with the string form."""
+        from netbox_librenms_plugin.import_utils.device_operations import validate_device_for_import
+
+        device = self._make_device("numeric-serial-host", serial="123456")
+        libre_device = {
+            "device_id": 8814,
+            "hostname": "numeric-import-row",  # matches no device → falls to the serial-identity match
+            "sysName": "numeric-import-row",
+            "serial": 123456,  # int, not str — .strip() would raise AttributeError without a str() cast
+            "hardware": "-",
+            "os": "-",
+            "location": "-",
+        }
+
+        result = validate_device_for_import(libre_device, api=None, server_key="default", include_vc_detection=False)
+
+        assert result["existing_device"] is not None, "numeric serial was not matched (crash swallowed by validator)"
+        assert result["existing_device"].pk == device.pk
+        # The later duplicate/merge stages read the serial again; an uncast read raises AttributeError
+        # there and validate_device_for_import swallows it into a generic "Validation error" issue.
+        assert not any("Validation error" in i for i in result.get("issues", [])), result.get("issues")
+
+    def test_zero_serial_still_matches_existing_device(self):
+        """A serial of JSON number 0 is real (only None means missing) and must still match a device stored as "0"."""
+        from netbox_librenms_plugin.import_utils.device_operations import validate_device_for_import
+
+        device = self._make_device("zero-serial-host", serial="0")
+        libre_device = {
+            "device_id": 8815,
+            "hostname": "zero-import-row",
+            "sysName": "zero-import-row",
+            "serial": 0,  # falsey but real — `str(x or "")` would silently drop it
+            "hardware": "-",
+            "os": "-",
+            "location": "-",
+        }
+
+        result = validate_device_for_import(libre_device, api=None, server_key="default", include_vc_detection=False)
+
+        assert result["existing_device"] is not None, "zero serial was dropped as falsey instead of matched"
+        assert result["existing_device"].pk == device.pk
+        assert not any("Validation error" in i for i in result.get("issues", [])), result.get("issues")
+
+    def test_legacy_padded_stored_serial_still_matches(self):
+        """The data migration canonicalizes a legacy padded row before exact identity matching."""
+        import importlib
+        from types import SimpleNamespace
+
+        from django.apps import apps
+        from django.db import connection
+
+        from netbox_librenms_plugin.import_utils.device_operations import validate_device_for_import
+
+        device = self._make_device("legacy-padded-host", serial=" SN-LEG-7 ")
+        migration = importlib.import_module("netbox_librenms_plugin.migrations.0012_normalize_device_serials")
+        migration.normalize_device_serials(apps, SimpleNamespace(connection=connection))
+        device.refresh_from_db()
+        assert device.serial == "SN-LEG-7"
+        libre_device = {
+            "device_id": 8816,
+            "hostname": "legacy-import-row",
+            "sysName": "legacy-import-row",
+            "serial": "SN-LEG-7",
+            "hardware": "-",
+            "os": "-",
+            "location": "-",
+        }
+
+        result = validate_device_for_import(libre_device, api=None, server_key="default", include_vc_detection=False)
+
+        assert result["existing_device"] is not None, "migrated serial was not matched exactly"
+        assert result["existing_device"].pk == device.pk
+
+    def test_padded_stored_serial_on_linked_device_is_confirmed_not_drift(self):
+        """A librenms_id-matched device whose STORED serial is padded must report serial_confirmed, not "hardware may have been replaced"."""
+        from netbox_librenms_plugin.import_utils.device_operations import validate_device_for_import
+
+        device = self._make_device("linked-padded-host", serial=" SN-PAD-1 ")
+        device.custom_field_data["librenms_id"] = {"default": 8817}
+        device.save()
+        libre_device = {
+            "device_id": 8817,
+            "hostname": "linked-padded-host",
+            "sysName": "linked-padded-host",
+            "serial": "SN-PAD-1",  # same serial, only the STORED side carries legacy padding
+            "hardware": "-",
+            "os": "-",
+            "location": "-",
+        }
+
+        result = validate_device_for_import(libre_device, api=None, server_key="default", include_vc_detection=False)
+
+        assert result["existing_match_type"] == "librenms_id"
+        assert result["existing_device"].pk == device.pk
+        assert result["serial_confirmed"] is True, "padded stored serial reported as drift"
+        assert result.get("serial_action") is None
+        assert not any("replaced" in w for w in result.get("warnings", [])), result.get("warnings")
+
+    def test_padded_stored_serial_on_hostname_match_is_not_drift(self):
+        """A hostname-matched device whose STORED serial is padded must not report a serial difference."""
+        from netbox_librenms_plugin.import_utils.device_operations import validate_device_for_import
+
+        device = self._make_device("hostname-padded-host", serial=" SN-PAD-2 ")
+        libre_device = {
+            "device_id": 8818,
+            "hostname": "hostname-padded-host",
+            "sysName": "hostname-padded-host",
+            "serial": "SN-PAD-2",
+            "hardware": "-",
+            "os": "-",
+            "location": "-",
+        }
+
+        result = validate_device_for_import(libre_device, api=None, server_key="default", include_vc_detection=False)
+
+        assert result["existing_match_type"] == "hostname"
+        assert result["existing_device"].pk == device.pk
+        assert result.get("serial_action") is None, "whitespace-only stored/incoming diff flagged as drift"
+        assert not any("differs" in w for w in result.get("warnings", [])), result.get("warnings")
+
+    def test_padded_stored_serial_does_not_leak_into_the_vc_member_name(self):
+        """The stored-serial fallback for the VC member name must be trimmed, or a padded serial suggests a renamed device."""
+        from dcim.models import VirtualChassis
+
+        from netbox_librenms_plugin.import_utils.device_operations import validate_device_for_import
+        from netbox_librenms_plugin.models import LibreNMSSettings
+
+        settings_row = LibreNMSSettings.objects.order_by("pk").first() or LibreNMSSettings()
+        settings_row.vc_member_name_pattern = "-{serial}"
+        settings_row.save()
+
+        device = self._make_device("stack-master-SN-VC-3", serial=" SN-VC-3 ")
+        device.custom_field_data["librenms_id"] = {"default": 8819}
+        vc = VirtualChassis.objects.create(name="vc-padded-serial")
+        device.virtual_chassis = vc
+        device.vc_position = 2
+        device.save()
+
+        libre_device = {
+            "device_id": 8819,
+            "hostname": "stack-master",
+            "sysName": "stack-master",
+            "serial": "-",  # placeholder → the name falls back to the STORED serial
+            "hardware": "-",
+            "os": "-",
+            "location": "-",
+        }
+
+        result = validate_device_for_import(libre_device, api=None, server_key="default", include_vc_detection=False)
+
+        assert result["suggested_name"] is None, result["suggested_name"]
+        assert result["name_matches"] is True, "padded stored serial produced a bogus VC member name"
+
+
+@pytest.mark.django_db
+class TestImportPersistsTrimmedSerial:
+    """import_single_device persists a trimmed serial so the next exact lookup finds it."""
+
+    def test_padded_incoming_serial_is_stored_trimmed(self):
+        from unittest.mock import patch
+
+        from dcim.models import Device, DeviceRole, DeviceType, Manufacturer, Site
+
+        from netbox_librenms_plugin.import_utils.device_operations import import_single_device
+
+        mfr, _ = Manufacturer.objects.get_or_create(name="ACME-trimp", slug="acme-trimp")
+        dt, _ = DeviceType.objects.get_or_create(manufacturer=mfr, model="DT-trimp", slug="dt-trimp")
+        role, _ = DeviceRole.objects.get_or_create(name="Role-trimp", slug="role-trimp")
+        site, _ = Site.objects.get_or_create(name="Site-trimp", slug="site-trimp")
+
+        libre_device = {
+            "device_id": 8813,
+            "hostname": "trim-persist-host",
+            "sysName": "trim-persist-host",
+            "hardware": "-",
+            "serial": "  SN-PERSIST-9  ",  # SNMP whitespace padding around the real serial
+            "os": "-",
+            "status": 1,
+            "location": "-",
+        }
+        validation = {
+            "existing_device": None,
+            "resolved_name": "trim-persist-host",
+            "site": {"found": True, "site": site},
+            "device_type": {"matched": True, "device_type": dt},
+            "device_role": {"found": True, "role": role},
+            "platform": {"found": False, "platform": None},
+            "rack": {"rack": None},
+        }
+
+        # Patch only set_librenms_device_id: it writes the librenms_id custom field, which isn't
+        # registered in the isolated test DB and would fail Device.full_clean() — orthogonal to the
+        # serial persistence under test. The real Device is created, full_clean'd, and saved.
+        with (
+            patch("netbox_librenms_plugin.import_utils.device_operations.LibreNMSAPI"),
+            patch("netbox_librenms_plugin.import_utils.device_operations.set_librenms_device_id"),
+        ):
+            result = import_single_device(
+                8813,
+                server_key="default",
+                validation=validation,
+                libre_device=libre_device,
+                sync_options={"sync_interfaces": False},
+            )
+
+        assert result["success"] is True, result.get("error")
+        device = Device.objects.get(name="trim-persist-host")
+        # Stored TRIMMED → a later filter(serial="SN-PERSIST-9") finds it, so no duplicate is minted.
+        assert device.serial == "SN-PERSIST-9"
+
+
+@pytest.mark.django_db
 class TestImportFallbackReadsLive:
     """Import fallbacks read LibreNMS live (use_cache=False) rather than the 60s get_device_info snapshot."""
 
@@ -2341,6 +2633,29 @@ class TestOOBDetection:
         assert result["merge_candidates"]["oob_named"]["librenms_link"]["host_id"] == 99
         assert result["can_import"] is False
 
+    def test_merge_candidates_detected_for_a_numeric_serial(self):
+        """An all-digit serial arriving as an int must still pair the hostname- and serial-matched devices; the pairing stage reads the serial again and would otherwise raise into the silent merge-detection catch."""
+        from netbox_librenms_plugin.tests.conftest import make_device
+
+        host = make_device("eve-ng-num", serial="123456", librenms_cf={"default": {"id": 42}})
+        oob = make_device("idrac-num", serial="123456", librenms_cf={"default": {"id": 99}})
+        libre_device = {
+            "device_id": 7,
+            "hostname": "eve-ng-num",
+            "sysName": "eve-ng-num",
+            "hardware": "Dell PowerEdge R770",
+            "serial": 123456,  # int, not str
+            "os": "linux",
+            "ip": "10.0.0.11",
+            "version": "",
+            "location": "",
+        }
+        result = self._validate(libre_device)
+
+        assert result["merge_candidates"] is not None
+        assert result["merge_candidates"]["host_named"]["pk"] == host.pk
+        assert result["merge_candidates"]["oob_named"]["pk"] == oob.pk
+
     def test_merge_candidates_skipped_when_neither_device_has_librenms_link(self):
         """Two devices share serial but neither has a LibreNMS link → conservative skip."""
         from netbox_librenms_plugin.tests.conftest import make_device
@@ -2635,10 +2950,29 @@ class TestDetectSerialMatchRole:
             _describe_existing_librenms_link,
             _detect_serial_match_role,
         )
+        from netbox_librenms_plugin.utils import normalize_serial
 
         existing_link = _describe_existing_librenms_link(existing_device, server_key)
-        serial = (libre_device.get("serial") or "").strip()
+        serial = normalize_serial(libre_device.get("serial"))
         return _detect_serial_match_role(existing_device, existing_link, hostname, serial, libre_device, server_key)
+
+    def test_zero_serial_is_preserved_in_hostname_difference_warning(self):
+        """The test helper follows production normalization, where numeric zero is a real serial."""
+        from netbox_librenms_plugin.tests.conftest import make_device
+
+        device = make_device("zero-warning-old")
+        libre_device = {
+            "device_id": 7,
+            "os": "linux",
+            "hardware": "server",
+            "hostname": "zero-warning-new",
+            "serial": 0,
+        }
+
+        out = self._role(device, "zero-warning-new", libre_device)
+
+        assert out["serial_action"] == "hostname_differs"
+        assert any("same serial (0)" in warning for warning in out["warnings"])
 
     def test_oob_candidate_default_when_incoming_is_oob_and_name_differs(self):
         # Existing unlinked host; incoming LibreNMS row is clearly an iDRAC whose hostname
@@ -2966,6 +3300,7 @@ class TestValidateDedupsSerialDuplicateQuery:
         serial_dup_queries = [
             q["sql"]
             for q in ctx.captured_queries
-            if 'serial" =' in q["sql"].lower() and "limit 2" in q["sql"].lower() and "not" not in q["sql"].lower()
+            if '."serial" =' in q["sql"].lower() and "limit 2" in q["sql"].lower() and "not" not in q["sql"].lower()
         ]
         assert len(serial_dup_queries) == 1
+        assert all("trim(" not in sql.lower() for sql in serial_dup_queries)

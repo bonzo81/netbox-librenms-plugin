@@ -8,6 +8,7 @@ from django.core.cache import cache
 from django.db import transaction
 
 from ..librenms_api import LibreNMSAPI
+from ..utils import normalize_serial
 
 logger = logging.getLogger(__name__)
 
@@ -404,8 +405,8 @@ def _safe_pos(value) -> int | None:
 
 
 def _norm_serial(s) -> str:
-    """Normalize serial: strip whitespace; treat '-' as absent."""
-    s = str(s or "").strip()
+    """Normalize serial via normalize_serial (only None means missing); additionally treat '-' as absent."""
+    s = normalize_serial(s)
     return "" if s == "-" else s
 
 
@@ -523,9 +524,7 @@ def create_virtual_chassis_with_members(
                 # Normalize serial and position up front so all skip-checks and
                 # downstream logic use consistent values (strips whitespace and
                 # treats the sentinel "-" as "no serial").
-                serial = str(member.get("serial") or "").strip()
-                if serial == "-":
-                    serial = ""
+                serial = _norm_serial(member.get("serial"))
                 member_pos = _safe_pos(member.get("position"))
 
                 # Skip the master member — identified by is_master flag, serial match,

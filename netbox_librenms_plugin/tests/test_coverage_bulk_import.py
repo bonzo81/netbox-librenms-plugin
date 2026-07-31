@@ -1377,14 +1377,21 @@ class TestRefreshExistingDevice:
         args = mock_logger.error.call_args.args
         assert any("99" in str(arg) for arg in args)
 
-    def test_exception_during_new_device_lookup_logs_error(self):
-        """An exception in the newly-imported-device check is caught and logged (forced)."""
+    def test_exception_during_new_device_lookup_logs_error_and_fails_closed(self):
+        """An exception in the newly-imported-device re-check is logged and blocks the import (forced)."""
         from unittest.mock import patch
 
         from netbox_librenms_plugin.import_utils.bulk_import import _refresh_existing_device
 
         libre_device = {"device_id": 44, "hostname": "sw03", "sysName": "sw03"}
-        validation = {"existing_device": None, "import_as_vm": False, "resolved_name": None}
+        # Cache-time state said "importable" — the failed recheck must revoke that.
+        validation = {
+            "existing_device": None,
+            "import_as_vm": False,
+            "resolved_name": None,
+            "can_import": True,
+            "is_ready": True,
+        }
 
         with (
             patch(
@@ -1396,6 +1403,10 @@ class TestRefreshExistingDevice:
             _refresh_existing_device(validation, libre_device=libre_device, server_key="default")
 
         mock_logger.error.assert_called()
+        assert validation["can_import"] is False
+        assert validation["is_ready"] is False
+        # Surfaced to the user as a blocking issue, not silently greyed out.
+        assert any("re-check failed" in issue for issue in validation.get("issues", []))
 
 
 # ===========================================================================
@@ -2701,3 +2712,63 @@ class TestRefreshLibreNMSLinkage:
         """Serial/hostname/primary_ip matches are left alone."""
         v = self._call(match_type="serial", scanned_id=42, host_id=None, oob_id=None)
         assert v["existing_match_type"] == "serial"
+
+
+# ===========================================================================
+# TestRefreshExistingDeviceVMMatch — real-DB display state for VM matches
+# ===========================================================================
+
+
+@pytest.mark.django_db
+class TestRefreshExistingDeviceVMMatch:
+    """Real-DB checks that a late-found VM match populates cluster display state."""
+
+    @staticmethod
+    def _cross_model_validation():
+        """Cached device row with no match at cache time, shaped like validate_device_for_import output."""
+        return {
+            "existing_device": None,
+            "import_as_vm": False,
+            "issues": [],
+            "site": {"found": True},
+            "device_type": {"found": True},
+            "device_role": {"found": False, "role": None, "available_roles": []},
+            "cluster": {"found": False, "cluster": None, "available_clusters": []},
+        }
+
+    def test_vm_match_shows_the_matched_vms_cluster(self):
+        """A cross-model VM match reflects the VM's actual cluster, mirroring the device-role display."""
+        from virtualization.models import Cluster, ClusterType, VirtualMachine
+
+        from netbox_librenms_plugin.import_utils.bulk_import import _refresh_existing_device
+
+        ctype = ClusterType.objects.create(name="ct-refresh", slug="ct-refresh")
+        cluster = Cluster.objects.create(name="cl-refresh", type=ctype)
+        VirtualMachine.objects.create(name="vm-clustered", cluster=cluster)
+
+        validation = self._cross_model_validation()
+        _refresh_existing_device(validation, {"hostname": "vm-clustered"}, server_key="default")
+
+        assert validation["import_as_vm"] is True
+        assert validation["cluster"]["found"] is True
+        assert validation["cluster"]["cluster"] == cluster
+        # Existing-match gating must stay force-blocked either way.
+        assert validation["can_import"] is False
+        assert validation["is_ready"] is False
+
+    def test_vm_match_without_cluster_resets_stale_cluster_display(self):
+        """A matched VM with no cluster clears a stale cached cluster selection."""
+        from virtualization.models import VirtualMachine
+
+        from netbox_librenms_plugin.import_utils.bulk_import import _refresh_existing_device
+
+        VirtualMachine.objects.create(name="vm-clusterless")
+
+        validation = self._cross_model_validation()
+        validation["cluster"] = {"found": True, "cluster": object(), "available_clusters": ["keep-me"]}
+
+        _refresh_existing_device(validation, {"hostname": "vm-clusterless"}, server_key="default")
+
+        assert validation["cluster"]["found"] is False
+        assert validation["cluster"]["cluster"] is None
+        assert validation["cluster"]["available_clusters"] == ["keep-me"]

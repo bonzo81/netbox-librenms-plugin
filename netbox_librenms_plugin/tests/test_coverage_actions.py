@@ -5,7 +5,13 @@ from unittest.mock import MagicMock, patch
 import pytest
 from django.test import RequestFactory
 
-from netbox_librenms_plugin.tests.conftest import make_device, make_interface, make_ip, make_superuser, make_vm
+from netbox_librenms_plugin.tests.conftest import (
+    make_device,
+    make_interface,
+    make_ip,
+    make_superuser,
+    make_vm,
+)
 
 
 def _make_request(post=None, get=None, headers=None, user_is_superuser=False):
@@ -967,6 +973,32 @@ class TestBuildSyncInfo:
         result = build_sync_info(libre_device, existing)
         assert result["serial_synced"] is False
 
+    def test_padded_incoming_serial_counts_as_synced(self):
+        """A whitespace-padded LibreNMS serial equal to the stored trimmed value must not report drift."""
+        build_sync_info = self._get_method()
+        libre_device = {"serial": " SN001 ", "os": "ios", "hardware": "-"}
+        existing = MagicMock()
+        existing.serial = "SN001"
+        existing.platform = None
+        existing.device_type = None
+
+        with patch("netbox_librenms_plugin.utils.find_matching_platform", return_value={"found": False}):
+            result = build_sync_info(libre_device, existing)
+
+        assert result["serial_synced"] is True
+
+    @pytest.mark.django_db
+    def test_padded_stored_serial_counts_as_synced(self):
+        """A real device whose STORED serial is legacy-padded must not report serial drift in the details modal."""
+        build_sync_info = self._get_method()
+        existing = make_device("sync-info-padded-serial", serial=" SN-STORED-1 ")
+        libre_device = {"serial": "SN-STORED-1", "os": "-", "hardware": "-"}
+
+        result = build_sync_info(libre_device, existing)
+
+        assert result["serial_synced"] is True, "padded stored serial reported as drift"
+        assert result["all_synced"] is True
+
     def test_platform_synced_when_matching(self):
         build_sync_info = self._get_method()
         libre_device = {"serial": "-", "os": "ios", "hardware": "-"}
@@ -1256,6 +1288,7 @@ class TestDeviceConflictActionView:
 
         view = object.__new__(DeviceConflictActionView)
         view._librenms_api = _make_api()
+        view.request = MagicMock()
         view.require_write_permission = MagicMock(return_value=None)
         view.require_object_permissions = MagicMock(return_value=None)
         return view
@@ -1677,7 +1710,7 @@ class TestDeviceConflictActionViewVMGuard:
                 MockAPI.get_available_servers.return_value = {"secondary": "Secondary"}
                 with patch("dcim.models.Device") as MockDevice:
                     mock_device_obj = MagicMock()
-                    MockDevice.objects.get.return_value = mock_device_obj
+                    MockDevice.objects.restrict.return_value.get.return_value = mock_device_obj
                     MockDevice.DoesNotExist = Exception
                     with patch("netbox_librenms_plugin.views.imports.actions.cache"):
                         with patch.object(
@@ -2162,7 +2195,7 @@ class TestDeviceConflictActionMissingExisting:
                     pass
 
                 MockDevice.DoesNotExist = _DeviceDoesNotExist
-                MockDevice.objects.get.side_effect = _DeviceDoesNotExist("Not found")
+                MockDevice.objects.restrict.return_value.get.side_effect = _DeviceDoesNotExist("Not found")
                 response = view.post(request, device_id=1)
 
         assert response.status_code == 200
@@ -2207,7 +2240,7 @@ class TestDeviceConflictActionMorePaths:
 
         with patch.object(view, "require_all_permissions", return_value=None):
             with patch("dcim.models.Device") as MockDevice:
-                MockDevice.objects.get.return_value = mock_existing
+                MockDevice.objects.restrict.return_value.get.return_value = mock_existing
                 MockDevice.DoesNotExist = Exception
                 with patch.object(view, "require_object_permissions", return_value=None):
                     with patch.object(
@@ -2239,7 +2272,7 @@ class TestDeviceConflictActionMorePaths:
 
         with patch.object(view, "require_all_permissions", return_value=None):
             with patch("dcim.models.Device") as MockDevice:
-                MockDevice.objects.get.return_value = mock_existing
+                MockDevice.objects.restrict.return_value.get.return_value = mock_existing
                 MockDevice.DoesNotExist = Exception
                 with patch.object(view, "require_object_permissions", return_value=None):
                     with patch.object(
@@ -2275,7 +2308,7 @@ class TestDeviceConflictActionMorePaths:
 
         with patch.object(view, "require_all_permissions", return_value=None):
             with patch("dcim.models.Device") as MockDevice:
-                MockDevice.objects.get.return_value = mock_existing
+                MockDevice.objects.restrict.return_value.get.return_value = mock_existing
                 MockDevice.DoesNotExist = Exception
                 with patch.object(view, "require_object_permissions", return_value=None):
                     with patch.object(
@@ -2308,7 +2341,7 @@ class TestDeviceConflictActionMorePaths:
 
         with patch.object(view, "require_all_permissions", return_value=None):
             with patch("dcim.models.Device") as MockDevice:
-                MockDevice.objects.get.return_value = mock_existing
+                MockDevice.objects.restrict.return_value.get.return_value = mock_existing
                 MockDevice.DoesNotExist = Exception
                 with patch.object(view, "require_object_permissions", return_value=None):
                     with patch.object(
@@ -2337,7 +2370,7 @@ class TestDeviceConflictActionMorePaths:
 
         with patch.object(view, "require_all_permissions", return_value=None):
             with patch("dcim.models.Device") as MockDevice:
-                MockDevice.objects.get.return_value = mock_existing
+                MockDevice.objects.restrict.return_value.get.return_value = mock_existing
                 MockDevice.DoesNotExist = Exception
                 with patch.object(view, "require_object_permissions", return_value=perm_error):
                     response = view.post(request, device_id=1)
@@ -2366,7 +2399,7 @@ class TestDeviceConflictActionMorePaths:
 
         with patch.object(view, "require_all_permissions", return_value=None):
             with patch("dcim.models.Device") as MockDevice:
-                MockDevice.objects.get.return_value = mock_existing
+                MockDevice.objects.restrict.return_value.get.return_value = mock_existing
                 MockDevice.DoesNotExist = Exception
                 with patch.object(view, "require_object_permissions", return_value=None):
                     with patch.object(
@@ -2401,7 +2434,7 @@ class TestDeviceConflictActionMorePaths:
 
         with patch.object(view, "require_all_permissions", return_value=None):
             with patch("dcim.models.Device") as MockDevice:
-                MockDevice.objects.get.return_value = mock_existing
+                MockDevice.objects.restrict.return_value.get.return_value = mock_existing
                 MockDevice.DoesNotExist = Exception
                 with patch.object(view, "require_object_permissions", return_value=None):
                     with patch.object(
@@ -2436,7 +2469,7 @@ class TestDeviceConflictActionMorePaths:
 
         with patch.object(view, "require_all_permissions", return_value=None):
             with patch("dcim.models.Device") as MockDevice:
-                MockDevice.objects.get.return_value = mock_existing
+                MockDevice.objects.restrict.return_value.get.return_value = mock_existing
                 MockDevice.DoesNotExist = Exception
                 with patch.object(view, "require_object_permissions", return_value=None):
                     with patch.object(
@@ -2469,7 +2502,7 @@ class TestDeviceConflictActionMorePaths:
 
         with patch.object(view, "require_all_permissions", return_value=None):
             with patch("dcim.models.Device") as MockDevice:
-                MockDevice.objects.get.return_value = mock_existing
+                MockDevice.objects.restrict.return_value.get.return_value = mock_existing
                 MockDevice.DoesNotExist = Exception
                 with patch.object(view, "require_object_permissions", return_value=None):
                     with patch.object(
@@ -2506,7 +2539,7 @@ class TestDeviceConflictActionMorePaths:
 
         with patch.object(view, "require_all_permissions", return_value=None):
             with patch("dcim.models.Device") as MockDevice:
-                MockDevice.objects.get.return_value = mock_existing
+                MockDevice.objects.restrict.return_value.get.return_value = mock_existing
                 MockDevice.DoesNotExist = Exception
                 with patch.object(view, "require_object_permissions", return_value=None):
                     with patch.object(
@@ -2539,7 +2572,7 @@ class TestDeviceConflictActionMorePaths:
 
         with patch.object(view, "require_all_permissions", return_value=None):
             with patch("dcim.models.Device") as MockDevice:
-                MockDevice.objects.get.return_value = mock_existing
+                MockDevice.objects.restrict.return_value.get.return_value = mock_existing
                 MockDevice.DoesNotExist = Exception
                 with patch.object(view, "require_object_permissions", return_value=None):
                     with patch.object(
@@ -2671,7 +2704,7 @@ class TestDeviceConflictActionBoolAndInvalidId:
 
         with patch.object(view, "require_all_permissions", return_value=None):
             with patch("dcim.models.Device") as MockDevice:
-                MockDevice.objects.get.return_value = mock_existing
+                MockDevice.objects.restrict.return_value.get.return_value = mock_existing
                 MockDevice.DoesNotExist = Exception
                 with patch.object(view, "require_object_permissions", return_value=None):
                     with patch.object(
@@ -2703,7 +2736,7 @@ class TestDeviceConflictActionBoolAndInvalidId:
 
         with patch.object(view, "require_all_permissions", return_value=None):
             with patch("dcim.models.Device") as MockDevice:
-                MockDevice.objects.get.return_value = mock_existing
+                MockDevice.objects.restrict.return_value.get.return_value = mock_existing
                 MockDevice.DoesNotExist = Exception
                 with patch.object(view, "require_object_permissions", return_value=None):
                     with patch.object(
@@ -2752,7 +2785,7 @@ class TestDeviceConflictLinkIdConflict:
 
         with patch.object(view, "require_all_permissions", return_value=None):
             with patch("dcim.models.Device") as MockDevice:
-                MockDevice.objects.get.return_value = mock_existing
+                MockDevice.objects.restrict.return_value.get.return_value = mock_existing
                 MockDevice.objects.select_for_update.return_value.get.return_value = mock_existing
                 MockDevice.DoesNotExist = Exception
                 with patch.object(view, "require_object_permissions", return_value=None):
@@ -2968,7 +3001,7 @@ class TestDeviceConflictSelectForUpdateDoesNotExist:
 
         with patch.object(view, "require_all_permissions", return_value=None):
             with patch("dcim.models.Device") as MockDevice:
-                MockDevice.objects.get.return_value = mock_existing
+                MockDevice.objects.restrict.return_value.get.return_value = mock_existing
                 # select_for_update().get() raises DoesNotExist
                 MockDevice.objects.select_for_update.return_value.get.side_effect = DoesNotExistExc("gone")
                 MockDevice.DoesNotExist = DoesNotExistExc
@@ -3033,7 +3066,7 @@ class TestMigrateLibreNMSIdMorePaths:
 
         with patch.object(view, "require_all_permissions", return_value=None):
             with patch("dcim.models.Device") as MockDevice:
-                MockDevice.objects.get.return_value = mock_existing
+                MockDevice.objects.restrict.return_value.get.return_value = mock_existing
                 MockDevice.DoesNotExist = Exception
                 with patch.object(view, "require_object_permissions", return_value=None):
                     with patch.object(
@@ -3073,7 +3106,7 @@ class TestMigrateLibreNMSIdMorePaths:
 
         with patch.object(view, "require_all_permissions", return_value=None):
             with patch("dcim.models.Device") as MockDevice:
-                MockDevice.objects.get.return_value = mock_existing
+                MockDevice.objects.restrict.return_value.get.return_value = mock_existing
                 MockDevice.DoesNotExist = DoesNotExistExc
                 with patch.object(view, "require_object_permissions", return_value=None):
                     with patch.object(
@@ -3086,7 +3119,7 @@ class TestMigrateLibreNMSIdMorePaths:
                                 # This inner patch shadows the outer one for the in-function
                                 # `from dcim.models import Device`, so it must serve BOTH the
                                 # pre-lock existing_device lookup and the locked re-read.
-                                MockDevice2.objects.get.return_value = mock_existing
+                                MockDevice2.objects.restrict.return_value.get.return_value = mock_existing
                                 MockDevice2.objects.select_for_update.return_value.get.return_value = locked_device
                                 MockDevice2.DoesNotExist = DoesNotExistExc
                                 with patch("netbox_librenms_plugin.utils.find_by_librenms_id", return_value=None):
@@ -3119,6 +3152,12 @@ class TestMigrateLibreNMSIdMorePaths:
 
 class TestDeviceConflictMoreActions:
     """Tests for many more action paths in DeviceConflictActionView."""
+
+    @pytest.fixture(autouse=True)
+    def _no_advisory_lock(self):
+        """The serial guard's pg_advisory_xact_lock needs a real connection these mock tests don't have."""
+        with patch("netbox_librenms_plugin.views.imports.actions._acquire_serial_assignment_lock"):
+            yield
 
     def _make_view(self):
         from netbox_librenms_plugin.views.imports.actions import DeviceConflictActionView
@@ -3157,9 +3196,9 @@ class TestDeviceConflictMoreActions:
         stack.enter_context(patch.object(view, "require_all_permissions", return_value=None))
 
         MockDevice = MagicMock()
-        MockDevice.objects.get.return_value = mock_existing
+        MockDevice.objects.restrict.return_value.get.return_value = mock_existing
         MockDevice.objects.select_for_update.return_value.get.return_value = mock_existing
-        MockDevice.objects.select_for_update.return_value.filter.return_value.exclude.return_value.first.return_value = None
+        MockDevice.objects.filter.return_value.exclude.return_value.first.return_value = None
         MockDevice.DoesNotExist = DoesNotExistExc
 
         stack.enter_context(patch("dcim.models.Device", MockDevice))
@@ -3211,7 +3250,7 @@ class TestDeviceConflictMoreActions:
 
         stack, MockDevice = self._common_patches(view, mock_existing, libre_device, validation)
         with stack:
-            MockDevice.objects.select_for_update.return_value.filter.return_value.exclude.return_value.first.return_value = conflict_device
+            MockDevice.objects.filter.return_value.exclude.return_value.first.return_value = conflict_device
             with patch("netbox_librenms_plugin.views.imports.actions._save_device", return_value=None):
                 response = view.post(request, device_id=42)
 
@@ -3328,6 +3367,12 @@ class TestDeviceConflictMoreActions:
 class TestMoreSaveErrorPaths:
     """Tests for save error paths in actions (lines 1108, 1116, 1119, 1146, 1149, 1168, 1182-1183, 1196-1210, 1222, 1238)."""
 
+    @pytest.fixture(autouse=True)
+    def _no_advisory_lock(self):
+        """The serial guard's pg_advisory_xact_lock needs a real connection these mock tests don't have."""
+        with patch("netbox_librenms_plugin.views.imports.actions._acquire_serial_assignment_lock"):
+            yield
+
     def _make_view(self):
         from netbox_librenms_plugin.views.imports.actions import DeviceConflictActionView
 
@@ -3359,9 +3404,9 @@ class TestMoreSaveErrorPaths:
 
         DoesNotExistExc = type("DoesNotExist", (Exception,), {})
         MockDevice = MagicMock()
-        MockDevice.objects.get.return_value = mock_existing
+        MockDevice.objects.restrict.return_value.get.return_value = mock_existing
         MockDevice.objects.select_for_update.return_value.get.return_value = mock_existing
-        MockDevice.objects.select_for_update.return_value.filter.return_value.exclude.return_value.first.return_value = None
+        MockDevice.objects.filter.return_value.exclude.return_value.first.return_value = None
         MockDevice.DoesNotExist = DoesNotExistExc
 
         mock_tx = MagicMock()
@@ -3405,7 +3450,7 @@ class TestMoreSaveErrorPaths:
 
         stack, MockDevice = self._setup_common(view, mock_existing, libre_device, validation, save_return=None)
         with stack:
-            MockDevice.objects.select_for_update.return_value.filter.return_value.exclude.return_value.first.return_value = conflict
+            MockDevice.objects.filter.return_value.exclude.return_value.first.return_value = conflict
             response = view.post(request, device_id=42)
 
         assert response.status_code == 200
@@ -3560,6 +3605,12 @@ class TestSyncSerialAction:
 class TestUpdateAndSerialSaveErrors:
     """Tests for update/update_serial _save_device error paths (lines 1119, 1149)."""
 
+    @pytest.fixture(autouse=True)
+    def _no_advisory_lock(self):
+        """The serial guard's pg_advisory_xact_lock needs a real connection these mock tests don't have."""
+        with patch("netbox_librenms_plugin.views.imports.actions._acquire_serial_assignment_lock"):
+            yield
+
     def _make_view(self):
         from netbox_librenms_plugin.views.imports.actions import DeviceConflictActionView
 
@@ -3583,9 +3634,9 @@ class TestUpdateAndSerialSaveErrors:
 
         DoesNotExistExc = type("DoesNotExist", (Exception,), {})
         MockDevice = MagicMock()
-        MockDevice.objects.get.return_value = mock_existing
+        MockDevice.objects.restrict.return_value.get.return_value = mock_existing
         MockDevice.objects.select_for_update.return_value.get.return_value = mock_existing
-        MockDevice.objects.select_for_update.return_value.filter.return_value.exclude.return_value.first.return_value = None
+        MockDevice.objects.filter.return_value.exclude.return_value.first.return_value = None
         MockDevice.DoesNotExist = DoesNotExistExc
         mock_tx = MagicMock()
         mock_tx.atomic.return_value.__enter__ = MagicMock(return_value=None)
@@ -3642,6 +3693,12 @@ class TestUpdateAndSerialSaveErrors:
 class TestSyncSerialMorePaths:
     """Tests for sync_serial action edge cases (lines 1182-1200, 1207)."""
 
+    @pytest.fixture(autouse=True)
+    def _no_advisory_lock(self):
+        """The serial guard's pg_advisory_xact_lock needs a real connection these mock tests don't have."""
+        with patch("netbox_librenms_plugin.views.imports.actions._acquire_serial_assignment_lock"):
+            yield
+
     def _make_view(self):
         from netbox_librenms_plugin.views.imports.actions import DeviceConflictActionView
 
@@ -3655,7 +3712,7 @@ class TestSyncSerialMorePaths:
 
         DoesNotExistExc = type("DoesNotExist", (Exception,), {})
         MockDevice = MagicMock()
-        MockDevice.objects.get.return_value = mock_existing
+        MockDevice.objects.restrict.return_value.get.return_value = mock_existing
         MockDevice.DoesNotExist = DoesNotExistExc
         mock_tx = MagicMock()
         mock_tx.atomic.return_value.__enter__ = MagicMock(return_value=None)
@@ -3714,6 +3771,8 @@ class TestSyncSerialMorePaths:
         )
         with stack:
             MockDevice.objects.select_for_update.return_value.get.return_value = locked_device
+            # The conflict lookup is deliberately UNLOCKED (advisory lock on the serial value instead);
+            # a second row lock would deadlock two swap-direction requests (A→B / B→A).
             MockDevice.objects.filter.return_value.exclude.return_value.first.return_value = conflict_device
             response = view.post(request, device_id=42)
 
@@ -3742,11 +3801,87 @@ class TestSyncSerialMorePaths:
         )
         with stack:
             MockDevice.objects.select_for_update.return_value.get.return_value = locked_device
+            # The conflict lookup is deliberately UNLOCKED (advisory lock on the serial value instead);
+            # a second row lock would deadlock two swap-direction requests (A→B / B→A).
             MockDevice.objects.filter.return_value.exclude.return_value.first.return_value = None
             with patch("netbox_librenms_plugin.views.imports.actions._save_device", return_value=err):
                 response = view.post(request, device_id=42)
 
         assert response.status_code == 400
+
+
+class TestSyncSerialConflictGuard:
+    """Real-DB check of the sync_serial conflict guard under an actual conflict.
+
+    Writers of the same serial serialize on a transaction-scoped advisory lock keyed by
+    the serial value; the conflict lookup itself must NOT take a second row lock — with
+    own-device rows already held, two swap-direction requests would deadlock (A→B / B→A).
+    """
+
+    @pytest.mark.django_db
+    def test_sync_serial_conflict_guard_uses_advisory_lock_not_row_lock(self):
+        from dcim.models import Device, DeviceRole, DeviceType, Manufacturer, Site
+        from django.contrib.auth import get_user_model
+        from django.db import connection
+        from django.test import RequestFactory
+        from django.test.utils import CaptureQueriesContext
+
+        from netbox_librenms_plugin.views.imports.actions import DeviceConflictActionView
+
+        site = Site.objects.create(name="site-serial-lock", slug="site-serial-lock")
+        manufacturer = Manufacturer.objects.create(name="mf-serial-lock", slug="mf-serial-lock")
+        device_type = DeviceType.objects.create(
+            manufacturer=manufacturer, model="dt-serial-lock", slug="dt-serial-lock"
+        )
+        role = DeviceRole.objects.create(name="role-serial-lock", slug="role-serial-lock")
+        target = Device.objects.create(
+            name="serial-lock-target", site=site, device_type=device_type, role=role, serial=""
+        )
+        conflict = Device.objects.create(
+            name="serial-lock-conflict", site=site, device_type=device_type, role=role, serial="SN-LOCK-CONF"
+        )
+
+        user = get_user_model().objects.create_user(username="serial-lock-admin", is_superuser=True)
+        request = RequestFactory().post("/", data={"action": "sync_serial", "existing_device_id": str(target.pk)})
+        request.user = user
+
+        view = DeviceConflictActionView()
+        view.request = request
+        libre_device = {"device_id": 42, "hostname": "serial-lock-target", "serial": "SN-LOCK-CONF"}
+        validation = {"existing_device": target, "device_type_mismatch": False}
+
+        with (
+            patch.object(
+                DeviceConflictActionView,
+                "get_validated_device_with_selections",
+                return_value=(libre_device, validation, {}),
+            ),
+            CaptureQueriesContext(connection) as ctx,
+        ):
+            response = view.post(request, device_id=42)
+
+        assert response.status_code == 200
+        assert b"Serial conflict" in response.content
+        target.refresh_from_db()
+        assert target.serial == ""
+
+        conflict_lookups = [
+            q["sql"]
+            for q in ctx.captured_queries
+            if "dcim_device" in q["sql"] and '."serial" = ' in q["sql"] and q["sql"].lstrip().startswith("SELECT")
+        ]
+        assert conflict_lookups, "conflicting-serial lookup was not captured"
+        assert all("TRIM(" not in sql for sql in conflict_lookups)
+        assert all("FOR UPDATE" not in sql for sql in conflict_lookups), (
+            "sync_serial conflict lookup must not row-lock the conflicting row "
+            f"(locked queries: {[s for s in conflict_lookups if 'FOR UPDATE' in s]})"
+        )
+        assert any("pg_advisory_xact_lock" in q["sql"] for q in ctx.captured_queries), (
+            "advisory lock on the serial value was not taken"
+        )
+        # The pre-check must not have been broken by the lock: the conflicting row still owns the serial.
+        conflict.refresh_from_db()
+        assert conflict.serial == "SN-LOCK-CONF"
 
 
 class TestMigrateLibreNMSIdTransactionPaths:
@@ -3783,7 +3918,7 @@ class TestMigrateLibreNMSIdTransactionPaths:
         locked_device.name = "router01"
 
         MockDevice = MagicMock()
-        MockDevice.objects.get.return_value = mock_existing
+        MockDevice.objects.restrict.return_value.get.return_value = mock_existing
         MockDevice.objects.select_for_update.return_value.get.return_value = locked_device
         MockDevice.DoesNotExist = DoesNotExistExc
 
@@ -5384,6 +5519,7 @@ class TestAddAsOOBViewPost:
         view = object.__new__(AddAsOOBView)
         view.kwargs = {}
         view._librenms_api = _make_api()
+        view.request = MagicMock()
 
         # Default: write permission granted
         view.require_write_permission = MagicMock(return_value=None)
@@ -5430,7 +5566,7 @@ class TestAddAsOOBViewPost:
         assert b"Existing device not found" in response.content
         assert response["HX-Reswap"] == "none"
         # The malformed id is rejected before any DB lookup.
-        mock_device.objects.get.assert_not_called()
+        mock_device.objects.restrict.return_value.get.assert_not_called()
 
     def test_device_does_not_exist_returns_htmx_error(self):
         """POST with an existing_device_id that isn't in the DB returns HTMX error — driven by a real ORM miss on an absent pk, not a stubbed manager raising DoesNotExist."""
@@ -5673,7 +5809,7 @@ class TestAddAsOOBViewPost:
             patch("netbox_librenms_plugin.utils.find_by_librenms_id", return_value=None) as mock_find,
         ):
             mock_device.DoesNotExist = Exception
-            mock_device.objects.get.return_value = existing_device
+            mock_device.objects.restrict.return_value.get.return_value = existing_device
             mock_device.objects.select_for_update.return_value.get.return_value = locked_device
             response = view.post(request, device_id=17)
 
@@ -6702,3 +6838,348 @@ class TestRebindOrHtmxErrorHelper:
         ):
             assert _rebind_or_htmx_error(view, request) is None
         assert view._librenms_api.server_key == "prod"
+
+
+@pytest.mark.django_db
+class TestSerialActionsNormalizeAndLock:
+    """Serial-writing actions must persist/compare the TRIMMED serial and guard conflicts without a second row lock."""
+
+    def _post_action(self, action, target, serial):
+        """Drive DeviceConflictActionView.post for *action* against real device *target* with only the API/cache seams patched."""
+        from django.http import HttpResponse
+
+        from netbox_librenms_plugin.views.imports.actions import DeviceConflictActionView
+
+        view = DeviceConflictActionView()
+        view._librenms_api = _make_api()
+        libre_device = {
+            "device_id": 10,
+            "hostname": target.name,
+            "sysName": target.name,
+            "serial": serial,
+        }
+        validation = {"can_import": False, "existing_device": target}
+        request = RequestFactory().post(
+            "/conflict-action/",
+            {"action": action, "existing_device_id": str(target.pk), "server_key": "default"},
+        )
+        request.user = make_superuser()
+        view.request = request
+        with (
+            patch.object(
+                DeviceConflictActionView,
+                "get_validated_device_with_selections",
+                return_value=(libre_device, validation, {}),
+            ),
+            patch.object(DeviceConflictActionView, "render_device_row", return_value=HttpResponse(b"row-ok")),
+            patch.object(DeviceConflictActionView, "rebind_api_for_server", return_value=view._librenms_api),
+        ):
+            return view.post(request, device_id=10)
+
+    @staticmethod
+    def _serial_row_locks(sqls):
+        """Return FOR UPDATE queries whose WHERE clause filters by serial."""
+        serial_row_locks = []
+        for sql in sqls:
+            if "FOR UPDATE" not in sql:
+                continue
+            _, separator, where_clause = sql.partition(" WHERE ")
+            assert separator, f"FOR UPDATE query has no WHERE clause: {sql}"
+            if '."serial" = ' in where_clause:
+                serial_row_locks.append(sql)
+        return serial_row_locks
+
+    def test_update_serial_persists_trimmed_serial(self):
+        """A padded LibreNMS serial is stored trimmed so the next exact lookup still matches."""
+        target = make_device("ser-act-upd")
+        self._post_action("update_serial", target, " SN-42 ")
+        target.refresh_from_db()
+        assert target.serial == "SN-42"
+
+    def test_sync_serial_persists_trimmed_serial(self):
+        """sync_serial stores the trimmed serial, consistent with validate/import normalization."""
+        target = make_device("ser-act-sync")
+        self._post_action("sync_serial", target, " SN-43 ")
+        target.refresh_from_db()
+        assert target.serial == "SN-43"
+
+    def test_update_serial_detects_conflict_against_trimmed_stored_serial(self):
+        """A padded incoming serial must still hit the conflict guard when another device stored the trimmed value."""
+        make_device("ser-act-owner", serial="SN-7")
+        target = make_device("ser-act-loser")
+        resp = self._post_action("update_serial", target, " SN-7 ")
+        assert b"Serial conflict" in resp.content
+        target.refresh_from_db()
+        assert target.serial == ""  # nothing persisted
+
+    def test_sync_serial_uses_advisory_lock_not_conflict_row_lock(self):
+        """The conflict guard serializes on an advisory lock keyed by the serial value; a second row lock would deadlock two swap-direction requests (A then B vs B then A)."""
+        from django.db import connection
+        from django.test.utils import CaptureQueriesContext
+
+        target = make_device("ser-act-lock")
+        with CaptureQueriesContext(connection) as ctx:
+            self._post_action("sync_serial", target, "SN-77")
+        sqls = [q["sql"] for q in ctx.captured_queries]
+        assert any("pg_advisory_xact_lock" in s for s in sqls), "advisory lock on the serial value not taken"
+        # The own-row lock (WHERE "id" = ...) is expected; a conflict-row lock filters on serial.
+        conflict_row_locks = self._serial_row_locks(sqls)
+        assert conflict_row_locks == [], f"conflict lookup still takes a row lock: {conflict_row_locks}"
+
+    def test_serial_lock_refuses_to_run_in_autocommit(self):
+        """pg_advisory_xact_lock is transaction-scoped, so taking it outside a transaction locks nothing and must fail loudly."""
+        from django.db import connection
+
+        from netbox_librenms_plugin.views.imports.actions import _acquire_serial_assignment_lock
+
+        # django_db wraps the test in a transaction, so autocommit has to be simulated on the
+        # connection flag itself — the guard reads exactly that flag.
+        with patch.object(connection, "in_atomic_block", False), pytest.raises(RuntimeError):
+            _acquire_serial_assignment_lock("SN-NO-TX")
+
+    def test_update_action_serializes_on_the_serial_advisory_lock(self):
+        """The update action's serial write takes the same advisory lock (same deadlock shape as sync_serial)."""
+        from django.db import connection
+        from django.test.utils import CaptureQueriesContext
+
+        target = make_device("ser-act-upd-lock")
+        with CaptureQueriesContext(connection) as ctx:
+            self._post_action("update", target, "SN-88")
+        sqls = [q["sql"] for q in ctx.captured_queries]
+        assert any("pg_advisory_xact_lock" in s for s in sqls)
+        assert self._serial_row_locks(sqls) == []
+
+    def test_conflict_toast_escapes_the_conflicting_device_name(self):
+        """_htmx_error_response substitutes the message via format_html('{}', ...), so a marked-up conflicting device name renders escaped — adding escape() at the call site would double-escape."""
+        make_device("<script>alert(1)</script>-owner", serial="SN-XSS")
+        target = make_device("ser-act-xss-target")
+        resp = self._post_action("update_serial", target, "SN-XSS")
+        assert b"Serial conflict" in resp.content
+        assert b"<script>" not in resp.content
+        assert b"&lt;script&gt;" in resp.content
+
+    def test_conflict_detected_against_legacy_padded_stored_serial(self):
+        """The migration canonicalizes a legacy owner before the exact conflict lookup runs."""
+        import importlib
+        from types import SimpleNamespace
+
+        from django.apps import apps
+        from django.db import connection
+
+        owner = make_device("ser-act-legacy-owner", serial=" SN-LEG-9 ")
+        migration = importlib.import_module("netbox_librenms_plugin.migrations.0012_normalize_device_serials")
+        migration.normalize_device_serials(apps, SimpleNamespace(connection=connection))
+        owner.refresh_from_db()
+        assert owner.serial == "SN-LEG-9"
+        target = make_device("ser-act-legacy-loser")
+        resp = self._post_action("update_serial", target, "SN-LEG-9")
+        assert b"Serial conflict" in resp.content
+        target.refresh_from_db()
+        assert target.serial == ""
+
+
+@pytest.mark.django_db
+class TestConflictActionsObjectScope:
+    """The conflict/OOB mutation endpoints must resolve the POSTed existing_device_id object-scoped.
+
+    require_object_permissions only asks ``user.has_perm("dcim.change_device")`` with no instance, so a
+    pk-constrained grant clears the gate. Without a restricted lookup the endpoint would then mutate any
+    device by raw pk.
+    """
+
+    @staticmethod
+    def _scoped_writer(in_scope_device, username):
+        """A real non-superuser with plugin write access and a pk-constrained change_device grant."""
+        from core.models import ObjectType
+        from dcim.models import Device
+        from django.apps import apps
+        from django.contrib.auth import get_user_model
+        from users.models import ObjectPermission
+
+        # Resolve via the app registry: the autouse config fixtures patch the models module during
+        # the full suite, so a plain import could hand get_for_model() a mock class.
+        LibreNMSSettings = apps.get_model("netbox_librenms_plugin", "LibreNMSSettings")
+
+        user = get_user_model().objects.create_user(username=username, password="x")
+        write = ObjectPermission.objects.create(name=f"{username}-plugin-write", actions=["change"])
+        write.object_types.set([ObjectType.objects.get_for_model(LibreNMSSettings)])
+        write.users.set([user])
+
+        scoped = ObjectPermission.objects.create(
+            name=f"{username}-scoped-change-device", actions=["change"], constraints={"pk": in_scope_device.pk}
+        )
+        scoped.object_types.set([ObjectType.objects.get_for_model(Device)])
+        scoped.users.set([user])
+
+        return get_user_model().objects.get(pk=user.pk)  # clear the per-request perm cache
+
+    def _post_conflict(self, user, target, action="link"):
+        """Drive the real DeviceConflictActionView.post against *target* with only the LibreNMS seams patched."""
+        from django.http import HttpResponse
+
+        from netbox_librenms_plugin.views.imports.actions import DeviceConflictActionView
+
+        view = DeviceConflictActionView()
+        view._librenms_api = _make_api()
+        libre_device = {"device_id": 4242, "hostname": target.name, "sysName": target.name, "serial": "-"}
+        validation = {"existing_device": target, "device_type_mismatch": False}
+        request = RequestFactory().post(
+            "/conflict-action/",
+            {"action": action, "existing_device_id": str(target.pk), "server_key": "default"},
+        )
+        request.user = user
+        view.request = request
+        with (
+            patch.object(
+                DeviceConflictActionView,
+                "get_validated_device_with_selections",
+                return_value=(libre_device, validation, {}),
+            ),
+            patch.object(DeviceConflictActionView, "render_device_row", return_value=HttpResponse(b"row-ok")),
+            patch.object(DeviceConflictActionView, "rebind_api_for_server", return_value=view._librenms_api),
+            patch(
+                "netbox_librenms_plugin.views.imports.actions._get_hostname_for_action",
+                return_value=target.name,
+            ),
+        ):
+            return view.post(request, device_id=4242)
+
+    def _post_add_as_oob(self, user, target):
+        """Drive the real AddAsOOBView.post against *target* with only the LibreNMS seams patched."""
+        from django.http import HttpResponse
+
+        from netbox_librenms_plugin.views.imports.actions import AddAsOOBView
+
+        view = AddAsOOBView()
+        view.kwargs = {}
+        view._librenms_api = _make_api()
+        libre_device = {"device_id": 4343, "hostname": f"{target.name}-oob", "sysName": f"{target.name}-oob"}
+        validation = {"oob_candidate": {"device": target, "type": "idrac", "ip": None}}
+        request = RequestFactory().post("/add-as-oob/", {"existing_device_id": str(target.pk), "server_key": "default"})
+        request.user = user
+        view.request = request
+        with (
+            patch.object(
+                AddAsOOBView,
+                "get_validated_device_with_selections",
+                return_value=(libre_device, validation, {}),
+            ),
+            patch.object(AddAsOOBView, "render_device_row", return_value=HttpResponse(b"row-ok")),
+            patch.object(AddAsOOBView, "rebind_api_for_server", return_value=view._librenms_api),
+        ):
+            return view.post(request, device_id=4343)
+
+    def test_conflict_action_cannot_link_an_out_of_scope_device(self):
+        """A pk-constrained change_device grant clears the model-level gate but must not link a device outside its scope."""
+        from dcim.models import Device
+
+        in_scope = make_device("scope-conflict-in")
+        out_of_scope = make_device("scope-conflict-out")
+        user = self._scoped_writer(in_scope, "scoped-conflict-writer")
+
+        response = self._post_conflict(user, out_of_scope)
+
+        assert b"Existing device not found" in response.content
+        assert "librenms_id" not in Device.objects.get(pk=out_of_scope.pk).custom_field_data
+
+    def test_conflict_action_still_links_the_in_scope_device(self):
+        """The device the grant DOES cover resolves through the restricted lookup (no over-block)."""
+        from dcim.models import Device
+
+        in_scope = make_device("scope-conflict-in-2")
+        user = self._scoped_writer(in_scope, "scoped-conflict-writer-2")
+
+        response = self._post_conflict(user, in_scope)
+
+        assert b"Existing device not found" not in response.content
+        assert Device.objects.get(pk=in_scope.pk).custom_field_data["librenms_id"]["default"] == 4242
+
+    def test_add_as_oob_cannot_attach_to_an_out_of_scope_device(self):
+        """AddAsOOB must object-scope its target too: a constrained grant cannot attach an OOB link elsewhere."""
+        from dcim.models import Device
+
+        in_scope = make_device("scope-oob-in")
+        out_of_scope = make_device("scope-oob-out")
+        user = self._scoped_writer(in_scope, "scoped-oob-writer")
+
+        response = self._post_add_as_oob(user, out_of_scope)
+
+        assert b"Existing device not found" in response.content
+        assert "librenms_id" not in Device.objects.get(pk=out_of_scope.pk).custom_field_data
+
+    def test_add_as_oob_still_attaches_to_the_in_scope_device(self):
+        """The in-scope device still resolves and receives the OOB link."""
+        from dcim.models import Device
+
+        in_scope = make_device("scope-oob-in-2")
+        user = self._scoped_writer(in_scope, "scoped-oob-writer-2")
+
+        response = self._post_add_as_oob(user, in_scope)
+
+        assert b"Existing device not found" not in response.content
+        stored = Device.objects.get(pk=in_scope.pk).custom_field_data["librenms_id"]["default"]
+        assert stored["oob"]["id"] == 4343
+
+    def test_superuser_is_unaffected_by_the_restricted_lookup(self):
+        """A superuser keeps the unrestricted queryset, so every device still resolves."""
+        from dcim.models import Device
+
+        target = make_device("scope-conflict-su")
+
+        response = self._post_conflict(make_superuser(), target)
+
+        assert b"Existing device not found" not in response.content
+        assert Device.objects.get(pk=target.pk).custom_field_data["librenms_id"]["default"] == 4242
+
+    @staticmethod
+    def _vc_pair(name, *, sync_cf):
+        """A real 2-member VirtualChassis whose m1 holds ``sync_cf`` (so it is the sync device)."""
+        from dcim.models import VirtualChassis
+
+        vc = VirtualChassis.objects.create(name=name)
+        m1 = make_device(f"{name}-m1", librenms_cf=sync_cf)
+        m1.virtual_chassis = vc
+        m1.vc_position = 1
+        m1.save()
+        m2 = make_device(f"{name}-m2")
+        m2.virtual_chassis = vc
+        m2.vc_position = 2
+        m2.save()
+        return m1, m2
+
+    def test_add_as_oob_cannot_write_an_out_of_scope_vc_sync_device(self):
+        """The OOB link lands on the VC sync sibling, so a grant covering only the selected member must not attach it."""
+        from dcim.models import Device
+
+        sync, selected = self._vc_pair("scope-oob-vc", sync_cf={"default": {"id": 30}})
+        user = self._scoped_writer(selected, "scoped-oob-vc-writer")  # excludes the sync sibling
+
+        response = self._post_add_as_oob(user, selected)
+
+        assert b"Existing device not found" in response.content
+        sync_entry = Device.objects.get(pk=sync.pk).custom_field_data["librenms_id"]["default"]
+        assert sync_entry == {"id": 30}  # no OOB half written onto the unauthorized sibling
+        assert "librenms_id" not in Device.objects.get(pk=selected.pk).custom_field_data
+
+    def test_add_as_oob_writes_the_vc_sync_device_when_it_is_in_scope(self):
+        """Widening the grant to the sync sibling lets the same attach through (no over-block)."""
+        from core.models import ObjectType
+        from dcim.models import Device
+        from django.contrib.auth import get_user_model
+        from users.models import ObjectPermission
+
+        sync, selected = self._vc_pair("scope-oob-vc-ok", sync_cf={"default": {"id": 30}})
+        user = self._scoped_writer(selected, "scoped-oob-vc-writer-ok")
+        extra = ObjectPermission.objects.create(
+            name="scoped-oob-vc-sync", actions=["change"], constraints={"pk": sync.pk}
+        )
+        extra.object_types.set([ObjectType.objects.get_for_model(Device)])
+        extra.users.set([user])
+        user = get_user_model().objects.get(pk=user.pk)  # clear the per-request perm cache
+
+        response = self._post_add_as_oob(user, selected)
+
+        assert b"Existing device not found" not in response.content
+        sync_entry = Device.objects.get(pk=sync.pk).custom_field_data["librenms_id"]["default"]
+        assert sync_entry["id"] == 30
+        assert sync_entry["oob"]["id"] == 4343

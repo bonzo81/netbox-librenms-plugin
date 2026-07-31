@@ -326,6 +326,40 @@ class TestUpdateDeviceSerialView:
         assert "set to" in mock_msg.success.call_args[0][1]
         assert Device.objects.get(pk=dev.pk).serial == "SN001"
 
+    def test_padded_serial_is_normalized_before_persisting(self):
+        """LibreNMS whitespace is stripped at this write boundary before Device.save()."""
+        from dcim.models import Device
+
+        view = self._view()
+        view._librenms_api.get_librenms_id.return_value = 5
+        view._librenms_api.get_device_info.return_value = (True, {"serial": "\t SN-SYNC-1 \n"})
+        dev = make_device("serial-padded-boundary", serial="")
+
+        with (
+            patch("netbox_librenms_plugin.views.sync.device_fields.messages"),
+            patch("netbox_librenms_plugin.views.sync.device_fields.redirect"),
+        ):
+            view.post(_make_request(), pk=dev.pk)
+
+        assert Device.objects.get(pk=dev.pk).serial == "SN-SYNC-1"
+
+    def test_numeric_zero_serial_is_not_dropped_as_missing(self):
+        """Only None is absent: an all-digit JSON serial parsed as numeric zero persists as "0"."""
+        from dcim.models import Device
+
+        view = self._view()
+        view._librenms_api.get_librenms_id.return_value = 5
+        view._librenms_api.get_device_info.return_value = (True, {"serial": 0})
+        dev = make_device("serial-zero-boundary", serial="")
+
+        with (
+            patch("netbox_librenms_plugin.views.sync.device_fields.messages"),
+            patch("netbox_librenms_plugin.views.sync.device_fields.redirect"),
+        ):
+            view.post(_make_request(), pk=dev.pk)
+
+        assert Device.objects.get(pk=dev.pk).serial == "0"
+
     def test_save_validation_error_restores_serial(self):
         from django.core.exceptions import ValidationError
 
@@ -1382,6 +1416,31 @@ class TestAssignVCSerialView:
         mock_msg.success.assert_called_once()
         assert Device.objects.get(pk=member.pk).serial == "SN100"  # real save committed
 
+    @pytest.mark.django_db
+    def test_member_serial_is_normalized_before_persisting(self):
+        """Whitespace from the posted LibreNMS VC inventory is stripped before Device.save()."""
+        from dcim.models import Device, VirtualChassis
+
+        view = self._view()
+        vc = VirtualChassis.objects.create(name="vc-serial-padded")
+        host = make_device("vc-padded-host")
+        host.virtual_chassis = vc
+        host.vc_position = 1
+        host.save()
+        member = make_device("vc-padded-member", serial="OLD")
+        member.virtual_chassis = vc
+        member.vc_position = 2
+        member.save()
+
+        req = _make_request({"serial_1": "\t SN-VC-1 \n", "member_id_1": str(member.pk)})
+        with (
+            patch("netbox_librenms_plugin.views.sync.device_fields.messages"),
+            patch("netbox_librenms_plugin.views.sync.device_fields.redirect"),
+        ):
+            view.post(req, pk=host.pk)
+
+        assert Device.objects.get(pk=member.pk).serial == "SN-VC-1"
+
     def test_permission_denied(self):
         view = self._view()
         err = MagicMock()
@@ -2163,6 +2222,38 @@ class TestConvertLegacyLibreNMSIdViewPost:
         assert not any("not a valid integer" in str(c) for c in mock_msg.error.call_args_list)
         # The serial gate must read live info (use_cache=False), not a stale sync-tab cache snapshot.
         assert view._librenms_api.get_device_info.call_args.kwargs.get("use_cache") is False
+
+    def test_numeric_librenms_serial_passes_the_serial_gate(self):
+        """An all-digit LibreNMS serial can arrive as an int; the gate must coerce it before stripping, not raise."""
+        view = self._view()
+        mock_obj = MagicMock()
+        mock_obj.custom_field_data = {"librenms_id": "42"}
+        mock_obj.serial = "987654"
+        view._librenms_api.get_device_info.return_value = (True, {"serial": 987654})
+
+        DoesNotExist = type("DoesNotExist", (Exception,), {})
+        mock_locked = MagicMock()
+        mock_locked.custom_field_data = {"librenms_id": "42"}
+        mock_locked.serial = "987654"
+        mock_dev_cls = MagicMock()
+        mock_dev_cls.DoesNotExist = DoesNotExist
+        mock_dev_cls.objects.select_for_update.return_value.get.return_value = mock_locked
+
+        with (
+            patch("netbox_librenms_plugin.views.sync.device_fields.get_object_or_404", return_value=mock_obj),
+            patch("netbox_librenms_plugin.views.sync.device_fields.Device", mock_dev_cls),
+            patch("netbox_librenms_plugin.views.sync.device_fields.find_by_librenms_id", return_value=None),
+            patch(
+                "netbox_librenms_plugin.views.sync.device_fields.migrate_legacy_librenms_id", return_value=True
+            ) as mock_migrate,
+            patch("netbox_librenms_plugin.views.sync.device_fields.transaction"),
+            patch("netbox_librenms_plugin.views.sync.device_fields.messages") as mock_msg,
+            patch("netbox_librenms_plugin.views.sync.device_fields.redirect"),
+        ):
+            view.post(_make_request({"object_type": "device"}), pk=1)
+
+        mock_migrate.assert_called_once()
+        assert not any("Serial number mismatch" in str(c) for c in mock_msg.error.call_args_list)
 
     def test_permission_denied(self):
         view = self._view()

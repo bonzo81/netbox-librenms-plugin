@@ -3,6 +3,7 @@ import re
 import threading
 from typing import Optional
 
+import netaddr
 from dcim.models import Device
 from django.core.exceptions import ObjectDoesNotExist, ValidationError
 from django.db.models import Count, Max, Q
@@ -160,6 +161,13 @@ def get_virtual_chassis_member(device: Device, port_name: str) -> Device:
                 Returns the original device if not part of a virtual chassis or if matching fails.
     """
     if not hasattr(device, "virtual_chassis") or not device.virtual_chassis:
+        return device
+
+    # A port row can lack the selected name field entirely (port.get(...) -> None) — or carry a
+    # non-string value from a malformed payload. re.match() raises TypeError on those, which the
+    # except tuple below deliberately doesn't cover (it must not mask real bugs), so guard here
+    # and fall back to the viewed device like any other unmatchable name.
+    if not isinstance(port_name, str):
         return device
 
     try:
@@ -1142,6 +1150,21 @@ def check_vlan_group_matches(
     return True
 
 
+def normalize_serial(value) -> str:
+    """
+    Return the trimmed str form of a LibreNMS serial; only None means missing.
+
+    LibreNMS returns all-digit serials as JSON numbers, so the value must be
+    coerced before stripping — and ``str(value or "")`` would silently drop the
+    real-but-falsey serial ``0``. Call sites keep their own ``"-"`` placeholder
+    guards.
+
+    Args:
+        value: The raw serial as returned by LibreNMS (str, number, or None).
+    """
+    return "" if value is None else str(value).strip()
+
+
 def coerce_librenms_id(value) -> int | None:
     """
     Coerce a raw LibreNMS ID value (int or string-digit) to int, or None.
@@ -1836,6 +1859,26 @@ def netbox_resolves_module_token_per_leaf():
     return version >= _MODULE_TOKEN_LEAF_FIX_VERSION
 
 
+def ip_family(ip):
+    """
+    Return the IP family (4 or 6) of an IPAddress, or None when it has no address.
+
+    Mirrors NetBox >= 4.5's ``IPAddress.family``. NetBox 4.4's property lacks the
+    str-tolerant branch, and a freshly constructed ``IPAddress(address="...")``
+    keeps the plain str in memory even after ``save()`` — so reading ``.family``
+    on 4.4 raises AttributeError for exactly the objects the sync flows create.
+
+    Args:
+        ip: The IPAddress whose family to read.
+    """
+    address = ip.address
+    if not address:
+        return None
+    if isinstance(address, str):
+        return netaddr.IPNetwork(address).version
+    return address.version
+
+
 # The device-level IP foreign keys this plugin re-homes during OOB linking, merges, and the
 # Stage-2b "move to winner" actions. NetBox requires each to reference an address assigned to
 # one of THAT device's own interfaces.
@@ -1891,10 +1934,12 @@ def set_device_ip_fk(device, field, ip, *, save=True):
         # NetBox's Device.clean() requires primary_ip4 to be IPv4 and primary_ip6 to be IPv6;
         # update_fields skips full_clean(), so enforce the family here too (oob_ip is family-
         # agnostic). Otherwise an IPv6 address could be silently stored as primary_ip4.
-        ip_family = getattr(ip, "family", None)
-        if field == "primary_ip4" and ip_family != 4:
+        # ip_family(), not ip.family: NetBox 4.4's property raises on in-memory str addresses,
+        # and getattr's default would turn that crash into a bogus refusal of a valid address.
+        family = ip_family(ip)
+        if field == "primary_ip4" and family != 4:
             raise ValueError(f"set_device_ip_fk: refusing to set primary_ip4 to non-IPv4 address {ip}")
-        if field == "primary_ip6" and ip_family != 6:
+        if field == "primary_ip6" and family != 6:
             raise ValueError(f"set_device_ip_fk: refusing to set primary_ip6 to non-IPv6 address {ip}")
     setattr(device, field, ip)
     if save:

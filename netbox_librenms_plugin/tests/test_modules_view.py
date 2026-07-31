@@ -128,6 +128,83 @@ class TestMergeTransceiverDataPortIdentity:
         assert item["_librenms_port_id"] == 99
         assert item["_librenms_ifname"] == "Eth2/1"
 
+    def test_numeric_transceiver_serial_is_coerced_to_a_string(self):
+        """An all-digit transceiver serial can arrive as an int; the merge must coerce it before stripping instead of raising."""
+        view = _make_view()
+        view.librenms_id = 104
+        view._librenms_api.get_device_transceivers.return_value = (
+            True,
+            [{"entity_physical_index": 400, "model": "SFP-10G-SR", "serial": 987654, "type": "SFP", "port_id": 8}],
+        )
+        view._librenms_api.get_ports.return_value = (True, {"ports": [{"port_id": 8, "ifName": "Eth4/1"}]})
+
+        inventory, error = view._merge_transceiver_data([])
+
+        assert error is None
+        assert len(inventory) == 1
+        assert inventory[0]["entPhysicalSerialNum"] == "987654"
+
+    def test_zero_transceiver_serial_is_preserved(self):
+        """A transceiver serial of JSON number 0 is a real serial and must survive as "0", not be dropped as falsey."""
+        view = _make_view()
+        view.librenms_id = 104
+        view._librenms_api.get_device_transceivers.return_value = (
+            True,
+            [{"entity_physical_index": 401, "model": "SFP-10G-SR", "serial": 0, "type": "SFP", "port_id": 9}],
+        )
+        view._librenms_api.get_ports.return_value = (True, {"ports": [{"port_id": 9, "ifName": "Eth5/1"}]})
+
+        inventory, error = view._merge_transceiver_data([])
+
+        assert error is None
+        assert len(inventory) == 1
+        assert inventory[0]["entPhysicalSerialNum"] == "0"
+
+    def test_numeric_transceiver_model_and_type_are_coerced_to_strings(self):
+        """An all-digit model/type arrives as a JSON number too; stripping it raw would 500 the modules refresh."""
+        view = _make_view()
+        view.librenms_id = 105
+        view._librenms_api.get_device_transceivers.return_value = (
+            True,
+            [{"entity_physical_index": 402, "model": 1000, "serial": "TX-402", "type": 40, "port_id": 10}],
+        )
+        view._librenms_api.get_ports.return_value = (True, {"ports": [{"port_id": 10, "ifName": "Eth6/1"}]})
+
+        inventory, error = view._merge_transceiver_data([])
+
+        assert error is None
+        assert len(inventory) == 1
+        assert inventory[0]["entPhysicalModelName"] == "1000"
+        assert inventory[0]["entPhysicalDescr"] == "40"
+
+    def test_numeric_entity_values_on_the_existing_item_are_coerced(self):
+        """The ENTITY-MIB side of the merge can carry numeric model/serial values as well."""
+        view = _make_view()
+        view.librenms_id = 106
+        view._librenms_api.get_device_transceivers.return_value = (
+            True,
+            [{"entity_physical_index": 403, "model": "SFP-10G-SR", "serial": "TX-403", "type": "SFP", "port_id": 11}],
+        )
+        view._librenms_api.get_ports.return_value = (True, {"ports": [{"port_id": 11, "ifName": "Eth7/1"}]})
+        inventory_seed = [
+            {
+                "entPhysicalIndex": 403,
+                "entPhysicalName": "Transceiver slot",
+                "entPhysicalModelName": 1000,  # all-digit model from ENTITY-MIB, delivered as a number
+                "entPhysicalSerialNum": 4242,
+                "entPhysicalClass": "port",
+                "entPhysicalContainedIn": 0,
+            }
+        ]
+
+        inventory, error = view._merge_transceiver_data(inventory_seed)
+
+        assert error is None
+        assert len(inventory) == 1
+        # Both existing values are real (not placeholders), so the transceiver data must not overwrite them.
+        assert inventory[0]["entPhysicalModelName"] == 1000
+        assert inventory[0]["entPhysicalSerialNum"] == 4242
+
     def test_string_index_matches_int_transceiver_index_no_duplicate(self):
         # LibreNMS may report the ENTITY index as a string ("300") while the transceiver API
         # returns it as an int (300). Without normalization the merge misses the existing ENTITY
@@ -5014,3 +5091,45 @@ class TestInterfacePortIdActiveServerScope:
         api = self._real_default_api()
         assert api.get_stored_librenms_id(iface) == 111  # bound (default) key
         assert api.get_stored_librenms_id(iface, server_key="server2") == 222  # explicit override
+
+
+@pytest.mark.django_db
+class TestInferVcMemberSerialNormalization:
+    """VC-member inference keys on serials that LibreNMS may deliver as JSON numbers (real Devices, real VirtualChassis)."""
+
+    def _vc_members(self, serials):
+        from dcim.models import VirtualChassis
+
+        from netbox_librenms_plugin.tests.conftest import make_device
+
+        vc = VirtualChassis.objects.create(name=f"vc-infer-{'-'.join(serials)}")
+        members = []
+        for pos, serial in enumerate(serials, start=1):
+            dev = make_device(f"vc-infer-member-{serial}", serial=serial)
+            dev.virtual_chassis = vc
+            dev.vc_position = pos
+            dev.save()
+            members.append(dev)
+        return members
+
+    def test_numeric_item_serial_matches_the_member_stored_as_text(self):
+        """An all-digit ENTITY serial arriving as an int must still resolve to its VC member instead of raising."""
+        view = _make_view()
+        master, member2 = self._vc_members(["100001", "100002"])
+
+        item = {"entPhysicalIndex": 1, "entPhysicalSerialNum": 100002, "entPhysicalContainedIn": 0}
+        target, source = view._infer_vc_member_for_item(master, item, {}, [master, member2])
+
+        assert target.pk == member2.pk
+        assert source == "serial"
+
+    def test_zero_item_serial_is_not_dropped_as_falsey(self):
+        """A serial of JSON number 0 is real; dropping it silently attributes the item to the wrong VC member."""
+        view = _make_view()
+        master, member2 = self._vc_members(["0", "100003"])
+
+        item = {"entPhysicalIndex": 2, "entPhysicalSerialNum": 0, "entPhysicalContainedIn": 0}
+        target, source = view._infer_vc_member_for_item(member2, item, {}, [master, member2])
+
+        assert target.pk == master.pk
+        assert source == "serial"
