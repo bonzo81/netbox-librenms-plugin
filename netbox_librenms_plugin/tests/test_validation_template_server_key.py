@@ -17,6 +17,9 @@ TEMPLATE = "netbox_librenms_plugin/htmx/device_validation_details.html"
 
 # Actions that persist a server-scoped librenms_id mapping (need the active server_key).
 MAPPING_ACTIONS = {"link", "update", "update_serial", "migrate_librenms_id"}
+HIDDEN_SERVER_KEY_INCLUDE = re.compile(
+    r'{%\s*include\s+["\']netbox_librenms_plugin/inc/_hidden_server_key\.html["\']\s*%}'
+)
 
 
 def _form_actions(form_html):
@@ -55,8 +58,9 @@ def test_mapping_writing_conflict_forms_include_server_key():
     mapping_forms = [f for f in forms if _form_actions(f) & MAPPING_ACTIONS]
     assert mapping_forms, "expected mapping-writing device_conflict_action forms in the template"
 
-    hidden_include = '{% include "netbox_librenms_plugin/inc/_hidden_server_key.html" %}'
     missing = [
-        sorted(_form_actions(f)) for f in mapping_forms if 'name="server_key"' not in f and hidden_include not in f
+        sorted(_form_actions(f))
+        for f in mapping_forms
+        if 'name="server_key"' not in f and not HIDDEN_SERVER_KEY_INCLUDE.search(f)
     ]
     assert not missing, f"mapping-writing forms missing a server_key hidden input: {missing}"
