@@ -330,7 +330,7 @@ class TestSingleInterfaceVerifyView:
         assert response.status_code == 400
 
     def test_checks_permission_before_resolving_device(self):
-        """The object-view gate must run BEFORE get_object_or_404 so an unauthorized caller can't probe arbitrary device IDs (existence via 404). Exercises the REAL require_object_permissions_json (only request.user.has_perm is mocked) — mocking the gate itself would mask a missing NetBoxObjectPermissionMixin base (AttributeError/500 in production)."""
+        """The object-view gate must run BEFORE restrict_object_or_404 so an unauthorized caller can't probe arbitrary device IDs (existence via 404). Exercises the REAL require_object_permissions_json (only request.user.has_perm is mocked) — mocking the gate itself would mask a missing NetBoxObjectPermissionMixin base (AttributeError/500 in production)."""
         import json
         from netbox_librenms_plugin.views.object_sync.devices import SingleInterfaceVerifyView
 
@@ -495,7 +495,7 @@ class TestSingleModuleVerifyView:
         return view
 
     def test_checks_permission_before_resolving_device(self):
-        """The object-view gate must run BEFORE get_object_or_404 so an unauthorized caller can't probe arbitrary device IDs (existence via 404). Exercises the real require_object_permissions_json (only request.user.has_perm is mocked)."""
+        """The object-view gate must run BEFORE restrict_object_or_404 so an unauthorized caller can't probe arbitrary device IDs (existence via 404). Exercises the real require_object_permissions_json (only request.user.has_perm is mocked)."""
         import json
         from netbox_librenms_plugin.views.object_sync.devices import SingleModuleVerifyView
 

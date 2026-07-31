@@ -3541,4 +3541,6 @@ class TestValidateDedupsSerialDuplicateQuery:
             if '."serial" =' in q["sql"].lower() and "limit 2" in q["sql"].lower() and "not" not in q["sql"].lower()
         ]
         assert len(serial_dup_queries) == 1
-        assert all("trim(" not in sql.lower() for sql in serial_dup_queries)
+        # A TRIM-wrapped comparison would not match the exact-serial filter above, so check
+        # every captured query rather than only the already-filtered exact-match subset.
+        assert all("trim(" not in query["sql"].lower() for query in ctx.captured_queries)

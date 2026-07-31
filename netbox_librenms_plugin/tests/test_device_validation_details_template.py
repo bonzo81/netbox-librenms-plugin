@@ -559,7 +559,7 @@ class TestPromoteModalAccessibility:
         assert re.search(
             r'<h\d(?=[^>]*\bid="promote-modal-label-12")(?=[^>]*\bclass="[^"]*\bmodal-title\b)[^>]*>',
             html,
-        )
+        ), "aria-labelledby must reference the modal-title heading"
 
 
 @pytest.mark.django_db

@@ -1803,12 +1803,11 @@ class TestDeviceConflictActionViewVMGuard:
                         with patch.object(
                             view, "get_validated_device_with_selections", return_value=(None, None, None)
                         ):
-                            try:
-                                view.post(request, device_id=1)
-                            except Exception:
-                                pass
+                            response = view.post(request, device_id=1)
 
         MockAPI.assert_called_with(server_key="secondary")
+        assert response.status_code == 200
+        assert response.headers.get("HX-Reswap") == "none"
 
 
 class TestDeviceRoleClusterRackViews:
@@ -8304,6 +8303,18 @@ class TestSerialActionsNormalizeAndLock:
             self._post_action("update", target, "SN-88")
         sqls = [q["sql"] for q in ctx.captured_queries]
         assert any("pg_advisory_xact_lock" in s for s in sqls)
+        assert self._serial_row_locks(sqls) == []
+
+    def test_update_serial_action_serializes_on_the_serial_advisory_lock(self):
+        """The dedicated update_serial action takes the same serial-keyed advisory lock."""
+        from django.db import connection
+        from django.test.utils import CaptureQueriesContext
+
+        target = make_device("ser-act-upd-serial-lock")
+        with CaptureQueriesContext(connection) as ctx:
+            self._post_action("update_serial", target, "SN-89")
+        sqls = [q["sql"] for q in ctx.captured_queries]
+        assert any("pg_advisory_xact_lock" in sql for sql in sqls)
         assert self._serial_row_locks(sqls) == []
 
     def test_conflict_toast_escapes_the_conflicting_device_name(self):
