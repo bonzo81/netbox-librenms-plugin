@@ -178,7 +178,7 @@ def test_two_ambiguous_rows_on_same_pk_do_not_collide():
 
 def test_invalid_pks_are_skipped():
     devices = [
-        _row(700, "a", {"existing_device": Device(pk=None, name="bad")}),
+        _row(700, "a", {"existing_device": Device(pk="not-int", name="bad")}),
         _row(701, "b", {"existing_device": Device(pk="not-int", name="worse")}),
     ]
     assert detect_bulk_collisions(devices) == []

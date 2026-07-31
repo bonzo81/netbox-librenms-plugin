@@ -1468,17 +1468,24 @@ class TestIpCachedSnapshotMgmtIpBackfill:
         # Pre-upgrade snapshot: NO "mgmt_ip" key.
         real_cache.set(key, {"ip_addresses": [], "ports_by_id": {"7": {}}}, timeout=300)
         try:
-            view._prepare_context(request, device, "ifName", fetch_fresh=False, server_key="default")
-            # The missing key triggered a one-time live resolve of the management IP...
-            api.get_device_info.assert_called_once_with(7)
-            # ...and the resolved VALUE was backfilled into the re-cached snapshot...
-            assert real_cache.get(key)["mgmt_ip"] == "10.0.0.9"
-            # ...so the next cached render reads it WITHOUT a second LibreNMS round-trip. Proving
-            # the backfill is consumed is the point of storing it; asserting only the stored value
-            # would still pass if every render re-resolved.
-            api.get_device_info.reset_mock()
-            view._prepare_context(request, device, "ifName", fetch_fresh=False, server_key="default")
-            api.get_device_info.assert_not_called()
+            # This test exercises the django-redis-style positive-TTL path explicitly. Other
+            # backends intentionally skip the backfill because Django's core cache API has no TTL
+            # introspection.
+            with patch(
+                "netbox_librenms_plugin.views.base.ip_addresses_view.cache_remaining_ttl",
+                return_value=300,
+            ):
+                view._prepare_context(request, device, "ifName", fetch_fresh=False, server_key="default")
+                # The missing key triggered a one-time live resolve of the management IP...
+                api.get_device_info.assert_called_once_with(7)
+                # ...and the resolved VALUE was backfilled into the re-cached snapshot...
+                assert real_cache.get(key)["mgmt_ip"] == "10.0.0.9"
+                # ...so the next cached render reads it WITHOUT a second LibreNMS round-trip. Proving
+                # the backfill is consumed is the point of storing it; asserting only the stored value
+                # would still pass if every render re-resolved.
+                api.get_device_info.reset_mock()
+                view._prepare_context(request, device, "ifName", fetch_fresh=False, server_key="default")
+                api.get_device_info.assert_not_called()
         finally:
             real_cache.delete(key)
 
