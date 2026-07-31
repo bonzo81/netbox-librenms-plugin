@@ -808,7 +808,7 @@ class LibreNMSAPI:
                 except ValueError:
                     error_data = None
                 message = error_data.get("message") if isinstance(error_data, dict) else None
-                if message == f"Device {device_id} does not have any IP addresses":
+                if isinstance(message, str) and "does not have any ip addresses" in message.lower():
                     return True, []
                 return False, message or str(e)
             return False, str(e)

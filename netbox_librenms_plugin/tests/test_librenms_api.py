@@ -1378,6 +1378,26 @@ class TestLibreNMSAPIPortsAndInventory:
         assert ips == []
 
     @patch("netbox_librenms_plugin.librenms_api.requests.get")
+    def test_get_device_ips_404_empty_message_is_case_insensitive(self, mock_get, mock_librenms_config):
+        """LibreNMS capitalization changes do not turn its stable no-address response into a failure."""
+        response = mock_get.return_value
+        response.status_code = 404
+        error = requests.exceptions.HTTPError("404 Client Error: Not Found")
+        error.response = response
+        response.raise_for_status.side_effect = error
+        response.json.return_value = {
+            "status": "error",
+            "message": "Device 123 Does Not Have Any IP Addresses",
+        }
+
+        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+
+        success, ips = LibreNMSAPI(server_key="default").get_device_ips(device_id=123)
+
+        assert success is True
+        assert ips == []
+
+    @patch("netbox_librenms_plugin.librenms_api.requests.get")
     def test_get_device_ips_404_for_missing_device_remains_a_failure(self, mock_get, mock_librenms_config):
         """Only LibreNMS's explicit empty-IP response is an empty success; a stale device id stays visible."""
         import requests

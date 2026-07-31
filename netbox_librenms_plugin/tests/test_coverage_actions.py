@@ -5978,7 +5978,7 @@ class TestAddAsOOBViewPost:
         view = self._make_view()
         existing_device = make_device("host-a", librenms_cf={"default": {"id": 10}})
         # A *different* real device already owns LibreNMS id 17 (e.g. imported standalone).
-        make_device("the-idrac", librenms_cf={"default": {"id": 17}})
+        make_device("<script>the-idrac</script>", librenms_cf={"default": {"id": 17}})
         request = _make_request(post={"existing_device_id": str(existing_device.pk)})
 
         libre_device = {"device_id": 17}
@@ -5990,7 +5990,8 @@ class TestAddAsOOBViewPost:
         # HTMX error toast (200 + HX-Reswap:none) naming the conflicting device.
         assert response.status_code == 200
         assert response["HX-Reswap"] == "none"
-        assert b"already linked to &#x27;the-idrac&#x27;" in response.content
+        assert b"already linked to &#x27;&lt;script&gt;the-idrac&lt;/script&gt;&#x27;" in response.content
+        assert b"&amp;lt;script&amp;gt;" not in response.content
         # Nothing attached: the host device's entry gained no oob sub-block.
         assert "oob" not in Device.objects.get(pk=existing_device.pk).custom_field_data["librenms_id"]["default"]
 
@@ -6230,7 +6231,7 @@ class TestPromoteToHostViewPost:
         view = self._make_view()
         existing_device = make_device("promote-src", librenms_cf={"default": {"id": 10}})
         # Another NetBox device already linked to the incoming host id 17.
-        make_device("promote-conflict", librenms_cf={"default": {"id": 17}})
+        make_device("<script>promote-conflict</script>", librenms_cf={"default": {"id": 17}})
         request = _make_request(post={"existing_device_id": str(existing_device.pk)})
 
         promote = {"existing_libre_id": 10, "existing_oob_type": "oob"}
@@ -6240,6 +6241,8 @@ class TestPromoteToHostViewPost:
 
         assert response.status_code == 200
         assert b"already linked to" in response.content
+        assert b"&lt;script&gt;promote-conflict&lt;/script&gt;" in response.content
+        assert b"&amp;lt;script&amp;gt;" not in response.content
         # The source device must be left unchanged (still host id 10, no OOB).
         existing_device.refresh_from_db()
         assert existing_device.custom_field_data["librenms_id"]["default"] == {"id": 10}
@@ -6672,13 +6675,15 @@ class TestMergeNetBoxDevicesViewFailClosed:
             "merge-orphan-winner",
             librenms_cf={"default": {"id": 100, "oob": {"id": 50, "type": "idrac"}}},
         )
-        donor = make_device("merge-orphan-donor", librenms_cf={"default": {"id": 200}})
+        donor = make_device("<script>merge-orphan-donor</script>", librenms_cf={"default": {"id": 200}})
 
         resp = self._post_merge(self._make_view(), winner, donor)
 
         assert resp.status_code == 200
         assert resp["HX-Reswap"] == "none"
         assert b"Cannot merge" in resp.content
+        assert b"&lt;script&gt;merge-orphan-donor&lt;/script&gt;" in resp.content
+        assert b"&amp;lt;script&amp;gt;" not in resp.content
         # Donor's link is preserved and it was NOT marked migrated (no orphaned LibreNMS host).
         donor.refresh_from_db()
         entry = donor.custom_field_data["librenms_id"]["default"]
@@ -7694,6 +7699,17 @@ class TestRebindOrHtmxErrorHelper:
         ):
             assert _rebind_or_htmx_error(view, request) is None
         assert view._librenms_api.server_key == "prod"
+
+
+class TestHtmxErrorResponse:
+    def test_plain_dynamic_message_is_html_escaped_once(self):
+        from netbox_librenms_plugin.views.imports.actions import _htmx_error_response
+
+        response = _htmx_error_response("Conflict with '<script>alert(1)</script>'.")
+
+        assert b"<script>" not in response.content
+        assert b"&lt;script&gt;alert(1)&lt;/script&gt;" in response.content
+        assert b"&amp;lt;script&amp;gt;" not in response.content
 
 
 @pytest.mark.django_db

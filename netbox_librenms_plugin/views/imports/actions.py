@@ -2629,8 +2629,7 @@ class AddAsOOBView(
                 )
             if oob_conflict is not None and oob_conflict.pk != sync_device.pk:
                 return _htmx_error_response(
-                    f"LibreNMS device #{librenms_id} is already linked to '{escape(oob_conflict.name)}'; "
-                    "refresh and retry."
+                    f"LibreNMS device #{librenms_id} is already linked to '{oob_conflict.name}'; refresh and retry."
                 )
 
             try:
@@ -2641,7 +2640,7 @@ class AddAsOOBView(
                     oob_type=oob_type,
                 )
             except ValueError as exc:
-                return _htmx_error_response(f"Invalid OOB data: {escape(str(exc))}")
+                return _htmx_error_response(f"Invalid OOB data: {exc}")
 
             update_fields = ["custom_field_data"]
 
@@ -3219,8 +3218,7 @@ class PromoteToHostView(
                 )
             if host_conflict is not None and host_conflict.pk != existing_device.pk:
                 return _htmx_error_response(
-                    f"LibreNMS device #{new_host_id} is already linked to '{escape(host_conflict.name)}'; "
-                    "refresh and retry."
+                    f"LibreNMS device #{new_host_id} is already linked to '{host_conflict.name}'; refresh and retry."
                 )
 
             try:
@@ -3239,7 +3237,7 @@ class PromoteToHostView(
                     oob_type=oob_type,
                 )
             except ValueError as exc:
-                return _htmx_error_response(f"Invalid promotion data: {escape(str(exc))}")
+                return _htmx_error_response(f"Invalid promotion data: {exc}")
 
             # Promotion re-points the LibreNMS host/OOB linkage only. NetBox
             # requires primary_ip4/6 and oob_ip to be assigned to one of the
@@ -3503,7 +3501,7 @@ class MergeNetBoxDevicesView(
                 # Nothing was persisted yet, but locks were taken under this atomic block — roll
                 # back defensively before returning the fail-closed toast.
                 transaction.set_rollback(True)
-                return _htmx_error_response(f"Cannot merge: {escape(str(exc))}")
+                return _htmx_error_response(f"Cannot merge: {exc}")
             except DatabaseError:
                 return _database_failure_response()
 

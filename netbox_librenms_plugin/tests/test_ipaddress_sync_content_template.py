@@ -83,6 +83,20 @@ class TestIpAddressSyncContentTemplateMigratedMode:
         assert "/fake/ipaddress_move_to_winner/77/" not in html
         assert "read-only" in html
 
+    def test_missing_winner_is_explained_above_the_move_table(self):
+        """A deleted migration winner produces a clear warning instead of only per-row placeholders."""
+        movable = [{"id": 78, "address": "10.0.0.10/24", "interface_name": "eth1"}]
+
+        html = self._render(
+            migrated={"server_key": "default", "device_id": 999999, "at": "now"},
+            movable=movable,
+            winner=None,
+            has_write=True,
+        )
+
+        assert "migration winner is unavailable" in html.lower()
+        assert "winner missing" in html
+
     def test_move_button_degrades_to_read_only_when_url_unregistered(self):
         """A missing/restacked ipaddress_move_to_winner route must degrade to read-only, not 500.
 

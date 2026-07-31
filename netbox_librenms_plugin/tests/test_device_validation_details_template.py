@@ -6,6 +6,8 @@ themes (measured ~1.2–2.3:1). ``bg-warning text-dark`` clears WCAG AA in both.
 real template guards against a regression to the bare class.
 """
 
+import re
+
 import pytest
 
 
@@ -554,7 +556,10 @@ class TestPromoteModalAccessibility:
         assert 'id="promote-modal-12"' in html
         # The modal references its heading, and the heading actually carries that id.
         assert 'aria-labelledby="promote-modal-label-12"' in html
-        assert 'id="promote-modal-label-12"' in html
+        assert re.search(
+            r'<h\d(?=[^>]*\bid="promote-modal-label-12")(?=[^>]*\bclass="[^"]*\bmodal-title\b)[^>]*>',
+            html,
+        )
 
 
 @pytest.mark.django_db

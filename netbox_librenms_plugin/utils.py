@@ -2144,6 +2144,16 @@ def merge_librenms_links(winner, donor, server_key: str = "default") -> dict:
         )
         donor_oob_has_valid_id = _donor_oob_id is not None
 
+    # The winner has only one free link slot (oob), while the donor carries two distinct links
+    # (its host id and a real oob id). Choosing either donor link would silently orphan the other
+    # once mark_librenms_migrated() clears the donor entry, so require the operator to unlink one
+    # side first rather than applying a lossy preference.
+    if winner_id is not None and donor_id is not None and donor_id != winner_id and donor_oob_has_valid_id:
+        raise ValueError(
+            f"Cannot merge: donor '{donor.name}' has two distinct LibreNMS links but winner "
+            f"'{winner.name}' has only one free link slot. Unlink one donor link first."
+        )
+
     # Fail closed when the donor's host id has nowhere to go: the winner already occupies BOTH
     # its host-id slot (winner_id) AND its oob slot (winner_oob), so neither the inherit-id branch
     # (needs an empty winner host slot) nor the demote branch (needs an empty winner oob slot) can

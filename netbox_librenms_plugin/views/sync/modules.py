@@ -1523,11 +1523,7 @@ class UpdateModuleInterfaceView(
             messages.error(request, "No LibreNMS interface identity is available for this row.")
         elif bind_result.get("status") == "bound":
             location = f"{module.module_type.model} in {module.module_bay.name}"
-            # Only announce an update that actually changed something: a no-op rebind returns
-            # changed=False (nothing written). Gate on changed (or an adoption tally) so a no-op
-            # click doesn't tell the user an interface was updated when it wasn't.
-            if bind_result.get("changed") or bind_result.get("adopted_count"):
-                messages.success(request, _module_interface_update_message(bind_result, location))
+            messages.success(request, _module_interface_update_message(bind_result, location))
         else:
             messages.warning(
                 request,
