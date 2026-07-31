@@ -265,7 +265,18 @@ systemctl restart netbox
 
 ## Uninstall
 
-See [the instructions for uninstalling plugins](https://netboxlabs.com/docs/netbox/en/stable/plugins/removal/).
+To cleanly uninstall the plugin and reverse its migrations, **while the plugin is still installed and enabled**, do the following:
+
+```
+source /opt/netbox/venv/bin/activate
+python manage.py migrate netbox_librenms_plugin zero
+```
+
+This is the supported way to undo everything the plugin's migrations created: its own tables and migration records, plus any objects it adds to NetBox's own tables (for example indexes on `dcim_device`). Those cross-app changes are **not** covered by NetBox's generic removal steps — which only look for tables named `netbox_librenms_plugin_*` — so reversing the migrations first ensures nothing is left behind.
+
+Then continue with the [general removal instructions](https://netboxlabs.com/docs/netbox/en/stable/plugins/removal/) (disable the plugin, remove its configuration, uninstall the package, and restart NetBox).
+
+> If you already removed the plugin without reversing its migrations, reinstall the matching version, run the `migrate … zero` command above, and then uninstall again.
 
 ## Credits
 

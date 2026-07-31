@@ -205,3 +205,40 @@ class TestCacheMixinKeyGeneration:
         key_with_server = mixin.get_vlan_overrides_key(obj, server_key="prod")
         assert key_with_server == "librenms_vlan_group_overrides_device_7_prod"
         assert key_no_server != key_with_server
+
+
+class TestRedirectWithServerKey:
+    """redirect_with_server_key appends a validated server_key, gated by the open-redirect barrier."""
+
+    def _request(self):
+        from django.test import RequestFactory
+
+        return RequestFactory().get("/")
+
+    def test_appends_server_key_to_safe_url(self):
+        from netbox_librenms_plugin.views.mixins import redirect_with_server_key
+
+        resp = redirect_with_server_key(self._request(), "/sync/1/", "prod")
+        assert resp.url == "/sync/1/?server_key=prod"
+
+    def test_uses_ampersand_when_url_already_has_query(self):
+        from netbox_librenms_plugin.views.mixins import redirect_with_server_key
+
+        resp = redirect_with_server_key(self._request(), "/sync/1/?tab=ports", "prod")
+        assert resp.url == "/sync/1/?tab=ports&server_key=prod"
+
+    def test_blank_or_none_server_key_redirects_to_bare_url(self):
+        from netbox_librenms_plugin.views.mixins import redirect_with_server_key
+
+        for key in (None, ""):
+            resp = redirect_with_server_key(self._request(), "/sync/1/", key)
+            assert resp.url == "/sync/1/"
+
+    def test_server_key_dropped_when_candidate_fails_open_redirect_barrier(self):
+        """A candidate the barrier rejects must drop the server_key and redirect to the bare url (the CodeQL py/url-redirection barrier, now shared in this helper)."""
+        from netbox_librenms_plugin.views.mixins import redirect_with_server_key
+
+        with patch("netbox_librenms_plugin.views.mixins.url_has_allowed_host_and_scheme", return_value=False):
+            resp = redirect_with_server_key(self._request(), "/sync/1/", "prod")
+        assert resp.url == "/sync/1/"
+        assert "server_key" not in resp.url

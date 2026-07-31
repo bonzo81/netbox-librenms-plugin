@@ -7,7 +7,6 @@ hierarchies and attribute presence.
 
 import os
 from pathlib import Path
-from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -207,6 +206,16 @@ class TestRequiredObjectPermissionsWiring:
         self._assert_has_mixins(RemoveServerMappingView)
         assert "POST" in RemoveServerMappingView.required_object_permissions
 
+    def test_single_cable_verify_has_object_permission_gate(self):
+        """The read-only verify-cable endpoint exposes device cable/topology rows, so it must gate on dcim.view_device like the interface/module verify views (object-permission mixin in MRO + declared perms)."""
+        from dcim.models import Device
+
+        from netbox_librenms_plugin.views.base.cables_view import SingleCableVerifyView
+        from netbox_librenms_plugin.views.mixins import NetBoxObjectPermissionMixin
+
+        assert NetBoxObjectPermissionMixin in SingleCableVerifyView.__mro__
+        assert ("view", Device) in SingleCableVerifyView.required_object_permissions.get("POST", [])
+
     def test_convert_legacy_id_has_required_object_permissions(self):
         from netbox_librenms_plugin.views.sync.device_fields import ConvertLegacyLibreNMSIdView
 
@@ -227,6 +236,38 @@ class TestRequiredObjectPermissionsWiring:
 
         assert ("delete", Interface) in perms_device
         assert ("delete", VMInterface) in perms_vm
+
+    def test_verify_views_have_object_permission_mixin_and_perms(self):
+        """Read-only verify endpoints must wire NetBoxObjectPermissionMixin so their declared gate enforces instead of raising AttributeError (a missing mixin 500s; mock-based perm tests mask it)."""
+        from netbox_librenms_plugin.views.base.ip_addresses_view import SingleIPAddressVerifyView
+        from netbox_librenms_plugin.views.object_sync.devices import (
+            SingleInterfaceVerifyView,
+            SingleModuleVerifyView,
+            SingleVlanGroupVerifyView,
+            VerifyVlanSyncGroupView,
+        )
+
+        for view_class in (
+            SingleInterfaceVerifyView,
+            SingleModuleVerifyView,
+            SingleVlanGroupVerifyView,
+            VerifyVlanSyncGroupView,
+            SingleIPAddressVerifyView,
+        ):
+            self._assert_has_mixins(view_class)
+            assert "POST" in view_class.required_object_permissions, (
+                f"{view_class.__name__} must declare a POST object-permission requirement"
+            )
+
+    def test_single_ipaddress_verify_has_object_permission_gate(self):
+        """The read-only verify-ipaddress endpoint resolves an arbitrary device_id and returns its data, so it must gate on dcim.view_device like the other verify views."""
+        from dcim.models import Device
+
+        from netbox_librenms_plugin.views.base.ip_addresses_view import SingleIPAddressVerifyView
+        from netbox_librenms_plugin.views.mixins import NetBoxObjectPermissionMixin
+
+        assert NetBoxObjectPermissionMixin in SingleIPAddressVerifyView.__mro__
+        assert ("view", Device) in SingleIPAddressVerifyView.required_object_permissions.get("POST", [])
 
 
 class TestViewPropertyLazyInit:
@@ -295,171 +336,98 @@ class TestTemplateSyntax:
         self._engine.from_string(source)
 
 
-class TestRenderDeviceSelectionEscape:
-    """VCCableTable.render_device_selection must HTML-escape member.name."""
-
-    def test_member_name_is_escaped(self):
-        from unittest.mock import MagicMock, patch
-
-        from netbox_librenms_plugin.tables.cables import VCCableTable
-
-        device = MagicMock()
-        device.id = 1
-        vc = MagicMock()
-        member = MagicMock()
-        member.id = 1
-        member.name = '<script>alert("xss")</script>'
-        vc.members.all.return_value = [member]
-        device.virtual_chassis = vc
-
-        table = VCCableTable([], device=device)
-        record = {"local_port": "eth0", "local_port_id": "42"}
-
-        with patch(
-            "netbox_librenms_plugin.tables.cables.get_virtual_chassis_member",
-            return_value=member,
-        ):
-            html = str(table.render_device_selection(None, record))
-
-        assert "<script>" not in html
-        assert "&lt;script&gt;" in html
-
-
-class TestAllServerMappingsDidValidation:
-    """all_server_mappings must skip invalid device IDs in the cf_value dict."""
-
-    def _call(self, obj, active_server_key="default"):
-        from netbox_librenms_plugin.views.base.librenms_sync_view import BaseLibreNMSSyncView
-
-        return BaseLibreNMSSyncView._build_all_server_mappings(obj, active_server_key)
-
-    @patch("netbox_librenms_plugin.views.base.librenms_sync_view.django_settings")
-    def test_skips_boolean_did(self, mock_settings):
-        mock_settings.PLUGINS_CONFIG = {"netbox_librenms_plugin": {"servers": {}}}
-        obj = MagicMock()
-        obj.custom_field_data = {"librenms_id": {"default": True, "prod": 42}}
-        result = self._call(obj)
-        # Only prod=42 should survive
-        assert len(result) == 1
-        assert result[0]["device_id"] == 42
-
-    @patch("netbox_librenms_plugin.views.base.librenms_sync_view.django_settings")
-    def test_skips_none_did(self, mock_settings):
-        mock_settings.PLUGINS_CONFIG = {"netbox_librenms_plugin": {"servers": {}}}
-        obj = MagicMock()
-        obj.custom_field_data = {"librenms_id": {"default": None}}
-        result = self._call(obj)
-        assert result is None  # empty list → returns None
-
-    @patch("netbox_librenms_plugin.views.base.librenms_sync_view.django_settings")
-    def test_coerces_digit_string_did(self, mock_settings):
-        mock_settings.PLUGINS_CONFIG = {"netbox_librenms_plugin": {"servers": {}}}
-        obj = MagicMock()
-        obj.custom_field_data = {"librenms_id": {"prod": "99"}}
-        result = self._call(obj)
-        assert len(result) == 1
-        assert result[0]["device_id"] == 99
-
-    @patch("netbox_librenms_plugin.views.base.librenms_sync_view.django_settings")
-    def test_skips_non_digit_string_did(self, mock_settings):
-        mock_settings.PLUGINS_CONFIG = {"netbox_librenms_plugin": {"servers": {}}}
-        obj = MagicMock()
-        obj.custom_field_data = {"librenms_id": {"default": "bogus"}}
-        result = self._call(obj)
-        assert result is None
-
-    @patch("netbox_librenms_plugin.views.base.librenms_sync_view.django_settings")
-    def test_valid_int_passes_through(self, mock_settings):
-        mock_settings.PLUGINS_CONFIG = {"netbox_librenms_plugin": {"servers": {}}}
-        obj = MagicMock()
-        obj.custom_field_data = {"librenms_id": {"default": 5, "secondary": 10}}
-        result = self._call(obj)
-        assert len(result) == 2
-        ids = {e["device_id"] for e in result}
-        assert ids == {5, 10}
-
-
-# ---------------------------------------------------------------------------
-# render_device_selection — XSS escape
-# ---------------------------------------------------------------------------
-
-
 class TestSingleCableVerifyServerKey:
-    """SingleCableVerifyView.post() must read server_key from POST body."""
+    """SingleCableVerifyView.post() must thread server_key from the POST body into VC resolution + cache key."""
 
-    def test_server_key_used_for_cache_lookup(self):
-        """The server_key from POST body is passed to get_cache_key and get_librenms_sync_device."""
+    @staticmethod
+    def _vc_device(tag):
+        """A real Device that belongs to a VirtualChassis (so post() takes the VC sync-resolution branch)."""
+        from dcim.models import Device, DeviceRole, DeviceType, Manufacturer, Site, VirtualChassis
+
+        mfr, _ = Manufacturer.objects.get_or_create(name=f"SkMfr-{tag}", slug=f"skmfr-{tag}")
+        dt, _ = DeviceType.objects.get_or_create(manufacturer=mfr, model=f"SkDT-{tag}", slug=f"skdt-{tag}")
+        role, _ = DeviceRole.objects.get_or_create(name="SkRole", slug="skrole")
+        site, _ = Site.objects.get_or_create(name="SkSite", slug="sksite")
+        vc = VirtualChassis.objects.create(name=f"SkVC-{tag}")
+        return Device.objects.create(
+            name=f"sk-{tag}", device_type=dt, role=role, site=site, status="active", virtual_chassis=vc, vc_position=1
+        )
+
+    @staticmethod
+    def _view_and_request(device, body, *, api_server_key):
+        """Real view + real superuser request; _librenms_api is stubbed only to supply the active-server key."""
         import json
+        from unittest.mock import MagicMock
+
+        from django.contrib.auth import get_user_model
+        from django.test import RequestFactory
 
         from netbox_librenms_plugin.views.base.cables_view import SingleCableVerifyView
 
-        view = object.__new__(SingleCableVerifyView)
+        view = SingleCableVerifyView()
         view._librenms_api = MagicMock()
-        view._librenms_api.server_key = "default-server"
+        view._librenms_api.server_key = api_server_key  # config boundary: the active-server fallback
+        request = RequestFactory().post("/verify-cable/", data=json.dumps(body), content_type="application/json")
+        request.user = get_user_model().objects.create_superuser(username=f"sk-{device.pk}", email="", password="x")
+        view.request = request
+        view.kwargs = {}
+        view.args = ()
+        return view, request
 
-        request = MagicMock()
-        request.body = json.dumps(
-            {
-                "device_id": 1,
-                "local_port_id": "42",
-                "server_key": "production",
-            }
-        ).encode()
+    @pytest.mark.django_db
+    def test_server_key_used_for_cache_lookup(self):
+        """The POSTed server_key is threaded into get_librenms_sync_device and the (real) cache key."""
+        from unittest.mock import patch
+
+        device = self._vc_device("used")
+        view, request = self._view_and_request(
+            device,
+            {"device_id": device.pk, "local_port_id": "42", "server_key": "production"},
+            api_server_key="default-server",
+        )
 
         with (
-            patch("netbox_librenms_plugin.views.base.cables_view.get_object_or_404") as mock_get_obj,
+            # The posted key is honoured only when it names a configured server; post() checks the
+            # LibreNMSAPI.get_available_servers() CLASSMETHOD (not the instance).
             patch(
-                "netbox_librenms_plugin.views.base.cables_view.get_librenms_sync_device",
+                "netbox_librenms_plugin.librenms_api.LibreNMSAPI.get_available_servers",
+                return_value={"production": "Production"},
+            ),
+            patch(
+                "netbox_librenms_plugin.views.base.cables_view.get_librenms_sync_device", return_value=device
             ) as mock_sync_device,
             patch("netbox_librenms_plugin.views.base.cables_view.cache") as mock_cache,
         ):
-            mock_device = MagicMock()
-            mock_sync_device.return_value = mock_device  # return a device so code reaches cache.get
-            mock_get_obj.return_value = mock_device
-            mock_cache.get.return_value = None  # No cached data
-
+            mock_cache.get.return_value = None  # no cached data -> early return once the key is built
             view.post(request)
 
-            # get_librenms_sync_device should be called with the posted server_key
-            mock_sync_device.assert_called_once_with(mock_device, server_key="production")
-            # cache lookup must also use the posted server_key (not the api default)
+            # get_librenms_sync_device gets the posted server_key (device compares by pk via Model.__eq__)
+            mock_sync_device.assert_called_once_with(device, server_key="production")
+            # the real cache key also carries the posted server_key (not the active default)
             cache_key_arg = mock_cache.get.call_args[0][0]
             assert "production" in cache_key_arg
 
+    @pytest.mark.django_db
     def test_fallback_to_api_server_key(self):
-        """When POST body has no server_key, falls back to self.librenms_api.server_key."""
-        import json
+        """With no server_key in the POST body, post() falls back to the active-server key."""
+        from unittest.mock import patch
 
-        from netbox_librenms_plugin.views.base.cables_view import SingleCableVerifyView
-
-        view = object.__new__(SingleCableVerifyView)
-        view._librenms_api = MagicMock()
-        view._librenms_api.server_key = "fallback-server"
-
-        request = MagicMock()
-        request.body = json.dumps(
-            {
-                "device_id": 1,
-                "local_port_id": "42",
-            }
-        ).encode()
+        device = self._vc_device("fallback")
+        view, request = self._view_and_request(
+            device, {"device_id": device.pk, "local_port_id": "42"}, api_server_key="fallback-server"
+        )
 
         with (
-            patch("netbox_librenms_plugin.views.base.cables_view.get_object_or_404") as mock_get_obj,
             patch(
                 "netbox_librenms_plugin.views.base.cables_view.get_librenms_sync_device",
+                side_effect=lambda dev, **kw: dev,
             ) as mock_sync_device,
             patch("netbox_librenms_plugin.views.base.cables_view.cache") as mock_cache,
         ):
-            mock_device = MagicMock()
-            mock_sync_device.return_value = mock_device  # return a device so code reaches cache.get
-            mock_get_obj.return_value = mock_device
             mock_cache.get.return_value = None
-
             view.post(request)
 
             mock_sync_device.assert_called_once()
             assert mock_sync_device.call_args[1]["server_key"] == "fallback-server"
-            # cache lookup must also use the fallback server_key
             cache_key_arg = mock_cache.get.call_args[0][0]
             assert "fallback-server" in cache_key_arg

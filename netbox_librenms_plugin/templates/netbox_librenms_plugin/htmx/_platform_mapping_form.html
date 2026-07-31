@@ -57,10 +57,8 @@ Optional:
       var seq = requestSeq;
       if (q.length < 2) { dropdownEl.style.display = "none"; dropdownEl.innerHTML = ""; return; }
       timer = setTimeout(function () {
-        var csrfToken = (document.querySelector('[name=csrfmiddlewaretoken]') || {}).value || "";
-        fetch("{% url 'dcim-api:platform-list' %}?q=" + encodeURIComponent(q) + "&limit=20", {
-          headers: { "X-CSRFToken": csrfToken }
-        })
+        // Read-only GET: no CSRF header needed (matches _dt_mapping_form's lookup).
+        fetch("{% url 'dcim-api:platform-list' %}?q=" + encodeURIComponent(q) + "&limit=20")
           .then(function (r) {
             if (!r.ok) { throw new Error("HTTP " + r.status); }
             return r.json();

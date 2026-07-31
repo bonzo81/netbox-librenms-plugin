@@ -16,6 +16,7 @@
   * [Background Jobs & Caching](librenms_import/background_jobs.md)
 * [Sync & Configuration](usage_tips/virtual_chassis.md)
   * [Virtual Chassis](usage_tips/virtual_chassis.md)
+  * [Out-of-Band Management](usage_tips/oob_management.md)
   * [Interface Mappings](usage_tips/interface_mappings.md)
   * [Module Sync](usage_tips/module_sync.md)
   * [Mapping Rules](usage_tips/mapping_rules.md)

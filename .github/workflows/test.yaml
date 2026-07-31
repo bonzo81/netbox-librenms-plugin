@@ -16,10 +16,33 @@ permissions:
 jobs:
   test-netbox:
     runs-on: ubuntu-latest
+    name: NetBox ${{ matrix.netbox-ref }} / Python ${{ matrix.python-version }}
+    # main is unreleased; report but don't gate.
+    continue-on-error: ${{ matrix.experimental }}
 
     strategy:
+      # one red version shouldn't cancel the others.
+      fail-fast: false
       matrix:
-        python-version: ["3.12", "3.13", "3.14"]
+        include:
+          # Floor: min_version = 4.4.0 (gating regression guard).
+          - netbox-ref: "v4.4.0"
+            python-version: "3.12"
+            experimental: false
+          # Current stable (gating).
+          - netbox-ref: "v4.6.5"
+            python-version: "3.12"
+            experimental: false
+          - netbox-ref: "v4.6.5"
+            python-version: "3.13"
+            experimental: false
+          # Unreleased NetBox — non-gating.
+          - netbox-ref: "main"
+            python-version: "3.13"
+            experimental: true
+          - netbox-ref: "main"
+            python-version: "3.14"
+            experimental: true
 
     services:
       redis:
@@ -45,6 +68,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           path: netbox-librenms-plugin
+          persist-credentials: false
 
       - name: Set up Python ${{ matrix.python-version }}
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
@@ -56,7 +80,8 @@ jobs:
         with:
           repository: "netbox-community/netbox"
           path: netbox
-          ref: main
+          ref: ${{ matrix.netbox-ref }}
+          persist-credentials: false
 
       - name: Install NetBox LibreNMS Plugin
         working-directory: netbox-librenms-plugin
@@ -85,7 +110,8 @@ jobs:
 
       - name: Upload coverage report
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        if: matrix.python-version == '3.12'
+        # Upload from exactly one job so the artifact name doesn't collide.
+        if: matrix.netbox-ref == 'v4.6.5' && matrix.python-version == '3.12'
         with:
           name: coverage-report
           path: netbox-librenms-plugin/coverage_html/

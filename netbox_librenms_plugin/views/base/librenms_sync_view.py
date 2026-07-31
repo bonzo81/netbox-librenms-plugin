@@ -1,6 +1,7 @@
 import re
 
 from django.conf import settings as django_settings
+from django.contrib import messages
 from django.shortcuts import get_object_or_404, render
 from netbox.views import generic
 
@@ -8,12 +9,15 @@ from netbox_librenms_plugin.forms import AddToLIbreSNMPV1V2, AddToLIbreSNMPV3
 from netbox_librenms_plugin.import_utils import _determine_device_name
 from netbox_librenms_plugin.import_utils.virtual_chassis import _generate_vc_member_name
 from netbox_librenms_plugin.utils import (
+    coerce_librenms_id,
     find_matching_platform,
     get_interface_name_field,
     get_librenms_device_id,
     get_librenms_sync_device,
+    is_legacy_librenms_id,
     match_librenms_hardware_to_device_type,
     resolve_naming_preferences,
+    resolve_server_mapping_display_id,
 )
 from netbox_librenms_plugin.views.mixins import LibreNMSAPIMixin, LibreNMSPermissionMixin
 
@@ -32,22 +36,79 @@ class BaseLibreNMSSyncView(LibreNMSPermissionMixin, LibreNMSAPIMixin, generic.Ob
         """Handle GET request for the LibreNMS sync view."""
         obj = get_object_or_404(self.model, pk=pk)
 
+        # Scope the page header (device info, VC inventory serials, active-server highlight) to the
+        # same ?server_key the embedded tabs rebind to. Without this the orchestrator reads the
+        # session/default server while a ?server_key load renders the tab tables for another server
+        # — an internally inconsistent page. A blank/absent key keeps the session/default client, so
+        # single-server and default renders are unchanged.
+        _scoped_key, unresolved = self.resolve_get_render_server_key(request)
+
+        # The resolve can decline WITHOUT binding a client: a blank/absent key with a
+        # misconfigured default (build_librenms_api(None) → None), or an unresolved
+        # ?server_key on a fresh view. Everything below (and get_context_data) reads the
+        # lazy self.librenms_api property, which would reconstruct LibreNMSAPI() and
+        # re-raise the very KeyError/ValueError the helper just swallowed — an unhandled
+        # 500 for every device page. Bind the default via the fail-closed factory. If even
+        # that can't build: for a blank/absent key (the page IS the default server's view)
+        # degrade to a minimal render with an error banner; for an unresolved ?server_key
+        # continue instead — that path already fails closed (librenms_id=None) and must
+        # still render its degraded page (e.g. the migrated banner scoped to the requested
+        # key), which an early return here would suppress.
+        if getattr(self, "_librenms_api", None) is None:
+            from netbox_librenms_plugin.librenms_api import build_librenms_api
+
+            default_api = build_librenms_api(None)
+            if default_api is not None:
+                self._librenms_api = default_api
+            elif not unresolved:
+                messages.error(
+                    request,
+                    "LibreNMS server is not configured correctly (missing URL or API token). "
+                    "Check the plugin settings.",
+                )
+                return render(
+                    request,
+                    self.template_name,
+                    {
+                        "object": obj,
+                        "tab": self.tab,
+                        "has_librenms_id": False,
+                        "found_in_librenms": False,
+                        "librenms_device_details": {},
+                        "platform_info": {},
+                    },
+                )
+
         # For Virtual Chassis members, always delegate to get_librenms_sync_device() so
         # self._librenms_lookup_device and self.librenms_id are consistent with the
         # helper-based VC status computed in get_context_data().  A legacy bare-int mapping
         # on the viewed member must not shadow an explicit per-server mapping on another
         # member — get_librenms_sync_device() applies the full priority order.
         librenms_lookup_device = obj
-        if hasattr(obj, "virtual_chassis") and obj.virtual_chassis:
+        if not unresolved and hasattr(obj, "virtual_chassis") and obj.virtual_chassis:
             sync_device = get_librenms_sync_device(obj, server_key=self.librenms_api.server_key)
             if sync_device:
                 librenms_lookup_device = sync_device
 
         # Store for use in get_context_data (badge generation needs the same object)
         self._librenms_lookup_device = librenms_lookup_device
+        # Store the unresolved flag so get_context_data's VC-status block can fail closed the
+        # same way this method does. Without it that block would recompute the sync-device
+        # linkage against the default-bound client (the rebind declined) and leak the default
+        # server's mapping onto a page whose header/tabs are failing closed for the gone server.
+        self._server_key_unresolved = unresolved
 
-        # Get librenms_id using the determined lookup device
-        self.librenms_id = self.librenms_api.get_librenms_id(librenms_lookup_device)
+        if unresolved:
+            # ?server_key named a server that no longer resolves; the rebind declined and left the
+            # default/session client bound. Fail closed — render the header with no mapping rather
+            # than attributing the default server's librenms_id to the requested (gone) server. The
+            # embedded tabs each rebind and render empty for the same unresolved key.
+            self.librenms_id = None
+        else:
+            # Get librenms_id using the determined lookup device. Normalise to a positive int
+            # or None at the source so every downstream `is not None` check (has_librenms_id,
+            # get_device_info, etc.) can rely on the invariant without re-validating.
+            self.librenms_id = coerce_librenms_id(self.librenms_api.get_librenms_id(librenms_lookup_device))
 
         context = self.get_context_data(request, obj)
 
@@ -63,11 +124,20 @@ class BaseLibreNMSSyncView(LibreNMSPermissionMixin, LibreNMSAPIMixin, generic.Ob
             {
                 "object": obj,
                 "tab": self.tab,
-                "has_librenms_id": bool(self.librenms_id),
+                # self.librenms_id is normalised to a positive int or None at assignment
+                # (see post()), so `is not None` is correct here — 0/negatives never reach it.
+                "has_librenms_id": self.librenms_id is not None,
             }
         )
 
-        if hasattr(obj, "virtual_chassis") and obj.virtual_chassis:
+        # Skip the VC-status block on an unresolved ?server_key: get() failed closed (librenms_id
+        # None, client left on the default server), so resolving the linkage here against the
+        # default server would leak a mapping for a server the page is otherwise reporting as gone.
+        if (
+            not getattr(self, "_server_key_unresolved", False)
+            and hasattr(obj, "virtual_chassis")
+            and obj.virtual_chassis
+        ):
             # Use helper function to determine the sync device
             librenms_sync_device = get_librenms_sync_device(obj, server_key=self.librenms_api.server_key)
 
@@ -112,9 +182,7 @@ class BaseLibreNMSSyncView(LibreNMSPermissionMixin, LibreNMSAPIMixin, generic.Ob
         # Detect legacy bare-int librenms_id format for conversion badge
         _lookup_device = getattr(self, "_librenms_lookup_device", obj)
         _raw_cf = _lookup_device.cf.get("librenms_id") if _lookup_device else None
-        librenms_id_is_legacy = (isinstance(_raw_cf, int) and not isinstance(_raw_cf, bool)) or (
-            isinstance(_raw_cf, str) and _raw_cf.isdigit()
-        )
+        librenms_id_is_legacy = is_legacy_librenms_id(_raw_cf)
 
         # Determine if serial match allows legacy ID conversion.
         # VMs have no serial field in NetBox; skip the gate so the Convert ID button is enabled.
@@ -133,6 +201,11 @@ class BaseLibreNMSSyncView(LibreNMSPermissionMixin, LibreNMSAPIMixin, generic.Ob
                 "vlan_sync": vlan_context,
                 "module_sync": module_context,
                 "has_write_permission": self.has_write_permission(),
+                # Active server key, so the create-platform modal (included without `only`, hence
+                # inheriting this context) forwards it as a hidden field — otherwise
+                # CreateAndAssignPlatformView redirects back to the default-server tab, dropping
+                # the non-default server context the user was acting on.
+                "server_key": self.librenms_api.server_key,
                 "v1v2form": AddToLIbreSNMPV1V2(prefix="v1v2"),
                 "v3form": AddToLIbreSNMPV3(prefix="v3"),
                 "librenms_device_id": self.librenms_id,
@@ -174,6 +247,8 @@ class BaseLibreNMSSyncView(LibreNMSPermissionMixin, LibreNMSAPIMixin, generic.Ob
         * ``device_url``    – direct URL to the device page on that server (or ``None``).
         * ``is_configured`` – True when the server key exists in current plugin config.
         * ``is_active``     – True when this is the currently active server.
+        * ``is_oob_only``   – True when the mapping was surfaced via an OOB-only linkage
+          (no host ``id``, only a nested ``oob.id``).
 
         Returns ``None`` for legacy bare-int format (no per-server info to show)
         and ``None`` when the CF is absent/invalid.
@@ -189,14 +264,13 @@ class BaseLibreNMSSyncView(LibreNMSPermissionMixin, LibreNMSAPIMixin, generic.Ob
 
         result = []
         for sk, did in cf_value.items():
-            # Validate device ID — accept int or digit-string, skip bool/None/junk.
-            if isinstance(did, bool) or did is None:
-                continue
-            if isinstance(did, str):
-                if not did.isdigit():
-                    continue
-                did = int(did)
-            elif not isinstance(did, int):
+            # Resolve the display id (host id, else the nested OOB controller id for an OOB-only
+            # entry) and whether it came from that OOB fallback. Shared with the import-validation
+            # modal (actions.DeviceValidationDetailsView._build_id_server_info) so both agree on
+            # which servers a device is linked to; the bool/str/positive coercion and the OOB
+            # fallback live in one place. A None result (migrated-only / corrupt entry) is skipped.
+            did, is_oob_only = resolve_server_mapping_display_id(did)
+            if did is None:
                 continue
             srv_cfg = servers_config.get(sk)
             # Legacy single-server config: "default" key with no matching servers entry —
@@ -225,6 +299,7 @@ class BaseLibreNMSSyncView(LibreNMSPermissionMixin, LibreNMSAPIMixin, generic.Ob
                     "device_url": device_url,
                     "is_configured": is_configured,
                     "is_active": sk == active_server_key,
+                    "is_oob_only": is_oob_only,
                 }
             )
 
@@ -248,9 +323,12 @@ class BaseLibreNMSSyncView(LibreNMSPermissionMixin, LibreNMSAPIMixin, generic.Ob
             "vc_inventory_serials": [],
         }
 
-        if self.librenms_id:
+        if self.librenms_id is not None:
             success, device_info = self.librenms_api.get_device_info(self.librenms_id)
-            if success and device_info:
+            # isinstance(dict) guard: a truthy non-dict payload (string/list) would 500 on the
+            # device_info.get(...) calls below; fall back to the default details block instead
+            # of trusting success=True alone (issue #100).
+            if success and isinstance(device_info, dict):
                 # Get NetBox device details
                 netbox_ip = str(obj.primary_ip.address.ip).lower() if obj.primary_ip else None
                 netbox_name = obj.name

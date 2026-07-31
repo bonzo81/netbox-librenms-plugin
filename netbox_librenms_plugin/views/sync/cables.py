@@ -115,6 +115,13 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libre
         port_id = str(interface.get("local_port_id", ""))
         try:
             link_data = next(link for link in cached_links if str(link.get("local_port_id", "")) == port_id)
+            # OOB-controller rows are merged into the host's cable list only for context
+            # (shared-LOM detection) and must never be synced onto the host: their local_port can
+            # resolve to a host interface (shared name), and creating a cable from OOB-controller
+            # LLDP data would attach it to the wrong device. Mirrors the OOB guards in interface
+            # sync (interfaces.py) and module sync (modules.py).
+            if link_data.get("_source") == "oob":
+                return {"status": "skipped", "interface": link_data.get("local_port") or port_id}
             # Apply posted device_id (VC member selection) without mutating the cached list.
             link_data = {**link_data, "device_id": interface.get("device_id", link_data.get("device_id"))}
             return self.handle_cable_creation(link_data, interface)
@@ -174,7 +181,7 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libre
         Each interface is processed in its own atomic block so individual
         failures roll back only that cable without affecting others.
         """
-        results = {"valid": [], "invalid": [], "duplicate": [], "missing_remote": []}
+        results = {"valid": [], "invalid": [], "duplicate": [], "missing_remote": [], "skipped": []}
 
         for interface in selected_interfaces:
             try:
@@ -229,6 +236,12 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libre
             messages.warning(
                 request,
                 f"Cable already exists for interfaces: {', '.join(results['duplicate'])}",
+            )
+        if results.get("skipped"):
+            messages.info(
+                request,
+                "Skipped OOB-controller links (context only, not syncable to the host): "
+                f"{', '.join(results['skipped'])}",
             )
         if results["valid"]:
             messages.success(

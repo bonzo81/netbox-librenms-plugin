@@ -115,8 +115,10 @@ Alternatively, share your ideas for the plugin over in [discussions](https://git
 
 | NetBox Version | Plugin Version |
 |----------------|----------------|
-|     4.1        | 0.2.x - 0.3.5  |
-|     4.2 - 4.5       | 0.3.6+          |
+| 4.1            | 0.2.x - 0.3.5  |
+| 4.2 - 4.3.x    | 0.3.6 - 0.3.9  |
+| 4.4.0+         | 0.4.7+         |
+
 ## Installing
 
 

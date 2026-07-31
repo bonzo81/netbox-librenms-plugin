@@ -65,9 +65,16 @@ def create_vm_from_librenms(
     # Validate device_id before creating the VM so a missing/invalid value
     # never leaves a VM without a librenms_id (partial persistence).
     raw_device_id = libre_device["device_id"]
-    if isinstance(raw_device_id, bool):
-        raise ValueError(f"device_id is a boolean ({raw_device_id!r}); expected an integer")
+    # Reject bool (a subclass of int → int(True) == 1) AND floats/Decimals (int(1.9) would truncate
+    # to a valid-looking but WRONG pk), accepting only a real int or a plain digit string. Without
+    # this a numeric-like device_id would create a VM with a truncated/garbage librenms_id mapping.
+    if isinstance(raw_device_id, bool) or not (
+        isinstance(raw_device_id, int) or (isinstance(raw_device_id, str) and raw_device_id.strip().isdecimal())
+    ):
+        raise ValueError(f"device_id {raw_device_id!r} is not a valid integer id")
     librenms_device_id = int(raw_device_id)
+    if librenms_device_id <= 0:
+        raise ValueError(f"device_id {raw_device_id!r} must be a positive integer")
 
     from ..utils import set_librenms_device_id
 

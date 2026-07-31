@@ -19,6 +19,9 @@ def _make_view():
     from netbox_librenms_plugin.views.base.ip_addresses_view import SingleIPAddressVerifyView
 
     view = object.__new__(SingleIPAddressVerifyView)
+    # Direct post() calls bypass dispatch() (which sets self.request), so null the object-perm
+    # gate; the gate itself is covered by TestSingleIPAddressVerifyObjectPermissionGate (real DB).
+    view.require_object_permissions_json = MagicMock(return_value=None)
     return view
 
 
@@ -71,23 +74,36 @@ class TestCacheKeyFormat:
         assert view.get_cache_key(device, "ip_addresses", "default") == expected_key
 
 
+@pytest.mark.django_db
 class TestServerKeyFromPost:
-    """server_key from POST body must be used for cache lookup."""
+    """server_key from POST body must be threaded into the cache lookup key, keyed on the REAL device pk.
 
-    @pytest.fixture(autouse=True)
-    def _patch_ip_models(self):
-        """Patch IPAddress.objects to avoid DB access."""
-        with patch("netbox_librenms_plugin.views.base.ip_addresses_view.IPAddress") as mock_ip:
-            mock_ip.objects.filter.return_value.first.return_value = None
-            yield
+    The device is resolved through the real object-scoped lookup (real Device + a real superuser on
+    the request, so ``restrict`` returns it); only the cache read is instrumented, to capture which
+    key the view queries.
+    """
 
-    def _run_post(self, body, device=None):
-        """Execute view.post() with mocks and return the cache key used."""
+    def _real_device(self):
+        from dcim.models import Device, DeviceRole, DeviceType, Manufacturer, Site
+
+        mfr, _ = Manufacturer.objects.get_or_create(name="IPSK-Mfr", slug="ipsk-mfr")
+        dt, _ = DeviceType.objects.get_or_create(manufacturer=mfr, model="IPSK-DT", slug="ipsk-dt")
+        role, _ = DeviceRole.objects.get_or_create(name="IPSK-Role", slug="ipsk-role")
+        site, _ = Site.objects.get_or_create(name="IPSK-Site", slug="ipsk-site")
+        return Device.objects.create(name="ipsk-dev", device_type=dt, role=role, site=site, status="active")
+
+    def _run_post(self, body):
+        """Execute view.post() against a real device and return (cache_key_queried, device_pk)."""
+        from django.contrib.auth import get_user_model
+
+        device = self._real_device()
+        body = {**body, "device_id": device.pk, "object_type": "device"}
+
         view = _make_view()
-        if device is None:
-            device = _mock_device()
-
         request = _make_request(body)
+        request.user = get_user_model().objects.create_superuser(username="ipsk-user", email="", password="x")
+        view.request = request
+
         captured_cache_key = {}
 
         def fake_cache_get(key):
@@ -95,43 +111,211 @@ class TestServerKeyFromPost:
             return {"ip_addresses": []}
 
         with (
+            # Configure "prod" so a posted "prod" threads through as the cache namespace, while an
+            # absent/unconfigured key falls back to "default".
             patch(
-                "netbox_librenms_plugin.views.base.ip_addresses_view.get_object_or_404",
-                return_value=device,
+                "netbox_librenms_plugin.librenms_api.LibreNMSAPI.get_available_servers",
+                return_value={"prod": "Prod"},
             ),
             patch("netbox_librenms_plugin.views.base.ip_addresses_view.cache") as mock_cache,
         ):
             mock_cache.get.side_effect = fake_cache_get
             view.post(request)
 
-        return captured_cache_key.get("key")
+        return captured_cache_key.get("key"), device.pk
 
     def test_server_key_threaded_to_cache_lookup(self):
         """post() must include server_key in the cache key."""
-        device = _mock_device(pk=5)
-        key = self._run_post(
-            {"device_id": 5, "ip_address": "10.0.0.1/24", "server_key": "prod", "object_type": "device"},
-            device=device,
-        )
-
-        assert key == "librenms_ip_addresses_device_5_prod"
+        key, pk = self._run_post({"ip_address": "10.0.0.1/24", "server_key": "prod"})
+        assert key == f"librenms_ip_addresses_device_{pk}_prod"
 
     def test_default_server_key_when_missing(self):
         """When server_key is absent from POST, default to 'default'."""
-        device = _mock_device(pk=5)
-        key = self._run_post(
-            {"device_id": 5, "ip_address": "10.0.0.1/24", "object_type": "device"},
-            device=device,
-        )
-
-        assert key == "librenms_ip_addresses_device_5_default"
+        key, pk = self._run_post({"ip_address": "10.0.0.1/24"})
+        assert key == f"librenms_ip_addresses_device_{pk}_default"
 
     def test_null_server_key_falls_back_to_default(self):
         """When server_key is explicitly null, fall back to 'default'."""
-        device = _mock_device(pk=5)
-        key = self._run_post(
-            {"device_id": 5, "ip_address": "10.0.0.1/24", "server_key": None, "object_type": "device"},
-            device=device,
-        )
+        key, pk = self._run_post({"ip_address": "10.0.0.1/24", "server_key": None})
+        assert key == f"librenms_ip_addresses_device_{pk}_default"
 
-        assert key == "librenms_ip_addresses_device_5_default"
+
+class TestVerifyPostRejectsNonObjectBody:
+    """A non-object JSON body must 400, not 500 on .get()."""
+
+    def test_non_dict_json_returns_400(self):
+        """A JSON array body returns 400 before any .get(), instead of raising AttributeError."""
+        view = _make_view()
+        request = _make_request([1, 2, 3])  # valid JSON, but an array — not an object
+
+        response = view.post(request)
+
+        assert response.status_code == 400
+        assert json.loads(response.content)["message"] == "JSON payload must be an object"
+
+
+@pytest.mark.django_db
+class TestVerifyPostRejectsMalformedVrfId:
+    """A non-numeric vrf_id must 400 before the VRF filter, not 500 via the broad handler.
+
+    The `vrf__id` filter in `_find_existing_ip` is only reached when an IPAddress at the posted address
+    already exists, so the real IP is created first — otherwise the guard is never exercised and the
+    pre-fix code wouldn't 500 either. Only the cache read is stubbed; `_find_existing_ip` runs for real.
+    """
+
+    def _real_device(self):
+        from dcim.models import Device, DeviceRole, DeviceType, Manufacturer, Site
+
+        mfr, _ = Manufacturer.objects.get_or_create(name="VRFSK-Mfr", slug="vrfsk-mfr")
+        dt, _ = DeviceType.objects.get_or_create(manufacturer=mfr, model="VRFSK-DT", slug="vrfsk-dt")
+        role, _ = DeviceRole.objects.get_or_create(name="VRFSK-Role", slug="vrfsk-role")
+        site, _ = Site.objects.get_or_create(name="VRFSK-Site", slug="vrfsk-site")
+        return Device.objects.create(name="vrfsk-dev", device_type=dt, role=role, site=site, status="active")
+
+    def _post(self, vrf_id):
+        from django.contrib.auth import get_user_model
+        from ipam.models import IPAddress
+
+        device = self._real_device()
+        IPAddress.objects.get_or_create(address="10.0.0.1/24")  # make the vrf__id filter reachable
+
+        view = _make_view()
+        request = _make_request(
+            {"ip_address": "10.0.0.1/24", "vrf_id": vrf_id, "device_id": device.pk, "object_type": "device"}
+        )
+        request.user = get_user_model().objects.create_superuser(username=f"vrfsk-{device.pk}", email="", password="x")
+        view.request = request
+
+        with patch("netbox_librenms_plugin.views.base.ip_addresses_view.cache") as mock_cache:
+            mock_cache.get.return_value = {"ip_addresses": []}  # no cache hit → real _find_existing_ip runs
+            return view.post(request)
+
+    def test_non_numeric_vrf_id_returns_400(self):
+        response = self._post("abc")
+        assert response.status_code == 400
+        assert json.loads(response.content)["message"] == "Invalid VRF ID"
+
+    def test_list_vrf_id_returns_400(self):
+        assert self._post([1, 2]).status_code == 400
+
+    def test_boolean_vrf_id_returns_400(self):
+        # bool is an int subclass; a JSON `true` must not silently coerce to vrf__id=1.
+        assert self._post(True).status_code == 400
+
+    def test_numeric_string_vrf_id_is_accepted(self):
+        # A digit string coerces to int and flows through the real filter without 400/500.
+        assert self._post("999999").status_code == 200
+
+
+class TestFindInCacheFailsClosed:
+    """SingleIPAddressVerifyView._find_in_cache treats a truthy non-dict entry as a miss, not a crash."""
+
+    def _make_view(self):
+        from netbox_librenms_plugin.views.base.ip_addresses_view import SingleIPAddressVerifyView
+
+        return object.__new__(SingleIPAddressVerifyView)
+
+    def test_non_dict_cache_entry_returns_empty_triple(self):
+        """A list (legacy snapshot shape) must not raise AttributeError on .get()."""
+        view = self._make_view()
+        assert view._find_in_cache([{"ip_address": "10.0.0.1"}], "10.0.0.1", 32) == (None, None, None)
+
+    def test_dict_cache_entry_still_matches(self):
+        """Positive control: a well-formed dict entry still resolves normally."""
+        view = self._make_view()
+        cached = {"ip_addresses": [{"ip_address": "10.0.0.1", "prefix_length": 32, "vrf_id": 7, "port_id": 5}]}
+        entry, vrf_id, port_id = view._find_in_cache(cached, "10.0.0.1", 32)
+        assert entry is not None and vrf_id == 7 and port_id == 5
+
+    def test_malformed_row_among_ip_addresses_is_skipped(self):
+        """A non-dict row inside ip_addresses must be skipped (not TypeError'd) so a later good row still matches."""
+        view = self._make_view()
+        cached = {
+            "ip_addresses": [
+                "not-a-dict",
+                ["also", "bad"],
+                {"ip_address": "10.0.0.1", "prefix_length": 32, "vrf_id": 7, "port_id": 5},
+            ]
+        }
+        entry, vrf_id, port_id = view._find_in_cache(cached, "10.0.0.1", 32)
+        assert entry is not None and vrf_id == 7 and port_id == 5
+
+    def test_all_rows_malformed_returns_empty_triple(self):
+        """When every row is malformed, the lookup is a clean miss rather than a crash."""
+        view = self._make_view()
+        assert view._find_in_cache({"ip_addresses": ["x", 5, None]}, "10.0.0.1", 32) == (None, None, None)
+
+
+class TestNumericIDValidation:
+    """post() must reject a non-numeric device_id/vrf_id with a clean 400 rather than let the value reach the ORM and surface as a generic 500."""
+
+    def test_non_numeric_object_id_returns_400(self):
+        view = _make_view()
+        request = _make_request({"device_id": "abc", "ip_address": "10.0.0.1/24", "object_type": "device"})
+        response = view.post(request)
+        assert response.status_code == 400
+        payload = json.loads(response.content)
+        assert payload["status"] == "error"
+        # Assert the specific message so the test can't pass on an unrelated 400 branch.
+        assert payload["message"] == "Invalid object ID"
+
+    def test_non_numeric_vrf_id_returns_400(self):
+        view = _make_view()
+        request = _make_request({"device_id": 5, "vrf_id": "xyz", "ip_address": "10.0.0.1/24", "object_type": "device"})
+        response = view.post(request)
+        assert response.status_code == 400
+        payload = json.loads(response.content)
+        assert payload["status"] == "error"
+        assert payload["message"] == "Invalid VRF ID"
+
+    def test_boolean_false_object_id_rejected_as_invalid(self):
+        # bool is an int subclass; object_id=False must hit the explicit boolean guard
+        # ("Invalid object ID"), not the falsy "No object ID provided" branch. The guard
+        # therefore has to run before `if not object_id`.
+        view = _make_view()
+        request = _make_request({"device_id": False, "ip_address": "10.0.0.1/24", "object_type": "device"})
+        response = view.post(request)
+        assert response.status_code == 400
+        payload = json.loads(response.content)
+        assert payload["message"] == "Invalid object ID"
+
+    def test_boolean_true_object_id_rejected_as_invalid(self):
+        # object_id=True would otherwise int() to 1 and validate as device #1.
+        view = _make_view()
+        request = _make_request({"device_id": True, "ip_address": "10.0.0.1/24", "object_type": "device"})
+        response = view.post(request)
+        assert response.status_code == 400
+        payload = json.loads(response.content)
+        assert payload["message"] == "Invalid object ID"
+
+    def test_boolean_vrf_id_rejected_as_invalid(self):
+        # bool is an int subclass; vrf_id=True would otherwise int() to 1 and validate as VRF #1.
+        # The boolean guard must reject it ("Invalid VRF ID"), mirroring the object_id guards —
+        # so true/false can't silently regress to 1/0.
+        view = _make_view()
+        request = _make_request({"device_id": 5, "vrf_id": True, "ip_address": "10.0.0.1/24", "object_type": "device"})
+        response = view.post(request)
+        assert response.status_code == 400
+        payload = json.loads(response.content)
+        assert payload["status"] == "error"
+        assert payload["message"] == "Invalid VRF ID"
+
+    def test_float_object_id_rejected_as_invalid(self):
+        # A JSON float device_id=1.9 would otherwise int()-truncate to 1 and bind device #1.
+        # The explicit float guard must reject it with a clean 400 instead.
+        view = _make_view()
+        request = _make_request({"device_id": 1.9, "ip_address": "10.0.0.1/24", "object_type": "device"})
+        response = view.post(request)
+        assert response.status_code == 400
+        payload = json.loads(response.content)
+        assert payload["message"] == "Invalid object ID"
+
+    def test_float_vrf_id_rejected_as_invalid(self):
+        # vrf_id=2.5 would otherwise int()-truncate to 2 and validate as VRF #2.
+        view = _make_view()
+        request = _make_request({"device_id": 5, "vrf_id": 2.5, "ip_address": "10.0.0.1/24", "object_type": "device"})
+        response = view.post(request)
+        assert response.status_code == 400
+        payload = json.loads(response.content)
+        assert payload["status"] == "error"
+        assert payload["message"] == "Invalid VRF ID"

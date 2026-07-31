@@ -2,6 +2,8 @@
 
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 
 class TestConvertSpeedToKbps:
     """Boundary and type tests for convert_speed_to_kbps."""
@@ -33,7 +35,6 @@ class TestConvertSpeedToKbps:
         assert convert_speed_to_kbps(1_000_000_000) == 1_000_000
 
     def test_string_input_raises_type_error(self):
-        import pytest
         from netbox_librenms_plugin.utils import convert_speed_to_kbps
 
         with pytest.raises(TypeError):
@@ -132,6 +133,24 @@ class TestGetLibreNMSSyncDeviceServerKey:
 
         result = get_librenms_sync_device(device, server_key=None)
         assert result is member_with_id
+
+    def test_float_id_is_rejected_not_int_truncated(self):
+        """A float id (e.g."""
+        from netbox_librenms_plugin.utils import get_librenms_sync_device
+
+        device = MagicMock()
+        vc = MagicMock()
+        device.virtual_chassis = vc
+
+        member_float = MagicMock()
+        member_float.cf = {"librenms_id": {"default": 1.0}}  # invalid: float, not int/str
+        member_valid = MagicMock()
+        member_valid.cf = {"librenms_id": {"prod": 5}}
+
+        vc.members.all.return_value = [member_float, member_valid]
+
+        result = get_librenms_sync_device(device, server_key=None)
+        assert result is member_valid
 
     def test_server_key_none_matches_legacy_cf(self):
         """server_key=None: matches member with legacy bare int librenms_id."""
@@ -321,6 +340,9 @@ class TestMatchLibrenmsHardwareImportError:
         assert result["matched"] is False
 
 
+# match_librenms_hardware_to_device_type runs the device_type NormalizationRule query (issue
+# #90); django_db lets that real (empty) query run while the lookups stay mocked below.
+@pytest.mark.django_db
 class TestMatchLibrenmsHardwareDeviceTypeMappingPaths:
     """Tests for DeviceTypeMapping paths (lines 251-261)."""
 
@@ -372,6 +394,198 @@ class TestMatchLibrenmsHardwareDeviceTypeMappingPaths:
         assert result is None  # multiple DeviceTypeMapping matches returns None (ambiguous)
 
 
+@pytest.mark.django_db
+class TestMatchLibrenmsHardwareDeviceTypeNormalization:
+    """Issue #90: the documented ``device_type`` NormalizationRule scope must clean the raw LibreNMS hardware string before the DeviceTypeMapping / part_number / model lookups (docs/usage_tips/mapping_rules.md)."""
+
+    def _make_device_type(self):
+        from dcim.models import DeviceType, Manufacturer
+
+        mfr = Manufacturer.objects.create(name="Cisco-90", slug="cisco-90")
+        return DeviceType.objects.create(manufacturer=mfr, model="C9300-48P", slug="c9300-48p-90")
+
+    def test_device_type_scope_rule_normalizes_before_mapping_lookup(self):
+        from netbox_librenms_plugin.models import DeviceTypeMapping, NormalizationRule
+        from netbox_librenms_plugin.utils import match_librenms_hardware_to_device_type
+
+        dt = self._make_device_type()
+        # Mapping is keyed on the normalized hardware string (model lowercases on save).
+        DeviceTypeMapping.objects.create(librenms_hardware="C9300-48P", netbox_device_type=dt)
+        # A device_type-scoped rule strips the "WS-" prefix the raw LibreNMS string carries.
+        NormalizationRule.objects.create(
+            scope="device_type", match_pattern=r"^WS-(.+)$", replacement=r"\1", priority=10
+        )
+
+        result = match_librenms_hardware_to_device_type("WS-C9300-48P")
+
+        assert result is not None
+        assert result["matched"] is True
+        assert result["device_type"] == dt
+        assert result["match_type"] == "mapping"
+
+    def test_wrong_scope_rule_does_not_affect_device_type_matching(self):
+        """A module_type-scoped rule must NOT normalize device-type lookups: the raw string is used unchanged, so a WS-prefixed string does not match while the bare string does."""
+        from netbox_librenms_plugin.models import DeviceTypeMapping, NormalizationRule
+        from netbox_librenms_plugin.utils import match_librenms_hardware_to_device_type
+
+        dt = self._make_device_type()
+        DeviceTypeMapping.objects.create(librenms_hardware="C9300-48P", netbox_device_type=dt)
+        NormalizationRule.objects.create(
+            scope="module_type", match_pattern=r"^WS-(.+)$", replacement=r"\1", priority=10
+        )
+
+        # Bare string matches the mapping directly; the wrong-scope WS- rule is not applied.
+        assert match_librenms_hardware_to_device_type("C9300-48P")["matched"] is True
+        assert match_librenms_hardware_to_device_type("WS-C9300-48P")["matched"] is False
+
+    def test_whitespace_padded_hardware_matches_stripped_mapping(self):
+        """Hardware with surrounding whitespace must still match the stripped-stored mapping (save() does .strip().lower(); iexact is not whitespace-insensitive, so the lookup must strip)."""
+        from netbox_librenms_plugin.models import DeviceTypeMapping
+        from netbox_librenms_plugin.utils import match_librenms_hardware_to_device_type
+
+        dt = self._make_device_type()
+        DeviceTypeMapping.objects.create(librenms_hardware="C9300-48P", netbox_device_type=dt)  # stored "c9300-48p"
+
+        # Unfixed: with no rules, search_name is the raw " C9300-48P " passed unstripped to iexact
+        # → never matches the stored "c9300-48p". Fixed: search_name is stripped before lookup.
+        result = match_librenms_hardware_to_device_type(" C9300-48P ")
+        assert result["matched"] is True
+        assert result["device_type"] == dt
+        assert result["match_type"] == "mapping"
+
+    def test_whitespace_only_hardware_never_matches_blank_part_number(self):
+        """A whitespace-only hardware string (truthy, so it passes the empty guard) must not match a DeviceType whose part_number is blank — part_number__iexact="" matches the field's default."""
+        from dcim.models import DeviceType
+
+        from netbox_librenms_plugin.utils import match_librenms_hardware_to_device_type
+
+        self._make_device_type()  # has no part number → a blank-part_number DeviceType exists
+        assert DeviceType.objects.filter(part_number="").exists()
+
+        result = match_librenms_hardware_to_device_type("   ")
+        assert result is not None
+        assert result["matched"] is False
+        assert result["device_type"] is None
+
+    def test_rule_emptied_hardware_does_not_match_blank_part_number(self):
+        """A rule that reduces the whole hardware string to empty must not turn the exact lookups into part_number__iexact="" — the raw string is what the exact lookups get, and it matches nothing here."""
+        from netbox_librenms_plugin.models import NormalizationRule
+        from netbox_librenms_plugin.utils import match_librenms_hardware_to_device_type
+
+        self._make_device_type()  # blank part_number exists
+        # replacement may not be blank, so empty the string via an empty capture group.
+        NormalizationRule.objects.create(
+            scope="device_type", match_pattern=r"^WS-(\s*)$", replacement=r"\1", priority=10
+        )
+
+        result = match_librenms_hardware_to_device_type("WS-")
+        assert result is not None
+        assert result["matched"] is False
+
+    def test_crud_form_stored_mapping_still_matches_via_raw_fallback(self):
+        """A mapping created through the standard CRUD/CSV write path (model clean: .strip().lower() only, NO rule normalization) must still be found: the lookup falls back to the raw hardware string when the normalized key misses."""
+        from netbox_librenms_plugin.models import DeviceTypeMapping, NormalizationRule
+        from netbox_librenms_plugin.utils import match_librenms_hardware_to_device_type
+
+        dt = self._make_device_type()
+        NormalizationRule.objects.create(
+            scope="device_type", match_pattern=r"^WS-(.+)$", replacement=r"\1", priority=10
+        )
+        # The standard form/CSV path stores the entered string un-normalized → "ws-c9300-48p".
+        DeviceTypeMapping.objects.create(librenms_hardware="WS-C9300-48P", netbox_device_type=dt)
+
+        # Lookup normalizes to "C9300-48P" (miss) and must fall back to the raw key (hit).
+        result = match_librenms_hardware_to_device_type("WS-C9300-48P")
+        assert result is not None
+        assert result["matched"] is True
+        assert result["device_type"] == dt
+        assert result["match_type"] == "mapping"
+
+    def test_raw_exact_model_match_survives_rule_addition(self):
+        """The part_number/model exact lookups use the RAW LibreNMS string (the documented rule scope is the DeviceTypeMapping lookup only) — adding a rule must not break a previously-working literal model match."""
+        from dcim.models import DeviceType, Manufacturer
+
+        from netbox_librenms_plugin.models import NormalizationRule
+        from netbox_librenms_plugin.utils import match_librenms_hardware_to_device_type
+
+        mfr = Manufacturer.objects.create(name="Cisco-raw-exact", slug="cisco-raw-exact")
+        dt = DeviceType.objects.create(manufacturer=mfr, model="WS-C9300-48P", slug="ws-c9300-48p-raw")
+        NormalizationRule.objects.create(
+            scope="device_type", match_pattern=r"^WS-(.+)$", replacement=r"\1", priority=10
+        )
+
+        # Raw string literally equals the DeviceType model; the rule must not hide it.
+        result = match_librenms_hardware_to_device_type("WS-C9300-48P")
+        assert result is not None
+        assert result["matched"] is True
+        assert result["device_type"] == dt
+        assert result["match_type"] == "exact"
+
+
+@pytest.mark.django_db
+class TestChassisFallbackHonorsPreloadedRules:
+    """Issue #90 / N+1: the chassis inventory fallback (_try_chassis_device_type_match) must thread the preloaded device_type rules into its own match call."""
+
+    def test_chassis_fallback_uses_preloaded_rules_no_per_call_query(self):
+        from unittest.mock import MagicMock
+
+        from django.db import connection
+        from django.test.utils import CaptureQueriesContext
+
+        from dcim.models import DeviceType, Manufacturer
+        from netbox_librenms_plugin.import_utils.device_operations import _try_chassis_device_type_match
+        from netbox_librenms_plugin.models import DeviceTypeMapping, NormalizationRule
+        from netbox_librenms_plugin.utils import preload_normalization_rules
+
+        mfr = Manufacturer.objects.create(name="Cisco-chassis", slug="cisco-chassis")
+        dt = DeviceType.objects.create(manufacturer=mfr, model="C9300-48P", slug="c9300-48p-chassis")
+        DeviceTypeMapping.objects.create(librenms_hardware="C9300-48P", netbox_device_type=dt)
+        NormalizationRule.objects.create(
+            scope="device_type", match_pattern=r"^WS-(.+)$", replacement=r"\1", priority=10
+        )
+        preloaded = preload_normalization_rules("device_type")
+
+        # api is a true external boundary (LibreNMS HTTP): stub only the inventory call.
+        api = MagicMock()
+        api.get_inventory_filtered.return_value = (True, [{"entPhysicalName": "WS-C9300-48P"}])
+
+        with CaptureQueriesContext(connection) as ctx:
+            result = _try_chassis_device_type_match(api, 123, preloaded_device_type_rules=preloaded)
+
+        assert result is not None
+        assert result["matched"] is True
+        assert result["device_type"] == dt
+        assert result["match_type"] == "chassis"
+        # The preloaded rules must reach the inner matcher, so no NormalizationRule query fires here.
+        assert not any("normalizationrule" in q["sql"].lower() for q in ctx.captured_queries)
+
+    def test_preloaded_rules_skip_the_per_call_normalization_query(self):
+        """Perf (issue #90 / N+1): passing preloaded_rules must avoid the per-call device_type NormalizationRule query — the bulk-import loop preloads it once instead of per device."""
+        from django.db import connection
+        from django.test.utils import CaptureQueriesContext
+
+        from netbox_librenms_plugin.models import NormalizationRule
+        from netbox_librenms_plugin.utils import (
+            match_librenms_hardware_to_device_type,
+            preload_normalization_rules,
+        )
+
+        NormalizationRule.objects.create(
+            scope="device_type", match_pattern=r"^WS-(.+)$", replacement=r"\1", priority=10
+        )
+        preloaded = preload_normalization_rules("device_type")
+
+        with CaptureQueriesContext(connection) as preloaded_ctx:
+            match_librenms_hardware_to_device_type("WS-C9300-48P", preloaded_rules=preloaded)
+        assert not any("normalizationrule" in q["sql"].lower() for q in preloaded_ctx.captured_queries)
+
+        # Without preloading, the match does hit NormalizationRule (the per-device cost).
+        with CaptureQueriesContext(connection) as unpreloaded_ctx:
+            match_librenms_hardware_to_device_type("WS-C9300-48P")
+        assert any("normalizationrule" in q["sql"].lower() for q in unpreloaded_ctx.captured_queries)
+
+
+@pytest.mark.django_db
 class TestMatchLibrenmsHardwareDeviceTypeMultipleReturned:
     """Tests for DeviceType MultipleObjectsReturned — ambiguity surfaces as None."""
 
@@ -561,6 +775,23 @@ class TestFindByLibreNMSIdNoneGuard:
         assert result is None
         model.objects.filter.assert_not_called()
 
+    @pytest.mark.django_db(transaction=False)
+    def test_select_for_update_locks_and_returns_owner(self):
+        """find_by_librenms_id(..., select_for_update=True) locks + returns the owning row inside a txn (serializes a concurrent conflict check against an existing owner)."""
+        from django.db import transaction
+
+        from dcim.models import Device
+
+        from netbox_librenms_plugin.tests.conftest import make_device
+        from netbox_librenms_plugin.utils import find_by_librenms_id
+
+        device = make_device("locked-owner", librenms_cf={"default": 4242})
+        # select_for_update requires an open transaction; the locked read must still resolve
+        # the owner (best-effort serialization is additive, not a behaviour change).
+        with transaction.atomic():
+            found = find_by_librenms_id(Device, 4242, server_key="default", select_for_update=True)
+        assert found is not None and found.pk == device.pk
+
 
 class TestNetboxResolvesModuleTokenPerLeaf:
     """Version-gating helper for {module} token resolution behaviour (NetBox #20467)."""
@@ -685,3 +916,80 @@ class TestGetNetboxVersionTuple:
         fake_release = MagicMock(version="not-a-version")
         with patch("netbox.settings.RELEASE", fake_release):
             assert utils._get_netbox_version_tuple() is None
+
+
+class TestIsLegacyLibrenmsId:
+    """is_legacy_librenms_id: one place defining what counts as the legacy bare-integer form."""
+
+    def test_bare_int_is_legacy(self):
+        from netbox_librenms_plugin.utils import is_legacy_librenms_id
+
+        assert is_legacy_librenms_id(42) is True
+
+    def test_int_parseable_string_is_legacy(self):
+        from netbox_librenms_plugin.utils import is_legacy_librenms_id
+
+        # int()-based, unlike str.isdigit(): a whitespace-padded digit string is still legacy.
+        assert is_legacy_librenms_id("42") is True
+        assert is_legacy_librenms_id(" 42 ") is True
+
+    def test_bool_is_not_legacy(self):
+        from netbox_librenms_plugin.utils import is_legacy_librenms_id
+
+        # bool is an int subclass; True/False must not be treated as a legacy id.
+        assert is_legacy_librenms_id(True) is False
+        assert is_legacy_librenms_id(False) is False
+
+    def test_dict_form_and_none_are_not_legacy(self):
+        from netbox_librenms_plugin.utils import is_legacy_librenms_id
+
+        assert is_legacy_librenms_id({"default": {"id": 42}}) is False
+        assert is_legacy_librenms_id(None) is False
+
+    def test_non_numeric_string_is_not_legacy(self):
+        from netbox_librenms_plugin.utils import is_legacy_librenms_id
+
+        assert is_legacy_librenms_id("abc") is False
+        assert is_legacy_librenms_id("") is False
+
+
+class TestValidateRegexField:
+    """validate_regex_field centralizes the re.compile -> ValidationError validator the mapping models share (NormalizationRule / CarrierAutoInstallRule / InventoryIgnoreRule / ModuleBayMapping / PortStackLagPattern)."""
+
+    def test_valid_pattern_returns_compiled(self):
+        import re
+
+        from netbox_librenms_plugin.utils import validate_regex_field
+
+        compiled = validate_regex_field(r"^Po\d+$", "lag_name_pattern")
+        assert isinstance(compiled, re.Pattern)
+        assert compiled.match("Po10")
+
+    def test_invalid_pattern_raises_field_scoped_validation_error(self):
+        from django.core.exceptions import ValidationError
+
+        from netbox_librenms_plugin.utils import validate_regex_field
+
+        with pytest.raises(ValidationError) as exc_info:
+            validate_regex_field("[unbalanced(", "device_type_pattern")
+        # Error attached to the named field with the shared "Invalid regex" wording.
+        assert "device_type_pattern" in exc_info.value.message_dict
+        assert "Invalid regex" in exc_info.value.message_dict["device_type_pattern"][0]
+
+    def test_model_clean_routes_bad_regex_through_the_shared_validator(self):
+        """A mapping model's clean() must reject an invalid regex via the shared helper — the bad-regex path through these models was previously untested."""
+        from django.core.exceptions import ValidationError
+
+        from netbox_librenms_plugin.models import ModuleBayMapping
+
+        mapping = ModuleBayMapping.__new__(ModuleBayMapping)
+        mapping.librenms_name = "[unbalanced("
+        mapping.librenms_class = ""
+        mapping.netbox_bay_name = "Slot 1"
+        mapping.is_regex = True
+        mapping.description = ""
+        with patch("netbox.models.NetBoxModel.clean"):
+            with pytest.raises(ValidationError) as exc_info:
+                mapping.clean()
+        assert "librenms_name" in exc_info.value.message_dict
+        assert "Invalid regex" in exc_info.value.message_dict["librenms_name"][0]

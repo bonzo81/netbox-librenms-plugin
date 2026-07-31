@@ -1,0 +1,87 @@
+"""Usable-server-config filtering for LibreNMSAPI, driven by real plugin settings.
+
+Unlike the mock-based suite in ``test_librenms_api.py`` (which patches
+``get_plugin_config``), these tests drive the real
+``netbox.plugins.get_plugin_config`` -> ``settings.PLUGINS_CONFIG`` path via
+``override_settings``. That exercises the usable-config predicate end to end,
+from configuration through to server selection.
+"""
+
+import copy
+
+import pytest
+from django.conf import settings
+from django.test import override_settings
+
+from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+
+
+@pytest.fixture(autouse=True)
+def mock_librenms_config():
+    """Neutralize the suite-wide autouse mock from ``test_librenms_api_helpers``.
+
+    That helper (registered globally via ``pytest_plugins``) patches
+    ``netbox_librenms_plugin.librenms_api.get_plugin_config``, which would shadow the
+    real ``settings.PLUGINS_CONFIG`` lookups these tests drive through
+    ``override_settings``. Overriding the fixture here (same name, module scope) takes
+    precedence over the plugin's autouse one, so this module's tests run against the
+    real ``get_plugin_config``.
+    """
+    yield
+
+
+def _plugins_config_with_servers(servers):
+    """Return a PLUGINS_CONFIG copy with the plugin's ``servers`` set to ``servers``."""
+    config = copy.deepcopy(settings.PLUGINS_CONFIG)
+    plugin_config = dict(config.get("netbox_librenms_plugin", {}))
+    plugin_config["servers"] = servers
+    config["netbox_librenms_plugin"] = plugin_config
+    return config
+
+
+class TestGetAvailableServersUsableConfig:
+    """get_available_servers must only offer servers that __init__ can actually bind."""
+
+    def test_skips_incomplete_and_malformed_entries(self):
+        """Non-mapping entries and dicts missing url/token are excluded from the picker."""
+        servers = {
+            "good": {
+                "librenms_url": "https://good.example.com",
+                "api_token": "good-token",
+                "display_name": "Good",
+            },
+            "nomap": None,
+            "nourl": {"display_name": "No URL", "api_token": "t"},
+            "notoken": {"display_name": "No Token", "librenms_url": "https://n.example.com"},
+        }
+        with override_settings(PLUGINS_CONFIG=_plugins_config_with_servers(servers)):
+            assert LibreNMSAPI.get_available_servers() == {"good": "Good"}
+
+    def test_keeps_fully_configured_entries(self):
+        """A server with a non-empty librenms_url and api_token remains selectable."""
+        servers = {
+            "primary": {
+                "librenms_url": "https://primary.example.com",
+                "api_token": "primary-token",
+            }
+        }
+        with override_settings(PLUGINS_CONFIG=_plugins_config_with_servers(servers)):
+            assert LibreNMSAPI.get_available_servers() == {"primary": "primary"}
+
+
+class TestInitDefaultFallbackUsableConfig:
+    """The 'default' auto-fallback must select the first usable configured server."""
+
+    def test_skips_incomplete_first_server(self):
+        """A partially configured first server is skipped so a later valid server is bound."""
+        servers = {
+            "broken": {"display_name": "Broken"},  # no librenms_url/api_token
+            "primary": {
+                "librenms_url": "https://primary.example.com",
+                "api_token": "primary-token",
+            },
+        }
+        with override_settings(PLUGINS_CONFIG=_plugins_config_with_servers(servers)):
+            api = LibreNMSAPI(server_key="default")
+        assert api.server_key == "primary"
+        assert api.librenms_url == "https://primary.example.com"

@@ -1,12 +1,14 @@
+import re
+
 import django_tables2 as tables
 from django.utils.html import escape, format_html
 from django.utils.safestring import mark_safe
 from netbox.tables.columns import ToggleColumn
 from utilities.paginator import EnhancedPaginator
 
+from netbox_librenms_plugin.constants import OOB_BADGE_HTML
 from netbox_librenms_plugin.utils import (
     get_table_paginate_count,
-    get_virtual_chassis_member,
 )
 
 
@@ -61,9 +63,19 @@ class LibreNMSCableTable(tables.Table):
 
     def render_local_port(self, value, record):
         """Render local port name as a link if URL is available."""
+        # Static trusted markup — use mark_safe, not format_html (which requires
+        # interpolation args and raises TypeError when given a bare string in Django 6+).
+        oob_badge = (
+            mark_safe(" " + OOB_BADGE_HTML)  # noqa: S308  (leading space: it follows the port name)
+            if record.get("_source") == "oob"
+            else ""
+        )
+        # Normalize None to "" in both branches; otherwise the linked branch
+        # renders the literal "None" as the link text when value is missing.
+        display_value = value or ""
         if url := record.get("local_port_url"):
-            return format_html('<a href="{}">{}</a>', url, value)
-        return value
+            return format_html('<a href="{}">{}</a>{}', url, display_value, oob_badge)
+        return format_html("{}{}", display_value, oob_badge)
 
     def render_remote_port(self, value, record):
         """Render remote port name as a link if URL is available."""
@@ -118,17 +130,43 @@ class VCCableTable(LibreNMSCableTable):
     def __init__(self, *args, device=None, **kwargs):
         """Initialize the VC cable table with device context."""
         super().__init__(*args, device=device, **kwargs)
+        # Cache the VC member set once so render_device_selection doesn't re-query
+        # members.all() (and a members.get per row via get_virtual_chassis_member) for every
+        # row in large cable tables. Mirrors VCModuleTable.
+        self._vc_members = []
+        self._vc_member_by_position = {}
+        if getattr(self.device, "virtual_chassis", None):
+            self._vc_members = list(self.device.virtual_chassis.members.all())
+            self._vc_member_by_position = {m.vc_position: m for m in self._vc_members}
+
+    def _selected_member_id(self, port_name):
+        """
+        Resolve the selected VC member id from the port name.
+
+        Served from the cached member set, mirroring get_virtual_chassis_member's position
+        parse but without a per-row members.get() query.
+
+        Args:
+            port_name: The LibreNMS local port name (e.g. ``Ethernet3``).
+
+        Returns:
+            int: The matched member's id, or the table device's id when no member matches.
+        """
+        match = re.match(r"^[A-Za-z]+(\d+)", port_name or "")
+        if match:
+            member = self._vc_member_by_position.get(int(match.group(1)))
+            if member is not None:
+                return member.id
+        return self.device.id
 
     def render_device_selection(self, value, record):
         """Render a dropdown to select the virtual chassis member for a port."""
-        members = self.device.virtual_chassis.members.all()
-        chassis_member = get_virtual_chassis_member(self.device, record["local_port"])
-        selected_member_id = chassis_member.id if chassis_member else self.device.id
+        selected_member_id = self._selected_member_id(record["local_port"])
         port_id = record["local_port_id"]
 
         options = [
             f'<option value="{member.id}"{" selected" if member.id == selected_member_id else ""}>{escape(member.name)}</option>'
-            for member in members
+            for member in self._vc_members
         ]
 
         return format_html(
