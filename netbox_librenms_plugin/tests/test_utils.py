@@ -1488,6 +1488,7 @@ class TestNormalizeDeviceSerialsMigration:
 
         assert module.Migration.atomic is False
         assert module.Migration.operations[0].atomic is False
+        assert module.Migration.operations[1].atomic is False
 
     def test_plain_serial_index_exists(self):
         """The migration adds the ordinary B-tree index used by exact serial equality lookups."""

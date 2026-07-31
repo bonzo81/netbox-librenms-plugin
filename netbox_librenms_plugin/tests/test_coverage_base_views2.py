@@ -764,9 +764,10 @@ class TestEnrichRemotePort:
     def test_vc_path_leaves_interface_unresolved_when_member_position_is_missing(self):
         """A failed VC-position lookup must not resolve the advertised port against the selected member."""
         view = self._make_view()
-        master, _member = _vc_with_member("vc-erp-missing", "erp-missing-master", "erp-missing-member", member_pos=1)
+        master, member = _vc_with_member("vc-erp-missing", "erp-missing-master", "erp-missing-member", member_pos=1)
         # LibreNMS advertises position 2, which is absent. A same-named interface on the selected
         # position-1 device must not be mistaken for the missing member's remote endpoint.
+        make_interface(member, "Gi2/0/1")
         make_interface(master, "Gi2/0/1")
 
         result = view.enrich_remote_port({"remote_port": "Gi2/0/1", "remote_port_id": 99}, master)
