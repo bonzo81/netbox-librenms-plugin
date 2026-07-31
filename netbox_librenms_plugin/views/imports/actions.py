@@ -3437,10 +3437,10 @@ class MergeNetBoxDevicesView(
                 )
 
             # merge_librenms_links(), set_device_ip_fk() and mark_librenms_migrated() all raise
-            # ValueError on corrupt link shapes or an ownership violation. Guard the whole group,
-            # not just the first call: none of them persist anything (the save block is below), so
-            # a ValueError from the oob transfer or the migration marker must fail closed with a
-            # toast exactly like a merge_librenms_links() rejection — never bubble up as a 500.
+            # ValueError on corrupt link shapes or an ownership violation. The locked OOB-IP reads
+            # can also raise DatabaseError (for example, a lock timeout). Guard the whole group:
+            # none of it persists anything (the save block is below), so every failure must return
+            # a safe toast and roll back rather than bubbling up as a 500.
             try:
                 summary = merge_librenms_links(winner_sync, donor_sync, server_key=server_key)
 
@@ -3485,13 +3485,19 @@ class MergeNetBoxDevicesView(
                 # back defensively before returning the fail-closed toast.
                 transaction.set_rollback(True)
                 return _htmx_error_response(f"Cannot merge: {escape(str(exc))}")
+            except DatabaseError:
+                logger.exception(
+                    "MergeNetBoxDevicesView: database failure preparing merge winner=%s donor=%s",
+                    winner.pk,
+                    donor.pk,
+                )
+                transaction.set_rollback(True)
+                return _htmx_error_response("Cannot merge because the database operation failed. Please retry.")
 
-            # Persist only the fields we actually touched.  Calling
-            # ``full_clean()`` here (or relying on it via ``_save_device``)
-            # would re-validate every field on the device — which is
-            # undesirable when the rows hold pre-existing inconsistencies
-            # (e.g. ``face`` set without ``rack``) that are unrelated to
-            # this merge.  See issue surfaced during eve-ng-02 merge.
+            # Persist only the fields we actually touched. Calling ``full_clean()`` here (or calling
+            # ``_save_device`` without update_fields) would re-validate every field on the device —
+            # undesirable when the rows hold pre-existing inconsistencies (e.g. ``face`` set without
+            # ``rack``) that are unrelated to this merge. See issue surfaced during eve-ng-02 merge.
             # Persist only the fields we actually touched, per row. The LibreNMS link merge +
             # migration marker land on the sync devices (custom_field_data); the oob_ip transfer
             # lands on the selected winner/donor. When a selected device IS its own sync device
@@ -3518,22 +3524,19 @@ class MergeNetBoxDevicesView(
             winner_extra = [winner_sync] if winner_sync.pk != winner.pk else []
             save_order = [donor, *donor_extra, *winner_extra, winner]
             saved = set()
-            try:
-                for dev in save_order:
-                    if dev.pk in saved:
-                        continue
-                    saved.add(dev.pk)
-                    fields = fields_by_pk.get(dev.pk)
-                    if fields:
-                        dev.save(update_fields=sorted(fields))
-            except Exception:  # pragma: no cover - defensive
-                logger.exception(
-                    "MergeNetBoxDevicesView: failed to persist merge winner=%s donor=%s",
-                    winner.pk,
-                    donor.pk,
-                )
-                transaction.set_rollback(True)
-                return _htmx_error_response("Unable to save the merge changes. Please try again.")
+            for dev in save_order:
+                if dev.pk in saved:
+                    continue
+                saved.add(dev.pk)
+                fields = fields_by_pk.get(dev.pk)
+                if fields and (error := _save_device(dev, update_fields=sorted(fields), request=request)):
+                    logger.error(
+                        "MergeNetBoxDevicesView: failed to persist merge winner=%s donor=%s",
+                        winner.pk,
+                        donor.pk,
+                    )
+                    transaction.set_rollback(True)
+                    return error
 
         logger.info(
             "Merged NetBox device '%s' (pk=%d) into '%s' (pk=%d) on server %s. Summary: %s; oob_ip_transferred=%s",

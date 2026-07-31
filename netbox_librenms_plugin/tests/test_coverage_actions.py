@@ -6504,7 +6504,8 @@ class TestMergeNetBoxDevicesViewOOBTransfer:
         # Surfaced as the HTMX OOB error toast (200 + HX-Reswap:none), not a 500.
         assert resp.status_code == 200
         assert resp["HX-Reswap"] == "none"
-        assert b"Unable to save" in resp.content
+        assert b"database integrity constraint was violated" in resp.content
+        assert b"forced winner save failure" not in resp.content
         # The donor's save (release + marker) was rolled back: it still owns the oob_ip, the
         # winner never claimed it, and no migration marker was stamped.
         donor.refresh_from_db()
@@ -6644,7 +6645,7 @@ class TestMergeNetBoxDevicesViewVCSyncDevice:
 
 @pytest.mark.django_db
 class TestMergeNetBoxDevicesViewFailClosed:
-    """MergeNetBoxDevicesView.post: ValueErrors from merge_librenms_links, the oob_ip transfer, and mark_librenms_migrated must all fail closed with a toast and leave the donor unmigrated — never a 500 or a silent lossy merge."""
+    """Merge preparation failures must return a toast and leave the donor unmigrated."""
 
     def _make_view(self):
         from netbox_librenms_plugin.views.imports.actions import MergeNetBoxDevicesView
@@ -6740,6 +6741,36 @@ class TestMergeNetBoxDevicesViewFailClosed:
         entry = donor.custom_field_data["librenms_id"]["default"]
         assert entry == {"id": 10}
         assert "_migrated_to" not in entry
+
+    def test_oob_ip_lock_database_error_fails_closed_without_leaking_backend_text(self):
+        """A DB failure while acquiring the OOB-IP lock returns a safe toast and rolls back."""
+        from django.db import DatabaseError
+
+        from ipam.models import IPAddress
+        from netbox_librenms_plugin.tests.conftest import ip_on
+
+        winner = make_device("merge-db-lock-winner", librenms_cf={"default": {"id": 20}})
+        donor = make_device("merge-db-lock-donor", librenms_cf={"default": {"id": 10}})
+        oob_ip = ip_on(winner, "192.0.2.12/32", "mgmt0")
+        donor.oob_ip = oob_ip
+        donor.save()
+
+        with patch.object(
+            IPAddress.objects,
+            "select_for_update",
+            side_effect=DatabaseError("forced lock timeout with backend detail"),
+        ):
+            resp = self._post_merge(self._make_view(), winner, donor)
+
+        assert resp.status_code == 200
+        assert resp["HX-Reswap"] == "none"
+        assert b"database operation failed" in resp.content
+        assert b"forced lock timeout" not in resp.content
+        donor.refresh_from_db()
+        winner.refresh_from_db()
+        assert donor.oob_ip_id == oob_ip.pk
+        assert winner.oob_ip_id is None
+        assert donor.custom_field_data["librenms_id"]["default"] == {"id": 10}
 
 
 @pytest.mark.django_db
