@@ -311,6 +311,8 @@ def _module_interface_update_message(bind_result, location):
     """
     interface_name = bind_result.get("interface")
     adopted_count = bind_result.get("adopted_count") or 0
+    if bind_result.get("changed") is False and not adopted_count:
+        return f"No interface changes were needed for {location}."
     if interface_name and adopted_count:
         return (
             f"Updated interface {interface_name} for {location} and "
