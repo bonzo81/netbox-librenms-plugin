@@ -2,22 +2,11 @@
 <div class="modal-header">
   <h5 class="modal-title text-danger">
     <i class="mdi mdi-alert-octagon"></i>
-    {# The modal also renders non-collision failures (error_message branch below), so keep the title generic in that case. #}
-    {% if error_message %}
-      Bulk import blocked
-    {% else %}
-      Bulk import blocked: NetBox object collisions
-    {% endif %}
+    Bulk import blocked: NetBox object collisions
   </h5>
   <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
 </div>
 <div class="modal-body">
-  {% if error_message %}
-    {# Non-collision block (e.g. a selected device whose LibreNMS info couldn't be fetched to collision-check). #}
-    <div class="alert alert-danger mb-0">
-      <i class="mdi mdi-alert-octagon me-1"></i>{{ error_message }}
-    </div>
-  {% else %}
   <div class="alert alert-danger mb-3">
     <div>
       <i class="mdi mdi-alert-octagon me-1"></i>
@@ -70,7 +59,6 @@
       per-row action that you can run from the import button.
     </div>
   </div>
-  {% endif %}
 </div>
 <div class="modal-footer">
   <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">

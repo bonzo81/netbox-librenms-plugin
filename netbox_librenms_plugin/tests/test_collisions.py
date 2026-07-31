@@ -369,6 +369,7 @@ def test_collision_template_renders_correct_link_targets_and_escapes():
     assert "srv-collide" in html
     assert "vm-collide" in html
     assert "beta" in html
+    assert "Bulk import blocked: NetBox object collisions" in html
     # The copy must be VM-safe: this batch includes a VM collision, so the modal must not use
     # device-only wording or point at device-only follow-up actions (Add as OOB / Promote to host)
     # that don't exist for a VM collision. Object-neutral language is used instead.
@@ -395,27 +396,6 @@ def test_collision_template_renders_correct_link_targets_and_escapes():
         r'class="(?=[^"]*\bbadge\b)(?=[^"]*\bbg-danger\b)(?=[^"]*\btext-white\b)[^"]*"',
         html,
     ), "collision badge must pair bg-danger with text-white on one element"
-
-
-def test_collision_template_title_is_generic_for_non_collision_failures():
-    """The modal title must drop the 'NetBox device collisions' wording when rendering a non-collision error_message (the same modal serves LibreNMS fetch/check failures)."""
-    from django.template.loader import render_to_string
-
-    # Collision render → collision-specific title.
-    collision_html = render_to_string(
-        "netbox_librenms_plugin/htmx/bulk_import_collision.html",
-        {"collisions": [{"nb_device_pk": 1, "nb_device_name": "x", "nb_model_name": "device", "librenms_rows": []}]},
-    )
-    assert "Bulk import blocked: NetBox object collisions" in collision_html
-
-    # Non-collision failure render → generic title, NOT the collision wording.
-    error_html = render_to_string(
-        "netbox_librenms_plugin/htmx/bulk_import_collision.html",
-        {"error_message": "Could not fetch LibreNMS info for the selected device."},
-    )
-    assert "Bulk import blocked" in error_html
-    assert "NetBox object collisions" not in error_html
-    assert "Could not fetch LibreNMS info for the selected device." in error_html
 
 
 def test_non_string_merge_model_name_is_normalized():
