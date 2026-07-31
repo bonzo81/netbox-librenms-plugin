@@ -6772,6 +6772,30 @@ class TestMergeNetBoxDevicesViewFailClosed:
         assert winner.oob_ip_id is None
         assert donor.custom_field_data["librenms_id"]["default"] == {"id": 10}
 
+    def test_device_lock_database_error_fails_closed_without_leaking_backend_text(self):
+        """A DB failure while locking the merge pair returns a safe retry toast, not a 500."""
+        from dcim.models import Device
+        from django.db import DatabaseError
+
+        winner = make_device("merge-device-lock-winner", librenms_cf={"default": {"id": 20}})
+        donor = make_device("merge-device-lock-donor", librenms_cf={"default": {"id": 10}})
+
+        with patch.object(
+            Device.objects,
+            "select_for_update",
+            side_effect=DatabaseError("forced primary lock timeout with backend detail"),
+        ):
+            resp = self._post_merge(self._make_view(), winner, donor)
+
+        assert resp.status_code == 200
+        assert resp["HX-Reswap"] == "none"
+        assert b"database operation failed" in resp.content
+        assert b"forced primary lock timeout" not in resp.content
+        donor.refresh_from_db()
+        winner.refresh_from_db()
+        assert donor.custom_field_data["librenms_id"]["default"] == {"id": 10}
+        assert winner.custom_field_data["librenms_id"]["default"] == {"id": 20}
+
 
 @pytest.mark.django_db
 class TestSuggestOOBInterface:

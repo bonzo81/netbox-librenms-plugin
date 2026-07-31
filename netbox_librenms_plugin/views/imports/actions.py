@@ -3372,6 +3372,15 @@ class MergeNetBoxDevicesView(
 
         server_key = self.librenms_api.server_key
 
+        def _database_failure_response():
+            logger.exception(
+                "MergeNetBoxDevicesView: database failure merging winner=%s donor=%s",
+                winner.pk,
+                donor.pk,
+            )
+            transaction.set_rollback(True)
+            return _htmx_error_response("Cannot merge because the database operation failed. Please retry.")
+
         # LibreNMS treats a Virtual Chassis as one logical device, so the host/OOB link lives on the
         # single sync member (get_librenms_sync_device) — which may differ from the winner/donor the
         # user selected when a candidate matched a NON-sync VC member by serial/hostname. Merge the
@@ -3388,13 +3397,16 @@ class MergeNetBoxDevicesView(
             # it from unlocked rows would let a concurrent VC edit (a member joining/leaving, or the
             # id moving between members) shift the sync member to a row we never locked — splitting
             # the link across the VC. Non-VC merges add no members, so they lock the same two rows.
-            lock_pks = {winner.pk, donor.pk}
-            for candidate in (winner, donor):
-                vc = getattr(candidate, "virtual_chassis", None)
-                if vc:
-                    lock_pks.update(vc.members.values_list("pk", flat=True))
-            lock_pks = sorted(lock_pks)
-            locked = list(Device.objects.select_for_update().filter(pk__in=lock_pks).order_by("pk"))
+            try:
+                lock_pks = {winner.pk, donor.pk}
+                for candidate in (winner, donor):
+                    vc = getattr(candidate, "virtual_chassis", None)
+                    if vc:
+                        lock_pks.update(vc.members.values_list("pk", flat=True))
+                lock_pks = sorted(lock_pks)
+                locked = list(Device.objects.select_for_update().filter(pk__in=lock_pks).order_by("pk"))
+            except DatabaseError:
+                return _database_failure_response()
             if len(locked) != len(lock_pks):
                 return _htmx_error_response(
                     "One of the devices no longer exists; it may have been deleted concurrently."
@@ -3404,8 +3416,11 @@ class MergeNetBoxDevicesView(
             donor = locked_by_pk[donor.pk]
 
             # Resolve the sync devices from the now-locked, current state.
-            winner_sync = get_librenms_sync_device(winner, server_key=server_key) or winner
-            donor_sync = get_librenms_sync_device(donor, server_key=server_key) or donor
+            try:
+                winner_sync = get_librenms_sync_device(winner, server_key=server_key) or winner
+                donor_sync = get_librenms_sync_device(donor, server_key=server_key) or donor
+            except DatabaseError:
+                return _database_failure_response()
             # Fail closed if a concurrent VC change added a member after we snapshotted lock_pks and
             # the resolved sync device wasn't among the locked rows — never write the link to an
             # unlocked row; the operator can retry.
@@ -3417,7 +3432,11 @@ class MergeNetBoxDevicesView(
             # scoped above, and the save block below writes their custom_field_data. Authorize them
             # too, or a grant covering only the selected pair mutates the link-holding sibling.
             sync_pks = {winner_sync.pk, donor_sync.pk}
-            if set(changeable.filter(pk__in=sync_pks).values_list("pk", flat=True)) != sync_pks:
+            try:
+                changeable_sync_pks = set(changeable.filter(pk__in=sync_pks).values_list("pk", flat=True))
+            except DatabaseError:
+                return _database_failure_response()
+            if changeable_sync_pks != sync_pks:
                 return _htmx_error_response("Winner or donor device not found")
             # Gate the link-holding sync devices, not merely the selected VC members. The merge
             # helpers reject legacy data either way; checking here preserves the actionable
@@ -3486,13 +3505,7 @@ class MergeNetBoxDevicesView(
                 transaction.set_rollback(True)
                 return _htmx_error_response(f"Cannot merge: {escape(str(exc))}")
             except DatabaseError:
-                logger.exception(
-                    "MergeNetBoxDevicesView: database failure preparing merge winner=%s donor=%s",
-                    winner.pk,
-                    donor.pk,
-                )
-                transaction.set_rollback(True)
-                return _htmx_error_response("Cannot merge because the database operation failed. Please retry.")
+                return _database_failure_response()
 
             # Persist only the fields we actually touched. Calling ``full_clean()`` here (or calling
             # ``_save_device`` without update_fields) would re-validate every field on the device —
