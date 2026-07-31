@@ -1480,6 +1480,15 @@ class TestNormalizeDeviceSerialsMigration:
         assert Device.objects.get(pk=blank.pk).serial == ""
         assert Device.objects.get(pk=unchanged.pk).serial == "SN-MIG-2"
 
+    def test_serial_rewrite_is_not_wrapped_in_one_migration_transaction(self):
+        """Each idempotent batch commits independently so a large Device table is not locked for the full rewrite."""
+        import importlib
+
+        module = importlib.import_module("netbox_librenms_plugin.migrations.0012_normalize_device_serials")
+
+        assert module.Migration.atomic is False
+        assert module.Migration.operations[0].atomic is False
+
     def test_plain_serial_index_exists(self):
         """The migration adds the ordinary B-tree index used by exact serial equality lookups."""
         from django.db import connection

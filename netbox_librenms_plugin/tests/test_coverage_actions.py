@@ -7727,6 +7727,18 @@ class TestSerialActionsNormalizeAndLock:
         conflict_row_locks = self._serial_row_locks(sqls)
         assert conflict_row_locks == [], f"conflict lookup still takes a row lock: {conflict_row_locks}"
 
+    def test_serial_advisory_lock_uses_a_stable_application_key(self):
+        """The advisory key is derived in application code, not PostgreSQL's undocumented hashtext()."""
+        from django.db import connection
+        from django.test.utils import CaptureQueriesContext
+
+        target = make_device("ser-act-stable-lock")
+        with CaptureQueriesContext(connection) as ctx:
+            self._post_action("sync_serial", target, "SN-STABLE")
+
+        lock_sql = next(q["sql"] for q in ctx.captured_queries if "pg_advisory_xact_lock" in q["sql"])
+        assert "hashtext" not in lock_sql.lower()
+
     def test_serial_lock_refuses_to_run_in_autocommit(self):
         """pg_advisory_xact_lock is transaction-scoped, so taking it outside a transaction locks nothing and must fail loudly."""
         from django.db import connection
@@ -8099,6 +8111,30 @@ class TestPromoteAndMergeObjectScope:
         entry = Device.objects.get(pk=in_scope.pk).custom_field_data["librenms_id"]["default"]
         assert entry["id"] == 55
         assert entry["oob"]["id"] == 10
+
+    def test_promote_rechecks_legacy_mapping_after_lock(self):
+        """A concurrent legacy write between validation and row lock must fail closed without partially promoting."""
+        from dcim.models import Device
+
+        target = make_device("promote-legacy-race", librenms_cf={"default": {"id": 10}})
+        user = _scoped_device_writer(target, "scoped-promote-legacy-race")
+        calls = 0
+
+        def concurrent_legacy_write(*args, **kwargs):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                Device.objects.filter(pk=target.pk).update(custom_field_data={"librenms_id": 10})
+            return None
+
+        with patch(
+            "netbox_librenms_plugin.utils.find_by_librenms_id",
+            side_effect=concurrent_legacy_write,
+        ):
+            response = self._post_promote(user, target)
+
+        assert b"Convert mapping" in response.content
+        assert Device.objects.get(pk=target.pk).custom_field_data["librenms_id"] == 10
 
     def test_promote_rejects_an_unviewable_device_type_override(self):
         """A catalog ID outside the user's view scope cannot change the promoted device type."""

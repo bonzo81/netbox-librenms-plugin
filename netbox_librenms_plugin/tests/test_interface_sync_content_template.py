@@ -168,6 +168,17 @@ class TestInterfaceSyncContentTemplateMigratedMode:
         html = self._render(migrated=None)
         assert "Exclude from Sync:" in html
 
+    def test_interface_type_help_uses_the_shared_modal_helper(self):
+        """The info link opens through NetBox's modal helper instead of competing Bootstrap trigger state."""
+        from netbox_librenms_plugin.tests._html_helpers import extract_enclosing_tag
+
+        html = self._render(migrated=None)
+        link = extract_enclosing_tag(html, "mdi-help-circle", tag="<a")
+
+        assert "showModal(document.getElementById('interfaceTypeHelpModal'))" in link
+        assert "data-bs-toggle" not in link
+        assert "data-bs-target" not in link
+
     @staticmethod
     def _patch_move_url_reverse(*, resolve):
         """Force ``interface_move_to_winner`` registered/unregistered via the shared helper."""

@@ -136,9 +136,7 @@ def _check_ignore_rules(
         Traversal stops at the first non-empty serial encountered to avoid false
         positives deeper in the tree.
     """
-    item_serial = (item.get("entPhysicalSerialNum") or "").strip()
-    if item_serial.lower() in _PLACEHOLDER_VALUES:
-        item_serial = ""
+    item_serial = _clean_librenms_value(item.get("entPhysicalSerialNum"))
     if device_serial.lower() in _PLACEHOLDER_VALUES:
         device_serial = ""
     name = (item.get("entPhysicalName") or "").strip()
@@ -176,9 +174,7 @@ def _check_ignore_rules(
                 if current_idx in visited:
                     break
                 visited.add(current_idx)
-            ancestor_serial = (current.get("entPhysicalSerialNum") or "").strip()
-            if ancestor_serial.lower() in _PLACEHOLDER_VALUES:
-                ancestor_serial = ""
+            ancestor_serial = _clean_librenms_value(current.get("entPhysicalSerialNum"))
             if ancestor_serial:
                 if ancestor_serial == item_serial:
                     return rule.action
@@ -2357,7 +2353,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
         )
 
         model_name = (item.get("entPhysicalModelName", "") or "").strip()
-        serial = (item.get("entPhysicalSerialNum", "") or "").strip()
+        serial = _clean_librenms_value(item.get("entPhysicalSerialNum"))
         phys_class = item.get("entPhysicalClass", "")
         name = item.get("entPhysicalName", "") or "-"
         description = item.get("entPhysicalDescr", "") or ""
@@ -3181,8 +3177,8 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
         item_class = (item.get("entPhysicalClass") or "").strip()
         if item_class not in INVENTORY_CLASSES or item_class in {"container", "powerSupply", "fan"}:
             return None
-        item_serial = (item.get("entPhysicalSerialNum") or "").strip()
-        if not item_serial or item_serial.lower() in _PLACEHOLDER_VALUES:
+        item_serial = _clean_librenms_value(item.get("entPhysicalSerialNum"))
+        if not item_serial:
             return None
         item_model = (item.get("entPhysicalModelName") or "").strip().lower()
         if not item_model or item_model in _PLACEHOLDER_VALUES:
@@ -3200,15 +3196,9 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
             if anc_class == "chassis":
                 return None
             if anc_class in INVENTORY_CLASSES and anc_class not in {"container", "powerSupply", "fan"}:
-                anc_serial = (ancestor.get("entPhysicalSerialNum") or "").strip()
+                anc_serial = _clean_librenms_value(ancestor.get("entPhysicalSerialNum"))
                 anc_model = (ancestor.get("entPhysicalModelName") or "").strip().lower()
-                if (
-                    anc_serial
-                    and anc_serial.lower() not in _PLACEHOLDER_VALUES
-                    and anc_serial == item_serial
-                    and anc_model
-                    and anc_model == item_model
-                ):
+                if anc_serial and anc_serial == item_serial and anc_model and anc_model == item_model:
                     return ancestor
             current_idx = ancestor.get("entPhysicalContainedIn", 0)
         return None

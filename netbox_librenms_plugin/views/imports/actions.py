@@ -1,5 +1,6 @@
 """HTMX endpoints and POST handlers for importing LibreNMS devices."""
 
+import hashlib
 import json
 import logging
 import re
@@ -254,8 +255,16 @@ def _acquire_serial_assignment_lock(serial: str) -> None:
 
     if not connection.in_atomic_block:
         raise RuntimeError("_acquire_serial_assignment_lock() requires an open transaction")
+    lock_key = int.from_bytes(
+        hashlib.blake2b(
+            f"netbox-librenms-plugin:device-serial:{serial}".encode(),
+            digest_size=8,
+        ).digest(),
+        byteorder="big",
+        signed=True,
+    )
     with connection.cursor() as cursor:
-        cursor.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", [serial])
+        cursor.execute("SELECT pg_advisory_xact_lock(%s)", [lock_key])
 
 
 def _apply_conflict_checked_serial(device, incoming_serial: str) -> HttpResponse | None:
@@ -3185,6 +3194,10 @@ class PromoteToHostView(
             existing_device = locked.get(existing_device.pk)
             if existing_device is None:
                 return _htmx_error_response("Device no longer exists; it may have been deleted concurrently.")
+            if is_legacy_librenms_id(existing_device.custom_field_data.get("librenms_id")):
+                return _htmx_error_response(
+                    "Device has a legacy bare-integer librenms_id; use 'Convert mapping' to migrate first."
+                )
 
             current_host_id = get_librenms_device_id(existing_device, server_key=server_key, auto_save=False)
             current_oob = get_librenms_oob(existing_device, server_key=server_key)

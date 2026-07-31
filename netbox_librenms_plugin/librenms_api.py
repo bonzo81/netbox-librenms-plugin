@@ -800,13 +800,17 @@ class LibreNMSAPI:
                 return False, message or "Unexpected response format: 'addresses' must be a list"
             return True, addresses
         except requests.exceptions.HTTPError as e:
-            # LibreNMS returns HTTP 404 from /devices/{id}/ip for a device that simply has no IP
-            # addresses (same as /links for a device with no LLDP neighbours). That is a successful
-            # empty result, not a fetch failure — surfacing it as one shows a red "Failed to fetch
-            # IP addresses" error and an empty table instead of just the empty table. Mirror
-            # get_device_links; any other HTTP status is a genuine failure.
+            # LibreNMS returns this specific HTTP 404 for an existing device with no IP
+            # addresses. Other 404s (for example a stale device id) remain real failures.
             if e.response is not None and e.response.status_code == 404:
-                return True, []
+                try:
+                    error_data = e.response.json()
+                except ValueError:
+                    error_data = None
+                message = error_data.get("message") if isinstance(error_data, dict) else None
+                if message == f"Device {device_id} does not have any IP addresses":
+                    return True, []
+                return False, message or str(e)
             return False, str(e)
         except (requests.exceptions.RequestException, ValueError) as e:
             return False, str(e)

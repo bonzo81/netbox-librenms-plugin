@@ -1840,6 +1840,17 @@ class TestBuildRowSerialMismatch:
             "entPhysicalIndex": 100,
         }
 
+    @pytest.mark.parametrize(("raw_serial", "expected"), [(123456, "123456"), (0, "0")])
+    def test_numeric_inventory_serial_is_preserved_as_text(self, raw_serial, expected):
+        """LibreNMS JSON may decode all-digit serials as numbers; row construction must not crash or discard zero."""
+        view = self._view()
+        item = self._make_item(serial=raw_serial)
+        item["_source"] = "oob"  # the real informational-row path needs no bay/type fixtures
+
+        row = view._build_row(item, {}, {}, {})
+
+        assert row["serial"] == expected
+
     def test_serial_match_sets_installed_status(self):
         """When ENTITY-MIB serial matches NetBox serial, status is Installed."""
         view = self._view()
@@ -2510,6 +2521,13 @@ class TestCheckIgnoreRules:
         rule = self._rule(match_type="serial_matches_device", pattern="", action="skip")
         item = {"entPhysicalName": "0/RP0/CPU0", "entPhysicalSerialNum": "FOC2418NHRK"}
         assert self._check(item, None, [rule], device_serial="FOC2418NHRK") == "skip"
+
+    def test_numeric_serial_matches_device_after_normalization(self):
+        """Numeric ENTITY serials use the same text normalization as the device serial."""
+        rule = self._rule(match_type="serial_matches_device", pattern="", action="transparent")
+        item = {"entPhysicalName": "0/RP0/CPU0", "entPhysicalSerialNum": 123456}
+
+        assert self._check(item, None, [rule], device_serial="123456") == "transparent"
 
     def test_serial_matches_device_no_match(self):
         """serial_matches_device: item serial differs from device serial → no match."""
@@ -4198,6 +4216,27 @@ class TestFindIntegratingAncestor:
         idx = self._index([xiom, mda])
         ancestor = BaseModuleTableView._find_integrating_ancestor(mda, idx)
         assert ancestor is xiom
+
+    def test_numeric_serial_finds_integrating_ancestor(self):
+        """Numeric ENTITY serials are normalized before integrated parent/child comparison."""
+        from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
+
+        xiom = {
+            "entPhysicalIndex": 100,
+            "entPhysicalClass": "xioModule",
+            "entPhysicalSerialNum": 123456,
+            "entPhysicalModelName": "3HE18883AARB01",
+            "entPhysicalContainedIn": 0,
+        }
+        mda = {
+            "entPhysicalIndex": 200,
+            "entPhysicalClass": "mdaModule",
+            "entPhysicalSerialNum": 123456,
+            "entPhysicalModelName": "3HE18883AARB01",
+            "entPhysicalContainedIn": 100,
+        }
+
+        assert BaseModuleTableView._find_integrating_ancestor(mda, self._index([xiom, mda])) is xiom
 
     def test_returns_none_when_serial_differs(self):
         from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView

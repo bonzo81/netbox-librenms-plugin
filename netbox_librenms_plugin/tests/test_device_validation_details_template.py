@@ -380,14 +380,11 @@ class TestPromoteToHostFallbackPane:
     """
 
     def _render(self, *, patch_promote_url_absent=False, choice_available=False):
-        from unittest.mock import patch
-
         from django.contrib.auth.models import AnonymousUser
         from django.template.loader import render_to_string
         from django.test import RequestFactory
-        from django.urls import NoReverseMatch
-        from django.urls import reverse as real_reverse
 
+        from netbox_librenms_plugin.tests._html_helpers import patch_move_url_reverse
         from netbox_librenms_plugin.tests.conftest import make_device
 
         existing = make_device("promote-fallback-host")
@@ -423,12 +420,7 @@ class TestPromoteToHostFallbackPane:
             # device_promote_to_host, which would flip a plain absence assertion. Force the
             # URL absent so the fallback path stays testable on every branch (Django's
             # {% url %} resolves reverse from django.urls at render time).
-            def fake_reverse(viewname, *args, **kwargs):
-                if "device_promote_to_host" in str(viewname):
-                    raise NoReverseMatch(viewname)
-                return real_reverse(viewname, *args, **kwargs)
-
-            with patch("django.urls.reverse", side_effect=fake_reverse):
+            with patch_move_url_reverse("device_promote_to_host", resolve=False):
                 return render_to_string(
                     "netbox_librenms_plugin/htmx/device_validation_details.html", ctx, request=request
                 )
@@ -505,9 +497,9 @@ def test_promote_form_reset_is_wired_to_both_close_paths():
         / "device_validation_details.html"
     ).read_text()
 
-    # Isolate the reset-binding block (between the bound-guard flag and the next handler).
+    # Isolate the complete one-time binding guard.
     start = source.index('modal.dataset.promoteResetBound = "1"')
-    end = source.index('modal.addEventListener("change"', start)
+    end = source.index("\n              }\n            })();", start)
     block = source[start:end]
 
     # hidden.bs.modal fires for EVERY Bootstrap close, including the backdrop click that the
@@ -515,6 +507,7 @@ def test_promote_form_reset_is_wired_to_both_close_paths():
     # fallback where hidden.bs.modal never fires.
     assert 'modal.addEventListener("hidden.bs.modal", resetPromoteForm)' in block
     assert 'btn.addEventListener("click", resetPromoteForm)' in block
+    assert 'modal.addEventListener("change"' in block
     # Both are now bound unconditionally: the old render-time if/else picked exactly ONE path,
     # so a Bootstrap backdrop dismiss (fires only hidden.bs.modal) was unhandled whenever the
     # fallback branch had been taken at render. That either/or is gone.

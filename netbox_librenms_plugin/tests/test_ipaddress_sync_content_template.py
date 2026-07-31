@@ -68,20 +68,19 @@ class TestIpAddressSyncContentTemplateMigratedMode:
 
     def test_move_button_hidden_for_read_only_users(self):
         """The Move action is a mutating POST; a read-only user sees muted 'read-only' text, not a live button."""
-        from django.urls import reverse
-
+        from netbox_librenms_plugin.tests._html_helpers import patch_move_url_reverse
         from netbox_librenms_plugin.tests.conftest import make_device
 
         winner = make_device("ip-tmpl-winner-ro")
         movable = [{"id": 77, "address": "10.0.0.9/24", "interface_name": "eth1"}]
-        html = self._render(
-            migrated={"server_key": "default", "device_id": winner.pk, "at": "now"},
-            movable=movable,
-            winner=winner,
-            has_write=False,
-        )
-        move_url = reverse("plugins:netbox_librenms_plugin:ipaddress_move_to_winner", kwargs={"pk": 77})
-        assert move_url not in html  # no live mutating button for read-only users
+        with patch_move_url_reverse("ipaddress_move_to_winner", resolve=True):
+            html = self._render(
+                migrated={"server_key": "default", "device_id": winner.pk, "at": "now"},
+                movable=movable,
+                winner=winner,
+                has_write=False,
+            )
+        assert "/fake/ipaddress_move_to_winner/77/" not in html
         assert "read-only" in html
 
     def test_move_button_degrades_to_read_only_when_url_unregistered(self):

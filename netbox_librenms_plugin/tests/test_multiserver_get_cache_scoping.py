@@ -17,7 +17,7 @@ from django.contrib.auth import get_user_model
 from django.core.cache import cache as real_cache
 from django.test import RequestFactory
 
-from netbox_librenms_plugin.tests.conftest import make_device
+from netbox_librenms_plugin.tests.conftest import make_device, make_interface, make_ip
 
 # A real cache backend that does NOT expose .ttl() (Django's default LocMemCache, like
 # Memcached/DB backends — only django-redis exposes ttl()). Used to prove the cable tab's
@@ -268,6 +268,18 @@ class TestUnresolvedServerKeyRendersEmpty:
         from netbox_librenms_plugin.views.object_sync.devices import DeviceIPAddressTableView
 
         device = make_device("ghost-ip-actions")
+        winner = make_device("ghost-ip-actions-winner")
+        device.custom_field_data["librenms_id"] = {
+            "ghost": {
+                "_migrated_to": {
+                    "device_id": winner.pk,
+                    "server_key": "ghost",
+                }
+            }
+        }
+        device.save(update_fields=["custom_field_data"])
+        interface = make_interface(device, "eth0")
+        ip = make_ip("198.18.0.1/24", assigned_object=interface)
         view = DeviceIPAddressTableView()
         view._librenms_api = MagicMock(server_key="default")
         view.request = self._ghost_request()
@@ -275,7 +287,13 @@ class TestUnresolvedServerKeyRendersEmpty:
         with patch("netbox_librenms_plugin.librenms_api.build_librenms_api", return_value=None):
             ctx = view.get_context_data(view.request, device)
 
-        assert ctx["movable_ips"] == []
+        assert ctx["movable_ips"] == [
+            {
+                "id": ip.pk,
+                "address": "198.18.0.1/24",
+                "interface_name": "eth0",
+            }
+        ]
         assert ctx["set_primary_ip"] is False
 
     # The two tests above seed the DEFAULT-server cache and prove the request doesn't fall back to

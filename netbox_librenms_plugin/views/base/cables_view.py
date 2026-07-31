@@ -530,7 +530,11 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin, 
             # extracted to close). VC-member selection stays here because the remote side leaves the
             # interface unresolved when the member lookup fails.
             if hasattr(device, "virtual_chassis") and device.virtual_chassis:
-                chassis_member = get_virtual_chassis_member(device, remote_port)
+                chassis_member = get_virtual_chassis_member(
+                    device,
+                    remote_port,
+                    return_device_on_failure=False,
+                )
                 if chassis_member:
                     netbox_remote_interface = _resolve_local_interface(
                         chassis_member, server_key, librenms_remote_port_id, [remote_port]

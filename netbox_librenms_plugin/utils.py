@@ -153,38 +153,48 @@ def validate_regex_field(value, field_name):
         raise ValidationError({field_name: f"Invalid regex: {exc}"}) from exc
 
 
-def get_virtual_chassis_member(device: Device, port_name: str) -> Device:
+def get_virtual_chassis_member(
+    device: Device,
+    port_name: str,
+    *,
+    return_device_on_failure: bool = True,
+) -> Device | None:
     """
     Determines the likely virtual chassis member based on the device's vc_position and port name.
 
     Args:
         device (Device): The NetBox device instance.
         port_name (str): The name of the port (e.g., 'Ethernet1').
+        return_device_on_failure: Return ``device`` when member matching fails. Callers
+            resolving a remote VC endpoint can disable this fallback to avoid binding the
+            advertised port against the wrong member.
 
     Returns:
-        Device: The virtual chassis member device corresponding to the port.
-                Returns the original device if not part of a virtual chassis or if matching fails.
+        Device | None: The matching virtual chassis member. By default, returns the
+            original device if matching fails; returns ``None`` instead when
+            ``return_device_on_failure`` is false.
     """
+    fallback = device if return_device_on_failure else None
     if not hasattr(device, "virtual_chassis") or not device.virtual_chassis:
-        return device
+        return fallback
 
     # A port row can lack the selected name field entirely (port.get(...) -> None) — or carry a
     # non-string value from a malformed payload. re.match() raises TypeError on those, which the
     # except tuple below deliberately doesn't cover (it must not mask real bugs), so guard here
     # and fall back to the viewed device like any other unmatchable name.
     if not isinstance(port_name, str):
-        return device
+        return fallback
 
     try:
         match = re.match(r"^[A-Za-z]+(\d+)", port_name)
         if not match:
-            return device
+            return fallback
 
         # Get the port number and use it
         vc_position = int(match.group(1))
         return device.virtual_chassis.members.get(vc_position=vc_position)
     except (re.error, ValueError, ObjectDoesNotExist):
-        return device
+        return fallback
 
 
 def get_virtual_chassis_members(device: Device) -> list:

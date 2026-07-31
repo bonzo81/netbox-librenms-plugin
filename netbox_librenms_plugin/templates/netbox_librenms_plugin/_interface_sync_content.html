@@ -29,7 +29,7 @@
     so JS handlers reading this input target the right LibreNMS server in either case.
     {% endcomment %}
     {% with effective_server_key=migrated_to_marker.server_key|default:interface_sync.server_key %}
-    {% if effective_server_key %}<input type="hidden" name="server_key" value="{{ effective_server_key }}">{% endif %}
+    {% include "netbox_librenms_plugin/inc/_hidden_server_key.html" with server_key=effective_server_key %}
     {% endwith %}
 {% else %}
 <form method="post"
@@ -48,7 +48,8 @@
                 <span>Sync Selected Interfaces</span>
             </button>
             {% endif %}
-            <a href="#" class="m-2" data-bs-toggle="modal" data-bs-target="#interfaceTypeHelpModal">
+            <a href="#" class="m-2"
+                onclick="event.preventDefault(); showModal(document.getElementById('interfaceTypeHelpModal'))">
                 <i class="mdi mdi-help-circle"></i> info
             </a>
         </div>

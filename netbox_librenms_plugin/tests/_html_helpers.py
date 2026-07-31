@@ -37,7 +37,7 @@ def patch_move_url_reverse(viewname_suffix, *, resolve):
             if resolve:
                 route_kwargs = kwargs.get("kwargs") or {}
                 route_args = kwargs.get("args") or ()
-                pk = route_kwargs.get("pk")
+                pk = route_kwargs.get("pk", route_kwargs.get("device_id"))
                 if pk is None and route_args:
                     pk = route_args[-1]
                 if pk is None:

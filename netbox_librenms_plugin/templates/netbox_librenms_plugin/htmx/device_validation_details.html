@@ -921,25 +921,25 @@
                 modal.querySelectorAll('[data-bs-dismiss="modal"]').forEach(function (btn) {
                   btn.addEventListener("click", resetPromoteForm);
                 });
-              }
-              modal.addEventListener("change", function (e) {
-                var t = e.target;
-                if (!t || t.type !== "radio") return;
-                var name = t.name;
-                if (!name || !name.startsWith("_promote_")) return;
-                var group = modal.querySelectorAll('input[name="' + name + '"]');
-                group.forEach(function (r) {
-                  var target = r.getAttribute("data-override-target");
-                  if (!target) return;
-                  var hidden = modal.querySelector('input[type=hidden][name="' + target + '"]');
-                  if (!hidden) return;
-                  // Only the "Use new" radio carries data-override-target; set the hidden to its
-                  // override value when it's checked and clear it otherwise. Keying off this
-                  // radio's own checked state means switching back to "Keep" (whose radio has no
-                  // data-override-target) still clears the hidden instead of leaving the stale value.
-                  hidden.value = r.checked ? (r.getAttribute("data-override-value") || "") : "";
+                modal.addEventListener("change", function (e) {
+                  var t = e.target;
+                  if (!t || t.type !== "radio") return;
+                  var name = t.name;
+                  if (!name || !name.startsWith("_promote_")) return;
+                  var group = modal.querySelectorAll('input[name="' + name + '"]');
+                  group.forEach(function (r) {
+                    var target = r.getAttribute("data-override-target");
+                    if (!target) return;
+                    var hidden = modal.querySelector('input[type=hidden][name="' + target + '"]');
+                    if (!hidden) return;
+                    // Only the "Use new" radio carries data-override-target; set the hidden to its
+                    // override value when it's checked and clear it otherwise. Keying off this
+                    // radio's own checked state means switching back to "Keep" (whose radio has no
+                    // data-override-target) still clears the hidden instead of leaving the stale value.
+                    hidden.value = r.checked ? (r.getAttribute("data-override-value") || "") : "";
+                  });
                 });
-              });
+              }
             })();
           </script>
         </div>
