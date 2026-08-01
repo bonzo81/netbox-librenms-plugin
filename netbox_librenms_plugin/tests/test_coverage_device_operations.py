@@ -343,6 +343,7 @@ class TestValidateDeviceStateMachine:
         # The duplicate-IP ambiguity is the only blocker — no new-import blockers appended.
         joined = " ".join(result["issues"]).lower()
         assert "site" not in joined
+        assert "device type" not in joined
         assert "role" not in joined
         assert "cluster" not in joined
         assert any("serial or management IP" in i for i in result["issues"])

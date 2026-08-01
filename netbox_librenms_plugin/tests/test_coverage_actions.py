@@ -8931,41 +8931,17 @@ class TestBulkImportPermGateRunsBeforeEnqueue:
 
     def test_unauthorized_background_import_is_denied_without_enqueueing(self):
         """A plugin-writer without dcim.add_device is denied and no ImportDevicesJob is enqueued."""
-        from django.contrib.messages.storage.fallback import FallbackStorage
-        from django.contrib.sessions.middleware import SessionMiddleware
-        from django.test import RequestFactory
-
         view = self._make_view()
         user = self._plugin_writer_without_import_perms("bulk-no-import-perms")
-
-        request = RequestFactory().post("/device-import/bulk/", data={"select": ["1"]})
-        request.user = user
-        SessionMiddleware(lambda req: None).process_request(request)
-        request.session.save()
-        request._messages = FallbackStorage(request)
+        request = self._request_for(user, {"select": ["1"]})
         view.request = request  # Django binds this in dispatch(); the perm gate reads it
 
-        def _fetch(device_id, *a, **k):
-            return {
-                "device_id": device_id,
-                "hostname": f"host{device_id}",
-                "sysName": f"host{device_id}",
-                "serial": f"SN{device_id}",
-                "hardware": "",
-                "os": "",
-            }
-
         with (
-            # The background branch is superuser-only, and a real superuser passes every has_perm;
-            # stub only that decision so the ordering under test is reachable with a real principal.
+            # Stub the background decision so this plugin writer reaches the ordering under test.
             patch.object(type(view), "should_use_background_job_for_import", return_value=True, create=False),
             patch("utilities.rqworker.get_workers_for_queue", return_value=1),
             patch("netbox_librenms_plugin.jobs.ImportDevicesJob.enqueue") as mock_enqueue,
-            patch("netbox_librenms_plugin.views.imports.actions.fetch_device_with_cache", side_effect=_fetch),
         ):
-            # A real pk so the too-late-gate path renders its "job started" link instead of
-            # crashing in reverse() — the failure under test is the enqueue, not the URL build.
-            mock_enqueue.return_value.pk = 4321
             response = view.post(request)
 
         mock_enqueue.assert_not_called()
