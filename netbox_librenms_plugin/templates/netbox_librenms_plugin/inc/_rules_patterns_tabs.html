@@ -1,11 +1,11 @@
 {% comment %}
 Switcher across the sync rule/pattern object lists (the sidebar has ONE
 "Rules & Patterns" entry). Same contract as _mapping_tabs.html: plain page links
-above the native Results/Filters tabs (active pill also aria-current="page"), one <a>
-per line for the tests' verbatim
-`class="nav-link active" href="..." aria-current="page"` match. A branch that introduces a new rule or
-pattern model adds its tab here (and to RULE_LIST_ROUTES in the navigation tests)
-in the same commit that adds the model.
+above the native Results/Filters tabs, with the active pill also carrying
+aria-current="page". Navigation tests assert its class, href, and aria-current
+attributes independently. A branch that introduces a new rule or pattern model adds
+its tab here (and to RULE_LIST_ROUTES in the navigation tests) in the same commit that
+adds the model.
 {% endcomment %}
 <ul class="nav nav-pills mb-3">
     <li class="nav-item">

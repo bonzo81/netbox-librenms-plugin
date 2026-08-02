@@ -4,9 +4,9 @@ entry, so the lists cross-link here, rendered above the native Results/Filters t
 Plain page links (no data-bs-toggle): every tab is the full generic list view of its
 model, keeping filters / bulk ops / import / export intact. `mapping_tab_active` is
 the current page's URL-name prefix; the active pill also carries aria-current="page"
-(Bootstrap's nav-pills guidance) so screen readers announce the current page. Keep each
-<a> on one line: tests match the rendered
-`class="nav-link active" href="..." aria-current="page"` run verbatim.
+(Bootstrap's nav-pills guidance) so screen readers announce the current page. Navigation
+tests assert the active link's class, href, and aria-current attributes independently;
+attribute order is not part of that contract.
 {% endcomment %}
 <ul class="nav nav-pills mb-3">
     <li class="nav-item">
