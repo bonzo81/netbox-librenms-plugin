@@ -390,7 +390,7 @@ class TestImportDevicesJob:
         # The collision pre-check fetches each device; return distinct devices so the batch
         # resolves cleanly with no collision (collision/unresolved handling has its own tests).
         # A "not found" here would now fail the batch closed (unresolved id), not skip silently.
-        mock_api_class.return_value.get_device_info.side_effect = lambda did: (
+        mock_api_class.return_value.get_device_info.side_effect = lambda did, **_kwargs: (
             True,
             {"device_id": did, "hostname": f"job-import-dev-{did}", "sysName": f"job-import-dev-{did}"},
         )
@@ -444,7 +444,7 @@ class TestImportDevicesJob:
         mock_api_class.return_value = MagicMock(server_key="default")
         # The batch-wide collision pre-check now fetches each VM id; return distinct devices so the
         # VM-only batch resolves cleanly (no collision) and the VM import still proceeds.
-        mock_api_class.return_value.get_device_info.side_effect = lambda did: (
+        mock_api_class.return_value.get_device_info.side_effect = lambda did, **_kwargs: (
             True,
             {"device_id": did, "hostname": f"job-vm-{did}", "sysName": f"job-vm-{did}"},
         )
@@ -552,7 +552,7 @@ class TestImportDevicesJob:
         mock_api = MagicMock()
         mock_api.server_key = "non-default"
         # Distinct devices so the mixed batch resolves cleanly and both imports proceed.
-        mock_api.get_device_info.side_effect = lambda did: (
+        mock_api.get_device_info.side_effect = lambda did, **_kwargs: (
             True,
             {"device_id": did, "hostname": f"job-mix-{did}", "sysName": f"job-mix-{did}"},
         )
@@ -657,7 +657,7 @@ class TestImportDevicesJob:
         mock_api_class.return_value = MagicMock(server_key="default")
         # Collision pre-check fetches each device; return distinct devices so the batch resolves
         # cleanly (a "not found" would now fail the batch closed as an unresolved id).
-        mock_api_class.return_value.get_device_info.side_effect = lambda did: (
+        mock_api_class.return_value.get_device_info.side_effect = lambda did, **_kwargs: (
             True,
             {"device_id": did, "hostname": f"job-mm-dev-{did}", "sysName": f"job-mm-dev-{did}"},
         )
@@ -747,7 +747,7 @@ class TestImportDevicesJob:
         from netbox_librenms_plugin.jobs import ImportDevicesJob
 
         mock_api_class.return_value = MagicMock(server_key="default")
-        mock_api_class.return_value.get_device_info.side_effect = lambda did: (
+        mock_api_class.return_value.get_device_info.side_effect = lambda did, **_kwargs: (
             True,
             {"device_id": did, "hostname": f"job-agg-{did}", "sysName": f"job-agg-{did}"},
         )
@@ -792,7 +792,7 @@ class TestImportDevicesJob:
         # cleanly (no collision/unresolved) and the import actually reaches
         # bulk_import_devices_shared. A "not found" here would fail the batch closed in the
         # unresolved branch, so the mocked all-failure payload below would never be exercised.
-        mock_api_class.return_value.get_device_info.side_effect = lambda did: (
+        mock_api_class.return_value.get_device_info.side_effect = lambda did, **_kwargs: (
             True,
             {"device_id": did, "hostname": f"job-fail-dev-{did}", "sysName": f"job-fail-dev-{did}"},
         )
@@ -1016,7 +1016,7 @@ class TestImportDevicesJob:
         # Even if the gate were bypassed, keep the pre-check viable so the failure mode
         # on unfixed code is "scan ran + import mocks reached", not an unpacking error.
         mock_api_class.return_value = MagicMock(server_key="default")
-        mock_api_class.return_value.get_device_info.side_effect = lambda did: (
+        mock_api_class.return_value.get_device_info.side_effect = lambda did, **_kwargs: (
             True,
             {"device_id": did, "hostname": f"authgate-{did}", "sysName": f"authgate-{did}"},
         )
@@ -1095,7 +1095,7 @@ class TestImportDevicesJob:
         from netbox_librenms_plugin.jobs import ImportDevicesJob
 
         mock_api_class.return_value = MagicMock(server_key="default")
-        mock_api_class.return_value.get_device_info.side_effect = lambda did: (
+        mock_api_class.return_value.get_device_info.side_effect = lambda did, **_kwargs: (
             True,
             {"device_id": did, "hostname": f"vmgate-{did}", "sysName": f"vmgate-{did}"},
         )
