@@ -493,7 +493,7 @@ class TestImportDevicesJob:
         # get_device_info fails for the VM ids → they can't be collision-checked → the batch-wide
         # pre-check must skip those rows and the VM import (before the fix it only saw device_ids,
         # so a VM-only batch bypassed it entirely and bulk_import_vms ran unchecked).
-        mock_api_class.return_value.get_device_info.side_effect = lambda did: (False, None)
+        mock_api_class.return_value.get_device_info.side_effect = lambda did, **_kwargs: (False, None)
 
         job = create_mock_job_runner(ImportDevicesJob, job_pk=801)
 
@@ -506,6 +506,9 @@ class TestImportDevicesJob:
         # The VM import must NOT run because every submitted row was skipped.
         mock_bulk_vms.assert_not_called()
         mock_bulk_devices.assert_not_called()
+        errors = job.job.data["errors"]
+        assert {error["device_id"] for error in errors} == {10, 11}
+        assert all("Skipped" in error["error"] and "verify collisions" in error["error"] for error in errors)
         assert job.job.data["failed_count"] == 2
         assert job.job.data["success_count"] == 0
 
@@ -833,7 +836,7 @@ class TestImportDevicesJob:
 
         # Real collision gate against the DB: ids 1 and 10 resolve + validate cleanly (match no
         # existing NetBox device); id 2 is a get_device_info miss → unresolved → skipped, not a block.
-        def _get_device_info(did):
+        def _get_device_info(did, **_kwargs):
             if did == 2:
                 return (False, None)
             return (True, {"device_id": did, "hostname": f"job-skip-dev-{did}", "sysName": f"job-skip-dev-{did}"})
@@ -880,7 +883,7 @@ class TestImportDevicesJob:
         mock_api = MagicMock()
         mock_api.server_key = "default"
 
-        def _get_device_info(did):
+        def _get_device_info(did, **_kwargs):
             if did == 1:  # device import row → hostname-matches the existing device (fine alone)
                 return (
                     True,

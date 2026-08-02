@@ -1771,11 +1771,12 @@ class TestCollectDescendants:
         depths = [d for d, _ in results]
         assert depths == [1, 2], f"Expected [1, 2] but got {depths}"
 
-    def test_numeric_model_child_is_collected(self):
+    @pytest.mark.parametrize("model_value", [0, 123456])
+    def test_numeric_model_child_is_collected(self, model_value):
         """An all-digit descendant model decoded as an int remains a real hardware row."""
         child = {
             "entPhysicalIndex": 1,
-            "entPhysicalModelName": 123456,
+            "entPhysicalModelName": model_value,
             "entPhysicalContainedIn": 0,
         }
         view = self._view()

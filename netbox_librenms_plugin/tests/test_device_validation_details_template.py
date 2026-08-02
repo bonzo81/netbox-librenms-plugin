@@ -458,6 +458,10 @@ class TestPromoteToHostFallbackPane:
         """Branch-agnostic: whether the fallback or the real promote pane renders, the row must offer an action inside the Host div."""
         html = self._render()
         assert 'id="serial-role-host-5"' in html
+        pane_start = html.find('id="serial-role-host-5"')
+        pane_end = html.find('id="serial-role-oob-5"', pane_start)
+        pane = html[pane_start : pane_end if pane_end != -1 else None]
+        assert "device_conflict_action" in pane or "promote-modal-trigger" in pane
 
 
 def test_promote_override_handler_clears_hidden_when_switching_back_to_keep():

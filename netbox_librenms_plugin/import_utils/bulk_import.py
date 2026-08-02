@@ -153,15 +153,17 @@ def detect_collisions_for_device_ids(
         just_fetched = False
         if libre_device is None:
             try:
-                success, libre_device = api.get_device_info(device_id)
+                # The verified row is written into the shared import cache below, so bypass the
+                # short-lived API snapshot just like the downstream import's own live read.
+                success, libre_device = api.get_device_info(device_id, use_cache=False)
             except Exception as exc:
-                # get_device_info can RAISE rather than return (False, None) — e.g. a cache-backend
-                # outage, since its cache.get() runs before its own try. An unhandled raise here would
-                # crash the whole gate/batch, but the gate's contract is to fail CLOSED per row, so
-                # treat an exception like a fetch miss: record the id unresolved and let the caller
-                # block it instead of importing it unchecked.
+                # get_device_info can raise rather than return (False, None), for example on an
+                # unexpected transport/backend failure. The gate's contract is to fail closed per
+                # row, so treat an exception like a fetch miss instead of crashing the whole batch.
                 if getattr(job, "logger", None):
                     job.logger.warning(f"Collision pre-check couldn't fetch device {device_id}: {exc}")
+                else:
+                    logger.warning("Collision pre-check couldn't fetch device %s: %s", device_id, exc)
                 unresolved_ids.append(device_id)
                 continue
             if not success or not isinstance(libre_device, dict):

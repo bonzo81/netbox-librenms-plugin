@@ -1311,7 +1311,7 @@ def resolve_server_mapping_display_id(entry) -> tuple[int | None, bool]:
     return coerce_librenms_id(entry), False
 
 
-def coerce_positive_int(value):
+def coerce_positive_int(value) -> int | None:
     """
     Coerce a value to a strictly-positive ``int``, or ``None`` when invalid.
 

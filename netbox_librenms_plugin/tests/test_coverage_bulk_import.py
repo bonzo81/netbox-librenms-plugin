@@ -3036,13 +3036,13 @@ class TestDetectCollisionsForDeviceIds:
         assert collisions == []
         assert unresolved == [8011]
 
-    def test_get_device_info_exception_is_unresolved_not_crash(self):
-        """A get_device_info that RAISES (e.g. a cache-backend outage — its cache.get runs before its own try) must fail closed to unresolved, not crash the whole gate."""
+    def test_get_device_info_exception_is_unresolved_not_crash(self, caplog):
+        """A raised fetch failure must be logged and fail closed to unresolved, not crash the gate."""
         from types import SimpleNamespace
 
         from netbox_librenms_plugin.import_utils.bulk_import import detect_collisions_for_device_ids
 
-        def _boom(device_id):
+        def _boom(device_id, **_kwargs):
             raise RuntimeError("cache backend unavailable")
 
         # Id not in the cache → the gate must fetch it; get_device_info raises instead of returning
@@ -3052,6 +3052,8 @@ class TestDetectCollisionsForDeviceIds:
         collisions, unresolved = detect_collisions_for_device_ids([8099], api, libre_devices_cache={})
         assert collisions == []
         assert unresolved == [8099]
+        assert "Collision pre-check couldn't fetch device 8099" in caplog.text
+        assert "cache backend unavailable" in caplog.text
 
     def test_two_rows_resolving_to_one_vm_collide(self):
         """Two LibreNMS rows whose real validation resolves to one existing VirtualMachine → a collision keyed to the VM model, proving the pre-check gate covers the VM half of a batch (validation flips import_as_vm on the existing-VM match)."""
@@ -3131,7 +3133,7 @@ class TestDetectCollisionsForDeviceIds:
         make_device("resolvable-host")
         cache = {9001: {"device_id": 9001, "sysName": "resolvable-host", "hostname": "resolvable-host"}}
         # 9002 isn't cached and its info fetch fails → it can't be collision-checked.
-        api = SimpleNamespace(server_key="default", get_device_info=lambda _did: (False, None))
+        api = SimpleNamespace(server_key="default", get_device_info=lambda _did, **_kwargs: (False, None))
         collisions, unresolved = detect_collisions_for_device_ids(
             [9001, 9002], api, libre_devices_cache=cache, sync_options={"use_sysname": True}
         )
@@ -3185,7 +3187,7 @@ class TestDetectCollisionsForDeviceIds:
 
         calls = []
 
-        def _get_device_info(did):
+        def _get_device_info(did, **_kwargs):
             calls.append(did)
             return True, {"device_id": did, "sysName": f"host-{did}", "hostname": f"host-{did}"}
 
@@ -3213,7 +3215,7 @@ class TestDetectCollisionsForDeviceIds:
         ids = [8301, 8302, 8303, 8304, 8305, 8306, 8307]
         calls = []
 
-        def _get_device_info(did):
+        def _get_device_info(did, **_kwargs):
             calls.append(did)
             return True, {"device_id": did, "sysName": f"host-{did}", "hostname": f"host-{did}"}
 
@@ -3241,8 +3243,8 @@ class TestDetectCollisionsForDeviceIds:
         make_device("writeback-b-host")
         calls = []
 
-        def _get_device_info(did):
-            calls.append(did)
+        def _get_device_info(did, **kwargs):
+            calls.append((did, kwargs))
             name = {8101: "writeback-a-host", 8102: "writeback-b-host"}[did]
             return True, {"device_id": did, "sysName": name, "hostname": name}
 
@@ -3253,7 +3255,7 @@ class TestDetectCollisionsForDeviceIds:
             [8101, 8102], api, libre_devices_cache=shared_cache, sync_options={"use_sysname": True}
         )
         # Each id fetched once and persisted into the SAME dict object the caller passed.
-        assert sorted(calls) == [8101, 8102]
+        assert calls == [(8101, {"use_cache": False}), (8102, {"use_cache": False})]
         assert shared_cache[8101]["hostname"] == "writeback-a-host"
         assert shared_cache[8102]["hostname"] == "writeback-b-host"
 
@@ -3275,7 +3277,7 @@ class TestDetectCollisionsForDeviceIds:
         shared_cache = {}
         api = SimpleNamespace(
             server_key="default",
-            get_device_info=lambda _did: (
+            get_device_info=lambda _did, **_kwargs: (
                 True,
                 {"device_id": 9999, "sysName": "wrong-row", "hostname": "wrong-row"},
             ),

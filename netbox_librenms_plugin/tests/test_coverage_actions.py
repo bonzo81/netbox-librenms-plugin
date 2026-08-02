@@ -6952,10 +6952,17 @@ class TestMergeNetBoxDevicesViewOOBTransfer:
         state = {"moved": False}
 
         def moving_sfu(*args, **kwargs):
-            if not state["moved"]:
-                state["moved"] = True
-                Interface.objects.filter(pk=iface_pk).update(device=winner)
-            return real_sfu(*args, **kwargs)
+            queryset = real_sfu(*args, **kwargs)
+            real_filter = queryset.filter
+
+            def moving_filter(*filter_args, **filter_kwargs):
+                if not state["moved"] and filter_kwargs.get("pk") == iface_pk:
+                    state["moved"] = True
+                    Interface.objects.filter(pk=iface_pk).update(device=winner)
+                return real_filter(*filter_args, **filter_kwargs)
+
+            queryset.filter = moving_filter
+            return queryset
 
         with patch.object(Interface.objects, "select_for_update", moving_sfu):
             resp = view.post(request, device_id=99)
