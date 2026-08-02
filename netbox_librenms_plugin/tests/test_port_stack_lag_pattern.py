@@ -14,7 +14,7 @@ class TestPortStackLagPattern:
         return PortStackLagPattern
 
     def test_migration_seeded_the_lowercased_default_patterns(self):
-        """Migration 0011's RunPython seed actually committed rows through the ORM (e.g. the lower-cased 'ios' default) — a real-DB check the __new__/patched-clean stand-in could never make."""
+        """Migration 0013's RunPython seed actually committed rows through the ORM (e.g. the lower-cased 'ios' default) — a real-DB check the __new__/patched-clean stand-in could never make."""
         assert self._model().objects.filter(librenms_os="ios", lag_name_pattern=r"^Po\d+$").exists()
 
     def test_save_normalizes_os_and_pattern(self):
@@ -34,6 +34,7 @@ class TestPortStackLagPattern:
         with pytest.raises(ValidationError) as exc_info:
             model.objects.create(librenms_os="zzbadregex", lag_name_pattern="[invalid(regex")
         assert "lag_name_pattern" in exc_info.value.message_dict
+        assert "Invalid regex:" in exc_info.value.message_dict["lag_name_pattern"][0]
         assert not model.objects.filter(librenms_os="zzbadregex").exists()
 
     def test_save_rejects_blank_os(self):
@@ -185,8 +186,8 @@ class TestHasLagSignalsOsScoped:
 
 
 @pytest.mark.django_db
-class TestMigration0012Preflight:
-    """Exercise 0012's RunPython preflight (normalize_librenms_os_case) against the real ORM: it canonicalizes casing and aborts with an actionable error before the CI-unique constraint would fail opaquely on legacy mixed-case duplicates."""
+class TestMigration0014Preflight:
+    """Exercise 0014's RunPython preflight (normalize_librenms_os_case) against the real ORM: it canonicalizes casing and aborts with an actionable error before the CI-unique constraint would fail opaquely on legacy mixed-case duplicates."""
 
     @staticmethod
     def _preflight():
@@ -228,7 +229,7 @@ class TestMigration0012Preflight:
         constraint = next(
             c for c in PortStackLagPattern._meta.constraints if c.name == "unique_portstacklagpattern_librenms_os_ci"
         )
-        # Reproduce the pre-0012 world (case-sensitive unique only) so the colliding rows can
+        # Reproduce the pre-0014 world (case-sensitive unique only) so the colliding rows can
         # coexist. Postgres DDL is transactional and this runs inside the test's transaction, so
         # the drop — and the rows below — roll back on teardown, restoring the constraint.
         with connection.schema_editor() as schema_editor:
@@ -252,7 +253,7 @@ class TestMigration0012Preflight:
         from netbox_librenms_plugin.models import PortStackLagPattern
 
         # Invoke the preflight with the HISTORICAL model as the migration actually sees it (state at
-        # 0012, before 0013). 0012 serialized FullCleanOnSaveMixin into the historical model's bases,
+        # 0013, before 0014). 0013 serialized FullCleanOnSaveMixin into the historical model's bases,
         # so its save() still runs full_clean() — we stub full_clean below during the preflight so a
         # future clean() gaining a strip can't mask a Lower()-only migration bug. With it stubbed the
         # migration's OWN normalization is the only thing that writes the value, so this is the only

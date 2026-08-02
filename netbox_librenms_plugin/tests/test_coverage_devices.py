@@ -355,6 +355,7 @@ class TestSingleInterfaceVerifyView:
         response = view.post(request)
         assert isinstance(response, JsonResponse)
         assert response.status_code == 400
+        view.require_object_permissions_json.assert_called_once_with("POST")
 
     def test_checks_permission_before_resolving_device(self):
         """The object-view gate must run BEFORE restrict_object_or_404 so an unauthorized caller can't probe arbitrary device IDs (existence via 404). Exercises the REAL require_object_permissions_json (only request.user.has_perm is mocked) — mocking the gate itself would mask a missing NetBoxObjectPermissionMixin base (AttributeError/500 in production)."""

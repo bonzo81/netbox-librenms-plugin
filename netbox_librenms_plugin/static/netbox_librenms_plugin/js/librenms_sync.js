@@ -2511,14 +2511,13 @@ document.addEventListener('click', function (e) {
 
     const url = `/plugins/librenms_plugin/${objectType}/${objectId}/${urlSuffix}/`;
 
-    const csrfInput = document.querySelector('[name=csrfmiddlewaretoken]');
-    if (!csrfInput || !csrfInput.value) {
-        // Fail fast: a missing input OR an empty value both POST X-CSRFToken: "" → a guaranteed
-        // 403. Surface the cause instead of firing a state-changing request that can't succeed.
+    // Fail fast: a missing input OR an empty value both POST X-CSRFToken: "" → a guaranteed
+    // 403. Surface the cause instead of firing a state-changing request that can't succeed.
+    const csrf = getCsrfToken();
+    if (!csrf) {
         btn.title = 'CSRF token not found. Please refresh the page and try again.';
         return;
     }
-    const csrf = csrfInput.value;
 
     const serverKeyInput = document.querySelector('[name=server_key]');
     const serverKey = serverKeyInput ? serverKeyInput.value : '';

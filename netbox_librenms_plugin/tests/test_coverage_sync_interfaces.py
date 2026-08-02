@@ -122,6 +122,32 @@ class TestSyncInterfaceParentViewPermissions:
             view.post(_make_request(), "invalid", 1)
 
 
+class TestSyncInterfaceLagViewPermissions:
+    def test_post_permissions_are_resolved_by_the_shared_base(self):
+        from dcim.models import Interface
+
+        from netbox_librenms_plugin.views.sync.interfaces import SyncInterfaceLagView
+
+        assert "required_object_permissions" not in SyncInterfaceLagView.__dict__
+        view = object.__new__(SyncInterfaceLagView)
+        with patch.object(SyncInterfaceLagView, "require_all_permissions_json", return_value=_denied_response()):
+            view.post(_make_request(), "device", 1)
+        assert view.required_object_permissions["POST"] == [("change", Interface)]
+
+
+def test_relationship_handler_reuses_shared_csrf_helper():
+    from pathlib import Path
+
+    import netbox_librenms_plugin
+
+    source = (
+        Path(netbox_librenms_plugin.__file__).parent / "static" / "netbox_librenms_plugin" / "js" / "librenms_sync.js"
+    ).read_text(encoding="utf-8")
+    handler = source[source.index("// Event delegation for LAG and parent interface sync buttons.") :]
+    assert "const csrf = getCsrfToken();" in handler
+    assert "const csrfInput = document.querySelector('[name=csrfmiddlewaretoken]');" not in handler
+
+
 @pytest.mark.django_db
 class TestInterfacesSameOwnerGuard:
     """_interfaces_same_owner gates lag/parent links so a port_stack relationship that resolves across two VC members can't persist a NetBox-forbidden cross-device link."""

@@ -145,10 +145,6 @@ class SingleInterfaceVerifyView(
         data, err = parse_request_json(request)
         if err:
             return err
-        # Gate BEFORE resolving the device: without this an unauthorized caller could probe
-        # arbitrary device IDs (existence via 404) through this endpoint.
-        if error := self.require_object_permissions_json("POST"):
-            return error
         selected_device_id = data.get("device_id")
         interface_name = data.get("interface_name")
         interface_name_field = data.get("interface_name_field") or get_interface_name_field()

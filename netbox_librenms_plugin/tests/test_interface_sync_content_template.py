@@ -11,6 +11,8 @@ server/cache on non-default servers. A bare hidden input never auto-submits, so 
 doesn't reintroduce the live-form problem migrated mode exists to avoid.
 """
 
+import re
+
 import pytest
 
 
@@ -72,7 +74,7 @@ class TestInterfaceSyncContentTemplateMigratedMode:
         assert "<form" not in html
         # ...but BOTH the CSRF token and the server_key input must remain so JS-driven
         # verify-interface / LAG-sync POSTs still target the right server.
-        assert "csrfmiddlewaretoken" in html
+        assert re.search(r'name="csrfmiddlewaretoken" value="[^"]+"', html)
         assert 'name="server_key"' in html
         assert 'value="prod"' in html
 
@@ -90,7 +92,7 @@ class TestInterfaceSyncContentTemplateMigratedMode:
     def test_normal_mode_emits_form_with_csrf_and_server_key(self):
         html = self._render(migrated=None)
         assert "<form" in html
-        assert "csrfmiddlewaretoken" in html
+        assert re.search(r'name="csrfmiddlewaretoken" value="[^"]+"', html)
         assert 'name="server_key"' in html
 
     def test_netbox_only_link_title_is_move_in_migrated_mode(self):

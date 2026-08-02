@@ -1421,7 +1421,7 @@ class _BaseRelationshipSyncView(LibreNMSPermissionMixin, NetBoxObjectPermissionM
 class SyncInterfaceLagView(_BaseRelationshipSyncView):
     """Set Interface.lag (member -> aggregate) based on LibreNMS port_stack data."""
 
-    required_object_permissions = {"POST": [("change", Interface)]}
+    # Permissions are resolved per object_type in the shared post().
     relation_field = "lag"
     related_port_param = "lag_port_id"
     related_name_param = "lag_name"
