@@ -556,13 +556,19 @@ document.addEventListener('change', function (e) {
     }
 });
 
-// When #autoSelectLagMembers is turned OFF, clear any cross-page parents injected while it was
-// on. The child checkbox stays checked, so the per-row deselect cleanup above never fires — the
-// stale hidden select_port_id would otherwise still be submitted even though auto-select is off
-// (and its notice may have already auto-dismissed).
+// Keep injected cross-page parents symmetric with #autoSelectLagMembers. Turning it off clears
+// inputs added while it was enabled; turning it back on replays the checked child rows because
+// their own change handlers do not otherwise run again.
 document.addEventListener('change', function (e) {
     const toggle = e.target;
-    if (!toggle.matches('#autoSelectLagMembers') || toggle.checked) return;
+    if (!toggle.matches('#autoSelectLagMembers')) return;
+
+    if (toggle.checked) {
+        document.querySelectorAll('input[name="select"]:checked').forEach(function (checkbox) {
+            checkbox.dispatchEvent(new Event('change', { bubbles: true }));
+        });
+        return;
+    }
 
     // Matches both the injected select_port_id (#auto-parent-<pid>) and its paired device
     // override (#auto-parent-dev-<pid>).

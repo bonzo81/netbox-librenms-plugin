@@ -148,6 +148,25 @@ def test_relationship_handler_reuses_shared_csrf_helper():
     assert "const csrfInput = document.querySelector('[name=csrfmiddlewaretoken]');" not in handler
 
 
+def test_reenabling_relationship_autoselect_replays_checked_rows():
+    """Checked children rebuild cross-page parent inputs when auto-select is re-enabled."""
+    from pathlib import Path
+
+    import netbox_librenms_plugin
+
+    source = (
+        Path(netbox_librenms_plugin.__file__).parent / "static" / "netbox_librenms_plugin" / "js" / "librenms_sync.js"
+    ).read_text(encoding="utf-8")
+    start = source.index("// Keep injected cross-page parents symmetric")
+    end = source.index("/**\n * Show a brief inline notice", start)
+    handler = source[start:end]
+
+    assert "if (!toggle.matches('#autoSelectLagMembers')) return;" in handler
+    assert "if (toggle.checked) {" in handler
+    assert "document.querySelectorAll('input[name=\"select\"]:checked')" in handler
+    assert "checkbox.dispatchEvent(new Event('change', { bubbles: true }));" in handler
+
+
 @pytest.mark.django_db
 class TestInterfacesSameOwnerGuard:
     """_interfaces_same_owner gates lag/parent links so a port_stack relationship that resolves across two VC members can't persist a NetBox-forbidden cross-device link."""

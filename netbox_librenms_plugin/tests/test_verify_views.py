@@ -340,26 +340,49 @@ class TestSingleInterfaceVerifyView:
             assert lag_members == {}
             assert sub_interfaces == {}
 
-    @patch("netbox_librenms_plugin.views.object_sync.devices.get_object_or_404")
     @patch("netbox_librenms_plugin.views.object_sync.devices.cache")
-    def test_verify_missed_port_id_does_not_repaint_same_named_row(self, mock_cache, mock_get_obj, db):
+    def test_verify_missed_port_id_does_not_repaint_same_named_row(self, mock_cache, db):
         """A supplied port_id is authoritative: if it misses, do NOT fall back to a same-named row."""
         from netbox_librenms_plugin.tests.conftest import make_device
 
-        # A REAL non-VC device drives the real SingleInterfaceVerifyView.post() path; only the
-        # LibreNMS cache (an external store) and the object lookup are stubbed at the boundary.
+        # A REAL non-VC device, superuser, permission gate, and restricted DB lookup drive the
+        # real SingleInterfaceVerifyView.post() path; only the LibreNMS cache is stubbed.
         device = make_device("verify-authoritative-pid")
-        mock_get_obj.return_value = device
+        user = _verify_superuser("authoritative-pid")
         # Cache holds a port NAMED "Et1" (port_id 99). The client posts a DIFFERENT stable id (777)
         # matching no cached port. Name-fallback would wrongly repaint the port_id-99 row.
-        mock_cache.get.return_value = {"ports": [{"port_id": 99, "ifName": "Et1", "_source": "host"}]}
+        mock_cache.get.return_value = {
+            "ports": [
+                {
+                    "port_id": 99,
+                    "ifName": "Et1",
+                    "ifDescr": "Et1",
+                    "ifAlias": "",
+                    "ifType": "ethernetCsmacd",
+                    "ifSpeed": 1_000_000_000,
+                    "ifPhysAddress": "",
+                    "ifMtu": 1500,
+                    "ifAdminStatus": "up",
+                    "_source": "host",
+                }
+            ]
+        }
 
-        view = self._make_view()
-        view.require_object_permissions_json = MagicMock(return_value=None)
-        view.get_cache_key = MagicMock(return_value="ck")
-        request = _make_request(
-            {"device_id": device.pk, "interface_name": "Et1", "interface_name_field": "ifName", "port_id": 777}
+        view, request = _real_verify_view(
+            SingleInterfaceVerifyView,
+            {"device_id": device.pk, "interface_name": "Et1", "interface_name_field": "ifName", "port_id": 99},
+            user,
         )
+        view.get_cache_key = MagicMock(return_value="ck")
+        response = view.post(request)
+        assert response.status_code == 200
+
+        view, request = _real_verify_view(
+            SingleInterfaceVerifyView,
+            {"device_id": device.pk, "interface_name": "Et1", "interface_name_field": "ifName", "port_id": 777},
+            user,
+        )
+        view.get_cache_key = MagicMock(return_value="ck")
         response = view.post(request)
 
         # The authoritative-but-missed id yields "not found", never a wrong-row repaint.

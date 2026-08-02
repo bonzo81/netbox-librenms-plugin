@@ -341,6 +341,10 @@ class TestInterfaceSyncRefreshButtonDeduped:
             },
         )
 
+    def _refresh_button_tag(self, html, path):
+        hx_post = html.index(f'hx-post="{path}"')
+        return html[html.rfind("<button", 0, hx_post) : html.index(">", hx_post) + 1]
+
     def test_device_refresh_button_single_with_device_url(self):
         from django.urls import reverse
 
@@ -353,7 +357,8 @@ class TestInterfaceSyncRefreshButtonDeduped:
         # shared hx-vals — and never the VM branch's URL.
         assert html.count("hx-post=") == 1
         assert f'hx-post="{device_path}"' in html
-        assert "hx-vals=" in html and "interfaces_per_page" in html
+        button = self._refresh_button_tag(html, device_path)
+        assert "hx-vals=" in button and "interfaces_per_page" in button and "server_key" in button
         assert vm_path not in html
 
     def test_vm_refresh_button_single_with_vm_url(self):
@@ -368,5 +373,6 @@ class TestInterfaceSyncRefreshButtonDeduped:
 
         assert html.count("hx-post=") == 1
         assert f'hx-post="{vm_path}"' in html
-        assert "hx-vals=" in html and "interfaces_per_page" in html
+        button = self._refresh_button_tag(html, vm_path)
+        assert "hx-vals=" in button and "interfaces_per_page" in button and "server_key" in button
         assert device_path not in html
