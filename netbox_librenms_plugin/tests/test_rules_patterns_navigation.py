@@ -7,6 +7,7 @@ changelog) while the sidebar stays small.
 """
 
 import re
+from pathlib import Path
 
 import pytest
 from django.urls import reverse
@@ -48,6 +49,15 @@ class TestConsolidatedMenu:
         assert groups.get("Rules & Patterns") == [
             f"plugins:netbox_librenms_plugin:{RULE_LIST_ROUTES[0]}",
         ]
+
+
+def test_mapping_rules_docs_use_top_level_librenms_menu_path():
+    """The mapping guide follows NetBox's top-level PluginMenu label."""
+    docs = (Path(__file__).resolve().parents[2] / "docs/usage_tips/mapping_rules.md").read_text(encoding="utf-8")
+
+    assert "Plugins > LibreNMS" not in docs
+    assert "**LibreNMS > Mappings**" in docs
+    assert "**LibreNMS > Rules & Patterns**" in docs
 
 
 @pytest.mark.django_db

@@ -2,7 +2,7 @@
 
 Mapping rules are the configuration layer that connects LibreNMS identifiers to NetBox objects. Without them the plugin relies on exact-string matching; with them you can cover vendor naming variations, OS string aliases, model-number differences, and bay naming schemes across your entire fleet.
 
-The type mappings live under **Plugins > LibreNMS > Mappings** and the rule engines under **Plugins > LibreNMS > Rules & Patterns** — each is a single menu entry, and the individual lists are reached through the tabs at the top of the page. All of them support individual creation, editing, deletion, and bulk YAML import/export.
+The type mappings live under **LibreNMS > Mappings** and the rule engines under **LibreNMS > Rules & Patterns** — each is a single menu entry, and the individual lists are reached through the tabs at the top of the page. All of them support individual creation, editing, deletion, and bulk YAML import/export.
 
 ---
 
