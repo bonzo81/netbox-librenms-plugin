@@ -2084,7 +2084,7 @@ class TestGetPortVlanDetailsResponseShape:
 
 
 # =============================================================================
-# Test Class: get_port_stack() (3 tests)
+# Test Class: get_port_stack()
 # =============================================================================
 
 
@@ -2310,7 +2310,7 @@ ARCOS_PORT_STACK = [
 
 
 # =============================================================================
-# Test Class: resolve_port_relationships() (10 tests)
+# Test Class: resolve_port_relationships()
 # =============================================================================
 
 

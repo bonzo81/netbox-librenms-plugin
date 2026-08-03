@@ -330,8 +330,14 @@ class TestInterfaceSyncRefreshButtonDeduped:
     """
 
     def _render(self, obj):
+        from unittest.mock import MagicMock
+
         from django.template.loader import render_to_string
 
+        # A real request (with a user) so {% csrf_token %} and the context processors the
+        # template relies on resolve instead of rendering empty with a warning.
+        request = RequestFactory().get("/")
+        request.user = MagicMock(is_authenticated=True)
         return render_to_string(
             "netbox_librenms_plugin/_interface_sync.html",
             {
@@ -339,6 +345,7 @@ class TestInterfaceSyncRefreshButtonDeduped:
                 "has_librenms_id": True,
                 "librenms_server_info": {"server_key": "default"},
             },
+            request=request,
         )
 
     def _refresh_button_tag(self, html, path):

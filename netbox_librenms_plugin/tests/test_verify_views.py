@@ -392,7 +392,7 @@ class TestSingleInterfaceVerifyView:
 
     @patch("netbox_librenms_plugin.views.sync.interfaces._resolve_interface_by_port_id")
     @patch("netbox_librenms_plugin.views.object_sync.devices.LibreNMSInterfaceTable")
-    @patch("netbox_librenms_plugin.views.object_sync.devices.get_object_or_404")
+    @patch.object(SingleInterfaceVerifyView, "restrict_object_or_404")
     @patch("netbox_librenms_plugin.views.object_sync.devices.cache")
     def test_verify_name_hint_derived_from_matched_row(
         self, mock_cache, mock_get_obj, mock_table_cls, mock_resolve, db
@@ -403,7 +403,8 @@ class TestSingleInterfaceVerifyView:
         # Real device + the REAL shared relationship-map prep run; _resolve_interface_by_port_id is
         # spied to capture the exact name_hint it receives (the thing under test). Only the LibreNMS
         # cache/object lookup and the downstream row RENDER (format_interface_data — not under test)
-        # are stubbed.
+        # are stubbed. The view resolves the device via restrict_object_or_404 (the sibling tests
+        # patch the same seam) — stubbing module-level get_object_or_404 would never be hit.
         device = make_device("verify-namehint")
         mock_get_obj.return_value = device
         mock_resolve.return_value = (None, None)

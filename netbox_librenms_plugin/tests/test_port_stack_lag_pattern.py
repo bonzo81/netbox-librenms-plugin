@@ -254,6 +254,29 @@ class TestMigration0014Preflight:
         with pytest.raises(RuntimeError, match="iosdup"):
             self._preflight()(django_apps, self._schema_editor())
 
+    def test_preflight_normalizes_row_with_uncompilable_pattern(self):
+        """A bypassing insert can leave a row the concrete model's clean() would reject (uncompilable lag_name_pattern); the preflight rewrite must still canonicalize librenms_os instead of aborting on unrelated-field validation."""
+        from django.db import connection
+        from django.db.migrations.executor import MigrationExecutor
+
+        from netbox_librenms_plugin.models import PortStackLagPattern
+
+        historical_apps = (
+            MigrationExecutor(connection)
+            .loader.project_state(("netbox_librenms_plugin", "0013_portstacklagpattern"))
+            .apps
+        )
+        # bulk_create bypasses clean(): both the mixed-case OS name and the invalid regex land
+        # verbatim. No full_clean stub here — the preflight itself must tolerate the row.
+        PortStackLagPattern.objects.bulk_create(
+            [PortStackLagPattern(librenms_os="ZZBAD", lag_name_pattern="([invalid")]
+        )
+        pk = PortStackLagPattern.objects.get(librenms_os="ZZBAD").pk
+
+        self._preflight()(historical_apps, self._schema_editor())
+
+        assert PortStackLagPattern.objects.get(pk=pk).librenms_os == "zzbad"
+
     def test_preflight_strips_surrounding_whitespace(self):
         """A whitespace-padded librenms_os a bypassing path left behind is canonicalized to .strip().lower() (matching clean()), not left with surrounding spaces behind the Lower()-only constraint."""
         from unittest.mock import patch
@@ -293,7 +316,7 @@ class TestMigration0014Preflight:
         assert PortStackLagPattern.objects.get(pk=pk).librenms_os == "zzws"
 
     def test_preflight_pins_orm_traffic_to_the_migration_alias_not_the_router(self):
-        """Multi-DB safety (matching sibling migrations 0012/0014): the preflight's OWN queryset iteration and save must be pinned to schema_editor.connection.alias via .using()/save(using=...). Unpinned ORM calls consult the database router, so `migrate --database=other` would normalize rows on the router's choice instead of the migration's target database — detected here by recording router consultations whose call stack passes through the migration module. Consults from INSIDE Model.full_clean are excluded: 0012 serialized FullCleanOnSaveMixin into the historical model's bases, so even a fully pinned save() runs full_clean, whose validate_unique/validate_constraints ask the router with instance hints and correctly fall back to the pinned instance._state.db — Django offers no using hook there, and the migration cannot avoid it."""
+        """Multi-DB safety (the same pinned-rewrite pattern as the sibling data migrations): the preflight's OWN queryset iteration and save must be pinned to schema_editor.connection.alias via .using()/save(using=...). Unpinned ORM calls consult the database router, so `migrate --database=other` would normalize rows on the router's choice instead of the migration's target database — detected here by recording router consultations whose call stack passes through the migration module. Consults from INSIDE Model.full_clean are excluded: 0013 serialized FullCleanOnSaveMixin into the historical model's bases, so even a fully pinned save() runs full_clean, whose validate_unique/validate_constraints ask the router with instance hints and correctly fall back to the pinned instance._state.db — Django offers no using hook there, and the migration cannot avoid it."""
         import traceback
 
         from django.db import connection
