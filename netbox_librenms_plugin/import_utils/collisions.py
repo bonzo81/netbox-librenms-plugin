@@ -213,6 +213,8 @@ def detect_bulk_collisions(devices: list[dict] | None) -> list[dict]:
                 # Model name ("device"/"virtualmachine") so the template links to the right object
                 # type — a VM collision must not render a dcim:device URL.
                 "nb_model_name": bucket["nb_model_name"],
+                # Display label computed once so the template doesn't repeat the ternary.
+                "nb_kind": "VM" if bucket["nb_model_name"] == "virtualmachine" else "device",
                 "librenms_rows": [
                     {
                         "device_id": r["device_id"],

@@ -303,6 +303,8 @@ def test_collision_payload_carries_model_name_for_link_targeting():
     assert len(groups) == 1
     assert groups[0]["nb_device_pk"] == 77
     assert groups[0]["nb_model_name"] == "virtualmachine"
+    # The template renders the human label from the group (computed once, not a repeated ternary).
+    assert groups[0]["nb_kind"] == "VM"
 
 
 @pytest.mark.django_db
@@ -329,6 +331,7 @@ def test_real_validator_output_feeds_detector_end_to_end():
     assert len(groups) == 1
     assert groups[0]["nb_device_pk"] == nb_device.pk
     assert groups[0]["nb_model_name"] == "device"
+    assert groups[0]["nb_kind"] == "device"
     assert {r["device_id"] for r in groups[0]["librenms_rows"]} == {5001, 5002}
 
 
@@ -342,6 +345,7 @@ def test_collision_template_renders_correct_link_targets_and_escapes():
             "nb_device_pk": 42,
             "nb_device_name": "srv-collide",
             "nb_model_name": "device",
+            "nb_kind": "device",
             "librenms_rows": [
                 {"device_id": 1, "hostname": "<script>alpha</script>", "role": "host"},
                 {"device_id": 2, "hostname": "beta", "role": "oob"},
@@ -351,6 +355,7 @@ def test_collision_template_renders_correct_link_targets_and_escapes():
             "nb_device_pk": 7,
             "nb_device_name": "vm-collide",
             "nb_model_name": "virtualmachine",
+            "nb_kind": "VM",
             "librenms_rows": [
                 {"device_id": 3, "hostname": "gamma", "role": "merge_host_named"},
                 {"device_id": 4, "hostname": "delta", "role": "merge_oob_named"},
