@@ -557,6 +557,21 @@ class TestInterfaceContextOOBRows:
 
 
 class TestSyncInterfacesViewPost:
+    def test_standalone_relationship_cache_read_fails_closed_on_non_dict(self):
+        from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
+
+        view = object.__new__(SyncInterfacesView)
+        obj = MagicMock()
+
+        with (
+            patch("netbox_librenms_plugin.views.sync.interfaces.get_librenms_sync_device", return_value=obj),
+            patch("netbox_librenms_plugin.views.sync.interfaces.cache") as mock_cache,
+            patch.object(view, "get_cache_key", return_value="ports-key"),
+        ):
+            mock_cache.get.return_value = ["corrupt", "snapshot"]
+
+            assert view._get_cached_relationships(obj, "default") == {}
+
     def test_permission_denied_returns_early(self):
         from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
 
@@ -1931,6 +1946,8 @@ class TestInterfaceLinkValidationErrorNoStackTrace:
         assert self._SENTINEL not in resp.content.decode()
         body = json.loads(resp.content)
         assert "Cannot link Et1 to LAG Po1" in body["error"]
+        assert "NetBox rejected the LAG relationship" in body["error"]
+        assert "cannot be its own" not in body["error"]
         # The real detail is logged server-side, not lost.
         assert any(self._SENTINEL in str(c.args) for c in mock_logger.warning.call_args_list)
 
@@ -1959,6 +1976,8 @@ class TestInterfaceLinkValidationErrorNoStackTrace:
         assert self._SENTINEL not in resp.content.decode()
         body = json.loads(resp.content)
         assert "Cannot link Et1.100 to parent Et1" in body["error"]
+        assert "NetBox rejected the parent relationship" in body["error"]
+        assert "cannot be its own" not in body["error"]
         assert any(self._SENTINEL in str(c.args) for c in mock_logger.warning.call_args_list)
 
 
@@ -2042,7 +2061,7 @@ class TestSyncInterfaceLagViewRealDB:
 
         assert resp.status_code == 409
         body = json.loads(resp.content)
-        assert "its own LAG" in body["error"]
+        assert "NetBox rejected the LAG relationship" in body["error"]
         iface.refresh_from_db()
         assert iface.lag_id is None
 

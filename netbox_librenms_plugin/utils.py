@@ -167,7 +167,8 @@ def normalize_relationship_maps(relationships) -> tuple[dict, dict]:
     ``relationships`` (e.g. a list) — or a present-but-None / non-dict nested ``lag_members`` /
     ``sub_interfaces`` — collapses to ``{}`` so ``.items()`` never raises ``AttributeError``. Keys
     are normalized via :func:`normalize_librenms_port_id` so the int-keyed lookups never miss a
-    stringified (JSON-round-tripped) cache key.
+    stringified (JSON-round-tripped) cache key. Entries whose keys cannot be normalized are dropped
+    rather than sharing a ``None`` key that an invalid lookup could accidentally match.
     """
     if not isinstance(relationships, dict):
         relationships = {}
@@ -177,8 +178,16 @@ def normalize_relationship_maps(relationships) -> tuple[dict, dict]:
     sub_interfaces_raw = relationships.get("sub_interfaces")
     if not isinstance(sub_interfaces_raw, dict):
         sub_interfaces_raw = {}
-    lag_members = {normalize_librenms_port_id(k): v for k, v in lag_members_raw.items()}
-    sub_interfaces = {normalize_librenms_port_id(k): v for k, v in sub_interfaces_raw.items()}
+    lag_members = {
+        normalized_key: value
+        for key, value in lag_members_raw.items()
+        if (normalized_key := normalize_librenms_port_id(key)) is not None
+    }
+    sub_interfaces = {
+        normalized_key: value
+        for key, value in sub_interfaces_raw.items()
+        if (normalized_key := normalize_librenms_port_id(key)) is not None
+    }
     return lag_members, sub_interfaces
 
 

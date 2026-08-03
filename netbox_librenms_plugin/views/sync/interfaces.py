@@ -208,7 +208,7 @@ class SyncInterfacesView(
         if cached_data is None:
             cache_obj = get_librenms_sync_device(obj, server_key=server_key) or obj
             cached_data = cache.get(self.get_cache_key(cache_obj, "ports", server_key))
-        if cached_data:
+        if isinstance(cached_data, dict):
             return cached_data.get("port_stack_relationships", {})
         return {}
 
@@ -1372,8 +1372,8 @@ class _BaseRelationshipSyncView(LibreNMSPermissionMixin, NetBoxObjectPermissionM
                 except ValidationError as exc:
                     # Log the validation detail server-side and return a fixed message — don't echo
                     # exception text to the client (CodeQL py/stack-trace-exposure). The
-                    # cross-device case is already rejected above, so this is the self-relationship
-                    # / NetBox-constraint case.
+                    # cross-device case is already rejected above, so this is a self-relationship
+                    # or another NetBox model constraint.
                     logger.warning(
                         "%s link validation failed (%s -> %s): %s",
                         self.relation_label,
@@ -1385,8 +1385,8 @@ class _BaseRelationshipSyncView(LibreNMSPermissionMixin, NetBoxObjectPermissionM
                         {
                             "error": (
                                 f"Cannot link {source_iface.name} to {self.relation_label} {related_iface.name}: "
-                                f"invalid {self.relation_label} relationship "
-                                f"(an interface cannot be its own {self.relation_label})."
+                                f"NetBox rejected the {self.relation_label} relationship. Check the interface "
+                                "types and that the two interfaces are not the same interface."
                             )
                         },
                         status=409,

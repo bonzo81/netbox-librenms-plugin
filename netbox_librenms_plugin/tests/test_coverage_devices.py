@@ -331,9 +331,7 @@ class TestSingleInterfaceVerifyView:
 
         mock_device = MagicMock()
         mock_device.virtual_chassis = None
-        with patch(
-            "netbox_librenms_plugin.views.object_sync.devices.get_object_or_404", return_value=mock_device
-        ) as mock_get_obj:
+        with patch.object(view, "restrict_object_or_404", return_value=mock_device) as mock_get_obj:
             with patch("netbox_librenms_plugin.views.object_sync.devices.cache") as mock_cache:
                 response = view.post(request)
 

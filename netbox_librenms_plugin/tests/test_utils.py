@@ -405,6 +405,19 @@ class TestConversionHelpers:
         assert lag == {10: 100}
         assert sub == {5: 7}
 
+    def test_normalize_relationship_maps_drops_unresolvable_keys(self):
+        from netbox_librenms_plugin.utils import normalize_relationship_maps
+
+        relationships = {
+            "lag_members": {"bad": 100, "": 101, None: 102, "10": 103},
+            "sub_interfaces": {"0": 7, False: 8, "5": 9},
+        }
+
+        lag, sub = normalize_relationship_maps(relationships)
+
+        assert lag == {10: 103}
+        assert sub == {5: 9}
+
     def test_normalize_relationship_maps_coerces_corrupt_shapes_to_empty(self):
         from netbox_librenms_plugin.utils import normalize_relationship_maps
 

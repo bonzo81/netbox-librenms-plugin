@@ -207,15 +207,26 @@ class TestMigration0014Preflight:
 
     def test_preflight_lowercases_mixed_case_rows(self):
         """A mixed-case librenms_os an old full_clean-bypassing path left behind is canonicalized to lowercase."""
-        from django.apps import apps as django_apps
+        from unittest.mock import patch
+
+        from django.db import connection
+        from django.db.migrations.executor import MigrationExecutor
 
         from netbox_librenms_plugin.models import PortStackLagPattern
+
+        historical_apps = (
+            MigrationExecutor(connection)
+            .loader.project_state(("netbox_librenms_plugin", "0013_portstacklagpattern"))
+            .apps
+        )
+        historical_model = historical_apps.get_model("netbox_librenms_plugin", "portstacklagpattern")
 
         # bulk_create skips clean()'s lowercasing, so "ZZOSX" reaches the row verbatim (unique on its
         # own, so the CI constraint permits it). The preflight must then canonicalize it. Use a
         # distinctive OS name so it can't collide with a migration-seeded default pattern.
         PortStackLagPattern.objects.bulk_create([PortStackLagPattern(librenms_os="ZZOSX", lag_name_pattern=r"^zz\d+$")])
-        self._preflight()(django_apps, self._schema_editor())
+        with patch.object(historical_model, "full_clean", lambda self, *a, **k: None):
+            self._preflight()(historical_apps, self._schema_editor())
         assert PortStackLagPattern.objects.filter(librenms_os="zzosx").exists()
         assert not PortStackLagPattern.objects.filter(librenms_os="ZZOSX").exists()
 
