@@ -2361,6 +2361,24 @@ def merge_librenms_links(winner, donor, server_key: str = "default") -> dict:
     return summary
 
 
+def validation_error_detail(exc: ValidationError) -> str:
+    """
+    Flatten a ValidationError into a single human-readable string for a JSON error body.
+
+    Shared by the interface-sync and migrate views so the two sync flows format
+    validation errors identically.
+
+    Args:
+        exc: The ValidationError to flatten.
+
+    Returns:
+        str: ``field: message`` pairs joined with ``"; "`` (or the plain messages/str form).
+    """
+    if hasattr(exc, "message_dict"):
+        return "; ".join(f"{field}: {' '.join(str(m) for m in msgs)}" for field, msgs in exc.message_dict.items())
+    return "; ".join(str(m) for m in exc.messages) if hasattr(exc, "messages") else str(exc)
+
+
 # The device-level IP foreign keys this plugin re-homes during OOB linking, merges, and the
 # Stage-2b "move to winner" actions. NetBox requires each to reference an address assigned to
 # one of THAT device's own interfaces.

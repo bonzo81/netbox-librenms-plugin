@@ -16,6 +16,7 @@ from netbox_librenms_plugin.models import InterfaceTypeMapping
 from netbox_librenms_plugin.utils import (
     AmbiguousLibreNMSIdError,
     convert_speed_to_kbps,
+    validation_error_detail,
     find_by_librenms_id,
     get_interface_name_field,
     get_librenms_device_id,
@@ -33,13 +34,6 @@ from netbox_librenms_plugin.views.mixins import (
 )
 
 logger = logging.getLogger(__name__)
-
-
-def _validation_error_detail(exc: ValidationError) -> str:
-    """Flatten a ValidationError into a single human-readable string for a JSON error body."""
-    if hasattr(exc, "message_dict"):
-        return "; ".join(f"{field}: {' '.join(str(m) for m in msgs)}" for field, msgs in exc.message_dict.items())
-    return "; ".join(str(m) for m in exc.messages) if hasattr(exc, "messages") else str(exc)
 
 
 class SyncInterfacesView(
@@ -445,7 +439,7 @@ class SyncInterfacesView(
                 log_kind,
                 source_iface.name,
                 related_iface.name,
-                _validation_error_detail(exc),
+                validation_error_detail(exc),
             )
             return
         except IntegrityError as exc:
@@ -1379,7 +1373,7 @@ class _BaseRelationshipSyncView(LibreNMSPermissionMixin, NetBoxObjectPermissionM
                         self.relation_label,
                         source_iface.name,
                         related_iface.name,
-                        _validation_error_detail(exc),
+                        validation_error_detail(exc),
                     )
                     return JsonResponse(
                         {
