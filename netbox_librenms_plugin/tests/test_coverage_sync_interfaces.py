@@ -179,8 +179,10 @@ def test_reenabling_relationship_autoselect_replays_checked_rows():
         "toggle handler must key on #autoSelectLagMembers"
     )
     assert re.search(r"if\s*\(\s*toggle\.checked\s*\)", handler), "re-enable branch must gate on toggle.checked"
-    assert re.search(r"querySelectorAll\(\s*['\"]input\[name=.select.\]:checked", handler), (
-        "re-enable branch must replay the checked rows"
+    # Backreference pins the string CLOSING right after :checked — a suffix like :not(*)
+    # (valid CSS, matches nothing) must fail this, not slip past a prefix check.
+    assert re.search(r"querySelectorAll\(\s*(['\"])input\[name=.select.\]:checked\1\s*\)", handler), (
+        "re-enable branch must replay exactly the checked rows"
     )
     assert re.search(r"dispatchEvent\(\s*new\s+Event\(\s*['\"]change['\"]\s*,\s*\{\s*bubbles:\s*true", handler), (
         "replay must re-dispatch a bubbling change event"
@@ -202,8 +204,17 @@ def test_cross_page_parent_selectors_are_css_escaped():
     assert re.search(r"data-parent-port-id=\"'\s*\+\s*CSS\.escape\(parentPortId\)", handler), (
         "the sibling-row attribute selector must CSS.escape the port id"
     )
-    assert not re.search(r"querySelector\(\s*'#'\s*\+(?!\s*CSS\.escape)", handler), (
-        "no raw '#' + value selector may remain in this block"
+    # Pin BOTH cleanup lookups individually — the injection lookup alone must not be able
+    # to satisfy this test while an unescaped cleanup selector sneaks back in.
+    assert re.search(r"CSS\.escape\(\s*'auto-parent-'\s*\+\s*parentPortId\s*\)", handler), (
+        "the cleanup lookup for the injected parent input must CSS.escape its id"
+    )
+    assert re.search(r"CSS\.escape\(\s*'auto-parent-dev-'\s*\+\s*parentPortId\s*\)", handler), (
+        "the cleanup lookup for the device-override input must CSS.escape its id"
+    )
+    # '#…' catches both the bare '#' + value form and a raw '#auto-parent-…' + value concat.
+    assert not re.search(r"querySelector\(\s*'#[^']*'\s*\+(?!\s*CSS\.escape)", handler), (
+        "no raw '#…' + value selector may remain in this block"
     )
 
 
