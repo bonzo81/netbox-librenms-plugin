@@ -17,6 +17,7 @@ from ..import_validation_helpers import (
 from ..librenms_api import LibreNMSAPI
 from ..utils import (
     AmbiguousLibreNMSIdError,
+    cached_row_matches,
     coerce_librenms_id,
     find_by_librenms_id,
     normalize_serial,
@@ -396,17 +397,12 @@ def bulk_import_devices_shared(
 
         try:
             # Use cached device data if available to avoid redundant API calls — but only when the
-            # cached row's OWN device_id doesn't contradict the requested id. A mis-keyed/stale cache
-            # entry (another device's row stored under this id) would otherwise be imported AS this
-            # device. detect_collisions_for_device_ids verifies this too, but its callers skip the
-            # pre-check for single-row imports, so re-check at the point of use; a contradiction falls
-            # through to a live fetch below. (A real LibreNMS row always carries device_id; a cached
-            # row lacking it can't be verified and is left trusted.)
+            # cached row's OWN device_id doesn't contradict the requested id (cached_row_matches).
+            # detect_collisions_for_device_ids verifies this too, but its callers skip the pre-check
+            # for single-row imports, so re-check at the point of use; a contradiction falls through
+            # to a live fetch below.
             cached_row = libre_devices_cache.get(device_id) if libre_devices_cache else None
-            cached_row_id = cached_row.get("device_id") if isinstance(cached_row, dict) else None
-            if cached_row is not None and (
-                cached_row_id is None or coerce_librenms_id(cached_row_id) == coerce_librenms_id(device_id)
-            ):
+            if cached_row_matches(cached_row, device_id):
                 libre_device = cached_row
                 success = True
             else:

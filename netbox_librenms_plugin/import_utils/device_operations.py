@@ -13,6 +13,7 @@ from virtualization.models import Cluster  # noqa: F401 — used by test mock.pa
 from ..librenms_api import LibreNMSAPI
 from ..utils import (
     AmbiguousLibreNMSIdError,
+    cached_row_matches,
     coerce_librenms_id,
     find_by_librenms_id,
     find_matching_platform,
@@ -1808,14 +1809,10 @@ def fetch_device_with_cache(
         >>> libre_device = fetch_device_with_cache(123, api, libre_devices_cache=cache_dict)
     """
     # Check pre-fetched cache dict first (fastest) — but only when the cached row's OWN device_id
-    # doesn't contradict the requested id, so a mis-keyed/stale entry (another device's row under
-    # this id) isn't served AS this device. A contradiction falls through to the Django cache / API
-    # fetch below. (A real LibreNMS row always carries device_id; one lacking it stays trusted.)
+    # doesn't contradict the requested id (cached_row_matches), so a mis-keyed/stale entry isn't
+    # served AS this device. A contradiction falls through to the Django cache / API fetch below.
     cached_row = libre_devices_cache.get(device_id) if libre_devices_cache else None
-    cached_row_id = cached_row.get("device_id") if isinstance(cached_row, dict) else None
-    if cached_row is not None and (
-        cached_row_id is None or coerce_librenms_id(cached_row_id) == coerce_librenms_id(device_id)
-    ):
+    if cached_row_matches(cached_row, device_id):
         return cached_row
 
     # Check Django cache

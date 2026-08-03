@@ -1333,6 +1333,29 @@ def coerce_positive_int(value) -> int | None:
     return coerce_librenms_id(value)
 
 
+def cached_row_matches(cached_row, device_id) -> bool:
+    """
+    Decide whether a cached LibreNMS device row may be served for *device_id*.
+
+    A row whose OWN ``device_id`` contradicts the requested id (a mis-keyed or stale
+    cache entry — another device's row stored under this key) must not be served AS
+    this device. A row without a readable ``device_id`` stays trusted (a real LibreNMS
+    row always carries one), and ``None`` (no cached row) never matches. Shared by the
+    single-import and bulk-import cache reads so the acceptance rule can't drift.
+
+    Args:
+        cached_row: The cached payload for *device_id* (usually a dict, possibly None).
+        device_id: The LibreNMS device id the caller asked for.
+
+    Returns:
+        bool: True when the cached row may be used for *device_id*.
+    """
+    if cached_row is None:
+        return False
+    cached_row_id = cached_row.get("device_id") if isinstance(cached_row, dict) else None
+    return cached_row_id is None or coerce_librenms_id(cached_row_id) == coerce_librenms_id(device_id)
+
+
 def get_librenms_device_id(obj, server_key: str = "default", *, auto_save: bool = True):
     """
     Get the LibreNMS device/port ID for a specific server from the JSON custom field.

@@ -10,7 +10,32 @@ Both are pure functions, so these exercise the real implementations directly wit
 
 import pytest
 
-from netbox_librenms_plugin.utils import is_valid_ports_payload, resolve_server_mapping_display_id
+from netbox_librenms_plugin.utils import cached_row_matches, is_valid_ports_payload, resolve_server_mapping_display_id
+
+
+class TestCachedRowMatches:
+    """The single- and bulk-import cache reads share this acceptance rule (can't drift)."""
+
+    def test_matching_id_is_served(self):
+        assert cached_row_matches({"device_id": 12, "hostname": "a"}, 12) is True
+
+    def test_string_and_int_ids_normalize_equal(self):
+        assert cached_row_matches({"device_id": "12"}, 12) is True
+
+    def test_contradicting_id_is_rejected(self):
+        # A mis-keyed/stale entry (another device's row under this key) must not be served.
+        assert cached_row_matches({"device_id": 99}, 12) is False
+
+    def test_row_without_device_id_stays_trusted(self):
+        assert cached_row_matches({"hostname": "a"}, 12) is True
+
+    def test_none_row_never_matches(self):
+        assert cached_row_matches(None, 12) is False
+
+    def test_non_dict_row_stays_trusted(self):
+        # Pre-existing behavior preserved by the extraction: a non-dict payload has no readable
+        # device_id, so it is left trusted (downstream shape gates reject it where it matters).
+        assert cached_row_matches(["not-a-dict"], 12) is True
 
 
 class TestIsValidPortsPayload:
