@@ -913,6 +913,12 @@ class TransferDeviceIPView(_BaseMoveToWinnerView):
             if isinstance(assigned, Interface):
                 # Lock the owning interface row (this transfer is device-scoped).
                 assigned = Interface.objects.select_for_update().filter(pk=assigned.pk).first()
+                if assigned is not None:
+                    # Freshen the cached GFK to the locked row: set_device_ip_fk() re-reads
+                    # donor_ip.assigned_object for its ownership check, and the pre-lock snapshot
+                    # would spuriously 409 a move that landed on the winner just before the lock —
+                    # same freshen-after-lock as _reconcile_donor_device_ip_fks.
+                    donor_ip.assigned_object = assigned
             else:
                 assigned = None
             if getattr(assigned, "device_id", None) != winner.pk:

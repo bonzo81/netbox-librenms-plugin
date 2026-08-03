@@ -2344,6 +2344,8 @@ def mark_librenms_migrated(donor, winner_pk: int, server_key: str = "default", a
     # ids so a malformed marker can never target the wrong device.
     if isinstance(winner_pk, bool) or not isinstance(winner_pk, int) or winner_pk <= 0:
         raise ValueError(f"winner_pk must be a positive integer, got {winner_pk!r}")
+    # Keep the writer's key normalization paired with get_migrated_to_marker()'s.
+    server_key = server_key or "default"
 
     cf_value = donor.custom_field_data.get("librenms_id")
     if cf_value is None:
@@ -2448,6 +2450,9 @@ def get_migrated_to_marker(device, server_key: str = "default") -> dict | None:
     """
     if device is None:
         return None
+    # Blank/None server_key means the default server everywhere else in this plugin; normalize
+    # here so every marker reader agrees, whatever key hygiene its call site has.
+    server_key = server_key or "default"
     cf_value = device.cf.get("librenms_id") if hasattr(device, "cf") else None
     if not isinstance(cf_value, dict):
         return None

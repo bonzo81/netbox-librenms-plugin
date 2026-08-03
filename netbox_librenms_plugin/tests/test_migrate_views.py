@@ -75,6 +75,47 @@ class TestGetMigratedToMarker:
 
         assert get_migrated_to_marker(None, "default") is None
 
+    def test_blank_or_none_server_key_reads_the_default_marker(self):
+        # A blank/None key means the default server everywhere else in the plugin; a reader
+        # passing a raw unnormalized key must not miss the default-server marker (and flip a
+        # migrated donor's UI back to ordinary sync mode).
+        from netbox_librenms_plugin.utils import get_migrated_to_marker
+
+        marker_data = {"device_id": 42, "server_key": "default", "at": "2025-01-01T00:00:00Z"}
+        donor = _make_migrate_device("mig-blank-key", {"default": {"_migrated_to": marker_data}})
+        assert get_migrated_to_marker(donor, "") == marker_data
+        assert get_migrated_to_marker(donor, None) == marker_data
+
+    def test_build_migrated_context_with_blank_key_carries_the_marker(self):
+        from netbox_librenms_plugin.utils import build_migrated_context
+
+        winner = _make_migrate_device("mig-blank-ctx-winner")
+        donor = _make_migrate_device(
+            "mig-blank-ctx-donor",
+            {
+                "default": {
+                    "_migrated_to": {"device_id": winner.pk, "server_key": "default", "at": "2025-01-01T00:00:00Z"}
+                }
+            },
+        )
+        ctx = build_migrated_context(donor, "")
+        assert ctx["migrated_to_marker"] is not None
+        assert bool(ctx["migrated_to_winner"])
+
+    def test_mark_librenms_migrated_normalizes_blank_key_to_default(self):
+        # Writer/reader pairing: stamping with a blank key must land under "default" so the
+        # normalized readers find it (marker server_key stamped as "default" too).
+        from netbox_librenms_plugin.utils import get_migrated_to_marker, mark_librenms_migrated
+
+        winner = _make_migrate_device("mig-blank-write-winner")
+        donor = _make_migrate_device("mig-blank-write-donor", {"default": {"id": 7}})
+        mark_librenms_migrated(donor, winner.pk, "")
+        donor.save()
+        marker = get_migrated_to_marker(donor, "default")
+        assert marker is not None
+        assert marker["server_key"] == "default"
+        assert marker["device_id"] == winner.pk
+
     def test_returns_none_when_device_id_is_bool(self):
         # bool is a subclass of int; a marker with device_id=True must not be
         # treated as a valid pk (would otherwise map to device #1).
@@ -818,6 +859,52 @@ class TestTransferDeviceIPView:
         winner.refresh_from_db()
         assert winner.oob_ip_id == oob_ip.pk  # winner claimed it
         assert donor.oob_ip_id is None  # donor released it
+
+    def test_transfer_survives_interface_move_onto_winner_between_read_and_lock(self):
+        """A concurrent interface move ONTO the winner, landing between the GFK read and the interface lock, must not spuriously 409 the transfer: the freshly locked (winner-owned) row is assigned back onto donor_ip before set_device_ip_fk re-checks ownership."""
+        from dcim.models import Interface
+
+        view = self._setup_view()
+        donor = make_device("tx-race-donor")
+        winner = make_device("tx-race-winner")
+        self._mark(donor, winner)
+        # The address starts on a DONOR interface, so the view's assigned_object read caches
+        # a device_id=donor snapshot on the locked IP row.
+        oob_ip = ip_on(donor, "10.0.0.7/24", "mgmt0")
+        donor.oob_ip = oob_ip
+        donor.save()
+        iface_pk = oob_ip.assigned_object_id
+
+        # Simulate the concurrent move: the owning-interface SELECT ... FOR UPDATE fires AFTER
+        # the GFK read cached device_id=donor. Move the interface onto the winner right then,
+        # so the locked row is winner-owned while the cached GFK snapshot is stale.
+        real_sfu = Interface.objects.select_for_update
+        state = {"moved": False}
+
+        def moving_sfu(*args, **kwargs):
+            queryset = real_sfu(*args, **kwargs)
+            real_filter = queryset.filter
+
+            def moving_filter(*f_args, **f_kwargs):
+                if not state["moved"] and f_kwargs.get("pk") == iface_pk:
+                    state["moved"] = True
+                    Interface.objects.filter(pk=iface_pk).update(device=winner)
+                return real_filter(*f_args, **f_kwargs)
+
+            queryset.filter = moving_filter
+            return queryset
+
+        req = _hx_request({"server_key": "default"})
+        with patch.object(Interface.objects, "select_for_update", moving_sfu):
+            resp = view.post(req, pk=donor.pk, ip_kind="oob")
+
+        # The interface is winner-owned at lock time, so the transfer MUST complete — not be
+        # rejected against the stale cached device_id and rolled back.
+        assert resp.headers.get("HX-Refresh") == "true"
+        donor.refresh_from_db()
+        winner.refresh_from_db()
+        assert winner.oob_ip_id == oob_ip.pk
+        assert donor.oob_ip_id is None
 
     def test_rejects_when_address_still_attached_to_donor(self):
         """The transfer only flips the FK (save skips full_clean), so it must refuse to point the winner at an address still assigned to a DONOR interface — otherwise the winner would own an oob_ip that isn't on one of its interfaces."""
