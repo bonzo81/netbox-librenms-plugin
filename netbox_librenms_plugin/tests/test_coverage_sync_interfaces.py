@@ -135,36 +135,76 @@ class TestSyncInterfaceLagViewPermissions:
         assert view.required_object_permissions["POST"] == [("change", Interface)]
 
 
-def test_relationship_handler_reuses_shared_csrf_helper():
+def _js_source():
     from pathlib import Path
 
     import netbox_librenms_plugin
 
-    source = (
+    return (
         Path(netbox_librenms_plugin.__file__).parent / "static" / "netbox_librenms_plugin" / "js" / "librenms_sync.js"
     ).read_text(encoding="utf-8")
-    handler = source[source.index("// Event delegation for LAG and parent interface sync buttons.") :]
-    assert "const csrf = getCsrfToken();" in handler
-    assert "const csrfInput = document.querySelector('[name=csrfmiddlewaretoken]');" not in handler
+
+
+def _js_block(source, start_anchor, end_anchor=None):
+    """Slice a handler block by its anchor comments, failing with a clear message (not a bare ValueError) when an anchor was reworded or the block moved."""
+    assert start_anchor in source, f"anchor comment missing from librenms_sync.js: {start_anchor!r}"
+    start = source.index(start_anchor)
+    if end_anchor is None:
+        return source[start:]
+    assert end_anchor in source[start:], f"anchor comment missing from librenms_sync.js: {end_anchor!r}"
+    return source[start : source.index(end_anchor, start)]
+
+
+def test_relationship_handler_reuses_shared_csrf_helper():
+    import re
+
+    handler = _js_block(_js_source(), "// Event delegation for LAG and parent interface sync buttons.")
+    # Regexes tolerate spacing/quote reformatting; the tokens themselves are the contract.
+    assert re.search(r"const\s+csrf\s*=\s*getCsrfToken\(\)", handler), "handler must use the shared getCsrfToken()"
+    assert not re.search(r"querySelector\(\s*['\"]\[name=csrfmiddlewaretoken\]", handler), (
+        "handler must not re-query the raw csrf input"
+    )
 
 
 def test_reenabling_relationship_autoselect_replays_checked_rows():
     """Checked children rebuild cross-page parent inputs when auto-select is re-enabled."""
-    from pathlib import Path
+    import re
 
-    import netbox_librenms_plugin
+    handler = _js_block(
+        _js_source(),
+        "// Keep injected cross-page parents symmetric",
+        "Show a brief inline notice",
+    )
+    assert re.search(r"toggle\.matches\(\s*['\"]#autoSelectLagMembers['\"]\s*\)", handler), (
+        "toggle handler must key on #autoSelectLagMembers"
+    )
+    assert re.search(r"if\s*\(\s*toggle\.checked\s*\)", handler), "re-enable branch must gate on toggle.checked"
+    assert re.search(r"querySelectorAll\(\s*['\"]input\[name=.select.\]:checked", handler), (
+        "re-enable branch must replay the checked rows"
+    )
+    assert re.search(r"dispatchEvent\(\s*new\s+Event\(\s*['\"]change['\"]\s*,\s*\{\s*bubbles:\s*true", handler), (
+        "replay must re-dispatch a bubbling change event"
+    )
 
-    source = (
-        Path(netbox_librenms_plugin.__file__).parent / "static" / "netbox_librenms_plugin" / "js" / "librenms_sync.js"
-    ).read_text(encoding="utf-8")
-    start = source.index("// Keep injected cross-page parents symmetric")
-    end = source.index("/**\n * Show a brief inline notice", start)
-    handler = source[start:end]
 
-    assert "if (!toggle.matches('#autoSelectLagMembers')) return;" in handler
-    assert "if (toggle.checked) {" in handler
-    assert "document.querySelectorAll('input[name=\"select\"]:checked')" in handler
-    assert "checkbox.dispatchEvent(new Event('change', { bubbles: true }));" in handler
+def test_cross_page_parent_selectors_are_css_escaped():
+    """The injected-parent lookups build selectors from data-parent-port-id; they must go through CSS.escape (like the notice code) so an unexpected id value can't throw a SyntaxError and abort the handler."""
+    import re
+
+    handler = _js_block(
+        _js_source(),
+        "// --- Sub-interface: select parent when checking ---",
+        "// Keep injected cross-page parents symmetric",
+    )
+    assert re.search(r"querySelector\(\s*'#'\s*\+\s*CSS\.escape\(", handler), (
+        "id selectors for injected parents must be CSS.escape'd"
+    )
+    assert re.search(r"data-parent-port-id=\"'\s*\+\s*CSS\.escape\(parentPortId\)", handler), (
+        "the sibling-row attribute selector must CSS.escape the port id"
+    )
+    assert not re.search(r"querySelector\(\s*'#'\s*\+(?!\s*CSS\.escape)", handler), (
+        "no raw '#' + value selector may remain in this block"
+    )
 
 
 @pytest.mark.django_db
@@ -1475,7 +1515,7 @@ class TestSyncLagAndParentRelationships:
             {"ifDescr": "Ethernet", "ifName": "Gi0/2", "port_id": 11},
             {"ifDescr": "Po1", "ifName": "Po1", "port_id": 100},
         ]
-        relationships = {"lag_members": {"10": 100, "11": 100}, "sub_interfaces": {}}
+        relationships = {"lag_members": {10: 100, 11: 100}, "sub_interfaces": {}}
 
         view = self._make_view(name_field="ifDescr")
         view._sync_lag_and_parent_relationships(device, ["Ethernet"], ports_data, relationships, "default")
@@ -1495,7 +1535,7 @@ class TestSyncLagAndParentRelationships:
             {"ifName": "Gi0/2", "port_id": 11},
             {"ifName": "Po1", "port_id": 100},
         ]
-        relationships = {"lag_members": {"11": 100}, "sub_interfaces": {}}
+        relationships = {"lag_members": {11: 100}, "sub_interfaces": {}}
 
         view = self._make_view(name_field="ifName", selected_port_ids={"11"})
         view._sync_lag_and_parent_relationships(device, [], ports_data, relationships, "default")
@@ -1529,7 +1569,7 @@ class TestSyncLagAndParentRelationships:
         ports_data = [{"ifName": "Gi0/2", "port_id": 11}]
         # Self-LAG: the member's aggregate resolves back to itself (port_id 11 → 11), which
         # Interface.full_clean() rejects.
-        relationships = {"lag_members": {"11": 11}, "sub_interfaces": {}}
+        relationships = {"lag_members": {11: 11}, "sub_interfaces": {}}
 
         view = self._make_view(name_field="ifName", selected_port_ids={"11"})
         view._sync_lag_and_parent_relationships(device, [], ports_data, relationships, "default")
@@ -1551,7 +1591,7 @@ class TestSyncLagAndParentRelationships:
             {"ifName": "Gi0/2", "port_id": 11},
             {"ifName": "Po1", "port_id": 100},
         ]
-        relationships = {"lag_members": {"10": 100, "11": 100}, "sub_interfaces": {}}
+        relationships = {"lag_members": {10: 100, 11: 100}, "sub_interfaces": {}}
 
         view = self._make_view(name_field="ifName", selected_port_ids={"10", "11"})
         view._sync_lag_and_parent_relationships(device, [], ports_data, relationships, "default")
@@ -2236,12 +2276,14 @@ class TestBulkRelationshipConcurrentConflict:
 
         from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
 
+        from netbox_librenms_plugin.utils import set_librenms_device_id
+
         device = make_device("batch-integrity-host")
         member = make_interface(device, "Gi0/1")
-        member.custom_field_data["librenms_id"] = {"default": 1}
+        set_librenms_device_id(member, 1, "default")
         member.save()
         agg = make_interface(device, "Po9", iface_type="lag")
-        agg.custom_field_data["librenms_id"] = {"default": 10}
+        set_librenms_device_id(agg, 10, "default")
         agg.save()
 
         view = object.__new__(SyncInterfacesView)

@@ -480,7 +480,9 @@ document.addEventListener('change', function (e) {
             const form = checkbox.closest('form');
             if (form) {
                 const hiddenId = 'auto-parent-' + parentPortId;
-                if (!form.querySelector('#' + hiddenId)) {
+                // CSS.escape like the notice code: a non-numeric id in a selector would throw
+                // a SyntaxError and abort the handler (the raw value stays fine as an element id).
+                if (!form.querySelector('#' + CSS.escape(hiddenId))) {
                     const hidden = document.createElement('input');
                     hidden.type = 'hidden';
                     hidden.name = 'select_port_id';
@@ -513,17 +515,17 @@ document.addEventListener('change', function (e) {
     // otherwise unchecking one sibling would drop the parent the remaining siblings still need.
     if (parentPortId && !checkbox.checked) {
         const siblingStillChecked = Array.prototype.some.call(
-            document.querySelectorAll('tr[data-parent-port-id="' + parentPortId + '"] input[name="select"]'),
+            document.querySelectorAll('tr[data-parent-port-id="' + CSS.escape(parentPortId) + '"] input[name="select"]'),
             function (cb) { return cb !== checkbox && cb.checked; }
         );
         if (!siblingStillChecked) {
             // Cross-page parent: drop the injected hidden select_port_id input.
             const form = checkbox.closest('form');
             if (form) {
-                const hidden = form.querySelector('#auto-parent-' + parentPortId);
+                const hidden = form.querySelector('#' + CSS.escape('auto-parent-' + parentPortId));
                 if (hidden) hidden.remove();
                 // Drop the paired cross-page device override too.
-                const devOverride = form.querySelector('#auto-parent-dev-' + parentPortId);
+                const devOverride = form.querySelector('#' + CSS.escape('auto-parent-dev-' + parentPortId));
                 if (devOverride) devOverride.remove();
             }
             // Same-page parent: uncheck it ONLY if we auto-selected it (data-auto-selected) — a
