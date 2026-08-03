@@ -933,7 +933,7 @@ class TestImportDevicesJob:
         mock_bulk_devices.return_value = {"success": [], "failed": [], "skipped": [], "virtual_chassis_created": 0}
         mock_bulk_vms.return_value = {"success": [], "failed": [], "skipped": []}
 
-        job = create_mock_job_runner(ImportDevicesJob, job_pk=811)
+        job = create_mock_job_runner(ImportDevicesJob, job_pk=812)
         job.run(device_ids=[1, 2], vm_imports={10: {"cluster_id": 1}}, server_key="default")
 
         mock_bulk_devices.assert_not_called()
