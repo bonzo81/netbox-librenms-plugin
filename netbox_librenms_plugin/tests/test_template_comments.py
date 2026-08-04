@@ -55,6 +55,18 @@ def _guard_precedes_all(src, needle):
     )
     occurrences = [m.start() for m in re.finditer(re.escape(needle), src)]
     assert occurrences, f"{needle!r} not found"
+
+    def _condition_guards(condition):
+        # Quoted literals are data, not structure: they can carry `and`/`or`/the guard text
+        # without evaluating it, so blank them before analyzing the operator shape.
+        condition = re.sub(r"'[^']*'|\"[^\"]*\"", "", condition)
+        # Only a pure and-conjunction carrying the guard as one conjunct protects the needle:
+        # any `or` (and `and` binds tighter than `or` in Django's if-tag) can render the
+        # branch with the marker set regardless of the guard operand — fail closed on those.
+        if re.search(r"\s+or\s+", condition):
+            return False
+        return "not migrated_to_marker" in re.split(r"\s+and\s+", condition)
+
     for pos in occurrences:
         stack = []
         for m in tag_re.finditer(src, 0, pos):
@@ -69,7 +81,7 @@ def _guard_precedes_all(src, needle):
             else:  # {% endif %}
                 assert stack, f"unbalanced {{% endif %}} before {needle!r}"
                 stack.pop()
-        assert "not migrated_to_marker" in stack, (
+        assert any(_condition_guards(condition) for condition in stack), (
             f"{needle!r} occurrence at {pos} is not inside a `not migrated_to_marker` block"
         )
     return True
@@ -123,3 +135,33 @@ def test_guard_scan_tracks_else_and_elif_branches():
     # And the if-branch of a guard that HAS an else stays recognised as guarded.
     if_branch = "{% if not migrated_to_marker %}NEEDLE{% else %}x{% endif %}"
     assert _guard_precedes_all(if_branch, "NEEDLE")
+
+
+def test_guard_scan_handles_compound_conditions():
+    """An and-conjunct guard protects the needle; any or-compound must not count as protection."""
+    import pytest
+
+    # The guard as one conjunct of a pure `and` chain always gates the render — accepted.
+    and_compound = "{% if not migrated_to_marker and extra %}NEEDLE{% endif %}"
+    assert _guard_precedes_all(and_compound, "NEEDLE")
+
+    # An `or` branch renders with the marker set whenever the other operand is true — rejected.
+    or_compound = "{% if other or not migrated_to_marker %}NEEDLE{% endif %}"
+    with pytest.raises(AssertionError):
+        _guard_precedes_all(or_compound, "NEEDLE")
+
+    # Django's if-tag binds `and` tighter than `or`, so a guard conjunct left of an `or`
+    # doesn't gate the right operand's render path either — still rejected.
+    mixed = "{% if not migrated_to_marker and extra or other %}NEEDLE{% endif %}"
+    with pytest.raises(AssertionError):
+        _guard_precedes_all(mixed, "NEEDLE")
+
+    # Operators and the guard token inside QUOTED literals are data, not structure: a literal
+    # containing the guard text must not count as protection...
+    quoted_token = '{% if value == "x and not migrated_to_marker and y" %}NEEDLE{% endif %}'
+    with pytest.raises(AssertionError):
+        _guard_precedes_all(quoted_token, "NEEDLE")
+
+    # ...and an `or` inside a literal must not disqualify a genuine and-conjunct guard.
+    quoted_or = '{% if not migrated_to_marker and label == "local or remote" %}NEEDLE{% endif %}'
+    assert _guard_precedes_all(quoted_or, "NEEDLE")
