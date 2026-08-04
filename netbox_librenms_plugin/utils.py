@@ -659,7 +659,10 @@ def get_table_paginate_count(request: HttpRequest, table_prefix: str) -> int:
     if f"{table_prefix}per_page" in request.GET:
         try:
             per_page = int(request.GET.get(f"{table_prefix}per_page"))
-            return min(per_page, config.MAX_PAGE_SIZE)
+            max_page_size = config.MAX_PAGE_SIZE
+            # MAX_PAGE_SIZE 0/None disables the NetBox ceiling; don't clamp to it (min() with 0
+            # would zero the page size, and with None it TypeErrors).
+            return min(per_page, max_page_size) if max_page_size else per_page
         except ValueError:
             pass
 

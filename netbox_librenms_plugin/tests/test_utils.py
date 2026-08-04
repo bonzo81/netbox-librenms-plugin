@@ -782,6 +782,20 @@ class TestPaginationHelpers:
 
         assert result == 50
 
+    @pytest.mark.parametrize("disabled_max", [0, None])
+    @patch("netbox_librenms_plugin.utils.get_config")
+    @patch("netbox_librenms_plugin.utils.netbox_get_paginate_count")
+    def test_get_table_paginate_count_no_clamp_when_max_disabled(self, mock_netbox_paginate, mock_config, disabled_max):
+        """MAX_PAGE_SIZE 0/None disables the NetBox ceiling; per_page must pass through unclamped."""
+        # min(per_page, 0) would silently return 0 rows per page; min(per_page, None) TypeErrors.
+        from netbox_librenms_plugin.utils import get_table_paginate_count
+
+        mock_config.return_value.MAX_PAGE_SIZE = disabled_max
+        mock_request = MagicMock()
+        mock_request.GET = {"table1_per_page": "500"}
+
+        assert get_table_paginate_count(mock_request, "table1_") == 500
+
     @patch("netbox_librenms_plugin.utils.get_config")
     @patch("netbox_librenms_plugin.utils.netbox_get_paginate_count")
     def test_get_table_paginate_count_default(self, mock_netbox_paginate, mock_config):
