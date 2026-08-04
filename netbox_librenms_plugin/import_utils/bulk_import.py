@@ -22,6 +22,7 @@ from ..utils import (
     find_by_librenms_id,
     normalize_serial,
     preload_normalization_rules,
+    row_identity_matches,
 )
 from .cache import get_cache_metadata_key, get_import_device_cache_key, get_validated_device_cache_key
 from .collisions import detect_bulk_collisions
@@ -177,9 +178,7 @@ def detect_collisions_for_device_ids(
         # row whose device_id doesn't match the requested id — e.g. a stale/mis-keyed cache entry)
         # would otherwise reach validation as a brand-new device and make the collision gate report
         # a clean scan for an id it never actually verified.
-        requested_id = coerce_librenms_id(device_id)
-        cached_id = coerce_librenms_id(libre_device.get("device_id")) if isinstance(libre_device, dict) else None
-        if requested_id is None or cached_id != requested_id:
+        if not row_identity_matches(libre_device, device_id):
             unresolved_ids.append(device_id)
             continue
         if just_fetched:
@@ -410,6 +409,11 @@ def bulk_import_devices_shared(
                 # live LibreNMS data: bypass the short device-info read cache so a value the user
                 # just corrected in LibreNMS isn't read back stale within the cache window.
                 success, libre_device = api.get_device_info(device_id, use_cache=False)
+                # Same fail-closed identity rule as the collision pre-check (row_identity_matches):
+                # a payload that isn't a dict carrying the requested device_id must be neither
+                # imported nor written into the shared cache — treat it as a failed retrieval.
+                if success and not row_identity_matches(libre_device, device_id):
+                    success, libre_device = False, None
                 # Backfill the shared cache so the synchronous import's post-import row re-render
                 # (which reads the same dict via fetch_device_with_cache) doesn't issue a second
                 # LibreNMS round-trip per device on a cold cache. The background path passes a

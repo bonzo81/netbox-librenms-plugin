@@ -275,6 +275,48 @@ class TestBulkImportDevicesShared:
         # importing device 99's data under the id-1 selection.
         mock_api.get_device_info.assert_called_once_with(1, use_cache=False)
 
+    @pytest.mark.parametrize(
+        "bad_payload",
+        [
+            {"device_id": 77, "hostname": "wrong-device"},  # another device's row
+            {},  # empty mapping — no identity to verify
+            ["not-a-dict"],  # non-dict payload
+        ],
+    )
+    def test_mismatched_fallback_fetch_is_failed_and_not_cached(self, bad_payload):
+        """A live-fetch payload not carrying the requested device_id is failed, not used or cached."""
+        # Same fail-closed identity rule as the multi-row collision pre-check (which single-row
+        # imports skip). The rejected mis-keyed cached row forces the live-fetch fallback.
+        stale_row = {"device_id": 99, "hostname": "someone-else"}
+        libre_cache = {1: dict(stale_row)}
+
+        with (
+            patch("netbox_librenms_plugin.import_utils.bulk_import.require_permissions"),
+            patch("netbox_librenms_plugin.import_utils.bulk_import.LibreNMSAPI") as mock_api_cls,
+            patch("netbox_librenms_plugin.import_utils.bulk_import.validate_device_for_import") as mock_validate,
+            patch("netbox_librenms_plugin.import_utils.bulk_import.import_single_device") as mock_import,
+        ):
+            mock_api = MagicMock()
+            mock_api.server_key = "default"
+            mock_api.get_device_info.return_value = (True, bad_payload)
+            mock_api_cls.return_value = mock_api
+
+            from netbox_librenms_plugin.import_utils.bulk_import import bulk_import_devices_shared
+
+            result = bulk_import_devices_shared(
+                device_ids=[1],
+                user=MagicMock(),
+                libre_devices_cache=libre_cache,
+            )
+
+        # The row fails closed instead of importing another device's data under id 1...
+        assert [row["device_id"] for row in result["failed"]] == [1]
+        assert result["success"] == []
+        mock_validate.assert_not_called()
+        mock_import.assert_not_called()
+        # ...and the bad payload must not overwrite the shared cache entry either.
+        assert libre_cache[1] == stale_row
+
     # ------------------------------------------------------------------
     # Line 183 – job.logger.info("Imported device X of Y")
     # ------------------------------------------------------------------

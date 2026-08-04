@@ -1340,8 +1340,10 @@ def cached_row_matches(cached_row, device_id) -> bool:
     A row whose OWN ``device_id`` contradicts the requested id (a mis-keyed or stale
     cache entry — another device's row stored under this key) must not be served AS
     this device. A row without a readable ``device_id`` stays trusted (a real LibreNMS
-    row always carries one), and ``None`` (no cached row) never matches. Shared by the
-    single-import and bulk-import cache reads so the acceptance rule can't drift.
+    row always carries one), and ``None`` (no cached row) never matches. An un-coercible
+    requested id never matches either — it can't be identity-checked, and two invalid ids
+    must not compare equal as ``None == None``. Shared by the single-import and
+    bulk-import cache reads so the acceptance rule can't drift.
 
     Args:
         cached_row: The cached payload for *device_id* (usually a dict, possibly None).
@@ -1352,8 +1354,35 @@ def cached_row_matches(cached_row, device_id) -> bool:
     """
     if cached_row is None:
         return False
+    requested_id = coerce_librenms_id(device_id)
+    if requested_id is None:
+        return False
     cached_row_id = cached_row.get("device_id") if isinstance(cached_row, dict) else None
-    return cached_row_id is None or coerce_librenms_id(cached_row_id) == coerce_librenms_id(device_id)
+    return cached_row_id is None or coerce_librenms_id(cached_row_id) == requested_id
+
+
+def row_identity_matches(row, device_id) -> bool:
+    """
+    Decide whether a LibreNMS device payload verifiably describes *device_id*.
+
+    Stricter than :func:`cached_row_matches`: a real LibreNMS device read always returns
+    a dict carrying its own ``device_id``, so anything else — a non-dict payload, a
+    missing or contradicting id, an un-coercible requested id — fails closed. Shared by
+    the bulk-import collision pre-check and the single-row live-fetch fallback so a
+    payload that flunks this check is neither imported nor written into the shared cache.
+
+    Args:
+        row: The fetched (or cached) payload to identity-check.
+        device_id: The LibreNMS device id the caller asked for.
+
+    Returns:
+        bool: True when the payload's own device_id equals the requested id.
+    """
+    requested_id = coerce_librenms_id(device_id)
+    if requested_id is None:
+        return False
+    row_id = coerce_librenms_id(row.get("device_id")) if isinstance(row, dict) else None
+    return row_id == requested_id
 
 
 def get_librenms_device_id(obj, server_key: str = "default", *, auto_save: bool = True):
