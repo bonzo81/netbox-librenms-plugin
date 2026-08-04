@@ -889,7 +889,10 @@ class TestSyncInterfacesViewPost:
             view._synced_count += 1  # second colliding port syncs
 
         with (
-            patch("netbox_librenms_plugin.views.sync.interfaces.get_object_or_404", return_value=mock_device),
+            patch(
+                "netbox_librenms_plugin.views.mixins.NetBoxObjectPermissionMixin.restrict_object_or_404",
+                return_value=mock_device,
+            ),
             patch("netbox_librenms_plugin.views.sync.interfaces.get_interface_name_field", return_value="ifName"),
             patch("netbox_librenms_plugin.views.sync.interfaces.cache") as mock_cache,
             patch("netbox_librenms_plugin.views.sync.interfaces.messages") as mock_msgs,
