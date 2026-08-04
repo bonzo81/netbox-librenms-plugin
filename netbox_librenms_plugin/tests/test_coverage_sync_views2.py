@@ -334,7 +334,10 @@ class TestSyncCablesViewSuccessPath:
         }
 
         with (
-            patch("netbox_librenms_plugin.views.sync.cables.get_object_or_404", return_value=dev_local),
+            patch(
+                "netbox_librenms_plugin.views.mixins.NetBoxObjectPermissionMixin.restrict_object_or_404",
+                return_value=dev_local,
+            ),
             patch("netbox_librenms_plugin.views.sync.cables.cache") as mock_cache,
             patch("netbox_librenms_plugin.views.sync.cables.messages"),
             patch("netbox_librenms_plugin.views.sync.cables.redirect"),
