@@ -9,7 +9,7 @@ from django.core.cache import cache
 from django.core.exceptions import ValidationError
 from django.db import IntegrityError, models, transaction
 from django.http import HttpResponse
-from django.shortcuts import get_object_or_404, redirect, render
+from django.shortcuts import redirect, render
 from django.urls import reverse
 from django.views import View
 
@@ -569,7 +569,7 @@ class InstallModuleView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
         if error := self.require_all_permissions("POST"):
             return error
 
-        page_device = get_object_or_404(Device, pk=pk)
+        page_device = self.restrict_object_or_404(Device, pk=pk)
         target_device, invalid_selected_device = _resolve_target_device_with_validation(
             page_device, request.POST.get("selected_device_id")
         )
@@ -594,8 +594,10 @@ class InstallModuleView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
             messages.error(request, "Missing or invalid module bay/module type ID.")
             return _modules_redirect_response(request, sync_url, server_key)
 
-        get_object_or_404(ModuleBay, pk=module_bay_id, device=target_device)  # verify bay belongs to selected device
-        module_type = get_object_or_404(ModuleType, pk=module_type_id)
+        self.restrict_object_or_404(
+            ModuleBay, pk=module_bay_id, device=target_device
+        )  # verify bay belongs to selected device
+        module_type = self.restrict_object_or_404(ModuleType, pk=module_type_id)
 
         try:
             with transaction.atomic():
@@ -682,7 +684,7 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
         if error := self.require_all_permissions("POST"):
             return error
 
-        page_device = get_object_or_404(Device, pk=pk)
+        page_device = self.restrict_object_or_404(Device, pk=pk)
         target_device, invalid_selected_device = _resolve_target_device_with_validation(
             page_device, request.POST.get("selected_device_id")
         )
@@ -1239,7 +1241,7 @@ class InstallSelectedView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
         if error := self.require_all_permissions("POST"):
             return error
 
-        page_device = get_object_or_404(Device, pk=pk)
+        page_device = self.restrict_object_or_404(Device, pk=pk)
         server_key = self.resolve_posted_server_key(request.POST)
         sync_url = reverse("plugins:netbox_librenms_plugin:device_librenms_sync", kwargs={"pk": pk})
 
@@ -1370,7 +1372,7 @@ class UpdateModuleSerialView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixi
         if error := self.require_all_permissions("POST"):
             return error
 
-        page_device = get_object_or_404(Device, pk=pk)
+        page_device = self.restrict_object_or_404(Device, pk=pk)
         target_device, invalid_selected_device = _resolve_target_device_with_validation(
             page_device, request.POST.get("selected_device_id")
         )
@@ -1423,7 +1425,7 @@ class UpdateModuleInterfaceView(
         if error := self.require_all_permissions("POST"):
             return error
 
-        page_device = get_object_or_404(Device, pk=pk)
+        page_device = self.restrict_object_or_404(Device, pk=pk)
         target_device, invalid_selected_device = _resolve_target_device_with_validation(
             page_device, request.POST.get("selected_device_id")
         )
@@ -1444,7 +1446,7 @@ class UpdateModuleInterfaceView(
             messages.error(request, "Missing or invalid module ID.")
             return _modules_redirect_response(request, sync_url, server_key)
 
-        module = get_object_or_404(Module, pk=module_id, device=target_device)
+        module = self.restrict_object_or_404(Module, "change", pk=module_id, device=target_device)
 
         bind_result = None
         # A primary interface is bindable only with both a cache-resolved item AND a server
@@ -1554,7 +1556,7 @@ class ModuleMismatchPreviewView(
         if error := self.require_object_permissions("GET"):
             return error
 
-        page_device = get_object_or_404(Device, pk=pk)
+        page_device = self.restrict_object_or_404(Device, pk=pk)
         target_device, invalid_selected_device = _resolve_target_device_with_validation(
             page_device, request.GET.get("selected_device_id")
         )
@@ -1568,8 +1570,9 @@ class ModuleMismatchPreviewView(
         except (TypeError, ValueError):
             return HttpResponse("Missing or invalid module_id/ent_index.", status=400)
 
-        installed_module = get_object_or_404(
-            Module.objects.select_related("module_type", "module_bay", "device"),
+        installed_module = self.restrict_object_or_404(
+            Module,
+            select_related=("module_type", "module_bay", "device"),
             pk=module_id,
             device=target_device,
         )
@@ -1667,7 +1670,7 @@ class VCNormalizationReportView(LibreNMSPermissionMixin, NetBoxObjectPermissionM
         if error := self.require_object_permissions("GET"):
             return error
 
-        page_device = get_object_or_404(Device, pk=pk)
+        page_device = self.restrict_object_or_404(Device, pk=pk)
         target_device, invalid_selected_device = _resolve_target_device_with_validation(
             page_device, request.GET.get("selected_device_id")
         )
@@ -1679,8 +1682,9 @@ class VCNormalizationReportView(LibreNMSPermissionMixin, NetBoxObjectPermissionM
         except (TypeError, ValueError):
             return HttpResponse("Missing or invalid module_id.", status=400)
 
-        module = get_object_or_404(
-            Module.objects.select_related("module_type", "module_type__manufacturer", "module_bay", "device"),
+        module = self.restrict_object_or_404(
+            Module,
+            select_related=("module_type", "module_type__manufacturer", "module_bay", "device"),
             pk=module_id,
             device=target_device,
         )
@@ -1726,7 +1730,7 @@ class ReplaceModuleView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjectP
         if error := self.require_all_permissions("POST"):
             return error
 
-        page_device = get_object_or_404(Device, pk=pk)
+        page_device = self.restrict_object_or_404(Device, pk=pk)
         target_device, invalid_selected_device = _resolve_target_device_with_validation(
             page_device, request.POST.get("selected_device_id")
         )
@@ -1742,8 +1746,10 @@ class ReplaceModuleView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjectP
             messages.error(request, "Missing or invalid module_id/ent_index.")
             return _modules_redirect_response(request, sync_url, server_key)
 
-        installed_module = get_object_or_404(
-            Module.objects.select_related("module_type", "module_bay"),
+        installed_module = self.restrict_object_or_404(
+            Module,
+            "change",
+            select_related=("module_type", "module_bay"),
             pk=module_id,
             device=target_device,
         )
@@ -1923,7 +1929,7 @@ class MoveModuleView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, View)
         if error := self.require_all_permissions("POST"):
             return error
 
-        page_device = get_object_or_404(Device, pk=pk)
+        page_device = self.restrict_object_or_404(Device, pk=pk)
         target_device, invalid_selected_device = _resolve_target_device_with_validation(
             page_device, request.POST.get("selected_device_id")
         )
@@ -1945,7 +1951,7 @@ class MoveModuleView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, View)
         except (TypeError, ValueError):
             module_id = None
 
-        get_object_or_404(ModuleBay, pk=target_bay_id, device=target_device)
+        self.restrict_object_or_404(ModuleBay, pk=target_bay_id, device=target_device)
 
         try:
             occupant_removed_msg = None
@@ -2012,9 +2018,9 @@ class AddBayTemplateView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, V
         from dcim.models import DeviceType, ModuleType
 
         if target_kind == "device_type":
-            return get_object_or_404(DeviceType, pk=target_pk)
+            return self.restrict_object_or_404(DeviceType, pk=target_pk)
         if target_kind == "module_type":
-            return get_object_or_404(ModuleType, pk=target_pk)
+            return self.restrict_object_or_404(ModuleType, pk=target_pk)
         return None
 
     @staticmethod
@@ -2210,7 +2216,7 @@ class AddBayTemplateView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, V
         if error := self.require_all_permissions("GET"):
             return error
 
-        device = get_object_or_404(Device, pk=pk)
+        device = self.restrict_object_or_404(Device, pk=pk)
 
         target_kind = request.GET.get("target_kind", "")
         if target_kind not in self.TARGET_KINDS:
@@ -2272,7 +2278,7 @@ class AddBayTemplateView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, V
         if error := self.require_all_permissions("POST"):
             return error
 
-        device = get_object_or_404(Device, pk=pk)
+        device = self.restrict_object_or_404(Device, pk=pk)
         sync_url = reverse("plugins:netbox_librenms_plugin:device_librenms_sync", kwargs={"pk": pk})
 
         target_kind = request.POST.get("target_kind", "")

@@ -5,6 +5,26 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 
+def _bind_and_call(view, request, method, **kwargs):
+    """Call *view*.<method>, binding the request the way ``View.setup()`` does under dispatch().
+
+    A direct ``view.post(request, ...)`` leaves ``self.request`` unset, which the object-scoped
+    lookups read — production always goes through dispatch(), so bind it here too.
+    """
+    view.setup(request)
+    return getattr(view, method)(request, **kwargs)
+
+
+def _post(view, request, **kwargs):
+    """POST into *view* with the request bound (see :func:`_bind_and_call`)."""
+    return _bind_and_call(view, request, "post", **kwargs)
+
+
+def _get(view, request, **kwargs):
+    """GET into *view* with the request bound (see :func:`_bind_and_call`)."""
+    return _bind_and_call(view, request, "get", **kwargs)
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -67,7 +87,10 @@ class TestModuleMismatchPreviewView:
         request = _make_request(data={})
         view.request = request
 
-        with patch("netbox_librenms_plugin.views.sync.modules.get_object_or_404", return_value=device):
+        with patch(
+            "netbox_librenms_plugin.views.mixins.NetBoxObjectPermissionMixin.restrict_object_or_404",
+            return_value=device,
+        ):
             resp = view.get(request, pk=24)
 
         assert resp.status_code == 400
@@ -79,7 +102,10 @@ class TestModuleMismatchPreviewView:
         request = _make_request(data={"module_id": "42", "ent_index": "notanint"})
         view.request = request
 
-        with patch("netbox_librenms_plugin.views.sync.modules.get_object_or_404", return_value=device):
+        with patch(
+            "netbox_librenms_plugin.views.mixins.NetBoxObjectPermissionMixin.restrict_object_or_404",
+            return_value=device,
+        ):
             resp = view.get(request, pk=24)
 
         assert resp.status_code == 400
@@ -94,14 +120,14 @@ class TestModuleMismatchPreviewView:
 
         with (
             patch(
-                "netbox_librenms_plugin.views.sync.modules.get_object_or_404",
+                "netbox_librenms_plugin.views.mixins.NetBoxObjectPermissionMixin.restrict_object_or_404",
                 side_effect=[device, installed],
             ),
             patch.object(view, "get_cache_key", return_value="cache-key"),
             patch("netbox_librenms_plugin.views.sync.modules.cache") as mock_cache,
         ):
             mock_cache.get.return_value = None
-            resp = view.get(request, pk=24)
+            resp = _get(view, request, pk=24)
 
         assert resp.status_code == 400
 
@@ -116,14 +142,14 @@ class TestModuleMismatchPreviewView:
 
         with (
             patch(
-                "netbox_librenms_plugin.views.sync.modules.get_object_or_404",
+                "netbox_librenms_plugin.views.mixins.NetBoxObjectPermissionMixin.restrict_object_or_404",
                 side_effect=[device, installed],
             ),
             patch.object(view, "get_cache_key", return_value="cache-key"),
             patch("netbox_librenms_plugin.views.sync.modules.cache") as mock_cache,
         ):
             mock_cache.get.return_value = {"inventory": cached, "librenms_id": "test"}
-            resp = view.get(request, pk=24)
+            resp = _get(view, request, pk=24)
 
         assert resp.status_code == 400
 
@@ -143,7 +169,7 @@ class TestModuleMismatchPreviewView:
 
         with (
             patch(
-                "netbox_librenms_plugin.views.sync.modules.get_object_or_404",
+                "netbox_librenms_plugin.views.mixins.NetBoxObjectPermissionMixin.restrict_object_or_404",
                 side_effect=[device, installed],
             ),
             patch.object(view, "get_cache_key", return_value="cache-key"),
@@ -184,7 +210,7 @@ class TestModuleMismatchPreviewView:
 
         with (
             patch(
-                "netbox_librenms_plugin.views.sync.modules.get_object_or_404",
+                "netbox_librenms_plugin.views.mixins.NetBoxObjectPermissionMixin.restrict_object_or_404",
                 side_effect=[device, installed],
             ),
             patch.object(view, "get_cache_key", return_value="cache-key"),
@@ -256,9 +282,10 @@ class TestModuleMismatchTypeMatchedBadge:
     def _render_modal(self, device, module, librenms_model, librenms_serial):
         from unittest.mock import MagicMock
 
-        from django.contrib.auth.models import AnonymousUser
         from django.core.cache import cache
         from django.test import RequestFactory
+
+        from netbox_librenms_plugin.tests.conftest import make_superuser
 
         from netbox_librenms_plugin.views.sync.modules import (
             ModuleMismatchPreviewView,
@@ -269,7 +296,9 @@ class TestModuleMismatchTypeMatchedBadge:
         view._librenms_api = MagicMock()
         view._librenms_api.server_key = "default"
         request = RequestFactory().get("/", {"module_id": str(module.pk), "ent_index": "100", "server_key": "default"})
-        request.user = AnonymousUser()
+        # A real user: the view resolves the device through a restricted queryset, and an
+        # anonymous caller legitimately sees nothing.
+        request.user = make_superuser("mmb-su")
         view.setup(request)
 
         sync_device = _get_sync_device_for_inventory(device, "default")
@@ -351,7 +380,10 @@ class TestReplaceModuleView:
         request = _make_request("POST", data={})
 
         with (
-            patch("netbox_librenms_plugin.views.sync.modules.get_object_or_404", return_value=device),
+            patch(
+                "netbox_librenms_plugin.views.mixins.NetBoxObjectPermissionMixin.restrict_object_or_404",
+                return_value=device,
+            ),
             patch.object(view, "require_all_permissions", return_value=None),
             patch("netbox_librenms_plugin.views.sync.modules.reverse", return_value="/sync/"),
             patch("netbox_librenms_plugin.views.sync.modules.messages") as mock_msg,
@@ -370,7 +402,10 @@ class TestReplaceModuleView:
         request = _make_request("POST", data={"module_id": "42", "ent_index": "100"})
 
         with (
-            patch("netbox_librenms_plugin.views.sync.modules.get_object_or_404", side_effect=[device, installed]),
+            patch(
+                "netbox_librenms_plugin.views.mixins.NetBoxObjectPermissionMixin.restrict_object_or_404",
+                side_effect=[device, installed],
+            ),
             patch.object(view, "require_all_permissions", return_value=None),
             patch.object(view, "get_cache_key", return_value="ck"),
             patch("netbox_librenms_plugin.views.sync.modules.reverse", return_value="/sync/"),
@@ -379,7 +414,7 @@ class TestReplaceModuleView:
             patch("netbox_librenms_plugin.views.sync.modules.redirect") as mock_redirect,
         ):
             mock_cache.get.return_value = None
-            view.post(request, pk=24)
+            _post(view, request, pk=24)
 
         mock_msg.error.assert_called_once()
         mock_redirect.assert_called_once()
@@ -398,7 +433,10 @@ class TestReplaceModuleView:
         new_module = MagicMock()
 
         with (
-            patch("netbox_librenms_plugin.views.sync.modules.get_object_or_404", side_effect=[device, installed]),
+            patch(
+                "netbox_librenms_plugin.views.mixins.NetBoxObjectPermissionMixin.restrict_object_or_404",
+                side_effect=[device, installed],
+            ),
             patch.object(view, "require_all_permissions", return_value=None),
             # "prod" must be a configured server for resolve_posted_server_key to honour the posted key
             # (else it degrades to the active "default"); mirrors a real multi-server deployment.
@@ -438,7 +476,7 @@ class TestReplaceModuleView:
             )
             mock_module_cls.objects.select_for_update.side_effect = [installed_chain, conflict_chain]
 
-            view.post(request, pk=24)
+            _post(view, request, pk=24)
 
         installed.delete.assert_called_once()
         new_module.full_clean.assert_called_once()
@@ -465,7 +503,10 @@ class TestReplaceModuleView:
         new_module = MagicMock()
 
         with (
-            patch("netbox_librenms_plugin.views.sync.modules.get_object_or_404", side_effect=[device, installed]),
+            patch(
+                "netbox_librenms_plugin.views.mixins.NetBoxObjectPermissionMixin.restrict_object_or_404",
+                side_effect=[device, installed],
+            ),
             patch.object(view, "require_all_permissions", return_value=None),
             patch.object(view, "get_cache_key", return_value="ck"),
             patch("netbox_librenms_plugin.views.sync.modules.reverse", return_value="/sync/"),
@@ -499,7 +540,7 @@ class TestReplaceModuleView:
             )
             mock_module_cls.objects.select_for_update.side_effect = [installed_chain, conflict_chain]
 
-            view.post(request, pk=24)
+            _post(view, request, pk=24)
 
         # Conflict module must be deleted, then the installed module, then new one saved
         conflict.delete.assert_called_once()
@@ -519,7 +560,10 @@ class TestReplaceModuleView:
         deny = HttpResponse(status=403)
 
         with (
-            patch("netbox_librenms_plugin.views.sync.modules.get_object_or_404", return_value=device),
+            patch(
+                "netbox_librenms_plugin.views.mixins.NetBoxObjectPermissionMixin.restrict_object_or_404",
+                return_value=device,
+            ),
             patch.object(view, "require_all_permissions", return_value=deny),
         ):
             resp = view.post(request, pk=24)
@@ -547,7 +591,10 @@ class TestMoveModuleView:
         request = _make_request("POST", data={})
 
         with (
-            patch("netbox_librenms_plugin.views.sync.modules.get_object_or_404", return_value=device),
+            patch(
+                "netbox_librenms_plugin.views.mixins.NetBoxObjectPermissionMixin.restrict_object_or_404",
+                return_value=device,
+            ),
             patch.object(view, "require_all_permissions", return_value=None),
             patch("netbox_librenms_plugin.views.sync.modules.reverse", return_value="/sync/"),
             patch("netbox_librenms_plugin.views.sync.modules.messages") as mock_msg,
@@ -570,7 +617,7 @@ class TestMoveModuleView:
 
         with (
             patch(
-                "netbox_librenms_plugin.views.sync.modules.get_object_or_404",
+                "netbox_librenms_plugin.views.mixins.NetBoxObjectPermissionMixin.restrict_object_or_404",
                 side_effect=[device, target_bay],
             ),
             patch.object(view, "require_all_permissions", return_value=None),
@@ -610,7 +657,10 @@ class TestMoveModuleView:
 
         deny = HttpResponse(status=403)
         with (
-            patch("netbox_librenms_plugin.views.sync.modules.get_object_or_404", return_value=device),
+            patch(
+                "netbox_librenms_plugin.views.mixins.NetBoxObjectPermissionMixin.restrict_object_or_404",
+                return_value=device,
+            ),
             patch.object(view, "require_all_permissions", return_value=deny),
         ):
             resp = view.post(request, pk=24)

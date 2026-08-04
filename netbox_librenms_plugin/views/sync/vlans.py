@@ -5,7 +5,7 @@ from django.contrib import messages
 from django.core.cache import cache
 from django.db import transaction
 from django.http import Http404
-from django.shortcuts import get_object_or_404, redirect
+from django.shortcuts import redirect
 from django.urls import reverse
 from django.views import View
 from ipam.models import VLAN, VLANGroup
@@ -25,6 +25,9 @@ class SyncVLANsView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreN
 
     required_object_permissions = {
         "POST": [
+            # The owner device is resolved through a restricted queryset (see get_object), so
+            # state that read here: a missing grant is an explicit 403, not a 404 at the lookup.
+            ("view", Device),
             ("add", VLAN),
             ("change", VLAN),
         ],
@@ -58,7 +61,7 @@ class SyncVLANsView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreN
     def get_object(self, object_type: str, object_id: int):
         """Get the target object (Device or VM)."""
         if object_type == "device":
-            return get_object_or_404(Device, pk=object_id)
+            return self.restrict_object_or_404(Device, pk=object_id)
         raise Http404("Invalid object type.")
 
     def _redirect(self, object_type: str, object_id: int):

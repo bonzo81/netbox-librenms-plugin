@@ -78,7 +78,10 @@ class TestSyncInterfacesViewGetObject:
         view = object.__new__(SyncInterfacesView)
         mock_device = MagicMock()
 
-        with patch("netbox_librenms_plugin.views.sync.interfaces.get_object_or_404", return_value=mock_device):
+        with patch(
+            "netbox_librenms_plugin.views.mixins.NetBoxObjectPermissionMixin.restrict_object_or_404",
+            return_value=mock_device,
+        ):
             result = view.get_object("device", 1)
         assert result is mock_device
 
@@ -88,7 +91,10 @@ class TestSyncInterfacesViewGetObject:
         view = object.__new__(SyncInterfacesView)
         mock_vm = MagicMock()
 
-        with patch("netbox_librenms_plugin.views.sync.interfaces.get_object_or_404", return_value=mock_vm):
+        with patch(
+            "netbox_librenms_plugin.views.mixins.NetBoxObjectPermissionMixin.restrict_object_or_404",
+            return_value=mock_vm,
+        ):
             result = view.get_object("virtualmachine", 2)
         assert result is mock_vm
 
@@ -373,7 +379,10 @@ class TestSyncInterfacesViewPost:
         req = _make_request(post_data={})  # No selection
 
         with (
-            patch("netbox_librenms_plugin.views.sync.interfaces.get_object_or_404", return_value=mock_device),
+            patch(
+                "netbox_librenms_plugin.views.mixins.NetBoxObjectPermissionMixin.restrict_object_or_404",
+                return_value=mock_device,
+            ),
             patch("netbox_librenms_plugin.views.sync.interfaces.get_interface_name_field", return_value="ifName"),
             patch("netbox_librenms_plugin.views.sync.interfaces.messages") as mock_msgs,
             patch("netbox_librenms_plugin.views.sync.interfaces.redirect") as mock_redirect,
@@ -418,7 +427,10 @@ class TestSyncInterfacesViewPost:
         req = _make_request(post_data={"select": ["Gi0/1"]})
 
         with (
-            patch("netbox_librenms_plugin.views.sync.interfaces.get_object_or_404", return_value=mock_device),
+            patch(
+                "netbox_librenms_plugin.views.mixins.NetBoxObjectPermissionMixin.restrict_object_or_404",
+                return_value=mock_device,
+            ),
             patch("netbox_librenms_plugin.views.sync.interfaces.get_interface_name_field", return_value="ifName"),
             patch("netbox_librenms_plugin.views.sync.interfaces.cache") as mock_cache,
             patch("netbox_librenms_plugin.views.sync.interfaces.messages"),
@@ -446,7 +458,10 @@ class TestSyncInterfacesViewPost:
         req = _make_request(post_data={"select": ["Gi0/1"], "server_key": "default"})
 
         with (
-            patch("netbox_librenms_plugin.views.sync.interfaces.get_object_or_404", return_value=mock_device),
+            patch(
+                "netbox_librenms_plugin.views.mixins.NetBoxObjectPermissionMixin.restrict_object_or_404",
+                return_value=mock_device,
+            ),
             patch("netbox_librenms_plugin.views.sync.interfaces.get_interface_name_field", return_value="ifName"),
             patch("netbox_librenms_plugin.views.sync.interfaces.cache") as mock_cache,
             patch("netbox_librenms_plugin.views.sync.interfaces.messages") as mock_msgs,
@@ -478,7 +493,10 @@ class TestSyncInterfacesViewPost:
         req = _make_request(post_data={"select": ["eth0"], "server_key": "default"})
 
         with (
-            patch("netbox_librenms_plugin.views.sync.interfaces.get_object_or_404", return_value=mock_vm),
+            patch(
+                "netbox_librenms_plugin.views.mixins.NetBoxObjectPermissionMixin.restrict_object_or_404",
+                return_value=mock_vm,
+            ),
             patch("netbox_librenms_plugin.views.sync.interfaces.get_interface_name_field", return_value="ifName"),
             patch("netbox_librenms_plugin.views.sync.interfaces.cache") as mock_cache,
             patch("netbox_librenms_plugin.views.sync.interfaces.messages") as mock_msgs,
@@ -514,7 +532,10 @@ class TestSyncInterfacesViewPost:
             view._skipped_conflicts.append("Gi0/1")
 
         with (
-            patch("netbox_librenms_plugin.views.sync.interfaces.get_object_or_404", return_value=mock_device),
+            patch(
+                "netbox_librenms_plugin.views.mixins.NetBoxObjectPermissionMixin.restrict_object_or_404",
+                return_value=mock_device,
+            ),
             patch("netbox_librenms_plugin.views.sync.interfaces.get_interface_name_field", return_value="ifName"),
             patch("netbox_librenms_plugin.views.sync.interfaces.cache") as mock_cache,
             patch("netbox_librenms_plugin.views.sync.interfaces.messages") as mock_msgs,
@@ -557,7 +578,10 @@ class TestSyncInterfacesViewServerKeyAndRedirect:
     def _run_no_selection(self, view, mock_api, post_data, name_field="ifName"):
         """Drive post() down the no-selection redirect path (server_key + redirect_url are set before that), returning the redirect call mock."""
         with (
-            patch("netbox_librenms_plugin.views.sync.interfaces.get_object_or_404", return_value=MagicMock(pk=1)),
+            patch(
+                "netbox_librenms_plugin.views.mixins.NetBoxObjectPermissionMixin.restrict_object_or_404",
+                return_value=MagicMock(pk=1),
+            ),
             patch("netbox_librenms_plugin.views.sync.interfaces.get_interface_name_field", return_value=name_field),
             patch("netbox_librenms_plugin.views.sync.interfaces.messages"),
             patch("netbox_librenms_plugin.views.sync.interfaces.redirect") as mock_redirect,
@@ -1354,7 +1378,10 @@ class TestDeleteNetBoxInterfacesViewPost:
         mock_device = MagicMock(pk=1)
         req = _make_request(post_data={})  # No interface_ids
 
-        with patch("netbox_librenms_plugin.views.sync.interfaces.get_object_or_404", return_value=mock_device):
+        with patch(
+            "netbox_librenms_plugin.views.mixins.NetBoxObjectPermissionMixin.restrict_object_or_404",
+            return_value=mock_device,
+        ):
             result = view.post(req, "device", 1)
 
         assert isinstance(result, JsonResponse)
@@ -1392,7 +1419,10 @@ class TestDeleteNetBoxInterfacesViewPost:
         req = _make_request(post_data={"interface_ids": ["5"]})
 
         with (
-            patch("netbox_librenms_plugin.views.sync.interfaces.get_object_or_404", return_value=mock_device),
+            patch(
+                "netbox_librenms_plugin.views.mixins.NetBoxObjectPermissionMixin.restrict_object_or_404",
+                return_value=mock_device,
+            ),
             patch("netbox_librenms_plugin.views.sync.interfaces.Interface") as mock_intf_cls,
             patch("netbox_librenms_plugin.views.sync.interfaces.transaction"),
         ):
@@ -1430,7 +1460,10 @@ class TestDeleteNetBoxInterfacesViewPost:
         req = _make_request(post_data={"interface_ids": ["7"]})
 
         with (
-            patch("netbox_librenms_plugin.views.sync.interfaces.get_object_or_404", return_value=mock_vm),
+            patch(
+                "netbox_librenms_plugin.views.mixins.NetBoxObjectPermissionMixin.restrict_object_or_404",
+                return_value=mock_vm,
+            ),
             patch("netbox_librenms_plugin.views.sync.interfaces.VMInterface") as mock_vmintf_cls,
             patch("netbox_librenms_plugin.views.sync.interfaces.transaction"),
         ):
@@ -1467,7 +1500,10 @@ class TestDeleteNetBoxInterfacesViewPost:
         req = _make_request(post_data={"interface_ids": ["5"]})
 
         with (
-            patch("netbox_librenms_plugin.views.sync.interfaces.get_object_or_404", return_value=mock_device),
+            patch(
+                "netbox_librenms_plugin.views.mixins.NetBoxObjectPermissionMixin.restrict_object_or_404",
+                return_value=mock_device,
+            ),
             patch("netbox_librenms_plugin.views.sync.interfaces.Interface") as mock_intf_cls,
             patch("netbox_librenms_plugin.views.sync.interfaces.transaction"),
         ):
@@ -1507,7 +1543,10 @@ class TestDeleteNetBoxInterfacesViewPost:
         req = _make_request(post_data={"interface_ids": ["5"]})
 
         with (
-            patch("netbox_librenms_plugin.views.sync.interfaces.get_object_or_404", return_value=mock_device),
+            patch(
+                "netbox_librenms_plugin.views.mixins.NetBoxObjectPermissionMixin.restrict_object_or_404",
+                return_value=mock_device,
+            ),
             patch("netbox_librenms_plugin.views.sync.interfaces.Interface") as mock_intf_cls,
             patch("netbox_librenms_plugin.views.sync.interfaces.transaction"),
         ):
@@ -1542,7 +1581,10 @@ class TestDeleteNetBoxInterfacesViewPost:
             pass
 
         with (
-            patch("netbox_librenms_plugin.views.sync.interfaces.get_object_or_404", return_value=mock_device),
+            patch(
+                "netbox_librenms_plugin.views.mixins.NetBoxObjectPermissionMixin.restrict_object_or_404",
+                return_value=mock_device,
+            ),
             patch("netbox_librenms_plugin.views.sync.interfaces.Interface") as mock_intf_cls,
             patch("netbox_librenms_plugin.views.sync.interfaces.transaction"),
         ):
@@ -1574,7 +1616,10 @@ class TestDeleteNetBoxInterfacesViewPost:
         req = _make_request(post_data={"interface_ids": ["7"]})
 
         with (
-            patch("netbox_librenms_plugin.views.sync.interfaces.get_object_or_404", return_value=mock_vm),
+            patch(
+                "netbox_librenms_plugin.views.mixins.NetBoxObjectPermissionMixin.restrict_object_or_404",
+                return_value=mock_vm,
+            ),
             patch("netbox_librenms_plugin.views.sync.interfaces.VMInterface") as mock_vmintf_cls,
             patch("netbox_librenms_plugin.views.sync.interfaces.transaction"),
         ):
@@ -1628,7 +1673,10 @@ class TestDeleteNetBoxInterfacesViewPost:
             pass
 
         with (
-            patch("netbox_librenms_plugin.views.sync.interfaces.get_object_or_404", return_value=mock_device),
+            patch(
+                "netbox_librenms_plugin.views.mixins.NetBoxObjectPermissionMixin.restrict_object_or_404",
+                return_value=mock_device,
+            ),
             patch("netbox_librenms_plugin.views.sync.interfaces.Interface") as mock_intf_cls,
             patch("netbox_librenms_plugin.views.sync.interfaces.transaction"),
         ):

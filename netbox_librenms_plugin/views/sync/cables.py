@@ -7,7 +7,7 @@ from django.contrib.contenttypes.models import ContentType
 from django.core.cache import cache
 from django.db import transaction
 from django.db.models import Q
-from django.shortcuts import get_object_or_404, redirect
+from django.shortcuts import redirect
 from django.urls import reverse
 from django.views import View
 
@@ -27,6 +27,10 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libre
 
     required_object_permissions = {
         "POST": [
+            # The device whose cable tab is being synced is resolved through a restricted
+            # queryset, so state that read here: a missing grant is then an explicit 403
+            # rather than a puzzling 404 at the lookup.
+            ("view", Device),
             ("add", Cable),
             ("change", Cable),
         ],
@@ -200,7 +204,7 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libre
         if error := self.require_all_permissions("POST"):
             return error
 
-        initial_device = get_object_or_404(Device, pk=pk)
+        initial_device = self.restrict_object_or_404(Device, pk=pk)
         server_key = request.POST.get("server_key") or self.librenms_api.server_key
         self._post_server_key = server_key
         self._initial_device = initial_device

@@ -6,7 +6,7 @@ from django.contrib import messages
 from django.core.cache import cache
 from django.db import transaction
 from django.http import Http404, JsonResponse
-from django.shortcuts import get_object_or_404, redirect
+from django.shortcuts import redirect
 from django.urls import reverse
 from django.views import View
 from virtualization.models import VirtualMachine, VMInterface
@@ -39,10 +39,12 @@ class SyncInterfacesView(
 
     def get_required_permissions_for_object_type(self, object_type):
         """Return the required permissions based on object type."""
+        # The owner is resolved through a restricted queryset (get_object), so its view
+        # permission is stated here: a missing grant is an explicit 403, not a 404.
         if object_type == "device":
-            return [("add", Interface), ("change", Interface)]
+            return [("view", Device), ("add", Interface), ("change", Interface)]
         elif object_type == "virtualmachine":
-            return [("add", VMInterface), ("change", VMInterface)]
+            return [("view", VirtualMachine), ("add", VMInterface), ("change", VMInterface)]
         else:
             raise Http404(f"Invalid object type: {object_type}")
 
@@ -123,11 +125,11 @@ class SyncInterfacesView(
         return redirect(redirect_url)
 
     def get_object(self, object_type, object_id):
-        """Return the Device or VirtualMachine for the given type and ID."""
+        """Return the Device or VirtualMachine for the given type and ID (object-scoped)."""
         if object_type == "device":
-            return get_object_or_404(Device, pk=object_id)
+            return self.restrict_object_or_404(Device, pk=object_id)
         if object_type == "virtualmachine":
-            return get_object_or_404(VirtualMachine, pk=object_id)
+            return self.restrict_object_or_404(VirtualMachine, pk=object_id)
         raise Http404("Invalid object type.")
 
     def get_selected_interfaces(self, request, interface_name_field):
@@ -466,9 +468,9 @@ class DeleteNetBoxInterfacesView(LibreNMSPermissionMixin, NetBoxObjectPermission
             return error
 
         if object_type == "device":
-            obj = get_object_or_404(Device, pk=object_id)
+            obj = self.restrict_object_or_404(Device, pk=object_id)
         elif object_type == "virtualmachine":
-            obj = get_object_or_404(VirtualMachine, pk=object_id)
+            obj = self.restrict_object_or_404(VirtualMachine, pk=object_id)
         else:
             return JsonResponse({"error": "Invalid object type"}, status=400)
 

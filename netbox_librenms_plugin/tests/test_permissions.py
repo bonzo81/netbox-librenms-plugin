@@ -978,19 +978,25 @@ class TestObjectTypeValidation:
 
     def test_sync_interfaces_device_type(self):
         """SyncInterfacesView returns correct perms for device type."""
+        from dcim.models import Device, Interface
+
         from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
 
         view = SyncInterfacesView()
         perms = view.get_required_permissions_for_object_type("device")
-        assert len(perms) == 2
+        # The owner read is declared alongside the writes: the device is resolved through a
+        # restricted queryset, so a missing view grant is a stated 403, not a 404 at the lookup.
+        assert perms == [("view", Device), ("add", Interface), ("change", Interface)]
 
     def test_sync_interfaces_vm_type(self):
         """SyncInterfacesView returns correct perms for virtualmachine type."""
+        from virtualization.models import VirtualMachine, VMInterface
+
         from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
 
         view = SyncInterfacesView()
         perms = view.get_required_permissions_for_object_type("virtualmachine")
-        assert len(perms) == 2
+        assert perms == [("view", VirtualMachine), ("add", VMInterface), ("change", VMInterface)]
 
     def test_sync_interfaces_invalid_type_raises_404(self):
         """SyncInterfacesView raises Http404 for invalid object type."""
@@ -1072,7 +1078,10 @@ class TestRemoveServerMappingViewErrorHandling:
         plugins_cfg = {"netbox_librenms_plugin": {"servers": {}}}  # orphan-server NOT configured
 
         with (
-            patch("netbox_librenms_plugin.views.sync.device_fields.get_object_or_404", return_value=mock_device),
+            patch(
+                "netbox_librenms_plugin.views.mixins.NetBoxObjectPermissionMixin.restrict_object_or_404",
+                return_value=mock_device,
+            ),
             patch("netbox_librenms_plugin.views.sync.device_fields.Device") as mock_Device_cls,
             patch("django.conf.settings") as mock_settings,
             patch("netbox_librenms_plugin.views.sync.device_fields.messages") as mock_messages,
@@ -1104,7 +1113,10 @@ class TestRemoveServerMappingViewErrorHandling:
         plugins_cfg = {"netbox_librenms_plugin": {"servers": {"active-server": {"librenms_url": "http://x"}}}}
 
         with (
-            patch("netbox_librenms_plugin.views.sync.device_fields.get_object_or_404", return_value=mock_device),
+            patch(
+                "netbox_librenms_plugin.views.mixins.NetBoxObjectPermissionMixin.restrict_object_or_404",
+                return_value=mock_device,
+            ),
             patch("django.conf.settings") as mock_settings,
             patch("netbox_librenms_plugin.views.sync.device_fields.messages") as mock_messages,
             patch("netbox_librenms_plugin.views.sync.device_fields.redirect"),
@@ -1132,7 +1144,10 @@ class TestRemoveServerMappingViewErrorHandling:
         plugins_cfg = {"netbox_librenms_plugin": {"servers": {}}}  # orphan-server NOT configured
 
         with (
-            patch("netbox_librenms_plugin.views.sync.device_fields.get_object_or_404", return_value=mock_device),
+            patch(
+                "netbox_librenms_plugin.views.mixins.NetBoxObjectPermissionMixin.restrict_object_or_404",
+                return_value=mock_device,
+            ),
             patch("netbox_librenms_plugin.views.sync.device_fields.Device") as mock_Device_cls,
             patch("django.conf.settings") as mock_settings,
             patch("netbox_librenms_plugin.views.sync.device_fields.messages") as mock_messages,

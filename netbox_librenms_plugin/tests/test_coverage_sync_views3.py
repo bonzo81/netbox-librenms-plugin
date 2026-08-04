@@ -84,13 +84,19 @@ class TestSyncInterfacesGetObject:
     def test_device_type(self):
         v = _make_iv()
         mock_obj = MagicMock()
-        with patch("netbox_librenms_plugin.views.sync.interfaces.get_object_or_404", return_value=mock_obj):
+        with patch(
+            "netbox_librenms_plugin.views.mixins.NetBoxObjectPermissionMixin.restrict_object_or_404",
+            return_value=mock_obj,
+        ):
             assert v.get_object("device", 1) is mock_obj
 
     def test_vm_type(self):
         v = _make_iv()
         mock_obj = MagicMock()
-        with patch("netbox_librenms_plugin.views.sync.interfaces.get_object_or_404", return_value=mock_obj):
+        with patch(
+            "netbox_librenms_plugin.views.mixins.NetBoxObjectPermissionMixin.restrict_object_or_404",
+            return_value=mock_obj,
+        ):
             assert v.get_object("virtualmachine", 2) is mock_obj
 
     def test_invalid_raises_http404(self):
@@ -558,7 +564,7 @@ class TestDeleteNetBoxInterfacesPost:
         v.get_required_permissions_for_object_type = MagicMock(return_value=[])
         req = MagicMock()
         req.POST.getlist.return_value = []
-        with patch("netbox_librenms_plugin.views.sync.interfaces.get_object_or_404"):
+        with patch("netbox_librenms_plugin.views.mixins.NetBoxObjectPermissionMixin.restrict_object_or_404"):
             resp = v.post(req, "device", 1)
         assert resp.status_code == 400
 
@@ -576,7 +582,9 @@ class TestDeleteNetBoxInterfacesPost:
         iface.device_id = 1
         req = MagicMock()
         req.POST.getlist.side_effect = lambda k: ["10"] if k == "interface_ids" else []
-        with patch("netbox_librenms_plugin.views.sync.interfaces.get_object_or_404", return_value=obj):
+        with patch(
+            "netbox_librenms_plugin.views.mixins.NetBoxObjectPermissionMixin.restrict_object_or_404", return_value=obj
+        ):
             with patch("netbox_librenms_plugin.views.sync.interfaces.Interface") as mc:
                 mc.objects.get.return_value = iface
                 with patch("netbox_librenms_plugin.views.sync.interfaces.transaction") as mt:
@@ -600,7 +608,9 @@ class TestDeleteNetBoxInterfacesPost:
         iface.device_id = 99
         req = MagicMock()
         req.POST.getlist.side_effect = lambda k: ["10"] if k == "interface_ids" else []
-        with patch("netbox_librenms_plugin.views.sync.interfaces.get_object_or_404", return_value=obj):
+        with patch(
+            "netbox_librenms_plugin.views.mixins.NetBoxObjectPermissionMixin.restrict_object_or_404", return_value=obj
+        ):
             with patch("netbox_librenms_plugin.views.sync.interfaces.Interface") as mc:
                 mc.objects.get.return_value = iface
                 with patch("netbox_librenms_plugin.views.sync.interfaces.transaction") as mt:
@@ -630,7 +640,9 @@ class TestDeleteNetBoxInterfacesPost:
         iface.device_id = 99
         req = MagicMock()
         req.POST.getlist.side_effect = lambda k: ["10"] if k == "interface_ids" else []
-        with patch("netbox_librenms_plugin.views.sync.interfaces.get_object_or_404", return_value=obj):
+        with patch(
+            "netbox_librenms_plugin.views.mixins.NetBoxObjectPermissionMixin.restrict_object_or_404", return_value=obj
+        ):
             with patch("netbox_librenms_plugin.views.sync.interfaces.Interface") as mc:
                 mc.objects.get.return_value = iface
                 with patch("netbox_librenms_plugin.views.sync.interfaces.transaction") as mt:
@@ -660,7 +672,9 @@ class TestDeleteNetBoxInterfacesPost:
         iface.device_id = 2
         req = MagicMock()
         req.POST.getlist.side_effect = lambda k: ["10"] if k == "interface_ids" else []
-        with patch("netbox_librenms_plugin.views.sync.interfaces.get_object_or_404", return_value=obj):
+        with patch(
+            "netbox_librenms_plugin.views.mixins.NetBoxObjectPermissionMixin.restrict_object_or_404", return_value=obj
+        ):
             with patch("netbox_librenms_plugin.views.sync.interfaces.Interface") as mc:
                 mc.objects.get.return_value = iface
                 with patch("netbox_librenms_plugin.views.sync.interfaces.transaction") as mt:
@@ -682,7 +696,9 @@ class TestDeleteNetBoxInterfacesPost:
         iface.virtual_machine_id = 5
         req = MagicMock()
         req.POST.getlist.side_effect = lambda k: ["20"] if k == "interface_ids" else []
-        with patch("netbox_librenms_plugin.views.sync.interfaces.get_object_or_404", return_value=obj):
+        with patch(
+            "netbox_librenms_plugin.views.mixins.NetBoxObjectPermissionMixin.restrict_object_or_404", return_value=obj
+        ):
             with patch("netbox_librenms_plugin.views.sync.interfaces.VMInterface") as mc:
                 mc.objects.get.return_value = iface
                 with patch("netbox_librenms_plugin.views.sync.interfaces.transaction") as mt:
@@ -705,7 +721,9 @@ class TestDeleteNetBoxInterfacesPost:
         iface.virtual_machine_id = 99
         req = MagicMock()
         req.POST.getlist.side_effect = lambda k: ["20"] if k == "interface_ids" else []
-        with patch("netbox_librenms_plugin.views.sync.interfaces.get_object_or_404", return_value=obj):
+        with patch(
+            "netbox_librenms_plugin.views.mixins.NetBoxObjectPermissionMixin.restrict_object_or_404", return_value=obj
+        ):
             with patch("netbox_librenms_plugin.views.sync.interfaces.VMInterface") as mc:
                 mc.objects.get.return_value = iface
                 with patch("netbox_librenms_plugin.views.sync.interfaces.transaction") as mt:
@@ -728,7 +746,9 @@ class TestDeleteNetBoxInterfacesPost:
         obj.virtual_chassis = None
         req = MagicMock()
         req.POST.getlist.side_effect = lambda k: ["999"] if k == "interface_ids" else []
-        with patch("netbox_librenms_plugin.views.sync.interfaces.get_object_or_404", return_value=obj):
+        with patch(
+            "netbox_librenms_plugin.views.mixins.NetBoxObjectPermissionMixin.restrict_object_or_404", return_value=obj
+        ):
             with patch("netbox_librenms_plugin.views.sync.interfaces.Interface") as mc:
                 mc.DoesNotExist = Interface.DoesNotExist
                 mc.objects.get.side_effect = Interface.DoesNotExist
@@ -763,7 +783,9 @@ class TestDeleteNetBoxInterfacesPost:
 
         req = MagicMock()
         req.POST.getlist.side_effect = lambda k: ["10", "20"] if k == "interface_ids" else []
-        with patch("netbox_librenms_plugin.views.sync.interfaces.get_object_or_404", return_value=obj):
+        with patch(
+            "netbox_librenms_plugin.views.mixins.NetBoxObjectPermissionMixin.restrict_object_or_404", return_value=obj
+        ):
             with patch("netbox_librenms_plugin.views.sync.interfaces.Interface") as mc:
                 mc.objects.get.side_effect = get_se
                 with patch("netbox_librenms_plugin.views.sync.interfaces.transaction") as mt:

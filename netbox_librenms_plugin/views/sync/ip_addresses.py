@@ -6,7 +6,7 @@ from django.contrib import messages
 from django.core.cache import cache
 from django.db import transaction
 from django.http import Http404
-from django.shortcuts import get_object_or_404, redirect
+from django.shortcuts import redirect
 from django.urls import reverse
 from django.views import View
 from ipam.models import VRF, IPAddress
@@ -39,6 +39,24 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
         ],
     }
 
+    def _required_permissions(self, object_type):
+        """
+        Return the POST permissions, narrowed to the owner model this request targets.
+
+        The owner is resolved through a restricted queryset (:meth:`get_object`), so its view
+        permission belongs in the gate: a missing grant is then an explicit 403 instead of a
+        puzzling 404 at the lookup. It cannot be declared statically because one view serves both
+        Devices and VirtualMachines.
+
+        Args:
+            object_type (str): ``"device"`` or ``"virtualmachine"`` from the URL.
+
+        Returns:
+            dict: The ``required_object_permissions`` mapping for this request.
+        """
+        owner_model = VirtualMachine if object_type == "virtualmachine" else Device
+        return {"POST": [("view", owner_model), *self.required_object_permissions["POST"]]}
+
     def get_selected_ips(self, request):
         """Return selected IP addresses from POST data."""
         return [x for x in request.POST.getlist("select") if x]
@@ -64,11 +82,11 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
         return cached_data.get("ip_addresses", [])
 
     def get_object(self, object_type, pk):
-        """Return the Device or VirtualMachine instance for the given type and pk."""
+        """Return the Device or VirtualMachine instance for the given type and pk (object-scoped)."""
         if object_type == "device":
-            return get_object_or_404(Device, pk=pk)
+            return self.restrict_object_or_404(Device, pk=pk)
         if object_type == "virtualmachine":
-            return get_object_or_404(VirtualMachine, pk=pk)
+            return self.restrict_object_or_404(VirtualMachine, pk=pk)
         raise Http404("Invalid object type.")
 
     def get_ip_tab_url(self, obj):
@@ -101,7 +119,8 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
 
     def post(self, request, object_type, pk):
         """Sync selected IP addresses from LibreNMS into NetBox."""
-        # Check both plugin write and NetBox object permissions
+        # Check both plugin write and NetBox object permissions (owner read included).
+        self.required_object_permissions = self._required_permissions(object_type)
         if error := self.require_all_permissions("POST"):
             return error
 

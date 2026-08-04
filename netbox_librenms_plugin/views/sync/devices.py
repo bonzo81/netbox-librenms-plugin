@@ -45,9 +45,9 @@ class AddDeviceToLibreNMSView(
         a client error, not a missing-resource error).
         """
         if object_type == "virtualmachine":
-            return get_object_or_404(VirtualMachine, pk=object_id)
+            return self.restrict_object_or_404(VirtualMachine, "change", pk=object_id)
         if object_type == "device":
-            return get_object_or_404(Device, pk=object_id)
+            return self.restrict_object_or_404(Device, "change", pk=object_id)
         return None
 
     def post(self, request, object_id):

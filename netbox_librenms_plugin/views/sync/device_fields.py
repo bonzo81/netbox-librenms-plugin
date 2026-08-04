@@ -7,7 +7,7 @@ from django.db import IntegrityError, transaction
 from django.utils.text import slugify
 
 from django.http import HttpResponse
-from django.shortcuts import get_object_or_404, redirect
+from django.shortcuts import redirect
 from django.urls import reverse
 from django.utils.html import escape
 from django.views import View
@@ -65,7 +65,7 @@ class UpdateDeviceNameView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin,
         if error := self.require_all_permissions("POST"):
             return error
 
-        device = get_object_or_404(Device, pk=pk)
+        device = self.restrict_object_or_404(Device, "change", pk=pk)
 
         # Rebind the API client to the POSTed server before resolving the per-server librenms_id,
         # so a multi-server user acting on a non-default tab isn't routed through the globally
@@ -160,7 +160,7 @@ class UpdateDeviceSerialView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixi
         if error := self.require_all_permissions("POST"):
             return error
 
-        device = get_object_or_404(Device, pk=pk)
+        device = self.restrict_object_or_404(Device, "change", pk=pk)
 
         # Rebind the API client to the POSTed server before resolving the per-server librenms_id,
         # so a multi-server user acting on a non-default tab isn't routed through the globally
@@ -224,7 +224,7 @@ class UpdateDeviceTypeView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin,
         if error := self.require_all_permissions("POST"):
             return error
 
-        device = get_object_or_404(Device, pk=pk)
+        device = self.restrict_object_or_404(Device, "change", pk=pk)
 
         # Rebind the API client to the POSTed server before resolving the per-server librenms_id,
         # so a multi-server user acting on a non-default tab isn't routed through the globally
@@ -302,7 +302,7 @@ class UpdateDevicePlatformView(LibreNMSPermissionMixin, NetBoxObjectPermissionMi
         if error := self.require_all_permissions("POST"):
             return error
 
-        device = get_object_or_404(Device, pk=pk)
+        device = self.restrict_object_or_404(Device, "change", pk=pk)
 
         # Rebind the API client to the POSTed server before resolving the per-server librenms_id,
         # so a multi-server user acting on a non-default tab isn't routed through the globally
@@ -415,7 +415,7 @@ class CreateAndAssignPlatformView(LibreNMSPermissionMixin, NetBoxObjectPermissio
         if error := self.require_all_permissions("POST"):
             return error
 
-        device = get_object_or_404(Device, pk=pk)
+        device = self.restrict_object_or_404(Device, "change", pk=pk)
 
         # Rebind the API client to the POSTed server so the server_key fallback in _sync_redirect
         # below resolves to the active server instead of None (self._librenms_api would otherwise
@@ -672,7 +672,7 @@ class AssignVCSerialView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, L
         if error := self.require_all_permissions("POST"):
             return error
 
-        device = get_object_or_404(Device, pk=pk)
+        device = self.restrict_object_or_404(Device, "change", pk=pk)
 
         if not device.virtual_chassis:
             messages.error(request, "Device is not part of a virtual chassis")
@@ -745,7 +745,7 @@ class RemoveServerMappingView(LibreNMSPermissionMixin, NetBoxObjectPermissionMix
     def _get_object(self, object_type, pk):
         """Return the Device or VirtualMachine for the given pk."""
         model = VirtualMachine if object_type == "vm" else Device
-        return get_object_or_404(model, pk=pk), model
+        return self.restrict_object_or_404(model, "change", pk=pk), model
 
     def _sync_url_name(self, object_type):
         if object_type == "vm":
@@ -860,7 +860,7 @@ class ConvertLegacyLibreNMSIdView(LibreNMSPermissionMixin, NetBoxObjectPermissio
 
     def _get_model_and_object(self, object_type, pk):
         model = VirtualMachine if object_type == "vm" else Device
-        return model, get_object_or_404(model, pk=pk)
+        return model, self.restrict_object_or_404(model, "change", pk=pk)
 
     def _sync_url(self, object_type, pk):
         name = "vm_librenms_sync" if object_type == "vm" else "device_librenms_sync"

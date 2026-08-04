@@ -5,6 +5,26 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 
+def _bind_and_call(view, request, method, **kwargs):
+    """Call *view*.<method>, binding the request the way ``View.setup()`` does under dispatch().
+
+    A direct ``view.post(request, ...)`` leaves ``self.request`` unset, which the object-scoped
+    lookups read — production always goes through dispatch(), so bind it here too.
+    """
+    view.setup(request)
+    return getattr(view, method)(request, **kwargs)
+
+
+def _post(view, request, **kwargs):
+    """POST into *view* with the request bound (see :func:`_bind_and_call`)."""
+    return _bind_and_call(view, request, "post", **kwargs)
+
+
+def _get(view, request, **kwargs):
+    """GET into *view* with the request bound (see :func:`_bind_and_call`)."""
+    return _bind_and_call(view, request, "get", **kwargs)
+
+
 def _make_real_device(tag):
     """Create and return a real NetBox Device (with its required FKs) for DB-backed tests."""
     from dcim.models import Device, DeviceRole, DeviceType, Manufacturer, Site
@@ -716,7 +736,9 @@ class TestSingleVlanGroupVerifyView:
         request.user.has_perm.return_value = False  # unauthorized → real gate returns 403
         view.request = request
 
-        with patch("netbox_librenms_plugin.views.object_sync.devices.get_object_or_404") as mock_get_obj:
+        with patch(
+            "netbox_librenms_plugin.views.mixins.NetBoxObjectPermissionMixin.restrict_object_or_404"
+        ) as mock_get_obj:
             response = view.post(request)
 
         assert response.status_code == 403
@@ -791,7 +813,7 @@ class TestSingleVlanGroupVerifyView:
         ).encode()
         request.user = _make_verify_superuser("vg-with")
         view.request = request
-        response = view.post(request)
+        response = _post(view, request)
 
         assert isinstance(response, JsonResponse)
         assert response.status_code == 200
@@ -890,7 +912,9 @@ class TestVerifyVlanSyncGroupView:
         request.user.has_perm.return_value = False  # unauthorized → real gate returns 403
         view.request = request
 
-        with patch("netbox_librenms_plugin.views.object_sync.devices.get_object_or_404") as mock_get_obj:
+        with patch(
+            "netbox_librenms_plugin.views.mixins.NetBoxObjectPermissionMixin.restrict_object_or_404"
+        ) as mock_get_obj:
             response = view.post(request)
 
         assert response.status_code == 403
@@ -938,7 +962,7 @@ class TestVerifyVlanSyncGroupView:
         view = self._make_view()
         request = MagicMock()
         request.body = json.dumps({"vid": "10", "vlan_group_id": group.pk, "name": "vlan10"}).encode()
-        response = view.post(request)
+        response = _post(view, request)
 
         assert isinstance(response, JsonResponse)
         data = json.loads(response.content)

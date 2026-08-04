@@ -7,6 +7,26 @@ import pytest
 from netbox_librenms_plugin.tests.conftest import make_device, make_interface, make_ip, make_vm
 
 
+def _bind_and_call(view, request, method, **kwargs):
+    """Call *view*.<method>, binding the request the way ``View.setup()`` does under dispatch().
+
+    A direct ``view.post(request, ...)`` leaves ``self.request`` unset, which the object-scoped
+    lookups read — production always goes through dispatch(), so bind it here too.
+    """
+    view.setup(request)
+    return getattr(view, method)(request, **kwargs)
+
+
+def _post(view, request, **kwargs):
+    """POST into *view* with the request bound (see :func:`_bind_and_call`)."""
+    return _bind_and_call(view, request, "post", **kwargs)
+
+
+def _get(view, request, **kwargs):
+    """GET into *view* with the request bound (see :func:`_bind_and_call`)."""
+    return _bind_and_call(view, request, "get", **kwargs)
+
+
 def _make_post(data):
     """Return a mock POST object backed by a real dict."""
     mock = MagicMock()
@@ -464,7 +484,10 @@ class TestSyncCablesViewPost:
         mock_device = MagicMock()
         mock_device.pk = 1
         with patch.object(view, "require_all_permissions", return_value=None):
-            with patch("netbox_librenms_plugin.views.sync.cables.get_object_or_404", return_value=mock_device):
+            with patch(
+                "netbox_librenms_plugin.views.mixins.NetBoxObjectPermissionMixin.restrict_object_or_404",
+                return_value=mock_device,
+            ):
                 with patch("netbox_librenms_plugin.views.sync.cables.reverse", return_value="/fake/"):
                     with patch.object(view, "get_selected_interfaces", return_value=None):
                         with patch.object(view, "get_cached_links_data", return_value=None):
@@ -481,7 +504,10 @@ class TestSyncCablesViewPost:
         mock_device.pk = 1
         results = {"valid": ["eth0"], "invalid": [], "duplicate": [], "missing_remote": []}
         with patch.object(view, "require_all_permissions", return_value=None):
-            with patch("netbox_librenms_plugin.views.sync.cables.get_object_or_404", return_value=mock_device):
+            with patch(
+                "netbox_librenms_plugin.views.mixins.NetBoxObjectPermissionMixin.restrict_object_or_404",
+                return_value=mock_device,
+            ):
                 with patch("netbox_librenms_plugin.views.sync.cables.reverse", return_value="/fake/"):
                     with patch.object(view, "get_selected_interfaces", return_value=[{"local_port_id": "1"}]):
                         with patch.object(view, "get_cached_links_data", return_value=[{"local_port_id": "1"}]):
@@ -500,7 +526,10 @@ class TestSyncCablesViewPost:
         mock_device = MagicMock()
         mock_device.pk = 1
         with patch.object(view, "require_all_permissions", return_value=None):
-            with patch("netbox_librenms_plugin.views.sync.cables.get_object_or_404", return_value=mock_device):
+            with patch(
+                "netbox_librenms_plugin.views.mixins.NetBoxObjectPermissionMixin.restrict_object_or_404",
+                return_value=mock_device,
+            ):
                 with patch("netbox_librenms_plugin.views.sync.cables.reverse", return_value="/fake/"):
                     with patch.object(view, "get_selected_interfaces", return_value=None):
                         with patch.object(view, "get_cached_links_data", return_value=None):
@@ -573,7 +602,10 @@ class TestAddDeviceToLibreNMSViewGetObject:
 
         view = _make_view(AddDeviceToLibreNMSView)
         mock_vm = MagicMock()
-        with patch("netbox_librenms_plugin.views.sync.devices.get_object_or_404", return_value=mock_vm):
+        with patch(
+            "netbox_librenms_plugin.views.mixins.NetBoxObjectPermissionMixin.restrict_object_or_404",
+            return_value=mock_vm,
+        ):
             result = view.get_object(5, "virtualmachine")
         assert result is mock_vm
 
@@ -582,10 +614,13 @@ class TestAddDeviceToLibreNMSViewGetObject:
 
         view = _make_view(AddDeviceToLibreNMSView)
         mock_device = MagicMock()
-        with patch("netbox_librenms_plugin.views.sync.devices.get_object_or_404", return_value=mock_device) as mock_get:
+        with patch(
+            "netbox_librenms_plugin.views.mixins.NetBoxObjectPermissionMixin.restrict_object_or_404",
+            return_value=mock_device,
+        ) as mock_get:
             result = view.get_object(1, "device")
         assert result is mock_device
-        mock_get.assert_called_once_with(Device, pk=1)
+        mock_get.assert_called_once_with(Device, "change", pk=1)
 
 
 class TestAddDeviceToLibreNMSViewPost:
@@ -788,10 +823,13 @@ class TestUpdateDeviceLocationViewPost:
         device.site.name = "London"
         device.get_absolute_url.return_value = "/dcim/devices/1/"
         with patch.object(view, "require_write_permission", return_value=None):
-            with patch("netbox_librenms_plugin.views.sync.devices.get_object_or_404", return_value=device):
+            with patch(
+                "netbox_librenms_plugin.views.sync.devices.get_object_or_404",
+                return_value=device,
+            ):
                 with patch("netbox_librenms_plugin.views.sync.devices.redirect"):
                     with patch("netbox_librenms_plugin.views.sync.devices.messages") as mock_msg:
-                        view.post(view.request, pk=1)
+                        _post(view, view.request, pk=1)
         view._librenms_api.update_device_field.assert_called_once()
         mock_msg.success.assert_called_once()
 
@@ -802,10 +840,13 @@ class TestUpdateDeviceLocationViewPost:
         device.site = None
         device.pk = 1
         with patch.object(view, "require_write_permission", return_value=None):
-            with patch("netbox_librenms_plugin.views.sync.devices.get_object_or_404", return_value=device):
+            with patch(
+                "netbox_librenms_plugin.views.sync.devices.get_object_or_404",
+                return_value=device,
+            ):
                 with patch("netbox_librenms_plugin.views.sync.devices.redirect"):
                     with patch("netbox_librenms_plugin.views.sync.devices.messages") as mock_msg:
-                        view.post(view.request, pk=1)
+                        _post(view, view.request, pk=1)
         view._librenms_api.update_device_field.assert_not_called()
         mock_msg.warning.assert_called_once()
 
@@ -817,10 +858,13 @@ class TestUpdateDeviceLocationViewPost:
         device.site = MagicMock()
         device.site.name = "Paris"
         with patch.object(view, "require_write_permission", return_value=None):
-            with patch("netbox_librenms_plugin.views.sync.devices.get_object_or_404", return_value=device):
+            with patch(
+                "netbox_librenms_plugin.views.sync.devices.get_object_or_404",
+                return_value=device,
+            ):
                 with patch("netbox_librenms_plugin.views.sync.devices.redirect"):
                     with patch("netbox_librenms_plugin.views.sync.devices.messages") as mock_msg:
-                        view.post(view.request, pk=1)
+                        _post(view, view.request, pk=1)
         mock_msg.error.assert_called_once()
 
 
@@ -1629,7 +1673,7 @@ class TestSyncIPAddressesViewGetObject:
         view = _make_view(SyncIPAddressesView)
         mock_dev = MagicMock()
         with patch(
-            "netbox_librenms_plugin.views.sync.ip_addresses.get_object_or_404",
+            "netbox_librenms_plugin.views.mixins.NetBoxObjectPermissionMixin.restrict_object_or_404",
             return_value=mock_dev,
         ):
             result = view.get_object("device", 1)
@@ -1641,7 +1685,7 @@ class TestSyncIPAddressesViewGetObject:
         view = _make_view(SyncIPAddressesView)
         mock_vm = MagicMock()
         with patch(
-            "netbox_librenms_plugin.views.sync.ip_addresses.get_object_or_404",
+            "netbox_librenms_plugin.views.mixins.NetBoxObjectPermissionMixin.restrict_object_or_404",
             return_value=mock_vm,
         ):
             result = view.get_object("virtualmachine", 1)
@@ -2491,7 +2535,7 @@ class TestSyncVLANsViewGetObject:
         view = _make_view(SyncVLANsView)
         mock_dev = MagicMock()
         with patch(
-            "netbox_librenms_plugin.views.sync.vlans.get_object_or_404",
+            "netbox_librenms_plugin.views.mixins.NetBoxObjectPermissionMixin.restrict_object_or_404",
             return_value=mock_dev,
         ):
             result = view.get_object("device", 1)

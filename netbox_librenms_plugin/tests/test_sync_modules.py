@@ -13,6 +13,26 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 
+def _bind_and_call(view, request, method, **kwargs):
+    """Call *view*.<method>, binding the request the way ``View.setup()`` does under dispatch().
+
+    A direct ``view.post(request, ...)`` leaves ``self.request`` unset, which the object-scoped
+    lookups read — production always goes through dispatch(), so bind it here too.
+    """
+    view.setup(request)
+    return getattr(view, method)(request, **kwargs)
+
+
+def _post(view, request, **kwargs):
+    """POST into *view* with the request bound (see :func:`_bind_and_call`)."""
+    return _bind_and_call(view, request, "post", **kwargs)
+
+
+def _get(view, request, **kwargs):
+    """GET into *view* with the request bound (see :func:`_bind_and_call`)."""
+    return _bind_and_call(view, request, "get", **kwargs)
+
+
 @contextmanager
 def _patch_build_row_deps(view, match_bay_return=None):
     """Patch all utility imports used by _build_row to isolate bay/type matching tests."""
@@ -1745,7 +1765,7 @@ class TestSingleInstallInterfaceBinding:
         with (
             patch.object(view, "require_all_permissions", return_value=None),
             patch(
-                "netbox_librenms_plugin.views.sync.modules.get_object_or_404",
+                "netbox_librenms_plugin.views.mixins.NetBoxObjectPermissionMixin.restrict_object_or_404",
                 side_effect=[device, module_bay, module_type],
             ),
             patch("netbox_librenms_plugin.views.sync.modules.reverse", return_value="/sync/"),
@@ -1827,7 +1847,7 @@ class TestSingleInstallInterfaceBinding:
         with (
             patch.object(view, "require_all_permissions", return_value=None),
             patch(
-                "netbox_librenms_plugin.views.sync.modules.get_object_or_404",
+                "netbox_librenms_plugin.views.mixins.NetBoxObjectPermissionMixin.restrict_object_or_404",
                 side_effect=[device, module_bay, module_type],
             ),
             patch("netbox_librenms_plugin.views.sync.modules.reverse", return_value="/sync/"),
@@ -1913,7 +1933,7 @@ class TestSingleInstallInterfaceBinding:
         with (
             patch.object(view, "require_all_permissions", return_value=None),
             patch(
-                "netbox_librenms_plugin.views.sync.modules.get_object_or_404",
+                "netbox_librenms_plugin.views.mixins.NetBoxObjectPermissionMixin.restrict_object_or_404",
                 side_effect=[device, module_bay, module_type],
             ),
             patch("netbox_librenms_plugin.views.sync.modules.reverse", return_value="/sync/"),
@@ -1968,7 +1988,10 @@ class TestSingleInstallInterfaceBinding:
 
         with (
             patch.object(view, "require_all_permissions", return_value=None),
-            patch("netbox_librenms_plugin.views.sync.modules.get_object_or_404", return_value=device),
+            patch(
+                "netbox_librenms_plugin.views.mixins.NetBoxObjectPermissionMixin.restrict_object_or_404",
+                return_value=device,
+            ),
             patch("netbox_librenms_plugin.views.sync.modules.reverse", return_value="/sync/"),
             patch("netbox_librenms_plugin.views.sync.modules.messages") as mock_messages,
             patch("netbox_librenms_plugin.views.sync.modules.redirect") as mock_redirect,
@@ -2004,7 +2027,7 @@ class TestSingleInstallInterfaceBinding:
         with (
             patch.object(view, "require_all_permissions", return_value=None),
             patch(
-                "netbox_librenms_plugin.views.sync.modules.get_object_or_404",
+                "netbox_librenms_plugin.views.mixins.NetBoxObjectPermissionMixin.restrict_object_or_404",
                 side_effect=[device, module],
             ),
             patch("netbox_librenms_plugin.views.sync.modules.reverse", return_value="/sync/"),
@@ -2051,7 +2074,7 @@ class TestSingleInstallInterfaceBinding:
         with (
             patch.object(view, "require_all_permissions", return_value=None),
             patch(
-                "netbox_librenms_plugin.views.sync.modules.get_object_or_404",
+                "netbox_librenms_plugin.views.mixins.NetBoxObjectPermissionMixin.restrict_object_or_404",
                 side_effect=[device, module],
             ),
             patch("netbox_librenms_plugin.views.sync.modules.reverse", return_value="/sync/"),
@@ -2105,7 +2128,7 @@ class TestSingleInstallInterfaceBinding:
         with (
             patch.object(view, "require_all_permissions", return_value=None),
             patch(
-                "netbox_librenms_plugin.views.sync.modules.get_object_or_404",
+                "netbox_librenms_plugin.views.mixins.NetBoxObjectPermissionMixin.restrict_object_or_404",
                 side_effect=[device, module],
             ),
             patch("netbox_librenms_plugin.views.sync.modules.reverse", return_value="/sync/"),
@@ -2157,7 +2180,7 @@ class TestSingleInstallInterfaceBinding:
         with (
             patch.object(view, "require_all_permissions", return_value=None),
             patch(
-                "netbox_librenms_plugin.views.sync.modules.get_object_or_404",
+                "netbox_librenms_plugin.views.mixins.NetBoxObjectPermissionMixin.restrict_object_or_404",
                 side_effect=[device, module],
             ),
             patch("netbox_librenms_plugin.views.sync.modules.reverse", return_value="/sync/"),
@@ -2219,7 +2242,7 @@ class TestSingleInstallInterfaceBinding:
         with (
             patch.object(view, "require_all_permissions", return_value=None),
             patch(
-                "netbox_librenms_plugin.views.sync.modules.get_object_or_404",
+                "netbox_librenms_plugin.views.mixins.NetBoxObjectPermissionMixin.restrict_object_or_404",
                 side_effect=[device, module],
             ),
             patch("netbox_librenms_plugin.views.sync.modules.reverse", return_value="/sync/"),
@@ -2267,7 +2290,7 @@ class TestSingleInstallInterfaceBinding:
         with (
             patch.object(view, "require_all_permissions", return_value=None),
             patch(
-                "netbox_librenms_plugin.views.sync.modules.get_object_or_404",
+                "netbox_librenms_plugin.views.mixins.NetBoxObjectPermissionMixin.restrict_object_or_404",
                 side_effect=[device, module],
             ),
             patch("netbox_librenms_plugin.views.sync.modules.reverse", return_value="/sync/"),
@@ -2321,7 +2344,7 @@ class TestSingleInstallInterfaceBinding:
         with (
             patch.object(view, "require_all_permissions", return_value=None),
             patch(
-                "netbox_librenms_plugin.views.sync.modules.get_object_or_404",
+                "netbox_librenms_plugin.views.mixins.NetBoxObjectPermissionMixin.restrict_object_or_404",
                 side_effect=[device, module],
             ),
             patch("netbox_librenms_plugin.views.sync.modules.reverse", return_value="/sync/"),
@@ -2391,7 +2414,7 @@ class TestSingleInstallInterfaceBinding:
         with (
             patch.object(view, "require_all_permissions", return_value=None),
             patch(
-                "netbox_librenms_plugin.views.sync.modules.get_object_or_404",
+                "netbox_librenms_plugin.views.mixins.NetBoxObjectPermissionMixin.restrict_object_or_404",
                 side_effect=[device, installed_module],
             ),
             patch("netbox_librenms_plugin.views.sync.modules.reverse", return_value="/sync/"),
@@ -2437,7 +2460,7 @@ class TestSingleInstallInterfaceBinding:
                 conflict_filter_qs,
             ]
 
-            response = view.post(request, pk=24)
+            response = _post(view, request, pk=24)
 
         mock_count.assert_called_once_with(device, new_module)
         assert new_module._adopt_components is True
@@ -2951,7 +2974,7 @@ class TestInstallViewsDoNotDeleteCache:
         with (
             patch.object(view, "require_all_permissions", return_value=None),
             patch(
-                "netbox_librenms_plugin.views.sync.modules.get_object_or_404",
+                "netbox_librenms_plugin.views.mixins.NetBoxObjectPermissionMixin.restrict_object_or_404",
                 side_effect=[device, module_bay, module_type],
             ),
             patch("netbox_librenms_plugin.views.sync.modules.reverse", return_value="/sync/"),
@@ -2995,7 +3018,10 @@ class TestInstallViewsDoNotDeleteCache:
 
         with (
             patch.object(view, "require_all_permissions", return_value=None),
-            patch("netbox_librenms_plugin.views.sync.modules.get_object_or_404", return_value=device),
+            patch(
+                "netbox_librenms_plugin.views.mixins.NetBoxObjectPermissionMixin.restrict_object_or_404",
+                return_value=device,
+            ),
             patch("netbox_librenms_plugin.views.sync.modules.reverse", return_value="/sync/"),
             patch("netbox_librenms_plugin.views.sync.modules.cache") as mock_cache,
             patch.object(view, "get_cache_key", return_value="test-key"),
@@ -3045,7 +3071,10 @@ class TestInstallViewsDoNotDeleteCache:
 
         with (
             patch.object(view, "require_all_permissions", return_value=None),
-            patch("netbox_librenms_plugin.views.sync.modules.get_object_or_404", return_value=device),
+            patch(
+                "netbox_librenms_plugin.views.mixins.NetBoxObjectPermissionMixin.restrict_object_or_404",
+                return_value=device,
+            ),
             patch("netbox_librenms_plugin.views.sync.modules.reverse", return_value="/sync/"),
             patch("netbox_librenms_plugin.views.sync.modules.cache") as mock_cache,
             patch.object(view, "get_cache_key", return_value="test-key"),
@@ -3078,7 +3107,10 @@ class TestInstallViewsDoNotDeleteCache:
 
         with (
             patch.object(view, "require_all_permissions", return_value=None),
-            patch("netbox_librenms_plugin.views.sync.modules.get_object_or_404", return_value=device),
+            patch(
+                "netbox_librenms_plugin.views.mixins.NetBoxObjectPermissionMixin.restrict_object_or_404",
+                return_value=device,
+            ),
             patch("netbox_librenms_plugin.views.sync.modules.reverse", return_value="/sync/"),
             patch("netbox_librenms_plugin.views.sync.modules.cache") as mock_cache,
             patch.object(view, "get_cache_key", return_value="test-key"),
@@ -3110,7 +3142,10 @@ class TestInstallViewsDoNotDeleteCache:
 
         with (
             patch.object(view, "require_all_permissions", return_value=None),
-            patch("netbox_librenms_plugin.views.sync.modules.get_object_or_404", return_value=device),
+            patch(
+                "netbox_librenms_plugin.views.mixins.NetBoxObjectPermissionMixin.restrict_object_or_404",
+                return_value=device,
+            ),
             patch("netbox_librenms_plugin.views.sync.modules.reverse", return_value="/sync/"),
             patch("netbox_librenms_plugin.views.sync.modules.cache") as mock_cache,
             patch.object(view, "get_cache_key", return_value="test-key"),
@@ -3148,7 +3183,10 @@ class TestInstallViewsDoNotDeleteCache:
 
         with (
             patch.object(view, "require_all_permissions", return_value=None),
-            patch("netbox_librenms_plugin.views.sync.modules.get_object_or_404", return_value=device),
+            patch(
+                "netbox_librenms_plugin.views.mixins.NetBoxObjectPermissionMixin.restrict_object_or_404",
+                return_value=device,
+            ),
             patch("netbox_librenms_plugin.views.sync.modules.reverse", return_value="/sync/"),
             patch("netbox_librenms_plugin.views.sync.modules.cache") as mock_cache,
             patch.object(view, "get_cache_key", return_value="test-key"),
@@ -3197,7 +3235,10 @@ class TestInstallViewsDoNotDeleteCache:
 
         with (
             patch.object(view, "require_all_permissions", return_value=None),
-            patch("netbox_librenms_plugin.views.sync.modules.get_object_or_404", return_value=device),
+            patch(
+                "netbox_librenms_plugin.views.mixins.NetBoxObjectPermissionMixin.restrict_object_or_404",
+                return_value=device,
+            ),
             patch("netbox_librenms_plugin.views.sync.modules.reverse", return_value="/sync/"),
             patch("netbox_librenms_plugin.views.sync.modules.cache") as mock_cache,
             patch.object(view, "get_cache_key", return_value="test-key"),
@@ -3246,7 +3287,10 @@ class TestInstallViewsDoNotDeleteCache:
 
         with (
             patch.object(view, "require_all_permissions", return_value=None),
-            patch("netbox_librenms_plugin.views.sync.modules.get_object_or_404", return_value=device),
+            patch(
+                "netbox_librenms_plugin.views.mixins.NetBoxObjectPermissionMixin.restrict_object_or_404",
+                return_value=device,
+            ),
             patch("netbox_librenms_plugin.views.sync.modules.reverse", return_value="/sync/"),
             patch("netbox_librenms_plugin.views.sync.modules.cache") as mock_cache,
             patch.object(view, "get_cache_key", return_value="test-key"),
@@ -3304,7 +3348,10 @@ class TestInstallViewsDoNotDeleteCache:
 
         with (
             patch.object(view, "require_all_permissions", return_value=None),
-            patch("netbox_librenms_plugin.views.sync.modules.get_object_or_404", return_value=device),
+            patch(
+                "netbox_librenms_plugin.views.mixins.NetBoxObjectPermissionMixin.restrict_object_or_404",
+                return_value=device,
+            ),
             patch("netbox_librenms_plugin.views.sync.modules.reverse", return_value="/sync/"),
             patch("netbox_librenms_plugin.views.sync.modules.cache") as mock_cache,
             patch.object(view, "get_cache_key", return_value="test-key"),
@@ -4138,7 +4185,10 @@ class TestPKValidationErrorPaths:
 
         with (
             patch.object(view, "require_all_permissions", return_value=None),
-            patch("netbox_librenms_plugin.views.sync.modules.get_object_or_404", return_value=device),
+            patch(
+                "netbox_librenms_plugin.views.mixins.NetBoxObjectPermissionMixin.restrict_object_or_404",
+                return_value=device,
+            ),
             patch("netbox_librenms_plugin.views.sync.modules.reverse", return_value="/sync/"),
             patch("netbox_librenms_plugin.views.sync.modules.messages") as mock_msg,
             patch("netbox_librenms_plugin.views.sync.modules.redirect") as mock_redirect,
@@ -4168,7 +4218,10 @@ class TestPKValidationErrorPaths:
 
         with (
             patch.object(view, "require_all_permissions", return_value=None),
-            patch("netbox_librenms_plugin.views.sync.modules.get_object_or_404", return_value=device),
+            patch(
+                "netbox_librenms_plugin.views.mixins.NetBoxObjectPermissionMixin.restrict_object_or_404",
+                return_value=device,
+            ),
             patch("netbox_librenms_plugin.views.sync.modules.reverse", return_value="/sync/"),
             patch("netbox_librenms_plugin.views.sync.modules.messages") as mock_msg,
             patch("netbox_librenms_plugin.views.sync.modules.redirect") as mock_redirect,
@@ -4197,7 +4250,10 @@ class TestPKValidationErrorPaths:
 
         with (
             patch.object(view, "require_all_permissions", return_value=None),
-            patch("netbox_librenms_plugin.views.sync.modules.get_object_or_404", return_value=device),
+            patch(
+                "netbox_librenms_plugin.views.mixins.NetBoxObjectPermissionMixin.restrict_object_or_404",
+                return_value=device,
+            ),
             patch("netbox_librenms_plugin.views.sync.modules.reverse", return_value="/sync/"),
             patch("netbox_librenms_plugin.views.sync.modules.messages") as mock_msg,
             patch("netbox_librenms_plugin.views.sync.modules.redirect") as mock_redirect,
@@ -4230,7 +4286,10 @@ class TestPKValidationErrorPaths:
 
         with (
             patch.object(view, "require_all_permissions", return_value=None),
-            patch("netbox_librenms_plugin.views.sync.modules.get_object_or_404", return_value=device),
+            patch(
+                "netbox_librenms_plugin.views.mixins.NetBoxObjectPermissionMixin.restrict_object_or_404",
+                return_value=device,
+            ),
             patch("netbox_librenms_plugin.views.sync.modules.reverse", return_value="/sync/"),
             patch.object(view, "get_cache_key", return_value="ck"),
             patch("netbox_librenms_plugin.views.sync.modules.cache") as mock_cache,
@@ -4296,7 +4355,7 @@ class TestInstallModuleViewBehavior:
         with (
             patch.object(view, "require_all_permissions", return_value=None),
             patch(
-                "netbox_librenms_plugin.views.sync.modules.get_object_or_404",
+                "netbox_librenms_plugin.views.mixins.NetBoxObjectPermissionMixin.restrict_object_or_404",
                 side_effect=[device, module_bay, module_type],
             ),
             patch("netbox_librenms_plugin.views.sync.modules.reverse", return_value="/sync/"),
@@ -4351,7 +4410,7 @@ class TestInstallModuleViewBehavior:
         with (
             patch.object(view, "require_all_permissions", return_value=None),
             patch(
-                "netbox_librenms_plugin.views.sync.modules.get_object_or_404",
+                "netbox_librenms_plugin.views.mixins.NetBoxObjectPermissionMixin.restrict_object_or_404",
                 side_effect=[device, module_bay, module_type],
             ),
             patch("netbox_librenms_plugin.views.sync.modules.reverse", return_value="/sync/"),
@@ -4423,7 +4482,7 @@ class TestUpdateModuleSerialViewBehavior:
         with (
             patch.object(view, "require_all_permissions", return_value=None),
             patch(
-                "netbox_librenms_plugin.views.sync.modules.get_object_or_404",
+                "netbox_librenms_plugin.views.mixins.NetBoxObjectPermissionMixin.restrict_object_or_404",
                 return_value=device,
             ),
             patch("netbox_librenms_plugin.views.sync.modules.reverse", return_value="/sync/"),
@@ -4633,7 +4692,10 @@ class TestAddBayTemplateViewPostValidation:
         view = self._make_view()
         req = self._make_request({"target_kind": "bogus", "target_pk": "1", "name": "Slot 1"})
         with (
-            patch("netbox_librenms_plugin.views.sync.modules.get_object_or_404", return_value=MagicMock()),
+            patch(
+                "netbox_librenms_plugin.views.mixins.NetBoxObjectPermissionMixin.restrict_object_or_404",
+                return_value=MagicMock(),
+            ),
             patch("netbox_librenms_plugin.views.sync.modules.reverse", return_value="/sync/"),
             patch("netbox_librenms_plugin.views.sync.modules.messages") as mock_messages,
             patch(
@@ -4650,7 +4712,10 @@ class TestAddBayTemplateViewPostValidation:
         view = self._make_view()
         req = self._make_request({"target_kind": "device_type", "target_pk": "", "name": "Slot 1"})
         with (
-            patch("netbox_librenms_plugin.views.sync.modules.get_object_or_404", return_value=MagicMock()),
+            patch(
+                "netbox_librenms_plugin.views.mixins.NetBoxObjectPermissionMixin.restrict_object_or_404",
+                return_value=MagicMock(),
+            ),
             patch("netbox_librenms_plugin.views.sync.modules.reverse", return_value="/sync/"),
             patch("netbox_librenms_plugin.views.sync.modules.messages") as mock_messages,
             patch("netbox_librenms_plugin.views.sync.modules._modules_redirect_response", return_value="REDIR"),
@@ -4662,7 +4727,10 @@ class TestAddBayTemplateViewPostValidation:
         view = self._make_view()
         req = self._make_request({"target_kind": "module_type", "target_pk": "5", "name": "  "})
         with (
-            patch("netbox_librenms_plugin.views.sync.modules.get_object_or_404", return_value=MagicMock()),
+            patch(
+                "netbox_librenms_plugin.views.mixins.NetBoxObjectPermissionMixin.restrict_object_or_404",
+                return_value=MagicMock(),
+            ),
             patch("netbox_librenms_plugin.views.sync.modules.reverse", return_value="/sync/"),
             patch("netbox_librenms_plugin.views.sync.modules.messages") as mock_messages,
             patch("netbox_librenms_plugin.views.sync.modules._modules_redirect_response", return_value="REDIR"),
@@ -4685,7 +4753,10 @@ class TestAddBayTemplateViewGetValidation:
         view = self._make_view()
         req = MagicMock()
         req.GET = {"target_kind": "nope", "target_pk": "1"}
-        with patch("netbox_librenms_plugin.views.sync.modules.get_object_or_404", return_value=MagicMock()):
+        with patch(
+            "netbox_librenms_plugin.views.mixins.NetBoxObjectPermissionMixin.restrict_object_or_404",
+            return_value=MagicMock(),
+        ):
             response = view.get(req, pk=1)
         assert response.status_code == 400
 
@@ -4693,7 +4764,10 @@ class TestAddBayTemplateViewGetValidation:
         view = self._make_view()
         req = MagicMock()
         req.GET = {"target_kind": "device_type", "target_pk": "abc"}
-        with patch("netbox_librenms_plugin.views.sync.modules.get_object_or_404", return_value=MagicMock()):
+        with patch(
+            "netbox_librenms_plugin.views.mixins.NetBoxObjectPermissionMixin.restrict_object_or_404",
+            return_value=MagicMock(),
+        ):
             response = view.get(req, pk=1)
         assert response.status_code == 400
 
@@ -4708,7 +4782,10 @@ class TestAddBayTemplateViewGetValidation:
             "suggested_label": "Fan Controller",
         }
         with (
-            patch("netbox_librenms_plugin.views.sync.modules.get_object_or_404", return_value=MagicMock()),
+            patch(
+                "netbox_librenms_plugin.views.mixins.NetBoxObjectPermissionMixin.restrict_object_or_404",
+                return_value=MagicMock(),
+            ),
             patch("netbox_librenms_plugin.views.sync.modules.render", return_value="RENDERED") as mock_render,
         ):
             response = view.get(req, pk=42)
@@ -4758,7 +4835,10 @@ class TestAddBayTemplateViewMappingCheckbox:
         }
         req.user.has_perm.return_value = True
         with (
-            patch("netbox_librenms_plugin.views.sync.modules.get_object_or_404", return_value=device),
+            patch(
+                "netbox_librenms_plugin.views.mixins.NetBoxObjectPermissionMixin.restrict_object_or_404",
+                return_value=device,
+            ),
             patch("netbox_librenms_plugin.views.sync.modules.render", return_value="R") as mock_render,
             patch("netbox_librenms_plugin.models.ModuleBayMapping") as mock_mapping_cls,
         ):
@@ -4783,7 +4863,10 @@ class TestAddBayTemplateViewMappingCheckbox:
         }
         req.user.has_perm.return_value = True
         with (
-            patch("netbox_librenms_plugin.views.sync.modules.get_object_or_404", return_value=device),
+            patch(
+                "netbox_librenms_plugin.views.mixins.NetBoxObjectPermissionMixin.restrict_object_or_404",
+                return_value=device,
+            ),
             patch("netbox_librenms_plugin.views.sync.modules.render", return_value="R") as mock_render,
             patch("netbox_librenms_plugin.models.ModuleBayMapping") as mock_mapping_cls,
         ):
@@ -4804,7 +4887,10 @@ class TestAddBayTemplateViewMappingCheckbox:
         }
         req.user.has_perm.return_value = False  # lacks add_modulebaymapping
         with (
-            patch("netbox_librenms_plugin.views.sync.modules.get_object_or_404", return_value=device),
+            patch(
+                "netbox_librenms_plugin.views.mixins.NetBoxObjectPermissionMixin.restrict_object_or_404",
+                return_value=device,
+            ),
             patch("netbox_librenms_plugin.views.sync.modules.render", return_value="R") as mock_render,
             patch("netbox_librenms_plugin.models.ModuleBayMapping") as mock_mapping_cls,
         ):
@@ -4830,7 +4916,10 @@ class TestAddBayTemplateViewMappingCheckbox:
         req.user.has_perm.return_value = True
         target = MagicMock()
         with (
-            patch("netbox_librenms_plugin.views.sync.modules.get_object_or_404", side_effect=[device, target]),
+            patch(
+                "netbox_librenms_plugin.views.mixins.NetBoxObjectPermissionMixin.restrict_object_or_404",
+                side_effect=[device, target],
+            ),
             patch("netbox_librenms_plugin.views.sync.modules.reverse", return_value="/sync/"),
             patch("netbox_librenms_plugin.views.sync.modules.transaction") as mock_tx,
             patch("netbox_librenms_plugin.views.sync.modules.messages") as mock_msg,
@@ -4872,7 +4961,10 @@ class TestAddBayTemplateViewMappingCheckbox:
         }
         req.user.has_perm.return_value = True
         with (
-            patch("netbox_librenms_plugin.views.sync.modules.get_object_or_404", side_effect=[device, MagicMock()]),
+            patch(
+                "netbox_librenms_plugin.views.mixins.NetBoxObjectPermissionMixin.restrict_object_or_404",
+                side_effect=[device, MagicMock()],
+            ),
             patch("netbox_librenms_plugin.views.sync.modules.reverse", return_value="/sync/"),
             patch("netbox_librenms_plugin.views.sync.modules.transaction") as mock_tx,
             patch("netbox_librenms_plugin.views.sync.modules.messages"),
@@ -4901,7 +4993,10 @@ class TestAddBayTemplateViewMappingCheckbox:
         }
         req.user.has_perm.return_value = True
         with (
-            patch("netbox_librenms_plugin.views.sync.modules.get_object_or_404", side_effect=[device, MagicMock()]),
+            patch(
+                "netbox_librenms_plugin.views.mixins.NetBoxObjectPermissionMixin.restrict_object_or_404",
+                side_effect=[device, MagicMock()],
+            ),
             patch("netbox_librenms_plugin.views.sync.modules.reverse", return_value="/sync/"),
             patch("netbox_librenms_plugin.views.sync.modules.transaction") as mock_tx,
             patch("netbox_librenms_plugin.views.sync.modules.messages"),
@@ -5125,7 +5220,10 @@ class TestAddBayTemplateViewRegexMapping:
         }
         req.user.has_perm.return_value = True
         with (
-            patch("netbox_librenms_plugin.views.sync.modules.get_object_or_404", return_value=device),
+            patch(
+                "netbox_librenms_plugin.views.mixins.NetBoxObjectPermissionMixin.restrict_object_or_404",
+                return_value=device,
+            ),
             patch("netbox_librenms_plugin.views.sync.modules.render", return_value="R") as mock_render,
             patch("netbox_librenms_plugin.models.ModuleBayMapping") as mock_mapping_cls,
         ):
@@ -5150,7 +5248,10 @@ class TestAddBayTemplateViewRegexMapping:
         }
         req.user.has_perm.return_value = True
         with (
-            patch("netbox_librenms_plugin.views.sync.modules.get_object_or_404", return_value=device),
+            patch(
+                "netbox_librenms_plugin.views.mixins.NetBoxObjectPermissionMixin.restrict_object_or_404",
+                return_value=device,
+            ),
             patch("netbox_librenms_plugin.views.sync.modules.render", return_value="R") as mock_render,
             patch("netbox_librenms_plugin.models.ModuleBayMapping") as mock_mapping_cls,
         ):
@@ -5176,7 +5277,10 @@ class TestAddBayTemplateViewRegexMapping:
         }
         req.user.has_perm.return_value = True
         with (
-            patch("netbox_librenms_plugin.views.sync.modules.get_object_or_404", return_value=device),
+            patch(
+                "netbox_librenms_plugin.views.mixins.NetBoxObjectPermissionMixin.restrict_object_or_404",
+                return_value=device,
+            ),
             patch("netbox_librenms_plugin.views.sync.modules.render", return_value="R") as mock_render,
             patch("netbox_librenms_plugin.models.ModuleBayMapping") as mock_mapping_cls,
         ):
@@ -5212,7 +5316,10 @@ class TestAddBayTemplateViewRegexMapping:
             }
         )
         with (
-            patch("netbox_librenms_plugin.views.sync.modules.get_object_or_404", side_effect=[device, target]),
+            patch(
+                "netbox_librenms_plugin.views.mixins.NetBoxObjectPermissionMixin.restrict_object_or_404",
+                side_effect=[device, target],
+            ),
             patch("netbox_librenms_plugin.views.sync.modules.reverse", return_value="/sync/"),
             patch("netbox_librenms_plugin.views.sync.modules.transaction") as mock_tx,
             patch("netbox_librenms_plugin.views.sync.modules.messages"),
@@ -5248,7 +5355,10 @@ class TestAddBayTemplateViewRegexMapping:
             }
         )
         with (
-            patch("netbox_librenms_plugin.views.sync.modules.get_object_or_404", side_effect=[device, target]),
+            patch(
+                "netbox_librenms_plugin.views.mixins.NetBoxObjectPermissionMixin.restrict_object_or_404",
+                side_effect=[device, target],
+            ),
             patch("netbox_librenms_plugin.views.sync.modules.reverse", return_value="/sync/"),
             patch("netbox_librenms_plugin.views.sync.modules.transaction") as mock_tx,
             patch("netbox_librenms_plugin.views.sync.modules.messages"),
@@ -5282,7 +5392,10 @@ class TestAddBayTemplateViewRegexMapping:
             }
         )
         with (
-            patch("netbox_librenms_plugin.views.sync.modules.get_object_or_404", side_effect=[device, target]),
+            patch(
+                "netbox_librenms_plugin.views.mixins.NetBoxObjectPermissionMixin.restrict_object_or_404",
+                side_effect=[device, target],
+            ),
             patch("netbox_librenms_plugin.views.sync.modules.reverse", return_value="/sync/"),
             patch("netbox_librenms_plugin.views.sync.modules.transaction") as mock_tx,
             patch("netbox_librenms_plugin.views.sync.modules.messages"),
@@ -5316,7 +5429,10 @@ class TestAddBayTemplateViewRegexMapping:
         existing = MagicMock()
         existing.librenms_name = r"^Sfm (\d+)$"
         with (
-            patch("netbox_librenms_plugin.views.sync.modules.get_object_or_404", side_effect=[device, target]),
+            patch(
+                "netbox_librenms_plugin.views.mixins.NetBoxObjectPermissionMixin.restrict_object_or_404",
+                side_effect=[device, target],
+            ),
             patch("netbox_librenms_plugin.views.sync.modules.reverse", return_value="/sync/"),
             patch("netbox_librenms_plugin.views.sync.modules.transaction") as mock_tx,
             patch("netbox_librenms_plugin.views.sync.modules.messages"),
@@ -5474,7 +5590,7 @@ class TestVCNormalizationReportView:
         with (
             patch.object(view, "require_object_permissions", return_value=None),
             patch(
-                "netbox_librenms_plugin.views.sync.modules.get_object_or_404",
+                "netbox_librenms_plugin.views.mixins.NetBoxObjectPermissionMixin.restrict_object_or_404",
                 return_value=device,
             ),
         ):
@@ -5495,7 +5611,7 @@ class TestVCNormalizationReportView:
         request = _make_request("GET", data={"module_id": str(module.pk)})
 
         with patch.object(view, "require_object_permissions", return_value=None):
-            response = view.get(request, pk=device.pk)
+            response = _get(view, request, pk=device.pk)
 
         assert response.status_code == 400
         assert b"nothing to report" in response.content.lower()
@@ -5520,7 +5636,7 @@ class TestVCNormalizationReportView:
                 return_value="rendered",
             ) as mock_render,
         ):
-            response = view.get(request, pk=device.pk)
+            response = _get(view, request, pk=device.pk)
 
         assert response == "rendered"
         ctx = mock_render.call_args[0][2]
@@ -5542,7 +5658,7 @@ class TestVCNormalizationReportView:
         with (
             patch.object(view, "require_object_permissions", return_value=None),
             patch(
-                "netbox_librenms_plugin.views.sync.modules.get_object_or_404",
+                "netbox_librenms_plugin.views.mixins.NetBoxObjectPermissionMixin.restrict_object_or_404",
                 side_effect=[device, module],
             ),
             patch(
@@ -5557,7 +5673,7 @@ class TestVCNormalizationReportView:
                 return_value=None,
             ),
         ):
-            response = view.get(request, pk=24)
+            response = _get(view, request, pk=24)
 
         mock_warn.assert_called_once_with(request)
         assert response.status_code == 400
@@ -5574,7 +5690,7 @@ class TestVCNormalizationReportView:
         with (
             patch.object(view, "require_object_permissions", return_value=None),
             patch(
-                "netbox_librenms_plugin.views.sync.modules.get_object_or_404",
+                "netbox_librenms_plugin.views.mixins.NetBoxObjectPermissionMixin.restrict_object_or_404",
                 return_value=device,
             ),
         ):
@@ -5895,7 +6011,10 @@ class TestReplaceModuleRedirectServerKey:
 
         with (
             patch.object(type(view), "librenms_api", new_callable=lambda: property(lambda s: mock_api)),
-            patch("netbox_librenms_plugin.views.sync.modules.get_object_or_404", return_value=MagicMock(pk=1)),
+            patch(
+                "netbox_librenms_plugin.views.mixins.NetBoxObjectPermissionMixin.restrict_object_or_404",
+                return_value=MagicMock(pk=1),
+            ),
             patch(
                 "netbox_librenms_plugin.views.sync.modules._resolve_target_device_with_validation",
                 return_value=(MagicMock(), False),
@@ -5937,7 +6056,10 @@ class TestUpdateModuleInterfaceRedirectServerKey:
 
         with (
             patch.object(view, "require_all_permissions", return_value=None),
-            patch("netbox_librenms_plugin.views.sync.modules.get_object_or_404", return_value=device),
+            patch(
+                "netbox_librenms_plugin.views.mixins.NetBoxObjectPermissionMixin.restrict_object_or_404",
+                return_value=device,
+            ),
             patch(
                 "netbox_librenms_plugin.views.sync.modules._resolve_target_device_with_validation",
                 return_value=(device, False),
@@ -5965,7 +6087,7 @@ class TestUpdateModuleInterfaceRedirectServerKey:
         with (
             patch.object(view, "require_all_permissions", return_value=None),
             patch(
-                "netbox_librenms_plugin.views.sync.modules.get_object_or_404",
+                "netbox_librenms_plugin.views.mixins.NetBoxObjectPermissionMixin.restrict_object_or_404",
                 side_effect=[device, module],
             ),
             patch(

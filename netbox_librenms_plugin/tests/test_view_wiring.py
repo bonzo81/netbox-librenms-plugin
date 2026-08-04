@@ -431,3 +431,291 @@ class TestSingleCableVerifyServerKey:
             assert mock_sync_device.call_args[1]["server_key"] == "fallback-server"
             cache_key_arg = mock_cache.get.call_args[0][0]
             assert "fallback-server" in cache_key_arg
+
+
+class TestGatedViewsResolveThroughRestrictedQuerysets:
+    """A view that declares required_object_permissions must not resolve an object by raw pk.
+
+    NetBoxObjectPermissionMixin asks ``has_perm`` WITHOUT an instance, so a CONSTRAINED grant (a
+    site-scoped change_device, say) clears the gate; a plain ``get_object_or_404`` behind it then
+    reads or writes an object outside that grant. This is a RECURRING defect class — the same
+    finding has landed on the cable remote picker, the LAG/parent relationship sync and the
+    move-to-winner endpoints — so it is enforced mechanically here instead of case by case.
+
+    Scope and limits: the scan flags ``get_object_or_404`` inside classes that assign
+    required_object_permissions themselves (statically or per-request). A raw lookup inherited from
+    an ungated base class is NOT seen, and neither is ``Model.objects.get(pk=...)``; both remain a
+    review matter.
+    """
+
+    @staticmethod
+    def _scan():
+        """Return {(module, class, line)} for gated view classes that resolve an object by raw pk."""
+        import ast
+        import pathlib
+
+        import netbox_librenms_plugin
+
+        def _is_scoped(node):
+            """Whether the first get_object_or_404 argument came from restricted_queryset(...)."""
+            # Accepts the chained form too: self.restricted_queryset(Module).select_related(...).
+            return any(
+                isinstance(inner, ast.Call) and getattr(inner.func, "attr", "") == "restricted_queryset"
+                for inner in ast.walk(node)
+            )
+
+        views_root = pathlib.Path(netbox_librenms_plugin.__file__).parent / "views"
+        offenders = set()
+        for path in sorted(views_root.rglob("*.py")):
+            tree = ast.parse(path.read_text(encoding="utf-8"), str(path))
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.ClassDef):
+                    continue
+                declares_gate = any(
+                    (isinstance(target, ast.Name) and target.id == "required_object_permissions")
+                    or (isinstance(target, ast.Attribute) and target.attr == "required_object_permissions")
+                    for sub in ast.walk(node)
+                    if isinstance(sub, ast.Assign)
+                    for target in sub.targets
+                )
+                if not declares_gate:
+                    continue
+                # The mixin that DEFINES restrict_object_or_404 is where the raw call belongs.
+                defines_helper = any(
+                    isinstance(sub, ast.FunctionDef) and sub.name == "restrict_object_or_404" for sub in node.body
+                )
+                if defines_helper:
+                    continue
+                for sub in ast.walk(node):
+                    if not (isinstance(sub, ast.Call) and getattr(sub.func, "id", None) == "get_object_or_404"):
+                        continue
+                    if not (sub.args and _is_scoped(sub.args[0])):
+                        offenders.add((str(path.relative_to(views_root)), node.name, sub.lineno))
+        return offenders
+
+    def test_no_gated_view_resolves_an_object_by_raw_pk(self):
+        """Every gated view resolves through restrict_object_or_404 / restricted_queryset, never a raw pk lookup."""
+        offenders = sorted(self._scan())
+        assert not offenders, (
+            "gated view(s) resolving an object by raw pk — a constrained grant clears the gate and "
+            f"then reaches objects outside it; use restrict_object_or_404: {offenders}"
+        )
+
+    def test_the_scan_recognizes_a_raw_lookup(self):
+        """Guard the guard: the scan must still flag the pattern it exists to catch."""
+        import ast
+
+        source = (
+            "class V:\n"
+            "    required_object_permissions = {'POST': []}\n"
+            "    def post(self, request, pk):\n"
+            "        return get_object_or_404(Device, pk=pk)\n"
+        )
+        tree = ast.parse(source)
+        calls = [n for n in ast.walk(tree) if isinstance(n, ast.Call) and getattr(n.func, "id", None)]
+        assert calls, "the fixture must contain a get_object_or_404 call"
+        scoped = any(
+            isinstance(inner, ast.Call) and getattr(inner.func, "attr", "") == "restricted_queryset"
+            for call in calls
+            for inner in ast.walk(call.args[0])
+            if call.args
+        )
+        assert not scoped  # a bare model argument is exactly what the scan must reject
+
+
+@pytest.mark.django_db
+class TestGatedViewsRefuseOutOfScopeObjects:
+    """The behavioural half of the guard above: a CONSTRAINED grant must not reach another object.
+
+    One representative view per family (device-field write, owner-scoped sync, module install) is
+    driven through the REAL gate and the REAL restrict(), so the structural scan cannot pass while
+    the runtime behaviour is broken.
+    """
+
+    @staticmethod
+    def _user(username, model_grants):
+        """A real non-superuser with plugin write plus ``model_grants`` = [(model, action, constraints)]."""
+        from core.models import ObjectType
+        from django.apps import apps
+        from django.contrib.auth import get_user_model
+        from users.models import ObjectPermission
+
+        LibreNMSSettings = apps.get_model("netbox_librenms_plugin", "LibreNMSSettings")
+
+        user = get_user_model().objects.create_user(username=username, password="x")
+        plugin = ObjectPermission.objects.create(name=f"{username}-plugin", actions=["view", "change"])
+        plugin.object_types.set([ObjectType.objects.get_for_model(LibreNMSSettings)])
+        plugin.users.set([user])
+        for i, (model, action, constraints) in enumerate(model_grants):
+            perm = ObjectPermission.objects.create(
+                name=f"{username}-{action}-{i}", actions=[action], constraints=constraints
+            )
+            perm.object_types.set([ObjectType.objects.get_for_model(model)])
+            perm.users.set([user])
+        return get_user_model().objects.get(pk=user.pk)  # reload to clear the perm cache
+
+    @staticmethod
+    def _request(user, data, method="post"):
+        from django.contrib.messages.storage.fallback import FallbackStorage
+        from django.test import RequestFactory
+
+        factory = RequestFactory()
+        request = getattr(factory, method)("/x/", data)
+        request.user = user
+        request.session = {}
+        request._messages = FallbackStorage(request)
+        return request
+
+    def test_device_field_write_404s_a_device_outside_the_grant(self):
+        """UpdateDeviceNameView writes the device itself, so a pk-constrained change_device must not reach another one."""
+        from dcim.models import Device
+        from django.http import Http404
+
+        from netbox_librenms_plugin.tests.conftest import make_device
+        from netbox_librenms_plugin.views.sync.device_fields import UpdateDeviceNameView
+
+        in_scope = make_device("scope-devfield-in")
+        out_of_scope = make_device("scope-devfield-out")
+        original_name = out_of_scope.name
+        user = self._user("scope-devfield", [(Device, "change", {"pk": in_scope.pk})])
+
+        view = UpdateDeviceNameView()
+        request = self._request(user, {"server_key": "default"})
+        view.setup(request)
+        with pytest.raises(Http404):
+            view.post(request, pk=out_of_scope.pk)
+
+        out_of_scope.refresh_from_db()
+        assert out_of_scope.name == original_name  # untouched
+
+    def test_ip_sync_404s_an_owner_outside_the_grant(self):
+        """SyncIPAddressesView resolves the owner device by URL pk; a scoped view_device must not reach another."""
+        from dcim.models import Device
+        from django.http import Http404
+        from ipam.models import IPAddress
+
+        from netbox_librenms_plugin.tests.conftest import make_device
+        from netbox_librenms_plugin.views.sync.ip_addresses import SyncIPAddressesView
+
+        in_scope = make_device("scope-ipsync-in")
+        out_of_scope = make_device("scope-ipsync-out")
+        user = self._user(
+            "scope-ipsync",
+            [
+                (Device, "view", {"pk": in_scope.pk}),
+                (IPAddress, "add", None),
+                (IPAddress, "change", None),
+            ],
+        )
+
+        view = SyncIPAddressesView()
+        request = self._request(user, {"server_key": "default", "select": ["10.0.0.1"]})
+        view.setup(request)
+        with pytest.raises(Http404):
+            view.post(request, object_type="device", pk=out_of_scope.pk)
+
+    def test_module_install_404s_a_page_device_outside_the_grant(self):
+        """InstallModuleView resolves the page device by URL pk before touching modules."""
+        from dcim.models import Device, Interface, Module
+        from django.http import Http404
+
+        from netbox_librenms_plugin.tests.conftest import make_device
+        from netbox_librenms_plugin.views.sync.modules import InstallModuleView
+
+        in_scope = make_device("scope-modinstall-in")
+        out_of_scope = make_device("scope-modinstall-out")
+        user = self._user(
+            "scope-modinstall",
+            [
+                (Device, "view", {"pk": in_scope.pk}),
+                (Module, "add", None),
+                (Interface, "add", None),
+                (Interface, "change", None),
+                (Interface, "delete", None),
+            ],
+        )
+
+        view = InstallModuleView()
+        request = self._request(user, {"server_key": "default"})
+        view.setup(request)
+        with pytest.raises(Http404):
+            view.post(request, pk=out_of_scope.pk)
+
+    def test_in_scope_object_still_resolves(self):
+        """The device the grant DOES cover passes the lookup — the scoping must not over-block."""
+        from dcim.models import Device
+
+        from netbox_librenms_plugin.tests.conftest import make_device
+        from netbox_librenms_plugin.views.sync.device_fields import UpdateDeviceNameView
+
+        device = make_device("scope-devfield-ok")
+        user = self._user("scope-devfield-ok", [(Device, "change", {"pk": device.pk})])
+
+        view = UpdateDeviceNameView()
+        request = self._request(user, {"server_key": "default"})
+        view.setup(request)
+        # No LibreNMS mapping on this device, so the view refuses on its MERITS (a flash message +
+        # redirect), not with a 404 at the lookup — proof the restricted queryset resolved it.
+        response = view.post(request, pk=device.pk)
+        assert response.status_code in (200, 302)
+
+
+class TestCacheKeysAreServerScoped:
+    """Every production cache key is namespaced by the LibreNMS server it belongs to.
+
+    Multi-server scoping is the most repeated finding class in this stack's review history: a
+    reader or writer that drops ``server_key`` silently addresses the DEFAULT server's namespace,
+    so a refresh on server B renders an empty table, or one server's snapshot lands where another
+    server's readers look. Every site was fixed one at a time; this keeps the class from returning.
+
+    The helpers take ``server_key`` last, so a call is scoped when it passes the keyword or enough
+    positional arguments to reach it.
+    """
+
+    # helper name -> number of positional args needed to reach server_key
+    HELPERS = {"get_cache_key": 3, "get_last_fetched_key": 3, "get_vlan_overrides_key": 2}
+
+    @classmethod
+    def _scan(cls):
+        """Return ["<file>:<line> <helper>"] for production cache-key calls with no server_key."""
+        import ast
+        import pathlib
+
+        import netbox_librenms_plugin
+
+        package_root = pathlib.Path(netbox_librenms_plugin.__file__).parent
+        unscoped = []
+        for path in sorted(package_root.rglob("*.py")):
+            if "tests" in path.parts:
+                continue
+            tree = ast.parse(path.read_text(encoding="utf-8"), str(path))
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.Call):
+                    continue
+                helper = getattr(node.func, "attr", "")
+                if helper not in cls.HELPERS:
+                    continue
+                keyed = any(kw.arg == "server_key" for kw in node.keywords) or len(node.args) >= cls.HELPERS[helper]
+                if not keyed:
+                    unscoped.append(f"{path.relative_to(package_root)}:{node.lineno} {helper}")
+        return unscoped
+
+    def test_every_cache_key_call_passes_a_server_key(self):
+        """A cache key built without server_key addresses the default server's namespace."""
+        unscoped = self._scan()
+        assert not unscoped, (
+            "cache key(s) built without a server_key — they address the default server's namespace, "
+            f"so another server's readers never see the entry: {unscoped}"
+        )
+
+    def test_the_helpers_still_take_server_key_last(self):
+        """Guard the guard: the positional-arity assumption above must match the real signatures."""
+        import inspect
+
+        from netbox_librenms_plugin.views.mixins import CacheMixin
+
+        for helper, position in self.HELPERS.items():
+            params = list(inspect.signature(getattr(CacheMixin, helper)).parameters)
+            assert params[-1] == "server_key", f"{helper} no longer takes server_key last: {params}"
+            # params includes self, so the positional count to reach server_key is len(params) - 1.
+            assert len(params) - 1 == position, f"{helper} arity changed — update HELPERS: {params}"

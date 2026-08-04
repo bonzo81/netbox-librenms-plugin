@@ -3,7 +3,6 @@ import copy
 from dcim.models import Device
 from django.core.cache import cache
 from django.http import JsonResponse
-from django.shortcuts import get_object_or_404
 from django.urls import reverse
 from django.views import View
 from ipam.models import VLAN
@@ -408,7 +407,7 @@ class SingleVlanGroupVerifyView(LibreNMSPermissionMixin, NetBoxObjectPermissionM
 
         # Build lookup for the selected group
         if vlan_group_id:
-            vlan_group = get_object_or_404(VLANGroup, pk=vlan_group_id)
+            vlan_group = self.restrict_object_or_404(VLANGroup, pk=vlan_group_id)
             # Get VLANs in selected group + global VLANs
             group_vids = set(VLAN.objects.filter(group=vlan_group).values_list("vid", flat=True))
             global_vids = set(VLAN.objects.filter(group__isnull=True).values_list("vid", flat=True))
@@ -539,7 +538,7 @@ class VerifyVlanSyncGroupView(LibreNMSPermissionMixin, NetBoxObjectPermissionMix
 
         # Check if VLAN exists in the selected group (or globally)
         if vlan_group_id:
-            vlan_group = get_object_or_404(VLANGroup, pk=vlan_group_id)
+            vlan_group = self.restrict_object_or_404(VLANGroup, pk=vlan_group_id)
             netbox_vlan = VLAN.objects.filter(vid=vid, group=vlan_group).first()
         else:
             # No group = global VLANs
