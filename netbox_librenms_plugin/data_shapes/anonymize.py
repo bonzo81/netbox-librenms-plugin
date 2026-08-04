@@ -26,6 +26,9 @@ field rules missed, so a human (or the mgmt command) can catch leaks before publ
 
 import hashlib
 import re
+from typing import NamedTuple
+
+from netbox_librenms_plugin.data_shapes.ports import compile_lag_patterns, name_matches_lag_pattern
 
 # Logic-bearing fields the sync/detection/relationship code reads — never altered.
 # NOTE: ifName/ifDescr are NOT here — they carry real infra (custom names, "** host **"
@@ -325,7 +328,14 @@ def _synthetic_mac(value, salt):
     return f"{_SYNTH_MAC_PREFIX}:{digest[0:2]}:{digest[2:4]}:{digest[4:6]}"
 
 
-def _anon_interface_name(value, salt):
+# A name preserved only because the recording's own LAG patterns match it must still LOOK like a
+# machine port name: those patterns are operator-authored (and, in a downloaded recording,
+# untrusted), so a sloppy one like "^.+$" would otherwise preserve every free-text label verbatim.
+# Aggregate-numbered, no spaces and no '_' (both mark free text like "to_core-rtr Customer A").
+_LAG_NAME_SHAPE_RE = re.compile(r"^[A-Za-z][A-Za-z0-9./:-]{0,30}\d$")
+
+
+def _anon_interface_name(value, rules):
     """
     Anonymize an ifName/ifDescr while preserving the logic-bearing port-name token.
 
@@ -337,7 +347,7 @@ def _anon_interface_name(value, salt):
 
     Args:
         value (str): The raw ifName/ifDescr value.
-        salt (str): Salt mixed into the pseudonym hash.
+        rules (_Rules): The recording-derived rules (salt + compiled LAG patterns).
 
     Returns:
         str: The preserved token, or a stable pseudonym.
@@ -348,7 +358,13 @@ def _anon_interface_name(value, salt):
         # Whole value is a port name → keep it; otherwise it had a free-text tail → keep only
         # the token (e.g. "lag2, IP interface, ** core-rtr ae42 **" → "lag2").
         return token
-    return f"iface-{_hash(value, salt)}"
+    # A name the recording's OWN lag_patterns recognize is logic-bearing even when the built-in
+    # prefix list doesn't know it (the patterns are captured precisely because an operator can name
+    # aggregates their own way). Hashing it would leave the pattern matching nothing, so replay
+    # stops seeing the aggregate at all — the shape the recording exists to reproduce.
+    if _LAG_NAME_SHAPE_RE.match(value) and name_matches_lag_pattern(value, rules.lag_patterns):
+        return value
+    return f"iface-{_hash(value, rules.salt)}"
 
 
 # A default Avocent serial-port label is a generic, device-agnostic port name: a known serial/console
@@ -362,7 +378,7 @@ _SERIAL_DEFAULT_LABEL_RE = re.compile(
 )
 
 
-def _anon_serial_label(value, salt):
+def _anon_serial_label(value, rules):
     """
     Anonymize a serial-port sensor description while preserving the is_configured outcome.
 
@@ -374,14 +390,19 @@ def _anon_serial_label(value, salt):
 
     Args:
         value (str): The raw sensor_descr value.
-        salt (str): Salt mixed into the pseudonym hash.
+        rules (_Rules): The recording-derived rules (salt + default serial-label matchers).
 
     Returns:
         str: The preserved default label, or a stable hostname pseudonym.
     """
+    # The recording's own serial_type_patterns come first: THEY define what the default port name
+    # is (the seeded Cisco map is "Line {N}", which the built-in prefix list below does not know).
+    # Hashing such a label would flip is_configured False -> True on replay.
+    if any(matcher.match(value) for matcher in rules.serial_default_labels):
+        return value
     if _SERIAL_DEFAULT_LABEL_RE.match(value):
         return value
-    return f"device-{_hash(value, salt)}"
+    return f"device-{_hash(value, rules.salt)}"
 
 
 def _anon_oid(value, salt):
@@ -397,8 +418,9 @@ def _anon_asn(value, salt):
     return 64512 + int(_hash(str(value), salt, 4), 16) % 1023
 
 
-def _anon_value(key, value, salt):
+def _anon_value(key, value, rules):
     """Apply the field rule for a single scalar (non-container) value keyed by *key*."""
+    salt = rules.salt
     if key in PRESERVE_KEYS:
         return value
     if key in GEO_KEYS:
@@ -411,9 +433,9 @@ def _anon_value(key, value, salt):
         # and non-strings (ints, bools, null) untouched so logic-bearing numerics survive.
         return value
     if key in INTERFACE_NAME_KEYS:
-        return _anon_interface_name(value, salt)
+        return _anon_interface_name(value, rules)
     if key in SERIAL_LABEL_KEYS:
-        return _anon_serial_label(value, salt)
+        return _anon_serial_label(value, rules)
     if key in SERIAL_KEYS:
         return f"SN-{_hash(value, salt)}"
     if key in HOSTNAME_KEYS:
@@ -443,12 +465,60 @@ def _anon_value(key, value, salt):
     return value
 
 
-def _walk(obj, salt):
+class _Rules(NamedTuple):
+    """The per-recording anonymization context threaded through the walk."""
+
+    salt: str = ""
+    # Compiled LAG name patterns captured WITH the recording (see _anon_interface_name).
+    lag_patterns: tuple = ()
+    # Compiled "this is the default port label" matchers built from the recording's
+    # serial_type_patterns (see _anon_serial_label).
+    serial_default_labels: tuple = ()
+
+
+# A serial port_name_pattern is a short template like "ttyS{N}" / "Line {N}" (the model caps it at
+# 100 chars), and a recording carries one per recognized vendor sensor table. Bound both, mirroring
+# the LAG-pattern caps, so a downloaded recording can't hand us thousands of long templates.
+_MAX_SERIAL_PATTERNS = 100
+_MAX_SERIAL_PATTERN_LEN = 100
+
+
+def _compile_serial_default_labels(recording):
+    r"""
+    Build the "default serial label" matchers from a recording's ``serial_type_patterns``.
+
+    ``map_sensors_to_serial_links`` names the local port by ``port_name_pattern.format(N=<port>)``
+    and reads ``is_configured`` from whether the sensor label differs from that name — so what
+    counts as a DEFAULT label is defined by the recording's own patterns, not by a fixed prefix
+    list. The literal parts are re.escape'd and only ``{N}`` becomes ``\\d+``, so the result carries
+    no quantifier the (untrusted) template could have supplied.
+
+    Args:
+        recording (dict): A recording; a missing/non-dict map yields no matchers.
+
+    Returns:
+        tuple[re.Pattern, ...]: Matchers accepting the rendered name, with LibreNMS's optional
+            trailing " Status" suffix.
+    """
+    patterns = recording.get("serial_type_patterns")
+    patterns = patterns if isinstance(patterns, dict) else {}
+    compiled = []
+    for template in list(patterns.values())[:_MAX_SERIAL_PATTERNS]:
+        if not isinstance(template, str) or "{N}" not in template or len(template) > _MAX_SERIAL_PATTERN_LEN:
+            continue
+        head, _, tail = template.partition("{N}")
+        compiled.append(re.compile(rf"^{re.escape(head)}\d+{re.escape(tail)}(?: Status)?$", re.IGNORECASE))
+    return tuple(compiled)
+
+
+def _walk(obj, rules):
     """Recursively anonymize a parsed JSON body (dict/list/scalar)."""
     if isinstance(obj, dict):
-        return {k: (_walk(v, salt) if isinstance(v, (dict, list)) else _anon_value(k, v, salt)) for k, v in obj.items()}
+        return {
+            k: (_walk(v, rules) if isinstance(v, (dict, list)) else _anon_value(k, v, rules)) for k, v in obj.items()
+        }
     if isinstance(obj, list):
-        return [_walk(item, salt) for item in obj]
+        return [_walk(item, rules) for item in obj]
     return obj
 
 
@@ -470,7 +540,14 @@ def anonymize_recording(recording, *, salt=""):
         dict: A new recording with anonymized ``responses`` and a neutral name/description.
     """
     out = dict(recording)
-    out["responses"] = {key: _walk(body, salt) for key, body in recording.get("responses", {}).items()}
+    # The recording's own LAG / serial-label patterns decide which names are logic-bearing, so they
+    # are compiled once here and threaded through the walk.
+    rules = _Rules(
+        salt=salt,
+        lag_patterns=tuple(compile_lag_patterns(recording)),
+        serial_default_labels=_compile_serial_default_labels(recording),
+    )
+    out["responses"] = {key: _walk(body, rules) for key, body in recording.get("responses", {}).items()}
     # Pseudonymize meta.os too (it's outside `responses`, so _walk doesn't reach it) and key the
     # neutral name off the pseudonymized token, so neither the metadata nor the name leaks the OS.
     meta = dict(recording.get("meta") or {})

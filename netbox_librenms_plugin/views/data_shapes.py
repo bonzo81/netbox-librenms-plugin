@@ -8,6 +8,7 @@ near zero. Read-only: it hits LibreNMS but mutates nothing in NetBox.
 """
 
 import json
+import secrets
 from urllib.parse import urlencode
 
 from dcim.models import Device
@@ -81,7 +82,11 @@ class CaptureDataShapeView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin,
         # exactly what relationship resolution reads — so the shape stays intact while the recording
         # the contributor submits is small and reviewable.
         recording = compress_recording(recording)
-        anonymized = anonymize_recording(recording)
+        # A fresh high-entropy salt per capture. The pseudonyms only need to be consistent WITHIN
+        # one recording (that is what keeps cross-references matching), and the contributor
+        # publishes this file: with the empty default salt, a sha256 of a low-entropy value like a
+        # hostname is recoverable by hashing candidates from a dictionary.
+        anonymized = anonymize_recording(recording, salt=secrets.token_hex(16))
         signature = compute_shape_signature(anonymized)
         novelty = classify_novelty(signature, recordings_store.load_manifest())
         residual_pii = find_pii(anonymized)

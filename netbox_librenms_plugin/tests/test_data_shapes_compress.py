@@ -282,3 +282,30 @@ def test_build_name_index_scans_ifdescr_and_drops_ambiguous():
     assert index["xe-0/0/0"]["port_id"] == 2
     # A name two distinct ports carry is dropped entirely (can't disambiguate which port it means).
     assert "dup" not in index
+
+
+def test_pattern_matched_lag_port_is_never_deduped_away():
+    """A LAG detected by NAME pattern (Cisco "Po1" is propVirtual, not ieee8023adLag) must keep a fingerprint of its own — otherwise it shares one with any plain propVirtual port and compression drops the device's only LAG, flipping the signature's lag axis."""
+    recording = {
+        "schema_version": 1,
+        "name": "cisco-lag",
+        "device_id": 1,
+        "lag_patterns": {"ios": r"^Po\d+$"},
+        "responses": {
+            "GET /api/v0/devices/1/ports": {
+                "status": "ok",
+                "ports": [
+                    _port(1, "Vlan10", "propVirtual"),  # same ifType, no relationship, listed first
+                    _port(2, "Po1", "propVirtual"),  # the aggregate, recognized only by name
+                ],
+            }
+        },
+    }
+
+    out = compress_recording(recording)
+
+    kept = {p["ifName"] for p in out["responses"]["GET /api/v0/devices/1/ports"]["ports"]}
+    assert kept == {"Vlan10", "Po1"}
+    # The invariant this module promises: the signature is unchanged by compression.
+    assert compute_shape_signature(out)["lag"] == compute_shape_signature(recording)["lag"]
+    assert compute_shape_signature(out)["lag"]["present"] is True

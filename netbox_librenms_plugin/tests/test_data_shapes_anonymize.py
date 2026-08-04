@@ -890,3 +890,80 @@ def test_serial_sensor_short_hostname_label_is_pseudonymized():
     descr = anonymize_recording(rec)["responses"]["GET /api/v0/resources/sensors"]["sensors"][0]["sensor_descr"]
     assert descr.startswith("device-")
     assert "core1" not in descr
+
+
+def _sensors(*sensor_dicts, serial_type_patterns=None):
+    rec = {
+        "schema_version": 1,
+        "name": "serial",
+        "device_id": 1,
+        "responses": {"GET /api/v0/resources/sensors": {"status": "ok", "sensors": list(sensor_dicts)}},
+    }
+    if serial_type_patterns is not None:
+        rec["serial_type_patterns"] = serial_type_patterns
+    return rec
+
+
+def test_lag_name_matched_by_the_recordings_own_pattern_survives():
+    """A name the recording's OWN captured lag_patterns recognize stays verbatim — hashing it would leave the pattern matching nothing, so replay stops seeing the aggregate."""
+    rec = _ports({"port_id": 1, "ifName": "agg7", "ifType": "propVirtual"})
+    rec["lag_patterns"] = {"myos": r"^agg\d+$"}
+
+    anon = anonymize_recording(rec)
+
+    assert anon["responses"]["GET /api/v0/devices/1/ports"]["ports"][0]["ifName"] == "agg7"
+
+
+def test_lag_pattern_cannot_preserve_free_text():
+    """The captured patterns are operator-authored, so a sloppy catch-all must NOT turn the preserve rule into a leak of every annotated interface name."""
+    rec = _ports({"port_id": 1, "ifName": "to_core-rtr Customer A", "ifType": "propVirtual"})
+    rec["lag_patterns"] = {"myos": "^.+$"}
+
+    name = anonymize_recording(rec)["responses"]["GET /api/v0/devices/1/ports"]["ports"][0]["ifName"]
+
+    assert name.startswith("iface-")
+    assert "core-rtr" not in name
+
+
+def test_serial_default_label_from_the_recordings_own_patterns_is_preserved():
+    """The recording's serial_type_patterns define the default label (the seeded Cisco map is "Line {N}", which no built-in prefix rule knows), and hashing such a label would flip is_configured False -> True on replay."""
+    rec = _sensors(
+        {
+            "sensor_id": 1,
+            "device_id": 1,
+            "sensor_type": "ciscoAsyncLine",
+            "sensor_index": "ciscoAsyncLine.3",
+            "sensor_descr": "Line 3",
+        },
+        serial_type_patterns={"ciscoAsyncLine": "Line {N}"},
+    )
+
+    anon = anonymize_recording(rec)
+    sensors = anon["responses"]["GET /api/v0/resources/sensors"]["sensors"]
+
+    assert sensors[0]["sensor_descr"] == "Line 3"
+    # The outcome the label feeds resolves identically before and after anonymization.
+    types = {"ciscoAsyncLine": "Line {N}"}
+    raw_sensors = rec["responses"]["GET /api/v0/resources/sensors"]["sensors"]
+    raw = map_sensors_to_serial_links(raw_sensors, device_id=1, sensor_types=types)
+    anonymized = map_sensors_to_serial_links(sensors, device_id=1, sensor_types=types)
+    assert [r["is_configured"] for r in raw] == [r["is_configured"] for r in anonymized] == [False]
+
+
+def test_serial_custom_label_still_pseudonymized_under_a_captured_pattern():
+    """The default-label rule must not become a blanket keep: a customised label is a hostname."""
+    rec = _sensors(
+        {
+            "sensor_id": 1,
+            "device_id": 1,
+            "sensor_type": "ciscoAsyncLine",
+            "sensor_index": "ciscoAsyncLine.3",
+            "sensor_descr": "core-rtr01",
+        },
+        serial_type_patterns={"ciscoAsyncLine": "Line {N}"},
+    )
+
+    descr = anonymize_recording(rec)["responses"]["GET /api/v0/resources/sensors"]["sensors"][0]["sensor_descr"]
+
+    assert descr.startswith("device-")
+    assert "core-rtr01" not in descr

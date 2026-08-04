@@ -545,16 +545,16 @@ def test_signature_lag_name_prefix_ignores_aggregate_number_for_sub_units():
 
 def test_is_redos_prone_flags_nested_quantifiers_but_not_real_lag_patterns():
     """The ReDoS guard flags nested unbounded quantifiers (the ^(a+)+$ class), not real LAG patterns."""
-    from netbox_librenms_plugin.data_shapes import signature
+    from netbox_librenms_plugin.data_shapes import ports
 
     for evil in (r"^(a+)+$", r"(a*)*", r"(a+)*", r"(.*x)+", r"(ab+)+"):
-        assert signature._is_redos_prone(evil) is True, evil
+        assert ports.is_redos_prone(evil) is True, evil
     for ok in (r"^Po\d+$", r"^Port-channel\d+$", r"^ae\d+$", r"^Bundle-Ether\d+$", r"^(Po|Te)\d+$", r"bond\d+"):
-        assert signature._is_redos_prone(ok) is False, ok
+        assert ports.is_redos_prone(ok) is False, ok
     # A non-string and an over-long (garbage/suspect) pattern are also refused — the latter bounds the
     # detector's own scan cost on an adversarial input.
-    assert signature._is_redos_prone(None) is True
-    assert signature._is_redos_prone("(" * 500) is True
+    assert ports.is_redos_prone(None) is True
+    assert ports.is_redos_prone("(" * 500) is True
 
 
 def test_signature_skips_redos_prone_untrusted_lag_pattern():

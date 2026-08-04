@@ -11,6 +11,12 @@ match and a reason, never an authoritative decision.
 import re
 
 from netbox_librenms_plugin.data_shapes.anonymize import pseudonymize_os
+from netbox_librenms_plugin.data_shapes.ports import (
+    compile_lag_patterns,
+    port_has_vlan,
+    port_is_lag,
+    port_names,
+)
 
 # Vendor kinship for the *similarity* signal only — NOT for collapsing distinct OSes into one
 # "covered" verdict. ios / iosxr / nxos share a vendor but their ifName/ifDescr conventions differ,
@@ -78,20 +84,6 @@ def _inventory_items(body):
     return []
 
 
-def port_has_vlan(port):
-    """
-    Return whether a port row carries real VLAN data (the signature's ``vlans`` axis predicate).
-
-    Keyed on the VALUE, not mere key presence: ``ifVlan`` ``None``/``""``/``0``/``"0"`` (LibreNMS's
-    no-/default-VLAN sentinels — ifVlan is string-valued JSON elsewhere in the client, so the
-    string ``"0"`` is the same sentinel as the int ``0``) do NOT count, only a real id or a
-    non-empty ``vlans`` list. The compressor's port fingerprint imports this so its VLAN axis stays
-    in lockstep with the signature (otherwise two same-shape ports — one with ``ifVlan: 0``/``None``
-    — could collapse to a representative whose value flips the signature's vlans axis).
-    """
-    return port.get("ifVlan") not in (None, "", 0, "0") or bool(port.get("vlans"))
-
-
 def _ports(recording):
     """Return the HOST device's ports list (anchored on devices/<device_id>/ports), or []."""
     # Anchor on the host device_id exactly as compress.py does, so an OOB recording carrying a second
@@ -107,49 +99,6 @@ def _ports(recording):
     if isinstance(body, dict) and isinstance(body.get("ports"), list):
         return [p for p in body["ports"] if isinstance(p, dict)]
     return []
-
-
-# Upper bound on the interface name fed to an untrusted (recording-supplied) LAG regex. This trims the
-# input a well-behaved pattern scans; it is NOT a ReDoS defense on its own — a nested unbounded
-# quantifier backtracks exponentially in the input length, so no practical length cap tames it (that's
-# what _is_redos_prone below is for). Real interface names are well under this; a longer one is
-# anonymized garbage that never needs LAG name-pattern classification.
-_MAX_LAG_NAME_LEN = 256
-
-# lag_patterns in a community-submitted recording are UNTRUSTED regexes that --validate compiles and
-# matches in CI. A length cap on the search input cannot bound catastrophic backtracking, so refuse to
-# compile a pattern whose structure is the classic ReDoS shape — a group that itself contains an
-# unbounded quantifier and is again unbounded-quantified (``^(a+)+$``, ``(a*)*``, ``(a+){2,}``) — and
-# cap how many patterns are compiled at all. This is a heuristic, not a guarantee (it won't catch every
-# pathological regex, e.g. overlapping alternation); the real gates remain human review of submissions
-# and the CI job timeout. A skipped pattern is simply not used for LAG-name classification (a lossless
-# nudge), exactly like the non-string/typo'd patterns already skipped below.
-_MAX_LAG_PATTERNS = 100
-# Bound the untrusted pattern length before running the detector on it: a real LAG pattern is short
-# (``^Bundle-Ether\d+$`` is ~17 chars), and capping keeps the O(n^2) worst case of the detector's own
-# scan on a pathological all-``(`` string trivially small — an over-long pattern is garbage/suspect and
-# never needs LAG classification, so it's treated as ReDoS-prone (skipped) too.
-_MAX_LAG_PATTERN_LEN = 200
-_NESTED_QUANTIFIER_RE = re.compile(r"\([^()]*[*+][^()]*\)\s*[*+]|\([^()]*[*+][^()]*\)\{\d*,\}")
-
-
-def _is_redos_prone(pattern):
-    """
-    Return whether *pattern* is unsafe to compile+match as an untrusted LAG regex.
-
-    Rejects a non-string, an over-long pattern (garbage/suspect, and it bounds this check's own cost),
-    and the classic catastrophic-backtracking shape — a group that itself contains an unbounded
-    quantifier and is again unbounded-quantified (``^(a+)+$``, ``(a*)*``, ``(a+){2,}``).
-
-    Args:
-        pattern: A candidate regex string (untrusted, from a recording's ``lag_patterns``).
-
-    Returns:
-        True if the pattern must be skipped rather than compiled and applied.
-    """
-    if not isinstance(pattern, str) or len(pattern) > _MAX_LAG_PATTERN_LEN:
-        return True
-    return _NESTED_QUANTIFIER_RE.search(pattern) is not None
 
 
 def compute_shape_signature(recording):
@@ -201,50 +150,19 @@ def compute_shape_signature(recording):
     # would fingerprint a pattern-based LAG shape (e.g. Cisco "Po1") as lag.present=False, collapsing
     # a real LAG into a non-LAG novelty bucket.
     ports = _ports(recording)
-    compiled_lag_patterns = []
-    # Same normalize-before-access as meta above: a truthy non-dict lag_patterns (e.g. a list)
-    # has no .values() and must degrade to "no patterns", not crash --validate.
-    lag_patterns = recording.get("lag_patterns")
-    lag_patterns = lag_patterns if isinstance(lag_patterns, dict) else {}
-    for pattern_str in list(lag_patterns.values())[:_MAX_LAG_PATTERNS]:
-        # recording lag_patterns are untrusted (community-submitted): skip a ReDoS-prone pattern
-        # (a length cap can't bound its backtracking — see _is_redos_prone) before compiling, and
-        # skip a typo'd regex (re.error) or a non-string value (TypeError on re.compile) — not
-        # crashed — mirroring resolve_port_relationships' explicit-pattern hardening.
-        if _is_redos_prone(pattern_str):
-            continue
-        try:
-            compiled_lag_patterns.append(re.compile(pattern_str))
-        except (re.error, TypeError):
-            continue
-
-    def _lag_names(port):
-        return [n for n in (port.get("ifName"), port.get("ifDescr")) if isinstance(n, str) and n]
-
-    def _is_lag_port(port):
-        if port.get("ifType") == "ieee8023adLag":
-            return True
-        # Bound the untrusted name length before applying an untrusted regex — see _MAX_LAG_NAME_LEN.
-        return any(
-            pat.search(name)
-            for pat in compiled_lag_patterns
-            for name in _lag_names(port)
-            if len(name) <= _MAX_LAG_NAME_LEN
-        )
-
-    lag_ports = [p for p in ports if _is_lag_port(p)]
-    lag_port_names = [name for p in lag_ports for name in _lag_names(p)]
+    compiled_lag_patterns = compile_lag_patterns(recording)
+    lag_ports = [p for p in ports if port_is_lag(p, compiled_lag_patterns)]
+    lag_port_names = [name for p in lag_ports for name in port_names(p)]
     # name_prefix is the LAG naming CONVENTION. Strip a trailing sub-unit (".N") BEFORE the aggregate
     # number so a first LAG port of "ae1.0" yields "ae" (like "ae2.0"), not "ae1." — the arbitrary
     # aggregate number is not a structural difference between two ae<N>.<unit> devices.
     name_prefix = re.sub(r"\d+$", "", re.sub(r"\.\d+$", "", lag_port_names[0])) if lag_port_names else None
     sub_styles = set()
     for p in ports:
-        # Scan BOTH name fields like every neighbouring detector (_lag_names above,
-        # compress._fingerprint, resolve_port_relationships): on ifDescr-mode devices the
-        # structured ".N" sub-unit name lives in ifDescr while ifName carries an arbitrary
-        # (anonymized) label, and an ifName-only scan fingerprints them as sub-interface-free.
-        for name in _lag_names(p):
+        # Scan BOTH name fields (port_names) like every neighbouring detector: on ifDescr-mode
+        # devices the structured ".N" sub-unit name lives in ifDescr while ifName carries an
+        # arbitrary (anonymized) label, and an ifName-only scan reads them as sub-interface-free.
+        for name in port_names(p):
             if re.search(r"\.\d+$", name):
                 sub_styles.add("dot-numeric")
     port_stack_body = _body(recording, lambda k: k.endswith("/port_stack"))

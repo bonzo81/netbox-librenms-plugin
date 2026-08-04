@@ -48,7 +48,10 @@ def test_capture_button_reads_server_key_from_url_in_shipped_template():
 
 def _superuser_request(query=""):
     request = RequestFactory().get(f"/{query}")
-    request.user = get_user_model().objects.create(username="cap-admin", is_superuser=True, is_active=True)
+    # get_or_create, not create: a test that captures twice (the per-capture salt one) reuses it.
+    request.user, _ = get_user_model().objects.get_or_create(
+        username="cap-admin", defaults={"is_superuser": True, "is_active": True}
+    )
     return request
 
 
@@ -344,3 +347,20 @@ def test_capture_view_denies_device_outside_users_object_scope(recording_server)
         # Out-of-scope id must 404 (fail-closed), never render the device's captured shape.
         with pytest.raises(Http404):
             view.get(request, device_id=target.pk)
+
+
+@pytest.mark.django_db
+def test_capture_view_salts_every_capture_freshly(recording_server):
+    """The contributor publishes this file, so the pseudonyms must not be a plain hash of low-entropy values: a fresh per-capture salt makes two captures of the SAME device produce different pseudonyms (dictionary-hashing a candidate hostname no longer confirms it)."""
+    import re
+
+    server, api = recording_server(load_recording("cisco-stackwise-3member"))
+    device = make_device("cap-dev-salt", librenms_cf={"test": {"id": 1000}})
+
+    first = _run_capture(_view_with_api(api), server, device).content.decode()
+    second = _run_capture(_view_with_api(api), server, device).content.decode()
+
+    first_pseudonyms = set(re.findall(r"SN-[0-9a-f]{6}", first))
+    second_pseudonyms = set(re.findall(r"SN-[0-9a-f]{6}", second))
+    assert first_pseudonyms and second_pseudonyms
+    assert first_pseudonyms.isdisjoint(second_pseudonyms)

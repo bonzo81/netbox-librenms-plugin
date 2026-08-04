@@ -23,7 +23,7 @@ lockstep if that signature grows.
 
 import re
 
-from netbox_librenms_plugin.data_shapes.signature import port_has_vlan
+from netbox_librenms_plugin.data_shapes.ports import compile_lag_patterns, port_has_vlan, port_is_lag, port_names
 
 _SUB_RE = re.compile(r"\.\d+$")
 
@@ -91,19 +91,6 @@ def _transceiver_referenced(recording):
     return referenced
 
 
-def _port_names(port):
-    """
-    Return the non-empty string names a port is known by (ifName + ifDescr).
-
-    Mirrors ``resolve_port_relationships._port_names``: that resolver keys its lookup maps on every
-    known name field, not just ifName, because an ifDescr-mode device's structured ``.N`` sub-unit
-    name can live in ifDescr while ifName carries an arbitrary label. Compress must scan the same
-    fields or it can drop a base port the resolver needs, breaking the relationship-integrity
-    invariant this module promises.
-    """
-    return [name for field in ("ifName", "ifDescr") if isinstance(name := port.get(field), str) and name]
-
-
 def _build_name_index(dict_ports):
     """
     Index ports by every name they're known by (ifName + ifDescr), dropping AMBIGUOUS names.
@@ -117,7 +104,7 @@ def _build_name_index(dict_ports):
     by_name: dict = {}
     ambiguous_names: set = set()
     for p in dict_ports:
-        for name in _port_names(p):
+        for name in port_names(p):
             if name in ambiguous_names:
                 continue
             existing = by_name.get(name)
@@ -144,7 +131,7 @@ def _add_base_name_ports(dict_ports, by_name, keep_ids):
         for p in dict_ports:
             if str(p.get("port_id")) not in keep_ids:
                 continue
-            for name in _port_names(p):
+            for name in port_names(p):
                 if "." not in name:
                     continue
                 base = by_name.get(name.rsplit(".", 1)[0])
@@ -153,19 +140,24 @@ def _add_base_name_ports(dict_ports, by_name, keep_ids):
                     changed = True
 
 
-def _fingerprint(port):
+def _fingerprint(port, compiled_lag_patterns=()):
     """Reduce a port to the shape axes the outcome tests/signature distinguish (for dedup)."""
     return (
         port.get("ifType"),
         # Sub-interface naming style (drives signature sub_interfaces). Scan BOTH name fields via
-        # _port_names, not just ifName: an ifDescr-mode capture's ".N" sub-unit name can live in
-        # ifDescr, and the retention path already keys on _port_names — a fingerprint that read only
+        # port_names, not just ifName: an ifDescr-mode capture's ".N" sub-unit name can live in
+        # ifDescr, and the retention path already keys on port_names — a fingerprint that read only
         # ifName could fold such a sub-interface into a non-subinterface representative.
-        any(_SUB_RE.search(name) for name in _port_names(port)),
+        any(_SUB_RE.search(name) for name in port_names(port)),
         # VLAN axis — use the signature's own value-based predicate (not key presence) so a
         # no-VLAN port (ifVlan None/0) and a real-VLAN port get distinct fingerprints and the
         # representative kept can't flip compute_shape_signature's vlans axis.
         port_has_vlan(port),
+        # LAG axis — the signature detects an aggregate by NAME pattern too, not only by the
+        # ieee8023adLag ifType the first axis already carries. Without this a pattern-matched LAG
+        # (Cisco "Po1", carried as propVirtual) shares a fingerprint with any other propVirtual
+        # port, so compression can drop the only LAG port and flip the signature's lag axis.
+        port_is_lag(port, compiled_lag_patterns),
     )
 
 
@@ -209,9 +201,10 @@ def compress_recording(recording):
     # One representative per distinct fingerprint preserves every shape the signature reads while
     # collapsing redundant cardinality. Iterate in original order so the first ieee8023adLag port
     # (the signature's LAG name_prefix source) is the same one the full recording would pick.
+    compiled_lag_patterns = compile_lag_patterns(recording)
     seen_fingerprints = set()
     for p in dict_ports:
-        fp = _fingerprint(p)
+        fp = _fingerprint(p, compiled_lag_patterns)
         if fp not in seen_fingerprints:
             seen_fingerprints.add(fp)
             keep_ids.add(str(p.get("port_id")))
