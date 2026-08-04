@@ -381,17 +381,30 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
                         ip_data, interfaces_by_librenms_id, interfaces_by_name, interfaces_by_pk
                     )
 
+                    # This row ends in obj.save() (primary_ip) when it matches the management
+                    # address, so it takes BOTH an ipam_ipaddress and a dcim_device row lock.
+                    is_primary_candidate = bool(mgmt_ip) and self._same_host(ip_data["ip_address"], mgmt_ip)
+
                     if interface is None:
                         # No matching NetBox interface — the row is stale, the interface isn't
                         # synced yet, or _match_interface refused an ambiguous port_id. Writing
                         # here would either drop an existing IP's binding (assigned_object=None)
                         # or create an unassigned/global address, both of which violate the
                         # interface-assigned model. Skip the row instead of corrupting state.
-                        if mgmt_ip and self._same_host(ip_data["ip_address"], mgmt_ip):
+                        if is_primary_candidate:
                             results["primary_no_interface"].append(ip_address)
                         else:
                             results["skipped_no_interface"].append(ip_address)
                         continue
+
+                    if is_primary_candidate:
+                        # Lock obj's row BEFORE the address write, so this path takes the same
+                        # Device -> IPAddress lock order as the migrate move views. The reverse
+                        # order closes a deadlock cycle with a concurrent donor move.
+                        if type(obj).objects.select_for_update().filter(pk=obj.pk).first() is not None:
+                            # Re-read the primary_ip ids from the locked row: a stale in-memory
+                            # value would make _set_primary_ip skip a set it must perform.
+                            obj.refresh_from_db()
 
                     ip_with_mask = ip_data["ip_with_mask"]
 
@@ -421,7 +434,7 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
                     # Primary-IP auto-match for the management IP. The no-interface case is
                     # handled above (the row was skipped before any write), so here the IP is
                     # guaranteed interface-assigned and can satisfy NetBox's primary constraint.
-                    if mgmt_ip and self._same_host(ip_data["ip_address"], mgmt_ip):
+                    if is_primary_candidate:
                         # _build_interface_maps indexes ALL VC member interfaces, so `interface`
                         # can belong to a sibling member. NetBox's Device.clean() accepts a
                         # primary IP on any same-VC member's non-mgmt-only interface
