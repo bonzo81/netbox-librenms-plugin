@@ -5,24 +5,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 
-def _bind_and_call(view, request, method, **kwargs):
-    """Call *view*.<method>, binding the request the way ``View.setup()`` does under dispatch().
-
-    A direct ``view.post(request, ...)`` leaves ``self.request`` unset, which the object-scoped
-    lookups read — production always goes through dispatch(), so bind it here too.
-    """
-    view.setup(request)
-    return getattr(view, method)(request, **kwargs)
-
-
-def _post(view, request, **kwargs):
-    """POST into *view* with the request bound (see :func:`_bind_and_call`)."""
-    return _bind_and_call(view, request, "post", **kwargs)
-
-
-def _get(view, request, **kwargs):
-    """GET into *view* with the request bound (see :func:`_bind_and_call`)."""
-    return _bind_and_call(view, request, "get", **kwargs)
+from netbox_librenms_plugin.tests.view_test_helpers import post as _post
 
 
 def _make_real_device(tag):

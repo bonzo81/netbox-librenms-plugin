@@ -1011,19 +1011,23 @@ class TestObjectTypeValidation:
 
     def test_delete_interfaces_device_type(self):
         """DeleteNetBoxInterfacesView returns correct perms for device type."""
+        from dcim.models import Device, Interface
+
         from netbox_librenms_plugin.views.sync.interfaces import DeleteNetBoxInterfacesView
 
         view = DeleteNetBoxInterfacesView()
         perms = view.get_required_permissions_for_object_type("device")
-        assert len(perms) == 1
+        assert perms == [("view", Device), ("delete", Interface)]
 
     def test_delete_interfaces_vm_type(self):
         """DeleteNetBoxInterfacesView returns correct perms for virtualmachine type."""
+        from virtualization.models import VirtualMachine, VMInterface
+
         from netbox_librenms_plugin.views.sync.interfaces import DeleteNetBoxInterfacesView
 
         view = DeleteNetBoxInterfacesView()
         perms = view.get_required_permissions_for_object_type("virtualmachine")
-        assert len(perms) == 1
+        assert perms == [("view", VirtualMachine), ("delete", VMInterface)]
 
     def test_delete_interfaces_invalid_type_raises_404(self):
         """DeleteNetBoxInterfacesView raises Http404 for invalid object type."""

@@ -5,24 +5,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 
-def _bind_and_call(view, request, method, **kwargs):
-    """Call *view*.<method>, binding the request the way ``View.setup()`` does under dispatch().
-
-    A direct ``view.post(request, ...)`` leaves ``self.request`` unset, which the object-scoped
-    lookups read — production always goes through dispatch(), so bind it here too.
-    """
-    view.setup(request)
-    return getattr(view, method)(request, **kwargs)
-
-
-def _post(view, request, **kwargs):
-    """POST into *view* with the request bound (see :func:`_bind_and_call`)."""
-    return _bind_and_call(view, request, "post", **kwargs)
-
-
-def _get(view, request, **kwargs):
-    """GET into *view* with the request bound (see :func:`_bind_and_call`)."""
-    return _bind_and_call(view, request, "get", **kwargs)
+from netbox_librenms_plugin.tests.view_test_helpers import get as _get, post as _post
 
 
 # ---------------------------------------------------------------------------
@@ -627,19 +610,22 @@ class TestMoveModuleView:
             patch("netbox_librenms_plugin.views.sync.modules.redirect"),
             patch("dcim.models.Module") as mock_module_cls,
             patch("dcim.models.ModuleBay") as mock_bay_cls,
+            # The conflict module is resolved through the SCOPED queryset (it is mutated below),
+            # so that is the seam this test stubs.
+            patch.object(view, "restricted_queryset") as mock_scoped,
         ):
             mock_tx.atomic.return_value.__enter__ = lambda s: s
             mock_tx.atomic.return_value.__exit__ = MagicMock(return_value=False)
             # select_for_update on ModuleBay returns locked target_bay
             mock_bay_cls.objects.select_for_update.return_value.get.return_value = target_bay
-            # select_for_update chain returns conflict_module
-            sfu_qs = MagicMock()
-            sfu_qs.filter.return_value.select_related.return_value.first.return_value = conflict_module
-            mock_module_cls.objects.select_for_update.return_value = sfu_qs
+            # scoped select_for_update chain returns conflict_module
+            scoped_qs = MagicMock()
+            scoped_qs.select_for_update.return_value.filter.return_value.select_related.return_value.first.return_value = conflict_module
+            mock_scoped.return_value = scoped_qs
             # No occupant in target bay
             mock_module_cls.objects.select_for_update.return_value.filter.return_value.first.return_value = None
 
-            view.post(request, pk=24)
+            _post(view, request, pk=24)
 
         assert conflict_module.module_bay is target_bay
         assert conflict_module.device is device

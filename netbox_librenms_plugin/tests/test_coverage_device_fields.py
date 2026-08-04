@@ -14,24 +14,7 @@ import pytest
 from netbox_librenms_plugin.tests.conftest import make_device
 
 
-def _bind_and_call(view, request, method, **kwargs):
-    """Call *view*.<method>, binding the request the way ``View.setup()`` does under dispatch().
-
-    A direct ``view.post(request, ...)`` leaves ``self.request`` unset, which the object-scoped
-    lookups read — production always goes through dispatch(), so bind it here too.
-    """
-    view.setup(request)
-    return getattr(view, method)(request, **kwargs)
-
-
-def _post(view, request, **kwargs):
-    """POST into *view* with the request bound (see :func:`_bind_and_call`)."""
-    return _bind_and_call(view, request, "post", **kwargs)
-
-
-def _get(view, request, **kwargs):
-    """GET into *view* with the request bound (see :func:`_bind_and_call`)."""
-    return _bind_and_call(view, request, "get", **kwargs)
+from netbox_librenms_plugin.tests.view_test_helpers import post as _post
 
 
 @pytest.mark.parametrize(
@@ -283,7 +266,7 @@ class TestUpdateDeviceSerialView:
             patch("netbox_librenms_plugin.views.sync.device_fields.messages") as mock_msg,
             patch("netbox_librenms_plugin.views.sync.device_fields.redirect"),
         ):
-            view.post(_make_request(), pk=1)
+            _post(view, _make_request(), pk=1)
         mock_msg.error.assert_called_once()
 
     def test_get_device_info_failure(self):
@@ -315,7 +298,7 @@ class TestUpdateDeviceSerialView:
             patch("netbox_librenms_plugin.views.sync.device_fields.messages") as mock_msg,
             patch("netbox_librenms_plugin.views.sync.device_fields.redirect"),
         ):
-            view.post(_make_request(), pk=1)
+            _post(view, _make_request(), pk=1)
         mock_msg.warning.assert_called_once()
 
     def test_serial_is_dash(self):
@@ -331,7 +314,7 @@ class TestUpdateDeviceSerialView:
             patch("netbox_librenms_plugin.views.sync.device_fields.messages") as mock_msg,
             patch("netbox_librenms_plugin.views.sync.device_fields.redirect"),
         ):
-            view.post(_make_request(), pk=1)
+            _post(view, _make_request(), pk=1)
         mock_msg.warning.assert_called_once()
 
     def test_save_success_with_old_serial(self):
@@ -491,7 +474,7 @@ class TestUpdateDeviceTypeView:
             patch("netbox_librenms_plugin.views.sync.device_fields.messages") as mock_msg,
             patch("netbox_librenms_plugin.views.sync.device_fields.redirect"),
         ):
-            view.post(_make_request(), pk=1)
+            _post(view, _make_request(), pk=1)
         mock_msg.error.assert_called_once()
 
     def test_get_device_info_failure(self):
@@ -521,7 +504,7 @@ class TestUpdateDeviceTypeView:
             patch("netbox_librenms_plugin.views.sync.device_fields.messages") as mock_msg,
             patch("netbox_librenms_plugin.views.sync.device_fields.redirect"),
         ):
-            view.post(_make_request(), pk=1)
+            _post(view, _make_request(), pk=1)
         mock_msg.warning.assert_called_once()
 
     def test_no_match_result(self):
@@ -540,7 +523,7 @@ class TestUpdateDeviceTypeView:
             patch("netbox_librenms_plugin.views.sync.device_fields.messages") as mock_msg,
             patch("netbox_librenms_plugin.views.sync.device_fields.redirect"),
         ):
-            view.post(_make_request(), pk=1)
+            _post(view, _make_request(), pk=1)
         mock_msg.error.assert_called_once()
 
     def test_match_none_returns_ambiguous_error(self):
@@ -561,7 +544,7 @@ class TestUpdateDeviceTypeView:
             patch("netbox_librenms_plugin.views.sync.device_fields.messages") as mock_msg,
             patch("netbox_librenms_plugin.views.sync.device_fields.redirect"),
         ):
-            view.post(_make_request(), pk=1)
+            _post(view, _make_request(), pk=1)
         mock_msg.error.assert_called_once()
         assert "Ambiguous" in mock_msg.error.call_args[0][1]
         mock_device.full_clean.assert_not_called()
@@ -680,7 +663,7 @@ class TestUpdateDevicePlatformView:
             patch("netbox_librenms_plugin.views.sync.device_fields.messages") as mock_msg,
             patch("netbox_librenms_plugin.views.sync.device_fields.redirect"),
         ):
-            view.post(_make_request(), pk=1)
+            _post(view, _make_request(), pk=1)
         mock_msg.error.assert_called_once()
 
     def test_get_device_info_failure(self):
@@ -710,7 +693,7 @@ class TestUpdateDevicePlatformView:
             patch("netbox_librenms_plugin.views.sync.device_fields.messages") as mock_msg,
             patch("netbox_librenms_plugin.views.sync.device_fields.redirect"),
         ):
-            view.post(_make_request(), pk=1)
+            _post(view, _make_request(), pk=1)
         mock_msg.warning.assert_called_once()
 
     def test_platform_does_not_exist(self):
@@ -731,7 +714,7 @@ class TestUpdateDevicePlatformView:
             patch("netbox_librenms_plugin.views.sync.device_fields.messages") as mock_msg,
             patch("netbox_librenms_plugin.views.sync.device_fields.redirect"),
         ):
-            view.post(_make_request(), pk=1)
+            _post(view, _make_request(), pk=1)
         mock_msg.error.assert_called_once()
 
     def test_save_success_with_old_platform(self):
@@ -831,7 +814,7 @@ class TestUpdateDevicePlatformView:
             patch("netbox_librenms_plugin.views.sync.device_fields.messages") as mock_msg,
             patch("netbox_librenms_plugin.views.sync.device_fields.redirect"),
         ):
-            view.post(_make_request(), pk=1)
+            _post(view, _make_request(), pk=1)
         mock_msg.error.assert_called_once()
         assert "ambiguity" in mock_msg.error.call_args[0][1].lower()
 
@@ -1619,7 +1602,7 @@ class TestAssignVCSerialView:
             patch("netbox_librenms_plugin.views.sync.device_fields.messages") as mock_msg,
             patch("netbox_librenms_plugin.views.sync.device_fields.redirect"),
         ):
-            view.post(_make_request(), pk=1)
+            _post(view, _make_request(), pk=1)
         mock_msg.error.assert_called_once()
 
     def test_no_serial_assignments_no_errors(self):
@@ -1673,10 +1656,13 @@ class TestAssignVCSerialView:
                 return_value=mock_device,
             ),
             patch("netbox_librenms_plugin.views.sync.device_fields.Device", mock_device_cls),
+            # Members are resolved through the SCOPED queryset (their serial is overwritten),
+            # so that is the seam this test stubs.
+            patch.object(view, "restricted_queryset", return_value=mock_device_cls.objects),
             patch("netbox_librenms_plugin.views.sync.device_fields.messages") as mock_msg,
             patch("netbox_librenms_plugin.views.sync.device_fields.redirect"),
         ):
-            view.post(req, pk=1)
+            _post(view, req, pk=1)
         # Should call error for the missing device
         mock_msg.error.assert_called()
 
@@ -1702,10 +1688,13 @@ class TestAssignVCSerialView:
                 return_value=mock_device,
             ),
             patch("netbox_librenms_plugin.views.sync.device_fields.Device", mock_device_cls),
+            # Members are resolved through the SCOPED queryset (their serial is overwritten),
+            # so that is the seam this test stubs.
+            patch.object(view, "restricted_queryset", return_value=mock_device_cls.objects),
             patch("netbox_librenms_plugin.views.sync.device_fields.messages") as mock_msg,
             patch("netbox_librenms_plugin.views.sync.device_fields.redirect"),
         ):
-            view.post(req, pk=1)
+            _post(view, req, pk=1)
         mock_msg.error.assert_called()
 
     def test_member_save_validation_error(self):
@@ -1734,10 +1723,13 @@ class TestAssignVCSerialView:
                 return_value=mock_device,
             ),
             patch("netbox_librenms_plugin.views.sync.device_fields.Device", mock_device_cls),
+            # Members are resolved through the SCOPED queryset (their serial is overwritten),
+            # so that is the seam this test stubs.
+            patch.object(view, "restricted_queryset", return_value=mock_device_cls.objects),
             patch("netbox_librenms_plugin.views.sync.device_fields.messages") as mock_msg,
             patch("netbox_librenms_plugin.views.sync.device_fields.redirect"),
         ):
-            view.post(req, pk=1)
+            _post(view, req, pk=1)
         mock_msg.error.assert_called()
 
     def test_assignments_and_errors_both_reported(self):
@@ -1779,10 +1771,13 @@ class TestAssignVCSerialView:
                 return_value=mock_device,
             ),
             patch("netbox_librenms_plugin.views.sync.device_fields.Device", mock_device_cls),
+            # Members are resolved through the SCOPED queryset (their serial is overwritten),
+            # so that is the seam this test stubs.
+            patch.object(view, "restricted_queryset", return_value=mock_device_cls.objects),
             patch("netbox_librenms_plugin.views.sync.device_fields.messages") as mock_msg,
             patch("netbox_librenms_plugin.views.sync.device_fields.redirect"),
         ):
-            view.post(req, pk=1)
+            _post(view, req, pk=1)
         mock_msg.success.assert_called()
         mock_msg.error.assert_called()
         assert good_member.serial == "SN001"

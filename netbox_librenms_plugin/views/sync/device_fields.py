@@ -691,7 +691,10 @@ class AssignVCSerialView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, L
                 continue
 
             try:
-                member = Device.objects.get(pk=member_id)
+                # Scoped like the page device: the member's serial is overwritten below and its pk
+                # comes from the POST, so the same-VC check alone would let a constrained grant
+                # write a serial onto a member it does not cover.
+                member = self.restricted_queryset(Device, "change").get(pk=member_id)
 
                 if not member.virtual_chassis or member.virtual_chassis.pk != device.virtual_chassis.pk:
                     errors.append(f"{member.name} is not part of the same virtual chassis")

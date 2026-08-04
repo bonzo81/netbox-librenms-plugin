@@ -1959,9 +1959,13 @@ class MoveModuleView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, View)
                 # Lock target bay to prevent concurrent modifications
                 target_bay = ModuleBay.objects.select_for_update().get(pk=target_bay_id, device=target_device)
 
-                # Re-fetch with row lock to prevent concurrent modifications
+                # Re-fetch with row lock to prevent concurrent modifications. Scoped like the
+                # primary lookup: this module's device and bay are reassigned below, and its pk
+                # comes straight from the POST, so an unscoped read would move a module the
+                # user's grant does not cover.
                 conflict_module = (
-                    Module.objects.select_for_update()
+                    self.restricted_queryset(Module, "change")
+                    .select_for_update()
                     .filter(pk=conflict_module_id)
                     .select_related("module_type", "module_bay", "device")
                     .first()

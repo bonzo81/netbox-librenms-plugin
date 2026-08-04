@@ -1,7 +1,7 @@
 from dcim.models import Device
 from django.contrib import messages
 from django.http import HttpResponse
-from django.shortcuts import get_object_or_404, redirect
+from django.shortcuts import redirect
 from django.utils.html import escape
 from django.views import View
 from virtualization.models import VirtualMachine
@@ -141,16 +141,21 @@ class AddDeviceToLibreNMSView(
         return redirect(self.object.get_absolute_url())
 
 
-class UpdateDeviceLocationView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
+class UpdateDeviceLocationView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreNMSAPIMixin, View):
     """Update the LibreNMS site/location based on the NetBox site."""
+
+    # The device is only read here (the write lands in LibreNMS), but it is read by raw URL pk —
+    # so gate on the object view permission and resolve through the restricted queryset, or a
+    # constrained grant could push any device's site to LibreNMS.
+    required_object_permissions = {"POST": [("view", Device)]}
 
     def post(self, request, pk):
         """Sync the device location to LibreNMS from the NetBox site."""
-        # Check write permission before updating location in LibreNMS
-        if error := self.require_write_permission():
+        # Check plugin write permission AND the object view permission before touching the device.
+        if error := self.require_all_permissions("POST"):
             return error
 
-        device = get_object_or_404(Device, pk=pk)
+        device = self.restrict_object_or_404(Device, pk=pk)
 
         # Rebind the API client to the POSTed server before resolving the per-server
         # librenms_id and writing the location, so a multi-server user acting on a

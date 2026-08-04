@@ -434,27 +434,39 @@ class TestSingleCableVerifyServerKey:
 
 
 class TestGatedViewsResolveThroughRestrictedQuerysets:
-    """A view that declares required_object_permissions must not resolve an object by raw pk.
+    """A gated view must not resolve an object by raw pk.
 
     NetBoxObjectPermissionMixin asks ``has_perm`` WITHOUT an instance, so a CONSTRAINED grant (a
     site-scoped change_device, say) clears the gate; a plain ``get_object_or_404`` behind it then
     reads or writes an object outside that grant. This is a RECURRING defect class — the same
-    finding has landed on the cable remote picker, the LAG/parent relationship sync and the
-    move-to-winner endpoints — so it is enforced mechanically here instead of case by case.
+    finding has landed on the cable remote picker, the LAG/parent relationship sync, the
+    move-to-winner endpoints and the LibreNMS location push — so it is enforced mechanically here
+    instead of case by case.
 
-    Scope and limits: the scan flags ``get_object_or_404`` inside classes that assign
-    required_object_permissions themselves (statically or per-request). A raw lookup inherited from
-    an ungated base class is NOT seen, and neither is ``Model.objects.get(pk=...)``; both remain a
+    "Gated" means the class declares ``required_object_permissions`` (by assignment or annotation,
+    statically or per-request) OR calls one of the ``require_*_permission(s)`` gates: a view gated
+    only by the plugin write permission reaches objects by raw pk just as easily.
+
+    Scope and limits: a raw lookup inherited from an ungated base class is NOT seen, and neither is
+    ``Model.objects.get(pk=...)`` / ``.filter(pk=...)`` — the secondary-lookup form. Both remain a
     review matter.
     """
 
-    @staticmethod
-    def _scan():
-        """Return {(module, class, line)} for gated view classes that resolve an object by raw pk."""
-        import ast
-        import pathlib
+    GATE_CALLS = frozenset(
+        {
+            "require_write_permission",
+            "require_write_permission_json",
+            "require_object_permissions",
+            "require_object_permissions_json",
+            "require_all_permissions",
+            "require_all_permissions_json",
+        }
+    )
 
-        import netbox_librenms_plugin
+    @classmethod
+    def _scan_tree(cls, tree, label):
+        """Return {(label, class, line)} for gated classes in *tree* that resolve by raw pk."""
+        import ast
 
         def _is_scoped(node):
             """Whether the first get_object_or_404 argument came from restricted_queryset(...)."""
@@ -464,33 +476,47 @@ class TestGatedViewsResolveThroughRestrictedQuerysets:
                 for inner in ast.walk(node)
             )
 
+        def _declares_gate(class_node):
+            for sub in ast.walk(class_node):
+                if isinstance(sub, ast.Assign):
+                    for target in sub.targets:
+                        if getattr(target, "id", getattr(target, "attr", "")) == "required_object_permissions":
+                            return True
+                elif isinstance(sub, ast.AnnAssign):
+                    target = sub.target
+                    if getattr(target, "id", getattr(target, "attr", "")) == "required_object_permissions":
+                        return True
+                elif isinstance(sub, ast.Call) and getattr(sub.func, "attr", "") in cls.GATE_CALLS:
+                    return True
+            return False
+
+        offenders = set()
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.ClassDef) or not _declares_gate(node):
+                continue
+            # The mixin that DEFINES restrict_object_or_404 is where the raw call belongs.
+            if any(isinstance(sub, ast.FunctionDef) and sub.name == "restrict_object_or_404" for sub in node.body):
+                continue
+            for sub in ast.walk(node):
+                if not (isinstance(sub, ast.Call) and getattr(sub.func, "id", None) == "get_object_or_404"):
+                    continue
+                if not (sub.args and _is_scoped(sub.args[0])):
+                    offenders.add((label, node.name, sub.lineno))
+        return offenders
+
+    @classmethod
+    def _scan(cls):
+        """Run :meth:`_scan_tree` over every view module."""
+        import ast
+        import pathlib
+
+        import netbox_librenms_plugin
+
         views_root = pathlib.Path(netbox_librenms_plugin.__file__).parent / "views"
         offenders = set()
         for path in sorted(views_root.rglob("*.py")):
             tree = ast.parse(path.read_text(encoding="utf-8"), str(path))
-            for node in ast.walk(tree):
-                if not isinstance(node, ast.ClassDef):
-                    continue
-                declares_gate = any(
-                    (isinstance(target, ast.Name) and target.id == "required_object_permissions")
-                    or (isinstance(target, ast.Attribute) and target.attr == "required_object_permissions")
-                    for sub in ast.walk(node)
-                    if isinstance(sub, ast.Assign)
-                    for target in sub.targets
-                )
-                if not declares_gate:
-                    continue
-                # The mixin that DEFINES restrict_object_or_404 is where the raw call belongs.
-                defines_helper = any(
-                    isinstance(sub, ast.FunctionDef) and sub.name == "restrict_object_or_404" for sub in node.body
-                )
-                if defines_helper:
-                    continue
-                for sub in ast.walk(node):
-                    if not (isinstance(sub, ast.Call) and getattr(sub.func, "id", None) == "get_object_or_404"):
-                        continue
-                    if not (sub.args and _is_scoped(sub.args[0])):
-                        offenders.add((str(path.relative_to(views_root)), node.name, sub.lineno))
+            offenders |= cls._scan_tree(tree, str(path.relative_to(views_root)))
         return offenders
 
     def test_no_gated_view_resolves_an_object_by_raw_pk(self):
@@ -501,8 +527,8 @@ class TestGatedViewsResolveThroughRestrictedQuerysets:
             f"then reaches objects outside it; use restrict_object_or_404: {offenders}"
         )
 
-    def test_the_scan_recognizes_a_raw_lookup(self):
-        """Guard the guard: the scan must still flag the pattern it exists to catch."""
+    def test_the_scan_flags_a_raw_lookup(self):
+        """Guard the guard: the REAL scan must still flag the pattern it exists to catch."""
         import ast
 
         source = (
@@ -511,16 +537,32 @@ class TestGatedViewsResolveThroughRestrictedQuerysets:
             "    def post(self, request, pk):\n"
             "        return get_object_or_404(Device, pk=pk)\n"
         )
-        tree = ast.parse(source)
-        calls = [n for n in ast.walk(tree) if isinstance(n, ast.Call) and getattr(n.func, "id", None)]
-        assert calls, "the fixture must contain a get_object_or_404 call"
-        scoped = any(
-            isinstance(inner, ast.Call) and getattr(inner.func, "attr", "") == "restricted_queryset"
-            for call in calls
-            for inner in ast.walk(call.args[0])
-            if call.args
+        assert self._scan_tree(ast.parse(source), "<fixture>"), "the scan no longer flags a raw pk lookup"
+
+    def test_the_scan_flags_a_view_gated_only_by_the_write_permission(self):
+        """A view gated by require_write_permission alone reaches objects by raw pk just as easily."""
+        import ast
+
+        source = (
+            "class V:\n"
+            "    def post(self, request, pk):\n"
+            "        if error := self.require_write_permission():\n"
+            "            return error\n"
+            "        return get_object_or_404(Device, pk=pk)\n"
         )
-        assert not scoped  # a bare model argument is exactly what the scan must reject
+        assert self._scan_tree(ast.parse(source), "<fixture>"), "a write-gated raw lookup must be flagged"
+
+    def test_the_scan_accepts_a_scoped_lookup(self):
+        """The positive control: a lookup already routed through restricted_queryset is not flagged."""
+        import ast
+
+        source = (
+            "class V:\n"
+            "    required_object_permissions = {'POST': []}\n"
+            "    def post(self, request, pk):\n"
+            "        return get_object_or_404(self.restricted_queryset(Device), pk=pk)\n"
+        )
+        assert not self._scan_tree(ast.parse(source), "<fixture>")
 
 
 @pytest.mark.django_db
@@ -641,6 +683,99 @@ class TestGatedViewsRefuseOutOfScopeObjects:
         with pytest.raises(Http404):
             view.post(request, pk=out_of_scope.pk)
 
+    def test_location_push_404s_a_device_outside_the_grant(self):
+        """UpdateDeviceLocationView is gated by the plugin write permission and reads the device by URL pk, so it must scope that read too."""
+        from dcim.models import Device
+        from django.http import Http404
+
+        from netbox_librenms_plugin.tests.conftest import make_device
+        from netbox_librenms_plugin.views.sync.devices import UpdateDeviceLocationView
+
+        in_scope = make_device("scope-loc-in")
+        out_of_scope = make_device("scope-loc-out")
+        user = self._user("scope-loc", [(Device, "view", {"pk": in_scope.pk})])
+
+        view = UpdateDeviceLocationView()
+        request = self._request(user, {"server_key": "default"})
+        view.setup(request)
+        with pytest.raises(Http404):
+            view.post(request, pk=out_of_scope.pk)
+
+    def test_module_move_refuses_a_conflict_module_outside_the_grant(self):
+        """MoveModuleView reassigns the conflict module's bay/device, and its pk comes from the POST — a secondary lookup the primary scoping does not cover."""
+        from dcim.models import Device, Module, ModuleBay, ModuleType
+        from dcim.models import Manufacturer
+
+        from netbox_librenms_plugin.tests.conftest import make_device
+        from netbox_librenms_plugin.views.sync.modules import MoveModuleView
+
+        page_device = make_device("scope-move-page")
+        other_device = make_device("scope-move-other")
+        mfr, _ = Manufacturer.objects.get_or_create(name="Mfr-scope-move", slug="mfr-scope-move")
+        mtype = ModuleType.objects.create(manufacturer=mfr, model="MT-scope-move")
+        target_bay = ModuleBay.objects.create(device=page_device, name="Slot 1")
+        foreign_bay = ModuleBay.objects.create(device=other_device, name="Slot 9")
+        # The module the caller names lives on a device the grant does NOT cover.
+        foreign_module = Module.objects.create(device=other_device, module_bay=foreign_bay, module_type=mtype)
+
+        user = self._user(
+            "scope-move",
+            [
+                (Device, "view", {"pk": page_device.pk}),
+                (ModuleBay, "view", None),  # so the run reaches the conflict-module lookup under test
+                (Module, "change", {"device__name": "scope-move-page"}),
+                (Module, "delete", {"device__name": "scope-move-page"}),
+            ],
+        )
+        view = MoveModuleView()
+        request = self._request(
+            user,
+            {
+                "server_key": "default",
+                "conflict_module_id": str(foreign_module.pk),
+                "target_bay_id": str(target_bay.pk),
+            },
+        )
+        view.setup(request)
+        view.post(request, pk=page_device.pk)
+
+        foreign_module.refresh_from_db()
+        assert foreign_module.device_id == other_device.pk  # not moved
+        assert foreign_module.module_bay_id == foreign_bay.pk
+
+    def test_vc_serial_assign_refuses_a_member_outside_the_grant(self):
+        """AssignVCSerialView overwrites the member's serial and takes its pk from the POST, guarded only by same-VC membership."""
+        from dcim.models import Device
+
+        from dcim.models import VirtualChassis
+
+        from netbox_librenms_plugin.tests.conftest import make_device
+        from netbox_librenms_plugin.views.sync.device_fields import AssignVCSerialView
+
+        vc = VirtualChassis.objects.create(name="VC-scope-vcser")
+        page_member = make_device("scope-vcser-1")
+        sibling = make_device("scope-vcser-2")
+        for position, member in ((1, page_member), (2, sibling)):
+            member.virtual_chassis = vc
+            member.vc_position = position
+            member.save()
+        vc.master = page_member
+        vc.save()
+        sibling.serial = "ORIGINAL"
+        sibling.save()
+
+        user = self._user("scope-vcser", [(Device, "change", {"pk": page_member.pk})])
+        view = AssignVCSerialView()
+        request = self._request(
+            user,
+            {"server_key": "default", "member_id_0": str(sibling.pk), "serial_0": "HIJACKED"},
+        )
+        view.setup(request)
+        view.post(request, pk=page_member.pk)
+
+        sibling.refresh_from_db()
+        assert sibling.serial == "ORIGINAL"  # a sibling outside the grant keeps its serial
+
     def test_in_scope_object_still_resolves(self):
         """The device the grant DOES cover passes the lookup — the scoping must not over-block."""
         from dcim.models import Device
@@ -670,6 +805,11 @@ class TestCacheKeysAreServerScoped:
 
     The helpers take ``server_key`` last, so a call is scoped when it passes the keyword or enough
     positional arguments to reach it.
+
+    Scope and limits: only direct attribute calls are matched, so a helper passed as a callable and
+    invoked under a local name (``modules.py`` hands ``self.get_cache_key`` to
+    ``_resolve_single_install_binding_item``) escapes the scan, and a call forwarding ``**kwargs``
+    is taken on trust — its contents are not inspected. Both remain a review matter.
     """
 
     # helper name -> number of positional args needed to reach server_key
@@ -695,7 +835,10 @@ class TestCacheKeysAreServerScoped:
                 helper = getattr(node.func, "attr", "")
                 if helper not in cls.HELPERS:
                     continue
-                keyed = any(kw.arg == "server_key" for kw in node.keywords) or len(node.args) >= cls.HELPERS[helper]
+                # kw.arg is None for **kwargs forwarding, which may carry server_key: not a miss.
+                keyed = (
+                    any(kw.arg in ("server_key", None) for kw in node.keywords) or len(node.args) >= cls.HELPERS[helper]
+                )
                 if not keyed:
                     unscoped.append(f"{path.relative_to(package_root)}:{node.lineno} {helper}")
         return unscoped

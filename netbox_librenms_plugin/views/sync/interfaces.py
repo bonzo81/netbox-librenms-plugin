@@ -449,10 +449,12 @@ class DeleteNetBoxInterfacesView(LibreNMSPermissionMixin, NetBoxObjectPermission
 
     def get_required_permissions_for_object_type(self, object_type):
         """Return the required permissions based on object type."""
+        # The owner is resolved through a restricted queryset, so its view permission is stated
+        # here too (mirroring SyncInterfacesView): a missing grant is a 403, not a bare 404.
         if object_type == "device":
-            return [("delete", Interface)]
+            return [("view", Device), ("delete", Interface)]
         elif object_type == "virtualmachine":
-            return [("delete", VMInterface)]
+            return [("view", VirtualMachine), ("delete", VMInterface)]
         else:
             raise Http404(f"Invalid object type: {object_type}")
 
