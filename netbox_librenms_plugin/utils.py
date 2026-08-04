@@ -208,7 +208,9 @@ def get_virtual_chassis_member(
             map. When provided, the member is resolved from it instead of issuing a per-call
             ``members.get(vc_position=...)`` query — pass it when resolving many rows of the same
             chassis (e.g. a VC interface table) to keep resolution O(1) per row instead of one
-            query per row.
+            query per row. An EMPTY map is treated like no map (falls back to the per-call
+            query), so a caller forwarding a raw possibly-empty dict can't silently lose
+            member resolution.
         return_device_on_failure: Return ``device`` when member matching fails. Callers
             resolving a remote VC endpoint can disable this fallback to avoid binding the
             advertised port against the wrong member.
@@ -236,7 +238,7 @@ def get_virtual_chassis_member(
 
         # Get the port number and use it
         vc_position = int(match.group(1))
-        if members_by_position is not None:
+        if members_by_position:
             return members_by_position.get(vc_position, fallback)
         return device.virtual_chassis.members.get(vc_position=vc_position)
     except (re.error, ValueError, ObjectDoesNotExist):
