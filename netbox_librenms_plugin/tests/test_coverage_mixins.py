@@ -1268,3 +1268,56 @@ class TestRenderServerKeyDegradation:
         view._librenms_api = LibreNMSAPI(server_key="active")
 
         assert view._render_server_key() == "active"
+
+
+@pytest.mark.django_db  # the blank rebind reads the selected server from LibreNMSSettings
+class TestRebindApiForServerOrDefault:
+    """rebind_api_for_server_or_default: an unresolvable key degrades to the session/default
+    server's RESOLVED key, never to the literal 'default'.
+
+    The action paths (cable sync response, remote picker) scope a cache WRITE and the closing
+    re-render by this key. In a multi-server setup 'default' names no configured server, so the
+    literal would namespace the write under a server no render ever reads.
+    """
+
+    _CONFIG = {
+        "netbox_librenms_plugin": {
+            "servers": {
+                "prod-a": {"librenms_url": "http://a.example", "api_token": "tok-a"},
+                "prod-b": {"librenms_url": "http://b.example", "api_token": "tok-b"},
+            }
+        }
+    }
+
+    def _mixin(self):
+        from netbox_librenms_plugin.views.mixins import LibreNMSAPIMixin
+
+        mixin = object.__new__(LibreNMSAPIMixin)
+        mixin._librenms_api = None
+        return mixin
+
+    def test_unresolvable_key_degrades_to_a_configured_server(self):
+        from django.test import override_settings
+
+        mixin = self._mixin()
+        with override_settings(PLUGINS_CONFIG=self._CONFIG):
+            resolved = mixin.rebind_api_for_server_or_default("server-that-was-deleted")
+
+        assert resolved in {"prod-a", "prod-b"}
+        assert resolved != "default"  # the literal would be a namespace nothing else reads
+        assert mixin._librenms_api.server_key == resolved  # and the client is actually bound to it
+
+    def test_resolvable_key_is_kept(self):
+        from django.test import override_settings
+
+        mixin = self._mixin()
+        with override_settings(PLUGINS_CONFIG=self._CONFIG):
+            assert mixin.rebind_api_for_server_or_default("prod-b") == "prod-b"
+
+    def test_falls_back_to_active_key_when_no_server_can_be_built(self):
+        """With nothing configurable at all, the degrade must still answer (and never raise)."""
+        from django.test import override_settings
+
+        mixin = self._mixin()
+        with override_settings(PLUGINS_CONFIG={"netbox_librenms_plugin": {"servers": {}}}):
+            assert mixin.rebind_api_for_server_or_default("anything") == "default"

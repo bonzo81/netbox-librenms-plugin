@@ -773,6 +773,26 @@ class LibreNMSAPIMixin:
         # so live fetches and cache writes target the same server.
         return api.server_key
 
+    def rebind_api_for_server_or_default(self, server_key):
+        """
+        Rebind to *server_key*, degrading to the session/default server's RESOLVED key.
+
+        For ACTION paths that must still render something after a failed rebind (a stale tab or a
+        forged form carrying a key that names no configured server). Reading
+        :attr:`active_server_key` alone is not enough there: the rebind failed before binding a
+        client, so it answers the literal ``"default"`` — which in a multi-server setup is not a
+        configured key, and namespaces the cache write under a bogus server no other render reads.
+        The blank rebind goes through the same fail-closed builder, so a misconfigured default
+        degrades to ``active_server_key`` instead of raising.
+
+        Args:
+            server_key (str | None): The requested (untrusted) server key.
+
+        Returns:
+            str: A resolved server key to scope the cache read/write and the re-render to.
+        """
+        return self.rebind_api_for_server(server_key) or self.rebind_api_for_server(None) or self.active_server_key
+
     def resolve_get_render_server_key(self, request, server_key=None):
         """
         Resolve and rebind ``self.librenms_api`` for a GET-render cache read.

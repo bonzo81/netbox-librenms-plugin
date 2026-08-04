@@ -481,10 +481,14 @@ class TestOverwriteRequiresDeletePermission:
     the destructive branch so create-only syncs keep working for add/change users.
     """
 
-    def _sync_view_with_real_user(self, *actions):
+    def _sync_view_with_real_user(self, *actions, constraints=None):
         """Build a sync view whose request user holds a REAL NetBox ObjectPermission for Cable
         with the given actions — NetBox's ObjectPermissionBackend ignores Django's
-        user_permissions m2m, so has_perm() only honors ObjectPermission assignments."""
+        user_permissions m2m, so has_perm() only honors ObjectPermission assignments.
+
+        *constraints* makes the grant a CONSTRAINED one: ``has_perm`` (asked without an instance)
+        still passes, while ``restrict()`` narrows to the matching cables.
+        """
         from core.models import ObjectType
         from dcim.models import Cable
         from django.contrib.auth import get_user_model
@@ -492,9 +496,12 @@ class TestOverwriteRequiresDeletePermission:
         from netbox_librenms_plugin.views.sync.cables import SyncCablesView
         from users.models import ObjectPermission
 
-        user = get_user_model().objects.create_user(f"perm-user-{'-'.join(actions) or 'none'}")
+        suffix = "-scoped" if constraints else ""
+        user = get_user_model().objects.create_user(f"perm-user-{'-'.join(actions) or 'none'}{suffix}")
         if actions:
-            op = ObjectPermission.objects.create(name=f"cable-{'-'.join(actions)}", actions=list(actions))
+            op = ObjectPermission.objects.create(
+                name=f"cable-{'-'.join(actions)}{suffix}", actions=list(actions), constraints=constraints
+            )
             op.object_types.add(ObjectType.objects.get_for_model(Cable))
             op.users.add(user)
         user = get_user_model().objects.get(pk=user.pk)  # reload to reset the perm cache
@@ -538,3 +545,28 @@ class TestOverwriteRequiresDeletePermission:
 
         assert result["status"] == "overwritten"
         assert not Cable.objects.filter(pk=old.pk).exists()
+
+    def test_overwrite_denied_when_the_delete_grant_excludes_the_doomed_cable(self):
+        """A CONSTRAINED delete_cable grant clears has_perm (no instance is asked), so the doomed
+        cable must be checked against the user's actual delete scope — otherwise the overwrite
+        destroys a cable the user cannot see."""
+        from dcim.models import Cable
+
+        from netbox_librenms_plugin.utils import get_librenms_cable_tag
+
+        acs, (csp,), _ = make_serial_device("permdel3", csp_names=["ttyS1"])
+        _r, _, (cp_a, cp_b) = make_serial_device("permdel3-r", cp_names=["console-A", "console-B"])
+        old = cable_together(csp, cp_a)
+        old.tags.add(get_librenms_cable_tag())
+        # An unrelated cable is the ONLY one the grant covers.
+        _other_acs, (other_csp,), _ = make_serial_device("permdel3-other", csp_names=["ttyS2"])
+        _o, _, (other_cp,) = make_serial_device("permdel3-other-r", cp_names=["console-C"])
+        in_scope = cable_together(other_csp, other_cp)
+
+        sync = self._sync_view_with_real_user("add", "change", "delete", constraints={"pk": in_scope.pk})
+        result = sync.handle_serial_cable_creation(_serial_link(csp, cp_b), {"device_id": acs.id})
+
+        assert result["status"] == "denied"
+        assert Cable.objects.filter(pk=old.pk).exists()  # the out-of-scope cable survives
+        csp.refresh_from_db()
+        assert csp.cable_id == old.pk

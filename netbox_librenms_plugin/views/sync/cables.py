@@ -174,8 +174,19 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libre
             user = getattr(self.request, "user", None)
             if user is None or not user.has_perm("dcim.delete_cable"):
                 return {"status": "denied", "interface": display_name}
+            to_remove = decision["to_remove"]
+            # has_perm is asked without an instance, so a CONSTRAINED delete_cable grant clears the
+            # check above. Confirm every doomed cable is inside the user's own delete scope before
+            # destroying it — an out-of-scope one denies the whole overwrite rather than part of it.
+            deletable = set(
+                self.restricted_queryset(Cable, "delete")
+                .filter(pk__in=[cable.pk for cable in to_remove])
+                .values_list("pk", flat=True)
+            )
+            if any(cable.pk not in deletable for cable in to_remove):
+                return {"status": "denied", "interface": display_name}
             # Remove the occupying cable(s) first (NetBox forbids a second cable on a live endpoint).
-            for cable in decision["to_remove"]:
+            for cable in to_remove:
                 cable.delete()
             if self.create_cable(local_term, remote_term, self.request):
                 return {"status": "overwritten", "interface": display_name}
@@ -438,14 +449,11 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libre
         view.setup(request, pk=obj.pk)
         # Rebind the delegated view's client to the POST-scoped server so its cache read and
         # re-enrichment target the same server the sync acted on (mirrors the refresh path).
-        resolved_key = view.rebind_api_for_server(server_key)
-        if resolved_key is None:
-            # The POSTed key names no configured server (stale tab / forged form). Reusing it
-            # would namespace the cache read AND render_sync_partial's migrated-donor context
-            # under the bogus key; fall back to the delegated view's active client key instead,
-            # exactly like DeviceCableTableView.post handles the same rebind failure (and like
-            # that path, don't touch the lazy librenms_api property — it can raise here).
-            resolved_key = view.active_server_key
+        # A POSTed key that names no configured server (stale tab / forged form) must not be
+        # reused: it would namespace the cache read AND render_sync_partial's migrated-donor
+        # context under a bogus key. Degrade to the session/default server's RESOLVED key (and,
+        # like that path, never touch the lazy librenms_api property — it can raise here).
+        resolved_key = view.rebind_api_for_server_or_default(server_key)
         context = view._prepare_context(request, obj, fetch_fresh=False, server_key=resolved_key)
         if context is None:
             # Cache genuinely gone (e.g. TTL elapsed between refresh and sync): render an empty

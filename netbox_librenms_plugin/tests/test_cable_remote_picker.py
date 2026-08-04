@@ -738,3 +738,161 @@ class TestManualRepointOfExistingCable:
         cache.set(key_view.get_cache_key(acs, "links", "default"), {"links": [link]}, timeout=300)
         picker_url = reverse("plugins:netbox_librenms_plugin:cable_remote_picker", args=[acs.pk])
         return acs, csp, old, link, picker_url
+
+
+@pytest.mark.django_db
+class TestRemotePickerObjectScope:
+    """The picker enumerates devices and their ports, so every lookup must run through a restricted
+    queryset.
+
+    Its gate asks ``has_perm("dcim.view_device")`` without an instance, which a CONSTRAINED grant
+    clears — a raw manager would then let that grant enumerate and bind terminations it cannot see.
+    """
+
+    @staticmethod
+    def _scoped_client(name, device_names, *, write=False):
+        """A real non-superuser with plugin access plus a view_device grant limited to *device_names*."""
+        from core.models import ObjectType
+        from dcim.models import Device
+        from django.apps import apps
+        from django.contrib.auth import get_user_model
+        from django.test import Client
+        from users.models import ObjectPermission
+
+        LibreNMSSettings = apps.get_model("netbox_librenms_plugin", "LibreNMSSettings")
+
+        user = get_user_model().objects.create_user(username=f"picker-scoped-{name}", password="pw")
+        plugin = ObjectPermission.objects.create(
+            name=f"{name}-plugin", actions=["view", "change"] if write else ["view"]
+        )
+        plugin.object_types.set([ObjectType.objects.get_for_model(LibreNMSSettings)])
+        plugin.users.set([user])
+        scope = ObjectPermission.objects.create(
+            name=f"{name}-devices", actions=["view"], constraints={"name__in": list(device_names)}
+        )
+        scope.object_types.set([ObjectType.objects.get_for_model(Device)])
+        scope.users.set([user])
+
+        client = Client()
+        client.force_login(user)
+        return client
+
+    @staticmethod
+    def _seed(name, label="name-that-matches-nothing"):
+        """Cache a serial row for a real ACS device and return it with the picker URL."""
+        from django.core.cache import cache
+        from django.urls import reverse
+
+        from netbox_librenms_plugin.views.sync.cables import SyncCablesView
+
+        acs, (csp,), _ = make_serial_device(f"acs-{name}", csp_names=["ttyS5"])
+        link = _serial_row(csp, label, acs)
+        link["local_port_id"] = f"serial:{csp.pk}-s"
+        key_view = object.__new__(SyncCablesView)
+        cache.set(key_view.get_cache_key(acs, "links", "default"), {"links": [link]}, timeout=300)
+        url = reverse("plugins:netbox_librenms_plugin:cable_remote_picker", args=[acs.pk])
+        return acs, link, url
+
+    def test_modal_404s_for_a_device_outside_the_grant(self):
+        _acs, link, url = self._seed("scope-modal")
+        client = self._scoped_client("modal", ["some-other-device"])
+
+        resp = client.get(url, {"port_id": link["local_port_id"], "server_key": "default"})
+
+        assert resp.status_code == 404
+
+    def test_search_lists_only_devices_inside_the_grant(self):
+        acs, link, url = self._seed("scope-search")
+        make_device("picker-scope-visible")
+        make_device("picker-scope-hidden")
+        client = self._scoped_client("search", [acs.name, "picker-scope-visible"])
+
+        resp = client.get(
+            url,
+            {"port_id": link["local_port_id"], "server_key": "default", "action": "search", "q": "picker-scope"},
+        )
+
+        assert resp.status_code == 200
+        content = resp.content.decode()
+        assert "picker-scope-visible" in content
+        assert "picker-scope-hidden" not in content
+
+    def test_ports_fragment_404s_for_a_device_outside_the_grant(self):
+        acs, link, url = self._seed("scope-ports")
+        hidden, _, (cp,) = make_serial_device("picker-scope-ports-hidden", cp_names=["console-H"])
+        client = self._scoped_client("ports", [acs.name])
+
+        resp = client.get(
+            url,
+            {
+                "port_id": link["local_port_id"],
+                "server_key": "default",
+                "action": "ports",
+                "device_id": hidden.pk,
+            },
+        )
+
+        assert resp.status_code == 404
+        assert cp.name not in resp.content.decode()
+
+    def test_post_refuses_a_port_on_a_device_outside_the_grant(self):
+        from django.core.cache import cache
+
+        from netbox_librenms_plugin.views.sync.cables import SyncCablesView
+
+        acs, link, url = self._seed("scope-post")
+        _hidden, _, (cp,) = make_serial_device("picker-scope-post-hidden", cp_names=["console"])
+        client = self._scoped_client("post", [acs.name], write=True)
+
+        resp = client.post(
+            url,
+            data={
+                "port_id": link["local_port_id"],
+                "server_key": "default",
+                "remote_interface_id": cp.pk,
+            },
+            HTTP_HX_REQUEST="true",
+        )
+
+        assert resp.status_code == 400
+        key_view = object.__new__(SyncCablesView)
+        cached = cache.get(key_view.get_cache_key(acs, "links", "default"))
+        row = next(r for r in cached["links"] if r["local_port_id"] == link["local_port_id"])
+        assert "manual_remote_id" not in row  # nothing bound
+
+    def test_in_scope_pick_still_works(self):
+        """The device the grant DOES cover still picks — the scoping must not over-block."""
+        from django.core.cache import cache
+
+        from netbox_librenms_plugin.views.sync.cables import SyncCablesView
+
+        acs, link, url = self._seed("scope-ok")
+        remote, _, (cp,) = make_serial_device("picker-scope-ok-target", cp_names=["console"])
+        client = self._scoped_client("ok", [acs.name, remote.name], write=True)
+
+        resp = client.post(
+            url,
+            data={
+                "port_id": link["local_port_id"],
+                "server_key": "default",
+                "remote_interface_id": cp.pk,
+            },
+            HTTP_HX_REQUEST="true",
+        )
+
+        assert resp.status_code == 200
+        key_view = object.__new__(SyncCablesView)
+        cached = cache.get(key_view.get_cache_key(acs, "links", "default"))
+        row = next(r for r in cached["links"] if r["local_port_id"] == link["local_port_id"])
+        assert row["manual_remote_id"] == cp.pk
+
+    def test_picker_declares_the_device_view_gate(self):
+        """A missing view_device grant must be refused by the declared gate, not by a 404 at the lookup."""
+        from dcim.models import Device
+
+        from netbox_librenms_plugin.views.base.cables_view import CableRemotePickerView
+        from netbox_librenms_plugin.views.mixins import NetBoxObjectPermissionMixin
+
+        assert NetBoxObjectPermissionMixin in CableRemotePickerView.__mro__
+        for method in ("GET", "POST"):
+            assert ("view", Device) in CableRemotePickerView.required_object_permissions[method]

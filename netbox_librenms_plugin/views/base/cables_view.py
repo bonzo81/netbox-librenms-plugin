@@ -1720,7 +1720,7 @@ class SingleCableVerifyView(BaseCableTableView):
         return JsonResponse({"status": "success", "formatted_row": formatted_row})
 
 
-class CableRemotePickerView(BaseCableTableView):
+class CableRemotePickerView(NetBoxObjectPermissionMixin, BaseCableTableView):
     """
     Modal picker for a cable row's remote endpoint.
 
@@ -1738,6 +1738,12 @@ class CableRemotePickerView(BaseCableTableView):
     state — so cache-lifetime persistence is deliberate: a full "Refresh Cables" rebuilds the
     snapshot from LibreNMS and drops unsynced picks.
     """
+
+    # Both methods enumerate devices and their ports, so both gate on dcim.view_device (mirroring
+    # SingleCableVerifyView). Every device/port lookup below additionally resolves through a
+    # restricted queryset: the gate only asks has_perm without an instance, which a CONSTRAINED
+    # view_device grant clears.
+    required_object_permissions = {"GET": [("view", Device)], "POST": [("view", Device)]}
 
     def _cache_state(self, obj, server_key):
         """Return ``(cache_key, cached_payload)`` for *obj*'s links snapshot (sync-device scoped)."""
@@ -1775,13 +1781,10 @@ class CableRemotePickerView(BaseCableTableView):
 
         view = DeviceCableTableView()
         view.setup(request, pk=obj.pk)
-        resolved_key = view.rebind_api_for_server(server_key)
-        if resolved_key is None:
-            # The key names no configured server (stale tab / forged form): reusing it would
-            # cache the fresh snapshot under the bogus namespace, invisible to every real
-            # render. Fall back to the delegated view's active client key instead, exactly
-            # like SyncCablesView._sync_response handles the same rebind failure.
-            resolved_key = view.active_server_key
+        # A key that names no configured server (stale tab / forged form) must not be reused: it
+        # would cache the fresh snapshot under a bogus namespace, invisible to every real render.
+        # Degrade to the session/default server's RESOLVED key, exactly like SyncCablesView.
+        resolved_key = view.rebind_api_for_server_or_default(server_key)
         # Caches the fresh snapshot on success (same write "Refresh Cables" performs).
         view._prepare_context(request, obj, fetch_fresh=True, server_key=resolved_key)
         cache_key, cached = self._cache_state(obj, resolved_key)
@@ -1789,7 +1792,9 @@ class CableRemotePickerView(BaseCableTableView):
 
     def get(self, request, pk):
         """Serve the picker modal or one of its search/ports HTMX fragments."""
-        obj = get_object_or_404(Device, pk=pk)
+        if denied := self.require_object_permissions("GET"):
+            return denied
+        obj = self.restrict_object_or_404(Device, pk=pk)
         server_key = request.GET.get("server_key") or self.librenms_api.server_key
         port_id = request.GET.get("port_id", "")
         action = request.GET.get("action")
@@ -1818,7 +1823,7 @@ class CableRemotePickerView(BaseCableTableView):
 
         if action == "search":
             q = (request.GET.get("q") or "").strip()
-            devices = Device.objects.filter(name__icontains=q).order_by("name")[:20] if q else []
+            devices = self.restricted_queryset(Device).filter(name__icontains=q).order_by("name")[:20] if q else []
             return render(
                 request,
                 "netbox_librenms_plugin/htmx/_remote_picker_device_results.html",
@@ -1830,7 +1835,7 @@ class CableRemotePickerView(BaseCableTableView):
                 target_pk = int(request.GET.get("device_id", ""))
             except (TypeError, ValueError):
                 return HttpResponse("Select a device.", status=400)
-            target = get_object_or_404(Device, pk=target_pk)
+            target = self.restrict_object_or_404(Device, pk=target_pk)
             serial = source == "serial"
             ports = target.consoleports.all() if serial else target.interfaces.all()
             return render(
@@ -1850,7 +1855,9 @@ class CableRemotePickerView(BaseCableTableView):
         label = (row or {}).get("remote_device")
         if row and label:
             device, found, _ = self.get_device_by_id_or_name(None, label)
-            if found:
+            # The label match runs against the plain manager (it is shared with the render path),
+            # so keep the prefill inside the user's own scope.
+            if found and self.restricted_queryset(Device).filter(pk=device.pk).exists():
                 initial_devices = [device]
         return render(
             request,
@@ -1868,10 +1875,10 @@ class CableRemotePickerView(BaseCableTableView):
 
     def post(self, request, pk):
         """Validate the picked port and store it on the cached row, then re-render the partial."""
-        denied = self.require_write_permission()
+        denied = self.require_all_permissions("POST")
         if denied is not None:
             return denied
-        obj = get_object_or_404(Device, pk=pk)
+        obj = self.restrict_object_or_404(Device, pk=pk)
         server_key = request.POST.get("server_key") or self.librenms_api.server_key
         port_id = request.POST.get("port_id", "")
         cache_key, cached = self._cache_state(obj, server_key)
@@ -1891,7 +1898,13 @@ class CableRemotePickerView(BaseCableTableView):
             remote_pk = int(request.POST.get("remote_interface_id", ""))
         except (TypeError, ValueError):
             return HttpResponse("Select a remote port.", status=400)
-        port = port_model.objects.filter(pk=remote_pk).select_related("device").first()
+        # Scope the pick to a device the user may see — the same rule the ports fragment lists by,
+        # so a forged remote_interface_id can't bind a termination on an out-of-scope device.
+        port = (
+            port_model.objects.filter(pk=remote_pk, device__in=self.restricted_queryset(Device))
+            .select_related("device")
+            .first()
+        )
         if port is None:
             noun = "console port" if serial else "interface"
             return HttpResponse(f"Selected {noun} does not exist (or is the wrong kind of port).", status=400)
@@ -1917,12 +1930,10 @@ class CableRemotePickerView(BaseCableTableView):
 
         view = DeviceCableTableView()
         view.setup(request, pk=obj.pk)
-        resolved_key = view.rebind_api_for_server(server_key)
-        if resolved_key is None:
-            # Same rebind-failure fallback as _refetch_snapshot: never scope the closing
-            # re-render under an unconfigured key, or the just-stored pick renders (and the
-            # table caches) in a namespace no other view reads.
-            resolved_key = view.active_server_key
+        # Same rebind-failure degrade as _refetch_snapshot: never scope the closing re-render
+        # under an unconfigured key, or the just-stored pick renders (and the table caches) in a
+        # namespace no other view reads.
+        resolved_key = view.rebind_api_for_server_or_default(server_key)
         context = view._prepare_context(request, obj, fetch_fresh=False, server_key=resolved_key)
         if context is None:
             context = {"table": None, "object": obj, "cache_expiry": None, "server_key": resolved_key}
