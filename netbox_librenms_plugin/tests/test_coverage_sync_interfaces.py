@@ -39,6 +39,12 @@ def _sync_view(request=None):
     return view
 
 
+def _post(view, req, **kwargs):
+    """POST straight into *view*, binding *req* the way ``View.setup()`` does under dispatch()."""
+    view.setup(req)
+    return view.post(req, **kwargs)
+
+
 def _denied_response():
     resp = MagicMock()
     resp.status_code = 403
@@ -95,22 +101,26 @@ class TestSyncInterfaceParentViewPermissions:
         )
 
     def test_device_post_requires_interface_change(self):
+        from dcim.models import Device, Interface
+
         from netbox_librenms_plugin.views.sync.interfaces import SyncInterfaceParentView
-        from dcim.models import Interface
 
         view = object.__new__(SyncInterfaceParentView)
         with self._stop_after_perms():
             view.post(_make_request(), "device", 1)
-        assert view.required_object_permissions["POST"] == [("change", Interface)]
+        # view_device too: the owner lookup resolves through a restricted queryset, so the gate
+        # must state the read the endpoint actually performs instead of 404ing on it.
+        assert view.required_object_permissions["POST"] == [("view", Device), ("change", Interface)]
 
     def test_vm_post_requires_vminterface_change(self):
+        from virtualization.models import VirtualMachine, VMInterface
+
         from netbox_librenms_plugin.views.sync.interfaces import SyncInterfaceParentView
-        from virtualization.models import VMInterface
 
         view = object.__new__(SyncInterfaceParentView)
         with self._stop_after_perms():
             view.post(_make_request(), "virtualmachine", 1)
-        assert view.required_object_permissions["POST"] == [("change", VMInterface)]
+        assert view.required_object_permissions["POST"] == [("view", VirtualMachine), ("change", VMInterface)]
 
     def test_invalid_type_raises_http404(self):
         from netbox_librenms_plugin.views.sync.interfaces import SyncInterfaceParentView
@@ -124,7 +134,7 @@ class TestSyncInterfaceParentViewPermissions:
 
 class TestSyncInterfaceLagViewPermissions:
     def test_post_permissions_are_resolved_by_the_shared_base(self):
-        from dcim.models import Interface
+        from dcim.models import Device, Interface
 
         from netbox_librenms_plugin.views.sync.interfaces import SyncInterfaceLagView
 
@@ -132,7 +142,7 @@ class TestSyncInterfaceLagViewPermissions:
         view = object.__new__(SyncInterfaceLagView)
         with patch.object(SyncInterfaceLagView, "require_all_permissions_json", return_value=_denied_response()):
             view.post(_make_request(), "device", 1)
-        assert view.required_object_permissions["POST"] == [("change", Interface)]
+        assert view.required_object_permissions["POST"] == [("view", Device), ("change", Interface)]
 
 
 def _js_source():
@@ -1991,7 +2001,7 @@ class TestInterfaceLinkValidationErrorNoStackTrace:
             patch.object(Interface, "full_clean", side_effect=ValidationError(self._SENTINEL)),
             patch("netbox_librenms_plugin.views.sync.interfaces.logger") as mock_logger,
         ):
-            resp = view.post(req, object_type="device", object_id=device.pk)
+            resp = _post(view, req, object_type="device", object_id=device.pk)
 
         assert resp.status_code == 409
         assert self._SENTINEL not in resp.content.decode()
@@ -2021,7 +2031,7 @@ class TestInterfaceLinkValidationErrorNoStackTrace:
             patch.object(Interface, "full_clean", side_effect=ValidationError(self._SENTINEL)),
             patch("netbox_librenms_plugin.views.sync.interfaces.logger") as mock_logger,
         ):
-            resp = view.post(req, object_type="device", object_id=device.pk)
+            resp = _post(view, req, object_type="device", object_id=device.pk)
 
         assert resp.status_code == 409
         assert self._SENTINEL not in resp.content.decode()
@@ -2063,7 +2073,7 @@ class TestSyncInterfaceLagViewRealDB:
 
         view = self._make_view()
         req = _make_request({"port_id": "10", "lag_port_id": "20", "server_key": "default"})
-        resp = view.post(req, object_type="device", object_id=device.pk)
+        resp = _post(view, req, object_type="device", object_id=device.pk)
 
         assert resp.status_code == 200
         member.refresh_from_db()
@@ -2084,17 +2094,19 @@ class TestSyncInterfaceLagViewRealDB:
         real_build = sync_mod._build_interface_index
         calls = []
 
-        def counting_build(obj, server_key):
-            calls.append(obj)
-            return real_build(obj, server_key)
+        def counting_build(obj, server_key, **kwargs):
+            calls.append((obj, kwargs))
+            return real_build(obj, server_key, **kwargs)
 
         view = self._make_view()
         req = _make_request({"port_id": "50", "lag_port_id": "60", "server_key": "default"})
         with patch.object(sync_mod, "_build_interface_index", side_effect=counting_build):
-            resp = view.post(req, object_type="device", object_id=device.pk)
+            resp = _post(view, req, object_type="device", object_id=device.pk)
 
         assert resp.status_code == 200
         assert len(calls) == 1  # built once and shared; pre-fix each resolve rebuilt it (2)
+        # ...and it is built SCOPED to the acting user, not against the plain manager.
+        assert calls[0][1]["user"] is req.user
 
     def test_self_lag_rejected_by_real_full_clean(self):
         import json
@@ -2108,7 +2120,7 @@ class TestSyncInterfaceLagViewRealDB:
         # port_id == lag_port_id resolves member == aggregate (same real interface); NetBox's
         # real Interface.clean() must reject the self-LAG with a 409 and persist nothing.
         req = _make_request({"port_id": "30", "lag_port_id": "30", "server_key": "default"})
-        resp = view.post(req, object_type="device", object_id=device.pk)
+        resp = _post(view, req, object_type="device", object_id=device.pk)
 
         assert resp.status_code == 409
         body = json.loads(resp.content)
@@ -2150,7 +2162,7 @@ class TestSyncInterfaceLagViewRealDB:
         with connection.cursor() as cur:
             cur.execute("SET CONSTRAINTS ALL IMMEDIATE")
         with patch.object(Interface, "full_clean", lambda self: None):
-            resp = view.post(req, object_type="device", object_id=device.pk)
+            resp = _post(view, req, object_type="device", object_id=device.pk)
 
         assert resp.status_code == 409
         body = json.loads(resp.content)
@@ -2178,7 +2190,7 @@ class TestSyncInterfaceLagViewRealDB:
         view = self._make_view()
         # Posting against member1: the aggregate resolves onto member2 and must be refused.
         req = _make_request({"port_id": "40", "lag_port_id": "50", "server_key": "default"})
-        resp = view.post(req, object_type="device", object_id=member1.pk)
+        resp = _post(view, req, object_type="device", object_id=member1.pk)
 
         # Pin the rejection to the expected_owner path: a bare `in (404, 409)` would still pass if
         # post() stopped pinning expected_owner and only the later cross-device guard (409) caught
@@ -2323,3 +2335,103 @@ class TestBulkRelationshipConcurrentConflict:
         assert member.lag_id is None  # the relationship pass rolled back as a unit
         queued = [str(m) for m in request._messages._queued_messages]
         assert any("concurrent change" in m for m in queued)
+
+
+@pytest.mark.django_db
+class TestRelationshipSyncObjectScope:
+    """The LAG/parent endpoints write both ends, so their resolution must run through a restricted
+    queryset.
+
+    NetBoxObjectPermissionMixin asks ``has_perm`` without an instance, so a CONSTRAINED
+    ``change_interface`` grant clears the POST gate; an unrestricted interface index would then let
+    it set ``lag``/``parent`` on interfaces it cannot see.
+    """
+
+    @staticmethod
+    def _writer(username, specs):
+        """A real non-superuser with plugin write access plus ``specs`` = [(model, action, constraints)] grants."""
+        from core.models import ObjectType
+        from django.apps import apps
+        from django.contrib.auth import get_user_model
+        from users.models import ObjectPermission
+
+        LibreNMSSettings = apps.get_model("netbox_librenms_plugin", "LibreNMSSettings")
+
+        user = get_user_model().objects.create_user(username=username, password="x")
+        write = ObjectPermission.objects.create(name=f"{username}-plugin-write", actions=["change"])
+        write.object_types.set([ObjectType.objects.get_for_model(LibreNMSSettings)])
+        write.users.set([user])
+
+        for i, (model, action, constraints) in enumerate(specs):
+            perm = ObjectPermission.objects.create(
+                name=f"{username}-{action}-{i}", actions=[action], constraints=constraints
+            )
+            perm.object_types.set([ObjectType.objects.get_for_model(model)])
+            perm.users.set([user])
+
+        return get_user_model().objects.get(pk=user.pk)  # clear the per-request perm cache
+
+    @staticmethod
+    def _iface(device, name, port_id):
+        from netbox_librenms_plugin.tests.conftest import make_interface
+        from netbox_librenms_plugin.utils import set_librenms_device_id
+
+        iface = make_interface(device, name)
+        set_librenms_device_id(iface, port_id, "default")
+        iface.save()
+        return iface
+
+    def _drive(self, user, device, port_id, lag_port_id):
+        """POST the LAG link as *user*, with the real permission gate and real restrict() running."""
+        from django.test import RequestFactory
+
+        from netbox_librenms_plugin.views.sync.interfaces import SyncInterfaceLagView
+
+        request = RequestFactory().post(
+            "/lag/", {"port_id": str(port_id), "lag_port_id": str(lag_port_id), "server_key": "default"}
+        )
+        request.user = user
+        view = SyncInterfaceLagView()
+        view.setup(request)
+        return view.post(request, object_type="device", object_id=device.pk)
+
+    def test_lag_sync_refuses_an_out_of_scope_interface(self):
+        from dcim.models import Device, Interface
+
+        in_scope_device = make_device("relscope-in")
+        out_of_scope_device = make_device("relscope-out")
+        self._iface(in_scope_device, "Gi0/1", 700)
+        member = self._iface(out_of_scope_device, "Gi0/1", 701)
+        agg = self._iface(out_of_scope_device, "Po1", 702)
+        user = self._writer(
+            "relscope-user",
+            [(Device, "view", None), (Interface, "change", {"device__name": "relscope-in"})],
+        )
+
+        response = self._drive(user, out_of_scope_device, 701, 702)
+
+        assert response.status_code == 404
+        member.refresh_from_db()
+        agg.refresh_from_db()
+        assert member.lag_id is None  # not linked
+        assert agg.type != "lag"  # the aggregate was not promoted either
+
+    def test_lag_sync_links_the_in_scope_interfaces(self):
+        """The interfaces the grant DOES cover still link — the scoping must not over-block."""
+        from dcim.models import Device, Interface
+
+        device = make_device("relscope-ok")
+        member = self._iface(device, "Gi0/1", 710)
+        agg = self._iface(device, "Po1", 711)
+        user = self._writer(
+            "relscope-user-ok",
+            [(Device, "view", None), (Interface, "change", {"device__name": "relscope-ok"})],
+        )
+
+        response = self._drive(user, device, 710, 711)
+
+        assert response.status_code == 200
+        member.refresh_from_db()
+        agg.refresh_from_db()
+        assert member.lag_id == agg.pk
+        assert agg.type == "lag"

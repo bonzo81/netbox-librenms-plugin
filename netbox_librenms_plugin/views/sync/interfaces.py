@@ -963,7 +963,7 @@ def _interface_owner_for_object(obj):
     return (None, obj.pk)
 
 
-def _build_interface_index(obj, server_key):
+def _build_interface_index(obj, server_key, user=None, action="change"):
     """
     Build a one-pass index of a device's interfaces for repeated resolution.
 
@@ -976,6 +976,10 @@ def _build_interface_index(obj, server_key):
     Args:
         obj: The Device (or VirtualMachine) whose interfaces are indexed.
         server_key (str): The LibreNMS server key scoping stored-id reads.
+        user: When given, scope the index to the interfaces this user may *action*. The view
+            gate only asks ``has_perm`` at model level, which a CONSTRAINED grant clears, so a
+            write path must pass the request user or it resolves out-of-grant interfaces.
+        action (str): The permission action to scope by (default ``"change"``).
 
     Returns:
         dict | None: ``{"by_lnms_id": {int: [iface, ...]}, "by_name": {name: [iface,
@@ -992,6 +996,9 @@ def _build_interface_index(obj, server_key):
         iface_qs = VMInterface.objects.filter(virtual_machine=obj)
     else:
         return None
+
+    if user is not None:
+        iface_qs = iface_qs.restrict(user, action)
 
     by_lnms_id: dict = {}
     by_name: dict = {}
@@ -1274,8 +1281,6 @@ class _BaseRelationshipSyncView(LibreNMSPermissionMixin, NetBoxObjectPermissionM
 
     def _required_permissions(self, object_type):
         """Object-type-scoped POST permissions; raise Http404 for an unsupported type."""
-        # The owner is resolved through a restricted queryset (_get_object), so its view
-        # permission belongs here: a missing grant is an explicit 403, not a 404 at the lookup.
         if object_type == "device":
             return {"POST": [("view", Device), ("change", Interface)]}
         if object_type == "virtualmachine" and self.supports_vm:
@@ -1287,7 +1292,9 @@ class _BaseRelationshipSyncView(LibreNMSPermissionMixin, NetBoxObjectPermissionM
         raise Http404("Invalid object type.")
 
     def _get_object(self, object_type, object_id):
-        """Resolve the owner the row belongs to, scoped to what the caller may see."""
+        # restrict_object_or_404, not get_object_or_404: the POST gate above clears a CONSTRAINED
+        # change grant (has_perm is asked without an instance), so a raw pk lookup would resolve a
+        # device the user may not see. An out-of-scope id 404s like a nonexistent one.
         if object_type == "device":
             return self.restrict_object_or_404(Device, pk=object_id)
         if object_type == "virtualmachine" and self.supports_vm:
@@ -1327,7 +1334,10 @@ class _BaseRelationshipSyncView(LibreNMSPermissionMixin, NetBoxObjectPermissionM
         # Build the interface index ONCE and share it across both resolutions below — otherwise
         # each _resolve_interface_by_port_id call rebuilds it internally (a VC-wide interface scan
         # re-reading every librenms_id custom field), doubling the DB work per click for no benefit.
-        iface_index = _build_interface_index(obj, server_key)
+        # Scoped to the interfaces this user may change: both ends are written (lag/parent on the
+        # source, and SyncInterfaceLagView bumps the aggregate's type), and the model-level gate
+        # above does not constrain either one.
+        iface_index = _build_interface_index(obj, server_key, user=request.user)
         source_iface, err = _resolve_interface_by_port_id(
             obj, port_id, server_key, expected_owner=expected_owner, index=iface_index
         )
