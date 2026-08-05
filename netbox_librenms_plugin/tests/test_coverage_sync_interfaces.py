@@ -1364,6 +1364,7 @@ class TestDeleteNetBoxInterfacesViewPost:
         view.require_all_permissions_json = MagicMock(return_value=_denied_response())
 
         req = _make_request(post_data={"interface_ids": ["1"]})
+        view.request = req
         result = view.post(req, "device", 1)
         assert result.status_code == 403
 
@@ -1377,6 +1378,7 @@ class TestDeleteNetBoxInterfacesViewPost:
 
         mock_device = MagicMock(pk=1)
         req = _make_request(post_data={})  # No interface_ids
+        view.request = req
 
         with patch(
             "netbox_librenms_plugin.views.mixins.NetBoxObjectPermissionMixin.restrict_object_or_404",
@@ -1396,6 +1398,7 @@ class TestDeleteNetBoxInterfacesViewPost:
         view.require_all_permissions_json = MagicMock(return_value=None)
 
         req = _make_request(post_data={"interface_ids": ["1"]})
+        view.request = req
         with pytest.raises(Http404):
             view.post(req, "badtype", 1)
 
@@ -1417,6 +1420,7 @@ class TestDeleteNetBoxInterfacesViewPost:
         mock_interface.device_id = 1
 
         req = _make_request(post_data={"interface_ids": ["5"]})
+        view.request = req
 
         with (
             patch(
@@ -1426,6 +1430,7 @@ class TestDeleteNetBoxInterfacesViewPost:
             patch("netbox_librenms_plugin.views.sync.interfaces.Interface") as mock_intf_cls,
             patch("netbox_librenms_plugin.views.sync.interfaces.transaction"),
         ):
+            mock_intf_cls.objects.restrict.return_value = mock_intf_cls.objects
             mock_intf_cls.objects.get.return_value = mock_interface
 
             class _DNE(Exception):
@@ -1458,6 +1463,7 @@ class TestDeleteNetBoxInterfacesViewPost:
         mock_interface.virtual_machine_id = 2
 
         req = _make_request(post_data={"interface_ids": ["7"]})
+        view.request = req
 
         with (
             patch(
@@ -1467,6 +1473,7 @@ class TestDeleteNetBoxInterfacesViewPost:
             patch("netbox_librenms_plugin.views.sync.interfaces.VMInterface") as mock_vmintf_cls,
             patch("netbox_librenms_plugin.views.sync.interfaces.transaction"),
         ):
+            mock_vmintf_cls.objects.restrict.return_value = mock_vmintf_cls.objects
             mock_vmintf_cls.objects.get.return_value = mock_interface
 
             class _DNE(Exception):
@@ -1498,6 +1505,7 @@ class TestDeleteNetBoxInterfacesViewPost:
         mock_interface.device_id = 99  # Wrong device
 
         req = _make_request(post_data={"interface_ids": ["5"]})
+        view.request = req
 
         with (
             patch(
@@ -1507,6 +1515,7 @@ class TestDeleteNetBoxInterfacesViewPost:
             patch("netbox_librenms_plugin.views.sync.interfaces.Interface") as mock_intf_cls,
             patch("netbox_librenms_plugin.views.sync.interfaces.transaction"),
         ):
+            mock_intf_cls.objects.restrict.return_value = mock_intf_cls.objects
             mock_intf_cls.objects.get.return_value = mock_interface
 
             class _DNE(Exception):
@@ -1541,6 +1550,7 @@ class TestDeleteNetBoxInterfacesViewPost:
         mock_interface.device_id = 999  # Not in VC
 
         req = _make_request(post_data={"interface_ids": ["5"]})
+        view.request = req
 
         with (
             patch(
@@ -1550,6 +1560,7 @@ class TestDeleteNetBoxInterfacesViewPost:
             patch("netbox_librenms_plugin.views.sync.interfaces.Interface") as mock_intf_cls,
             patch("netbox_librenms_plugin.views.sync.interfaces.transaction"),
         ):
+            mock_intf_cls.objects.restrict.return_value = mock_intf_cls.objects
             mock_intf_cls.objects.get.return_value = mock_interface
 
             class _DNE(Exception):
@@ -1576,6 +1587,7 @@ class TestDeleteNetBoxInterfacesViewPost:
         mock_device.virtual_chassis = None
 
         req = _make_request(post_data={"interface_ids": ["999"]})
+        view.request = req
 
         class _DNE(Exception):
             pass
@@ -1589,6 +1601,7 @@ class TestDeleteNetBoxInterfacesViewPost:
             patch("netbox_librenms_plugin.views.sync.interfaces.transaction"),
         ):
             mock_intf_cls.DoesNotExist = _DNE
+            mock_intf_cls.objects.restrict.return_value = mock_intf_cls.objects
             mock_intf_cls.objects.get.side_effect = _DNE()
 
             result = view.post(req, "device", 1)
@@ -1614,6 +1627,7 @@ class TestDeleteNetBoxInterfacesViewPost:
         mock_interface.virtual_machine_id = 99  # Wrong VM
 
         req = _make_request(post_data={"interface_ids": ["7"]})
+        view.request = req
 
         with (
             patch(
@@ -1623,6 +1637,7 @@ class TestDeleteNetBoxInterfacesViewPost:
             patch("netbox_librenms_plugin.views.sync.interfaces.VMInterface") as mock_vmintf_cls,
             patch("netbox_librenms_plugin.views.sync.interfaces.transaction"),
         ):
+            mock_vmintf_cls.objects.restrict.return_value = mock_vmintf_cls.objects
             mock_vmintf_cls.objects.get.return_value = mock_interface
 
             class _DNE(Exception):
@@ -1660,6 +1675,7 @@ class TestDeleteNetBoxInterfacesViewPost:
         mock_interface_bad.device_id = 99  # Wrong device
 
         req = _make_request(post_data={"interface_ids": ["5", "6"]})
+        view.request = req
 
         call_count = [0]
 
@@ -1681,6 +1697,7 @@ class TestDeleteNetBoxInterfacesViewPost:
             patch("netbox_librenms_plugin.views.sync.interfaces.transaction"),
         ):
             mock_intf_cls.DoesNotExist = _DNE
+            mock_intf_cls.objects.restrict.return_value = mock_intf_cls.objects
             mock_intf_cls.objects.get.side_effect = get_side_effect
             result = view.post(req, "device", 1)
 

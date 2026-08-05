@@ -586,6 +586,7 @@ class TestDeleteNetBoxInterfacesPost:
             "netbox_librenms_plugin.views.mixins.NetBoxObjectPermissionMixin.restrict_object_or_404", return_value=obj
         ):
             with patch("netbox_librenms_plugin.views.sync.interfaces.Interface") as mc:
+                mc.objects.restrict.return_value = mc.objects
                 mc.objects.get.return_value = iface
                 with patch("netbox_librenms_plugin.views.sync.interfaces.transaction") as mt:
                     mt.atomic = _pa
@@ -612,6 +613,7 @@ class TestDeleteNetBoxInterfacesPost:
             "netbox_librenms_plugin.views.mixins.NetBoxObjectPermissionMixin.restrict_object_or_404", return_value=obj
         ):
             with patch("netbox_librenms_plugin.views.sync.interfaces.Interface") as mc:
+                mc.objects.restrict.return_value = mc.objects
                 mc.objects.get.return_value = iface
                 with patch("netbox_librenms_plugin.views.sync.interfaces.transaction") as mt:
                     mt.atomic = _pa
@@ -644,6 +646,7 @@ class TestDeleteNetBoxInterfacesPost:
             "netbox_librenms_plugin.views.mixins.NetBoxObjectPermissionMixin.restrict_object_or_404", return_value=obj
         ):
             with patch("netbox_librenms_plugin.views.sync.interfaces.Interface") as mc:
+                mc.objects.restrict.return_value = mc.objects
                 mc.objects.get.return_value = iface
                 with patch("netbox_librenms_plugin.views.sync.interfaces.transaction") as mt:
                     mt.atomic = _pa
@@ -676,6 +679,7 @@ class TestDeleteNetBoxInterfacesPost:
             "netbox_librenms_plugin.views.mixins.NetBoxObjectPermissionMixin.restrict_object_or_404", return_value=obj
         ):
             with patch("netbox_librenms_plugin.views.sync.interfaces.Interface") as mc:
+                mc.objects.restrict.return_value = mc.objects
                 mc.objects.get.return_value = iface
                 with patch("netbox_librenms_plugin.views.sync.interfaces.transaction") as mt:
                     mt.atomic = _pa
@@ -700,6 +704,7 @@ class TestDeleteNetBoxInterfacesPost:
             "netbox_librenms_plugin.views.mixins.NetBoxObjectPermissionMixin.restrict_object_or_404", return_value=obj
         ):
             with patch("netbox_librenms_plugin.views.sync.interfaces.VMInterface") as mc:
+                mc.objects.restrict.return_value = mc.objects
                 mc.objects.get.return_value = iface
                 with patch("netbox_librenms_plugin.views.sync.interfaces.transaction") as mt:
                     mt.atomic = _pa
@@ -725,6 +730,7 @@ class TestDeleteNetBoxInterfacesPost:
             "netbox_librenms_plugin.views.mixins.NetBoxObjectPermissionMixin.restrict_object_or_404", return_value=obj
         ):
             with patch("netbox_librenms_plugin.views.sync.interfaces.VMInterface") as mc:
+                mc.objects.restrict.return_value = mc.objects
                 mc.objects.get.return_value = iface
                 with patch("netbox_librenms_plugin.views.sync.interfaces.transaction") as mt:
                     mt.atomic = _pa
@@ -751,6 +757,7 @@ class TestDeleteNetBoxInterfacesPost:
         ):
             with patch("netbox_librenms_plugin.views.sync.interfaces.Interface") as mc:
                 mc.DoesNotExist = Interface.DoesNotExist
+                mc.objects.restrict.return_value = mc.objects
                 mc.objects.get.side_effect = Interface.DoesNotExist
                 with patch("netbox_librenms_plugin.views.sync.interfaces.VMInterface") as mvc:
                     mvc.DoesNotExist = VMI.DoesNotExist
@@ -787,6 +794,7 @@ class TestDeleteNetBoxInterfacesPost:
             "netbox_librenms_plugin.views.mixins.NetBoxObjectPermissionMixin.restrict_object_or_404", return_value=obj
         ):
             with patch("netbox_librenms_plugin.views.sync.interfaces.Interface") as mc:
+                mc.objects.restrict.return_value = mc.objects
                 mc.objects.get.side_effect = get_se
                 with patch("netbox_librenms_plugin.views.sync.interfaces.transaction") as mt:
                     mt.atomic = _pa

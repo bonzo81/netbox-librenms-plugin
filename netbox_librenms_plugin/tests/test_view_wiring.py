@@ -5,6 +5,7 @@ These tests never touch the database or network; they only inspect class
 hierarchies and attribute presence.
 """
 
+import json
 import os
 from pathlib import Path
 
@@ -743,6 +744,98 @@ class TestGatedViewsRefuseOutOfScopeObjects:
         assert foreign_module.device_id == other_device.pk  # not moved
         assert foreign_module.module_bay_id == foreign_bay.pk
 
+    def test_module_move_refuses_to_delete_a_bay_occupant_outside_the_grant(self):
+        """MoveModuleView deletes whatever occupies the target bay; the bay filter proves where that row sits, not that the delete grant covers it."""
+        from dcim.models import Device, Module, ModuleBay
+
+        from netbox_librenms_plugin.tests.conftest import make_device, make_module_bay, make_module_type
+        from netbox_librenms_plugin.views.sync.modules import MoveModuleView
+
+        page_device = make_device("scope-moveocc-page")
+        mtype = make_module_type("MT-scope-moveocc")
+        source_bay = make_module_bay(page_device, "Slot 1")
+        target_bay = make_module_bay(page_device, "Slot 2")
+        conflict_module = Module.objects.create(device=page_device, module_bay=source_bay, module_type=mtype)
+        # The bay's current occupant sits on the page device, so only the delete grant excludes it.
+        occupant = Module.objects.create(device=page_device, module_bay=target_bay, module_type=mtype)
+
+        user = self._user(
+            "scope-moveocc",
+            [
+                (Device, "view", {"pk": page_device.pk}),
+                (ModuleBay, "view", None),
+                (Module, "change", None),  # the module being moved IS covered
+                (Module, "delete", {"pk": conflict_module.pk}),  # the occupant is NOT
+            ],
+        )
+        view = MoveModuleView()
+        request = self._request(
+            user,
+            {
+                "server_key": "default",
+                "conflict_module_id": str(conflict_module.pk),
+                "target_bay_id": str(target_bay.pk),
+                "module_id": str(occupant.pk),
+            },
+        )
+        view.setup(request)
+        view.post(request, pk=page_device.pk)
+
+        assert Module.objects.filter(pk=occupant.pk).exists()  # outside the delete grant, so kept
+
+    def test_interface_delete_refuses_an_interface_outside_the_grant(self):
+        """DeleteNetBoxInterfacesView deletes ids straight from the POST; the device check proves ownership, not the grant."""
+        from dcim.models import Device, Interface
+
+        from netbox_librenms_plugin.tests.conftest import make_device, make_interface
+        from netbox_librenms_plugin.views.sync.interfaces import DeleteNetBoxInterfacesView
+
+        device = make_device("scope-ifdel")
+        granted = make_interface(device, "eth0")
+        # Same device, so every ownership check the view makes passes; only the grant excludes it.
+        outside = make_interface(device, "eth1")
+
+        user = self._user(
+            "scope-ifdel",
+            [
+                (Device, "view", {"pk": device.pk}),
+                (Interface, "delete", {"pk": granted.pk}),
+            ],
+        )
+        view = DeleteNetBoxInterfacesView()
+        request = self._request(user, {"server_key": "default", "interface_ids": [str(outside.pk)]})
+        view.setup(request)
+        response = view.post(request, object_type="device", object_id=device.pk)
+
+        assert Interface.objects.filter(pk=outside.pk).exists()
+        assert json.loads(response.content)["deleted_count"] == 0
+
+    def test_vm_interface_delete_refuses_an_interface_outside_the_grant(self):
+        """The virtual-machine branch of the same view resolves VMInterface ids from the POST too."""
+        from virtualization.models import VirtualMachine, VMInterface
+
+        from netbox_librenms_plugin.tests.conftest import make_vm
+        from netbox_librenms_plugin.views.sync.interfaces import DeleteNetBoxInterfacesView
+
+        vm = make_vm("scope-vmifdel")
+        granted = VMInterface.objects.create(virtual_machine=vm, name="eth0")
+        outside = VMInterface.objects.create(virtual_machine=vm, name="eth1")
+
+        user = self._user(
+            "scope-vmifdel",
+            [
+                (VirtualMachine, "view", {"pk": vm.pk}),
+                (VMInterface, "delete", {"pk": granted.pk}),
+            ],
+        )
+        view = DeleteNetBoxInterfacesView()
+        request = self._request(user, {"server_key": "default", "interface_ids": [str(outside.pk)]})
+        view.setup(request)
+        response = view.post(request, object_type="virtualmachine", object_id=vm.pk)
+
+        assert VMInterface.objects.filter(pk=outside.pk).exists()
+        assert json.loads(response.content)["deleted_count"] == 0
+
     def test_vc_serial_assign_refuses_a_member_outside_the_grant(self):
         """AssignVCSerialView overwrites the member's serial and takes its pk from the POST, guarded only by same-VC membership."""
         from dcim.models import Device
@@ -768,7 +861,7 @@ class TestGatedViewsRefuseOutOfScopeObjects:
         view = AssignVCSerialView()
         request = self._request(
             user,
-            {"server_key": "default", "member_id_0": str(sibling.pk), "serial_0": "HIJACKED"},
+            {"server_key": "default", "member_id_1": str(sibling.pk), "serial_1": "HIJACKED"},
         )
         view.setup(request)
         view.post(request, pk=page_member.pk)

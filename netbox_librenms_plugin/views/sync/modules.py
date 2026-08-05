@@ -1974,10 +1974,13 @@ class MoveModuleView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, View)
                     messages.error(request, "Module no longer exists.")
                     return _modules_redirect_response(request, sync_url)
 
-                # Remove whatever is currently in the target bay (if provided and different)
+                # Remove whatever is currently in the target bay (if provided and different).
+                # Scoped by "delete": the device and bay filters prove where the row sits, not that
+                # the grant covers it, and the gate asked has_perm without an instance.
                 if module_id:
                     occupant = (
-                        Module.objects.select_for_update()
+                        self.restricted_queryset(Module, "delete")
+                        .select_for_update()
                         .filter(pk=module_id, device=target_device, module_bay=target_bay)
                         .first()
                     )
