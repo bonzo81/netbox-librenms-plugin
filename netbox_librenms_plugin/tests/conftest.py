@@ -7,17 +7,20 @@ import pytest
 
 @pytest.fixture(autouse=True)
 def _clear_device_info_cache():
-    """Clear get_device_info()'s short-lived cache between tests.
+    """Flush the plugin's caches between tests.
 
-    get_device_info() caches successful lookups in the shared cache. Without this,
-    a cached success from one test leaks into another that reuses the same
-    (server_key, device_id) but mocks a different response — e.g. the failure-path
-    tests keyed on device_id=123 that run after test_get_device_info_success.
+    NetBox uses Redis, which (unlike the test DB) is NOT rolled back between tests, while
+    primary keys ARE reused after each rollback. Every plugin cache key is built from a model
+    name and a pk (``CacheMixin.get_cache_key`` → ``librenms_links_device_7_default``), so a
+    value cached by one test is read by the next test that draws the same pk, with entirely
+    different data behind it. ``librenms_*`` covers the per-object render caches (ports, links,
+    vlans, ip_addresses, inventory, last-fetched stamps, VLAN group overrides) as well as
+    ``get_device_info()``'s short-lived lookup cache.
     """
     from django.core.cache import cache
 
     try:
-        cache.delete_pattern("librenms_device_info_*")
+        cache.delete_pattern("librenms_*")
     except (AttributeError, NotImplementedError):
         cache.clear()
     yield
