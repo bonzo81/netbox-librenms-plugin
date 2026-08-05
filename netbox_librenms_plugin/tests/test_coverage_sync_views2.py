@@ -741,12 +741,32 @@ class TestAddDeviceToLibreNMSViewV3:
 
 class TestAddDeviceToLibreNMSViewUnknownVersion:
     def test_unknown_snmp_version_shows_error(self):
-        """No version toggle at all: the v3 form runs, reports "v3", and the add still happens.
+        """A version string that is neither v1/v2c nor v3 is refused before reaching LibreNMS.
 
-        The "Unknown SNMP version." branch is unreachable through post(): get_form_class falls
-        back to the v3 form, whose snmp_version field is a hidden constant. This pins what a
-        version-less POST actually does.
+        ``snmp_version`` on the v3 form is a plain CharField whose ``initial`` does not constrain a
+        BOUND form, so a posted "v99" survives validation, reaches form_valid as the version, and
+        must hit the guard rather than be sent on.
         """
+        dev = make_device("addsnmp-badversion")
+        req = _make_request(
+            post_data={
+                "object_type": "device",
+                "v3-snmp_version": "v99",
+                "v3-hostname": "router.example.com",
+                "v3-authlevel": "noAuthNoPriv",
+                "v3-authname": "user",
+            }
+        )
+        view = _add_device_view(req)
+
+        with _poller_groups([]):
+            _post(view, req, object_id=dev.pk)
+
+        assert message_texts(req, "error") == ["Unknown SNMP version."]
+        view._librenms_api.add_device.assert_not_called()
+
+    def test_no_version_toggle_falls_back_to_the_v3_form(self):
+        """With no toggle at all, get_form_class picks the v3 form and the add still happens."""
         dev = make_device("addsnmp-noversion")
         req = _make_request(
             post_data={
