@@ -8,10 +8,14 @@ from django_tables2 import SingleTableView
 
 from netbox_librenms_plugin.filtersets import SiteLocationFilterSet
 from netbox_librenms_plugin.tables.locations import SiteLocationSyncTable
-from netbox_librenms_plugin.views.mixins import LibreNMSAPIMixin, LibreNMSPermissionMixin
+from netbox_librenms_plugin.views.mixins import (
+    LibreNMSAPIMixin,
+    LibreNMSPermissionMixin,
+    NetBoxObjectPermissionMixin,
+)
 
 
-class SyncSiteLocationView(LibreNMSPermissionMixin, LibreNMSAPIMixin, SingleTableView):
+class SyncSiteLocationView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreNMSAPIMixin, SingleTableView):
     """Synchronize NetBox Sites with LibreNMS locations."""
 
     table_class = SiteLocationSyncTable
@@ -106,10 +110,10 @@ class SyncSiteLocationView(LibreNMSPermissionMixin, LibreNMSAPIMixin, SingleTabl
         return redirect("plugins:netbox_librenms_plugin:site_location_sync")
 
     def get_site_by_pk(self, pk):
-        """Return the Site for the given pk, or None if not found."""
+        """Return the Site for the given pk, or None if not found or outside the user's grant."""
         try:
-            return Site.objects.get(pk=pk)
-        except ObjectDoesNotExist:
+            return self.restricted_queryset(Site).get(pk=pk)
+        except (ObjectDoesNotExist, ValueError):
             return None
 
     def create_librenms_location(self, request, site):

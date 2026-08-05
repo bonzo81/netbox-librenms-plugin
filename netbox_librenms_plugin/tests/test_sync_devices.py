@@ -282,6 +282,7 @@ class TestRemoveServerMappingViewWiring:
 
         # Use a mock model class so the select_for_update().get() call doesn't hit the DB
         mock_model = MagicMock()
+        mock_model.objects.restrict.return_value = mock_model.objects
         mock_model.objects.select_for_update.return_value.get.return_value = mock_vm
 
         request = MagicMock()
@@ -298,6 +299,7 @@ class TestRemoveServerMappingViewWiring:
                 PLUGINS_CONFIG={"netbox_librenms_plugin": {}},
             ),
         ):
+            view.request = request
             view.post(request, pk=10)
 
         # required_object_permissions must be scoped to VirtualMachine, not Device

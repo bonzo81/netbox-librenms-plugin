@@ -208,7 +208,7 @@ class SyncInterfacesView(
 
             if selected_device_id:
                 try:
-                    target_device = Device.objects.get(id=selected_device_id)
+                    target_device = self.restricted_queryset(Device).get(id=selected_device_id)
                     # Validate the target is the current device or a VC member
                     if hasattr(obj, "virtual_chassis") and obj.virtual_chassis:
                         valid_ids = set(obj.virtual_chassis.members.values_list("id", flat=True))

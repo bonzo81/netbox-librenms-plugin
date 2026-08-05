@@ -55,7 +55,13 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
             dict: The ``required_object_permissions`` mapping for this request.
         """
         owner_model = VirtualMachine if object_type == "virtualmachine" else Device
-        return {"POST": [("view", owner_model), *self.required_object_permissions["POST"]]}
+        perms = [("view", owner_model), *self.required_object_permissions["POST"]]
+        # A per-row VRF is resolved by client-supplied id through a restricted queryset. Only
+        # demand its view permission when one is actually posted, so the common no-VRF sync
+        # is not gated on a permission it never uses.
+        if any(k.startswith("vrf_") for k in self.request.POST):
+            perms.append(("view", VRF))
+        return {"POST": perms}
 
     def get_selected_ips(self, request):
         """Return selected IP addresses from POST data."""
@@ -67,7 +73,7 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
 
         if vrf_id:
             try:
-                return VRF.objects.get(pk=vrf_id)
+                return self.restricted_queryset(VRF).get(pk=vrf_id)
             except VRF.DoesNotExist:
                 pass
 

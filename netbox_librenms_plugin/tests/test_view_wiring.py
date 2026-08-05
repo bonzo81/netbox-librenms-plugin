@@ -448,9 +448,22 @@ class TestGatedViewsResolveThroughRestrictedQuerysets:
     statically or per-request) OR calls one of the ``require_*_permission(s)`` gates: a view gated
     only by the plugin write permission reaches objects by raw pk just as easily.
 
-    Scope and limits: a raw lookup inherited from an ungated base class is NOT seen, and neither is
-    ``Model.objects.get(pk=...)`` / ``.filter(pk=...)`` — the secondary-lookup form. Both remain a
-    review matter.
+    Two forms are flagged: the PRIMARY lookup (``get_object_or_404(Model, pk=...)``) and the
+    SECONDARY one (``Model.objects.get(pk=...)`` / ``.filter(pk=...)``), which is where the same
+    defect kept reappearing after the primary lookups were scoped — on the module move/serial
+    endpoints, the interface delete targets and the OOB interface reuse.
+
+    What counts is where the id came from. A bare name, ``int(...)`` or a subscript is a CLIENT id
+    and must be scoped. A re-lock keyed by an already-resolved object (``pk=device.pk``,
+    ``pk=donor.oob_ip_id``) is exempt: the scoping happened where that object was resolved, and
+    restricting the re-read would instead demand a permission the view's gate never required —
+    ``restrict()`` returns ``none()`` for a user who lacks the model-level grant, so a change-only
+    caller would silently lose rows out of a lock set and be told the object "no longer exists".
+
+    Scope and limits: a raw lookup inherited from an ungated base class is NOT seen; bulk
+    ``pk__in=<collection>`` locks are not covered (each is built in-function from rows already
+    resolved); and a ``.filter(pk=...).exists()`` probe is exempt — it reads no object data and is how
+    ``_required_perms_for_object`` decides WHICH permission to demand, before any gate has run.
     """
 
     GATE_CALLS = frozenset(
@@ -463,6 +476,8 @@ class TestGatedViewsResolveThroughRestrictedQuerysets:
             "require_all_permissions_json",
         }
     )
+    PK_LOOKUP_KEYS = frozenset({"pk", "id"})
+    RAW_TERMINALS = frozenset({"get", "filter", "get_or_create"})
 
     @classmethod
     def _scan_tree(cls, tree, label):
@@ -470,12 +485,27 @@ class TestGatedViewsResolveThroughRestrictedQuerysets:
         import ast
 
         def _is_scoped(node):
-            """Whether the first get_object_or_404 argument came from restricted_queryset(...)."""
+            """Whether the queryset came from restricted_queryset(...) / .restrict(...)."""
             # Accepts the chained form too: self.restricted_queryset(Module).select_related(...).
             return any(
-                isinstance(inner, ast.Call) and getattr(inner.func, "attr", "") == "restricted_queryset"
+                isinstance(inner, ast.Call) and getattr(inner.func, "attr", "") in ("restricted_queryset", "restrict")
                 for inner in ast.walk(node)
             )
+
+        def _through_manager(node):
+            """Whether *node* is an unscoped ``<Model>.objects`` chain."""
+            saw_objects = False
+            cur = node
+            while True:
+                if isinstance(cur, ast.Call):
+                    if getattr(cur.func, "attr", "") in ("restricted_queryset", "restrict"):
+                        return False
+                    cur = cur.func
+                elif isinstance(cur, ast.Attribute):
+                    saw_objects = saw_objects or cur.attr == "objects"
+                    cur = cur.value
+                else:
+                    return saw_objects
 
         def _declares_gate(class_node):
             for sub in ast.walk(class_node):
@@ -498,10 +528,37 @@ class TestGatedViewsResolveThroughRestrictedQuerysets:
             # The mixin that DEFINES restrict_object_or_404 is where the raw call belongs.
             if any(isinstance(sub, ast.FunctionDef) and sub.name == "restrict_object_or_404" for sub in node.body):
                 continue
+            # `<qs>.exists()` reads no object data — see the class docstring.
+            exempt = {
+                sub.func.value
+                for sub in ast.walk(node)
+                if isinstance(sub, ast.Call)
+                and isinstance(sub.func, ast.Attribute)
+                and sub.func.attr == "exists"
+                and isinstance(sub.func.value, ast.Call)
+            }
             for sub in ast.walk(node):
-                if not (isinstance(sub, ast.Call) and getattr(sub.func, "id", None) == "get_object_or_404"):
+                if not isinstance(sub, ast.Call):
                     continue
-                if not (sub.args and _is_scoped(sub.args[0])):
+                if getattr(sub.func, "id", None) == "get_object_or_404":
+                    if not (sub.args and _is_scoped(sub.args[0])):
+                        offenders.add((label, node.name, sub.lineno))
+                    continue
+                if not isinstance(sub.func, ast.Attribute) or sub.func.attr not in cls.RAW_TERMINALS:
+                    continue
+                if sub in exempt:
+                    continue
+                pk_kwargs = [kw for kw in sub.keywords if kw.arg in cls.PK_LOOKUP_KEYS]
+                # `pk=obj.pk` / `pk=obj.foo_id` is a re-lock, not a client id — see the docstring.
+                if not pk_kwargs or all(
+                    isinstance(kw.value, ast.Attribute) and (kw.value.attr == "pk" or kw.value.attr.endswith("_id"))
+                    for kw in pk_kwargs
+                ):
+                    continue
+                # A scoped queryset can also arrive as an ARGUMENT rather than the receiver:
+                # `Port.objects.filter(pk=..., device__in=self.restricted_queryset(Device))`
+                # constrains by owner visibility, which is a deliberate and sufficient scoping.
+                if _through_manager(sub.func.value) and not _is_scoped(sub):
                     offenders.add((label, node.name, sub.lineno))
         return offenders
 
@@ -562,6 +619,79 @@ class TestGatedViewsResolveThroughRestrictedQuerysets:
             "    required_object_permissions = {'POST': []}\n"
             "    def post(self, request, pk):\n"
             "        return get_object_or_404(self.restricted_queryset(Device), pk=pk)\n"
+        )
+        assert not self._scan_tree(ast.parse(source), "<fixture>")
+
+    @pytest.mark.parametrize(
+        "lookup",
+        [
+            "Module.objects.get(pk=module_id)",
+            "Module.objects.filter(pk=module_id, device=d).first()",
+            "Module.objects.select_for_update().filter(pk=module_id).first()",
+            "Interface.objects.get(id=iface_id)",
+        ],
+    )
+    def test_the_scan_flags_a_secondary_raw_lookup(self, lookup):
+        """The secondary form is the one that kept slipping through — every shape of it must be flagged."""
+        import ast
+
+        source = (
+            "class V:\n"
+            "    required_object_permissions = {'POST': []}\n"
+            "    def post(self, request, pk):\n"
+            f"        return {lookup}\n"
+        )
+        assert self._scan_tree(ast.parse(source), "<fixture>"), f"not flagged: {lookup}"
+
+    def test_the_scan_accepts_a_scoped_secondary_lookup(self):
+        """Both scoping spellings clear it: the mixin helper and the bare manager restrict()."""
+        import ast
+
+        source = (
+            "class V:\n"
+            "    required_object_permissions = {'POST': []}\n"
+            "    def post(self, request, pk):\n"
+            "        a = self.restricted_queryset(Module, 'change').select_for_update().filter(pk=module_id)\n"
+            "        return Interface.objects.restrict(request.user, 'view').get(pk=iface_id)\n"
+        )
+        assert not self._scan_tree(ast.parse(source), "<fixture>")
+
+    def test_the_scan_accepts_scoping_passed_as_an_argument(self):
+        """Constraining by owner visibility scopes the row just as well as scoping its own manager."""
+        import ast
+
+        source = (
+            "class V:\n"
+            "    required_object_permissions = {'POST': []}\n"
+            "    def post(self, request, pk):\n"
+            "        return Interface.objects.filter(\n"
+            "            pk=remote_pk, device__in=self.restricted_queryset(Device)\n"
+            "        ).first()\n"
+        )
+        assert not self._scan_tree(ast.parse(source), "<fixture>")
+
+    def test_the_scan_exempts_a_relock_of_an_already_resolved_object(self):
+        """Re-locking a row already resolved through a scoped queryset must not demand a new permission."""
+        import ast
+
+        source = (
+            "class V:\n"
+            "    required_object_permissions = {'POST': []}\n"
+            "    def post(self, request, pk):\n"
+            "        a = Device.objects.select_for_update().get(pk=existing_device.pk)\n"
+            "        return IPAddress.objects.select_for_update().filter(pk=donor.oob_ip_id).first()\n"
+        )
+        assert not self._scan_tree(ast.parse(source), "<fixture>")
+
+    def test_the_scan_exempts_an_exists_probe(self):
+        """A .exists() probe reads no object data and picks WHICH permission to demand."""
+        import ast
+
+        source = (
+            "class V:\n"
+            "    required_object_permissions = {'POST': []}\n"
+            "    def post(self, request, pk):\n"
+            "        return Device.objects.filter(pk=object_id).exists()\n"
         )
         assert not self._scan_tree(ast.parse(source), "<fixture>")
 
@@ -743,6 +873,84 @@ class TestGatedViewsRefuseOutOfScopeObjects:
         foreign_module.refresh_from_db()
         assert foreign_module.device_id == other_device.pk  # not moved
         assert foreign_module.module_bay_id == foreign_bay.pk
+
+    def test_module_serial_update_refuses_a_module_outside_the_grant(self):
+        """UpdateModuleSerialView writes the serial of a module whose pk comes from the POST, filtered only by device."""
+        from dcim.models import Device, Module
+
+        from netbox_librenms_plugin.tests.conftest import make_device, make_module_bay, make_module_type
+        from netbox_librenms_plugin.views.sync.modules import UpdateModuleSerialView
+
+        page_device = make_device("scope-modserial-page")
+        mtype = make_module_type("MT-scope-modserial")
+        bay = make_module_bay(page_device, "Slot 1")
+        # On the page device, so the view's device filter passes; only the grant excludes it.
+        module = Module.objects.create(device=page_device, module_bay=bay, module_type=mtype, serial="ORIGINAL")
+        decoy = Module.objects.create(
+            device=page_device, module_bay=make_module_bay(page_device, "Slot 2"), module_type=mtype
+        )
+
+        user = self._user(
+            "scope-modserial",
+            [
+                (Device, "view", {"pk": page_device.pk}),
+                (Module, "change", {"pk": decoy.pk}),
+            ],
+        )
+        view = UpdateModuleSerialView()
+        request = self._request(
+            user,
+            {"server_key": "default", "module_id": str(module.pk), "serial": "HIJACKED"},
+        )
+        view.setup(request)
+        view.post(request, pk=page_device.pk)
+
+        module.refresh_from_db()
+        assert module.serial == "ORIGINAL"
+
+    def test_site_location_push_refuses_a_site_outside_the_grant(self):
+        """SyncSiteLocationView is gated by the plugin write permission alone and takes the site pk from the POST body."""
+        from dcim.models import Site
+
+        from netbox_librenms_plugin.views.sync.locations import SyncSiteLocationView
+
+        in_scope = Site.objects.create(name="scope-site-in", slug="scope-site-in")
+        out_of_scope = Site.objects.create(name="scope-site-out", slug="scope-site-out")
+        user = self._user("scope-site", [(Site, "view", {"pk": in_scope.pk})])
+
+        view = SyncSiteLocationView()
+        request = self._request(user, {"action": "update", "pk": str(out_of_scope.pk)})
+        view.setup(request)
+
+        # Bounces on "Site not found" before any LibreNMS call, so no API stub is needed.
+        assert view.get_site_by_pk(out_of_scope.pk) is None
+        assert view.get_site_by_pk(in_scope.pk) == in_scope  # the grant DOES still resolve
+
+    def test_oob_interface_reuse_refuses_an_interface_outside_the_grant(self):
+        """AddAsOOBView reuses an interface whose pk comes from the OOB form, filtered only by device."""
+        from dcim.models import Device, Interface
+        from django.db import transaction
+
+        from netbox_librenms_plugin.tests.conftest import make_device, make_interface
+        from netbox_librenms_plugin.views.imports.actions import AddAsOOBView
+
+        device = make_device("scope-oobiface")
+        granted = make_interface(device, "eth0")
+        # Same device, so the view's device filter passes; only the grant excludes it.
+        outside = make_interface(device, "idrac0")
+
+        user = self._user(
+            "scope-oobiface",
+            [
+                (Device, "view", {"pk": device.pk}),
+                (Interface, "view", {"pk": granted.pk}),
+            ],
+        )
+        request = self._request(user, {"oob_interface_id": str(outside.pk)})
+
+        with transaction.atomic():
+            resolved, _reason = AddAsOOBView._resolve_oob_interface(request, device)
+        assert resolved is None  # outside the grant, so it is not handed back for the OOB attach
 
     def test_module_move_refuses_to_delete_a_bay_occupant_outside_the_grant(self):
         """MoveModuleView deletes whatever occupies the target bay; the bay filter proves where that row sits, not that the delete grant covers it."""

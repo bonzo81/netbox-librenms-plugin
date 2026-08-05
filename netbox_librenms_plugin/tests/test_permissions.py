@@ -1093,6 +1093,7 @@ class TestRemoveServerMappingViewErrorHandling:
             patch("netbox_librenms_plugin.views.sync.device_fields.transaction") as mock_tx,
         ):
             mock_settings.PLUGINS_CONFIG = plugins_cfg
+            mock_Device_cls.objects.restrict.return_value = mock_Device_cls.objects
             mock_Device_cls.objects.select_for_update.return_value.get.return_value = mock_locked
 
             # Make transaction.atomic() a no-op context manager
@@ -1100,6 +1101,7 @@ class TestRemoveServerMappingViewErrorHandling:
             mock_tx.atomic.return_value.__exit__ = lambda s, *a: None
             mock_tx.set_rollback = MagicMock()
 
+            view.request = request
             view.post(request, pk=1)
 
         mock_messages.error.assert_called_once()
@@ -1126,6 +1128,7 @@ class TestRemoveServerMappingViewErrorHandling:
             patch("netbox_librenms_plugin.views.sync.device_fields.redirect"),
         ):
             mock_settings.PLUGINS_CONFIG = plugins_cfg
+            view.request = request
             view.post(request, pk=1)
 
         mock_messages.error.assert_called_once()
@@ -1159,12 +1162,14 @@ class TestRemoveServerMappingViewErrorHandling:
             patch("netbox_librenms_plugin.views.sync.device_fields.transaction") as mock_tx,
         ):
             mock_settings.PLUGINS_CONFIG = plugins_cfg
+            mock_Device_cls.objects.restrict.return_value = mock_Device_cls.objects
             mock_Device_cls.objects.select_for_update.return_value.get.return_value = mock_locked
 
             mock_tx.atomic.return_value.__enter__ = lambda s: None
             mock_tx.atomic.return_value.__exit__ = lambda s, *a: None
             mock_tx.set_rollback = MagicMock()
 
+            view.request = request
             view.post(request, pk=1)
 
         # The "orphan-server" key should have been removed and the device saved.

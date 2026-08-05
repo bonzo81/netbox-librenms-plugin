@@ -751,6 +751,7 @@ class TestMatchModuleBayExactFallback:
             "netbox_librenms_plugin.utils.apply_normalization_rules", side_effect=lambda name, scope, **kw: name
         ):
             with patch("netbox_librenms_plugin.models.ModuleBayMapping") as mock_mbm:
+                mock_mbm.objects.restrict.return_value = mock_mbm.objects
                 mock_mbm.objects.filter.return_value.first.return_value = None
 
                 # Also patch _lookup_regex_bay_mapping to return None
@@ -779,6 +780,7 @@ class TestMatchModuleBayExactFallback:
             "netbox_librenms_plugin.utils.apply_normalization_rules", side_effect=lambda name, scope, **kw: name
         ):
             with patch("netbox_librenms_plugin.models.ModuleBayMapping") as mock_mbm:
+                mock_mbm.objects.restrict.return_value = mock_mbm.objects
                 mock_mbm.objects.filter.return_value.first.return_value = None
                 with patch.object(BaseModuleTableView, "_lookup_regex_bay_mapping", return_value=None):
                     with patch.object(BaseModuleTableView, "_match_bay_by_position", return_value=None):
@@ -804,6 +806,7 @@ class TestMatchModuleBayExactFallback:
             "netbox_librenms_plugin.utils.apply_normalization_rules", side_effect=lambda name, scope, **kw: name
         ):
             with patch("netbox_librenms_plugin.models.ModuleBayMapping") as mock_mbm:
+                mock_mbm.objects.restrict.return_value = mock_mbm.objects
                 mock_mbm.objects.filter.return_value.first.return_value = None
                 with patch.object(BaseModuleTableView, "_lookup_regex_bay_mapping", return_value=None):
                     with patch.object(BaseModuleTableView, "_match_bay_by_position", return_value=None):
@@ -846,12 +849,14 @@ class TestInstallSingleStatus:
         module_types = {"WS-X4748": mt}
 
         ModuleBay = MagicMock()
+        ModuleBay.objects.restrict.return_value = ModuleBay.objects
         ModuleBay.objects.filter.return_value.select_related.return_value = [bay]
         # Support select_for_update chain used in _install_single
         locked_bay = _bay("Slot 1")
         locked_bay.installed_module = None
         locked_bay.pk = bay.pk
         locked_bay.module_id = None
+        ModuleBay.objects.restrict.return_value = ModuleBay.objects
         ModuleBay.objects.select_for_update.return_value.select_related.return_value.get.return_value = locked_bay
         ModuleType = MagicMock()
         Module = MagicMock()
@@ -1050,12 +1055,14 @@ class TestInstallSingleStatus:
 
         bay.name = "SFP 1"
         bay.module_id = None
+        ModuleBay.objects.restrict.return_value = ModuleBay.objects
         ModuleBay.objects.filter.return_value.select_related.return_value = [bay]
 
         locked_bay = _bay("SFP 1")
         locked_bay.pk = bay.pk
         locked_bay.module_id = None
         locked_bay.installed_module = None
+        ModuleBay.objects.restrict.return_value = ModuleBay.objects
         ModuleBay.objects.select_for_update.return_value.select_related.return_value.get.return_value = locked_bay
 
         module_instance = MagicMock()
@@ -1103,6 +1110,7 @@ class TestInstallSingleStatus:
         )
 
         # No bays under parent module scope.
+        ModuleBay.objects.restrict.return_value = ModuleBay.objects
         ModuleBay.objects.filter.return_value.select_related.return_value = []
         ModuleBay.objects.filter.return_value.first.return_value = None
 
@@ -1262,6 +1270,7 @@ class TestAdoptExistingTemplateInterfaces:
             patch("netbox_librenms_plugin.views.sync.modules.transaction") as mock_tx,
         ):
             mock_tx.atomic = noop_atomic
+            mock_interface_model.objects.restrict.return_value = mock_interface_model.objects
             mock_interface_model.objects.filter.return_value = [iface_a, iface_b]
             result = _adopt_existing_template_interfaces(device, module)
 
@@ -1307,6 +1316,7 @@ class TestAdoptExistingTemplateInterfaces:
             patch("netbox_librenms_plugin.views.sync.modules.transaction") as mock_tx,
         ):
             mock_tx.atomic = tracking_atomic
+            mock_interface_model.objects.restrict.return_value = mock_interface_model.objects
             mock_interface_model.objects.filter.return_value = [iface_a, iface_b]
 
             try:
@@ -1347,6 +1357,7 @@ class TestAdoptExistingTemplateInterfaces:
             patch("netbox_librenms_plugin.views.sync.modules.transaction") as mock_tx,
         ):
             mock_tx.atomic = noop_atomic
+            mock_interface_model.objects.restrict.return_value = mock_interface_model.objects
             mock_interface_model.objects.filter.return_value = [iface]
             result = _adopt_existing_template_interfaces(device, module)
 
@@ -1381,6 +1392,7 @@ class TestAdoptExistingTemplateInterfaces:
             patch("netbox_librenms_plugin.views.sync.modules.get_librenms_device_id", return_value=None),
             patch("netbox_librenms_plugin.views.sync.modules.set_librenms_device_id") as mock_set,
         ):
+            mock_interface_model.objects.restrict.return_value = mock_interface_model.objects
             mock_interface_model.objects.filter.side_effect = [by_name_qs, module_qs]
             result = _bind_interface_librenms_id(
                 device,
@@ -1418,6 +1430,7 @@ class TestAdoptExistingTemplateInterfaces:
             patch("netbox_librenms_plugin.views.sync.modules.get_librenms_device_id", return_value=None),
             patch("netbox_librenms_plugin.views.sync.modules.set_librenms_device_id") as mock_set,
         ):
+            mock_interface_model.objects.restrict.return_value = mock_interface_model.objects
             mock_interface_model.objects.filter.side_effect = [by_name_qs, module_qs]
             result = _bind_interface_librenms_id(
                 device,
@@ -1502,6 +1515,7 @@ class TestAdoptExistingTemplateInterfaces:
             patch("netbox_librenms_plugin.views.sync.modules.get_librenms_device_id", return_value=None),
             patch("netbox_librenms_plugin.views.sync.modules.set_librenms_device_id") as mock_set,
         ):
+            mock_interface_model.objects.restrict.return_value = mock_interface_model.objects
             mock_interface_model.objects.filter.return_value = by_name_qs
             result = _bind_interface_librenms_id(
                 device,
@@ -1548,6 +1562,7 @@ class TestAdoptExistingTemplateInterfaces:
             patch("netbox_librenms_plugin.views.sync.modules.get_librenms_device_id", return_value=None),
             patch("netbox_librenms_plugin.views.sync.modules.set_librenms_device_id") as mock_set,
         ):
+            mock_interface_model.objects.restrict.return_value = mock_interface_model.objects
             mock_interface_model.objects.filter.side_effect = [by_name_qs, module_qs]
             result = _bind_interface_librenms_id(
                 device,
@@ -1590,6 +1605,7 @@ class TestAdoptExistingTemplateInterfaces:
             patch("dcim.models.Interface") as mock_interface_model,
             patch("netbox_librenms_plugin.views.sync.modules.find_by_librenms_id", return_value=None),
         ):
+            mock_interface_model.objects.restrict.return_value = mock_interface_model.objects
             mock_interface_model.objects.filter.side_effect = [by_name_qs, module_qs]
             result = _bind_interface_librenms_id(
                 device,
@@ -1767,6 +1783,8 @@ class TestSingleInstallInterfaceBinding:
         ):
             mock_tx.atomic = noop_atomic
             mock_module_cls.return_value = new_module
+            # The locked re-fetch goes through restrict(user, ...), so hand back the same manager.
+            mock_objects.restrict.return_value = mock_objects
             mock_objects.select_for_update.return_value = mock_qs
             # Mismatched cache context triggers posted fallback path.
             mock_cache.get.return_value = {
@@ -1779,6 +1797,7 @@ class TestSingleInstallInterfaceBinding:
                     }
                 ],
             }
+            view.request = request
             view.post(request, pk=24)
 
         assert any(
@@ -1848,6 +1867,8 @@ class TestSingleInstallInterfaceBinding:
         ):
             mock_tx.atomic = noop_atomic
             mock_module_cls.return_value = new_module
+            # The locked re-fetch goes through restrict(user, ...), so hand back the same manager.
+            mock_objects.restrict.return_value = mock_objects
             mock_objects.select_for_update.return_value = mock_qs
             mock_cache.get.return_value = {
                 "inventory": [
@@ -1858,6 +1879,7 @@ class TestSingleInstallInterfaceBinding:
                     }
                 ]
             }
+            view.request = request
             view.post(request, pk=24)
 
         mock_bind.assert_called_once()
@@ -1934,6 +1956,8 @@ class TestSingleInstallInterfaceBinding:
         ):
             mock_tx.atomic = noop_atomic
             mock_module_cls.return_value = new_module
+            # The locked re-fetch goes through restrict(user, ...), so hand back the same manager.
+            mock_objects.restrict.return_value = mock_objects
             mock_objects.select_for_update.return_value = mock_qs
             mock_cache.get.return_value = {
                 "inventory": [
@@ -1944,6 +1968,7 @@ class TestSingleInstallInterfaceBinding:
                     }
                 ]
             }
+            view.request = request
             view.post(request, pk=24)
 
         # The bind must run and be scoped to the active server the blank key fell back to.
@@ -1979,6 +2004,7 @@ class TestSingleInstallInterfaceBinding:
             patch("netbox_librenms_plugin.views.sync.modules.messages") as mock_messages,
             patch("netbox_librenms_plugin.views.sync.modules.redirect") as mock_redirect,
         ):
+            view.request = request
             view.post(request, pk=24)
 
         mock_messages.error.assert_called_once()
@@ -2030,6 +2056,7 @@ class TestSingleInstallInterfaceBinding:
                 "inventory": [{"entPhysicalIndex": 77, "_librenms_port_id": 42, "_librenms_ifname": "Te1/1/1"}],
                 "librenms_id": 999,
             }
+            view.request = request
             response = view.post(request, pk=24)
 
         mock_bind.assert_called_once()
@@ -2079,6 +2106,7 @@ class TestSingleInstallInterfaceBinding:
                 "inventory": [{"entPhysicalIndex": 78, "_librenms_port_id": 43, "_librenms_ifname": "Te1/1/2"}],
                 "librenms_id": 999,
             }
+            view.request = request
             response = view.post(request, pk=24)
 
         mock_messages.success.assert_called_once()
@@ -2133,6 +2161,7 @@ class TestSingleInstallInterfaceBinding:
                 "inventory": [{"entPhysicalIndex": 77, "entPhysicalName": "Slot 1"}],
                 "librenms_id": 999,
             }
+            view.request = request
             response = view.post(request, pk=24)
 
         mock_bind.assert_called_once()
@@ -2188,6 +2217,7 @@ class TestSingleInstallInterfaceBinding:
                 "inventory": [{"entPhysicalIndex": 77, "_librenms_port_id": 42, "_librenms_ifname": "Te1/1/1"}],
                 "librenms_id": 999,
             }
+            view.request = request
             response = view.post(request, pk=24)
 
         mock_bind.assert_called_once()
@@ -2242,6 +2272,7 @@ class TestSingleInstallInterfaceBinding:
             patch("netbox_librenms_plugin.views.sync.modules._modules_redirect_response", return_value="redirected"),
         ):
             mock_cache.get.return_value = {"inventory": [], "librenms_id": 999}
+            view.request = request
             response = view.post(request, pk=24)
 
         mock_bind.assert_not_called()  # no server context → bind never attempted
@@ -2295,6 +2326,7 @@ class TestSingleInstallInterfaceBinding:
                 "inventory": [{"entPhysicalIndex": 77, "_librenms_port_id": 587, "_librenms_ifname": "2/x1/1/c2"}],
                 "librenms_id": 999,
             }
+            view.request = request
             response = view.post(request, pk=24)
 
         # Bind no-op'd on the already-bound interface, but adoption still ran...
@@ -2348,6 +2380,7 @@ class TestSingleInstallInterfaceBinding:
                 "inventory": [{"entPhysicalIndex": 77, "_librenms_port_id": 587, "_librenms_ifname": "2/x1/1/c2"}],
                 "librenms_id": 999,
             }
+            view.request = request
             view.post(request, pk=24)
 
         mock_adopt.assert_not_called()
@@ -2438,6 +2471,7 @@ class TestSingleInstallInterfaceBinding:
             }
             mock_module_cls.return_value = new_module
             mock_module_cls.objects.select_related.return_value = MagicMock()
+            mock_module_cls.objects.restrict.return_value = mock_module_cls.objects
             mock_module_cls.objects.select_for_update.return_value.filter.side_effect = [
                 installed_filter_qs,
                 conflict_filter_qs,
@@ -2515,6 +2549,7 @@ class TestVCMemberInterfaceNormalization:
         conflict_qs.exclude.return_value.first.return_value = None
 
         with patch("dcim.models.Interface") as mock_interface:
+            mock_interface.objects.restrict.return_value = mock_interface.objects
             mock_interface.objects.filter.side_effect = [module_qs, conflict_qs]
             result = _normalize_module_interface_names_for_vc_member(device, module)
 
@@ -2545,6 +2580,7 @@ class TestVCMemberInterfaceNormalization:
         conflict_qs.exclude.return_value.first.return_value = existing_iface
 
         with patch("dcim.models.Interface") as mock_interface:
+            mock_interface.objects.restrict.return_value = mock_interface.objects
             mock_interface.objects.filter.side_effect = [module_qs, conflict_qs]
             result = _normalize_module_interface_names_for_vc_member(device, module)
 
@@ -2570,6 +2606,7 @@ class TestVCMemberInterfaceNormalization:
         module_qs.order_by.return_value = [iface]
 
         with patch("dcim.models.Interface") as mock_interface:
+            mock_interface.objects.restrict.return_value = mock_interface.objects
             mock_interface.objects.filter.side_effect = [module_qs]
             result = _normalize_module_interface_names_for_vc_member(device, module)
 
@@ -2878,6 +2915,7 @@ class TestParentRowIdxVsEntityIndex:
         with patch("netbox_librenms_plugin.models.ModuleBayMapping") as mock_mapping:
             mock_mapping.objects.all.return_value = []
             with patch("netbox_librenms_plugin.models.InventoryIgnoreRule") as mock_ignore:
+                mock_ignore.objects.restrict.return_value = mock_ignore.objects
                 mock_ignore.objects.filter.return_value.order_by.return_value = []
                 with patch("netbox_librenms_plugin.utils.preload_normalization_rules", return_value={}):
                     with patch.object(view, "_get_module_bays", return_value=({}, {})):
@@ -2970,7 +3008,10 @@ class TestInstallViewsDoNotDeleteCache:
         ):
             mock_tx.atomic = noop_atomic
             mock_module_cls.return_value = new_module
+            # The locked re-fetch goes through restrict(user, ...), so hand back the same manager.
+            mock_objects.restrict.return_value = mock_objects
             mock_objects.select_for_update.return_value = mock_qs
+            view.request = request
             view.post(request, pk=24)
 
         mock_messages.success.assert_called_once()
@@ -3020,6 +3061,7 @@ class TestInstallViewsDoNotDeleteCache:
         ):
             mock_cache.get.return_value = {"inventory": cached_inventory, "librenms_id": "test"}
             mock_tx.atomic = lambda *a, **kw: MagicMock(__enter__=MagicMock(), __exit__=MagicMock(return_value=False))
+            view.request = request
             view.post(request, pk=24)
 
         mock_messages.success.assert_called_once()
@@ -3072,6 +3114,7 @@ class TestInstallViewsDoNotDeleteCache:
         ):
             mock_cache.get.return_value = {"inventory": cached_inventory, "librenms_id": "test"}
             mock_tx.atomic = lambda *a, **kw: MagicMock(__enter__=MagicMock(), __exit__=MagicMock(return_value=False))
+            view.request = request
             view.post(request, pk=24)
 
         mock_messages.success.assert_called_once()
@@ -3103,6 +3146,7 @@ class TestInstallViewsDoNotDeleteCache:
             patch.object(InstallBranchView, "_collect_branch") as mock_collect,
         ):
             mock_cache.get.return_value = {"inventory": [{"entPhysicalIndex": 100}], "librenms_id": 555}
+            view.request = request
             view.post(request, pk=24)
 
         mock_collect.assert_not_called()
@@ -3138,6 +3182,7 @@ class TestInstallViewsDoNotDeleteCache:
             patch("netbox_librenms_plugin.views.sync.modules.InstallBranchView._install_single") as mock_install,
         ):
             mock_cache.get.return_value = {"inventory": [{"entPhysicalIndex": 100}], "librenms_id": 555}
+            view.request = request
             view.post(request, pk=24)
 
         mock_install.assert_not_called()
@@ -3186,6 +3231,7 @@ class TestInstallViewsDoNotDeleteCache:
         ):
             mock_cache.get.return_value = {"inventory": cached_inventory, "librenms_id": "test"}
             mock_tx.atomic = lambda: MagicMock(__enter__=MagicMock(), __exit__=MagicMock(return_value=False))
+            view.request = request
             view.post(request, pk=24)
 
         mock_bind.assert_not_called()
@@ -3237,6 +3283,7 @@ class TestInstallViewsDoNotDeleteCache:
         ):
             mock_cache.get.return_value = {"inventory": cached_inventory, "librenms_id": "test"}
             mock_tx.atomic = lambda: MagicMock(__enter__=MagicMock(), __exit__=MagicMock(return_value=False))
+            view.request = request
             view.post(request, pk=24)
 
         mock_bind.assert_not_called()
@@ -3293,6 +3340,7 @@ class TestInstallViewsDoNotDeleteCache:
         ):
             mock_cache.get.return_value = {"inventory": cached_inventory, "librenms_id": "test"}
             mock_tx.atomic = lambda: MagicMock(__enter__=MagicMock(), __exit__=MagicMock(return_value=False))
+            view.request = request
             view.post(request, pk=24)
 
         mock_bind.assert_called_once()
@@ -3353,6 +3401,7 @@ class TestInstallViewsDoNotDeleteCache:
         ):
             mock_cache.get.return_value = {"inventory": cached_inventory, "librenms_id": "test"}
             mock_tx.atomic = lambda: MagicMock(__enter__=MagicMock(), __exit__=MagicMock(return_value=False))
+            view.request = request
             view.post(request, pk=24)
 
         mock_bind.assert_called_once()
@@ -4176,6 +4225,7 @@ class TestPKValidationErrorPaths:
             patch("netbox_librenms_plugin.views.sync.modules.messages") as mock_msg,
             patch("netbox_librenms_plugin.views.sync.modules.redirect") as mock_redirect,
         ):
+            view.request = request
             view.post(request, pk=24)
 
         mock_msg.error.assert_called_once()
@@ -4209,6 +4259,7 @@ class TestPKValidationErrorPaths:
             patch("netbox_librenms_plugin.views.sync.modules.messages") as mock_msg,
             patch("netbox_librenms_plugin.views.sync.modules.redirect") as mock_redirect,
         ):
+            view.request = request
             view.post(request, pk=24)
 
         mock_msg.error.assert_called_once()
@@ -4241,6 +4292,7 @@ class TestPKValidationErrorPaths:
             patch("netbox_librenms_plugin.views.sync.modules.messages") as mock_msg,
             patch("netbox_librenms_plugin.views.sync.modules.redirect") as mock_redirect,
         ):
+            view.request = request
             view.post(request, pk=24)
 
         mock_msg.error.assert_called_once()
@@ -4280,6 +4332,7 @@ class TestPKValidationErrorPaths:
             patch("netbox_librenms_plugin.views.sync.modules.redirect") as mock_redirect,
         ):
             mock_cache.get.return_value = {"inventory": cached, "librenms_id": "test"}
+            view.request = request
             view.post(request, pk=24)
 
         mock_msg.error.assert_called_once()
@@ -4348,7 +4401,12 @@ class TestInstallModuleViewBehavior:
             patch.object(ModuleBay, "objects") as mock_objects,
         ):
             mock_tx.atomic = noop_atomic
+            # The module is read through restrict(user, "change"), so hand back the same manager.
+            mock_objects.restrict.return_value = mock_objects
+            # The locked re-fetch goes through restrict(user, ...), so hand back the same manager.
+            mock_objects.restrict.return_value = mock_objects
             mock_objects.select_for_update.return_value = mock_qs
+            view.request = request
             view.post(request, pk=24)
 
         mock_msg.warning.assert_called_once()
@@ -4405,7 +4463,10 @@ class TestInstallModuleViewBehavior:
         ):
             mock_tx.atomic = noop_atomic
             mock_module_cls.return_value = new_module
+            # The locked re-fetch goes through restrict(user, ...), so hand back the same manager.
+            mock_objects.restrict.return_value = mock_objects
             mock_objects.select_for_update.return_value = mock_qs
+            view.request = request
             view.post(request, pk=24)
 
         new_module.full_clean.assert_called_once()
@@ -4475,7 +4536,12 @@ class TestUpdateModuleSerialViewBehavior:
             patch.object(Module, "objects") as mock_objects,
         ):
             mock_tx.atomic = noop_atomic
+            # The module is read through restrict(user, "change"), so hand back the same manager.
+            mock_objects.restrict.return_value = mock_objects
+            # The locked re-fetch goes through restrict(user, ...), so hand back the same manager.
+            mock_objects.restrict.return_value = mock_objects
             mock_objects.select_for_update.return_value = mock_qs
+            view.request = request
             view.post(request, pk=24)
 
         assert module.serial == "NEW-SN"
@@ -4685,6 +4751,7 @@ class TestAddBayTemplateViewPostValidation:
                 "netbox_librenms_plugin.views.sync.modules._modules_redirect_response", return_value="REDIR"
             ) as mock_redir,
         ):
+            view.request = req
             result = view.post(req, pk=1)
         assert result == "REDIR"
         assert mock_messages.error.called
@@ -4703,6 +4770,7 @@ class TestAddBayTemplateViewPostValidation:
             patch("netbox_librenms_plugin.views.sync.modules.messages") as mock_messages,
             patch("netbox_librenms_plugin.views.sync.modules._modules_redirect_response", return_value="REDIR"),
         ):
+            view.request = req
             view.post(req, pk=1)
         assert "target_pk" in mock_messages.error.call_args[0][1]
 
@@ -4718,6 +4786,7 @@ class TestAddBayTemplateViewPostValidation:
             patch("netbox_librenms_plugin.views.sync.modules.messages") as mock_messages,
             patch("netbox_librenms_plugin.views.sync.modules._modules_redirect_response", return_value="REDIR"),
         ):
+            view.request = req
             view.post(req, pk=1)
         assert "name is required" in mock_messages.error.call_args[0][1]
 
@@ -4825,6 +4894,7 @@ class TestAddBayTemplateViewMappingCheckbox:
             patch("netbox_librenms_plugin.views.sync.modules.render", return_value="R") as mock_render,
             patch("netbox_librenms_plugin.models.ModuleBayMapping") as mock_mapping_cls,
         ):
+            mock_mapping_cls.objects.restrict.return_value = mock_mapping_cls.objects
             mock_mapping_cls.objects.filter.return_value.filter.return_value.exists.return_value = False
             view.get(req, pk=42)
         ctx = mock_render.call_args[0][2]
@@ -4853,6 +4923,7 @@ class TestAddBayTemplateViewMappingCheckbox:
             patch("netbox_librenms_plugin.views.sync.modules.render", return_value="R") as mock_render,
             patch("netbox_librenms_plugin.models.ModuleBayMapping") as mock_mapping_cls,
         ):
+            mock_mapping_cls.objects.restrict.return_value = mock_mapping_cls.objects
             mock_mapping_cls.objects.filter.return_value.filter.return_value.exists.return_value = True
             view.get(req, pk=42)
         ctx = mock_render.call_args[0][2]
@@ -4877,6 +4948,7 @@ class TestAddBayTemplateViewMappingCheckbox:
             patch("netbox_librenms_plugin.views.sync.modules.render", return_value="R") as mock_render,
             patch("netbox_librenms_plugin.models.ModuleBayMapping") as mock_mapping_cls,
         ):
+            mock_mapping_cls.objects.restrict.return_value = mock_mapping_cls.objects
             mock_mapping_cls.objects.filter.return_value.filter.return_value.exists.return_value = False
             view.get(req, pk=42)
         ctx = mock_render.call_args[0][2]
@@ -4914,9 +4986,11 @@ class TestAddBayTemplateViewMappingCheckbox:
             mock_tx.atomic.return_value.__exit__ = MagicMock(return_value=False)
             mock_bt_cls.return_value = MagicMock()
             # No existing mapping
+            mock_mapping_cls.objects.restrict.return_value = mock_mapping_cls.objects
             mock_mapping_cls.objects.filter.return_value.filter.return_value.exists.return_value = False
             mapping_instance = MagicMock()
             mock_mapping_cls.return_value = mapping_instance
+            view.request = req
             view.post(req, pk=1)
         # ModuleBayMapping was constructed with the right field values
         call_kwargs = mock_mapping_cls.call_args.kwargs
@@ -4958,6 +5032,7 @@ class TestAddBayTemplateViewMappingCheckbox:
             mock_tx.atomic.return_value.__enter__ = lambda s: s
             mock_tx.atomic.return_value.__exit__ = MagicMock(return_value=False)
             mock_bt_cls.return_value = MagicMock()
+            view.request = req
             view.post(req, pk=1)
         # Mapping must not be instantiated when names match
         mock_mapping_cls.assert_not_called()
@@ -4990,6 +5065,7 @@ class TestAddBayTemplateViewMappingCheckbox:
             mock_tx.atomic.return_value.__enter__ = lambda s: s
             mock_tx.atomic.return_value.__exit__ = MagicMock(return_value=False)
             mock_bt_cls.return_value = MagicMock()
+            view.request = req
             view.post(req, pk=1)
         mock_mapping_cls.assert_not_called()
 
@@ -5012,7 +5088,9 @@ class TestAddBayTemplateViewInstantiation:
             patch("dcim.models.Module") as mock_module_cls,
             patch("dcim.models.ModuleBay") as mock_bay_cls,
         ):
+            mock_device_cls.objects.restrict.return_value = mock_device_cls.objects
             mock_device_cls.objects.filter.return_value = [dev_a, dev_b]
+            mock_bay_cls.objects.restrict.return_value = mock_bay_cls.objects
             mock_bay_cls.objects.filter.return_value.exists.return_value = False
             count = AddBayTemplateView._instantiate_template_on_existing(bay_template, "device_type", device_type)
         assert count == 2
@@ -5035,8 +5113,10 @@ class TestAddBayTemplateViewInstantiation:
             patch("dcim.models.Module"),
             patch("dcim.models.ModuleBay") as mock_bay_cls,
         ):
+            mock_device_cls.objects.restrict.return_value = mock_device_cls.objects
             mock_device_cls.objects.filter.return_value = [MagicMock()]
             # Bay already exists on the device
+            mock_bay_cls.objects.restrict.return_value = mock_bay_cls.objects
             mock_bay_cls.objects.filter.return_value.exists.return_value = True
             count = AddBayTemplateView._instantiate_template_on_existing(bay_template, "device_type", device_type)
         assert count == 0
@@ -5054,7 +5134,9 @@ class TestAddBayTemplateViewInstantiation:
             patch("dcim.models.Module") as mock_module_cls,
             patch("dcim.models.ModuleBay") as mock_bay_cls,
         ):
+            mock_module_cls.objects.restrict.return_value = mock_module_cls.objects
             mock_module_cls.objects.filter.return_value.select_related.return_value = [module_a]
+            mock_bay_cls.objects.restrict.return_value = mock_bay_cls.objects
             mock_bay_cls.objects.filter.return_value.exists.return_value = False
             count = AddBayTemplateView._instantiate_template_on_existing(bay_template, "module_type", module_type)
         assert count == 1
@@ -5210,6 +5292,7 @@ class TestAddBayTemplateViewRegexMapping:
             patch("netbox_librenms_plugin.views.sync.modules.render", return_value="R") as mock_render,
             patch("netbox_librenms_plugin.models.ModuleBayMapping") as mock_mapping_cls,
         ):
+            mock_mapping_cls.objects.restrict.return_value = mock_mapping_cls.objects
             mock_mapping_cls.objects.filter.return_value.filter.return_value.exists.return_value = False
             mock_mapping_cls.objects.filter.return_value.filter.return_value.only.return_value = []
             view.get(req, pk=42)
@@ -5238,6 +5321,7 @@ class TestAddBayTemplateViewRegexMapping:
             patch("netbox_librenms_plugin.views.sync.modules.render", return_value="R") as mock_render,
             patch("netbox_librenms_plugin.models.ModuleBayMapping") as mock_mapping_cls,
         ):
+            mock_mapping_cls.objects.restrict.return_value = mock_mapping_cls.objects
             mock_mapping_cls.objects.filter.return_value.filter.return_value.exists.return_value = False
             mock_mapping_cls.objects.filter.return_value.filter.return_value.only.return_value = []
             view.get(req, pk=42)
@@ -5268,6 +5352,7 @@ class TestAddBayTemplateViewRegexMapping:
             patch("netbox_librenms_plugin.models.ModuleBayMapping") as mock_mapping_cls,
         ):
             # No exact mapping, but a covering regex row exists.
+            mock_mapping_cls.objects.restrict.return_value = mock_mapping_cls.objects
             mock_mapping_cls.objects.filter.return_value.filter.return_value.exists.return_value = False
             mock_mapping_cls.objects.filter.return_value.filter.return_value.only.return_value = [existing]
             view.get(req, pk=42)
@@ -5314,9 +5399,11 @@ class TestAddBayTemplateViewRegexMapping:
             mock_tx.atomic.return_value.__exit__ = MagicMock(return_value=False)
             mock_bt_cls.return_value = MagicMock()
             # No existing exact or regex coverage.
+            mock_mapping_cls.objects.restrict.return_value = mock_mapping_cls.objects
             mock_mapping_cls.objects.filter.return_value.filter.return_value.exists.return_value = False
             mock_mapping_cls.objects.filter.return_value.filter.return_value.only.return_value = []
             mock_mapping_cls.return_value = MagicMock()
+            view.request = req
             view.post(req, pk=1)
         kwargs = mock_mapping_cls.call_args.kwargs
         assert kwargs["is_regex"] is True
@@ -5352,9 +5439,11 @@ class TestAddBayTemplateViewRegexMapping:
             mock_tx.atomic.return_value.__enter__ = lambda s: s
             mock_tx.atomic.return_value.__exit__ = MagicMock(return_value=False)
             mock_bt_cls.return_value = MagicMock()
+            mock_mapping_cls.objects.restrict.return_value = mock_mapping_cls.objects
             mock_mapping_cls.objects.filter.return_value.filter.return_value.exists.return_value = False
             mock_mapping_cls.objects.filter.return_value.filter.return_value.only.return_value = []
             mock_mapping_cls.return_value = MagicMock()
+            view.request = req
             view.post(req, pk=1)
         kwargs = mock_mapping_cls.call_args.kwargs
         assert kwargs["is_regex"] is False
@@ -5389,9 +5478,11 @@ class TestAddBayTemplateViewRegexMapping:
             mock_tx.atomic.return_value.__enter__ = lambda s: s
             mock_tx.atomic.return_value.__exit__ = MagicMock(return_value=False)
             mock_bt_cls.return_value = MagicMock()
+            mock_mapping_cls.objects.restrict.return_value = mock_mapping_cls.objects
             mock_mapping_cls.objects.filter.return_value.filter.return_value.exists.return_value = False
             mock_mapping_cls.objects.filter.return_value.filter.return_value.only.return_value = []
             mock_mapping_cls.return_value = MagicMock()
+            view.request = req
             view.post(req, pk=1)
         kwargs = mock_mapping_cls.call_args.kwargs
         assert kwargs["is_regex"] is False
@@ -5426,8 +5517,10 @@ class TestAddBayTemplateViewRegexMapping:
             mock_tx.atomic.return_value.__enter__ = lambda s: s
             mock_tx.atomic.return_value.__exit__ = MagicMock(return_value=False)
             mock_bt_cls.return_value = MagicMock()
+            mock_mapping_cls.objects.restrict.return_value = mock_mapping_cls.objects
             mock_mapping_cls.objects.filter.return_value.filter.return_value.exists.return_value = False
             mock_mapping_cls.objects.filter.return_value.filter.return_value.only.return_value = [existing]
+            view.request = req
             view.post(req, pk=1)
         # Coverage already exists → no new ModuleBayMapping instantiated.
         mock_mapping_cls.assert_not_called()
@@ -6005,6 +6098,7 @@ class TestReplaceModuleRedirectServerKey:
             patch("netbox_librenms_plugin.views.sync.modules.reverse", return_value="/sync/url/"),
             patch("netbox_librenms_plugin.views.sync.modules.messages"),
         ):
+            view.request = request
             return view.post(request, pk=1)
 
     def test_missing_module_id_redirect_preserves_fallback_server_key(self):
@@ -6054,6 +6148,7 @@ class TestUpdateModuleInterfaceRedirectServerKey:
             patch("netbox_librenms_plugin.views.sync.modules.reverse", return_value="/sync/url/"),
             patch("netbox_librenms_plugin.views.sync.modules.messages"),
         ):
+            view.request = request
             response = view.post(request, pk=device.pk)
 
         assert "server_key=prod" in response["HX-Redirect"]
@@ -6088,6 +6183,7 @@ class TestUpdateModuleInterfaceRedirectServerKey:
             patch("netbox_librenms_plugin.views.sync.modules.reverse", return_value="/sync/url/"),
             patch("netbox_librenms_plugin.views.sync.modules.messages"),
         ):
+            view.request = request
             response = view.post(request, pk=device.pk)
 
         assert "server_key=prod" in response["HX-Redirect"]

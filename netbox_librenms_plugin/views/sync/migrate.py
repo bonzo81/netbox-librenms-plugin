@@ -429,7 +429,13 @@ class _BaseMoveToWinnerView(LibreNMSAPIMixin, LibreNMSPermissionMixin, NetBoxObj
                 error_response)`` when a device was deleted or the marker changed concurrently.
         """
         ordered = sorted({donor.pk, winner.pk})
-        locked = {d.pk: d for d in Device.objects.select_for_update().filter(pk__in=ordered).order_by("pk")}
+        locked = {
+            d.pk: d
+            for d in self.restricted_queryset(Device, "change")
+            .select_for_update()
+            .filter(pk__in=ordered)
+            .order_by("pk")
+        }
         donor = locked.get(donor.pk)
         winner = locked.get(winner.pk)
         if donor is None or winner is None:
@@ -548,7 +554,12 @@ class MoveInterfaceToWinnerView(_BaseMoveToWinnerView):
             # Lock the donor interface row and re-read it under the lock. A
             # concurrent rename would otherwise let a stale name slip past the
             # collision check below while the row is still moved by pk.
-            interface = Interface.objects.select_for_update().filter(pk=interface.pk, device=donor).first()
+            interface = (
+                self.restricted_queryset(Interface, "change")
+                .select_for_update()
+                .filter(pk=interface.pk, device=donor)
+                .first()
+            )
             if interface is None:
                 return self._fail(
                     request,
@@ -769,7 +780,7 @@ class MoveIPAddressToWinnerView(_BaseMoveToWinnerView):
             donor, winner, err = self._lock_donor_winner_and_reverify(request, donor, winner, server_key)
             if err is not None:
                 return err
-            ip = IPAddress.objects.select_for_update().filter(pk=ip.pk).first()
+            ip = self.restricted_queryset(IPAddress, "change").select_for_update().filter(pk=ip.pk).first()
             if ip is None:
                 return self._fail(request, "IP address no longer exists.", status=410)
             assigned = ip.assigned_object

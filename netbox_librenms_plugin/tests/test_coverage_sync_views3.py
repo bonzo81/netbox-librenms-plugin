@@ -188,6 +188,7 @@ class TestSyncInterfacesPost:
         with patch("netbox_librenms_plugin.views.sync.interfaces.get_interface_name_field", return_value="ifName"):
             with patch("netbox_librenms_plugin.views.sync.interfaces.reverse", return_value="/s/"):
                 with patch("netbox_librenms_plugin.views.sync.interfaces.redirect") as mr:
+                    v.request = req
                     v.post(req, "device", 1)
         mr.assert_called_once()
 
@@ -206,6 +207,7 @@ class TestSyncInterfacesPost:
         with patch("netbox_librenms_plugin.views.sync.interfaces.get_interface_name_field", return_value="ifName"):
             with patch("netbox_librenms_plugin.views.sync.interfaces.reverse", return_value="/s/"):
                 with patch("netbox_librenms_plugin.views.sync.interfaces.redirect") as mr:
+                    v.request = req
                     v.post(req, "device", 1)
         mr.assert_called_once()
 
@@ -226,6 +228,7 @@ class TestSyncInterfacesPost:
             with patch("netbox_librenms_plugin.views.sync.interfaces.reverse", return_value="/s/"):
                 with patch("netbox_librenms_plugin.views.sync.interfaces.redirect") as mr:
                     with patch("netbox_librenms_plugin.views.sync.interfaces.messages") as mm:
+                        v.request = req
                         v.post(req, "device", 1)
         v.sync_selected_interfaces.assert_called_once()
         mm.success.assert_called_once()
@@ -248,6 +251,7 @@ class TestSyncInterfacesPost:
             with patch("netbox_librenms_plugin.views.sync.interfaces.reverse", return_value="/s/"):
                 with patch("netbox_librenms_plugin.views.sync.interfaces.redirect"):
                     with patch("netbox_librenms_plugin.views.sync.interfaces.messages"):
+                        v.request = req
                         v.post(req, "virtualmachine", 2)
         v.sync_selected_interfaces.assert_called_once()
 
@@ -294,6 +298,7 @@ class TestSyncInterface:
         obj.virtual_chassis = None
         iface = MagicMock()
         with patch("netbox_librenms_plugin.views.sync.interfaces.Interface") as mc:
+            mc.objects.restrict.return_value = mc.objects
             mc.objects.get_or_create.return_value = (iface, True)
             v.sync_interface(obj, {"ifName": "eth0"}, [], "ifName")
         mc.objects.get_or_create.assert_called_once_with(device=obj, name="eth0")
@@ -313,8 +318,11 @@ class TestSyncInterface:
         v.request.POST.get = lambda k, *a: "2" if k == "device_selection_eth0" else None
         iface = MagicMock()
         # Patch only Device.objects.get, not Device itself (isinstance must work)
-        with patch("netbox_librenms_plugin.views.sync.interfaces.Device.objects.get", return_value=target):
+        # The VC-selected device is read through restrict(user, "view"), so stub that chain.
+        with patch("netbox_librenms_plugin.views.sync.interfaces.Device.objects.restrict") as mock_restrict:
+            mock_restrict.return_value.get.return_value = target
             with patch("netbox_librenms_plugin.views.sync.interfaces.Interface") as mc:
+                mc.objects.restrict.return_value = mc.objects
                 mc.objects.get_or_create.return_value = (iface, True)
                 v.sync_interface(obj, {"ifName": "eth0"}, [], "ifName")
         mc.objects.get_or_create.assert_called_once_with(device=target, name="eth0")
@@ -332,8 +340,11 @@ class TestSyncInterface:
         target.id = 99
         v.request.POST.get = lambda k, *a: "99" if k == "device_selection_eth0" else None
         iface = MagicMock()
-        with patch("netbox_librenms_plugin.views.sync.interfaces.Device.objects.get", return_value=target):
+        # The VC-selected device is read through restrict(user, "view"), so stub that chain.
+        with patch("netbox_librenms_plugin.views.sync.interfaces.Device.objects.restrict") as mock_restrict:
+            mock_restrict.return_value.get.return_value = target
             with patch("netbox_librenms_plugin.views.sync.interfaces.Interface") as mc:
+                mc.objects.restrict.return_value = mc.objects
                 mc.objects.get_or_create.return_value = (iface, True)
                 v.sync_interface(obj, {"ifName": "eth0"}, [], "ifName")
         mc.objects.get_or_create.assert_called_once_with(device=obj, name="eth0")
@@ -349,8 +360,11 @@ class TestSyncInterface:
         target.id = 99
         v.request.POST.get = lambda k, *a: "99" if k == "device_selection_eth0" else None
         iface = MagicMock()
-        with patch("netbox_librenms_plugin.views.sync.interfaces.Device.objects.get", return_value=target):
+        # The VC-selected device is read through restrict(user, "view"), so stub that chain.
+        with patch("netbox_librenms_plugin.views.sync.interfaces.Device.objects.restrict") as mock_restrict:
+            mock_restrict.return_value.get.return_value = target
             with patch("netbox_librenms_plugin.views.sync.interfaces.Interface") as mc:
+                mc.objects.restrict.return_value = mc.objects
                 mc.objects.get_or_create.return_value = (iface, True)
                 v.sync_interface(obj, {"ifName": "eth0"}, [], "ifName")
         mc.objects.get_or_create.assert_called_once_with(device=obj, name="eth0")
@@ -364,11 +378,11 @@ class TestSyncInterface:
         obj.virtual_chassis = None
         v.request.POST.get = lambda k, *a: "999" if k == "device_selection_eth0" else None
         iface = MagicMock()
-        with patch(
-            "netbox_librenms_plugin.views.sync.interfaces.Device.objects.get",
-            side_effect=Device.DoesNotExist,
-        ):
+        # Same chain: an unknown id raises DoesNotExist out of the restricted queryset.
+        with patch("netbox_librenms_plugin.views.sync.interfaces.Device.objects.restrict") as mock_restrict:
+            mock_restrict.return_value.get.side_effect = Device.DoesNotExist
             with patch("netbox_librenms_plugin.views.sync.interfaces.Interface") as mc:
+                mc.objects.restrict.return_value = mc.objects
                 mc.objects.get_or_create.return_value = (iface, True)
                 v.sync_interface(obj, {"ifName": "eth0"}, [], "ifName")
         mc.objects.get_or_create.assert_called_once_with(device=obj, name="eth0")
@@ -380,6 +394,7 @@ class TestSyncInterface:
         obj = MagicMock(spec=VirtualMachine)
         iface = MagicMock()
         with patch("netbox_librenms_plugin.views.sync.interfaces.VMInterface") as mc:
+            mc.objects.restrict.return_value = mc.objects
             mc.objects.get_or_create.return_value = (iface, True)
             v.sync_interface(obj, {"ifName": "eth0"}, [], "ifName")
         mc.objects.get_or_create.assert_called_once_with(virtual_machine=obj, name="eth0")
@@ -394,6 +409,7 @@ class TestSyncInterface:
         obj.virtual_chassis = None
         iface = MagicMock()
         with patch("netbox_librenms_plugin.views.sync.interfaces.Interface") as mc:
+            mc.objects.restrict.return_value = mc.objects
             mc.objects.get_or_create.return_value = (iface, True)
             v.sync_interface(obj, {"ifName": "eth0"}, ["vlans"], "ifName")
         v._sync_interface_vlans.assert_not_called()
@@ -407,6 +423,7 @@ class TestSyncInterface:
         obj.virtual_chassis = None
         iface = MagicMock()
         with patch("netbox_librenms_plugin.views.sync.interfaces.Interface") as mc:
+            mc.objects.restrict.return_value = mc.objects
             mc.objects.get_or_create.return_value = (iface, True)
             v.sync_interface(obj, {"ifName": "eth0"}, [], "ifName")
         v._sync_interface_vlans.assert_called_once()
@@ -425,6 +442,7 @@ class TestGetNetboxInterfaceType:
         with patch("netbox_librenms_plugin.views.sync.interfaces.convert_speed_to_kbps", return_value=1000000):
             with patch("netbox_librenms_plugin.views.sync.interfaces.InterfaceTypeMapping") as mc:
                 qs = MagicMock()
+                mc.objects.restrict.return_value = mc.objects
                 mc.objects.filter.return_value = qs
                 qs.filter.return_value.order_by.return_value.first.return_value = mm
                 result = v.get_netbox_interface_type({"ifType": "ethernetCsmacd", "ifSpeed": 1000000000})
@@ -437,6 +455,7 @@ class TestGetNetboxInterfaceType:
         with patch("netbox_librenms_plugin.views.sync.interfaces.convert_speed_to_kbps", return_value=1000000):
             with patch("netbox_librenms_plugin.views.sync.interfaces.InterfaceTypeMapping") as mc:
                 qs = MagicMock()
+                mc.objects.restrict.return_value = mc.objects
                 mc.objects.filter.return_value = qs
                 qs.filter.return_value.order_by.return_value.first.return_value = None
                 qs.filter.return_value.first.return_value = null_m
@@ -450,6 +469,7 @@ class TestGetNetboxInterfaceType:
         with patch("netbox_librenms_plugin.views.sync.interfaces.convert_speed_to_kbps", return_value=None):
             with patch("netbox_librenms_plugin.views.sync.interfaces.InterfaceTypeMapping") as mc:
                 qs = MagicMock()
+                mc.objects.restrict.return_value = mc.objects
                 mc.objects.filter.return_value = qs
                 qs.filter.return_value.first.return_value = m
                 result = v.get_netbox_interface_type({"ifType": "eth", "ifSpeed": None})
@@ -460,6 +480,7 @@ class TestGetNetboxInterfaceType:
         with patch("netbox_librenms_plugin.views.sync.interfaces.convert_speed_to_kbps", return_value=None):
             with patch("netbox_librenms_plugin.views.sync.interfaces.InterfaceTypeMapping") as mc:
                 qs = MagicMock()
+                mc.objects.restrict.return_value = mc.objects
                 mc.objects.filter.return_value = qs
                 qs.filter.return_value.first.return_value = None
                 result = v.get_netbox_interface_type({"ifType": "unknown", "ifSpeed": None})
@@ -547,6 +568,7 @@ class TestDeleteNetBoxInterfacesPost:
         v.get_required_permissions_for_object_type = MagicMock(return_value=[])
         req = MagicMock()
         req.POST.getlist.return_value = ["1"]
+        v.request = req
         assert v.post(req, "device", 1) is err
 
     def test_invalid_object_type_400(self):
@@ -555,6 +577,7 @@ class TestDeleteNetBoxInterfacesPost:
         v.get_required_permissions_for_object_type = MagicMock(return_value=[])
         req = MagicMock()
         req.POST.getlist.return_value = ["1"]
+        v.request = req
         resp = v.post(req, "rack", 1)
         assert resp.status_code == 400
 
@@ -565,6 +588,7 @@ class TestDeleteNetBoxInterfacesPost:
         req = MagicMock()
         req.POST.getlist.return_value = []
         with patch("netbox_librenms_plugin.views.mixins.NetBoxObjectPermissionMixin.restrict_object_or_404"):
+            v.request = req
             resp = v.post(req, "device", 1)
         assert resp.status_code == 400
 
@@ -590,6 +614,7 @@ class TestDeleteNetBoxInterfacesPost:
                 mc.objects.get.return_value = iface
                 with patch("netbox_librenms_plugin.views.sync.interfaces.transaction") as mt:
                     mt.atomic = _pa
+                    v.request = req
                     resp = v.post(req, "device", 1)
         data = json.loads(resp.content)
         assert data["deleted_count"] == 1
@@ -617,6 +642,7 @@ class TestDeleteNetBoxInterfacesPost:
                 mc.objects.get.return_value = iface
                 with patch("netbox_librenms_plugin.views.sync.interfaces.transaction") as mt:
                     mt.atomic = _pa
+                    v.request = req
                     resp = v.post(req, "device", 1)
         data = json.loads(resp.content)
         assert data["deleted_count"] == 0
@@ -650,6 +676,7 @@ class TestDeleteNetBoxInterfacesPost:
                 mc.objects.get.return_value = iface
                 with patch("netbox_librenms_plugin.views.sync.interfaces.transaction") as mt:
                     mt.atomic = _pa
+                    v.request = req
                     resp = v.post(req, "device", 1)
         data = json.loads(resp.content)
         assert data["deleted_count"] == 0
@@ -683,6 +710,7 @@ class TestDeleteNetBoxInterfacesPost:
                 mc.objects.get.return_value = iface
                 with patch("netbox_librenms_plugin.views.sync.interfaces.transaction") as mt:
                     mt.atomic = _pa
+                    v.request = req
                     resp = v.post(req, "device", 1)
         data = json.loads(resp.content)
         assert data["deleted_count"] == 1
@@ -708,6 +736,7 @@ class TestDeleteNetBoxInterfacesPost:
                 mc.objects.get.return_value = iface
                 with patch("netbox_librenms_plugin.views.sync.interfaces.transaction") as mt:
                     mt.atomic = _pa
+                    v.request = req
                     resp = v.post(req, "virtualmachine", 5)
         data = json.loads(resp.content)
         assert data["deleted_count"] == 1
@@ -734,6 +763,7 @@ class TestDeleteNetBoxInterfacesPost:
                 mc.objects.get.return_value = iface
                 with patch("netbox_librenms_plugin.views.sync.interfaces.transaction") as mt:
                     mt.atomic = _pa
+                    v.request = req
                     resp = v.post(req, "virtualmachine", 5)
         data = json.loads(resp.content)
         assert data["deleted_count"] == 0
@@ -763,6 +793,7 @@ class TestDeleteNetBoxInterfacesPost:
                     mvc.DoesNotExist = VMI.DoesNotExist
                     with patch("netbox_librenms_plugin.views.sync.interfaces.transaction") as mt:
                         mt.atomic = _pa
+                        v.request = req
                         resp = v.post(req, "device", 1)
         data = json.loads(resp.content)
         assert any("999" in e for e in data.get("errors", []))
@@ -798,6 +829,7 @@ class TestDeleteNetBoxInterfacesPost:
                 mc.objects.get.side_effect = get_se
                 with patch("netbox_librenms_plugin.views.sync.interfaces.transaction") as mt:
                     mt.atomic = _pa
+                    v.request = req
                     resp = v.post(req, "device", 1)
         data = json.loads(resp.content)
         assert data["deleted_count"] == 1
@@ -978,8 +1010,10 @@ class TestVlansGroupedUpdateAndSkip:
             mc.get.return_value = [{"vlan_vlan": 100, "vlan_name": "NewName"}]
             with patch("netbox_librenms_plugin.views.sync.vlans.VLANGroup") as mvg:
                 mvg.DoesNotExist = VLANGroup.DoesNotExist
+                mvg.objects.restrict.return_value = mvg.objects
                 mvg.objects.get.return_value = mg
                 with patch("netbox_librenms_plugin.views.sync.vlans.VLAN") as mvl:
+                    mvl.objects.restrict.return_value = mvl.objects
                     mvl.objects.get_or_create.return_value = (mv, False)
                     with patch("netbox_librenms_plugin.views.sync.vlans.transaction"):
                         with patch("netbox_librenms_plugin.views.sync.vlans.messages") as mm:
@@ -1000,8 +1034,10 @@ class TestVlansGroupedUpdateAndSkip:
             mc.get.return_value = [{"vlan_vlan": 100, "vlan_name": "Same"}]
             with patch("netbox_librenms_plugin.views.sync.vlans.VLANGroup") as mvg:
                 mvg.DoesNotExist = VLANGroup.DoesNotExist
+                mvg.objects.restrict.return_value = mvg.objects
                 mvg.objects.get.return_value = mg
                 with patch("netbox_librenms_plugin.views.sync.vlans.VLAN") as mvl:
+                    mvl.objects.restrict.return_value = mvl.objects
                     mvl.objects.get_or_create.return_value = (mv, False)
                     with patch("netbox_librenms_plugin.views.sync.vlans.transaction"):
                         with patch("netbox_librenms_plugin.views.sync.vlans.messages") as mm:

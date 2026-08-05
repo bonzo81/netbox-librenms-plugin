@@ -119,7 +119,7 @@ class SyncVLANsView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreN
                 row_vlan_group = None
                 if group_id_str:
                     try:
-                        row_vlan_group = VLANGroup.objects.get(pk=int(group_id_str))
+                        row_vlan_group = self.restricted_queryset(VLANGroup).get(pk=int(group_id_str))
                     except (ValueError, VLANGroup.DoesNotExist):
                         # A group was explicitly requested but doesn't exist (stale page or
                         # tampered id). Fail closed: do NOT fall back to a global VLAN, which

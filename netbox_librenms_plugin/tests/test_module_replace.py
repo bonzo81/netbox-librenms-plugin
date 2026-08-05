@@ -166,6 +166,7 @@ class TestModuleMismatchPreviewView:
             patch("netbox_librenms_plugin.views.sync.modules.render", return_value=HttpResponse("OK")) as mock_render,
         ):
             mock_cache.get.return_value = {"inventory": cached, "librenms_id": "test"}
+            mock_module_cls.objects.restrict.return_value = mock_module_cls.objects
             mock_module_cls.objects.filter.return_value.exclude.return_value.select_related.return_value.count.return_value = 0
             mock_module_cls.objects.filter.return_value.exclude.return_value.select_related.return_value.first.return_value = None
             resp = view.get(request, pk=24)
@@ -207,6 +208,7 @@ class TestModuleMismatchPreviewView:
             patch("netbox_librenms_plugin.views.sync.modules.render", return_value=HttpResponse("OK")) as mock_render,
         ):
             mock_cache.get.return_value = {"inventory": cached, "librenms_id": "test"}
+            mock_module_cls.objects.restrict.return_value = mock_module_cls.objects
             mock_module_cls.objects.filter.return_value.exclude.return_value.select_related.return_value.count.return_value = 1
             mock_module_cls.objects.filter.return_value.exclude.return_value.select_related.return_value.first.return_value = conflict_module
             view.get(request, pk=24)
@@ -372,6 +374,7 @@ class TestReplaceModuleView:
             patch("netbox_librenms_plugin.views.sync.modules.messages") as mock_msg,
             patch("netbox_librenms_plugin.views.sync.modules.redirect") as mock_redirect,
         ):
+            view.request = request
             view.post(request, pk=24)
 
         mock_msg.error.assert_called_once()
@@ -457,6 +460,7 @@ class TestReplaceModuleView:
             conflict_chain.filter.return_value.exclude.return_value.select_related.return_value.__iter__ = lambda s: (
                 iter([])
             )
+            mock_module_cls.objects.restrict.return_value = mock_module_cls.objects
             mock_module_cls.objects.select_for_update.side_effect = [installed_chain, conflict_chain]
 
             _post(view, request, pk=24)
@@ -521,6 +525,7 @@ class TestReplaceModuleView:
             conflict_chain.filter.return_value.exclude.return_value.select_related.return_value.__iter__ = lambda s: (
                 iter([conflict])
             )
+            mock_module_cls.objects.restrict.return_value = mock_module_cls.objects
             mock_module_cls.objects.select_for_update.side_effect = [installed_chain, conflict_chain]
 
             _post(view, request, pk=24)
@@ -549,6 +554,7 @@ class TestReplaceModuleView:
             ),
             patch.object(view, "require_all_permissions", return_value=deny),
         ):
+            view.request = request
             resp = view.post(request, pk=24)
 
         assert resp.status_code == 403
@@ -583,6 +589,7 @@ class TestMoveModuleView:
             patch("netbox_librenms_plugin.views.sync.modules.messages") as mock_msg,
             patch("netbox_librenms_plugin.views.sync.modules.redirect") as mock_redirect,
         ):
+            view.request = request
             view.post(request, pk=24)
 
         mock_msg.error.assert_called_once()
@@ -608,7 +615,7 @@ class TestMoveModuleView:
             patch("netbox_librenms_plugin.views.sync.modules.transaction") as mock_tx,
             patch("netbox_librenms_plugin.views.sync.modules.messages") as mock_msg,
             patch("netbox_librenms_plugin.views.sync.modules.redirect"),
-            patch("dcim.models.Module") as mock_module_cls,
+            patch("dcim.models.Module"),
             patch("dcim.models.ModuleBay") as mock_bay_cls,
             # The conflict module is resolved through the SCOPED queryset (it is mutated below),
             # so that is the seam this test stubs.
@@ -616,14 +623,13 @@ class TestMoveModuleView:
         ):
             mock_tx.atomic.return_value.__enter__ = lambda s: s
             mock_tx.atomic.return_value.__exit__ = MagicMock(return_value=False)
-            # select_for_update on ModuleBay returns locked target_bay
-            mock_bay_cls.objects.select_for_update.return_value.get.return_value = target_bay
-            # scoped select_for_update chain returns conflict_module
-            scoped_qs = MagicMock()
-            scoped_qs.select_for_update.return_value.filter.return_value.select_related.return_value.first.return_value = conflict_module
-            mock_scoped.return_value = scoped_qs
-            # No occupant in target bay
-            mock_module_cls.objects.select_for_update.return_value.filter.return_value.first.return_value = None
+            # Both the locked target bay and the conflict module are resolved through
+            # restricted_queryset now, so dispatch on the model the view asks for.
+            bay_qs = MagicMock()
+            bay_qs.select_for_update.return_value.get.return_value = target_bay
+            module_qs = MagicMock()
+            module_qs.select_for_update.return_value.filter.return_value.select_related.return_value.first.return_value = conflict_module
+            mock_scoped.side_effect = lambda model, *a, **kw: bay_qs if model is mock_bay_cls else module_qs
 
             _post(view, request, pk=24)
 
@@ -649,6 +655,7 @@ class TestMoveModuleView:
             ),
             patch.object(view, "require_all_permissions", return_value=deny),
         ):
+            view.request = request
             resp = view.post(request, pk=24)
 
         assert resp.status_code == 403

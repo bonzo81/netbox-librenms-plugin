@@ -38,7 +38,9 @@ def test_write_views_fetch_device_info_live_not_cached(view_name):
         patch("netbox_librenms_plugin.views.sync.device_fields.messages"),
         patch("netbox_librenms_plugin.views.sync.device_fields.redirect"),
     ):
-        view.post(_make_request(), pk=1)
+        _r = _make_request()
+        view.request = _r
+        view.post(_r, pk=1)
     # Unfixed: called as get_device_info(42) → use_cache defaults True → reads the stale render cache.
     assert view._librenms_api.get_device_info.call_args.kwargs.get("use_cache") is False
 
@@ -83,7 +85,9 @@ class TestUpdateDeviceNameView:
         with patch(
             "netbox_librenms_plugin.views.mixins.NetBoxObjectPermissionMixin.restrict_object_or_404"
         ) as mock_get:
-            result = view.post(_make_request(), pk=1)
+            _r = _make_request()
+            view.request = _r
+            result = view.post(_r, pk=1)
 
         assert result is error_response
         mock_get.assert_not_called()
@@ -224,7 +228,9 @@ class TestUpdateDeviceNameView:
             patch("netbox_librenms_plugin.views.sync.device_fields.messages") as mock_msg,
             patch("netbox_librenms_plugin.views.sync.device_fields.redirect"),
         ):
-            view.post(_make_request(), pk=dev.pk)
+            _r = _make_request()
+            view.request = _r
+            view.post(_r, pk=dev.pk)
 
         mock_msg.error.assert_called_once()
         assert dev.name == "orig-int"  # restored after the failed save
@@ -250,7 +256,9 @@ class TestUpdateDeviceSerialView:
         with patch(
             "netbox_librenms_plugin.views.mixins.NetBoxObjectPermissionMixin.restrict_object_or_404"
         ) as mock_get:
-            result = view.post(_make_request(), pk=1)
+            _r = _make_request()
+            view.request = _r
+            result = view.post(_r, pk=1)
         assert result is err
         mock_get.assert_not_called()
 
@@ -403,7 +411,9 @@ class TestUpdateDeviceSerialView:
             patch("netbox_librenms_plugin.views.sync.device_fields.messages") as mock_msg,
             patch("netbox_librenms_plugin.views.sync.device_fields.redirect"),
         ):
-            view.post(_make_request(), pk=dev.pk)
+            _r = _make_request()
+            view.request = _r
+            view.post(_r, pk=dev.pk)
         mock_msg.error.assert_called_once()
         assert dev.serial == "OLD"  # restored in memory
         from dcim.models import Device
@@ -429,7 +439,9 @@ class TestUpdateDeviceSerialView:
             patch("netbox_librenms_plugin.views.sync.device_fields.messages") as mock_msg,
             patch("netbox_librenms_plugin.views.sync.device_fields.redirect"),
         ):
-            view.post(_make_request(), pk=dev.pk)
+            _r = _make_request()
+            view.request = _r
+            view.post(_r, pk=dev.pk)
         mock_msg.error.assert_called_once()
 
 
@@ -459,7 +471,9 @@ class TestUpdateDeviceTypeView:
         with patch(
             "netbox_librenms_plugin.views.mixins.NetBoxObjectPermissionMixin.restrict_object_or_404"
         ) as mock_get:
-            result = view.post(_make_request(), pk=1)
+            _r = _make_request()
+            view.request = _r
+            result = view.post(_r, pk=1)
         assert result is err
         mock_get.assert_not_called()
 
@@ -594,7 +608,9 @@ class TestUpdateDeviceTypeView:
             patch("netbox_librenms_plugin.views.sync.device_fields.messages") as mock_msg,
             patch("netbox_librenms_plugin.views.sync.device_fields.redirect"),
         ):
-            view.post(_make_request(), pk=dev.pk)
+            _r = _make_request()
+            view.request = _r
+            view.post(_r, pk=dev.pk)
         mock_msg.error.assert_called_once()
         assert Device.objects.get(pk=dev.pk).device_type_id == original_dt  # nothing persisted
 
@@ -622,7 +638,9 @@ class TestUpdateDeviceTypeView:
             patch("netbox_librenms_plugin.views.sync.device_fields.messages") as mock_msg,
             patch("netbox_librenms_plugin.views.sync.device_fields.redirect"),
         ):
-            view.post(_make_request(), pk=dev.pk)
+            _r = _make_request()
+            view.request = _r
+            view.post(_r, pk=dev.pk)
         mock_msg.error.assert_called_once()
 
 
@@ -649,7 +667,9 @@ class TestUpdateDevicePlatformView:
         err = MagicMock()
         view.require_all_permissions = MagicMock(return_value=err)
         with patch("netbox_librenms_plugin.views.mixins.NetBoxObjectPermissionMixin.restrict_object_or_404"):
-            result = view.post(_make_request(), pk=1)
+            _r = _make_request()
+            view.request = _r
+            result = view.post(_r, pk=1)
         assert result is err
 
     def test_no_librenms_id(self):
@@ -740,7 +760,9 @@ class TestUpdateDevicePlatformView:
             patch("netbox_librenms_plugin.views.sync.device_fields.messages") as mock_msg,
             patch("netbox_librenms_plugin.views.sync.device_fields.redirect"),
         ):
-            view.post(_make_request(), pk=dev.pk)
+            _r = _make_request()
+            view.request = _r
+            view.post(_r, pk=dev.pk)
         mock_msg.success.assert_called_once()
         assert "updated from" in mock_msg.success.call_args[0][1]
         assert Device.objects.get(pk=dev.pk).platform_id == new_platform.pk
@@ -766,7 +788,9 @@ class TestUpdateDevicePlatformView:
             patch("netbox_librenms_plugin.views.sync.device_fields.messages") as mock_msg,
             patch("netbox_librenms_plugin.views.sync.device_fields.redirect"),
         ):
-            view.post(_make_request(), pk=dev.pk)
+            _r = _make_request()
+            view.request = _r
+            view.post(_r, pk=dev.pk)
         mock_msg.success.assert_called_once()
         assert "set to" in mock_msg.success.call_args[0][1]
         assert Device.objects.get(pk=dev.pk).platform_id == new_platform.pk
@@ -793,7 +817,9 @@ class TestUpdateDevicePlatformView:
             patch("netbox_librenms_plugin.views.sync.device_fields.messages") as mock_msg,
             patch("netbox_librenms_plugin.views.sync.device_fields.redirect"),
         ):
-            view.post(_make_request(), pk=dev.pk)
+            _r = _make_request()
+            view.request = _r
+            view.post(_r, pk=dev.pk)
         mock_msg.success.assert_called_once()
         assert Device.objects.get(pk=dev.pk).platform_id == new_platform.pk
 
@@ -843,7 +869,9 @@ class TestUpdateDevicePlatformView:
             patch("netbox_librenms_plugin.views.sync.device_fields.messages") as mock_msg,
             patch("netbox_librenms_plugin.views.sync.device_fields.redirect"),
         ):
-            view.post(_make_request(), pk=dev.pk)
+            _r = _make_request()
+            view.request = _r
+            view.post(_r, pk=dev.pk)
         mock_msg.error.assert_called_once()
         assert Device.objects.get(pk=dev.pk).platform_id is None  # nothing persisted
 
@@ -865,7 +893,9 @@ class TestCreateAndAssignPlatformView:
         err = MagicMock()
         view.require_all_permissions = MagicMock(return_value=err)
         with patch("netbox_librenms_plugin.views.mixins.NetBoxObjectPermissionMixin.restrict_object_or_404"):
-            result = view.post(_make_request(), pk=1)
+            _r = _make_request()
+            view.request = _r
+            result = view.post(_r, pk=1)
         assert result is err
 
     def test_no_platform_name(self):
@@ -880,6 +910,7 @@ class TestCreateAndAssignPlatformView:
             patch("netbox_librenms_plugin.views.sync.device_fields.messages") as mock_msg,
             patch("netbox_librenms_plugin.views.sync.device_fields.redirect"),
         ):
+            view.request = req
             view.post(req, pk=1)
         mock_msg.error.assert_called_once()
         assert "required" in mock_msg.error.call_args[0][1].lower()
@@ -907,6 +938,7 @@ class TestCreateAndAssignPlatformView:
             patch("netbox_librenms_plugin.views.sync.device_fields.messages"),
             patch("netbox_librenms_plugin.views.sync.device_fields.redirect"),
         ):
+            view.request = req
             view.post(req, pk=dev.pk)
 
         # Rebound to the POSTed server (not left on the initial/global client), so the
@@ -931,6 +963,7 @@ class TestCreateAndAssignPlatformView:
             patch("netbox_librenms_plugin.views.sync.device_fields.messages") as mock_msg,
             patch("netbox_librenms_plugin.views.sync.device_fields.redirect"),
         ):
+            view.request = req
             view.post(req, pk=dev.pk)
         # Reused — not duplicated.
         assert Platform.objects.filter(name__iexact="ios").count() == 1
@@ -960,6 +993,7 @@ class TestCreateAndAssignPlatformView:
             patch("netbox_librenms_plugin.views.sync.device_fields.messages") as mock_msg,
             patch("netbox_librenms_plugin.views.sync.device_fields.redirect"),
         ):
+            view.request = req
             view.post(req, pk=dev.pk)
         assert Platform.objects.filter(name__iexact="ios").count() == 1  # reused
         # A real mapping now points the posted OS at the reused platform.
@@ -975,16 +1009,19 @@ class TestCreateAndAssignPlatformView:
 
         found_platform = MagicMock(pk=5)
         mock_platform_cls = MagicMock()
+        mock_platform_cls.objects.restrict.return_value = mock_platform_cls.objects
         mock_platform_cls.objects.filter.return_value.first.return_value = found_platform
 
         mock_device_cls = MagicMock()
         mock_device_cls.DoesNotExist = type("DoesNotExist", (Exception,), {})
         mock_locked = MagicMock()
+        mock_device_cls.objects.restrict.return_value = mock_device_cls.objects
         mock_device_cls.objects.select_for_update.return_value.get.return_value = mock_locked
 
         # Existing mapping for "ios" points at a different platform (id 999, not 5).
         other_mapping = MagicMock(netbox_platform_id=999)
         mock_mapping_cls = MagicMock()
+        mock_mapping_cls.objects.restrict.return_value = mock_mapping_cls.objects
         mock_mapping_cls.objects.filter.return_value.first.return_value = other_mapping
 
         with (
@@ -999,6 +1036,7 @@ class TestCreateAndAssignPlatformView:
             patch("netbox_librenms_plugin.views.sync.device_fields.messages") as mock_msg,
             patch("netbox_librenms_plugin.views.sync.device_fields.redirect"),
         ):
+            view.request = req
             view.post(req, pk=1)
 
         # No new mapping created (PlatformMapping class never instantiated for a create), and
@@ -1016,17 +1054,20 @@ class TestCreateAndAssignPlatformView:
         req = _make_request({"platform_name": "ios", "manufacturer": "99"})
 
         mock_platform_cls = MagicMock()
+        mock_platform_cls.objects.restrict.return_value = mock_platform_cls.objects
         mock_platform_cls.objects.filter.return_value.first.return_value = None
         mock_platform_instance = MagicMock()
         mock_platform_cls.return_value = mock_platform_instance
 
         mock_manuf_cls = MagicMock()
         mock_manuf_cls.DoesNotExist = type("DoesNotExist", (Exception,), {})
+        mock_manuf_cls.objects.restrict.return_value = mock_manuf_cls.objects
         mock_manuf_cls.objects.get.side_effect = mock_manuf_cls.DoesNotExist()
 
         mock_device_cls = MagicMock()
         mock_device_cls.DoesNotExist = type("DoesNotExist", (Exception,), {})
         mock_locked = MagicMock()
+        mock_device_cls.objects.restrict.return_value = mock_device_cls.objects
         mock_device_cls.objects.select_for_update.return_value.get.return_value = mock_locked
 
         with (
@@ -1041,6 +1082,7 @@ class TestCreateAndAssignPlatformView:
             patch("netbox_librenms_plugin.views.sync.device_fields.messages") as mock_msg,
             patch("netbox_librenms_plugin.views.sync.device_fields.redirect"),
         ):
+            view.request = req
             view.post(req, pk=1)
         # Should succeed (manufacturer silently ignored)
         mock_msg.success.assert_called_once()
@@ -1063,6 +1105,7 @@ class TestCreateAndAssignPlatformView:
             patch("netbox_librenms_plugin.views.sync.device_fields.messages") as mock_msg,
             patch("netbox_librenms_plugin.views.sync.device_fields.redirect"),
         ):
+            view.request = req
             view.post(req, pk=dev.pk)
         mock_msg.success.assert_called_once()
         platform = Platform.objects.get(name="ios-new")
@@ -1088,6 +1131,7 @@ class TestCreateAndAssignPlatformView:
             patch("netbox_librenms_plugin.views.sync.device_fields.messages"),
             patch("netbox_librenms_plugin.views.sync.device_fields.redirect"),
         ):
+            view.request = req
             view.post(req, pk=dev.pk)
 
         assert Platform.objects.get(name=platform_name).slug == slugify(platform_name)
@@ -1099,6 +1143,7 @@ class TestCreateAndAssignPlatformView:
         req = _make_request({"platform_name": "ios", "manufacturer": ""})
 
         mock_platform_cls = MagicMock()
+        mock_platform_cls.objects.restrict.return_value = mock_platform_cls.objects
         mock_platform_cls.objects.filter.return_value.first.return_value = None
         mock_platform_instance = MagicMock()
         mock_platform_instance.full_clean.side_effect = ValidationError({"name": ["err"]})
@@ -1117,6 +1162,7 @@ class TestCreateAndAssignPlatformView:
             patch("netbox_librenms_plugin.views.sync.device_fields.messages") as mock_msg,
             patch("netbox_librenms_plugin.views.sync.device_fields.redirect"),
         ):
+            view.request = req
             view.post(req, pk=1)
         mock_msg.error.assert_called_once()
         mock_txn.set_rollback.assert_called_once_with(True)
@@ -1126,6 +1172,7 @@ class TestCreateAndAssignPlatformView:
         req = _make_request({"platform_name": "ios", "manufacturer": ""})
 
         mock_platform_cls = MagicMock()
+        mock_platform_cls.objects.restrict.return_value = mock_platform_cls.objects
         mock_platform_cls.objects.filter.return_value.first.return_value = None
         mock_platform_instance = MagicMock()
         mock_platform_cls.return_value = mock_platform_instance
@@ -1133,6 +1180,7 @@ class TestCreateAndAssignPlatformView:
         DoesNotExist = type("DoesNotExist", (Exception,), {})
         mock_device_cls = MagicMock()
         mock_device_cls.DoesNotExist = DoesNotExist
+        mock_device_cls.objects.restrict.return_value = mock_device_cls.objects
         mock_device_cls.objects.select_for_update.return_value.get.side_effect = DoesNotExist()
 
         mock_txn = MagicMock()
@@ -1149,6 +1197,7 @@ class TestCreateAndAssignPlatformView:
             patch("netbox_librenms_plugin.views.sync.device_fields.messages") as mock_msg,
             patch("netbox_librenms_plugin.views.sync.device_fields.redirect"),
         ):
+            view.request = req
             view.post(req, pk=1)
         mock_msg.error.assert_called_once()
         mock_txn.set_rollback.assert_called_once_with(True)
@@ -1160,6 +1209,7 @@ class TestCreateAndAssignPlatformView:
         req = _make_request({"platform_name": "ios", "manufacturer": ""})
 
         mock_platform_cls = MagicMock()
+        mock_platform_cls.objects.restrict.return_value = mock_platform_cls.objects
         mock_platform_cls.objects.filter.return_value.first.return_value = None
         mock_platform_instance = MagicMock()
         mock_platform_cls.return_value = mock_platform_instance
@@ -1170,6 +1220,7 @@ class TestCreateAndAssignPlatformView:
 
         mock_device_cls = MagicMock()
         mock_device_cls.DoesNotExist = DoesNotExist
+        mock_device_cls.objects.restrict.return_value = mock_device_cls.objects
         mock_device_cls.objects.select_for_update.return_value.get.return_value = mock_locked
 
         mock_txn = MagicMock()
@@ -1186,6 +1237,7 @@ class TestCreateAndAssignPlatformView:
             patch("netbox_librenms_plugin.views.sync.device_fields.messages") as mock_msg,
             patch("netbox_librenms_plugin.views.sync.device_fields.redirect"),
         ):
+            view.request = req
             view.post(req, pk=1)
         mock_msg.error.assert_called_once()
         mock_txn.set_rollback.assert_called_once_with(True)
@@ -1197,6 +1249,7 @@ class TestCreateAndAssignPlatformView:
         req = _make_request({"platform_name": "ios", "manufacturer": ""})
 
         mock_platform_cls = MagicMock()
+        mock_platform_cls.objects.restrict.return_value = mock_platform_cls.objects
         mock_platform_cls.objects.filter.return_value.first.return_value = None
         mock_platform_instance = MagicMock()
         # Make save raise IntegrityError
@@ -1221,6 +1274,7 @@ class TestCreateAndAssignPlatformView:
             patch("netbox_librenms_plugin.views.sync.device_fields.messages") as mock_msg,
             patch("netbox_librenms_plugin.views.sync.device_fields.redirect"),
         ):
+            view.request = req
             view.post(req, pk=1)
         mock_msg.error.assert_called_once()
         mock_txn.set_rollback.assert_called_once_with(True)
@@ -1236,6 +1290,7 @@ class TestCreateAndAssignPlatformView:
         mock_platform_cls = MagicMock()
         # First .first() is the up-front existence check (None → take the create path);
         # the second is the post-IntegrityError re-query (the concurrently-created row).
+        mock_platform_cls.objects.restrict.return_value = mock_platform_cls.objects
         mock_platform_cls.objects.filter.return_value.first.side_effect = [None, reused_platform]
         mock_platform_instance = MagicMock()
         mock_platform_instance.save.side_effect = IntegrityError("duplicate")
@@ -1244,6 +1299,7 @@ class TestCreateAndAssignPlatformView:
         mock_device_cls = MagicMock()
         mock_device_cls.DoesNotExist = type("DoesNotExist", (Exception,), {})
         mock_locked = MagicMock()
+        mock_device_cls.objects.restrict.return_value = mock_device_cls.objects
         mock_device_cls.objects.select_for_update.return_value.get.return_value = mock_locked
 
         # __exit__ must return False so the IntegrityError propagates out of the nested atomic.
@@ -1265,6 +1321,7 @@ class TestCreateAndAssignPlatformView:
             patch("netbox_librenms_plugin.views.sync.device_fields.messages") as mock_msg,
             patch("netbox_librenms_plugin.views.sync.device_fields.redirect"),
         ):
+            view.request = req
             view.post(req, pk=1)
 
         # Reuse path: the concurrently-created platform is assigned and persisted, with
@@ -1292,13 +1349,17 @@ class TestCreateAndAssignPlatformView:
             }
         )
         mock_platform_cls = MagicMock()
+        mock_platform_cls.objects.restrict.return_value = mock_platform_cls.objects
         mock_platform_cls.objects.filter.return_value.first.return_value = None
+        mock_platform_cls.objects.restrict.return_value = mock_platform_cls.objects
         mock_platform_instance = MagicMock()
         mock_platform_cls.return_value = mock_platform_instance
         mock_device_cls = MagicMock()
         mock_device_cls.DoesNotExist = type("DoesNotExist", (Exception,), {})
         mock_locked = MagicMock()
+        mock_device_cls.objects.restrict.return_value = mock_device_cls.objects
         mock_device_cls.objects.select_for_update.return_value.get.return_value = mock_locked
+        mock_device_cls.objects.restrict.return_value = mock_device_cls.objects
         return view, req, mock_platform_cls, mock_platform_instance, mock_device_cls, mock_locked
 
     def test_mapping_created_when_name_differs(self):
@@ -1309,6 +1370,7 @@ class TestCreateAndAssignPlatformView:
         mock_mapping_cls = MagicMock()
         mock_mapping_instance = MagicMock()
         mock_mapping_cls.return_value = mock_mapping_instance
+        mock_mapping_cls.objects.restrict.return_value = mock_mapping_cls.objects
         mock_mapping_cls.objects.filter.return_value.first.return_value = None
 
         with (
@@ -1323,6 +1385,7 @@ class TestCreateAndAssignPlatformView:
             patch("netbox_librenms_plugin.views.sync.device_fields.redirect"),
             patch("netbox_librenms_plugin.views.sync.device_fields.PlatformMapping", mock_mapping_cls),
         ):
+            view.request = req
             view.post(req, pk=1)
 
         mock_mapping_cls.assert_called_once_with(librenms_os="ios", netbox_platform=mock_platform_instance)
@@ -1350,6 +1413,7 @@ class TestCreateAndAssignPlatformView:
             patch("netbox_librenms_plugin.views.sync.device_fields.redirect"),
             patch("netbox_librenms_plugin.views.sync.device_fields.PlatformMapping", mock_mapping_cls),
         ):
+            view.request = req
             view.post(req, pk=1)
 
         mock_mapping_cls.assert_not_called()
@@ -1360,6 +1424,7 @@ class TestCreateAndAssignPlatformView:
             platform_name="Cisco IOS", librenms_os="ios", create_mapping="1"
         )
         mock_mapping_cls = MagicMock()
+        mock_mapping_cls.objects.restrict.return_value = mock_mapping_cls.objects
         mock_mapping_cls.objects.filter.return_value.first.return_value = MagicMock()  # existing mapping
 
         with (
@@ -1374,6 +1439,7 @@ class TestCreateAndAssignPlatformView:
             patch("netbox_librenms_plugin.views.sync.device_fields.redirect"),
             patch("netbox_librenms_plugin.views.sync.device_fields.PlatformMapping", mock_mapping_cls),
         ):
+            view.request = req
             view.post(req, pk=1)
 
         mock_mapping_cls.assert_not_called()
@@ -1391,6 +1457,7 @@ class TestCreateAndAssignPlatformView:
         mapping_add_perm = "netbox_librenms_plugin.add_platformmapping"
         req.user.has_perm = MagicMock(side_effect=lambda perm: perm != mapping_add_perm)
         mock_mapping_cls = MagicMock()
+        mock_mapping_cls.objects.restrict.return_value = mock_mapping_cls.objects
         mock_mapping_cls.objects.filter.return_value.first.return_value = None  # deleted since preflight
 
         with (
@@ -1406,6 +1473,7 @@ class TestCreateAndAssignPlatformView:
             patch("netbox_librenms_plugin.views.sync.device_fields.PlatformMapping", mock_mapping_cls),
             patch("utilities.permissions.get_permission_for_model", return_value=mapping_add_perm),
         ):
+            view.request = req
             view.post(req, pk=1)
 
         # Prove the write-site permission check actually ran (so the skip is due to the TOCTOU
@@ -1449,6 +1517,7 @@ class TestCreateAndAssignPlatformView:
             patch("netbox_librenms_plugin.views.sync.device_fields.Device", mock_device_cls),
             patch("netbox_librenms_plugin.views.sync.device_fields.PlatformMapping", RealPlatformMapping),
         ):
+            view.request = req
             view.post(req, pk=1)
 
         assert ("add", RealPlatformMapping) not in captured["perms"], (
@@ -1483,6 +1552,7 @@ class TestCreateAndAssignPlatformView:
             patch("netbox_librenms_plugin.views.sync.device_fields.Device", mock_device_cls),
             patch("netbox_librenms_plugin.views.sync.device_fields.PlatformMapping", RealPlatformMapping),
         ):
+            view.request = req
             view.post(req, pk=1)
 
         assert ("add", RealPlatformMapping) not in captured["perms"], (
@@ -1514,6 +1584,7 @@ class TestCreateAndAssignPlatformView:
             patch("netbox_librenms_plugin.views.sync.device_fields.Device", mock_device_cls),
             patch("netbox_librenms_plugin.views.sync.device_fields.PlatformMapping", RealPlatformMapping),
         ):
+            view.request = req
             view.post(req, pk=1)
 
         assert ("add", RealPlatformMapping) not in captured["perms"], (
@@ -1587,7 +1658,9 @@ class TestAssignVCSerialView:
         err = MagicMock()
         view.require_all_permissions = MagicMock(return_value=err)
         with patch("netbox_librenms_plugin.views.mixins.NetBoxObjectPermissionMixin.restrict_object_or_404"):
-            result = view.post(_make_request(), pk=1)
+            _r = _make_request()
+            view.request = _r
+            result = view.post(_r, pk=1)
         assert result is err
 
     def test_not_virtual_chassis(self):
@@ -1618,7 +1691,9 @@ class TestAssignVCSerialView:
             patch("netbox_librenms_plugin.views.sync.device_fields.messages") as mock_msg,
             patch("netbox_librenms_plugin.views.sync.device_fields.redirect"),
         ):
-            view.post(_make_request({}), pk=1)
+            _r = _make_request({})
+            view.request = _r
+            view.post(_r, pk=1)
         mock_msg.info.assert_called_once()
 
     def test_member_id_missing(self):
@@ -1636,6 +1711,7 @@ class TestAssignVCSerialView:
             patch("netbox_librenms_plugin.views.sync.device_fields.messages") as mock_msg,
             patch("netbox_librenms_plugin.views.sync.device_fields.redirect"),
         ):
+            view.request = req
             view.post(req, pk=1)
         mock_msg.info.assert_called_once()
 
@@ -1647,6 +1723,7 @@ class TestAssignVCSerialView:
         DoesNotExist = type("DoesNotExist", (Exception,), {})
         mock_device_cls = MagicMock()
         mock_device_cls.DoesNotExist = DoesNotExist
+        mock_device_cls.objects.restrict.return_value = mock_device_cls.objects
         mock_device_cls.objects.get.side_effect = DoesNotExist()
 
         req = _make_request({"serial_1": "SN100", "member_id_1": "99"})
@@ -1679,6 +1756,7 @@ class TestAssignVCSerialView:
         DoesNotExist = type("DoesNotExist", (Exception,), {})
         mock_device_cls = MagicMock()
         mock_device_cls.DoesNotExist = DoesNotExist
+        mock_device_cls.objects.restrict.return_value = mock_device_cls.objects
         mock_device_cls.objects.get.return_value = member
 
         req = _make_request({"serial_1": "SN100", "member_id_1": "5"})
@@ -1714,6 +1792,7 @@ class TestAssignVCSerialView:
         DoesNotExist = type("DoesNotExist", (Exception,), {})
         mock_device_cls = MagicMock()
         mock_device_cls.DoesNotExist = DoesNotExist
+        mock_device_cls.objects.restrict.return_value = mock_device_cls.objects
         mock_device_cls.objects.get.return_value = member
 
         req = _make_request({"serial_1": "SN100", "member_id_1": "5"})
@@ -1755,6 +1834,7 @@ class TestAssignVCSerialView:
         DoesNotExist = type("DoesNotExist", (Exception,), {})
         mock_device_cls = MagicMock()
         mock_device_cls.DoesNotExist = DoesNotExist
+        mock_device_cls.objects.restrict.return_value = mock_device_cls.objects
         mock_device_cls.objects.get.side_effect = [good_member, bad_member]
 
         req = _make_request(
@@ -1870,6 +1950,7 @@ class TestRemoveServerMappingViewPost:
     def test_invalid_object_type_returns_400(self):
         view = self._view()
         req = _make_request({"object_type": "badtype"})
+        view.request = req
         result = view.post(req, pk=1)
         assert result.status_code == 400
 
@@ -1886,6 +1967,7 @@ class TestRemoveServerMappingViewPost:
         mock_vm_cls.DoesNotExist = DoesNotExist
         mock_locked = MagicMock()
         mock_locked.custom_field_data = {"librenms_id": {"orphan": 5}}
+        mock_vm_cls.objects.restrict.return_value = mock_vm_cls.objects
         mock_vm_cls.objects.select_for_update.return_value.get.return_value = mock_locked
 
         mock_cfg = {"netbox_librenms_plugin": {"servers": {}, "librenms_url": ""}}
@@ -1902,6 +1984,7 @@ class TestRemoveServerMappingViewPost:
             patch("django.conf.settings") as mock_settings,
         ):
             mock_settings.PLUGINS_CONFIG = mock_cfg
+            view.request = req
             view.post(req, pk=1)
         mock_msg.success.assert_called_once()
 
@@ -1910,6 +1993,7 @@ class TestRemoveServerMappingViewPost:
         err = MagicMock()
         view.require_all_permissions = MagicMock(return_value=err)
         req = _make_request({"object_type": "device", "server_key": "x"})
+        view.request = req
         result = view.post(req, pk=1)
         assert result is err
 
@@ -1925,6 +2009,7 @@ class TestRemoveServerMappingViewPost:
             patch("netbox_librenms_plugin.views.sync.device_fields.messages") as mock_msg,
             patch("netbox_librenms_plugin.views.sync.device_fields.redirect"),
         ):
+            view.request = req
             view.post(req, pk=1)
         mock_msg.error.assert_called_once()
 
@@ -1944,6 +2029,7 @@ class TestRemoveServerMappingViewPost:
             patch("netbox_librenms_plugin.views.sync.device_fields.messages") as mock_msg,
             patch("netbox_librenms_plugin.views.sync.device_fields.redirect"),
         ):
+            view.request = req
             view.post(req, pk=1)
         mock_msg.warning.assert_called_once()
 
@@ -1963,6 +2049,7 @@ class TestRemoveServerMappingViewPost:
             patch("netbox_librenms_plugin.views.sync.device_fields.messages") as mock_msg,
             patch("netbox_librenms_plugin.views.sync.device_fields.redirect"),
         ):
+            view.request = req
             view.post(req, pk=1)
         mock_msg.warning.assert_called_once()
 
@@ -1981,6 +2068,7 @@ class TestRemoveServerMappingViewPost:
         mock_device_cls = MagicMock()
         mock_device_cls.__name__ = "Device"
         mock_device_cls.DoesNotExist = DoesNotExist
+        mock_device_cls.objects.restrict.return_value = mock_device_cls.objects
         mock_device_cls.objects.select_for_update.return_value.get.return_value = mock_locked
 
         # servers is a list (non-dict) → line 496 normalises it to {}
@@ -1997,6 +2085,7 @@ class TestRemoveServerMappingViewPost:
             patch("django.conf.settings") as mock_settings,
         ):
             mock_settings.PLUGINS_CONFIG = mock_cfg
+            view.request = req
             view.post(req, pk=1)
         mock_msg.success.assert_called_once()
 
@@ -2019,6 +2108,7 @@ class TestRemoveServerMappingViewPost:
             patch("django.conf.settings") as mock_settings,
         ):
             mock_settings.PLUGINS_CONFIG = mock_cfg
+            view.request = req
             view.post(req, pk=1)
         mock_msg.error.assert_called_once()
         assert "Cannot remove" in mock_msg.error.call_args[0][1]
@@ -2042,6 +2132,7 @@ class TestRemoveServerMappingViewPost:
             patch("django.conf.settings") as mock_settings,
         ):
             mock_settings.PLUGINS_CONFIG = mock_cfg
+            view.request = req
             view.post(req, pk=1)
         mock_msg.error.assert_called_once()
 
@@ -2056,6 +2147,7 @@ class TestRemoveServerMappingViewPost:
         mock_device_cls = MagicMock()
         mock_device_cls.__name__ = "Device"
         mock_device_cls.DoesNotExist = DoesNotExist
+        mock_device_cls.objects.restrict.return_value = mock_device_cls.objects
         mock_device_cls.objects.select_for_update.return_value.get.side_effect = DoesNotExist()
 
         mock_cfg = {"netbox_librenms_plugin": {"servers": {}, "librenms_url": ""}}
@@ -2071,6 +2163,7 @@ class TestRemoveServerMappingViewPost:
             patch("django.conf.settings") as mock_settings,
         ):
             mock_settings.PLUGINS_CONFIG = mock_cfg
+            view.request = req
             view.post(req, pk=1)
         mock_msg.error.assert_called_once()
 
@@ -2089,6 +2182,7 @@ class TestRemoveServerMappingViewPost:
 
         mock_device_cls = MagicMock()
         mock_device_cls.DoesNotExist = DoesNotExist
+        mock_device_cls.objects.restrict.return_value = mock_device_cls.objects
         mock_device_cls.objects.select_for_update.return_value.get.return_value = mock_locked
 
         mock_cfg = {"netbox_librenms_plugin": {"servers": {}, "librenms_url": ""}}
@@ -2104,6 +2198,7 @@ class TestRemoveServerMappingViewPost:
             patch("django.conf.settings") as mock_settings,
         ):
             mock_settings.PLUGINS_CONFIG = mock_cfg
+            view.request = req
             view.post(req, pk=1)
         mock_msg.warning.assert_called_once()
 
@@ -2123,6 +2218,7 @@ class TestRemoveServerMappingViewPost:
 
         mock_device_cls = MagicMock()
         mock_device_cls.DoesNotExist = DoesNotExist
+        mock_device_cls.objects.restrict.return_value = mock_device_cls.objects
         mock_device_cls.objects.select_for_update.return_value.get.return_value = mock_locked
 
         mock_txn = MagicMock()
@@ -2141,6 +2237,7 @@ class TestRemoveServerMappingViewPost:
             patch("django.conf.settings") as mock_settings,
         ):
             mock_settings.PLUGINS_CONFIG = mock_cfg
+            view.request = req
             view.post(req, pk=1)
         mock_msg.error.assert_called_once()
         mock_txn.set_rollback.assert_called_once_with(True)
@@ -2159,6 +2256,7 @@ class TestRemoveServerMappingViewPost:
 
         mock_device_cls = MagicMock()
         mock_device_cls.DoesNotExist = DoesNotExist
+        mock_device_cls.objects.restrict.return_value = mock_device_cls.objects
         mock_device_cls.objects.select_for_update.return_value.get.return_value = mock_locked
 
         mock_txn = MagicMock()
@@ -2177,6 +2275,7 @@ class TestRemoveServerMappingViewPost:
             patch("django.conf.settings") as mock_settings,
         ):
             mock_settings.PLUGINS_CONFIG = mock_cfg
+            view.request = req
             view.post(req, pk=1)
         mock_msg.error.assert_called_once()
         mock_txn.set_rollback.assert_called_once_with(True)
@@ -2368,6 +2467,7 @@ class TestConvertLegacyLibreNMSIdViewPost:
         view = self._view()
         req = _make_request({"object_type": "badtype"})
         with patch("netbox_librenms_plugin.views.mixins.NetBoxObjectPermissionMixin.restrict_object_or_404"):
+            view.request = req
             result = view.post(req, pk=1)
         assert result.status_code == 400
 
@@ -2389,6 +2489,7 @@ class TestConvertLegacyLibreNMSIdViewPost:
 
         mock_vm_cls = MagicMock()
         mock_vm_cls.DoesNotExist = DoesNotExist
+        mock_vm_cls.objects.restrict.return_value = mock_vm_cls.objects
         mock_vm_cls.objects.select_for_update.return_value.get.return_value = mock_locked
 
         with (
@@ -2405,7 +2506,9 @@ class TestConvertLegacyLibreNMSIdViewPost:
             patch("netbox_librenms_plugin.views.sync.device_fields.messages") as mock_msg,
             patch("netbox_librenms_plugin.views.sync.device_fields.redirect"),
         ):
-            view.post(_make_request({"object_type": "virtualmachine"}), pk=1)
+            _r = _make_request({"object_type": "virtualmachine"})
+            view.request = _r
+            view.post(_r, pk=1)
         mock_msg.success.assert_called_once()
         mock_migrate.assert_called_once()
         mock_locked.full_clean.assert_called_once()
@@ -2425,6 +2528,7 @@ class TestConvertLegacyLibreNMSIdViewPost:
         mock_locked.serial = "SN-MATCH"
         mock_dev_cls = MagicMock()
         mock_dev_cls.DoesNotExist = DoesNotExist
+        mock_dev_cls.objects.restrict.return_value = mock_dev_cls.objects
         mock_dev_cls.objects.select_for_update.return_value.get.return_value = mock_locked
 
         with (
@@ -2441,7 +2545,9 @@ class TestConvertLegacyLibreNMSIdViewPost:
             patch("netbox_librenms_plugin.views.sync.device_fields.messages") as mock_msg,
             patch("netbox_librenms_plugin.views.sync.device_fields.redirect"),
         ):
-            view.post(_make_request({"object_type": "device"}), pk=1)
+            _r = _make_request({"object_type": "device"})
+            view.request = _r
+            view.post(_r, pk=1)
         # Unfixed: ' 42 '.isdigit() is False → error "not a valid integer" and migrate NOT called.
         mock_migrate.assert_called_once()
         assert not any("not a valid integer" in str(c) for c in mock_msg.error.call_args_list)
@@ -2462,6 +2568,7 @@ class TestConvertLegacyLibreNMSIdViewPost:
         mock_locked.serial = "987654"
         mock_dev_cls = MagicMock()
         mock_dev_cls.DoesNotExist = DoesNotExist
+        mock_dev_cls.objects.restrict.return_value = mock_dev_cls.objects
         mock_dev_cls.objects.select_for_update.return_value.get.return_value = mock_locked
 
         with (
@@ -2478,7 +2585,9 @@ class TestConvertLegacyLibreNMSIdViewPost:
             patch("netbox_librenms_plugin.views.sync.device_fields.messages") as mock_msg,
             patch("netbox_librenms_plugin.views.sync.device_fields.redirect"),
         ):
-            view.post(_make_request({"object_type": "device"}), pk=1)
+            _r = _make_request({"object_type": "device"})
+            view.request = _r
+            view.post(_r, pk=1)
 
         mock_migrate.assert_called_once()
         assert not any("Serial number mismatch" in str(c) for c in mock_msg.error.call_args_list)
@@ -2489,6 +2598,7 @@ class TestConvertLegacyLibreNMSIdViewPost:
         view.require_all_permissions = MagicMock(return_value=err)
         req = _make_request({"object_type": "device"})
         with patch("netbox_librenms_plugin.views.mixins.NetBoxObjectPermissionMixin.restrict_object_or_404"):
+            view.request = req
             result = view.post(req, pk=1)
         assert result is err
 
@@ -2505,7 +2615,9 @@ class TestConvertLegacyLibreNMSIdViewPost:
             patch("netbox_librenms_plugin.views.sync.device_fields.messages") as mock_msg,
             patch("netbox_librenms_plugin.views.sync.device_fields.redirect"),
         ):
-            view.post(_make_request({"object_type": "device"}), pk=1)
+            _r = _make_request({"object_type": "device"})
+            view.request = _r
+            view.post(_r, pk=1)
         mock_msg.warning.assert_called_once()
         assert "already" in mock_msg.warning.call_args[0][1].lower()
 
@@ -2522,7 +2634,9 @@ class TestConvertLegacyLibreNMSIdViewPost:
             patch("netbox_librenms_plugin.views.sync.device_fields.messages") as mock_msg,
             patch("netbox_librenms_plugin.views.sync.device_fields.redirect"),
         ):
-            view.post(_make_request({"object_type": "device"}), pk=1)
+            _r = _make_request({"object_type": "device"})
+            view.request = _r
+            view.post(_r, pk=1)
         mock_msg.error.assert_called_once()
 
     def test_non_digit_string_cf_value(self):
@@ -2538,7 +2652,9 @@ class TestConvertLegacyLibreNMSIdViewPost:
             patch("netbox_librenms_plugin.views.sync.device_fields.messages") as mock_msg,
             patch("netbox_librenms_plugin.views.sync.device_fields.redirect"),
         ):
-            view.post(_make_request({"object_type": "device"}), pk=1)
+            _r = _make_request({"object_type": "device"})
+            view.request = _r
+            view.post(_r, pk=1)
         mock_msg.error.assert_called_once()
 
     @pytest.mark.django_db
@@ -2566,7 +2682,9 @@ class TestConvertLegacyLibreNMSIdViewPost:
             patch("netbox_librenms_plugin.views.sync.device_fields.messages") as mock_msg,
             patch("netbox_librenms_plugin.views.sync.device_fields.redirect"),
         ):
-            view.post(_make_request({"object_type": "device"}), pk=dev_a.pk)
+            _r = _make_request({"object_type": "device"})
+            view.request = _r
+            view.post(_r, pk=dev_a.pk)
 
         # Refused (fail closed): an error, never a success, and the legacy id is left untouched
         # (NOT silently converted to the JSON dict form).
@@ -2608,7 +2726,9 @@ class TestConvertLegacyLibreNMSIdViewPost:
             patch("netbox_librenms_plugin.views.sync.device_fields.messages") as mock_msg,
             patch("netbox_librenms_plugin.views.sync.device_fields.redirect"),
         ):
-            view.post(_make_request({"object_type": "device"}), pk=1)
+            _r = _make_request({"object_type": "device"})
+            view.request = _r
+            view.post(_r, pk=1)
         mock_msg.error.assert_called_once()
         assert "Serial" in mock_msg.error.call_args[0][1]
 
@@ -2627,7 +2747,9 @@ class TestConvertLegacyLibreNMSIdViewPost:
             patch("netbox_librenms_plugin.views.sync.device_fields.messages") as mock_msg,
             patch("netbox_librenms_plugin.views.sync.device_fields.redirect"),
         ):
-            view.post(_make_request({"object_type": "device"}), pk=1)
+            _r = _make_request({"object_type": "device"})
+            view.request = _r
+            view.post(_r, pk=1)
         mock_msg.error.assert_called_once()
 
     def test_object_no_longer_exists_in_lock(self):
@@ -2641,6 +2763,7 @@ class TestConvertLegacyLibreNMSIdViewPost:
         mock_device_cls = MagicMock()
         mock_device_cls.__name__ = "Device"
         mock_device_cls.DoesNotExist = DoesNotExist
+        mock_device_cls.objects.restrict.return_value = mock_device_cls.objects
         mock_device_cls.objects.select_for_update.return_value.get.side_effect = DoesNotExist()
 
         with (
@@ -2653,7 +2776,9 @@ class TestConvertLegacyLibreNMSIdViewPost:
             patch("netbox_librenms_plugin.views.sync.device_fields.messages") as mock_msg,
             patch("netbox_librenms_plugin.views.sync.device_fields.redirect"),
         ):
-            view.post(_make_request({"object_type": "device"}), pk=1)
+            _r = _make_request({"object_type": "device"})
+            view.request = _r
+            view.post(_r, pk=1)
         mock_msg.error.assert_called_once()
 
     def test_cf_value_changed_to_json_after_lock(self):
@@ -2670,6 +2795,7 @@ class TestConvertLegacyLibreNMSIdViewPost:
 
         mock_device_cls = MagicMock()
         mock_device_cls.DoesNotExist = DoesNotExist
+        mock_device_cls.objects.restrict.return_value = mock_device_cls.objects
         mock_device_cls.objects.select_for_update.return_value.get.return_value = mock_locked
 
         with (
@@ -2682,7 +2808,9 @@ class TestConvertLegacyLibreNMSIdViewPost:
             patch("netbox_librenms_plugin.views.sync.device_fields.messages") as mock_msg,
             patch("netbox_librenms_plugin.views.sync.device_fields.redirect"),
         ):
-            view.post(_make_request({"object_type": "device"}), pk=1)
+            _r = _make_request({"object_type": "device"})
+            view.request = _r
+            view.post(_r, pk=1)
         mock_msg.warning.assert_called_once()
 
     def test_cf_value_not_int_after_lock(self):
@@ -2699,6 +2827,7 @@ class TestConvertLegacyLibreNMSIdViewPost:
 
         mock_device_cls = MagicMock()
         mock_device_cls.DoesNotExist = DoesNotExist
+        mock_device_cls.objects.restrict.return_value = mock_device_cls.objects
         mock_device_cls.objects.select_for_update.return_value.get.return_value = mock_locked
 
         with (
@@ -2711,7 +2840,9 @@ class TestConvertLegacyLibreNMSIdViewPost:
             patch("netbox_librenms_plugin.views.sync.device_fields.messages") as mock_msg,
             patch("netbox_librenms_plugin.views.sync.device_fields.redirect"),
         ):
-            view.post(_make_request({"object_type": "device"}), pk=1)
+            _r = _make_request({"object_type": "device"})
+            view.request = _r
+            view.post(_r, pk=1)
         mock_msg.error.assert_called_once()
 
     def test_data_changed_before_lock(self):
@@ -2729,6 +2860,7 @@ class TestConvertLegacyLibreNMSIdViewPost:
 
         mock_device_cls = MagicMock()
         mock_device_cls.DoesNotExist = DoesNotExist
+        mock_device_cls.objects.restrict.return_value = mock_device_cls.objects
         mock_device_cls.objects.select_for_update.return_value.get.return_value = mock_locked
 
         with (
@@ -2741,7 +2873,9 @@ class TestConvertLegacyLibreNMSIdViewPost:
             patch("netbox_librenms_plugin.views.sync.device_fields.messages") as mock_msg,
             patch("netbox_librenms_plugin.views.sync.device_fields.redirect"),
         ):
-            view.post(_make_request({"object_type": "device"}), pk=1)
+            _r = _make_request({"object_type": "device"})
+            view.request = _r
+            view.post(_r, pk=1)
         mock_msg.error.assert_called_once()
 
     def test_conflict_with_another_object(self):
@@ -2765,6 +2899,7 @@ class TestConvertLegacyLibreNMSIdViewPost:
         mock_device_cls = MagicMock()
         mock_device_cls.__name__ = "Device"
         mock_device_cls.DoesNotExist = DoesNotExist
+        mock_device_cls.objects.restrict.return_value = mock_device_cls.objects
         mock_device_cls.objects.select_for_update.return_value.get.return_value = mock_locked
 
         mock_txn = MagicMock()
@@ -2781,7 +2916,9 @@ class TestConvertLegacyLibreNMSIdViewPost:
             patch("netbox_librenms_plugin.views.sync.device_fields.messages") as mock_msg,
             patch("netbox_librenms_plugin.views.sync.device_fields.redirect"),
         ):
-            view.post(_make_request({"object_type": "device"}), pk=1)
+            _r = _make_request({"object_type": "device"})
+            view.request = _r
+            view.post(_r, pk=1)
         mock_msg.error.assert_called_once()
         mock_txn.set_rollback.assert_called_once_with(True)
 
@@ -2802,6 +2939,7 @@ class TestConvertLegacyLibreNMSIdViewPost:
 
         mock_device_cls = MagicMock()
         mock_device_cls.DoesNotExist = DoesNotExist
+        mock_device_cls.objects.restrict.return_value = mock_device_cls.objects
         mock_device_cls.objects.select_for_update.return_value.get.return_value = mock_locked
 
         with (
@@ -2816,7 +2954,9 @@ class TestConvertLegacyLibreNMSIdViewPost:
             patch("netbox_librenms_plugin.views.sync.device_fields.messages") as mock_msg,
             patch("netbox_librenms_plugin.views.sync.device_fields.redirect"),
         ):
-            view.post(_make_request({"object_type": "device"}), pk=1)
+            _r = _make_request({"object_type": "device"})
+            view.request = _r
+            view.post(_r, pk=1)
         mock_msg.warning.assert_called_once()
 
     def test_validation_error_on_save(self):
@@ -2838,6 +2978,7 @@ class TestConvertLegacyLibreNMSIdViewPost:
 
         mock_device_cls = MagicMock()
         mock_device_cls.DoesNotExist = DoesNotExist
+        mock_device_cls.objects.restrict.return_value = mock_device_cls.objects
         mock_device_cls.objects.select_for_update.return_value.get.return_value = mock_locked
 
         mock_txn = MagicMock()
@@ -2855,7 +2996,9 @@ class TestConvertLegacyLibreNMSIdViewPost:
             patch("netbox_librenms_plugin.views.sync.device_fields.messages") as mock_msg,
             patch("netbox_librenms_plugin.views.sync.device_fields.redirect"),
         ):
-            view.post(_make_request({"object_type": "device"}), pk=1)
+            _r = _make_request({"object_type": "device"})
+            view.request = _r
+            view.post(_r, pk=1)
         mock_msg.error.assert_called_once()
         mock_txn.set_rollback.assert_called_once_with(True)
 
@@ -2876,6 +3019,7 @@ class TestConvertLegacyLibreNMSIdViewPost:
 
         mock_device_cls = MagicMock()
         mock_device_cls.DoesNotExist = DoesNotExist
+        mock_device_cls.objects.restrict.return_value = mock_device_cls.objects
         mock_device_cls.objects.select_for_update.return_value.get.return_value = mock_locked
 
         mock_txn = MagicMock()
@@ -2893,7 +3037,9 @@ class TestConvertLegacyLibreNMSIdViewPost:
             patch("netbox_librenms_plugin.views.sync.device_fields.messages") as mock_msg,
             patch("netbox_librenms_plugin.views.sync.device_fields.redirect"),
         ):
-            view.post(_make_request({"object_type": "device"}), pk=1)
+            _r = _make_request({"object_type": "device"})
+            view.request = _r
+            view.post(_r, pk=1)
         mock_msg.error.assert_called_once()
         mock_txn.set_rollback.assert_called_once_with(True)
 
@@ -2951,6 +3097,7 @@ class TestConvertLegacyLibreNMSIdViewPost:
 
         mock_device_cls = MagicMock()
         mock_device_cls.DoesNotExist = DoesNotExist
+        mock_device_cls.objects.restrict.return_value = mock_device_cls.objects
         mock_device_cls.objects.select_for_update.return_value.get.return_value = mock_locked
 
         with (
@@ -2965,7 +3112,9 @@ class TestConvertLegacyLibreNMSIdViewPost:
             patch("netbox_librenms_plugin.views.sync.device_fields.messages") as mock_msg,
             patch("netbox_librenms_plugin.views.sync.device_fields.redirect"),
         ):
-            view.post(_make_request({"object_type": "device"}), pk=1)
+            _r = _make_request({"object_type": "device"})
+            view.request = _r
+            view.post(_r, pk=1)
         mock_msg.success.assert_called_once()
         mock_locked.full_clean.assert_called_once()
         mock_locked.save.assert_called_once()
@@ -3201,6 +3350,7 @@ class TestUpdateDeviceFieldsServerRebind:
             patch("netbox_librenms_plugin.views.sync.device_fields.messages"),
             patch("netbox_librenms_plugin.views.sync.device_fields.redirect"),
         ):
+            view.request = request
             view.post(request, pk=pk)
 
     def test_update_name_rebinds_and_renames_from_posted_server(self):

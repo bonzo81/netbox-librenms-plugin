@@ -270,7 +270,9 @@ class TestSyncCablesViewDuplicateCable:
             local_iface = MagicMock(pk=10)
             local_iface.device_id = 1  # match the device pk to skip VC branch
             remote_iface = MagicMock(pk=20)
+            mock_iface_cls.objects.restrict.return_value = mock_iface_cls.objects
             mock_iface_cls.objects.get.side_effect = [local_iface, remote_iface]
+            mock_cable_cls.objects.restrict.return_value = mock_cable_cls.objects
             mock_cable_cls.objects.filter.return_value.exists.return_value = True
             mock_ct.objects.get_for_model.return_value = MagicMock()
 
@@ -317,6 +319,7 @@ class TestSyncCablesViewMissingRemote:
         ):
             mock_cache.get.return_value = {"links": [link_data]}
             mock_iface_cls.DoesNotExist = _DNE
+            mock_iface_cls.objects.restrict.return_value = mock_iface_cls.objects
             mock_iface_cls.objects.get.side_effect = _DNE()
 
             view.post(view.request, pk=1)
@@ -517,6 +520,7 @@ class TestSyncCablesViewHelpers:
             patch("netbox_librenms_plugin.views.sync.cables.Cable") as mock_cable_cls,
             patch("netbox_librenms_plugin.views.sync.cables.ContentType") as mock_ct,
         ):
+            mock_cable_cls.objects.restrict.return_value = mock_cable_cls.objects
             mock_cable_cls.objects.filter.return_value.exists.return_value = True
             mock_ct.objects.get_for_model.return_value = MagicMock()
             result = view.check_existing_cable(local, remote)
@@ -580,6 +584,7 @@ class TestAddDeviceToLibreNMSViewFormInvalid:
             patch("netbox_librenms_plugin.views.sync.devices.redirect"),
             patch("netbox_librenms_plugin.forms._get_librenms_poller_group_choices", return_value=[]),
         ):
+            mock_device_cls.objects.restrict.return_value = mock_device_cls.objects
             mock_device_cls.objects.get.return_value = mock_device
             view.request = _make_request(post_data=post_data)
             view.object = mock_device
@@ -624,6 +629,7 @@ class TestAddDeviceToLibreNMSViewFormValid:
             patch("netbox_librenms_plugin.views.sync.devices.AddToLIbreSNMPV1V2", return_value=mock_form),
             patch.object(type(view), "librenms_api", new_callable=lambda: property(lambda s: mock_api)),
         ):
+            mock_device_cls.objects.restrict.return_value = mock_device_cls.objects
             mock_device_cls.objects.get.return_value = mock_device
             post_data = {"v1v2-snmp_version": "v2c", "object_type": "device"}
             view.request = _make_request(post_data=post_data)
@@ -670,6 +676,7 @@ class TestAddDeviceToLibreNMSViewFormValidExtraFields:
             patch("netbox_librenms_plugin.views.sync.devices.AddToLIbreSNMPV1V2", return_value=mock_form),
             patch.object(type(view), "librenms_api", new_callable=lambda: property(lambda s: mock_api)),
         ):
+            mock_device_cls.objects.restrict.return_value = mock_device_cls.objects
             mock_device_cls.objects.get.return_value = mock_device
             post_data = {"v1v2-snmp_version": "v2c", "object_type": "device"}
             view.request = _make_request(post_data=post_data)
@@ -714,6 +721,7 @@ class TestAddDeviceToLibreNMSViewFormValidExtraFields:
             patch("netbox_librenms_plugin.views.sync.devices.AddToLIbreSNMPV1V2", return_value=mock_form),
             patch.object(type(view), "librenms_api", new_callable=lambda: property(lambda s: mock_api)),
         ):
+            mock_device_cls.objects.restrict.return_value = mock_device_cls.objects
             mock_device_cls.objects.get.return_value = mock_device
             post_data = {"v1v2-snmp_version": "v2c", "object_type": "device"}
             view.request = _make_request(post_data=post_data)
@@ -763,6 +771,7 @@ class TestAddDeviceToLibreNMSViewV3:
             patch("netbox_librenms_plugin.views.sync.devices.AddToLIbreSNMPV3", return_value=mock_form),
             patch.object(type(view), "librenms_api", new_callable=lambda: property(lambda s: mock_api)),
         ):
+            mock_device_cls.objects.restrict.return_value = mock_device_cls.objects
             mock_device_cls.objects.get.return_value = mock_device
             post_data = {"v3-snmp_version": "v3", "object_type": "device"}
             view.request = _make_request(post_data=post_data)
@@ -803,6 +812,7 @@ class TestAddDeviceToLibreNMSViewUnknownVersion:
             patch("netbox_librenms_plugin.views.sync.devices.AddToLIbreSNMPV3", return_value=mock_form),
             patch.object(type(view), "librenms_api", new_callable=lambda: property(lambda s: mock_api)),
         ):
+            mock_device_cls.objects.restrict.return_value = mock_device_cls.objects
             mock_device_cls.objects.get.return_value = mock_device
             post_data = {"object_type": "device"}
             view.request = _make_request(post_data=post_data)
@@ -1259,8 +1269,10 @@ class TestSyncIPAddressesViewHelpers:
         view = object.__new__(SyncIPAddressesView)
         mock_vrf = MagicMock()
         req = _make_request(post_data={"vrf_10.0.0.1": "3"})
+        view.request = req  # dispatch() would set this; restricted_queryset reads request.user
 
         with patch("netbox_librenms_plugin.views.sync.ip_addresses.VRF") as mock_vrf_cls:
+            mock_vrf_cls.objects.restrict.return_value = mock_vrf_cls.objects
             mock_vrf_cls.objects.get.return_value = mock_vrf
             result = view.get_vrf_selection(req, "10.0.0.1")
         assert result is mock_vrf
@@ -1270,12 +1282,14 @@ class TestSyncIPAddressesViewHelpers:
 
         view = object.__new__(SyncIPAddressesView)
         req = _make_request(post_data={"vrf_10.0.0.1": "99"})
+        view.request = req  # dispatch() would set this; restricted_queryset reads request.user
 
         class _DNE(Exception):
             pass
 
         with patch("netbox_librenms_plugin.views.sync.ip_addresses.VRF") as mock_vrf_cls:
             mock_vrf_cls.DoesNotExist = _DNE
+            mock_vrf_cls.objects.restrict.return_value = mock_vrf_cls.objects
             mock_vrf_cls.objects.get.side_effect = _DNE()
             result = view.get_vrf_selection(req, "10.0.0.1")
         assert result is None
@@ -1385,6 +1399,7 @@ class TestSyncIPAddressesViewVMInterface:
             patch.object(type(view), "librenms_api", new_callable=lambda: property(lambda s: mock_api)),
         ):
             mock_cache.get.return_value = {"ip_addresses": [ip_data]}
+            mock_ip_cls.objects.restrict.return_value = mock_ip_cls.objects
             mock_ip_cls.objects.filter.return_value.first.return_value = None
 
             view.request = _make_request(post_data={"select": ["10.0.0.5"]})
@@ -1922,7 +1937,9 @@ class TestSyncVLANsViewWithGroup:
             patch.object(type(view), "librenms_api", new_callable=lambda: property(lambda s: mock_api)),
         ):
             mock_cache.get.return_value = librenms_vlans
+            mock_group_cls.objects.restrict.return_value = mock_group_cls.objects
             mock_group_cls.objects.get.return_value = mock_vlan_group
+            mock_vlan_cls.objects.restrict.return_value = mock_vlan_cls.objects
             mock_vlan_cls.objects.get_or_create.return_value = (mock_vlan, True)
 
             view.request = _make_request(post_data={"action": "create_vlans", "select": ["200"], "vlan_group_200": "3"})
@@ -1968,7 +1985,9 @@ class TestSyncVLANsViewWithGroup:
         ):
             mock_cache.get.return_value = librenms_vlans
             mock_group_cls.DoesNotExist = _DNE
+            mock_group_cls.objects.restrict.return_value = mock_group_cls.objects
             mock_group_cls.objects.get.side_effect = _DNE()
+            mock_vlan_cls.objects.restrict.return_value = mock_vlan_cls.objects
             mock_vlan_cls.objects.get_or_create.return_value = (mock_vlan, True)
 
             view.request = _make_request(
@@ -2111,7 +2130,9 @@ class TestSyncVLANsViewGroupedUpdateSkip:
             patch.object(type(view), "librenms_api", new_callable=lambda: property(lambda s: mock_api)),
         ):
             mock_cache.get.return_value = librenms_vlans
+            mock_group_cls.objects.restrict.return_value = mock_group_cls.objects
             mock_group_cls.objects.get.return_value = mock_vlan_group
+            mock_vlan_cls.objects.restrict.return_value = mock_vlan_cls.objects
             mock_vlan_cls.objects.get_or_create.return_value = (mock_vlan, False)  # exists
 
             view.request = _make_request(post_data={"action": "create_vlans", "select": ["300"], "vlan_group_300": "3"})
@@ -2150,7 +2171,9 @@ class TestSyncVLANsViewGroupedUpdateSkip:
             patch.object(type(view), "librenms_api", new_callable=lambda: property(lambda s: mock_api)),
         ):
             mock_cache.get.return_value = librenms_vlans
+            mock_group_cls.objects.restrict.return_value = mock_group_cls.objects
             mock_group_cls.objects.get.return_value = mock_vlan_group
+            mock_vlan_cls.objects.restrict.return_value = mock_vlan_cls.objects
             mock_vlan_cls.objects.get_or_create.return_value = (mock_vlan, False)
 
             view.request = _make_request(post_data={"action": "create_vlans", "select": ["300"], "vlan_group_300": "3"})
@@ -2248,6 +2271,7 @@ class TestSyncSiteLocationViewPost:
             patch("netbox_librenms_plugin.views.sync.locations.Site") as mock_site_cls,
             patch.object(type(view), "librenms_api", new_callable=lambda: property(lambda s: mock_api)),
         ):
+            mock_site_cls.objects.restrict.return_value = mock_site_cls.objects
             mock_site_cls.objects.get.side_effect = ObjectDoesNotExist()
             view.request = _make_request(post_data={"action": "create", "pk": "99"})
             view.post(view.request)
@@ -2268,6 +2292,7 @@ class TestSyncSiteLocationViewPost:
             patch("netbox_librenms_plugin.views.sync.locations.Site") as mock_site_cls,
             patch.object(type(view), "librenms_api", new_callable=lambda: property(lambda s: mock_api)),
         ):
+            mock_site_cls.objects.restrict.return_value = mock_site_cls.objects
             mock_site_cls.objects.get.return_value = mock_site
             view.request = _make_request(post_data={"action": "banana", "pk": "1"})
             view.post(view.request)
@@ -2293,6 +2318,7 @@ class TestSyncSiteLocationViewCreate:
             patch("netbox_librenms_plugin.views.sync.locations.Site") as mock_site_cls,
             patch.object(type(view), "librenms_api", new_callable=lambda: property(lambda s: mock_api)),
         ):
+            mock_site_cls.objects.restrict.return_value = mock_site_cls.objects
             mock_site_cls.objects.get.return_value = mock_site
             view.request = _make_request(post_data={"action": "create", "pk": "1"})
             view.post(view.request)
@@ -2317,6 +2343,7 @@ class TestSyncSiteLocationViewCreate:
             patch("netbox_librenms_plugin.views.sync.locations.Site") as mock_site_cls,
             patch.object(type(view), "librenms_api", new_callable=lambda: property(lambda s: mock_api)),
         ):
+            mock_site_cls.objects.restrict.return_value = mock_site_cls.objects
             mock_site_cls.objects.get.return_value = mock_site
             view.request = _make_request(post_data={"action": "create", "pk": "1"})
             view.post(view.request)
@@ -2341,6 +2368,7 @@ class TestSyncSiteLocationViewCreate:
             patch("netbox_librenms_plugin.views.sync.locations.Site") as mock_site_cls,
             patch.object(type(view), "librenms_api", new_callable=lambda: property(lambda s: mock_api)),
         ):
+            mock_site_cls.objects.restrict.return_value = mock_site_cls.objects
             mock_site_cls.objects.get.return_value = mock_site
             view.request = _make_request(post_data={"action": "create", "pk": "1"})
             view.post(view.request)
@@ -2366,6 +2394,7 @@ class TestSyncSiteLocationViewUpdate:
             patch("netbox_librenms_plugin.views.sync.locations.Site") as mock_site_cls,
             patch.object(type(view), "librenms_api", new_callable=lambda: property(lambda s: mock_api)),
         ):
+            mock_site_cls.objects.restrict.return_value = mock_site_cls.objects
             mock_site_cls.objects.get.return_value = mock_site
             view.request = _make_request(post_data={"action": "update", "pk": "1"})
             view.post(view.request)
@@ -2390,6 +2419,7 @@ class TestSyncSiteLocationViewUpdate:
             patch("netbox_librenms_plugin.views.sync.locations.Site") as mock_site_cls,
             patch.object(type(view), "librenms_api", new_callable=lambda: property(lambda s: mock_api)),
         ):
+            mock_site_cls.objects.restrict.return_value = mock_site_cls.objects
             mock_site_cls.objects.get.return_value = mock_site
             view.request = _make_request(post_data={"action": "update", "pk": "1"})
             view.post(view.request)
@@ -2415,6 +2445,7 @@ class TestSyncSiteLocationViewUpdate:
             patch("netbox_librenms_plugin.views.sync.locations.Site") as mock_site_cls,
             patch.object(type(view), "librenms_api", new_callable=lambda: property(lambda s: mock_api)),
         ):
+            mock_site_cls.objects.restrict.return_value = mock_site_cls.objects
             mock_site_cls.objects.get.return_value = mock_site
             view.request = _make_request(post_data={"action": "update", "pk": "1"})
             view.post(view.request)
@@ -2441,6 +2472,7 @@ class TestSyncSiteLocationViewUpdate:
             patch("netbox_librenms_plugin.views.sync.locations.Site") as mock_site_cls,
             patch.object(type(view), "librenms_api", new_callable=lambda: property(lambda s: mock_api)),
         ):
+            mock_site_cls.objects.restrict.return_value = mock_site_cls.objects
             mock_site_cls.objects.get.return_value = mock_site
             view.request = _make_request(post_data={"action": "update", "pk": "1"})
             view.post(view.request)
@@ -2467,6 +2499,7 @@ class TestSyncSiteLocationViewUpdate:
             patch("netbox_librenms_plugin.views.sync.locations.Site") as mock_site_cls,
             patch.object(type(view), "librenms_api", new_callable=lambda: property(lambda s: mock_api)),
         ):
+            mock_site_cls.objects.restrict.return_value = mock_site_cls.objects
             mock_site_cls.objects.get.return_value = mock_site
             view.request = _make_request(post_data={"action": "update", "pk": "1"})
             view.post(view.request)
@@ -2554,8 +2587,10 @@ class TestSyncSiteLocationViewHelpers:
         from netbox_librenms_plugin.views.sync.locations import SyncSiteLocationView
 
         view = object.__new__(SyncSiteLocationView)
+        view.request = MagicMock()  # restricted_queryset reads request.user
 
         with patch("netbox_librenms_plugin.views.sync.locations.Site") as mock_site_cls:
+            mock_site_cls.objects.restrict.return_value = mock_site_cls.objects
             mock_site_cls.objects.get.side_effect = ObjectDoesNotExist()
             result = view.get_site_by_pk(99)
         assert result is None

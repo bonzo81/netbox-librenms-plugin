@@ -3039,7 +3039,10 @@ class TestDeviceConflictSelectForUpdateDoesNotExist:
 
         with patch.object(view, "require_all_permissions", return_value=None):
             with patch("dcim.models.Device") as MockDevice:
-                MockDevice.objects.restrict.return_value.get.return_value = mock_existing
+                # The locked re-read is reached through restrict(user, action), so hand back the
+                # same manager: the stubs below then describe both the primary read and the lock.
+                MockDevice.objects.restrict.return_value = MockDevice.objects
+                MockDevice.objects.get.return_value = mock_existing
                 # select_for_update().get() raises DoesNotExist
                 MockDevice.objects.select_for_update.return_value.get.side_effect = DoesNotExistExc("gone")
                 MockDevice.DoesNotExist = DoesNotExistExc
@@ -3156,8 +3159,10 @@ class TestMigrateLibreNMSIdMorePaths:
                             with patch("dcim.models.Device") as MockDevice2:
                                 # This inner patch shadows the outer one for the in-function
                                 # `from dcim.models import Device`, so it must serve BOTH the
-                                # pre-lock existing_device lookup and the locked re-read.
-                                MockDevice2.objects.restrict.return_value.get.return_value = mock_existing
+                                # pre-lock existing_device lookup and the locked re-read. Both go
+                                # through restrict(user, action), so it returns the same manager.
+                                MockDevice2.objects.restrict.return_value = MockDevice2.objects
+                                MockDevice2.objects.get.return_value = mock_existing
                                 MockDevice2.objects.select_for_update.return_value.get.return_value = locked_device
                                 MockDevice2.DoesNotExist = DoesNotExistExc
                                 with patch("netbox_librenms_plugin.utils.find_by_librenms_id", return_value=None):
@@ -3234,7 +3239,10 @@ class TestDeviceConflictMoreActions:
         stack.enter_context(patch.object(view, "require_all_permissions", return_value=None))
 
         MockDevice = MagicMock()
-        MockDevice.objects.restrict.return_value.get.return_value = mock_existing
+        # restrict() hands back the same manager, so the locked re-read reached through it
+        # resolves to the stubs below.
+        MockDevice.objects.restrict.return_value = MockDevice.objects
+        MockDevice.objects.get.return_value = mock_existing
         MockDevice.objects.select_for_update.return_value.get.return_value = mock_existing
         MockDevice.objects.filter.return_value.exclude.return_value.first.return_value = None
         MockDevice.DoesNotExist = DoesNotExistExc
@@ -3442,7 +3450,10 @@ class TestMoreSaveErrorPaths:
 
         DoesNotExistExc = type("DoesNotExist", (Exception,), {})
         MockDevice = MagicMock()
-        MockDevice.objects.restrict.return_value.get.return_value = mock_existing
+        # restrict() hands back the same manager, so the locked re-read reached through it
+        # resolves to the stubs below.
+        MockDevice.objects.restrict.return_value = MockDevice.objects
+        MockDevice.objects.get.return_value = mock_existing
         MockDevice.objects.select_for_update.return_value.get.return_value = mock_existing
         MockDevice.objects.filter.return_value.exclude.return_value.first.return_value = None
         MockDevice.DoesNotExist = DoesNotExistExc
@@ -3672,7 +3683,10 @@ class TestUpdateAndSerialSaveErrors:
 
         DoesNotExistExc = type("DoesNotExist", (Exception,), {})
         MockDevice = MagicMock()
-        MockDevice.objects.restrict.return_value.get.return_value = mock_existing
+        # restrict() hands back the same manager, so the locked re-read reached through it
+        # resolves to the stubs below.
+        MockDevice.objects.restrict.return_value = MockDevice.objects
+        MockDevice.objects.get.return_value = mock_existing
         MockDevice.objects.select_for_update.return_value.get.return_value = mock_existing
         MockDevice.objects.filter.return_value.exclude.return_value.first.return_value = None
         MockDevice.DoesNotExist = DoesNotExistExc
@@ -3750,7 +3764,10 @@ class TestSyncSerialMorePaths:
 
         DoesNotExistExc = type("DoesNotExist", (Exception,), {})
         MockDevice = MagicMock()
-        MockDevice.objects.restrict.return_value.get.return_value = mock_existing
+        # restrict() hands back the same manager so the locked re-read the tests stub as
+        # objects.select_for_update() resolves through it too.
+        MockDevice.objects.restrict.return_value = MockDevice.objects
+        MockDevice.objects.get.return_value = mock_existing
         MockDevice.DoesNotExist = DoesNotExistExc
         mock_tx = MagicMock()
         mock_tx.atomic.return_value.__enter__ = MagicMock(return_value=None)
@@ -3956,7 +3973,11 @@ class TestMigrateLibreNMSIdTransactionPaths:
         locked_device.name = "router01"
 
         MockDevice = MagicMock()
-        MockDevice.objects.restrict.return_value.get.return_value = mock_existing
+        # The view reaches the manager through restrict(user, action) for both the primary read
+        # and the locked re-read, so restrict() hands back the same manager: the stubs below then
+        # describe both chains, and a test can still override either one.
+        MockDevice.objects.restrict.return_value = MockDevice.objects
+        MockDevice.objects.get.return_value = mock_existing
         MockDevice.objects.select_for_update.return_value.get.return_value = locked_device
         MockDevice.DoesNotExist = DoesNotExistExc
 
@@ -4892,6 +4913,7 @@ class TestAddDeviceTypeMappingNoSecondRoundTrip:
             data={"device_type_id": str(dt.pk)},
         )
         request.user = user
+        view.request = request
 
         # Mock ONLY the LibreNMS HTTP boundary; have it raise if ever called after the cache hit,
         # so a second round-trip would be unmistakable. Also stub the auth gates and VC detection.
@@ -4949,6 +4971,7 @@ class TestAddDeviceTypeMappingNoSecondRoundTrip:
             data={"device_type_id": str(dt.pk)},
         )
         request.user = user
+        view.request = request
 
         spy_cache = MagicMock(wraps=cache)
         with (
@@ -5007,6 +5030,7 @@ class TestAddDeviceTypeMappingNoSecondRoundTrip:
             data={"device_type_id": str(dt.pk)},
         )
         request.user = user
+        view.request = request
 
         with (
             patch("netbox_librenms_plugin.import_utils.device_operations.get_librenms_device_by_id", return_value=None),
@@ -5067,6 +5091,7 @@ class TestAddDeviceTypeMappingNoSecondRoundTrip:
             data={"device_type_id": str(dt_new.pk)},
         )
         request.user = user
+        view.request = request
 
         with (
             patch("netbox_librenms_plugin.import_utils.device_operations.get_librenms_device_by_id", return_value=None),
@@ -5115,6 +5140,7 @@ class TestCreatePlatformAssignmentIndependence:
 
         request = MagicMock()
         request.POST = {"platform_name": "NewPlatPF"}
+        view.request = request  # dispatch() would set this; restricted_queryset reads request.user
 
         validation = {"existing_device": target}
         dvdv = MagicMock()
@@ -5154,6 +5180,7 @@ class TestCreatePlatformAssignmentIndependence:
 
         request = MagicMock()
         request.POST = {"platform_name": "NewPlatPF2"}
+        view.request = request  # dispatch() would set this; restricted_queryset reads request.user
 
         validation = {"existing_device": target}
         # Patched so the UNFIXED success path can still render its OOB modal swap cleanly,
@@ -5847,7 +5874,10 @@ class TestAddAsOOBViewPost:
             patch("netbox_librenms_plugin.utils.find_by_librenms_id", return_value=None) as mock_find,
         ):
             mock_device.DoesNotExist = Exception
-            mock_device.objects.restrict.return_value.get.return_value = existing_device
+            # The sync-device re-read under lock goes through restrict(user, action) too, so
+            # restrict() hands back the same manager and both stubs below apply.
+            mock_device.objects.restrict.return_value = mock_device.objects
+            mock_device.objects.get.return_value = existing_device
             mock_device.objects.select_for_update.return_value.get.return_value = locked_device
             response = view.post(request, device_id=17)
 
@@ -6891,7 +6921,10 @@ class TestResolveOOBInterface:
         view = self._view()
         dev = make_device("oob-res-existing")
         iface = make_interface(dev, "eth0")
-        req = _make_request(post={"oob_interface_id": str(iface.pk)})
+        # Superuser: the reused interface is now read through a restricted queryset, and this
+        # test is about resolving the selection, not about the grant (see
+        # TestGatedViewsRefuseOutOfScopeObjects for the scoping itself).
+        req = _make_request(post={"oob_interface_id": str(iface.pk)}, user_is_superuser=True)
         with transaction.atomic():
             result_iface, reason = view._resolve_oob_interface(req, dev)
         assert result_iface.pk == iface.pk and reason is None
@@ -7313,8 +7346,13 @@ class TestCreatePlatformFromImportManufacturer:
         view = self._view()
         req = _make_request(post={"platform_name": "New-OS", "manufacturer": "9999"})
 
+        view.request = req  # dispatch() would set this; restricted_queryset reads request.user
+
         mock_manuf = MagicMock()
         mock_manuf.DoesNotExist = type("DoesNotExist", (Exception,), {})
+        # The manufacturer is resolved through restrict(user, "view"), so hand back the same
+        # manager and the not-found stub below still describes that chain.
+        mock_manuf.objects.restrict.return_value = mock_manuf.objects
         mock_manuf.objects.get.side_effect = mock_manuf.DoesNotExist()
         mock_platform = MagicMock()
         mock_platform.objects.filter.return_value.exists.return_value = False
@@ -7354,10 +7392,13 @@ class TestCreatePlatformFromImportManufacturer:
         assert other_mfr.pk != device.device_type.manufacturer_id
 
         view = self._view()
+        # Superuser: the subject is the assignment failure, not the object gate.
         req = _make_request(
             post={"platform_name": "Mismatch-OS", "manufacturer": str(other_mfr.pk)},
             headers={"HX-Request": "true"},
+            user_is_superuser=True,
         )
+        view.request = req
 
         with (
             patch.object(view, "require_write_permission", return_value=None),
@@ -7388,10 +7429,14 @@ class TestCreatePlatformFromImportManufacturer:
         mfr = Manufacturer.objects.get(slug="test-mfr")  # make_device's device_type manufacturer
 
         view = self._view()
+        # Superuser: this test is about the platform assignment, not the object gate, and the
+        # manufacturer is now read through a restricted queryset.
         req = _make_request(
             post={"platform_name": "Match-OS", "manufacturer": str(mfr.pk)},
             headers={"HX-Request": "true"},
+            user_is_superuser=True,
         )
+        view.request = req
 
         with (
             patch.object(view, "require_write_permission", return_value=None),

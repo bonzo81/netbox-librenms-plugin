@@ -1695,7 +1695,9 @@ class DeviceConflictActionView(
                 # best-effort guard for different devices; a DB unique constraint
                 # would be needed for full protection.
                 try:
-                    existing_device = Device.objects.select_for_update().get(pk=existing_device.pk)
+                    existing_device = (
+                        self.restricted_queryset(Device, "change").select_for_update().get(pk=existing_device.pk)
+                    )
                 except Device.DoesNotExist:
                     return _htmx_error_response("Device no longer exists; it may have been deleted concurrently.")
                 try:
@@ -1804,7 +1806,9 @@ class DeviceConflictActionView(
             if incoming_serial and incoming_serial != "-":
                 with transaction.atomic():
                     try:
-                        locked_device = Device.objects.select_for_update().get(pk=existing_device.pk)
+                        locked_device = (
+                            self.restricted_queryset(Device, "change").select_for_update().get(pk=existing_device.pk)
+                        )
                     except Device.DoesNotExist:
                         return _htmx_error_response("Device no longer exists; it may have been deleted concurrently.")
                     # Re-check for serial ownership conflict under the locks, on the LOCKED row.
@@ -1883,7 +1887,11 @@ class DeviceConflictActionView(
                 )
             with transaction.atomic():
                 try:
-                    locked_device = existing_model.objects.select_for_update().get(pk=existing_device.pk)
+                    locked_device = (
+                        self.restricted_queryset(existing_model, "change")
+                        .select_for_update()
+                        .get(pk=existing_device.pk)
+                    )
                 except existing_model.DoesNotExist:
                     return _htmx_error_response("Object no longer exists; it may have been deleted concurrently.")
                 # Re-check under lock — another request may have already migrated it
@@ -2000,7 +2008,7 @@ class AddDeviceTypeMappingView(
             return _htmx_error_response("Invalid device type selection.")
 
         try:
-            device_type = DeviceType.objects.get(pk=device_type_id)
+            device_type = self.restricted_queryset(DeviceType).get(pk=device_type_id)
         except DeviceType.DoesNotExist:
             return _htmx_error_response("Selected device type not found.")
 
@@ -2259,6 +2267,10 @@ class CreatePlatformFromImportView(
         perms = [("add", Platform)]
         if target_model is not None:
             perms.append(("change", target_model))
+        # When a manufacturer is posted it is resolved by client-supplied id through a restricted
+        # queryset, so state that read in the gate.
+        if (request.POST.get("manufacturer") or "").strip():
+            perms.append(("view", Manufacturer))
         self.required_object_permissions = {"POST": perms}
 
         if error := self.require_object_permissions("POST"):
@@ -2276,7 +2288,7 @@ class CreatePlatformFromImportView(
         manufacturer = None
         if manufacturer_id:
             try:
-                manufacturer = Manufacturer.objects.get(pk=int(manufacturer_id))
+                manufacturer = self.restricted_queryset(Manufacturer).get(pk=int(manufacturer_id))
             except (Manufacturer.DoesNotExist, ValueError, TypeError):
                 # The user explicitly submitted a manufacturer; a stale/tampered id must be
                 # rejected, not silently dropped to None (which would persist a Platform with
@@ -2399,7 +2411,7 @@ class CreatePlatformFromImportView(
         if target_model is not None and target_pk is not None:
             try:
                 with transaction.atomic():
-                    target = target_model.objects.select_for_update().get(pk=target_pk)
+                    target = self.restricted_queryset(target_model, "change").select_for_update().get(pk=target_pk)
                     target.platform = platform
                     target.full_clean()
                     target.save()
@@ -2569,7 +2581,7 @@ class AddAsOOBView(
 
         with transaction.atomic():
             try:
-                sync_device = Device.objects.select_for_update().get(pk=sync_device.pk)
+                sync_device = self.restricted_queryset(Device, "change").select_for_update().get(pk=sync_device.pk)
             except Device.DoesNotExist:
                 return _htmx_error_response("Device no longer exists; it may have been deleted concurrently.")
 
@@ -2957,7 +2969,14 @@ class AddAsOOBView(
         if iface_id:
             try:
                 # Lock the reused row too (same orphan-on-concurrent-delete reasoning).
-                return Interface.objects.select_for_update().get(pk=int(iface_id), device=device), None
+                # Scoped like every other client-supplied id: the device filter proves where the
+                # interface sits, not that the caller's grant covers it.
+                return (
+                    Interface.objects.restrict(request.user, "view")
+                    .select_for_update()
+                    .get(pk=int(iface_id), device=device),
+                    None,
+                )
             except (Interface.DoesNotExist, ValueError):
                 return None, None
         return None, None
@@ -3645,7 +3664,7 @@ class AddPlatformMappingView(
             return _htmx_error_response("Invalid platform selection.")
 
         try:
-            platform = Platform.objects.get(pk=platform_id)
+            platform = self.restricted_queryset(Platform).get(pk=platform_id)
         except Platform.DoesNotExist:
             return _htmx_error_response("Selected platform not found.")
 

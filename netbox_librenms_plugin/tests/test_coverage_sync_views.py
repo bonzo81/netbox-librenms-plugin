@@ -1006,6 +1006,7 @@ class TestSyncInterfacesViewServerRebind:
             patch("netbox_librenms_plugin.views.sync.interfaces.messages") as mock_msg,
             patch.object(view, "sync_selected_interfaces") as mock_sync,
         ):
+            view.request = req
             resp = view.post(req, "device", 1)
         mock_sync.assert_not_called()
         mock_msg.error.assert_called_once()
@@ -1029,6 +1030,7 @@ class TestSyncInterfacesViewServerRebind:
             patch.object(view, "get_cached_ports_data", return_value=None),
             patch("netbox_librenms_plugin.views.sync.interfaces.messages"),
         ):
+            view.request = req
             resp = view.post(req, "device", 1)
         mock_build.assert_called_once_with("secondary")
         assert view._librenms_api is api
@@ -1322,6 +1324,7 @@ class TestSyncInterfacesViewGetNetboxInterfaceType:
                 "netbox_librenms_plugin.views.sync.interfaces.convert_speed_to_kbps",
                 return_value=1000000,
             ):
+                mock_itm.objects.restrict.return_value = mock_itm.objects
                 mock_itm.objects.filter.return_value = mock_qs
                 result = view.get_netbox_interface_type(librenms_if)
         assert result is not None
@@ -1340,6 +1343,7 @@ class TestSyncInterfacesViewGetNetboxInterfaceType:
                 "netbox_librenms_plugin.views.sync.interfaces.convert_speed_to_kbps",
                 return_value=None,
             ):
+                mock_itm.objects.restrict.return_value = mock_itm.objects
                 mock_itm.objects.filter.return_value = mock_qs
                 result = view.get_netbox_interface_type(librenms_if)
         assert result == "other"
@@ -1356,6 +1360,7 @@ class TestSyncInterfacesViewGetNetboxInterfaceType:
                 "netbox_librenms_plugin.views.sync.interfaces.convert_speed_to_kbps",
                 return_value=None,
             ):
+                mock_itm.objects.restrict.return_value = mock_itm.objects
                 mock_itm.objects.filter.return_value = mock_qs
                 result = view.get_netbox_interface_type(librenms_if)
         assert result == "other"
@@ -1434,6 +1439,7 @@ class TestDeleteNetBoxInterfacesViewPost:
         obj = make_device("del-noids-dev")
         req = _make_request({"interface_ids": []})
         with patch.object(view, "require_all_permissions_json", return_value=None):
+            view.request = req
             result = view.post(req, object_type="device", object_id=obj.pk)
         assert result.status_code == 400
 
@@ -1447,6 +1453,7 @@ class TestDeleteNetBoxInterfacesViewPost:
         iface = make_interface(other, "eth0")  # belongs to a different device
         req = _make_request({"interface_ids": [str(iface.pk)]})
         with patch.object(view, "require_all_permissions_json", return_value=None):
+            view.request = req
             result = view.post(req, object_type="device", object_id=obj.pk)
         data = json.loads(result.content)
         assert data["deleted_count"] == 0
@@ -1464,6 +1471,7 @@ class TestDeleteNetBoxInterfacesViewPost:
         vmiface = VMInterface.objects.create(virtual_machine=other_vm, name="eth0")
         req = _make_request({"interface_ids": [str(vmiface.pk)]})
         with patch.object(view, "require_all_permissions_json", return_value=None):
+            view.request = req
             result = view.post(req, object_type="virtualmachine", object_id=vm.pk)
         data = json.loads(result.content)
         assert data["deleted_count"] == 0
@@ -1480,6 +1488,7 @@ class TestDeleteNetBoxInterfacesViewPost:
         iface = make_interface(obj, "eth0")
         req = _make_request({"interface_ids": [str(iface.pk)]})
         with patch.object(view, "require_all_permissions_json", return_value=None):
+            view.request = req
             result = view.post(req, object_type="device", object_id=obj.pk)
         data = json.loads(result.content)
         assert data["deleted_count"] == 1
@@ -1496,6 +1505,7 @@ class TestDeleteNetBoxInterfacesViewPost:
         vmiface = VMInterface.objects.create(virtual_machine=vm, name="eth0")
         req = _make_request({"interface_ids": [str(vmiface.pk)]})
         with patch.object(view, "require_all_permissions_json", return_value=None):
+            view.request = req
             result = view.post(req, object_type="virtualmachine", object_id=vm.pk)
         data = json.loads(result.content)
         assert data["deleted_count"] == 1
@@ -1510,6 +1520,7 @@ class TestDeleteNetBoxInterfacesViewPost:
         # An interface id that does not exist → real Interface.DoesNotExist → recorded error.
         req = _make_request({"interface_ids": ["999999"]})
         with patch.object(view, "require_all_permissions_json", return_value=None):
+            view.request = req
             result = view.post(req, object_type="device", object_id=obj.pk)
         data = json.loads(result.content)
         assert "errors" in data
@@ -1531,6 +1542,7 @@ class TestDeleteNetBoxInterfacesViewPost:
         iface = make_interface(outsider, "eth0")
         req = _make_request({"interface_ids": [str(iface.pk)]})
         with patch.object(view, "require_all_permissions_json", return_value=None):
+            view.request = req
             result = view.post(req, object_type="device", object_id=member.pk)
         data = json.loads(result.content)
         assert data["deleted_count"] == 0
@@ -1582,6 +1594,7 @@ class TestSyncIPAddressesViewGetVrfSelection:
         req = _make_request({"vrf_192.168.1.1": "3"})
         mock_vrf = MagicMock()
         with patch("netbox_librenms_plugin.views.sync.ip_addresses.VRF") as mock_vrf_cls:
+            mock_vrf_cls.objects.restrict.return_value = mock_vrf_cls.objects
             mock_vrf_cls.objects.get.return_value = mock_vrf
             result = view.get_vrf_selection(req, "192.168.1.1")
         assert result is mock_vrf
@@ -1595,6 +1608,7 @@ class TestSyncIPAddressesViewGetVrfSelection:
         req = _make_request({"vrf_192.168.1.1": "999"})
         with patch("netbox_librenms_plugin.views.sync.ip_addresses.VRF") as mock_vrf_cls:
             mock_vrf_cls.DoesNotExist = VRF.DoesNotExist
+            mock_vrf_cls.objects.restrict.return_value = mock_vrf_cls.objects
             mock_vrf_cls.objects.get.side_effect = VRF.DoesNotExist
             result = view.get_vrf_selection(req, "192.168.1.1")
         assert result is None
@@ -2241,6 +2255,7 @@ class TestSyncSiteLocationViewGetSiteByPk:
         view = self._make_view()
         mock_site = MagicMock()
         with patch("netbox_librenms_plugin.views.sync.locations.Site") as mock_site_cls:
+            mock_site_cls.objects.restrict.return_value = mock_site_cls.objects
             mock_site_cls.objects.get.return_value = mock_site
             result = view.get_site_by_pk(1)
         assert result is mock_site
@@ -2250,6 +2265,7 @@ class TestSyncSiteLocationViewGetSiteByPk:
 
         view = self._make_view()
         with patch("netbox_librenms_plugin.views.sync.locations.Site") as mock_site_cls:
+            mock_site_cls.objects.restrict.return_value = mock_site_cls.objects
             mock_site_cls.objects.get.side_effect = ObjectDoesNotExist
             result = view.get_site_by_pk(999)
         assert result is None
@@ -2277,6 +2293,7 @@ class TestSyncSiteLocationViewPost:
         with patch.object(view, "require_write_permission", return_value=None):
             with patch("netbox_librenms_plugin.views.sync.locations.messages") as mock_msg:
                 with patch("netbox_librenms_plugin.views.sync.locations.redirect"):
+                    view.request = req
                     view.post(req)
         mock_msg.error.assert_called_once()
 
@@ -2287,6 +2304,7 @@ class TestSyncSiteLocationViewPost:
             with patch.object(view, "get_site_by_pk", return_value=None):
                 with patch("netbox_librenms_plugin.views.sync.locations.messages") as mock_msg:
                     with patch("netbox_librenms_plugin.views.sync.locations.redirect"):
+                        view.request = req
                         view.post(req)
         mock_msg.error.assert_called_once()
 
@@ -2298,6 +2316,7 @@ class TestSyncSiteLocationViewPost:
             with patch.object(view, "get_site_by_pk", return_value=mock_site):
                 with patch("netbox_librenms_plugin.views.sync.locations.messages") as mock_msg:
                     with patch("netbox_librenms_plugin.views.sync.locations.redirect"):
+                        view.request = req
                         view.post(req)
         mock_msg.error.assert_called_once()
 
@@ -2309,6 +2328,7 @@ class TestSyncSiteLocationViewPost:
         with patch.object(view, "require_write_permission", return_value=None):
             with patch.object(view, "get_site_by_pk", return_value=mock_site):
                 with patch.object(view, "create_librenms_location", return_value=mock_response) as mock_create:
+                    view.request = req
                     result = view.post(req)
         mock_create.assert_called_once_with(req, mock_site)
         assert result is mock_response
@@ -2321,6 +2341,7 @@ class TestSyncSiteLocationViewPost:
         with patch.object(view, "require_write_permission", return_value=None):
             with patch.object(view, "get_site_by_pk", return_value=mock_site):
                 with patch.object(view, "update_librenms_location", return_value=mock_response) as mock_update:
+                    view.request = req
                     result = view.post(req)
         mock_update.assert_called_once_with(req, mock_site)
         assert result is mock_response
@@ -2589,6 +2610,7 @@ class TestSyncVLANsViewPost:
             with patch.object(view, "get_object", return_value=mock_obj):
                 with patch("netbox_librenms_plugin.views.sync.vlans.messages") as mock_msg:
                     with patch.object(view, "_redirect", return_value=MagicMock()):
+                        view.request = req
                         view.post(req, object_type="device", object_id=1)
         mock_msg.error.assert_called_once()
 
@@ -2602,6 +2624,7 @@ class TestSyncVLANsViewPost:
         with patch.object(view, "require_all_permissions", return_value=None):
             with patch.object(view, "get_object", return_value=mock_obj):
                 with patch.object(view, "_handle_create_vlans", return_value=mock_response) as mock_handle:
+                    view.request = req
                     result = view.post(req, object_type="device", object_id=1)
         mock_handle.assert_called_once()
         assert result is mock_response

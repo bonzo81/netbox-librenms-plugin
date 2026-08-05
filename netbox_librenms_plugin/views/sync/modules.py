@@ -602,7 +602,7 @@ class InstallModuleView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
         try:
             with transaction.atomic():
                 # Re-fetch bay under lock to prevent TOCTOU race with concurrent installs.
-                locked_bay = ModuleBay.objects.select_for_update().get(pk=module_bay_id)
+                locked_bay = self.restricted_queryset(ModuleBay).select_for_update().get(pk=module_bay_id)
                 if hasattr(locked_bay, "installed_module") and locked_bay.installed_module:
                     messages.warning(request, f"Module bay '{locked_bay.name}' already has a module installed.")
                     return _modules_redirect_response(request, sync_url, server_key)
@@ -1392,7 +1392,8 @@ class UpdateModuleSerialView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixi
         try:
             with transaction.atomic():
                 module = (
-                    Module.objects.select_for_update()
+                    self.restricted_queryset(Module, "change")
+                    .select_for_update()
                     .select_related("module_type", "module_bay")
                     .filter(pk=module_id, device=target_device)
                     .first()
@@ -1792,7 +1793,8 @@ class ReplaceModuleView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjectP
             with transaction.atomic():
                 # Re-fetch with row lock to prevent concurrent modifications
                 installed_module = (
-                    Module.objects.select_for_update()
+                    self.restricted_queryset(Module, "change")
+                    .select_for_update()
                     .filter(pk=module_id, device=target_device)
                     .select_related("module_type", "module_bay")
                     .first()
@@ -1957,7 +1959,9 @@ class MoveModuleView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, View)
             occupant_removed_msg = None
             with transaction.atomic():
                 # Lock target bay to prevent concurrent modifications
-                target_bay = ModuleBay.objects.select_for_update().get(pk=target_bay_id, device=target_device)
+                target_bay = (
+                    self.restricted_queryset(ModuleBay).select_for_update().get(pk=target_bay_id, device=target_device)
+                )
 
                 # Re-fetch with row lock to prevent concurrent modifications. Scoped like the
                 # primary lookup: this module's device and bay are reassigned below, and its pk
