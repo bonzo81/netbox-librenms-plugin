@@ -43,6 +43,8 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libre
             # Creating a cable changes the cable state of both terminations. Resolve the
             # client-supplied ids through the same change scope NetBox's cable form uses.
             ("change", Interface),
+            ("change", ConsoleServerPort),
+            ("change", ConsolePort),
             ("add", Cable),
             ("change", Cable),
         ],
@@ -324,8 +326,10 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libre
             return {"status": "missing_remote", "interface": display_name}
 
         try:
-            csp = ConsoleServerPort.objects.get(pk=csp_id)
-            cp = ConsolePort.objects.get(pk=cp_id)
+            # Scoped like the interface terminations: both ids come from the cached link row
+            # the POST selected, so a constrained grant must not cable an out-of-scope port.
+            csp = self.restricted_queryset(ConsoleServerPort, "change").get(pk=csp_id)
+            cp = self.restricted_queryset(ConsolePort, "change").get(pk=cp_id)
             return self._apply_cable_action(csp, cp, link_data, display_name, force)
 
         except (ConsoleServerPort.DoesNotExist, ConsolePort.DoesNotExist):

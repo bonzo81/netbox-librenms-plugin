@@ -497,6 +497,8 @@ class TestOverwriteRequiresDeletePermission:
         from users.models import ObjectPermission
 
         suffix = "-scoped" if constraints else ""
+        from dcim.models import ConsolePort, ConsoleServerPort
+
         user = get_user_model().objects.create_user(f"perm-user-{'-'.join(actions) or 'none'}{suffix}")
         if actions:
             op = ObjectPermission.objects.create(
@@ -504,6 +506,14 @@ class TestOverwriteRequiresDeletePermission:
             )
             op.object_types.add(ObjectType.objects.get_for_model(Cable))
             op.users.add(user)
+        # The terminations are resolved through a restricted queryset, so the user needs to see
+        # them; these tests vary the CABLE grant, so keep the port grant unconstrained.
+        ports = ObjectPermission.objects.create(
+            name=f"ports-view{suffix}-{'-'.join(actions) or 'none'}", actions=["view"]
+        )
+        ports.object_types.add(ObjectType.objects.get_for_model(ConsoleServerPort))
+        ports.object_types.add(ObjectType.objects.get_for_model(ConsolePort))
+        ports.users.add(user)
         user = get_user_model().objects.get(pk=user.pk)  # reload to reset the perm cache
 
         sync = object.__new__(SyncCablesView)

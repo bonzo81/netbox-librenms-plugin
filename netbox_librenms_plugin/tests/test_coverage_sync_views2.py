@@ -473,10 +473,15 @@ class TestSyncCablesViewDuplicateCable:
         old = cable_together(csp, cp_a)
         old.tags.add(Tag.objects.create(name="foreign-dupwarn", slug="foreign-dupwarn", color="ff0000"))
 
+        from netbox_librenms_plugin.tests.conftest import make_superuser
+
         view = object.__new__(SyncCablesView)
         req = RequestFactory().post("/")
         req.session = {}
         req._messages = FallbackStorage(req)
+        # The terminations are read through a restricted queryset; this test is about the
+        # foreign-tag conflict, not the object gate.
+        req.user = make_superuser("cable-dupwarn-su")
         view.request = req
         view._post_server_key = "default"
 
@@ -529,13 +534,24 @@ class TestSyncCablesViewMissingRemote:
 
     def test_a_remote_interface_outside_the_grant_is_reported_missing(self):
         """The remote id comes from the cached LibreNMS row; a constrained grant must not cable it."""
-        from dcim.models import Cable, Device, Interface
+        from dcim.models import Cable, ConsolePort, ConsoleServerPort, Device, Interface
 
         dev = make_device("cable-scoped-local")
         remote = make_device("cable-scoped-remote")
         local_iface = make_interface(dev, "Gi0/1")
         remote_iface = make_interface(remote, "Gi0/2")
-        user = make_user_with_perms("cable-scoped", [("view", Device), ("add", Cable), ("change", Cable)])
+        # The POST gate also covers the console-port terminations of a serial link; grant those
+        # unconstrained so the only thing narrowing this sync is the Interface constraint.
+        user = make_user_with_perms(
+            "cable-scoped",
+            [
+                ("view", Device),
+                ("add", Cable),
+                ("change", Cable),
+                ("view", ConsoleServerPort),
+                ("view", ConsolePort),
+            ],
+        )
         user = grant(user, "change", Interface, constraints={"device__name": "cable-scoped-local"})
         req = _make_request(post_data={"select": ["port1"]}, user=user)
         view = _cables_view(
