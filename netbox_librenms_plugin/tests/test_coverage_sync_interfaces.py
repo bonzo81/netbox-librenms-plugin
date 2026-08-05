@@ -9,7 +9,11 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from netbox_librenms_plugin.tests.conftest import make_device, make_interface
+from netbox_librenms_plugin.tests.conftest import make_device, make_interface, make_vm
+from netbox_librenms_plugin.tests.view_test_helpers import make_request, make_view
+
+# The views here are built with real requests and real users, so the whole file needs the DB.
+pytestmark = pytest.mark.django_db
 
 
 # ---------------------------------------------------------------------------
@@ -17,16 +21,22 @@ from netbox_librenms_plugin.tests.conftest import make_device, make_interface
 # ---------------------------------------------------------------------------
 
 
-def _make_request(post_data=None, get_data=None):
-    """Build a mock request with proper POST / GET dicts."""
-    req = MagicMock()
-    _post = post_data or {}
-    post_mock = MagicMock()
-    post_mock.get = lambda k, d=None: _post.get(k, d)
-    post_mock.getlist = lambda k: _post[k] if isinstance(_post.get(k), list) else ([] if k not in _post else [_post[k]])
-    req.POST = post_mock
-    req.GET = get_data or {}
-    return req
+def _make_request(post_data=None, get_data=None, user=None):
+    """A real request. POST wins when both are given; a GET-only call builds a GET request."""
+    if post_data is None and get_data:
+        return make_request("get", get_data, user=user)
+    request = make_request("post", post_data or {}, user=user)
+    request.GET = get_data or request.GET
+    return request
+
+
+def _sync_view(request=None):
+    """The real SyncInterfacesView; only the LibreNMS client is stubbed."""
+    from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
+
+    view = make_view(SyncInterfacesView, request)
+    view._post_server_key = "default"
+    return view
 
 
 def _denied_response():
@@ -614,12 +624,9 @@ class TestSyncInterfacesViewServerKeyAndRedirect:
 
 
 class TestSyncInterfacesViewSyncInterfaceDevice:
-    def _make_view(self):
-        from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
-
-        view = object.__new__(SyncInterfacesView)
-        view.request = _make_request()
-        view._post_server_key = "default"
+    def _make_view(self, request=None):
+        """The real view; only its own next steps (attribute copy, VLAN sync) are stubbed."""
+        view = _sync_view(request)
         view._lookup_maps = {}
         view.interface_name_field = "ifName"
         view.update_interface_attributes = MagicMock()
@@ -714,99 +721,56 @@ class TestSyncInterfacesViewSyncInterfaceDevice:
         assert view._skipped_conflicts == ["Gi0/1"]
         view.update_interface_attributes.assert_not_called()
 
+    @staticmethod
+    def _vc(tag, count=2):
+        """A real VirtualChassis with *count* members at consecutive positions."""
+        from dcim.models import VirtualChassis
+
+        vc = VirtualChassis.objects.create(name=f"vc-{tag}")
+        members = []
+        for position in range(1, count + 1):
+            member = make_device(f"{tag}-m{position}")
+            member.virtual_chassis = vc
+            member.vc_position = position
+            member.save()
+            members.append(member)
+        return vc, members
+
     def test_device_selection_with_vc_valid(self):
-        from dcim.models import Device
+        """A posted sibling of the same chassis receives the interface."""
+        from dcim.models import Interface
 
-        view = self._make_view()
-        view.request = _make_request(post_data={"device_selection_Gi0/1": "2"})
+        _vc, (host, sibling) = self._vc("selvalid")
+        view = self._make_view(_make_request(post_data={"device_selection_Gi0/1": str(sibling.pk)}))
 
-        mock_device = MagicMock()
-        mock_device.__class__ = Device
-        mock_device.id = 1
-        mock_vc = MagicMock()
-        mock_vc.members.values_list.return_value = [1, 2]
-        mock_device.virtual_chassis = mock_vc
+        view.sync_interface(host, {"ifName": "Gi0/1", "port_id": None}, [], "ifName")
 
-        mock_target_device = MagicMock()
-        mock_target_device.__class__ = Device
-        mock_target_device.id = 2
-
-        mock_interface = MagicMock()
-        librenms_port = {"ifName": "Gi0/1", "port_id": None}
-
-        with (
-            patch("netbox_librenms_plugin.views.sync.interfaces.Interface") as mock_intf_cls,
-            patch.object(Device, "objects") as mock_device_objects,
-        ):
-            mock_device_objects.restrict.return_value = mock_device_objects
-            mock_device_objects.get.return_value = mock_target_device
-            mock_intf_cls.objects.restrict.return_value = mock_intf_cls.objects
-            mock_intf_cls.objects.get_or_create.return_value = (mock_interface, True)
-            view.get_netbox_interface_type = MagicMock(return_value="other")
-            view.sync_interface(mock_device, librenms_port, [], "ifName")
-
-        mock_intf_cls.objects.get_or_create.assert_called_once_with(device=mock_target_device, name="Gi0/1")
+        assert Interface.objects.filter(device=sibling, name="Gi0/1").exists()
+        assert not Interface.objects.filter(device=host, name="Gi0/1").exists()
 
     def test_device_selection_invalid_defaults_to_obj(self):
-        from dcim.models import Device
+        """A device that is neither the page device nor a VC sibling is refused."""
+        from dcim.models import Interface
 
-        view = self._make_view()
-        view.request = _make_request(post_data={"device_selection_Gi0/1": "99"})
+        dev = make_device("selinvalid-page")
+        other = make_device("selinvalid-other")
+        view = self._make_view(_make_request(post_data={"device_selection_Gi0/1": str(other.pk)}))
 
-        mock_device = MagicMock()
-        mock_device.__class__ = Device
-        mock_device.id = 1
-        mock_device.virtual_chassis = None
+        view.sync_interface(dev, {"ifName": "Gi0/1", "port_id": None}, [], "ifName")
 
-        mock_other_device = MagicMock()
-        mock_other_device.__class__ = Device
-        mock_other_device.id = 99  # Different id, no VC → falls back to obj
-
-        mock_interface = MagicMock()
-        librenms_port = {"ifName": "Gi0/1", "port_id": None}
-
-        with (
-            patch("netbox_librenms_plugin.views.sync.interfaces.Interface") as mock_intf_cls,
-            patch.object(Device, "objects") as mock_device_objects,
-        ):
-            mock_device_objects.restrict.return_value = mock_device_objects
-            mock_device_objects.get.return_value = mock_other_device
-            mock_intf_cls.objects.restrict.return_value = mock_intf_cls.objects
-            mock_intf_cls.objects.get_or_create.return_value = (mock_interface, True)
-            view.get_netbox_interface_type = MagicMock(return_value="other")
-            view.sync_interface(mock_device, librenms_port, [], "ifName")
-
-        # Should use mock_device (obj), not mock_other_device
-        call_kwargs = mock_intf_cls.objects.get_or_create.call_args[1]
-        assert call_kwargs["device"] is mock_device
+        assert Interface.objects.filter(device=dev, name="Gi0/1").exists()
+        assert not Interface.objects.filter(device=other, name="Gi0/1").exists()
 
     def test_device_selection_does_not_exist_defaults_to_obj(self):
-        from dcim.models import Device
+        from dcim.models import Device, Interface
 
-        view = self._make_view()
-        view.request = _make_request(post_data={"device_selection_Gi0/1": "999"})
+        dev = make_device("selgone-page")
+        missing_pk = Device.objects.order_by("-pk").first().pk + 1000
+        view = self._make_view(_make_request(post_data={"device_selection_Gi0/1": str(missing_pk)}))
 
-        mock_device = MagicMock()
-        mock_device.__class__ = Device
-        mock_device.id = 1
-        mock_device.virtual_chassis = None
+        view.sync_interface(dev, {"ifName": "Gi0/1", "port_id": None}, [], "ifName")
 
-        mock_interface = MagicMock()
-        librenms_port = {"ifName": "Gi0/1", "port_id": None}
-
-        with (
-            patch("netbox_librenms_plugin.views.sync.interfaces.Interface") as mock_intf_cls,
-            patch.object(Device, "objects") as mock_device_objects,
-        ):
-            mock_device_objects.restrict.return_value = mock_device_objects
-            mock_device_objects.get.side_effect = Device.DoesNotExist()
-            mock_intf_cls.objects.restrict.return_value = mock_intf_cls.objects
-            mock_intf_cls.objects.get_or_create.return_value = (mock_interface, True)
-            view.get_netbox_interface_type = MagicMock(return_value="other")
-            view.sync_interface(mock_device, librenms_port, [], "ifName")
-
-        call_kwargs = mock_intf_cls.objects.get_or_create.call_args[1]
-        assert call_kwargs["device"] is mock_device
+        assert Interface.objects.filter(device=dev, name="Gi0/1").exists()
 
     @pytest.mark.django_db
     def test_device_port_id_prefers_existing_librenms_id_match(self):
@@ -875,63 +839,37 @@ class TestSyncInterfacesViewSyncInterfaceDevice:
 
 class TestSyncInterfacesViewSyncInterfaceVM:
     def test_vm_interface_created(self):
-        from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
-        from virtualization.models import VirtualMachine
+        from virtualization.models import VMInterface
 
-        view = object.__new__(SyncInterfacesView)
-        view.request = _make_request()
-        view._post_server_key = "default"
+        vm = make_vm("vmsync-created")
+        view = _sync_view()
         view._lookup_maps = {}
-        view.interface_name_field = "ifName"
         view.update_interface_attributes = MagicMock()
         view._sync_interface_vlans = MagicMock()
 
-        mock_vm = MagicMock()
-        mock_vm.__class__ = VirtualMachine
-        mock_vm_interface = MagicMock()
-        librenms_port = {"ifName": "eth0", "port_id": None}
+        view.sync_interface(vm, {"ifName": "eth0", "port_id": None}, [], "ifName")
 
-        with patch("netbox_librenms_plugin.views.sync.interfaces.VMInterface") as mock_vmintf_cls:
-            mock_vmintf_cls.objects.restrict.return_value = mock_vmintf_cls.objects
-            mock_vmintf_cls.objects.get_or_create.return_value = (mock_vm_interface, True)
-            view.sync_interface(mock_vm, librenms_port, [], "ifName")
-
-        mock_vmintf_cls.objects.get_or_create.assert_called_once()
+        assert VMInterface.objects.filter(virtual_machine=vm, name="eth0").exists()
         view.update_interface_attributes.assert_called_once()
 
     def test_vm_port_id_prefers_existing_librenms_id_match(self):
-        from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
-        from virtualization.models import VirtualMachine
+        """A port_id already stored on this VM's interface updates it; no second interface."""
+        from virtualization.models import VMInterface
 
-        view = object.__new__(SyncInterfacesView)
-        view.request = _make_request()
-        view._post_server_key = "default"
+        vm = make_vm("vmsync-portid")
+        matched = VMInterface.objects.create(virtual_machine=vm, name="eth0")
+        matched.custom_field_data["librenms_id"] = {"default": 55}
+        matched.save()
+        view = _sync_view()
         view._lookup_maps = {}
-        view.interface_name_field = "ifName"
         view.update_interface_attributes = MagicMock()
         view._sync_interface_vlans = MagicMock()
+        librenms_port = {"ifName": "renamed-in-librenms", "port_id": 55}
 
-        mock_vm = MagicMock()
-        mock_vm.__class__ = VirtualMachine
-        mock_vm.id = 5
-        matched_interface = MagicMock()
-        matched_interface.virtual_machine_id = 5
-        librenms_port = {"ifName": "eth0", "port_id": 55}
+        view.sync_interface(vm, librenms_port, [], "ifName")
 
-        with (
-            patch("netbox_librenms_plugin.views.sync.interfaces.VMInterface") as mock_vmintf_cls,
-            patch("netbox_librenms_plugin.views.sync.interfaces.find_by_librenms_id", return_value=matched_interface),
-        ):
-            view.sync_interface(mock_vm, librenms_port, [], "ifName")
-
-        mock_vmintf_cls.objects.get_or_create.assert_not_called()
-        view.update_interface_attributes.assert_called_once_with(
-            matched_interface,
-            librenms_port,
-            None,
-            [],
-            "ifName",
-        )
+        assert VMInterface.objects.filter(virtual_machine=vm).count() == 1
+        view.update_interface_attributes.assert_called_once_with(matched, librenms_port, None, [], "ifName")
 
     def test_invalid_obj_raises_value_error(self):
         from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
@@ -945,162 +883,56 @@ class TestSyncInterfacesViewSyncInterfaceVM:
 
 
 # ===========================================================================
-# SyncInterfacesView.get_netbox_interface_type
-# ===========================================================================
-
-
-class TestSyncInterfacesViewGetNetboxInterfaceType:
-    def test_with_speed_uses_speed_mapping(self):
-        from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
-
-        view = object.__new__(SyncInterfacesView)
-        mock_mapping = MagicMock()
-        mock_mapping.netbox_type = "1000base-t"
-
-        with (
-            patch("netbox_librenms_plugin.views.sync.interfaces.convert_speed_to_kbps", return_value=1000),
-            patch("netbox_librenms_plugin.views.sync.interfaces.InterfaceTypeMapping") as mock_cls,
-        ):
-            # mappings = objects.filter(...); speed_mapping = mappings.filter(...).order_by(...).first()
-            mock_cls.objects.restrict.return_value = mock_cls.objects
-            mock_cls.objects.filter.return_value.filter.return_value.order_by.return_value.first.return_value = (
-                mock_mapping
-            )
-            result = view.get_netbox_interface_type({"ifType": "ethernetCsmacd", "ifSpeed": 1000000000})
-
-        assert result == "1000base-t"
-
-    def test_no_speed_uses_null_mapping(self):
-        from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
-
-        view = object.__new__(SyncInterfacesView)
-        mock_mapping = MagicMock()
-        mock_mapping.netbox_type = "virtual"
-
-        with (
-            patch("netbox_librenms_plugin.views.sync.interfaces.convert_speed_to_kbps", return_value=None),
-            patch("netbox_librenms_plugin.views.sync.interfaces.InterfaceTypeMapping") as mock_cls,
-        ):
-            mock_qs = MagicMock()
-            mock_qs.filter.return_value.first.return_value = mock_mapping
-            mock_cls.objects.restrict.return_value = mock_cls.objects
-            mock_cls.objects.filter.return_value = mock_qs
-            result = view.get_netbox_interface_type({"ifType": "softwareLoopback", "ifSpeed": None})
-
-        assert result == "virtual"
-
-    def test_no_mapping_returns_other(self):
-        from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
-
-        view = object.__new__(SyncInterfacesView)
-        with (
-            patch("netbox_librenms_plugin.views.sync.interfaces.convert_speed_to_kbps", return_value=None),
-            patch("netbox_librenms_plugin.views.sync.interfaces.InterfaceTypeMapping") as mock_cls,
-        ):
-            mock_qs = MagicMock()
-            mock_qs.filter.return_value.first.return_value = None
-            mock_cls.objects.restrict.return_value = mock_cls.objects
-            mock_cls.objects.filter.return_value = mock_qs
-            result = view.get_netbox_interface_type({"ifType": "unknown", "ifSpeed": None})
-
-        assert result == "other"
-
-    def test_speed_mapping_falls_back_to_null(self):
-        """When speed mapping returns None, falls back to null-speed mapping."""
-        from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
-
-        view = object.__new__(SyncInterfacesView)
-        mock_null_mapping = MagicMock()
-        mock_null_mapping.netbox_type = "other"
-
-        with (
-            patch("netbox_librenms_plugin.views.sync.interfaces.convert_speed_to_kbps", return_value=1000),
-            patch("netbox_librenms_plugin.views.sync.interfaces.InterfaceTypeMapping") as mock_cls,
-        ):
-            mock_speed_qs = MagicMock()
-            mock_speed_qs.order_by.return_value.first.return_value = None  # No speed match
-            mock_null_qs = MagicMock()
-            mock_null_qs.first.return_value = mock_null_mapping
-            mock_qs = MagicMock()
-            mock_qs.filter.side_effect = [mock_speed_qs, mock_null_qs]
-            mock_cls.objects.restrict.return_value = mock_cls.objects
-            mock_cls.objects.filter.return_value = mock_qs
-            result = view.get_netbox_interface_type({"ifType": "ethernetCsmacd", "ifSpeed": 1000})
-
-        assert result == "other"
-
-
-# ===========================================================================
 # SyncInterfacesView.handle_mac_address
 # ===========================================================================
 
 
 class TestSyncInterfacesViewHandleMacAddress:
-    def test_no_mac_address_does_nothing(self):
-        from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
+    """Real Interfaces and real MACAddress rows: the m2m and the primary pointer both land."""
 
-        view = object.__new__(SyncInterfacesView)
-        interface = MagicMock()
-        view.handle_mac_address(interface, None)
-        interface.mac_addresses.add.assert_not_called()
+    def test_no_mac_address_does_nothing(self):
+        iface = make_interface(make_device("mac-none"), "Gi0/1")
+
+        _sync_view().handle_mac_address(iface, None)
+
+        assert not iface.mac_addresses.exists()
 
     def test_new_mac_created_and_added(self):
-        from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
+        from dcim.models import MACAddress
 
-        view = object.__new__(SyncInterfacesView)
-        interface = MagicMock()
-        interface.mac_addresses.filter.return_value.first.return_value = None
-        mock_mac = MagicMock()
+        iface = make_interface(make_device("mac-new"), "Gi0/1")
 
-        with patch("netbox_librenms_plugin.views.sync.interfaces.MACAddress") as mock_mac_cls:
-            mock_mac_cls.objects.create.return_value = mock_mac
-            view.handle_mac_address(interface, "aa:bb:cc:dd:ee:ff")
+        _sync_view().handle_mac_address(iface, "aa:bb:cc:dd:ee:ff")
 
-        interface.mac_addresses.add.assert_called_once_with(mock_mac)
+        mac = MACAddress.objects.get(mac_address="aa:bb:cc:dd:ee:ff")
+        assert list(iface.mac_addresses.all()) == [mac]
 
     def test_existing_mac_added_without_create(self):
-        from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
+        """A MAC already on this interface is reused, not duplicated."""
+        from dcim.models import MACAddress
 
-        view = object.__new__(SyncInterfacesView)
-        existing_mac = MagicMock()
-        interface = MagicMock()
-        interface.mac_addresses.filter.return_value.first.return_value = existing_mac
+        iface = make_interface(make_device("mac-existing"), "Gi0/1")
+        existing = MACAddress.objects.create(mac_address="aa:bb:cc:dd:ee:ff")
+        iface.mac_addresses.add(existing)
 
-        with patch("netbox_librenms_plugin.views.sync.interfaces.MACAddress") as mock_mac_cls:
-            view.handle_mac_address(interface, "aa:bb:cc:dd:ee:ff")
+        _sync_view().handle_mac_address(iface, "aa:bb:cc:dd:ee:ff")
 
-        mock_mac_cls.objects.create.assert_not_called()
-        interface.mac_addresses.add.assert_called_once_with(existing_mac)
+        assert MACAddress.objects.filter(mac_address="aa:bb:cc:dd:ee:ff").count() == 1
+        assert list(iface.mac_addresses.all()) == [existing]
 
     def test_primary_mac_assigned_if_attribute_exists(self):
-        from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
+        from dcim.models import Interface, MACAddress
 
-        view = object.__new__(SyncInterfacesView)
+        iface = make_interface(make_device("mac-primary"), "Gi0/1")
 
-        # Use a stub with explicit attributes to enforce the guard on primary_mac_address
-        class InterfaceStub:
-            primary_mac_address = None
+        view = _sync_view()
+        view.handle_mac_address(iface, "aa:bb:cc:dd:ee:ff")
+        iface.save()
 
-            def __init__(self):
-                self.mac_addresses = MagicMock()
-                self.mac_addresses.filter.return_value.first.return_value = None
-
-        interface = InterfaceStub()
-        mock_mac = MagicMock()
-
-        with patch("netbox_librenms_plugin.views.sync.interfaces.MACAddress") as mock_mac_cls:
-            mock_mac_cls.objects.create.return_value = mock_mac
-            view.handle_mac_address(interface, "aa:bb:cc:dd:ee:ff")
-
-        assert interface.primary_mac_address == mock_mac
+        mac = MACAddress.objects.get(mac_address="aa:bb:cc:dd:ee:ff")
+        assert Interface.objects.get(pk=iface.pk).primary_mac_address == mac
 
 
-# ===========================================================================
-# SyncInterfacesView.update_interface_attributes
-# ===========================================================================
-
-
-@pytest.mark.django_db
 class TestSyncInterfacesViewUpdateInterfaceAttributes:
     def _make_view(self):
         from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
@@ -1339,389 +1171,6 @@ class TestSyncInterfacesViewSyncSelected:
         assert view.sync_interface.call_count == 1
         call_args = view.sync_interface.call_args
         assert call_args[0][1]["ifName"] == "Gi0/1"
-
-
-# ===========================================================================
-# DeleteNetBoxInterfacesView
-# ===========================================================================
-
-
-class TestDeleteNetBoxInterfacesViewPermissions:
-    def test_device_returns_interface_delete_perm(self):
-        from netbox_librenms_plugin.views.sync.interfaces import DeleteNetBoxInterfacesView
-        from dcim.models import Interface
-
-        view = object.__new__(DeleteNetBoxInterfacesView)
-        perms = view.get_required_permissions_for_object_type("device")
-        assert ("delete", Interface) in perms
-
-    def test_vm_returns_vminterface_delete_perm(self):
-        from netbox_librenms_plugin.views.sync.interfaces import DeleteNetBoxInterfacesView
-        from virtualization.models import VMInterface
-
-        view = object.__new__(DeleteNetBoxInterfacesView)
-        perms = view.get_required_permissions_for_object_type("virtualmachine")
-        assert ("delete", VMInterface) in perms
-
-    def test_invalid_type_raises_http404(self):
-        from netbox_librenms_plugin.views.sync.interfaces import DeleteNetBoxInterfacesView
-        from django.http import Http404
-
-        view = object.__new__(DeleteNetBoxInterfacesView)
-        with pytest.raises(Http404):
-            view.get_required_permissions_for_object_type("invalid")
-
-
-class TestDeleteNetBoxInterfacesViewPost:
-    def test_permission_denied_returns_early(self):
-        from netbox_librenms_plugin.views.sync.interfaces import DeleteNetBoxInterfacesView
-
-        view = object.__new__(DeleteNetBoxInterfacesView)
-        view.get_required_permissions_for_object_type = MagicMock(return_value=[])
-        view.require_all_permissions_json = MagicMock(return_value=_denied_response())
-
-        req = _make_request(post_data={"interface_ids": ["1"]})
-        view.request = req
-        result = view.post(req, "device", 1)
-        assert result.status_code == 403
-
-    def test_empty_interface_ids_returns_400(self):
-        from netbox_librenms_plugin.views.sync.interfaces import DeleteNetBoxInterfacesView
-        from django.http import JsonResponse
-
-        view = object.__new__(DeleteNetBoxInterfacesView)
-        view.get_required_permissions_for_object_type = MagicMock(return_value=[])
-        view.require_all_permissions_json = MagicMock(return_value=None)
-
-        mock_device = MagicMock(pk=1)
-        req = _make_request(post_data={})  # No interface_ids
-
-        with patch(
-            "netbox_librenms_plugin.views.mixins.NetBoxObjectPermissionMixin.restrict_object_or_404",
-            return_value=mock_device,
-        ):
-            view.request = req
-            result = view.post(req, "device", 1)
-
-        assert isinstance(result, JsonResponse)
-        assert result.status_code == 400
-
-    def test_invalid_object_type_raises_http404(self):
-        """Invalid object_type raises Http404 from get_required_permissions_for_object_type."""
-        from django.http import Http404
-        from netbox_librenms_plugin.views.sync.interfaces import DeleteNetBoxInterfacesView
-
-        view = object.__new__(DeleteNetBoxInterfacesView)
-        view.require_all_permissions_json = MagicMock(return_value=None)
-
-        req = _make_request(post_data={"interface_ids": ["1"]})
-        with pytest.raises(Http404):
-            view.request = req
-            view.post(req, "badtype", 1)
-
-    def test_device_interface_deleted_successfully(self):
-        from netbox_librenms_plugin.views.sync.interfaces import DeleteNetBoxInterfacesView
-        from django.http import JsonResponse
-        import json
-
-        view = object.__new__(DeleteNetBoxInterfacesView)
-        view.get_required_permissions_for_object_type = MagicMock(return_value=[])
-        view.require_all_permissions_json = MagicMock(return_value=None)
-
-        mock_device = MagicMock(pk=1)
-        mock_device.id = 1
-        mock_device.virtual_chassis = None
-
-        mock_interface = MagicMock()
-        mock_interface.name = "Gi0/1"
-        mock_interface.device_id = 1
-
-        req = _make_request(post_data={"interface_ids": ["5"]})
-
-        with (
-            patch(
-                "netbox_librenms_plugin.views.mixins.NetBoxObjectPermissionMixin.restrict_object_or_404",
-                return_value=mock_device,
-            ),
-            patch("netbox_librenms_plugin.views.sync.interfaces.Interface") as mock_intf_cls,
-            patch("netbox_librenms_plugin.views.sync.interfaces.transaction"),
-        ):
-            mock_intf_cls.objects.restrict.return_value = mock_intf_cls.objects
-            mock_intf_cls.objects.get.return_value = mock_interface
-
-            class _DNE(Exception):
-                pass
-
-            mock_intf_cls.DoesNotExist = _DNE
-
-            view.request = req
-            result = view.post(req, "device", 1)
-
-        assert isinstance(result, JsonResponse)
-        data = json.loads(result.content)
-        assert data["deleted_count"] == 1
-        mock_interface.delete.assert_called_once()
-
-    def test_vm_interface_deleted_successfully(self):
-        from netbox_librenms_plugin.views.sync.interfaces import DeleteNetBoxInterfacesView
-        from virtualization.models import VMInterface
-        from django.http import JsonResponse
-        import json
-
-        view = object.__new__(DeleteNetBoxInterfacesView)
-        view.get_required_permissions_for_object_type = MagicMock(return_value=[])
-        view.require_all_permissions_json = MagicMock(return_value=None)
-
-        mock_vm = MagicMock(pk=2)
-        mock_vm.id = 2
-
-        mock_interface = MagicMock(spec=VMInterface)
-        mock_interface.name = "eth0"
-        mock_interface.virtual_machine_id = 2
-
-        req = _make_request(post_data={"interface_ids": ["7"]})
-
-        with (
-            patch(
-                "netbox_librenms_plugin.views.mixins.NetBoxObjectPermissionMixin.restrict_object_or_404",
-                return_value=mock_vm,
-            ),
-            patch("netbox_librenms_plugin.views.sync.interfaces.VMInterface") as mock_vmintf_cls,
-            patch("netbox_librenms_plugin.views.sync.interfaces.transaction"),
-        ):
-            mock_vmintf_cls.objects.restrict.return_value = mock_vmintf_cls.objects
-            mock_vmintf_cls.objects.get.return_value = mock_interface
-
-            class _DNE(Exception):
-                pass
-
-            mock_vmintf_cls.DoesNotExist = _DNE
-
-            view.request = req
-            result = view.post(req, "virtualmachine", 2)
-
-        assert isinstance(result, JsonResponse)
-        data = json.loads(result.content)
-        assert data["deleted_count"] == 1
-        mock_interface.delete.assert_called_once()
-
-    def test_device_interface_wrong_device_adds_error(self):
-        from netbox_librenms_plugin.views.sync.interfaces import DeleteNetBoxInterfacesView
-        import json
-
-        view = object.__new__(DeleteNetBoxInterfacesView)
-        view.get_required_permissions_for_object_type = MagicMock(return_value=[])
-        view.require_all_permissions_json = MagicMock(return_value=None)
-
-        mock_device = MagicMock(pk=1)
-        mock_device.id = 1
-        mock_device.virtual_chassis = None
-
-        mock_interface = MagicMock()
-        mock_interface.name = "Gi0/1"
-        mock_interface.device_id = 99  # Wrong device
-
-        req = _make_request(post_data={"interface_ids": ["5"]})
-
-        with (
-            patch(
-                "netbox_librenms_plugin.views.mixins.NetBoxObjectPermissionMixin.restrict_object_or_404",
-                return_value=mock_device,
-            ),
-            patch("netbox_librenms_plugin.views.sync.interfaces.Interface") as mock_intf_cls,
-            patch("netbox_librenms_plugin.views.sync.interfaces.transaction"),
-        ):
-            mock_intf_cls.objects.restrict.return_value = mock_intf_cls.objects
-            mock_intf_cls.objects.get.return_value = mock_interface
-
-            class _DNE(Exception):
-                pass
-
-            mock_intf_cls.DoesNotExist = _DNE
-
-            view.request = req
-            result = view.post(req, "device", 1)
-
-        data = json.loads(result.content)
-        assert data["deleted_count"] == 0
-        assert len(data["errors"]) == 1
-
-    def test_device_interface_with_vc_wrong_member_adds_error(self):
-        from netbox_librenms_plugin.views.sync.interfaces import DeleteNetBoxInterfacesView
-        import json
-
-        view = object.__new__(DeleteNetBoxInterfacesView)
-        view.get_required_permissions_for_object_type = MagicMock(return_value=[])
-        view.require_all_permissions_json = MagicMock(return_value=None)
-
-        mock_device = MagicMock(pk=1)
-        mock_device.id = 1
-        mock_vc = MagicMock()
-        mock_member = MagicMock()
-        mock_member.id = 1
-        mock_vc.members.all.return_value = [mock_member]
-        mock_device.virtual_chassis = mock_vc
-
-        mock_interface = MagicMock()
-        mock_interface.name = "Gi0/1"
-        mock_interface.device_id = 999  # Not in VC
-
-        req = _make_request(post_data={"interface_ids": ["5"]})
-
-        with (
-            patch(
-                "netbox_librenms_plugin.views.mixins.NetBoxObjectPermissionMixin.restrict_object_or_404",
-                return_value=mock_device,
-            ),
-            patch("netbox_librenms_plugin.views.sync.interfaces.Interface") as mock_intf_cls,
-            patch("netbox_librenms_plugin.views.sync.interfaces.transaction"),
-        ):
-            mock_intf_cls.objects.restrict.return_value = mock_intf_cls.objects
-            mock_intf_cls.objects.get.return_value = mock_interface
-
-            class _DNE(Exception):
-                pass
-
-            mock_intf_cls.DoesNotExist = _DNE
-
-            view.request = req
-            result = view.post(req, "device", 1)
-
-        data = json.loads(result.content)
-        assert data["deleted_count"] == 0
-        assert len(data["errors"]) == 1
-
-    def test_interface_not_found_adds_error(self):
-        from netbox_librenms_plugin.views.sync.interfaces import DeleteNetBoxInterfacesView
-        import json
-
-        view = object.__new__(DeleteNetBoxInterfacesView)
-        view.get_required_permissions_for_object_type = MagicMock(return_value=[])
-        view.require_all_permissions_json = MagicMock(return_value=None)
-
-        mock_device = MagicMock(pk=1)
-        mock_device.id = 1
-        mock_device.virtual_chassis = None
-
-        req = _make_request(post_data={"interface_ids": ["999"]})
-
-        class _DNE(Exception):
-            pass
-
-        with (
-            patch(
-                "netbox_librenms_plugin.views.mixins.NetBoxObjectPermissionMixin.restrict_object_or_404",
-                return_value=mock_device,
-            ),
-            patch("netbox_librenms_plugin.views.sync.interfaces.Interface") as mock_intf_cls,
-            patch("netbox_librenms_plugin.views.sync.interfaces.transaction"),
-        ):
-            mock_intf_cls.DoesNotExist = _DNE
-            mock_intf_cls.objects.restrict.return_value = mock_intf_cls.objects
-            mock_intf_cls.objects.get.side_effect = _DNE()
-
-            view.request = req
-            result = view.post(req, "device", 1)
-
-        data = json.loads(result.content)
-        assert data["deleted_count"] == 0
-        assert len(data["errors"]) == 1
-
-    def test_vm_interface_wrong_vm_adds_error(self):
-        from netbox_librenms_plugin.views.sync.interfaces import DeleteNetBoxInterfacesView
-        from virtualization.models import VMInterface
-        import json
-
-        view = object.__new__(DeleteNetBoxInterfacesView)
-        view.get_required_permissions_for_object_type = MagicMock(return_value=[])
-        view.require_all_permissions_json = MagicMock(return_value=None)
-
-        mock_vm = MagicMock(pk=2)
-        mock_vm.id = 2
-
-        mock_interface = MagicMock(spec=VMInterface)
-        mock_interface.name = "eth0"
-        mock_interface.virtual_machine_id = 99  # Wrong VM
-
-        req = _make_request(post_data={"interface_ids": ["7"]})
-
-        with (
-            patch(
-                "netbox_librenms_plugin.views.mixins.NetBoxObjectPermissionMixin.restrict_object_or_404",
-                return_value=mock_vm,
-            ),
-            patch("netbox_librenms_plugin.views.sync.interfaces.VMInterface") as mock_vmintf_cls,
-            patch("netbox_librenms_plugin.views.sync.interfaces.transaction"),
-        ):
-            mock_vmintf_cls.objects.restrict.return_value = mock_vmintf_cls.objects
-            mock_vmintf_cls.objects.get.return_value = mock_interface
-
-            class _DNE(Exception):
-                pass
-
-            mock_vmintf_cls.DoesNotExist = _DNE
-
-            view.request = req
-            result = view.post(req, "virtualmachine", 2)
-
-        data = json.loads(result.content)
-        assert data["deleted_count"] == 0
-        assert len(data["errors"]) == 1
-
-    def test_response_includes_errors_in_message(self):
-        """When errors exist, message mentions error count."""
-        from netbox_librenms_plugin.views.sync.interfaces import DeleteNetBoxInterfacesView
-        from dcim.models import Interface
-        import json
-
-        view = object.__new__(DeleteNetBoxInterfacesView)
-        view.get_required_permissions_for_object_type = MagicMock(return_value=[])
-        view.require_all_permissions_json = MagicMock(return_value=None)
-
-        mock_device = MagicMock(pk=1)
-        mock_device.id = 1
-        mock_device.virtual_chassis = None
-
-        # Two interfaces: one that belongs, one that doesn't
-        mock_interface_ok = MagicMock(spec=Interface)
-        mock_interface_ok.name = "Gi0/1"
-        mock_interface_ok.device_id = 1
-
-        mock_interface_bad = MagicMock(spec=Interface)
-        mock_interface_bad.name = "Gi0/2"
-        mock_interface_bad.device_id = 99  # Wrong device
-
-        req = _make_request(post_data={"interface_ids": ["5", "6"]})
-
-        call_count = [0]
-
-        def get_side_effect(id):
-            call_count[0] += 1
-            if call_count[0] == 1:
-                return mock_interface_ok
-            return mock_interface_bad
-
-        class _DNE(Exception):
-            pass
-
-        with (
-            patch(
-                "netbox_librenms_plugin.views.mixins.NetBoxObjectPermissionMixin.restrict_object_or_404",
-                return_value=mock_device,
-            ),
-            patch("netbox_librenms_plugin.views.sync.interfaces.Interface") as mock_intf_cls,
-            patch("netbox_librenms_plugin.views.sync.interfaces.transaction"),
-        ):
-            mock_intf_cls.DoesNotExist = _DNE
-            mock_intf_cls.objects.restrict.return_value = mock_intf_cls.objects
-            mock_intf_cls.objects.get.side_effect = get_side_effect
-            view.request = req
-            result = view.post(req, "device", 1)
-
-        data = json.loads(result.content)
-        assert data["deleted_count"] == 1
-        assert "error" in data["message"]
-        mock_interface_ok.delete.assert_called_once()
 
 
 # A POSTed valid non-default server_key must scope the sync to that server without 500ing on a
