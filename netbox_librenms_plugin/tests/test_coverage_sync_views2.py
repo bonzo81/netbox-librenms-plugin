@@ -765,14 +765,13 @@ class TestAddDeviceToLibreNMSViewUnknownVersion:
         assert message_texts(req, "error") == ["Unknown SNMP version."]
         view._librenms_api.add_device.assert_not_called()
 
-    def test_no_version_toggle_falls_back_to_the_v3_form(self):
-        """With no toggle at all, get_form_class picks the v3 form and the add still happens."""
+    def test_no_version_field_at_all_is_a_form_error(self):
+        """With no snmp_version posted, the v3 form's required field rejects the submission."""
         dev = make_device("addsnmp-noversion")
         req = _make_request(
             post_data={
                 "object_type": "device",
                 "v3-hostname": "router.example.com",
-                "v3-snmp_version": "v3",
                 "v3-authlevel": "noAuthNoPriv",
                 "v3-authname": "user",
             }
@@ -782,7 +781,8 @@ class TestAddDeviceToLibreNMSViewUnknownVersion:
         with _poller_groups([]):
             _post(view, req, object_id=dev.pk)
 
-        assert view._librenms_api.add_device.call_args[0][0]["snmp_version"] == "v3"
+        assert any(t.startswith("snmp_version:") for t in message_texts(req, "error"))
+        view._librenms_api.add_device.assert_not_called()
 
 
 class TestAddDeviceToLibreNMSViewGetFormClass:
@@ -1927,26 +1927,34 @@ class TestSyncVLANsViewWithGroup:
         assert any("no longer exists" in t for t in message_texts(req, "error"))
 
     def test_invalid_vid_string_skipped(self):
+        """A non-numeric selection is skipped, and the rest of the batch still syncs.
+
+        The batch carries a valid VID after the bad one so a `break` in place of the
+        `continue` would be caught — a single-item batch cannot tell them apart.
+        """
         from ipam.models import VLAN
 
         dev = make_device("vlan-badvid")
-        req = _make_request(post_data={"action": "create_vlans", "select": ["not-a-vid"]})
+        req = _make_request(post_data={"action": "create_vlans", "select": ["not-a-vid", "100"]})
         view = _vlan_view(req, dev, [{"vlan_vlan": 100, "vlan_name": "Mgmt"}])
 
         _post(view, req, object_type="device", object_id=dev.pk)
 
-        assert not VLAN.objects.filter(name="Mgmt").exists()
+        assert VLAN.objects.filter(vid=100, name="Mgmt").exists()
+        assert VLAN.objects.count() == 1
 
     def test_unknown_vid_in_cache_skipped(self):
+        """A VID absent from the cached snapshot is skipped, and the rest of the batch syncs."""
         from ipam.models import VLAN
 
         dev = make_device("vlan-unknownvid")
-        req = _make_request(post_data={"action": "create_vlans", "select": ["999"]})
+        req = _make_request(post_data={"action": "create_vlans", "select": ["999", "100"]})
         view = _vlan_view(req, dev, [{"vlan_vlan": 100, "vlan_name": "Mgmt"}])
 
         _post(view, req, object_type="device", object_id=dev.pk)
 
         assert not VLAN.objects.filter(vid=999).exists()
+        assert VLAN.objects.filter(vid=100, name="Mgmt").exists()
 
 
 class TestSyncVLANsViewGroupedUpdateSkip:

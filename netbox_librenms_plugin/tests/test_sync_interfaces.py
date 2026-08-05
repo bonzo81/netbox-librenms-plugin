@@ -254,8 +254,8 @@ class TestUpdateInterfaceAttributes:
 @pytest.mark.django_db
 class TestHandleMacAddress:
     """
-    handle_mac_address() must work for both Interface (has primary_mac_address)
-    and VMInterface (does not have primary_mac_address)."""
+    handle_mac_address() must work for both Interface and VMInterface. Both carry
+    primary_mac_address in the NetBox versions this plugin supports."""
 
     @pytest.fixture
     def view(self):
@@ -277,16 +277,21 @@ class TestHandleMacAddress:
         assert list(iface.mac_addresses.all()) == [mac]
 
     def test_reuses_existing_mac(self, view):
-        from dcim.models import MACAddress
+        """The already-attached MAC is reused AND promoted to primary, not re-created."""
+        from dcim.models import Interface, MACAddress
 
         iface = make_interface(make_device("mac-reuse"), "Gi0/1")
         existing = MACAddress.objects.create(mac_address="aa:bb:cc:dd:ee:ff")
         iface.mac_addresses.add(existing)
+        assert iface.primary_mac_address is None  # the branch has done nothing yet
 
         view.handle_mac_address(iface, "aa:bb:cc:dd:ee:ff")
+        iface.save()
 
         assert MACAddress.objects.filter(mac_address="aa:bb:cc:dd:ee:ff").count() == 1
         assert list(iface.mac_addresses.all()) == [existing]
+        # Without this the test would pass on an early return: the m2m link predates the call.
+        assert Interface.objects.get(pk=iface.pk).primary_mac_address == existing
 
     def test_sets_primary_mac_when_attribute_present(self, view):
         from dcim.models import Interface, MACAddress

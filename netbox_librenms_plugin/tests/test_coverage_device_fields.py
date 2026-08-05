@@ -145,12 +145,16 @@ def _cf_changed_before_lock(view, obj, librenms_id):
 
 @contextmanager
 def _deleted_when_platform_saved(device):
-    """Delete *device* for real the moment a Platform is saved.
+    """Issue a real DELETE for *device* the moment a Platform is saved.
 
     ``CreateAndAssignPlatformView`` resolves the device once before its transaction and again
-    under ``select_for_update`` inside it, with the platform insert in between. Hooking the
-    insert lands a real DELETE in that exact window, which is the only way another session's
-    delete can reach the lock branch.
+    under ``select_for_update`` inside it, with the platform insert in between; hooking the
+    insert puts the DELETE in that window so the locked re-read misses the row.
+
+    This is NOT a faithful concurrent delete: the statement runs on the test's own connection
+    inside the view's transaction, so the view's ``set_rollback(True)`` unwinds it along with
+    the platform insert. A real other-session delete would already be committed and would
+    survive. What the test pins is the view's branch, not the other session's durability.
     """
     from dcim.models import Device, Platform
     from django.db.models.signals import post_save
@@ -1207,7 +1211,7 @@ class TestCreateAndAssignPlatformView:
         assert Device.objects.get(pk=dev.pk).platform_id is None
 
     def test_device_does_not_exist_inside_transaction(self):
-        """A concurrent delete between the first lookup and the lock rolls the whole action back."""
+        """The device vanishing between the first lookup and the lock rolls the whole action back."""
         from dcim.models import Device, Platform
 
         dev = make_device("plat-vanishes")
@@ -1220,7 +1224,8 @@ class TestCreateAndAssignPlatformView:
         assert any("no longer exists" in t for t in message_texts(req, "error"))
         # set_rollback(True) unwinds the whole savepoint — the platform insert must not survive.
         assert not Platform.objects.filter(name="ios").exists()
-        assert Device.objects.filter(pk=dev.pk).exists()  # the delete rolled back with it
+        # The DELETE was issued inside that same savepoint, so it is unwound too (see the helper).
+        assert Device.objects.filter(pk=dev.pk).exists()
 
     def test_device_validation_error(self):
         """A platform scoped to another vendor fails the device's real clean(); nothing persists."""
@@ -1271,9 +1276,10 @@ class TestCreateAndAssignPlatformView:
 
         # Land the rival's row after the view's up-front existence check, so the view takes the
         # create path; the hook runs outside the view's savepoint, so the rollback of the failed
-        # insert cannot undo it. Skipping full_clean for that one insert puts the rival's commit
-        # in the only window this branch exists for — between validation and INSERT — and leaves
-        # the DB's unique constraint to raise the IntegrityError for real.
+        # insert cannot undo it. The rival is in place before the view validates, which real
+        # concurrency would not guarantee, so full_clean is skipped for that one insert to model
+        # a rival that committed after validation. The IntegrityError itself is then raised by
+        # the DB's unique constraint, and the re-query that follows is entirely real.
         with (
             _before_restricted_read(view, _rival_commits_first, on_call=1),
             patch.object(Platform, "full_clean", _skip_once(Platform.full_clean)),
@@ -1842,13 +1848,16 @@ class TestRemoveServerMappingViewPost:
     def test_unexpected_error_on_save(self):
         """A non-ValidationError is caught, reported and rolled back rather than 500ing."""
         from dcim.models import Device
+        from django.db import OperationalError
 
         dev = make_device("rm-unexpected", librenms_cf={"orphan": 5})
         req = _make_request({"object_type": "device", "server_key": "orphan"})
 
+        # Injected at the persistence boundary, which is where an unexpected failure of this
+        # kind actually originates; full_clean still runs for real ahead of it.
         with (
             _plugins_config(servers={}, librenms_url=""),
-            patch.object(Device, "full_clean", side_effect=RuntimeError("disk full")),
+            patch.object(Device, "save", side_effect=OperationalError("disk full")),
         ):
             _post(self._view(req), req, pk=dev.pk)
 
@@ -2300,11 +2309,14 @@ class TestConvertLegacyLibreNMSIdViewPost:
     def test_unexpected_error_on_save(self):
         """A non-ValidationError is caught, reported and rolled back rather than 500ing."""
         from dcim.models import Device
+        from django.db import OperationalError
 
         dev = make_device("convert-unexpected", serial="SN-MATCH", librenms_cf=42)
         view, req = self._device_view(dev)
 
-        with patch.object(Device, "full_clean", side_effect=RuntimeError("disk full")):
+        # Injected at the persistence boundary, which is where an unexpected failure of this
+        # kind actually originates; full_clean still runs for real ahead of it.
+        with patch.object(Device, "save", side_effect=OperationalError("disk full")):
             _post(view, req, pk=dev.pk)
 
         assert any("Failed to save converted librenms_id" in t for t in message_texts(req, "error"))

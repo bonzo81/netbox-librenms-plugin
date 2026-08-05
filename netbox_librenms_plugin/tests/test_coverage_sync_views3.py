@@ -571,7 +571,8 @@ class TestDeleteNetBoxInterfacesPost:
         assert response.status_code == 403
         assert Interface.objects.filter(pk=iface.pk).exists()
 
-    def test_invalid_object_type_400(self):
+    def test_invalid_object_type_raises_http404(self):
+        """get_required_permissions_for_object_type rejects the type before any lookup."""
         from django.http import Http404
 
         req = make_request("post", {"interface_ids": ["1"]})

@@ -908,17 +908,21 @@ class TestSyncInterfacesViewHandleMacAddress:
         assert list(iface.mac_addresses.all()) == [mac]
 
     def test_existing_mac_added_without_create(self):
-        """A MAC already on this interface is reused, not duplicated."""
-        from dcim.models import MACAddress
+        """A MAC already on this interface is reused, not duplicated, and becomes primary."""
+        from dcim.models import Interface, MACAddress
 
         iface = make_interface(make_device("mac-existing"), "Gi0/1")
         existing = MACAddress.objects.create(mac_address="aa:bb:cc:dd:ee:ff")
         iface.mac_addresses.add(existing)
+        assert iface.primary_mac_address is None  # the branch has done nothing yet
 
         _sync_view().handle_mac_address(iface, "aa:bb:cc:dd:ee:ff")
+        iface.save()
 
         assert MACAddress.objects.filter(mac_address="aa:bb:cc:dd:ee:ff").count() == 1
         assert list(iface.mac_addresses.all()) == [existing]
+        # Without this the test would pass on an early return: the m2m link predates the call.
+        assert Interface.objects.get(pk=iface.pk).primary_mac_address == existing
 
     def test_primary_mac_assigned_if_attribute_exists(self):
         from dcim.models import Interface, MACAddress
