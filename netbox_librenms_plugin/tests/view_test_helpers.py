@@ -80,13 +80,17 @@ def make_user_with_perms(username, perm_specs, *, constraints=None, plugin_write
     Returns:
         The user, re-read so its permission cache is current.
     """
+    from django.apps import apps
     from django.contrib.auth import get_user_model
-    from netbox_librenms_plugin.models import LibreNMSSettings
 
     user = get_user_model().objects.create_user(username=username, password="x")
     if plugin_write:
+        # Resolve through the app registry, not the module attribute: a suite-wide autouse
+        # fixture patches ``netbox_librenms_plugin.models.LibreNMSSettings`` (spread by
+        # pytest_plugins), and importing it here would hand a MagicMock to get_for_model.
+        settings_model = apps.get_model("netbox_librenms_plugin", "LibreNMSSettings")
         for action in ("view", "change"):
-            user = grant(user, action, LibreNMSSettings, name=f"{username}-plugin-{action}")
+            user = grant(user, action, settings_model, name=f"{username}-plugin-{action}")
     for action, model in perm_specs:
         user = grant(user, action, model, constraints=constraints)
     return user

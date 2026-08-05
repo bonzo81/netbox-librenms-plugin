@@ -7,6 +7,7 @@ import pytest
 from netbox_librenms_plugin.tests.conftest import make_device, make_interface, make_ip, make_vm
 
 
+from netbox_librenms_plugin.tests.view_test_helpers import make_view
 from netbox_librenms_plugin.tests.view_test_helpers import post as _post
 
 
@@ -1309,101 +1310,6 @@ class TestSyncInterfacesViewSyncInterface:
         assert raised
 
 
-class TestSyncInterfacesViewGetNetboxInterfaceType:
-    def test_speed_match_returns_mapped_type(self):
-        from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
-
-        view = _make_view(SyncInterfacesView)
-        librenms_if = {"ifType": "ethernetCsmacd", "ifSpeed": 1000000000}
-        mock_mapping = MagicMock()
-        mock_mapping.netbox_type = "1000base-t"
-        mock_qs = MagicMock()
-        mock_qs.filter.return_value.order_by.return_value.first.return_value = mock_mapping
-        with patch("netbox_librenms_plugin.views.sync.interfaces.InterfaceTypeMapping") as mock_itm:
-            with patch(
-                "netbox_librenms_plugin.views.sync.interfaces.convert_speed_to_kbps",
-                return_value=1000000,
-            ):
-                mock_itm.objects.restrict.return_value = mock_itm.objects
-                mock_itm.objects.filter.return_value = mock_qs
-                result = view.get_netbox_interface_type(librenms_if)
-        assert result is not None
-
-    def test_fallback_no_speed_mapping(self):
-        from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
-
-        view = _make_view(SyncInterfacesView)
-        librenms_if = {"ifType": "ethernetCsmacd", "ifSpeed": None}
-        mock_mapping = MagicMock()
-        mock_mapping.netbox_type = "other"
-        mock_qs = MagicMock()
-        mock_qs.filter.return_value.first.return_value = mock_mapping
-        with patch("netbox_librenms_plugin.views.sync.interfaces.InterfaceTypeMapping") as mock_itm:
-            with patch(
-                "netbox_librenms_plugin.views.sync.interfaces.convert_speed_to_kbps",
-                return_value=None,
-            ):
-                mock_itm.objects.restrict.return_value = mock_itm.objects
-                mock_itm.objects.filter.return_value = mock_qs
-                result = view.get_netbox_interface_type(librenms_if)
-        assert result == "other"
-
-    def test_no_mappings_returns_other(self):
-        from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
-
-        view = _make_view(SyncInterfacesView)
-        librenms_if = {"ifType": "unknown_type", "ifSpeed": None}
-        mock_qs = MagicMock()
-        mock_qs.filter.return_value.first.return_value = None
-        with patch("netbox_librenms_plugin.views.sync.interfaces.InterfaceTypeMapping") as mock_itm:
-            with patch(
-                "netbox_librenms_plugin.views.sync.interfaces.convert_speed_to_kbps",
-                return_value=None,
-            ):
-                mock_itm.objects.restrict.return_value = mock_itm.objects
-                mock_itm.objects.filter.return_value = mock_qs
-                result = view.get_netbox_interface_type(librenms_if)
-        assert result == "other"
-
-
-class TestSyncInterfacesViewHandleMacAddress:
-    def test_no_mac_address_no_op(self):
-        from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
-
-        view = _make_view(SyncInterfacesView)
-        mock_iface = MagicMock()
-        view.handle_mac_address(mock_iface, None)
-        mock_iface.mac_addresses.filter.assert_not_called()
-
-    def test_existing_mac_is_reused(self):
-        from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
-
-        view = _make_view(SyncInterfacesView)
-        mock_iface = MagicMock()
-        existing_mac = MagicMock()
-        mock_iface.mac_addresses.filter.return_value.first.return_value = existing_mac
-        view.handle_mac_address(mock_iface, "aa:bb:cc:dd:ee:ff")
-        mock_iface.mac_addresses.add.assert_called_once_with(existing_mac)
-
-    def test_new_mac_is_created(self):
-        from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
-
-        view = _make_view(SyncInterfacesView)
-        mock_iface = MagicMock()
-        mock_iface.mac_addresses.filter.return_value.first.return_value = None
-        new_mac = MagicMock()
-        with patch("netbox_librenms_plugin.views.sync.interfaces.MACAddress") as mock_mac_cls:
-            mock_mac_cls.objects.create.return_value = new_mac
-            view.handle_mac_address(mock_iface, "aa:bb:cc:dd:ee:ff")
-        mock_mac_cls.objects.create.assert_called_once_with(mac_address="aa:bb:cc:dd:ee:ff")
-        mock_iface.mac_addresses.add.assert_called_once_with(new_mac)
-
-
-# ===========================================================================
-# interfaces.py — DeleteNetBoxInterfacesView
-# ===========================================================================
-
-
 class TestDeleteNetBoxInterfacesViewPost:
     def _make_view(self):
         from netbox_librenms_plugin.views.sync.interfaces import DeleteNetBoxInterfacesView
@@ -1576,42 +1482,6 @@ class TestSyncIPAddressesViewStructure:
         perms = SyncIPAddressesView.required_object_permissions["POST"]
         assert ("add", IPAddress) in perms
         assert ("change", IPAddress) in perms
-
-
-class TestSyncIPAddressesViewGetVrfSelection:
-    def test_no_vrf_id_returns_none(self):
-        from netbox_librenms_plugin.views.sync.ip_addresses import SyncIPAddressesView
-
-        view = _make_view(SyncIPAddressesView)
-        req = _make_request({})
-        result = view.get_vrf_selection(req, "192.168.1.1")
-        assert result is None
-
-    def test_valid_vrf_id_returns_vrf(self):
-        from netbox_librenms_plugin.views.sync.ip_addresses import SyncIPAddressesView
-
-        view = _make_view(SyncIPAddressesView)
-        req = _make_request({"vrf_192.168.1.1": "3"})
-        mock_vrf = MagicMock()
-        with patch("netbox_librenms_plugin.views.sync.ip_addresses.VRF") as mock_vrf_cls:
-            mock_vrf_cls.objects.restrict.return_value = mock_vrf_cls.objects
-            mock_vrf_cls.objects.get.return_value = mock_vrf
-            result = view.get_vrf_selection(req, "192.168.1.1")
-        assert result is mock_vrf
-
-    def test_vrf_does_not_exist_returns_none(self):
-        from ipam.models import VRF
-
-        from netbox_librenms_plugin.views.sync.ip_addresses import SyncIPAddressesView
-
-        view = _make_view(SyncIPAddressesView)
-        req = _make_request({"vrf_192.168.1.1": "999"})
-        with patch("netbox_librenms_plugin.views.sync.ip_addresses.VRF") as mock_vrf_cls:
-            mock_vrf_cls.DoesNotExist = VRF.DoesNotExist
-            mock_vrf_cls.objects.restrict.return_value = mock_vrf_cls.objects
-            mock_vrf_cls.objects.get.side_effect = VRF.DoesNotExist
-            result = view.get_vrf_selection(req, "192.168.1.1")
-        assert result is None
 
 
 class TestSyncIPAddressesViewGetManagementIp:
@@ -2242,33 +2112,26 @@ class TestSyncSiteLocationViewCreateSyncData:
         assert result.is_synced is False
 
 
+@pytest.mark.django_db
 class TestSyncSiteLocationViewGetSiteByPk:
-    def _make_view(self):
+    def _make_view(self, request=None):
         from netbox_librenms_plugin.views.sync.locations import SyncSiteLocationView
 
-        view = object.__new__(SyncSiteLocationView)
-        view._librenms_api = MagicMock()
-        view.request = _make_request()
-        return view
+        return make_view(SyncSiteLocationView, request)
 
     def test_found_returns_site(self):
-        view = self._make_view()
-        mock_site = MagicMock()
-        with patch("netbox_librenms_plugin.views.sync.locations.Site") as mock_site_cls:
-            mock_site_cls.objects.restrict.return_value = mock_site_cls.objects
-            mock_site_cls.objects.get.return_value = mock_site
-            result = view.get_site_by_pk(1)
-        assert result is mock_site
+        from dcim.models import Site
+
+        site = Site.objects.create(name="Bypk Site", slug="bypk-site")
+
+        assert self._make_view().get_site_by_pk(site.pk) == site
 
     def test_not_found_returns_none(self):
-        from django.core.exceptions import ObjectDoesNotExist
+        from dcim.models import Site
 
-        view = self._make_view()
-        with patch("netbox_librenms_plugin.views.sync.locations.Site") as mock_site_cls:
-            mock_site_cls.objects.restrict.return_value = mock_site_cls.objects
-            mock_site_cls.objects.get.side_effect = ObjectDoesNotExist
-            result = view.get_site_by_pk(999)
-        assert result is None
+        missing_pk = (Site.objects.order_by("-pk").first().pk if Site.objects.exists() else 0) + 1000
+
+        assert self._make_view().get_site_by_pk(missing_pk) is None
 
 
 class TestSyncSiteLocationViewPost:

@@ -4,6 +4,9 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from netbox_librenms_plugin.tests.conftest import make_device, make_interface, make_vm
+from netbox_librenms_plugin.tests.view_test_helpers import make_view
+
 
 class TestUpdateInterfaceAttributes:
     """update_interface_attributes() must set fields respecting exclude_columns."""
@@ -248,75 +251,81 @@ class TestUpdateInterfaceAttributes:
         mock_mac.assert_not_called()
 
 
+@pytest.mark.django_db
 class TestHandleMacAddress:
     """
     handle_mac_address() must work for both Interface (has primary_mac_address)
     and VMInterface (does not have primary_mac_address)."""
 
     @pytest.fixture
-    def view(self, mock_librenms_api):
-        """Return a SyncInterfacesView wired to the shared mock API fixture."""
+    def view(self):
+        """The real SyncInterfacesView; only the LibreNMS client is stubbed."""
         from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
 
-        v = object.__new__(SyncInterfacesView)
-        v._librenms_api = mock_librenms_api
-        v.request = MagicMock()
+        v = make_view(SyncInterfacesView)
         v._lookup_maps = {}
         return v
 
     def test_creates_new_mac_and_adds_to_interface(self, view):
-        iface = MagicMock()
-        iface.mac_addresses = MagicMock()
-        iface.mac_addresses.filter.return_value.first.return_value = None
-        new_mac = MagicMock()
+        from dcim.models import MACAddress
 
-        with patch("netbox_librenms_plugin.views.sync.interfaces.MACAddress") as mock_cls:
-            mock_cls.objects.create.return_value = new_mac
-            view.handle_mac_address(iface, "aa:bb:cc:dd:ee:ff")
+        iface = make_interface(make_device("mac-create"), "Gi0/1")
 
-        mock_cls.objects.create.assert_called_once_with(mac_address="aa:bb:cc:dd:ee:ff")
-        iface.mac_addresses.add.assert_called_once_with(new_mac)
+        view.handle_mac_address(iface, "aa:bb:cc:dd:ee:ff")
+
+        mac = MACAddress.objects.get(mac_address="aa:bb:cc:dd:ee:ff")
+        assert list(iface.mac_addresses.all()) == [mac]
 
     def test_reuses_existing_mac(self, view):
-        existing_mac = MagicMock()
-        iface = MagicMock()
-        iface.mac_addresses = MagicMock()
-        iface.mac_addresses.filter.return_value.first.return_value = existing_mac
+        from dcim.models import MACAddress
 
-        with patch("netbox_librenms_plugin.views.sync.interfaces.MACAddress") as mock_cls:
-            view.handle_mac_address(iface, "aa:bb:cc:dd:ee:ff")
+        iface = make_interface(make_device("mac-reuse"), "Gi0/1")
+        existing = MACAddress.objects.create(mac_address="aa:bb:cc:dd:ee:ff")
+        iface.mac_addresses.add(existing)
 
-        mock_cls.objects.create.assert_not_called()
-        iface.mac_addresses.add.assert_called_once_with(existing_mac)
+        view.handle_mac_address(iface, "aa:bb:cc:dd:ee:ff")
+
+        assert MACAddress.objects.filter(mac_address="aa:bb:cc:dd:ee:ff").count() == 1
+        assert list(iface.mac_addresses.all()) == [existing]
 
     def test_sets_primary_mac_when_attribute_present(self, view):
-        mac_obj = MagicMock()
-        iface = MagicMock(spec=["mac_addresses", "primary_mac_address"])
-        iface.mac_addresses = MagicMock()
-        iface.mac_addresses.filter.return_value.first.return_value = None
+        from dcim.models import Interface, MACAddress
 
-        with patch("netbox_librenms_plugin.views.sync.interfaces.MACAddress") as mock_cls:
-            mock_cls.objects.create.return_value = mac_obj
-            view.handle_mac_address(iface, "aa:bb:cc:dd:ee:ff")
+        iface = make_interface(make_device("mac-primary"), "Gi0/1")
 
-        assert iface.primary_mac_address is mac_obj
+        view.handle_mac_address(iface, "aa:bb:cc:dd:ee:ff")
+        iface.save()
 
-    def test_no_error_when_primary_mac_attribute_absent(self, view):
-        """VMInterface does not have primary_mac_address — handle_mac_address must not raise."""
-        mac_obj = MagicMock()
-        iface = MagicMock(spec=["mac_addresses"])  # no primary_mac_address attr
-        iface.mac_addresses = MagicMock()
-        iface.mac_addresses.filter.return_value.first.return_value = None
+        mac = MACAddress.objects.get(mac_address="aa:bb:cc:dd:ee:ff")
+        assert Interface.objects.get(pk=iface.pk).primary_mac_address == mac
 
-        with patch("netbox_librenms_plugin.views.sync.interfaces.MACAddress") as mock_cls:
-            mock_cls.objects.create.return_value = mac_obj
-            # Must not raise AttributeError
-            view.handle_mac_address(iface, "aa:bb:cc:dd:ee:ff")
+    def test_vm_interface_also_gets_its_primary_mac_set(self, view):
+        """VMInterface carries primary_mac_address in this NetBox version, same as Interface.
+
+        The old mock built the VM interface with ``spec=["mac_addresses"]``, fabricating an
+        absence NetBox no longer has, so it pinned a fact that had stopped being true. The
+        ``hasattr`` guard in handle_mac_address is now dead for both interface models.
+        """
+        from dcim.models import MACAddress
+        from virtualization.models import VMInterface
+
+        vm = make_vm("mac-vm")
+        vmiface = VMInterface.objects.create(virtual_machine=vm, name="eth0")
+
+        view.handle_mac_address(vmiface, "aa:bb:cc:dd:ee:ff")
+        vmiface.save()
+
+        mac = MACAddress.objects.get(mac_address="aa:bb:cc:dd:ee:ff")
+        assert list(vmiface.mac_addresses.all()) == [mac]
+        assert VMInterface.objects.get(pk=vmiface.pk).primary_mac_address == mac
 
     def test_noop_when_mac_address_is_falsy(self, view):
-        iface = MagicMock()
-        with patch("netbox_librenms_plugin.views.sync.interfaces.MACAddress") as mock_cls:
-            view.handle_mac_address(iface, "")
-            view.handle_mac_address(iface, None)
+        from dcim.models import MACAddress
 
-        mock_cls.objects.create.assert_not_called()
+        iface = make_interface(make_device("mac-falsy"), "Gi0/1")
+
+        view.handle_mac_address(iface, "")
+        view.handle_mac_address(iface, None)
+
+        assert not MACAddress.objects.exists()
+        assert not iface.mac_addresses.exists()
