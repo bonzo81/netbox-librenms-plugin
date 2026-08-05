@@ -2571,6 +2571,7 @@ class TestRenderType:
 # ===========================================================================
 
 
+@pytest.mark.django_db
 class TestGetInterfaceMapping:
     """Tests for LibreNMSInterfaceTable.get_interface_mapping()."""
 
@@ -2579,63 +2580,56 @@ class TestGetInterfaceMapping:
 
         return object.__new__(LibreNMSInterfaceTable)
 
-    def _mapping(self, librenms_type, librenms_speed):
-        m = MagicMock()
-        m.librenms_type = librenms_type
-        m.librenms_speed = librenms_speed
-        return m
+    def _mapping(self, librenms_type, librenms_speed, netbox_type="1000base-t"):
+        from netbox_librenms_plugin.models import InterfaceTypeMapping
+
+        return InterfaceTypeMapping.objects.create(
+            librenms_type=librenms_type, librenms_speed=librenms_speed, netbox_type=netbox_type
+        )
 
     def test_exact_match_returned(self):
         from netbox_librenms_plugin.tables.interfaces import LibreNMSInterfaceTable
 
         table = object.__new__(LibreNMSInterfaceTable)
         mapping = self._mapping("ethernetCsmacd", 1000000)
+        self._mapping("ethernetCsmacd", None, netbox_type="virtual")  # type-only fallback
 
-        # The mappings are snapshotted once via .all() and resolved in memory.
-        with patch("netbox_librenms_plugin.tables.interfaces.InterfaceTypeMapping") as mock_model:
-            mock_model.objects.all.return_value = [mapping]
-            result = table.get_interface_mapping("ethernetCsmacd", 1000000)
-
-        assert result is mapping
+        assert table.get_interface_mapping("ethernetCsmacd", 1000000) == mapping
 
     def test_fallback_type_only_match(self):
         from netbox_librenms_plugin.tables.interfaces import LibreNMSInterfaceTable
 
         table = object.__new__(LibreNMSInterfaceTable)
         # Only a type-only (speed is None) mapping exists; the exact (type, speed) lookup misses.
-        fallback_mapping = self._mapping("ethernetCsmacd", None)
+        fallback = self._mapping("ethernetCsmacd", None, netbox_type="virtual")
 
-        with patch("netbox_librenms_plugin.tables.interfaces.InterfaceTypeMapping") as mock_model:
-            mock_model.objects.all.return_value = [fallback_mapping]
-            result = table.get_interface_mapping("ethernetCsmacd", 1000000)
-
-        assert result is fallback_mapping
+        assert table.get_interface_mapping("ethernetCsmacd", 1000000) == fallback
 
     def test_no_match_returns_none(self):
         from netbox_librenms_plugin.tables.interfaces import LibreNMSInterfaceTable
 
         table = object.__new__(LibreNMSInterfaceTable)
+        self._mapping("ethernetCsmacd", 1000000)  # a mapping exists, but not for this type
 
-        with patch("netbox_librenms_plugin.tables.interfaces.InterfaceTypeMapping") as mock_model:
-            mock_model.objects.all.return_value = []
-            result = table.get_interface_mapping("unknown_type", 0)
-
-        assert result is None
+        assert table.get_interface_mapping("unknown_type", 0) is None
 
     def test_mappings_snapshotted_once_for_repeated_lookups(self):
-        """The mapping table is read once (InterfaceTypeMapping.objects.all()), not per lookup, so a multi-row render doesn't re-query the static table."""
+        """The mapping table is read once, not per lookup, so a multi-row render doesn't re-query the static table."""
+        from django.test.utils import CaptureQueriesContext
+        from django.db import connection
+
         from netbox_librenms_plugin.tables.interfaces import LibreNMSInterfaceTable
 
         table = object.__new__(LibreNMSInterfaceTable)
-        m1 = self._mapping("ethernetCsmacd", 1000000)
-        m2 = self._mapping("ethernetCsmacd", None)
+        self._mapping("ethernetCsmacd", 1000000)
+        self._mapping("ethernetCsmacd", None, netbox_type="virtual")
 
-        with patch("netbox_librenms_plugin.tables.interfaces.InterfaceTypeMapping") as mock_model:
-            mock_model.objects.all.return_value = [m1, m2]
+        with CaptureQueriesContext(connection) as queries:
             for _ in range(5):
                 table.get_interface_mapping("ethernetCsmacd", 1000000)
 
-        assert mock_model.objects.all.call_count == 1
+        mapping_queries = [q for q in queries.captured_queries if "interfacetypemapping" in q["sql"].lower()]
+        assert len(mapping_queries) == 1
 
 
 # ===========================================================================

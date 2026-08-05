@@ -1,5 +1,7 @@
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 
 class TestLibreNMSPermissionMixin:
     """Tests for permission mixin functionality."""
@@ -1046,137 +1048,80 @@ class TestObjectTypeValidation:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.django_db
 class TestRemoveServerMappingViewErrorHandling:
     """Test RemoveServerMappingView handles full_clean/save failures gracefully."""
 
-    def _make_view(self, server_key, post_extra=None):
+    def _make_view(self, device, server_key, post_extra=None):
         """Return a (view, request) pair with permissions satisfied."""
-        from unittest.mock import MagicMock
-
+        from netbox_librenms_plugin.tests.view_test_helpers import make_request, make_view
         from netbox_librenms_plugin.views.sync.device_fields import RemoveServerMappingView
 
-        request = MagicMock()
-        request.POST = {"server_key": server_key, "object_type": "device", **(post_extra or {})}
-        request.user = MagicMock()
-        request.user.has_perm.return_value = True
+        request = make_request("post", {"server_key": server_key, "object_type": "device", **(post_extra or {})})
+        return make_view(RemoveServerMappingView, request), request
 
-        view = RemoveServerMappingView()
-        view.request = request  # required by mixin's has_write_permission
-        return view, request
+    @staticmethod
+    def _plugins_config(servers):
+        from django.test import override_settings
+
+        return override_settings(PLUGINS_CONFIG={"netbox_librenms_plugin": {"servers": servers}})
 
     def test_validation_error_returns_error_message(self):
         """ValidationError from full_clean leads to error message, not 500."""
-        from unittest.mock import MagicMock, patch
-
+        from dcim.models import Device
         from django.core.exceptions import ValidationError
 
-        view, request = self._make_view(server_key="orphan-server")
+        from netbox_librenms_plugin.tests.conftest import make_device
+        from netbox_librenms_plugin.tests.view_test_helpers import message_texts, post as _post
 
-        mock_device = MagicMock()
-        mock_device.custom_field_data = {"librenms_id": {"orphan-server": 99}}
+        dev = make_device("perm-rm-validation", librenms_cf={"orphan-server": 99})
+        view, request = self._make_view(dev, "orphan-server")
 
-        mock_locked = MagicMock()
-        mock_locked.custom_field_data = {"librenms_id": {"orphan-server": 99}}
-        mock_locked.full_clean.side_effect = ValidationError("CF validation failed")
-
-        plugins_cfg = {"netbox_librenms_plugin": {"servers": {}}}  # orphan-server NOT configured
-
+        # The custom field accepts any dict, so the rejection has to be injected; the manager,
+        # the lock and the transaction all stay real.
         with (
-            patch(
-                "netbox_librenms_plugin.views.mixins.NetBoxObjectPermissionMixin.restrict_object_or_404",
-                return_value=mock_device,
-            ),
-            patch("netbox_librenms_plugin.views.sync.device_fields.Device") as mock_Device_cls,
-            patch("django.conf.settings") as mock_settings,
-            patch("netbox_librenms_plugin.views.sync.device_fields.messages") as mock_messages,
-            patch("netbox_librenms_plugin.views.sync.device_fields.redirect"),
-            patch("netbox_librenms_plugin.views.sync.device_fields.transaction") as mock_tx,
+            self._plugins_config({}),  # orphan-server NOT configured
+            patch.object(Device, "full_clean", side_effect=ValidationError("CF validation failed")),
         ):
-            mock_settings.PLUGINS_CONFIG = plugins_cfg
-            mock_Device_cls.objects.restrict.return_value = mock_Device_cls.objects
-            mock_Device_cls.objects.select_for_update.return_value.get.return_value = mock_locked
+            _post(view, request, pk=dev.pk)
 
-            # Make transaction.atomic() a no-op context manager
-            mock_tx.atomic.return_value.__enter__ = lambda s: None
-            mock_tx.atomic.return_value.__exit__ = lambda s, *a: None
-            mock_tx.set_rollback = MagicMock()
-
-            view.request = request
-            view.post(request, pk=1)
-
-        mock_messages.error.assert_called_once()
-        error_args = mock_messages.error.call_args[0]
-        assert "Validation error" in str(error_args[1]) or "CF validation failed" in str(error_args[1])
+        errors = message_texts(request, "error")
+        assert len(errors) == 1
+        assert "Validation error" in errors[0] or "CF validation failed" in errors[0]
+        # Rolled back: the mapping the user tried to remove is still there.
+        assert Device.objects.get(pk=dev.pk).custom_field_data["librenms_id"] == {"orphan-server": 99}
 
     def test_configured_server_refused(self):
         """Configured server mapping cannot be removed — error message shown."""
-        from unittest.mock import MagicMock, patch
+        from dcim.models import Device
 
-        view, request = self._make_view(server_key="active-server")
-        mock_device = MagicMock()
-        mock_device.custom_field_data = {"librenms_id": {"active-server": 5}}
+        from netbox_librenms_plugin.tests.conftest import make_device
+        from netbox_librenms_plugin.tests.view_test_helpers import message_texts, post as _post
 
-        plugins_cfg = {"netbox_librenms_plugin": {"servers": {"active-server": {"librenms_url": "http://x"}}}}
+        dev = make_device("perm-rm-configured", librenms_cf={"active-server": 5})
+        view, request = self._make_view(dev, "active-server")
 
-        with (
-            patch(
-                "netbox_librenms_plugin.views.mixins.NetBoxObjectPermissionMixin.restrict_object_or_404",
-                return_value=mock_device,
-            ),
-            patch("django.conf.settings") as mock_settings,
-            patch("netbox_librenms_plugin.views.sync.device_fields.messages") as mock_messages,
-            patch("netbox_librenms_plugin.views.sync.device_fields.redirect"),
-        ):
-            mock_settings.PLUGINS_CONFIG = plugins_cfg
-            view.request = request
-            view.post(request, pk=1)
+        with self._plugins_config({"active-server": {"librenms_url": "http://x"}}):
+            _post(view, request, pk=dev.pk)
 
-        mock_messages.error.assert_called_once()
-        assert "Cannot remove" in mock_messages.error.call_args[0][1]
+        errors = message_texts(request, "error")
+        assert len(errors) == 1
+        assert "Cannot remove" in errors[0]
+        assert Device.objects.get(pk=dev.pk).custom_field_data["librenms_id"] == {"active-server": 5}
 
     def test_successful_removal_mutates_and_saves(self):
         """Successful removal deletes the key from custom_field_data and saves the device."""
-        from unittest.mock import MagicMock, patch
+        from dcim.models import Device
 
-        view, request = self._make_view(server_key="orphan-server")
+        from netbox_librenms_plugin.tests.conftest import make_device
+        from netbox_librenms_plugin.tests.view_test_helpers import message_texts, post as _post
 
-        mock_device = MagicMock()
-        mock_device.custom_field_data = {"librenms_id": {"orphan-server": 42, "other-server": 7}}
+        dev = make_device("perm-rm-ok", librenms_cf={"orphan-server": 42, "other-server": 7})
+        view, request = self._make_view(dev, "orphan-server")
 
-        mock_locked = MagicMock()
-        mock_locked.custom_field_data = {"librenms_id": {"orphan-server": 42, "other-server": 7}}
-        mock_locked.full_clean = MagicMock()
-        mock_locked.save = MagicMock()
+        with self._plugins_config({}):  # orphan-server NOT configured
+            _post(view, request, pk=dev.pk)
 
-        plugins_cfg = {"netbox_librenms_plugin": {"servers": {}}}  # orphan-server NOT configured
-
-        with (
-            patch(
-                "netbox_librenms_plugin.views.mixins.NetBoxObjectPermissionMixin.restrict_object_or_404",
-                return_value=mock_device,
-            ),
-            patch("netbox_librenms_plugin.views.sync.device_fields.Device") as mock_Device_cls,
-            patch("django.conf.settings") as mock_settings,
-            patch("netbox_librenms_plugin.views.sync.device_fields.messages") as mock_messages,
-            patch("netbox_librenms_plugin.views.sync.device_fields.redirect"),
-            patch("netbox_librenms_plugin.views.sync.device_fields.transaction") as mock_tx,
-        ):
-            mock_settings.PLUGINS_CONFIG = plugins_cfg
-            mock_Device_cls.objects.restrict.return_value = mock_Device_cls.objects
-            mock_Device_cls.objects.select_for_update.return_value.get.return_value = mock_locked
-
-            mock_tx.atomic.return_value.__enter__ = lambda s: None
-            mock_tx.atomic.return_value.__exit__ = lambda s, *a: None
-            mock_tx.set_rollback = MagicMock()
-
-            view.request = request
-            view.post(request, pk=1)
-
-        # The "orphan-server" key should have been removed and the device saved.
-        # Assert the exact shape of custom_field_data so misspelled keys are caught.
-        assert mock_locked.custom_field_data == {"librenms_id": {"other-server": 7}}
-        remaining = mock_locked.custom_field_data["librenms_id"]
-        assert "orphan-server" not in remaining
-        assert remaining.get("other-server") == 7  # sibling key preserved
-        mock_locked.save.assert_called_once()
-        mock_messages.success.assert_called_once()
+        # Assert the exact shape of the persisted value so a misspelled key is caught.
+        assert Device.objects.get(pk=dev.pk).custom_field_data["librenms_id"] == {"other-server": 7}
+        assert len(message_texts(request, "success")) == 1
