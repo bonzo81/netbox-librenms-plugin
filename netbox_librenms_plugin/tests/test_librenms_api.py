@@ -2320,18 +2320,6 @@ def ios_lag_patterns():
     return {"ios": r"^Po\d+$"}
 
 
-@pytest.fixture
-def arcos_lag_patterns():
-    """LAG patterns dict for ArcOS bonds."""
-    return {"arcos": r"^bond\d+$"}
-
-
-@pytest.fixture
-def combined_lag_patterns():
-    """LAG patterns for both Cisco IOS and ArcOS."""
-    return {"ios": r"^Po\d+$", "arcos": r"^bond\d+$"}
-
-
 class TestResolvePortRelationships:
     """Tests for LibreNMSAPI.resolve_port_relationships()."""
 

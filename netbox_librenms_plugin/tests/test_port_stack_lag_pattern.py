@@ -82,6 +82,19 @@ class TestPortStackLagPattern:
                 model.objects.bulk_create([model(librenms_os=" ZZWSC ", lag_name_pattern=r"^Y\d+$")])
         assert model.objects.filter(librenms_os="zzwsc").count() == 1
 
+    def test_db_enforces_tab_variant_unique_when_full_clean_bypassed(self):
+        """The database constraint must match ``str.strip()`` for non-space whitespace."""
+        from django.db import IntegrityError, transaction
+
+        model = self._model()
+        model.objects.create(librenms_os="zztab", lag_name_pattern=r"^Po\d+$")
+
+        with pytest.raises(IntegrityError):
+            with transaction.atomic():
+                model.objects.bulk_create([model(librenms_os="\tZZTAB\t", lag_name_pattern=r"^Y\d+$")])
+
+        assert model.objects.filter(librenms_os="zztab").count() == 1
+
 
 @pytest.mark.django_db
 class TestHasLagSignalsFieldSelection:

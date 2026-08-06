@@ -1,5 +1,11 @@
 from django.db import migrations, models
-from django.db.models.functions import Lower, Trim
+from django.db.models.functions import Lower
+
+
+_PYTHON_STRIP_WHITESPACE = (
+    "\t\n\v\f\r\x1c\x1d\x1e\x1f \x85\xa0"
+    "\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a\u2028\u2029\u202f\u205f\u3000"
+)
 
 
 def normalize_librenms_os_case(apps, schema_editor):
@@ -79,14 +85,13 @@ class Migration(migrations.Migration):
         # case-variant duplicates exist, instead of letting AddConstraint fail with an opaque
         # IntegrityError at deploy time. noop reverse (lowercasing isn't reversible).
         migrations.RunPython(normalize_librenms_os_case, migrations.RunPython.noop),
-        # Replace it with a functional unique on Lower(Trim(librenms_os)) so the DB enforces the
-        # SAME canonical form clean() writes on every save (.strip().lower()); this closes the
-        # gap for any path that bypasses full_clean (bulk_create / raw SQL / loaddata) — with
-        # Lower() alone, a bypassing " ios " could still coexist with "ios".
+        # Use BTRIM with Python's full whitespace set. PostgreSQL's default removes only spaces,
+        # while clean() uses str.strip(). The database must enforce the same canonical key for
+        # paths that bypass full_clean (bulk_create, raw SQL, or loaddata).
         migrations.AddConstraint(
             model_name="portstacklagpattern",
             constraint=models.UniqueConstraint(
-                Lower(Trim("librenms_os")),
+                Lower(models.Func("librenms_os", models.Value(_PYTHON_STRIP_WHITESPACE), function="BTRIM")),
                 name="unique_portstacklagpattern_librenms_os_ci",
             ),
         ),

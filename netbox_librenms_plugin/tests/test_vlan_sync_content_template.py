@@ -59,8 +59,7 @@ class TestVlanSyncContentTemplateMigratedMode:
         # right server with a USABLE token — an empty value would still POST X-CSRFToken: ''
         # and 403, so pin a non-empty value, not mere input presence.
         assert re.search(r'name="csrfmiddlewaretoken" value="[^"]+"', html)
-        assert 'name="server_key"' in html
-        assert 'value="prod"' in html
+        assert re.search(r'<input[^>]*name="server_key"[^>]*value="prod"[^>]*>', html)
         # The form-submit action input is form-only and must NOT render in migrated mode.
         assert 'value="create_vlans"' not in html
 

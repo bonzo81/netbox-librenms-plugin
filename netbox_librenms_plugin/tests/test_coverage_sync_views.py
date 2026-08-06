@@ -2422,7 +2422,7 @@ class TestSyncVLANsViewStructure:
         assert ("view", Device) in perms
         assert ("add", VLAN) in perms
         assert ("change", VLAN) in perms
-        assert ("view", VLANGroup) in perms
+        assert ("view", VLANGroup) not in perms
 
 
 class TestSyncVLANsViewGetObject:
@@ -2521,6 +2521,62 @@ class TestSyncVLANsViewPost:
                     result = view.post(req, object_type="device", object_id=1)
         mock_handle.assert_called_once()
         assert result is mock_response
+
+    @pytest.mark.django_db
+    def test_global_vlan_sync_does_not_require_vlan_group_permission(self):
+        """A request that selects no group must not require access to VLANGroup."""
+        from dcim.models import Device
+        from ipam.models import VLAN
+
+        from netbox_librenms_plugin.views.sync.vlans import SyncVLANsView
+
+        device = make_device("vlan-global-perm")
+        user = make_user_with_perms(
+            "vlan-global-perm",
+            [("view", Device), ("add", VLAN), ("change", VLAN)],
+        )
+        request = make_real_request(
+            "post",
+            {"action": "invalid", "server_key": "default", "select": ["100"], "vlan_group_100": ""},
+            user=user,
+        )
+        view = make_view(SyncVLANsView, request)
+
+        response = view.post(request, object_type="device", object_id=device.pk)
+
+        assert response.status_code == 302
+        assert not any("ipam.view_vlangroup" in str(message) for message in request._messages._queued_messages)
+
+    @pytest.mark.django_db
+    def test_grouped_vlan_sync_still_requires_vlan_group_permission(self):
+        """A non-empty per-row group selection must keep the VLANGroup permission gate."""
+        from dcim.models import Device
+        from ipam.models import VLAN, VLANGroup
+
+        from netbox_librenms_plugin.views.sync.vlans import SyncVLANsView
+
+        device = make_device("vlan-grouped-perm")
+        group = VLANGroup.objects.create(name="Group permission", slug="group-permission")
+        user = make_user_with_perms(
+            "vlan-grouped-perm",
+            [("view", Device), ("add", VLAN), ("change", VLAN)],
+        )
+        request = make_real_request(
+            "post",
+            {
+                "action": "create_vlans",
+                "server_key": "default",
+                "select": ["100"],
+                "vlan_group_100": str(group.pk),
+            },
+            user=user,
+        )
+        view = make_view(SyncVLANsView, request)
+
+        response = view.post(request, object_type="device", object_id=device.pk)
+
+        assert response.status_code == 302
+        assert any("ipam.view_vlangroup" in str(message) for message in request._messages._queued_messages)
 
 
 @pytest.mark.django_db

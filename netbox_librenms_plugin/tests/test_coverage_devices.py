@@ -1125,6 +1125,26 @@ class TestSingleVlanGroupVerifyView:
         assert response.status_code == 400
 
     @pytest.mark.django_db
+    def test_returns_400_when_vlan_group_id_is_not_an_integer(self):
+        """Reject a malformed group ID before it reaches the restricted ORM lookup."""
+        import json
+
+        from netbox_librenms_plugin.views.object_sync.devices import SingleVlanGroupVerifyView
+
+        device = _make_real_device("vg-invalid-group")
+        request = _real_verify_request(
+            {"device_id": device.pk, "vid": "100", "vlan_group_id": "not-an-id"},
+            "vg-invalid-group",
+        )
+        view = SingleVlanGroupVerifyView()
+        view.setup(request)
+
+        response = view.post(request)
+
+        assert response.status_code == 400
+        assert json.loads(response.content)["message"] == "Invalid VLAN group ID"
+
+    @pytest.mark.django_db
     def test_returns_success_with_vlan_group(self):
         """A VID present in the selected group is reported not-missing — real Device/Interface/VLAN/VLANGroup, no mocks."""
         import json
@@ -1286,6 +1306,25 @@ class TestVerifyVlanSyncGroupView:
         response = view.post(request)
         assert isinstance(response, JsonResponse)
         assert response.status_code == 400
+
+    @pytest.mark.django_db
+    def test_returns_400_when_vlan_group_id_is_not_an_integer(self):
+        """Reject a malformed group ID before it reaches the restricted ORM lookup."""
+        import json
+
+        from netbox_librenms_plugin.views.object_sync.devices import VerifyVlanSyncGroupView
+
+        request = _real_verify_request(
+            {"vid": "100", "vlan_group_id": "not-an-id"},
+            "sync-invalid-group",
+        )
+        view = VerifyVlanSyncGroupView()
+        view.setup(request)
+
+        response = view.post(request)
+
+        assert response.status_code == 400
+        assert json.loads(response.content)["message"] == "Invalid VLAN group ID"
 
     @pytest.mark.django_db
     def test_returns_success_with_vlan_group(self):

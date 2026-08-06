@@ -908,6 +908,7 @@ class TestSyncInterfacesViewPost:
             patch.object(type(view), "librenms_api", new_callable=lambda: property(lambda s: mock_api)),
         ):
             mock_cache.get.return_value = {"ports": ports}
+            view.request = req
             view.post(req, "device", 1)
 
         # len(_skipped_conflicts) == len(selected_interfaces) == 1, but _synced_count == 1, so the
@@ -1521,8 +1522,7 @@ class TestSyncLagAndParentRelationships:
 
         view = object.__new__(SyncInterfacesView)
         view.interface_name_field = name_field
-        view.request = MagicMock()
-        view.request.POST = {}  # no per-row device_selection → owner defaults to the page device
+        view.request = make_request("post", {})
         if selected_port_ids is not None:
             view._selected_port_ids = set(selected_port_ids)
         return view
@@ -1566,6 +1566,50 @@ class TestSyncLagAndParentRelationships:
 
         member.refresh_from_db()
         assert member.lag_id == agg.pk
+
+    def test_stable_ids_are_canonicalized_before_relationship_lookup(self, db):
+        """Equivalent string and integer port IDs must resolve to one canonical key."""
+        device = self._make_device()
+        member = self._iface(device, "Gi0/3", 12)
+        agg = self._iface(device, "Po2", 101, itype="lag")
+        ports_data = [
+            {"ifName": "Gi0/3", "port_id": "0012"},
+            {"ifName": "Po2", "port_id": 101},
+        ]
+        relationships = {"lag_members": {12: 101}, "sub_interfaces": {}}
+
+        view = self._make_view(selected_port_ids={"12"})
+        view._sync_lag_and_parent_relationships(device, [], ports_data, relationships, "default")
+
+        member.refresh_from_db()
+        assert member.lag_id == agg.pk
+
+    def test_bulk_relationship_sync_excludes_interfaces_outside_the_change_grant(self, db):
+        """A constrained change grant must scope the shared bulk relationship index."""
+        from dcim.models import Interface
+
+        from netbox_librenms_plugin.tests.view_test_helpers import grant, make_user_with_perms
+
+        device = self._make_device()
+        self._iface(device, "allowed", 20)
+        hidden_member = self._iface(device, "Gi0/4", 21)
+        hidden_agg = self._iface(device, "Po3", 102)
+        user = make_user_with_perms("bulk-rel-scope", [])
+        user = grant(user, "change", Interface, constraints={"name": "allowed"})
+        ports_data = [
+            {"ifName": "Gi0/4", "port_id": 21},
+            {"ifName": "Po3", "port_id": 102},
+        ]
+        relationships = {"lag_members": {21: 102}, "sub_interfaces": {}}
+
+        view = self._make_view(selected_port_ids={"21"})
+        view.request = make_request("post", {}, user=user)
+        view._sync_lag_and_parent_relationships(device, [], ports_data, relationships, "default")
+
+        hidden_member.refresh_from_db()
+        hidden_agg.refresh_from_db()
+        assert hidden_member.lag_id is None
+        assert hidden_agg.type == "1000base-t"
 
     def test_non_dict_relationships_fails_soft_not_attributeerror(self, db):
         """
@@ -2296,9 +2340,7 @@ class TestBulkRelationshipConcurrentConflict:
         follow_up.refresh_from_db()  # the batch's later work persisted fine
 
     def test_commit_time_conflict_warns_instead_of_500(self):
-        from django.contrib.messages.storage.fallback import FallbackStorage
         from django.db import IntegrityError
-        from django.test import RequestFactory
 
         from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
 
@@ -2314,9 +2356,7 @@ class TestBulkRelationshipConcurrentConflict:
 
         view = object.__new__(SyncInterfacesView)
         view.interface_name_field = "ifName"
-        request = RequestFactory().post("/", data={})
-        request.session = {}
-        request._messages = FallbackStorage(request)
+        request = make_request("post", {})
         view.request = request
 
         ports_data = [

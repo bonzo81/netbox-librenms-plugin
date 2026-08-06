@@ -48,11 +48,18 @@ class SyncVLANsView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreN
             # The owner device is resolved through a restricted queryset (see get_object), so
             # state that read here: a missing grant is an explicit 403, not a 404 at the lookup.
             ("view", Device),
-            ("view", VLANGroup),
             ("add", VLAN),
             ("change", VLAN),
         ],
     }
+
+    def _required_post_permissions(self, request):
+        """Require VLANGroup access only when a selected row names a group."""
+        permissions = list(type(self).required_object_permissions["POST"])
+        selected_vids = request.POST.getlist("select")
+        if any(request.POST.get(f"vlan_group_{vid}") for vid in selected_vids):
+            permissions.append(("view", VLANGroup))
+        return permissions
 
     def post(self, request, object_type: str, object_id: int):
         """
@@ -63,6 +70,8 @@ class SyncVLANsView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreN
         - select: List of VLAN IDs to create
         - vlan_group_{vid}: Per-row VLAN group selection
         """
+        self.required_object_permissions = {"POST": self._required_post_permissions(request)}
+
         # Check both plugin write and NetBox object permissions
         if error := self.require_all_permissions("POST"):
             return error

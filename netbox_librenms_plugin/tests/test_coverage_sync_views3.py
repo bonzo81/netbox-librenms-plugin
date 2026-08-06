@@ -902,31 +902,40 @@ class TestVlansGroupedUpdateAndSkip:
         req = make_request("post", {"select": ["100"], "vlan_group_100": str(group.pk)})
         view = make_view(SyncVLANsView, req)
         view._post_server_key = "default"
+        cache_key = view.get_cache_key(dev, "vlans", "default")
         cache.set(
-            view.get_cache_key(dev, "vlans", "default"),
+            cache_key,
             [{"vlan_vlan": 100, "vlan_name": cached_name}],
         )
-        return view, req, dev, vlan
+        return view, req, dev, vlan, cache_key
 
     def test_grouped_vlan_with_different_name_is_renamed(self):
         """A grouped VLAN whose LibreNMS name differs is renamed and persisted."""
+        from django.core.cache import cache
         from ipam.models import VLAN
 
-        view, req, dev, vlan = self._setup("update", cached_name="NewName", existing_name="OldName")
+        view, req, dev, vlan, cache_key = self._setup("update", cached_name="NewName", existing_name="OldName")
 
-        view._handle_create_vlans(req, dev, "device", dev.pk)
+        try:
+            view._handle_create_vlans(req, dev, "device", dev.pk)
 
-        assert VLAN.objects.get(pk=vlan.pk).name == "NewName"
-        assert any("updated" in t for t in message_texts(req, "success"))
+            assert VLAN.objects.get(pk=vlan.pk).name == "NewName"
+            assert any("updated" in t for t in message_texts(req, "success"))
+        finally:
+            cache.delete(cache_key)
 
     def test_grouped_vlan_with_matching_name_is_unchanged(self):
         """A grouped VLAN already carrying the LibreNMS name is left untouched."""
+        from django.core.cache import cache
         from ipam.models import VLAN
 
-        view, req, dev, vlan = self._setup("skip", cached_name="Same", existing_name="Same")
+        view, req, dev, vlan, cache_key = self._setup("skip", cached_name="Same", existing_name="Same")
         last_updated = VLAN.objects.get(pk=vlan.pk).last_updated
 
-        view._handle_create_vlans(req, dev, "device", dev.pk)
+        try:
+            view._handle_create_vlans(req, dev, "device", dev.pk)
 
-        assert VLAN.objects.get(pk=vlan.pk).last_updated == last_updated
-        assert any("unchanged" in t for t in message_texts(req, "success"))
+            assert VLAN.objects.get(pk=vlan.pk).last_updated == last_updated
+            assert any("unchanged" in t for t in message_texts(req, "success"))
+        finally:
+            cache.delete(cache_key)

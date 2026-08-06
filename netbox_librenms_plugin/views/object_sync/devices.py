@@ -486,10 +486,15 @@ class SingleVlanGroupVerifyView(LibreNMSPermissionMixin, NetBoxObjectPermissionM
         except (ValueError, TypeError):
             return JsonResponse({"status": "error", "message": "Invalid VID"}, status=400)
 
+        try:
+            selected_gid = int(vlan_group_id) if vlan_group_id else None
+        except (ValueError, TypeError):
+            return JsonResponse({"status": "error", "message": "Invalid VLAN group ID"}, status=400)
+
         # Build lookup for the selected group
         visible_vlans = self.restricted_queryset(VLAN)
-        if vlan_group_id:
-            vlan_group = self.restrict_object_or_404(VLANGroup, pk=vlan_group_id)
+        if selected_gid:
+            vlan_group = self.restrict_object_or_404(VLANGroup, pk=selected_gid)
             # Get VLANs in selected group + global VLANs
             group_vids = set(visible_vlans.filter(group=vlan_group).values_list("vid", flat=True))
             global_vids = set(visible_vlans.filter(group__isnull=True).values_list("vid", flat=True))
@@ -520,8 +525,6 @@ class SingleVlanGroupVerifyView(LibreNMSPermissionMixin, NetBoxObjectPermissionM
                 netbox_tagged_group_ids[v.vid] = v.group_id
 
         # Determine group match: selected group vs NetBox VLAN's actual group
-        selected_gid = int(vlan_group_id) if vlan_group_id else None
-
         # Determine CSS class based on actual VLAN type
         if vlan_type == "U":
             # Group matches only matters when VIDs match
@@ -616,10 +619,15 @@ class VerifyVlanSyncGroupView(LibreNMSPermissionMixin, NetBoxObjectPermissionMix
         except (ValueError, TypeError):
             return JsonResponse({"status": "error", "message": "Invalid VID"}, status=400)
 
+        try:
+            selected_gid = int(vlan_group_id) if vlan_group_id else None
+        except (ValueError, TypeError):
+            return JsonResponse({"status": "error", "message": "Invalid VLAN group ID"}, status=400)
+
         # Check if VLAN exists in the selected group (or globally)
         visible_vlans = self.restricted_queryset(VLAN)
-        if vlan_group_id:
-            vlan_group = self.restrict_object_or_404(VLANGroup, pk=vlan_group_id)
+        if selected_gid:
+            vlan_group = self.restrict_object_or_404(VLANGroup, pk=selected_gid)
             netbox_vlan = visible_vlans.filter(vid=vid, group=vlan_group).first()
         else:
             # No group = global VLANs

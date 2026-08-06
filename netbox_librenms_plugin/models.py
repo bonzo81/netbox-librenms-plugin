@@ -7,13 +7,26 @@ from dcim.choices import InterfaceTypeChoices
 from dcim.models import DeviceType, Manufacturer, ModuleType, Platform
 from django.core.exceptions import ValidationError
 from django.db import models
-from django.db.models.functions import Lower, Trim
+from django.db.models.functions import Lower
 from django.urls import reverse
 from netbox.models import NetBoxModel
 
 from netbox_librenms_plugin.utils import validate_regex_field
 
 logger = logging.getLogger(__name__)
+
+# Characters removed by Python's no-argument str.strip(). PostgreSQL BTRIM removes only ASCII
+# spaces when its second argument is absent, so pass this set explicitly wherever the database
+# must enforce the same normalization as PortStackLagPattern.clean().
+_PYTHON_STRIP_WHITESPACE = (
+    "\t\n\v\f\r\x1c\x1d\x1e\x1f \x85\xa0"
+    "\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a\u2028\u2029\u202f\u205f\u3000"
+)
+
+
+def _trim_python_whitespace(expression):
+    """Return a PostgreSQL expression with Python ``str.strip()`` semantics."""
+    return models.Func(expression, models.Value(_PYTHON_STRIP_WHITESPACE), function="BTRIM")
 
 
 def _validate_replacement_template(compiled: re.Pattern, replacement: str) -> None:
@@ -1025,15 +1038,18 @@ class PortStackLagPattern(FullCleanOnSaveMixin, NetBoxModel):
         verbose_name = "Port Stack LAG Pattern"
         verbose_name_plural = "Port Stack LAG Patterns"
         constraints = [
-            # Enforce uniqueness the SAME case-insensitive way the OS-scoped pattern lookup
+            # Enforce uniqueness in the same case-insensitive way as the OS-scoped pattern lookup
             # reads it (compiled_patterns_for_os filters librenms_os__iexact). A plain
             # unique=True is case-sensitive, so at the DB level "ios" and "IOS" could coexist
             # and both apply to one device, making the per-OS fallback ambiguous. clean()
-            # already normalizes with .strip().lower() on every save; Lower(Trim(...)) makes the
-            # DB enforce that SAME canonical form for any path that bypasses full_clean
-            # (bulk_create / raw SQL / loaddata) — Lower() alone would let " ios " coexist
-            # with "ios".
-            models.UniqueConstraint(Lower(Trim("librenms_os")), name="unique_portstacklagpattern_librenms_os_ci"),
+            # already normalizes with .strip().lower() on every save. BTRIM with Python's full
+            # whitespace set makes the database enforce the same canonical form for paths that
+            # skip full_clean, such as bulk_create, raw SQL, or loaddata. Lower() alone would let
+            # " ios " coexist with "ios".
+            models.UniqueConstraint(
+                Lower(_trim_python_whitespace("librenms_os")),
+                name="unique_portstacklagpattern_librenms_os_ci",
+            ),
         ]
 
     def __str__(self):

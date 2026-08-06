@@ -248,7 +248,11 @@ class SyncInterfacesView(
         # Keying by port_id avoids collapsing distinct ports that share a display name —
         # possible in ifDescr mode, where the visible name is not a unique identifier.
         port_by_id = {}
-        selected_port_ids = set(getattr(self, "_selected_port_ids", set()))
+        selected_port_ids = {
+            str(port_id)
+            for raw_port_id in getattr(self, "_selected_port_ids", set())
+            if (port_id := normalize_librenms_port_id(raw_port_id)) is not None
+        }
         for port in ports_data:
             # OOB-controller rows are context-only (merged for shared-LOM display); sync_selected_interfaces()
             # already skips them. Exclude them here too: on a page where an OOB row shares the host display
@@ -256,19 +260,20 @@ class SyncInterfacesView(
             # row instead of the host interface.
             if port.get("_source") == "oob":
                 continue
-            pid = port.get("port_id")
+            pid = normalize_librenms_port_id(port.get("port_id"))
             if pid is None:
                 continue
-            port_by_id[str(pid)] = port
+            canonical_pid = str(pid)
+            port_by_id[canonical_pid] = port
             if port.get(interface_name_field) in selected_interfaces:
-                selected_port_ids.add(str(pid))
+                selected_port_ids.add(canonical_pid)
 
         # Build the interface lookup index once for the whole batch. Each port_id below
         # resolves both ends of a relationship; without a shared index every resolution
         # re-queries obj's interfaces and re-reads their librenms_id custom fields, which is
         # O(selected × interfaces). Built after sync_selected_interfaces() so newly created
         # interfaces are included.
-        iface_index = _build_interface_index(obj, server_key)
+        iface_index = _build_interface_index(obj, server_key, user=self.request.user)
 
         try:
             with transaction.atomic():

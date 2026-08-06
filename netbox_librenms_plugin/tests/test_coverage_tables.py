@@ -3261,7 +3261,7 @@ class TestVCInterfaceTable:
         record = {"ifName": "Vlan2", "ifType": "l3ipvlan"}  # digit 2 == sw2's vc_position
 
         assert table._resolve_row_member_id(record) == sw1.pk  # viewed member, not sw2
-        assert f'value="{sw1.pk}"' in str(table.render_device_selection(value=None, record=record))
+        assert f'value="{sw1.pk}" selected' in str(table.render_device_selection(value=None, record=record))
 
     @pytest.mark.django_db
     def test_render_device_selection_physical_and_subiface_use_name_heuristic(self):
@@ -3743,10 +3743,8 @@ class TestRelationshipOwnerResolutionConsistency:
 
         # Behaviour preserved: each row resolves to the member at its name's vc_position.
         assert owners == [m1.pk, m2.pk, m1.pk, m2.pk, m1.pk, m2.pk]
-        # Perf (the finding): the member set is prefetched once via a cached_property, so six rows
-        # issue far fewer than six queries. The old path ran members.get(vc_position=...) per row
-        # — one query each — which this would catch (6 queries, not < 6).
-        assert len(ctx.captured_queries) < len(records)
+        # The member set is prefetched once through the cached property.
+        assert len(ctx.captured_queries) == 1
 
 
 class TestVMTableHidesLagSyncButton:
