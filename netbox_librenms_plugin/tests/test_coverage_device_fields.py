@@ -16,6 +16,7 @@ from netbox_librenms_plugin.tests.conftest import make_device, make_vm
 
 
 from netbox_librenms_plugin.tests.view_test_helpers import (
+    grant,
     make_request,
     make_user_with_perms,
     make_view,
@@ -1019,8 +1020,8 @@ class TestCreateAndAssignPlatformView:
         mock_msg.error.assert_called_once()
         assert "required" in mock_msg.error.call_args[0][1].lower()
 
-    def test_non_numeric_manufacturer_is_treated_as_unresolved(self):
-        """A stale or forged manufacturer value must not crash platform creation."""
+    def test_non_numeric_manufacturer_is_rejected(self):
+        """A stale or forged manufacturer value must not remove the requested scope."""
         from dcim.models import Device, Platform
 
         device = make_device("plat-invalid-manufacturer")
@@ -1029,9 +1030,9 @@ class TestCreateAndAssignPlatformView:
 
         _post(view, request, pk=device.pk)
 
-        platform = Platform.objects.get(name="Invalid Manufacturer Platform")
-        assert platform.manufacturer_id is None
-        assert Device.objects.get(pk=device.pk).platform_id == platform.pk
+        assert not Platform.objects.filter(name="Invalid Manufacturer Platform").exists()
+        assert Device.objects.get(pk=device.pk).platform_id is None
+        assert message_texts(request, "error") == ["Selected manufacturer is not available."]
 
     @pytest.mark.django_db
     def test_rebinds_to_posted_server_for_redirect_fallback(self):
@@ -1144,7 +1145,7 @@ class TestCreateAndAssignPlatformView:
         assert Device.objects.get(pk=dev.pk).platform_id == wanted.pk
 
     def test_manufacturer_not_found(self):
-        """An unresolvable manufacturer id is ignored: the platform is still created, unscoped."""
+        """An unresolvable manufacturer ID stops the platform write."""
         from dcim.models import Device, Manufacturer, Platform
 
         dev = make_device("plat-nomanuf")
@@ -1154,11 +1155,33 @@ class TestCreateAndAssignPlatformView:
 
         _post(view, req, pk=dev.pk)
 
-        platform = Platform.objects.get(name="ios")
-        assert platform.manufacturer_id is None
-        assert Device.objects.get(pk=dev.pk).platform_id == platform.pk
-        assert message_texts(req, "success")
-        assert not message_texts(req, "error")
+        assert not Platform.objects.filter(name="ios").exists()
+        assert Device.objects.get(pk=dev.pk).platform_id is None
+        assert message_texts(req, "error") == ["Selected manufacturer is not available."]
+
+    def test_manufacturer_outside_the_grant_is_rejected(self):
+        """A constrained grant must not let a hidden manufacturer become an unscoped platform."""
+        from dcim.models import Device, Manufacturer, Platform
+
+        Manufacturer.objects.create(name="Visible Vendor", slug="visible-vendor")
+        hidden = Manufacturer.objects.create(name="Hidden Vendor", slug="hidden-vendor")
+        device = make_device("plat-hidden-manufacturer")
+        user = make_user_with_perms(
+            "platform-manufacturer-scoped",
+            [("change", Device), ("add", Platform)],
+        )
+        user = grant(user, "view", Manufacturer, constraints={"name": "Visible Vendor"})
+        request = _make_request(
+            {"platform_name": "Hidden Vendor Platform", "manufacturer": str(hidden.pk)},
+            user=user,
+        )
+        view = self._view(request)
+
+        _post(view, request, pk=device.pk)
+
+        assert not Platform.objects.filter(name="Hidden Vendor Platform").exists()
+        assert Device.objects.get(pk=device.pk).platform_id is None
+        assert message_texts(request, "error") == ["Selected manufacturer is not available."]
 
     def test_success_no_manufacturer(self):
         """A new platform (no manufacturer) is created and assigned to the device (real)."""

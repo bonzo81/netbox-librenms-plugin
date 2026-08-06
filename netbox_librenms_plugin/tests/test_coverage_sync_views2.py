@@ -220,7 +220,10 @@ class TestSyncCablesViewSuccessPath:
         assert cached_local.cable_id is None
         assert remote.cable_id is None
         assert Cable.objects.count() == 0
-        assert any("Gi0/1" in text for text in message_texts(request, "error"))
+        assert any(
+            "Selected device is not part of this cable-sync page for interfaces: Gi0/1" in text
+            for text in message_texts(request, "error")
+        )
 
     def test_missing_interface_on_selected_vc_member_does_not_cable_cached_interface(self):
         """A selected VC member without the port must not cable the page member's cached port."""
@@ -1269,6 +1272,22 @@ class TestSyncIPAddressesViewIPWrites:
 
 
 class TestSyncIPAddressesViewHelpers:
+    def test_blank_vrf_selection_does_not_require_vrf_permission(self):
+        from ipam.models import VRF
+
+        req = _make_request(post_data={"vrf_10.0.0.1": ""})
+        view = make_view(_sync_ip_view_class(), req)
+
+        assert ("view", VRF) not in view._required_permissions("device")["POST"]
+
+    def test_nonblank_vrf_selection_requires_vrf_permission(self):
+        from ipam.models import VRF
+
+        req = _make_request(post_data={"vrf_10.0.0.1": "1"})
+        view = make_view(_sync_ip_view_class(), req)
+
+        assert ("view", VRF) in view._required_permissions("device")["POST"]
+
     def test_get_object_device(self):
         from netbox_librenms_plugin.views.sync.ip_addresses import SyncIPAddressesView
 

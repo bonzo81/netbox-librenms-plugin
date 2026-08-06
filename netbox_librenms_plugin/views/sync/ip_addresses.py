@@ -59,7 +59,7 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
         # A per-row VRF is resolved by client-supplied id through a restricted queryset. Only
         # demand its view permission when one is actually posted, so the common no-VRF sync
         # is not gated on a permission it never uses.
-        if any(k.startswith("vrf_") for k in self.request.POST):
+        if any(key.startswith("vrf_") and value for key, value in self.request.POST.items()):
             perms.append(("view", VRF))
         return {"POST": perms}
 

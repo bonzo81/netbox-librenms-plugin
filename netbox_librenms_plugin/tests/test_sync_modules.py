@@ -1759,7 +1759,7 @@ class TestSingleInstallInterfaceBinding:
             yield
 
         mock_qs = MagicMock()
-        mock_qs.get.return_value = module_bay
+        mock_qs.filter.return_value.first.return_value = module_bay
 
         with (
             patch.object(view, "require_all_permissions", return_value=None),
@@ -1844,7 +1844,7 @@ class TestSingleInstallInterfaceBinding:
             yield
 
         mock_qs = MagicMock()
-        mock_qs.get.return_value = module_bay
+        mock_qs.filter.return_value.first.return_value = module_bay
 
         with (
             patch.object(view, "require_all_permissions", return_value=None),
@@ -1933,7 +1933,7 @@ class TestSingleInstallInterfaceBinding:
             yield
 
         mock_qs = MagicMock()
-        mock_qs.get.return_value = module_bay
+        mock_qs.filter.return_value.first.return_value = module_bay
 
         with (
             patch.object(view, "require_all_permissions", return_value=None),
@@ -2386,117 +2386,72 @@ class TestSingleInstallInterfaceBinding:
         mock_adopt.assert_not_called()
         mock_messages.warning.assert_called_once()
 
+    @pytest.mark.django_db
     def test_replace_module_view_binds_interface_after_replace(self):
+        from dcim.models import Module
+        from django.core.cache import cache
+
+        from netbox_librenms_plugin.tests.conftest import (
+            make_device,
+            make_interface,
+            make_module_bay,
+            make_module_type,
+        )
+        from netbox_librenms_plugin.tests.view_test_helpers import make_request, make_view, message_texts
+        from netbox_librenms_plugin.utils import get_librenms_device_id
         from netbox_librenms_plugin.views.sync.modules import ReplaceModuleView
 
-        view = object.__new__(ReplaceModuleView)
-        view.required_object_permissions = {}
-        view._librenms_api = MagicMock(server_key="production")
-        device = _make_device()
-
-        target_bay = MagicMock()
-        target_bay.name = "SFP 1"
-
-        installed_module = MagicMock()
-        installed_module.pk = 321
-        installed_module.module_type.model = "OLD-SFP"
-        installed_module.module_bay = target_bay
-
-        matched_type = MagicMock()
-        matched_type.model = "NEW-SFP"
-
-        new_module = MagicMock()
-        new_module.pk = 654
-
-        request = _make_request(
-            "POST",
-            data={
-                "module_id": "321",
+        device = make_device("replace-bind-device")
+        old_type = make_module_type("OLD-SFP-BIND")
+        new_type = make_module_type("NEW-SFP-BIND")
+        target_bay = make_module_bay(device, "SFP 1")
+        installed_module = Module.objects.create(
+            device=device,
+            module_bay=target_bay,
+            module_type=old_type,
+            serial="SN-OLD-BIND",
+        )
+        interface = make_interface(device, "Te1/1/1")
+        request = make_request(
+            "post",
+            {
+                "module_id": str(installed_module.pk),
                 "ent_index": "77",
-                "server_key": "production",
+                "server_key": "default",
             },
         )
-
-        @contextmanager
-        def noop_atomic():
-            yield
-
-        installed_filter_qs = MagicMock()
-        installed_filter_qs.select_related.return_value.first.return_value = installed_module
-
-        conflict_filter_qs = MagicMock()
-        conflict_filter_qs.exclude.return_value.select_related.return_value = []
-
-        with (
-            patch.object(view, "require_all_permissions", return_value=None),
-            patch(
-                "netbox_librenms_plugin.views.mixins.NetBoxObjectPermissionMixin.restrict_object_or_404",
-                side_effect=[device, installed_module],
-            ),
-            patch("netbox_librenms_plugin.views.sync.modules.reverse", return_value="/sync/"),
-            patch("netbox_librenms_plugin.views.sync.modules.transaction") as mock_tx,
-            patch("netbox_librenms_plugin.views.sync.modules.messages") as mock_messages,
-            patch("netbox_librenms_plugin.views.sync.modules._modules_redirect_response", return_value="redirected"),
-            patch.object(view, "get_cache_key", return_value="inv-key"),
-            patch("netbox_librenms_plugin.views.sync.modules.cache") as mock_cache,
-            patch(
-                "netbox_librenms_plugin.views.sync.modules.get_module_types_indexed",
-                return_value={"NEW-SFP": matched_type},
-            ),
-            patch("netbox_librenms_plugin.utils.resolve_module_type", return_value=matched_type),
-            patch(
-                "netbox_librenms_plugin.views.sync.modules._count_adoptable_interfaces", return_value=2
-            ) as mock_count,
-            patch(
-                "netbox_librenms_plugin.views.sync.modules._normalize_module_interface_names_for_vc_member",
-                return_value={"renamed": 1, "adopted": 0, "removed": 0, "skipped": 0},
-            ) as mock_normalize,
-            patch(
-                "netbox_librenms_plugin.views.sync.modules._bind_interface_librenms_id",
-                return_value={"status": "bound", "interface": "Te1/1/1", "port_id": 42},
-            ) as mock_bind,
-            patch("dcim.models.Module") as mock_module_cls,
-        ):
-            mock_tx.atomic = noop_atomic
-            mock_cache.get.return_value = {
+        view = make_view(ReplaceModuleView, request, librenms_api=MagicMock(server_key="default"))
+        cache_key = view.get_cache_key(device, "inventory", server_key="default")
+        cache.set(
+            cache_key,
+            {
                 "inventory": [
                     {
                         "entPhysicalIndex": 77,
-                        "entPhysicalModelName": "NEW-SFP",
-                        "entPhysicalSerialNum": "SN-42",
+                        "entPhysicalModelName": new_type.model,
+                        "entPhysicalSerialNum": "SN-NEW-BIND",
                         "_librenms_port_id": 42,
-                        "_librenms_ifname": "Te1/1/1",
+                        "_librenms_ifname": interface.name,
                     }
-                ]
-            }
-            mock_module_cls.return_value = new_module
-            mock_module_cls.objects.select_related.return_value = MagicMock()
-            mock_module_cls.objects.restrict.return_value = mock_module_cls.objects
-            mock_module_cls.objects.select_for_update.return_value.filter.side_effect = [
-                installed_filter_qs,
-                conflict_filter_qs,
-            ]
-
-            response = _post(view, request, pk=24)
-
-        mock_count.assert_called_once_with(device, new_module)
-        assert new_module._adopt_components is True
-        mock_normalize.assert_called_once_with(device, new_module)
-        mock_bind.assert_called_once()
-        bind_call = mock_bind.call_args
-        assert bind_call.args[0] is device
-        assert bind_call.args[1]["_librenms_port_id"] == 42
-        assert bind_call.args[2] == 654
-        assert bind_call.args[3] == "production"
-        mock_messages.success.assert_called_once()
-        warning_messages = [call.args[1] for call in mock_messages.warning.call_args_list]
-        assert (
-            "Module sync authority applied: adopted 2 existing standalone interface(s) into the module."
-            in warning_messages
+                ],
+                "librenms_id": 1,
+            },
         )
-        assert "VC member interface normalization applied: renamed 1." in warning_messages
-        mock_messages.info.assert_called()
-        assert response == "redirected"
+        try:
+            response = _post(view, request, pk=device.pk)
+        finally:
+            cache.delete(cache_key)
+
+        assert response.status_code == 302
+        assert not Module.objects.filter(pk=installed_module.pk).exists()
+        replacement = Module.objects.get(device=device, module_bay=target_bay)
+        assert replacement.module_type == new_type
+        assert replacement.serial == "SN-NEW-BIND"
+        interface.refresh_from_db()
+        assert interface.module_id == replacement.pk
+        assert get_librenms_device_id(interface, "default") == 42
+        assert any("Replaced OLD-SFP-BIND with NEW-SFP-BIND" in text for text in message_texts(request, "success"))
+        assert any("Bound Te1/1/1 to LibreNMS port_id 42" in text for text in message_texts(request, "info"))
 
 
 class TestVCMemberInterfaceNormalization:
@@ -2990,7 +2945,7 @@ class TestInstallViewsDoNotDeleteCache:
             yield
 
         mock_qs = MagicMock()
-        mock_qs.get.return_value = module_bay
+        mock_qs.filter.return_value.first.return_value = module_bay
 
         with (
             patch.object(view, "require_all_permissions", return_value=None),
@@ -4386,7 +4341,7 @@ class TestInstallModuleViewBehavior:
             yield
 
         mock_qs = MagicMock()
-        mock_qs.get.return_value = module_bay  # locked re-fetch returns same occupied bay
+        mock_qs.filter.return_value.first.return_value = module_bay  # locked re-fetch returns same occupied bay
 
         with (
             patch.object(view, "require_all_permissions", return_value=None),
@@ -4411,6 +4366,50 @@ class TestInstallModuleViewBehavior:
 
         mock_msg.warning.assert_called_once()
         assert "already has a module" in mock_msg.warning.call_args[0][1]
+        mock_redirect.assert_called_once()
+
+    def test_bay_deleted_before_lock_reports_error(self):
+        """A bay removed after the first lookup must not cause an uncaught exception."""
+        from contextlib import contextmanager
+
+        from dcim.models import ModuleBay
+
+        view = self._view()
+        device = _make_device()
+        module_bay = MagicMock()
+        module_type = MagicMock()
+        request = _make_request(
+            "POST",
+            data={"module_bay_id": "10", "module_type_id": "5", "serial": "SN1"},
+        )
+
+        @contextmanager
+        def noop_atomic():
+            yield
+
+        mock_qs = MagicMock()
+        mock_qs.get.side_effect = ModuleBay.DoesNotExist
+        mock_qs.filter.return_value.first.return_value = None
+
+        with (
+            patch.object(view, "require_all_permissions", return_value=None),
+            patch(
+                "netbox_librenms_plugin.views.mixins.NetBoxObjectPermissionMixin.restrict_object_or_404",
+                side_effect=[device, module_bay, module_type],
+            ),
+            patch("netbox_librenms_plugin.views.sync.modules.reverse", return_value="/sync/"),
+            patch("netbox_librenms_plugin.views.sync.modules.transaction") as mock_tx,
+            patch("netbox_librenms_plugin.views.sync.modules.messages") as mock_msg,
+            patch("netbox_librenms_plugin.views.sync.modules.redirect") as mock_redirect,
+            patch.object(ModuleBay, "objects") as mock_objects,
+        ):
+            mock_tx.atomic = noop_atomic
+            mock_objects.restrict.return_value = mock_objects
+            mock_objects.select_for_update.return_value = mock_qs
+            view.request = request
+            view.post(request, pk=24)
+
+        mock_msg.error.assert_called_once_with(request, "Module bay no longer exists.")
         mock_redirect.assert_called_once()
 
     def test_successful_install(self):
@@ -4446,7 +4445,7 @@ class TestInstallModuleViewBehavior:
             yield
 
         mock_qs = MagicMock()
-        mock_qs.get.return_value = module_bay  # locked re-fetch returns same bay
+        mock_qs.filter.return_value.first.return_value = module_bay  # locked re-fetch returns same bay
 
         with (
             patch.object(view, "require_all_permissions", return_value=None),

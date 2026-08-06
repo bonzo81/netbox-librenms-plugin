@@ -618,7 +618,12 @@ class InstallModuleView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
         try:
             with transaction.atomic():
                 # Re-fetch bay under lock to prevent TOCTOU race with concurrent installs.
-                locked_bay = self.restricted_queryset(ModuleBay).select_for_update(of=("self",)).get(pk=module_bay_id)
+                locked_bay = (
+                    self.restricted_queryset(ModuleBay).select_for_update(of=("self",)).filter(pk=module_bay_id).first()
+                )
+                if not locked_bay:
+                    messages.error(request, "Module bay no longer exists.")
+                    return _modules_redirect_response(request, sync_url, server_key)
                 if hasattr(locked_bay, "installed_module") and locked_bay.installed_module:
                     messages.warning(request, f"Module bay '{locked_bay.name}' already has a module installed.")
                     return _modules_redirect_response(request, sync_url, server_key)
@@ -2007,8 +2012,12 @@ class MoveModuleView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, View)
                 target_bay = (
                     self.restricted_queryset(ModuleBay)
                     .select_for_update(of=("self",))
-                    .get(pk=target_bay_id, device=target_device)
+                    .filter(pk=target_bay_id, device=target_device)
+                    .first()
                 )
+                if not target_bay:
+                    messages.error(request, "Module bay no longer exists.")
+                    return _modules_redirect_response(request, sync_url)
 
                 # Re-fetch with row lock to prevent concurrent modifications. Scoped like the
                 # primary lookup: this module's device and bay are reassigned below, and its pk

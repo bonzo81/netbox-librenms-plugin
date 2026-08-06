@@ -428,7 +428,7 @@ class CreateAndAssignPlatformView(LibreNMSPermissionMixin, NetBoxObjectPermissio
         # primary source, so a bad key can't refuse the platform create (which needs no LibreNMS).
         self.rebind_api_for_server(request.POST.get("server_key"))
 
-        manufacturer_id = request.POST.get("manufacturer")
+        manufacturer_id = (request.POST.get("manufacturer") or "").strip()
 
         if not platform_name:
             messages.error(request, "Platform name is required")
@@ -439,7 +439,12 @@ class CreateAndAssignPlatformView(LibreNMSPermissionMixin, NetBoxObjectPermissio
             try:
                 manufacturer = self.restricted_queryset(Manufacturer).get(pk=manufacturer_id)
             except (Manufacturer.DoesNotExist, ValueError):
-                pass
+                messages.error(request, "Selected manufacturer is not available.")
+                return self._sync_redirect(
+                    request,
+                    pk,
+                    getattr(getattr(self, "_librenms_api", None), "server_key", None),
+                )
 
         with transaction.atomic():
             platform_created = False

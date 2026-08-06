@@ -628,7 +628,7 @@ class TestMoveModuleView:
             # Both the locked target bay and the conflict module are resolved through
             # restricted_queryset now, so dispatch on the model the view asks for.
             bay_qs = MagicMock()
-            bay_qs.select_for_update.return_value.get.return_value = target_bay
+            bay_qs.select_for_update.return_value.filter.return_value.first.return_value = target_bay
             module_qs = MagicMock()
             module_qs.select_for_update.return_value.filter.return_value.select_related.return_value.first.return_value = conflict_module
             mock_scoped.side_effect = lambda model, *a, **kw: bay_qs if model is mock_bay_cls else module_qs
@@ -640,6 +640,40 @@ class TestMoveModuleView:
         conflict_module.full_clean.assert_called_once()
         conflict_module.save.assert_called_once()
         mock_msg.success.assert_called_once()
+
+    def test_target_bay_deleted_before_lock_reports_error(self):
+        """A target bay removed after validation must not cause an uncaught exception."""
+        from dcim.models import ModuleBay
+
+        view = self._view()
+        device = _make_device(pk=24)
+        target_bay = MagicMock()
+        request = _make_request("POST", data={"conflict_module_id": "99", "target_bay_id": "10"})
+
+        with (
+            patch(
+                "netbox_librenms_plugin.views.mixins.NetBoxObjectPermissionMixin.restrict_object_or_404",
+                side_effect=[device, target_bay],
+            ),
+            patch.object(view, "require_all_permissions", return_value=None),
+            patch("netbox_librenms_plugin.views.sync.modules.reverse", return_value="/sync/"),
+            patch("netbox_librenms_plugin.views.sync.modules.transaction") as mock_tx,
+            patch("netbox_librenms_plugin.views.sync.modules.messages") as mock_msg,
+            patch("netbox_librenms_plugin.views.sync.modules.redirect") as mock_redirect,
+            patch.object(view, "restricted_queryset") as mock_scoped,
+        ):
+            mock_tx.atomic.return_value.__enter__ = lambda context: context
+            mock_tx.atomic.return_value.__exit__ = MagicMock(return_value=False)
+            bay_qs = MagicMock()
+            bay_qs.select_for_update.return_value.get.side_effect = ModuleBay.DoesNotExist
+            bay_qs.select_for_update.return_value.filter.return_value.first.return_value = None
+            module_qs = MagicMock()
+            mock_scoped.side_effect = lambda model, *args, **kwargs: bay_qs if model is ModuleBay else module_qs
+
+            _post(view, request, pk=24)
+
+        mock_msg.error.assert_called_once_with(request, "Module bay no longer exists.")
+        mock_redirect.assert_called_once()
 
     def test_requires_all_permissions(self):
         """POST returns early when require_all_permissions returns a response."""

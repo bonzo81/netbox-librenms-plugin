@@ -178,7 +178,7 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libre
                         "Selected device %s is outside the cable-sync page context; rejecting cable creation",
                         selected_device_id,
                     )
-                    return {"status": "invalid", "interface": display_name}
+                    return {"status": "rejected_selection", "interface": display_name}
                 port_name = link_data.get("local_port") or local_interface.name
                 try:
                     local_interface = self.restricted_queryset(Interface).get(
@@ -211,7 +211,14 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libre
         Each interface is processed in its own atomic block so individual
         failures roll back only that cable without affecting others.
         """
-        results = {"valid": [], "invalid": [], "duplicate": [], "missing_remote": [], "skipped": []}
+        results = {
+            "valid": [],
+            "invalid": [],
+            "duplicate": [],
+            "missing_remote": [],
+            "rejected_selection": [],
+            "skipped": [],
+        }
 
         for interface in selected_interfaces:
             try:
@@ -261,6 +268,12 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libre
             messages.error(
                 request,
                 f"No LibreNMS link data found for interfaces: {', '.join(results['invalid'])}",
+            )
+        if results.get("rejected_selection"):
+            messages.error(
+                request,
+                "Selected device is not part of this cable-sync page for interfaces: "
+                f"{', '.join(results['rejected_selection'])}",
             )
         if results["duplicate"]:
             messages.warning(

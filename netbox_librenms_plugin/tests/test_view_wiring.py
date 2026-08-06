@@ -1337,6 +1337,7 @@ class TestGatedViewsRefuseOutOfScopeObjects:
         assert hidden.module_bay.name not in html
         assert f'name="conflict_module_id" value="{hidden.pk}"' not in html
         assert "cannot view" in html
+        assert "Update Serial Only" not in html
 
     def test_site_location_push_refuses_a_site_outside_the_grant(self):
         """SyncSiteLocationView is gated by the plugin write permission alone and takes the site pk from the POST body."""
