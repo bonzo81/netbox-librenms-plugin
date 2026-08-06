@@ -52,11 +52,8 @@ class AddDeviceToLibreNMSView(
 
     def post(self, request, object_id):
         """Add a device to LibreNMS using the submitted SNMP form."""
-        # Resolve the target object first so we can apply object-level perms
-        # against the correct model (Device vs VirtualMachine).
         object_type = request.POST.get("object_type")
-        self.object = self.get_object(object_id, object_type=object_type)
-        if self.object is None:
+        if object_type not in ("device", "virtualmachine"):
             # Match the convention used in views/sync/device_fields.py — return
             # 400 (Bad Request) with an escaped echo of the offending value
             # rather than raising 404, which would mislead clients into
@@ -66,14 +63,14 @@ class AddDeviceToLibreNMSView(
                 status=400,
             )
 
-        # Plugin write perm + NetBox change perm on the resolved model. The
-        # mapping is set per-request because object_type can be either
-        # device or virtualmachine; static class-level declaration cannot
-        # express that branch.
+        # Gate before the change-scoped lookup so a missing grant produces the
+        # named permission error instead of a bare 404.
         target_model = VirtualMachine if object_type == "virtualmachine" else Device
         self.required_object_permissions = {"POST": [("change", target_model)]}
         if error := self.require_all_permissions("POST"):
             return error
+
+        self.object = self.get_object(object_id, object_type=object_type)
 
         form_class = self.get_form_class()
 

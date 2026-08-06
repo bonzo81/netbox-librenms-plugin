@@ -17,6 +17,7 @@ from netbox_librenms_plugin.tests.view_test_helpers import (
     make_view,
     message_texts,
 )
+from netbox_librenms_plugin.tests.view_test_helpers import get as _get
 from netbox_librenms_plugin.tests.view_test_helpers import post as _post
 
 # The views here are built with real requests and real users, so the whole file needs the DB.
@@ -213,6 +214,48 @@ class TestSyncCablesViewSuccessPath:
         assert used_local != unrelated_local
         assert used_remote == remote
         assert used_request is request
+
+    def test_missing_interface_on_selected_vc_member_does_not_cable_cached_interface(self):
+        """A selected VC member without the port must not cable the page member's cached port."""
+        from dcim.models import Cable, VirtualChassis
+
+        vc = VirtualChassis.objects.create(name="cable-vc-missing-port")
+        page_device = make_device("cable-vc-page")
+        page_device.virtual_chassis = vc
+        page_device.vc_position = 1
+        page_device.save()
+        selected_member = make_device("cable-vc-selected")
+        selected_member.virtual_chassis = vc
+        selected_member.vc_position = 2
+        selected_member.save()
+        remote_device = make_device("cable-vc-remote")
+        cached_local = make_interface(page_device, "Gi0/1")
+        remote = make_interface(remote_device, "Gi0/2")
+        request = _make_request(
+            post_data={
+                "select": ["port1"],
+                "device_selection_port1": str(selected_member.pk),
+            }
+        )
+        view = _cables_view(
+            request,
+            page_device,
+            [
+                {
+                    "local_port_id": "port1",
+                    "local_port": "Gi0/1",
+                    "netbox_local_interface_id": cached_local.pk,
+                    "netbox_remote_interface_id": remote.pk,
+                }
+            ],
+        )
+
+        _post(view, request, pk=page_device.pk)
+
+        cached_local.refresh_from_db()
+        assert cached_local.cable_id is None
+        assert Cable.objects.count() == 0
+        assert any("Gi0/1" in text for text in message_texts(request, "error"))
 
 
 class TestSyncCablesViewSkipsOOBRows:
@@ -633,19 +676,20 @@ class TestAddDeviceToLibreNMSViewPermission:
 
         view._librenms_api.add_device.assert_not_called()
 
-    def test_a_user_without_the_change_grant_404s(self):
-        """The object resolve is scoped by "change", so a view-only grant never gets that far."""
+    def test_a_user_without_the_change_grant_gets_named_permission_error(self):
+        """The permission gate reports the missing change grant before the scoped lookup."""
         from dcim.models import Device
-        from django.http import Http404
 
         dev = make_device("addsnmp-viewonly")
         user = make_user_with_perms("addsnmp-viewer", [("view", Device)])
         req = _make_request(post_data=_snmp_post("v1v2", hostname="r.example.com", community="public"), user=user)
         view = _add_device_view(req)
 
-        with _poller_groups([]), pytest.raises(Http404):
-            _post(view, req, object_id=dev.pk)
+        with _poller_groups([]):
+            response = _post(view, req, object_id=dev.pk)
 
+        assert response.status_code == 302
+        assert any("dcim.change_device" in text for text in message_texts(req, "error"))
         view._librenms_api.add_device.assert_not_called()
 
     def test_a_device_outside_the_grant_404s(self):
@@ -2396,7 +2440,7 @@ class TestSyncSiteLocationViewGetQuerysetFilterset:
         assert {row.netbox_site.name for row in result} >= {"London", "Paris"}
 
     def test_get_queryset_lists_only_sites_in_the_users_grant(self):
-        """A constrained Site grant must hide all other rows from the sync table."""
+        """A read-only constrained grant renders only its sites through the GET gate."""
         from dcim.models import Site
 
         mine = _make_site("Location List Mine")
@@ -2407,6 +2451,10 @@ class TestSyncSiteLocationViewGetQuerysetFilterset:
             constraints={"pk": mine.pk},
             plugin_write=False,
         )
-        view = _location_view(_make_request(user=user), locations=[])
+        request = _make_request(user=user)
+        view = _location_view(request, locations=[])
 
-        assert [row.netbox_site.pk for row in view.get_queryset()] == [mine.pk]
+        response = _get(view, request)
+
+        assert response.status_code == 200
+        assert [row.netbox_site.pk for row in response.context_data["table"].data] == [mine.pk]

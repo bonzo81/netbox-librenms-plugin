@@ -31,7 +31,7 @@ class SyncSiteLocationView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin,
 
     def get(self, request, *args, **kwargs):
         """Render only after checking the declared Site read permission."""
-        if error := self.require_all_permissions("GET"):
+        if error := self.require_object_permissions("GET"):
             return error
         return super().get(request, *args, **kwargs)
 

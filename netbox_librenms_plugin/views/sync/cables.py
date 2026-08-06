@@ -184,10 +184,11 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libre
                     )
                 except Interface.DoesNotExist:
                     logger.debug(
-                        "Port %s not found on device %s; falling back to cached interface",
+                        "Port %s not found on selected device %s; rejecting cable creation",
                         port_name,
                         selected_device_id,
                     )
+                    return {"status": "invalid", "interface": display_name}
 
             remote_interface = self.restricted_queryset(Interface).get(pk=link_data["netbox_remote_interface_id"])
 
