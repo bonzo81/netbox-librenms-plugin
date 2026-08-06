@@ -27,8 +27,9 @@ services:
       HTTPS_PROXY: ${HTTPS_PROXY:-}
       http_proxy: ${HTTP_PROXY:-}
       https_proxy: ${HTTPS_PROXY:-}
-      NO_PROXY: ${NO_PROXY:-}
-      no_proxy: ${NO_PROXY:-}
+      NO_PROXY: ${NO_PROXY:-},librenms-stub
+      no_proxy: ${NO_PROXY:-},librenms-stub
+      LIBRENMS_STUB_TOKEN: ${LIBRENMS_STUB_TOKEN:-dev-stub-token}
       REQUESTS_CA_BUNDLE: ${REQUESTS_CA_BUNDLE:-}
       SSL_CERT_FILE: ${SSL_CERT_FILE:-}
       CURL_CA_BUNDLE: ${CURL_CA_BUNDLE:-}
@@ -38,8 +39,36 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+      librenms-stub:
+        condition: service_healthy
     ports:
       - "8000:8000"
+
+  librenms-stub:
+    image: python:3.13-alpine
+    working_dir: /app
+    environment:
+      NO_PROXY: 127.0.0.1,localhost
+      no_proxy: 127.0.0.1,localhost
+    command:
+      - python
+      - netbox_librenms_plugin/tests/mock_librenms_server.py
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8001"
+      - --token
+      - ${LIBRENMS_STUB_TOKEN:-dev-stub-token}
+    volumes:
+      - ..:/app:ro
+    expose:
+      - "8001"
+    healthcheck:
+      test: ["CMD", "wget", "-Y", "off", "-q", "-O", "/dev/null", "http://127.0.0.1:8001/healthz"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
 
   postgres:
     image: postgres:15

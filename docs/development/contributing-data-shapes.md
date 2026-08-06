@@ -11,6 +11,13 @@ A *recording* is one device scenario: the LibreNMS response shape with anonymize
 `netbox_librenms_plugin/data_shapes/recordings/*.json`; `netbox_librenms_plugin/tests/test_recordings.py`
 parametrizes over them, so **a new JSON with an `expected` block is a new passing test, no code required**.
 
+A deliberately scaffolded development scenario must set `meta.synthetic` to `true`. Use only
+reserved addresses and placeholder values. Captured recordings remain the preferred source.
+
+The development container also replays a selected set of these recordings through its
+`librenms-stub` service. A promoted recording can therefore become an interactive development
+scenario as well as an automated outcome test.
+
 ## Capturing a shape (contributors)
 
 1. Open a device's **LibreNMS** sync tab in NetBox.

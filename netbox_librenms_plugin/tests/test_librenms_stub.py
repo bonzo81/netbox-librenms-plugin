@@ -1,0 +1,237 @@
+"""Real-HTTP contract tests for the development LibreNMS stub."""
+
+import runpy
+from pathlib import Path
+
+import requests
+
+from netbox_librenms_plugin.data_shapes.recordings_store import load_recording
+from netbox_librenms_plugin.tests.conftest import make_recording_api
+from netbox_librenms_plugin.tests.mock_librenms_server import DEFAULT_STUB_RECORDINGS, LibreNMSStubServer
+
+TOKEN = "dev-stub-token"
+RECORDING_NAMES = DEFAULT_STUB_RECORDINGS
+
+
+def test_devcontainer_stub_keeps_import_cache_enabled():
+    config_path = Path(__file__).resolve().parents[2] / ".devcontainer/config/plugin-config.py.example"
+    plugin_config = runpy.run_path(config_path)["PLUGINS_CONFIG"]["netbox_librenms_plugin"]
+
+    assert plugin_config["servers"]["stub"]["cache_timeout"] > 0
+
+
+def _request(server, method, path, **kwargs):
+    headers = dict(kwargs.pop("headers", {}))
+    headers["X-Auth-Token"] = TOKEN
+    return requests.request(method, f"{server.url}{path}", headers=headers, timeout=5, **kwargs)
+
+
+def _start_stub():
+    recordings = [load_recording(name) for name in RECORDING_NAMES]
+    return LibreNMSStubServer(recordings=recordings, api_token=TOKEN).start()
+
+
+def test_stub_serves_recordings_and_derived_instance_endpoints_over_real_http():
+    server = _start_stub()
+    try:
+        api = make_recording_api(server.url, server_key="stub", token=TOKEN)
+
+        assert api.test_connection() == {"version": "development-stub"}
+
+        ok, devices = api.list_devices()
+        assert ok is True
+        assert {device["device_id"] for device in devices} == {1, 12, 25, 32, 39, 1000, 2000}
+        assert {device["device_id"]: device["status"] for device in devices} == {
+            1: 0,
+            12: 1,
+            25: 1,
+            32: 0,
+            39: 1,
+            1000: 1,
+            2000: 1,
+        }
+        assert all(device["location"] == "Lab" for device in devices)
+
+        ok, ports = api.get_ports(1)
+        assert ok is True
+        recorded_ports = load_recording("arcos-lag-transceivers")["responses"]["GET /api/v0/devices/1/ports"]
+        assert [port["port_id"] for port in ports["ports"]] == [port["port_id"] for port in recorded_ports["ports"]]
+        assert any(port.get("vlans") for port in ports["ports"])
+
+        ok, addresses = api.get_device_ips(1)
+        assert ok is True
+        assert addresses
+        assert addresses[0]["ipv4_address"] == "192.0.2.94"
+        assert addresses[0]["port_id"] is not None
+
+        ok, vlans = api.get_device_vlans(1)
+        assert ok is True
+        assert {vlan["vlan_vlan"] for vlan in vlans} == {100, 200}
+        assert all(vlan["device_id"] == 1 for vlan in vlans)
+
+        ok, links = api.get_device_links(1)
+        assert ok is True
+        assert links["status"] == "ok"
+        assert links["links"]
+
+        ok, locations = api.get_locations()
+        assert ok is True
+        assert locations == [{"id": 1, "location": "Lab", "lat": None, "lng": None}]
+
+        ok, poller_groups = api.get_poller_groups()
+        assert ok is True
+        assert poller_groups == [{"id": 0, "group_name": "default", "descr": "Development stub"}]
+    finally:
+        server.stop()
+
+
+def test_stub_supports_librenms_device_filters_and_lookup_aliases():
+    server = _start_stub()
+    try:
+        all_devices = _request(server, "GET", "/api/v0/devices").json()["devices"]
+        management = _request(
+            server,
+            "GET",
+            "/api/v0/devices",
+            params={"type": "type", "query": "management"},
+        ).json()["devices"]
+        down = _request(server, "GET", "/api/v0/devices", params={"type": "down"}).json()["devices"]
+
+        assert {device["device_id"] for device in management} == {12, 25}
+        assert {device["device_id"] for device in down} == {1, 32}
+
+        target = next(device for device in all_devices if device["device_id"] == 1000)
+        for lookup in (target["device_id"], target["hostname"], target["ip"]):
+            response = _request(server, "GET", f"/api/v0/devices/{lookup}")
+            assert response.status_code == 200
+            assert response.json()["devices"][0]["device_id"] == 1000
+    finally:
+        server.stop()
+
+
+def test_stub_derives_the_oob_controller_device_from_the_recorded_host_pair():
+    recording = load_recording("linux-host-oob")
+    server = LibreNMSStubServer(recordings=[recording], api_token=TOKEN).start()
+    try:
+        api = make_recording_api(server.url, server_key="stub", token=TOKEN)
+
+        ok, devices = api.list_devices()
+        assert ok is True
+        by_id = {device["device_id"]: device for device in devices}
+        assert set(by_id) == {25, 39}
+        assert by_id[25]["serial"] == by_id[39]["serial"]
+        assert by_id[25]["os"] == "idrac"
+
+        ok, ports = api.get_ports(25)
+        assert ok is True
+        assert len(ports["ports"]) == 10
+    finally:
+        server.stop()
+
+
+def test_stub_replays_the_scaffolded_virtual_machine_recording():
+    recording = load_recording("linux-virtual-machine")
+    server = LibreNMSStubServer(recordings=[recording], api_token=TOKEN).start()
+    try:
+        api = make_recording_api(server.url, server_key="stub", token=TOKEN)
+
+        ok, devices = api.list_devices()
+        assert ok is True
+        assert len(devices) == 1
+        assert devices[0]["type"] == "server"
+        assert "virtual machine" in devices[0]["hardware"].casefold()
+
+        ok, ports = api.get_ports(recording["device_id"])
+        assert ok is True
+        assert {port["ifName"] for port in ports["ports"]} == {"lo", "ens3"}
+    finally:
+        server.stop()
+
+
+def test_stub_aggregates_instance_wide_serial_sensors():
+    server = _start_stub()
+    try:
+        response = _request(server, "GET", "/api/v0/resources/sensors")
+        expected = load_recording("avocent-serial-ports")["responses"]["GET /api/v0/resources/sensors"]
+
+        assert response.status_code == 200
+        assert response.json() == expected
+    finally:
+        server.stop()
+
+
+def test_stub_supports_filtered_inventory_without_a_recorded_query_variant():
+    server = _start_stub()
+    try:
+        api = make_recording_api(server.url, server_key="stub", token=TOKEN)
+
+        ok, inventory = api.get_inventory_filtered(12, ent_physical_class="chassis")
+
+        assert ok is True
+        assert inventory == []
+    finally:
+        server.stop()
+
+
+def test_stub_rejects_wrong_tokens_and_unimplemented_routes():
+    server = _start_stub()
+    try:
+        health = requests.get(f"{server.url}/healthz", timeout=5)
+        unauthenticated = requests.get(f"{server.url}/api/v0/devices", timeout=5)
+        unknown = _request(server, "GET", "/api/v0/unsupported")
+
+        assert health.status_code == 200
+        assert unauthenticated.status_code == 401
+        assert unauthenticated.json()["status"] == "error"
+        assert unknown.status_code == 404
+        assert unknown.json()["status"] == "error"
+    finally:
+        server.stop()
+
+
+def test_stub_device_and_location_writes_are_visible_until_restart():
+    server = _start_stub()
+    try:
+        api = make_recording_api(server.url, server_key="stub", token=TOKEN)
+
+        ok, message = api.add_device(
+            {
+                "hostname": "device-new.example.test",
+                "snmp_version": "v2c",
+                "community": "stub-community",
+                "force_add": True,
+            }
+        )
+        assert ok is True, message
+
+        lookup = _request(server, "GET", "/api/v0/devices/device-new.example.test")
+        assert lookup.status_code == 200
+        created = lookup.json()["devices"][0]
+
+        ok, message = api.update_device_field(
+            created["device_id"],
+            {"field": ["location", "override_sysLocation"], "data": ["Stub Row B", "1"]},
+        )
+        assert ok is True, message
+        updated = _request(server, "GET", f"/api/v0/devices/{created['device_id']}").json()["devices"][0]
+        assert updated["location"] == "Stub Row B"
+        assert updated["override_sysLocation"] == "1"
+
+        ok, location = api.add_location({"location": "Stub Row B", "lat": None, "lng": None})
+        assert ok is True, location
+        ok, locations = api.get_locations()
+        assert ok is True
+        assert any(item["location"] == "Stub Row B" for item in locations)
+    finally:
+        server.stop()
+
+
+def test_stub_rejects_duplicate_recording_device_ids():
+    recording = load_recording("cisco-stackwise-3member")
+
+    try:
+        LibreNMSStubServer(recordings=[recording, recording], api_token=TOKEN)
+    except ValueError as exc:
+        assert "Duplicate recording device_id 1000" in str(exc)
+    else:
+        raise AssertionError("duplicate device ids must fail closed")
