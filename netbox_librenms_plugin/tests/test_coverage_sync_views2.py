@@ -180,12 +180,14 @@ class TestSyncCablesViewSuccessPath:
         assert Cable.objects.filter(pk=local.cable_id).exists()
 
     def test_unrelated_posted_device_cannot_redirect_the_local_termination(self):
-        """A forged VC selection must keep the cached local interface on the page device."""
+        """A forged VC selection must reject the row, not cable the cached page interface."""
+        from dcim.models import Cable
+
         page_device = make_device("cable-page-device")
         unrelated_device = make_device("cable-unrelated-device")
         remote_device = make_device("cable-forged-remote")
         cached_local = make_interface(page_device, "Gi0/1")
-        unrelated_local = make_interface(unrelated_device, "Gi0/1")
+        make_interface(unrelated_device, "Gi0/1")
         remote = make_interface(remote_device, "Gi0/2")
         request = _make_request(
             post_data={
@@ -206,14 +208,19 @@ class TestSyncCablesViewSuccessPath:
             ],
         )
 
-        with patch.object(view, "create_cable", return_value=True) as create_cable:
-            _post(view, request, pk=page_device.pk)
+        selected = view.get_selected_interfaces(request, page_device)
+        assert selected == [{"device_id": str(unrelated_device.pk), "local_port_id": "port1"}]
+        view._initial_device = page_device
+        assert view._selected_device_is_in_page_context(unrelated_device.pk) is False
 
-        used_local, used_remote, used_request = create_cable.call_args.args
-        assert used_local == cached_local
-        assert used_local != unrelated_local
-        assert used_remote == remote
-        assert used_request is request
+        _post(view, request, pk=page_device.pk)
+
+        cached_local.refresh_from_db()
+        remote.refresh_from_db()
+        assert cached_local.cable_id is None
+        assert remote.cable_id is None
+        assert Cable.objects.count() == 0
+        assert any("Gi0/1" in text for text in message_texts(request, "error"))
 
     def test_missing_interface_on_selected_vc_member_does_not_cable_cached_interface(self):
         """A selected VC member without the port must not cable the page member's cached port."""

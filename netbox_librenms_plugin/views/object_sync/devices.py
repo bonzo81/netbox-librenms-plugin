@@ -374,7 +374,7 @@ class SingleVlanGroupVerifyView(LibreNMSPermissionMixin, NetBoxObjectPermissionM
 
     # Read-only verify endpoint that surfaces a device's interface VLAN assignments —
     # require object-view permission on the underlying Device (mirrors the other verify views).
-    required_object_permissions = {"POST": [("view", Device), ("view", VLANGroup)]}
+    required_object_permissions = {"POST": [("view", Device), ("view", VLANGroup), ("view", VLAN)]}
 
     def post(self, request):
         data, err = parse_request_json(request)

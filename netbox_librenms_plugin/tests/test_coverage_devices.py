@@ -734,6 +734,37 @@ class TestSingleVlanGroupVerifyView:
 
         assert ("view", VLANGroup) in SingleVlanGroupVerifyView.required_object_permissions["POST"]
 
+    @pytest.mark.django_db
+    def test_denies_a_user_without_vlan_read_permission(self):
+        """The verify endpoint must gate its VLAN membership reads."""
+        from dcim.models import Device
+        from ipam.models import VLAN, VLANGroup
+
+        from netbox_librenms_plugin.views.object_sync.devices import SingleVlanGroupVerifyView
+
+        device = _make_real_device("vg-no-vlan-perm")
+        user = _user_with_perms(
+            "vg-no-vlan-perm",
+            [("view", Device), ("view", VLANGroup)],
+        )
+        request = _real_verify_request(
+            {"device_id": device.pk, "vid": "100", "server_key": "default"},
+            "vg-no-vlan-request",
+        )
+        request.user = user
+        view = SingleVlanGroupVerifyView()
+        view.setup(request)
+
+        assert user.has_perm("dcim.view_device") is True
+        assert user.has_perm("ipam.view_vlangroup") is True
+        assert user.has_perm("ipam.view_vlan") is False
+        assert ("view", VLAN) in view.required_object_permissions["POST"]
+        assert view.check_object_permissions("POST")[0] is False
+
+        response = view.post(request)
+
+        assert response.status_code == 403
+
     def test_returns_400_when_no_device_id(self):
         """Returns 400 when no device_id provided."""
         import json

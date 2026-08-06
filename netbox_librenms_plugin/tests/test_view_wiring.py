@@ -484,17 +484,34 @@ class TestGatedViewsResolveThroughRestrictedQuerysets:
         """Return {(label, class, line)} for gated classes in *tree* that resolve by raw pk."""
         import ast
 
+        def _call_chain(node):
+            """Yield calls in a queryset receiver chain, excluding arguments and filters."""
+            cur = node
+            while True:
+                if isinstance(cur, ast.Call):
+                    yield cur
+                    if not isinstance(cur.func, ast.Attribute):
+                        return
+                    cur = cur.func.value
+                elif isinstance(cur, ast.Attribute):
+                    cur = cur.value
+                else:
+                    return
+
         def _is_scoped(node):
             """Whether the queryset came from restricted_queryset(...) / .restrict(...)."""
             # Accepts the chained form too: self.restricted_queryset(Module).select_related(...).
             return any(
-                isinstance(inner, ast.Call) and getattr(inner.func, "attr", "") in ("restricted_queryset", "restrict")
-                for inner in ast.walk(node)
+                getattr(call.func, "attr", "") in ("restricted_queryset", "restrict") for call in _call_chain(node)
             )
 
         def _has_scoped_relationship_filter(call):
             """Whether an ``__in`` relationship value is a restricted queryset."""
-            return any(kw.arg and kw.arg.endswith("__in") and _is_scoped(kw.value) for kw in call.keywords)
+            return any(
+                kw.arg and kw.arg.endswith("__in") and _is_scoped(kw.value)
+                for chain_call in _call_chain(call)
+                for kw in chain_call.keywords
+            )
 
         def _through_manager(node):
             """Whether *node* is an unscoped ``<Model>.objects`` chain."""
@@ -545,7 +562,7 @@ class TestGatedViewsResolveThroughRestrictedQuerysets:
                 if not isinstance(sub, ast.Call):
                     continue
                 if getattr(sub.func, "id", None) == "get_object_or_404":
-                    if not (sub.args and _is_scoped(sub.args[0])):
+                    if not (sub.args and (_is_scoped(sub.args[0]) or _has_scoped_relationship_filter(sub.args[0]))):
                         offenders.add((label, node.name, sub.lineno))
                     continue
                 if not isinstance(sub.func, ast.Attribute) or sub.func.attr not in cls.RAW_TERMINALS:
@@ -627,6 +644,34 @@ class TestGatedViewsResolveThroughRestrictedQuerysets:
             "    required_object_permissions = {'POST': []}\n"
             "    def post(self, request, pk):\n"
             "        return get_object_or_404(self.restricted_queryset(Device), pk=pk)\n"
+        )
+        assert not self._scan_tree(ast.parse(source), "<fixture>")
+
+    def test_the_scan_rejects_an_unrelated_scope_in_a_primary_queryset(self):
+        """A nested scope call must not bless get_object_or_404's unscoped queryset."""
+        import ast
+
+        source = (
+            "class V:\n"
+            "    required_object_permissions = {'POST': []}\n"
+            "    def post(self, request, pk):\n"
+            "        return get_object_or_404(\n"
+            "            Interface.objects.filter(audit=self.restricted_queryset(Device).count()), pk=remote_pk\n"
+            "        )\n"
+        )
+        assert self._scan_tree(ast.parse(source), "<fixture>"), "an unrelated scope call must not hide a raw lookup"
+
+    def test_the_scan_accepts_a_primary_relationship_scope(self):
+        """An owner ``__in`` filter from a restricted queryset scopes the primary lookup."""
+        import ast
+
+        source = (
+            "class V:\n"
+            "    required_object_permissions = {'POST': []}\n"
+            "    def post(self, request, pk):\n"
+            "        return get_object_or_404(\n"
+            "            Interface.objects.filter(device__in=self.restricted_queryset(Device)), pk=remote_pk\n"
+            "        )\n"
         )
         assert not self._scan_tree(ast.parse(source), "<fixture>")
 

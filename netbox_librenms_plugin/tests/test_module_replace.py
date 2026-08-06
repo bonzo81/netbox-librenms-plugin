@@ -534,6 +534,7 @@ class TestReplaceModuleView:
         conflict.delete.assert_called_once()
         installed.delete.assert_called_once()
         new_module.save.assert_called_once()
+        mock_module_cls.objects.restrict.assert_any_call(request.user, "delete")
         mock_msg.info.assert_called_once()
         mock_msg.success.assert_called_once()
 

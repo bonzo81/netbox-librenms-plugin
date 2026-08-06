@@ -1828,7 +1828,8 @@ class ReplaceModuleView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjectP
                 conflict_module = None
                 if serial:
                     conflict_qs = (
-                        Module.objects.select_for_update()
+                        self.restricted_queryset(Module, "delete")
+                        .select_for_update(of=("self",))
                         .filter(serial=serial)
                         .exclude(pk=installed_module.pk)
                         .select_related("module_type", "module_bay", "device")

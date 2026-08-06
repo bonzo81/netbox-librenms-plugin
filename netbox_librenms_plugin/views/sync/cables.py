@@ -172,11 +172,13 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libre
             # Honour user's VC member selection: if the selected device_id differs from
             # the cached interface's device, look up the same port name on that device.
             selected_device_id = interface.get("device_id")
-            if (
-                selected_device_id
-                and str(local_interface.device_id) != str(selected_device_id)
-                and self._selected_device_is_in_page_context(selected_device_id)
-            ):
+            if selected_device_id and str(local_interface.device_id) != str(selected_device_id):
+                if not self._selected_device_is_in_page_context(selected_device_id):
+                    logger.debug(
+                        "Selected device %s is outside the cable-sync page context; rejecting cable creation",
+                        selected_device_id,
+                    )
+                    return {"status": "invalid", "interface": display_name}
                 port_name = link_data.get("local_port") or local_interface.name
                 try:
                     local_interface = self.restricted_queryset(Interface).get(
