@@ -23,6 +23,8 @@ from netbox_librenms_plugin.tests.conftest import (
     persist_test_server_mapping,
 )
 
+pytestmark = pytest.mark.usefixtures("configured_default_librenms_server")
+
 
 # ---------------------------------------------------------------------------
 # Helpers
