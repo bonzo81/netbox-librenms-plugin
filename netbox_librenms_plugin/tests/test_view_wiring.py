@@ -8,6 +8,7 @@ hierarchies and attribute presence.
 import json
 import os
 from pathlib import Path
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -506,10 +507,11 @@ class TestGatedViewsResolveThroughRestrictedQuerysets:
             )
 
         def _has_scoped_relationship_filter(call):
-            """Whether an ``__in`` relationship value is a restricted queryset."""
+            """Whether a positive lookup constrains ``__in`` to a restricted queryset."""
             return any(
                 kw.arg and kw.arg.endswith("__in") and _is_scoped(kw.value)
                 for chain_call in _call_chain(call)
+                if getattr(chain_call.func, "attr", "") in cls.RAW_TERMINALS
                 for kw in chain_call.keywords
             )
 
@@ -674,6 +676,20 @@ class TestGatedViewsResolveThroughRestrictedQuerysets:
             "        )\n"
         )
         assert not self._scan_tree(ast.parse(source), "<fixture>")
+
+    def test_the_scan_rejects_a_negated_relationship_scope(self):
+        """An exclusion of permitted owners selects precisely the objects outside the grant."""
+        import ast
+
+        source = (
+            "class V:\n"
+            "    required_object_permissions = {'POST': []}\n"
+            "    def post(self, request, pk):\n"
+            "        return get_object_or_404(\n"
+            "            Interface.objects.exclude(device__in=self.restricted_queryset(Device)), pk=remote_pk\n"
+            "        )\n"
+        )
+        assert self._scan_tree(ast.parse(source), "<fixture>"), "a negated permission scope must be flagged"
 
     @pytest.mark.parametrize(
         "lookup",
@@ -1127,6 +1143,200 @@ class TestGatedViewsRefuseOutOfScopeObjects:
 
         module.refresh_from_db()
         assert module.serial == "ORIGINAL"
+
+    def test_module_replace_refuses_to_delete_the_target_outside_the_delete_grant(self):
+        """Replace deletes its target, so change access alone must not authorize the operation."""
+        from dcim.models import Device, Interface, Module
+        from django.core.cache import cache
+        from django.http import Http404
+
+        from netbox_librenms_plugin.tests.conftest import make_device, make_module_bay, make_module_type
+        from netbox_librenms_plugin.views.sync.modules import ReplaceModuleView
+
+        device = make_device("scope-replace-target")
+        module_type = make_module_type("MT-scope-replace-target")
+        target = Module.objects.create(
+            device=device,
+            module_bay=make_module_bay(device, "Slot 1"),
+            module_type=module_type,
+            serial="OLD-TARGET",
+        )
+        decoy = Module.objects.create(
+            device=device,
+            module_bay=make_module_bay(device, "Slot 2"),
+            module_type=module_type,
+        )
+        user = self._user(
+            "scope-replace-target",
+            [
+                (Device, "view", {"pk": device.pk}),
+                (Module, "add", None),
+                (Module, "change", {"pk": target.pk}),
+                (Module, "delete", {"pk": decoy.pk}),
+                (Interface, "add", None),
+                (Interface, "change", None),
+                (Interface, "delete", None),
+            ],
+        )
+        view = ReplaceModuleView()
+        view._librenms_api = MagicMock(server_key="default")
+        request = self._request(
+            user,
+            {"module_id": str(target.pk), "ent_index": "100"},
+        )
+        view.setup(request)
+        cache_key = view.get_cache_key(device, "inventory", server_key="default")
+        cache.set(
+            cache_key,
+            {
+                "inventory": [
+                    {
+                        "entPhysicalIndex": 100,
+                        "entPhysicalModelName": module_type.model,
+                        "entPhysicalSerialNum": "NEW-TARGET",
+                    }
+                ],
+                "librenms_id": 1,
+            },
+        )
+        try:
+            with pytest.raises(Http404):
+                view.post(request, pk=device.pk)
+        finally:
+            cache.delete(cache_key)
+
+        target.refresh_from_db()
+        assert target.serial == "OLD-TARGET"
+        assert Module.objects.filter(module_bay=target.module_bay).count() == 1
+
+    def test_module_replace_fails_closed_on_a_hidden_serial_conflict(self):
+        """An existing serial outside delete scope must block replacement, not become a duplicate."""
+        from dcim.models import Device, Interface, Module
+        from django.core.cache import cache
+
+        from netbox_librenms_plugin.tests.conftest import make_device, make_module_bay, make_module_type
+        from netbox_librenms_plugin.tests.view_test_helpers import message_texts
+        from netbox_librenms_plugin.views.sync.modules import ReplaceModuleView
+
+        device = make_device("scope-replace-conflict")
+        other_device = make_device("scope-replace-hidden")
+        module_type = make_module_type("MT-scope-replace-conflict")
+        target = Module.objects.create(
+            device=device,
+            module_bay=make_module_bay(device, "Slot 1"),
+            module_type=module_type,
+            serial="OLD-CONFLICT",
+        )
+        hidden = Module.objects.create(
+            device=other_device,
+            module_bay=make_module_bay(other_device, "Secret Slot"),
+            module_type=module_type,
+            serial="INCOMING-CONFLICT",
+        )
+        user = self._user(
+            "scope-replace-conflict",
+            [
+                (Device, "view", {"pk": device.pk}),
+                (Module, "add", None),
+                (Module, "change", {"pk": target.pk}),
+                (Module, "delete", {"pk": target.pk}),
+                (Interface, "add", None),
+                (Interface, "change", None),
+                (Interface, "delete", None),
+            ],
+        )
+        view = ReplaceModuleView()
+        view._librenms_api = MagicMock(server_key="default")
+        request = self._request(user, {"module_id": str(target.pk), "ent_index": "100"})
+        view.setup(request)
+        cache_key = view.get_cache_key(device, "inventory", server_key="default")
+        cache.set(
+            cache_key,
+            {
+                "inventory": [
+                    {
+                        "entPhysicalIndex": 100,
+                        "entPhysicalModelName": module_type.model,
+                        "entPhysicalSerialNum": hidden.serial,
+                    }
+                ],
+                "librenms_id": 1,
+            },
+        )
+        try:
+            view.post(request, pk=device.pk)
+        finally:
+            cache.delete(cache_key)
+
+        target.refresh_from_db()
+        hidden.refresh_from_db()
+        assert target.serial == "OLD-CONFLICT"
+        assert hidden.serial == "INCOMING-CONFLICT"
+        assert Module.objects.filter(serial="INCOMING-CONFLICT").count() == 1
+        assert any("cannot remove" in text for text in message_texts(request, "error"))
+
+    def test_module_preview_does_not_expose_a_hidden_serial_conflict(self):
+        """The preview must not render the location or id of a conflict outside view scope."""
+        from dcim.models import Device, Module
+        from django.core.cache import cache
+
+        from netbox_librenms_plugin.tests.conftest import make_device, make_module_bay, make_module_type
+        from netbox_librenms_plugin.views.sync.modules import ModuleMismatchPreviewView
+
+        device = make_device("scope-preview-target")
+        hidden_device = make_device("scope-preview-hidden")
+        module_type = make_module_type("MT-scope-preview")
+        target = Module.objects.create(
+            device=device,
+            module_bay=make_module_bay(device, "Visible Slot"),
+            module_type=module_type,
+            serial="OLD-PREVIEW",
+        )
+        hidden = Module.objects.create(
+            device=hidden_device,
+            module_bay=make_module_bay(hidden_device, "Hidden Slot"),
+            module_type=module_type,
+            serial="INCOMING-PREVIEW",
+        )
+        user = self._user(
+            "scope-preview-conflict",
+            [
+                (Device, "view", {"pk": device.pk}),
+                (Module, "view", {"pk": target.pk}),
+            ],
+        )
+        view = ModuleMismatchPreviewView()
+        view._librenms_api = MagicMock(server_key="default")
+        request = self._request(
+            user,
+            {"module_id": str(target.pk), "ent_index": "100"},
+            method="get",
+        )
+        view.setup(request)
+        cache_key = view.get_cache_key(device, "inventory", server_key="default")
+        cache.set(
+            cache_key,
+            {
+                "inventory": [
+                    {
+                        "entPhysicalIndex": 100,
+                        "entPhysicalModelName": module_type.model,
+                        "entPhysicalSerialNum": hidden.serial,
+                    }
+                ],
+                "librenms_id": 1,
+            },
+        )
+        try:
+            response = view.get(request, pk=device.pk)
+        finally:
+            cache.delete(cache_key)
+
+        html = response.content.decode()
+        assert hidden_device.name not in html
+        assert hidden.module_bay.name not in html
+        assert f'name="conflict_module_id" value="{hidden.pk}"' not in html
+        assert "cannot view" in html
 
     def test_site_location_push_refuses_a_site_outside_the_grant(self):
         """SyncSiteLocationView is gated by the plugin write permission alone and takes the site pk from the POST body."""

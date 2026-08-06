@@ -404,15 +404,16 @@ class SingleVlanGroupVerifyView(LibreNMSPermissionMixin, NetBoxObjectPermissionM
             return JsonResponse({"status": "error", "message": "Invalid VID"}, status=400)
 
         # Build lookup for the selected group
+        visible_vlans = self.restricted_queryset(VLAN)
         if vlan_group_id:
             vlan_group = self.restrict_object_or_404(VLANGroup, pk=vlan_group_id)
             # Get VLANs in selected group + global VLANs
-            group_vids = set(VLAN.objects.filter(group=vlan_group).values_list("vid", flat=True))
-            global_vids = set(VLAN.objects.filter(group__isnull=True).values_list("vid", flat=True))
+            group_vids = set(visible_vlans.filter(group=vlan_group).values_list("vid", flat=True))
+            global_vids = set(visible_vlans.filter(group__isnull=True).values_list("vid", flat=True))
             available_vids = group_vids | global_vids
         else:
             # No group selected - use global VLANs only
-            available_vids = set(VLAN.objects.filter(group__isnull=True).values_list("vid", flat=True))
+            available_vids = set(visible_vlans.filter(group__isnull=True).values_list("vid", flat=True))
 
         # Compute whether VID is missing from selected group
         is_missing = vid not in available_vids
@@ -533,12 +534,13 @@ class VerifyVlanSyncGroupView(LibreNMSPermissionMixin, NetBoxObjectPermissionMix
             return JsonResponse({"status": "error", "message": "Invalid VID"}, status=400)
 
         # Check if VLAN exists in the selected group (or globally)
+        visible_vlans = self.restricted_queryset(VLAN)
         if vlan_group_id:
             vlan_group = self.restrict_object_or_404(VLANGroup, pk=vlan_group_id)
-            netbox_vlan = VLAN.objects.filter(vid=vid, group=vlan_group).first()
+            netbox_vlan = visible_vlans.filter(vid=vid, group=vlan_group).first()
         else:
             # No group = global VLANs
-            netbox_vlan = VLAN.objects.filter(vid=vid, group__isnull=True).first()
+            netbox_vlan = visible_vlans.filter(vid=vid, group__isnull=True).first()
 
         exists_in_netbox = bool(netbox_vlan)
         name_matches = netbox_vlan.name == librenms_name if netbox_vlan else False

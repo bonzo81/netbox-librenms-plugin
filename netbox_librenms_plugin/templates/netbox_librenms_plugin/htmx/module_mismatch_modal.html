@@ -68,6 +68,12 @@
         <em>Move</em> will update its location to this bay instead of creating a new entry.
     </small>
 </div>
+{% elif serial_conflict_hidden %}
+<div class="alert alert-warning py-2 mb-3">
+    <i class="mdi mdi-alert me-1"></i>
+    <strong>Serial conflict:</strong> This serial is assigned to a module you cannot view.
+    Ask an administrator to resolve the conflict.
+</div>
 {% elif serial_conflict_ambiguous %}
 <div class="alert alert-warning py-2 mb-3">
     <i class="mdi mdi-alert me-1"></i>
@@ -119,7 +125,7 @@
     {% endif %}
 
     {# Replace: delete current + install fresh from LibreNMS data #}
-    {% if installed_module and not serial_conflict_ambiguous %}
+    {% if installed_module and not serial_conflict_ambiguous and not serial_conflict_hidden %}
     <form method="post"
           action="{% url 'plugins:netbox_librenms_plugin:replace_module' pk=device_pk %}"
           hx-post="{% url 'plugins:netbox_librenms_plugin:replace_module' pk=device_pk %}"

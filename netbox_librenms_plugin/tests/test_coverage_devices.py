@@ -765,6 +765,44 @@ class TestSingleVlanGroupVerifyView:
 
         assert response.status_code == 403
 
+    @pytest.mark.django_db
+    def test_a_hidden_vlan_is_not_reported_as_available(self):
+        """A constrained VLAN grant must not disclose another VLAN through its VID."""
+        import json
+
+        from dcim.models import Device
+        from ipam.models import VLAN, VLANGroup
+
+        from netbox_librenms_plugin.tests.view_test_helpers import grant
+        from netbox_librenms_plugin.views.object_sync.devices import SingleVlanGroupVerifyView
+
+        device = _make_real_device("vg-hidden")
+        group = VLANGroup.objects.create(name="Grp-vg-hidden", slug="grp-vg-hidden")
+        visible = VLAN.objects.create(vid=10, name="visible", group=group)
+        hidden = VLAN.objects.create(vid=20, name="hidden", group=group)
+        user = _user_with_perms(
+            "vg-hidden",
+            [("view", Device), ("view", VLANGroup)],
+        )
+        user = grant(user, "view", VLAN, constraints={"pk": visible.pk})
+        request = _real_verify_request(
+            {
+                "device_id": device.pk,
+                "vid": str(hidden.vid),
+                "vlan_group_id": group.pk,
+                "vlan_type": "U",
+            },
+            "vg-hidden-request",
+        )
+        request.user = user
+        view = SingleVlanGroupVerifyView()
+        view.setup(request)
+
+        response = view.post(request)
+
+        assert response.status_code == 200
+        assert json.loads(response.content)["is_missing"] is True
+
     def test_returns_400_when_no_device_id(self):
         """Returns 400 when no device_id provided."""
         import json
@@ -1010,7 +1048,7 @@ class TestVerifyVlanSyncGroupView:
         view = self._make_view()
         request = MagicMock()
         request.body = json.dumps({"vid": "20", "name": "vlan20"}).encode()
-        response = view.post(request)
+        response = _post(view, request)
 
         assert isinstance(response, JsonResponse)
         data = json.loads(response.content)
@@ -1018,6 +1056,36 @@ class TestVerifyVlanSyncGroupView:
         assert data["status"] == "success"
         assert data["exists_in_netbox"] is False
         assert data["css_class"]  # a real CSS class was computed
+
+    @pytest.mark.django_db
+    def test_a_hidden_vlan_is_not_returned_from_the_group_lookup(self):
+        """The standalone VLAN verifier must apply the constrained VLAN grant too."""
+        import json
+
+        from ipam.models import VLAN, VLANGroup
+
+        from netbox_librenms_plugin.tests.view_test_helpers import grant
+        from netbox_librenms_plugin.views.object_sync.devices import VerifyVlanSyncGroupView
+
+        group = VLANGroup.objects.create(name="Grp-sync-hidden", slug="grp-sync-hidden")
+        visible = VLAN.objects.create(vid=10, name="visible", group=group)
+        hidden = VLAN.objects.create(vid=20, name="hidden", group=group)
+        user = _user_with_perms("sync-hidden", [("view", VLANGroup)])
+        user = grant(user, "view", VLAN, constraints={"pk": visible.pk})
+        request = _real_verify_request(
+            {"vid": str(hidden.vid), "vlan_group_id": group.pk, "name": hidden.name},
+            "sync-hidden-request",
+        )
+        request.user = user
+        view = VerifyVlanSyncGroupView()
+        view.setup(request)
+
+        response = view.post(request)
+
+        data = json.loads(response.content)
+        assert response.status_code == 200
+        assert data["exists_in_netbox"] is False
+        assert data["name_matches"] is False
 
 
 class TestSaveVlanGroupOverridesView:

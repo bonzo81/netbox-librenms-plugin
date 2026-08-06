@@ -158,6 +158,14 @@ class _SerialConflictAmbiguous(Exception):
         self.serial = serial
 
 
+class _SerialConflictUnavailable(Exception):
+    """Abort replacement when a serial conflict is outside the caller's delete scope."""
+
+    def __init__(self, serial):
+        super().__init__(serial)
+        self.serial = serial
+
+
 def _get_sync_device_for_inventory(device, server_key):
     """Return the VC sync device used for module inventory cache keys."""
     return get_librenms_sync_device(device, server_key=server_key) or device
@@ -1631,15 +1639,18 @@ class ModuleMismatchPreviewView(
         # Check whether the LibreNMS serial already exists at a different location
         serial_conflict = None
         serial_conflict_ambiguous = False
+        serial_conflict_hidden = False
         if librenms_serial:
-            conflict_qs = (
-                Module.objects.filter(serial=librenms_serial)
-                .exclude(pk=installed_module.pk)
-                .select_related("module_type", "module_bay", "device")
-            )
+            conflict_qs = Module.objects.filter(serial=librenms_serial).exclude(pk=installed_module.pk)
             conflict_count = conflict_qs.count()
             if conflict_count == 1:
-                serial_conflict = conflict_qs.first()
+                serial_conflict = (
+                    self.restricted_queryset(Module)
+                    .filter(pk__in=conflict_qs)
+                    .select_related("module_type", "module_bay", "device")
+                    .first()
+                )
+                serial_conflict_hidden = serial_conflict is None
             elif conflict_count > 1:
                 serial_conflict_ambiguous = True
 
@@ -1659,6 +1670,7 @@ class ModuleMismatchPreviewView(
                 "serial_mismatch": serial_mismatch,
                 "serial_conflict": serial_conflict,
                 "serial_conflict_ambiguous": serial_conflict_ambiguous,
+                "serial_conflict_hidden": serial_conflict_hidden,
                 "ent_index": ent_index_int,
                 "server_key": server_key or "",
                 "selected_device_id": target_device.pk,
@@ -1764,6 +1776,7 @@ class ReplaceModuleView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjectP
             select_related=("module_type", "module_bay"),
             pk=module_id,
             device=target_device,
+            pk__in=self.restricted_queryset(Module, "delete").values("pk"),
         )
 
         sync_device = _get_sync_device_for_inventory(target_device, server_key)
@@ -1806,7 +1819,11 @@ class ReplaceModuleView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjectP
                 installed_module = (
                     self.restricted_queryset(Module, "change")
                     .select_for_update(of=("self",))
-                    .filter(pk=module_id, device=target_device)
+                    .filter(
+                        pk=module_id,
+                        device=target_device,
+                        pk__in=self.restricted_queryset(Module, "delete").values("pk"),
+                    )
                     .select_related("module_type", "module_bay")
                     .first()
                 )
@@ -1835,11 +1852,14 @@ class ReplaceModuleView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjectP
                         .select_related("module_type", "module_bay", "device")
                     )
                     locked_conflicts = list(conflict_qs)
-                    if len(locked_conflicts) > 1:
+                    conflict_count = Module.objects.filter(serial=serial).exclude(pk=installed_module.pk).count()
+                    if conflict_count > 1:
                         # Roll back and surface a clear error — we don't want to
                         # guess which of N conflicts to remove.
                         raise _SerialConflictAmbiguous(serial)
-                    if len(locked_conflicts) == 1:
+                    if conflict_count != len(locked_conflicts):
+                        raise _SerialConflictUnavailable(serial)
+                    if conflict_count == 1:
                         conflict_module = locked_conflicts[0]
 
                 # Remove the serial-conflicting module from its current location.
@@ -1912,6 +1932,12 @@ class ReplaceModuleView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjectP
                 request,
                 f"Serial '{exc.serial}' is assigned to multiple modules; cannot determine which to remove. "
                 "Please resolve the conflict manually.",
+            )
+        except _SerialConflictUnavailable as exc:
+            messages.error(
+                request,
+                f"Serial '{exc.serial}' is assigned to a module you cannot remove. "
+                "Ask an administrator to resolve the conflict.",
             )
         except (ValidationError, IntegrityError) as e:
             error_msg = str(e)

@@ -167,8 +167,7 @@ class TestModuleMismatchPreviewView:
         ):
             mock_cache.get.return_value = {"inventory": cached, "librenms_id": "test"}
             mock_module_cls.objects.restrict.return_value = mock_module_cls.objects
-            mock_module_cls.objects.filter.return_value.exclude.return_value.select_related.return_value.count.return_value = 0
-            mock_module_cls.objects.filter.return_value.exclude.return_value.select_related.return_value.first.return_value = None
+            mock_module_cls.objects.filter.return_value.exclude.return_value.count.return_value = 0
             resp = view.get(request, pk=24)
 
         assert resp.status_code == 200
@@ -209,8 +208,8 @@ class TestModuleMismatchPreviewView:
         ):
             mock_cache.get.return_value = {"inventory": cached, "librenms_id": "test"}
             mock_module_cls.objects.restrict.return_value = mock_module_cls.objects
-            mock_module_cls.objects.filter.return_value.exclude.return_value.select_related.return_value.count.return_value = 1
-            mock_module_cls.objects.filter.return_value.exclude.return_value.select_related.return_value.first.return_value = conflict_module
+            mock_module_cls.objects.filter.return_value.exclude.return_value.count.return_value = 1
+            mock_module_cls.objects.filter.return_value.select_related.return_value.first.return_value = conflict_module
             view.get(request, pk=24)
 
         ctx = mock_render.call_args[0][2]
@@ -462,6 +461,7 @@ class TestReplaceModuleView:
             )
             mock_module_cls.objects.restrict.return_value = mock_module_cls.objects
             mock_module_cls.objects.select_for_update.side_effect = [installed_chain, conflict_chain]
+            mock_module_cls.objects.filter.return_value.exclude.return_value.count.return_value = 0
 
             _post(view, request, pk=24)
 
@@ -527,6 +527,7 @@ class TestReplaceModuleView:
             )
             mock_module_cls.objects.restrict.return_value = mock_module_cls.objects
             mock_module_cls.objects.select_for_update.side_effect = [installed_chain, conflict_chain]
+            mock_module_cls.objects.filter.return_value.exclude.return_value.count.return_value = 1
 
             _post(view, request, pk=24)
 
