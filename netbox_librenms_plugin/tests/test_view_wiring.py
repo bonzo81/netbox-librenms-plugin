@@ -888,6 +888,10 @@ class TestImportMappingPermissionOrder:
             for assignment in ast.walk(tree)
             if isinstance(assignment, ast.Assign)
             and any(
+                getattr(target, "id", getattr(target, "attr", "")) == "required_object_permissions"
+                for target in assignment.targets
+            )
+            and any(
                 isinstance(node, ast.Tuple)
                 and len(node.elts) == 2
                 and isinstance(node.elts[0], ast.Constant)
