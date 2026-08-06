@@ -883,17 +883,21 @@ class TestImportMappingPermissionOrder:
             and node.func.value.args
             and getattr(node.func.value.args[0], "id", "") == target_model
         )
-        declared_read = any(
-            isinstance(node, ast.Tuple)
-            and len(node.elts) == 2
-            and isinstance(node.elts[0], ast.Constant)
-            and node.elts[0].value == "view"
-            and getattr(node.elts[1], "id", "") == target_model
-            for node in ast.walk(tree)
+        declaration_line = min(
+            assignment.lineno
+            for assignment in ast.walk(tree)
+            if isinstance(assignment, ast.Assign)
+            and any(
+                isinstance(node, ast.Tuple)
+                and len(node.elts) == 2
+                and isinstance(node.elts[0], ast.Constant)
+                and node.elts[0].value == "view"
+                and getattr(node.elts[1], "id", "") == target_model
+                for node in ast.walk(assignment.value)
+            )
         )
 
-        assert declared_read
-        assert gate_line < target_lookup_line
+        assert declaration_line < gate_line < target_lookup_line
 
 
 class TestScopedRowLocks:

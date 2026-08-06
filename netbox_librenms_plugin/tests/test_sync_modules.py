@@ -4410,6 +4410,7 @@ class TestInstallModuleViewBehavior:
             view.post(request, pk=24)
 
         mock_msg.error.assert_called_once_with(request, "Module bay no longer exists.")
+        mock_qs.filter.assert_called_once_with(pk=10, device=device)
         mock_redirect.assert_called_once()
 
     def test_successful_install(self):

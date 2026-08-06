@@ -619,7 +619,10 @@ class InstallModuleView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
             with transaction.atomic():
                 # Re-fetch bay under lock to prevent TOCTOU race with concurrent installs.
                 locked_bay = (
-                    self.restricted_queryset(ModuleBay).select_for_update(of=("self",)).filter(pk=module_bay_id).first()
+                    self.restricted_queryset(ModuleBay)
+                    .select_for_update(of=("self",))
+                    .filter(pk=module_bay_id, device=target_device)
+                    .first()
                 )
                 if not locked_bay:
                     messages.error(request, "Module bay no longer exists.")

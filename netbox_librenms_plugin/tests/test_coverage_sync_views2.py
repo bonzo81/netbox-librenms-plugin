@@ -1349,6 +1349,12 @@ class TestSyncIPAddressesViewHelpers:
 
         assert view.get_vrf_selection(req, "10.0.0.1") is None
 
+    def test_get_vrf_selection_invalid_id_returns_none(self):
+        req = _make_request(post_data={"vrf_10.0.0.1": "not-an-id"})
+        view = make_view(_sync_ip_view_class(), req)
+
+        assert view.get_vrf_selection(req, "10.0.0.1") is None
+
     def test_get_vrf_selection_returns_none_for_a_vrf_outside_the_grant(self):
         """The VRF id is posted by the client, so a constrained grant must not resolve it."""
         from ipam.models import VRF

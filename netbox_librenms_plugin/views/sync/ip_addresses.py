@@ -74,7 +74,7 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
         if vrf_id:
             try:
                 return self.restricted_queryset(VRF).get(pk=vrf_id)
-            except VRF.DoesNotExist:
+            except (VRF.DoesNotExist, TypeError, ValueError):
                 pass
 
         return None
