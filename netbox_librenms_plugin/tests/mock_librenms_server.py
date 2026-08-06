@@ -10,11 +10,14 @@ manager directly:
         ...
 """
 
+import argparse
+import copy
 import json
 import threading
 from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import parse_qs, urlparse
+from pathlib import Path
+from urllib.parse import parse_qs, quote, urlparse
 
 from netbox_librenms_plugin.data_shapes.envelope import unwrap_response
 
@@ -32,7 +35,8 @@ class _LibreNMSHandler(BaseHTTPRequestHandler):
     """Request handler that dispatches to registered route responses."""
 
     def log_message(self, format, *args):  # noqa: A002
-        pass  # Suppress request logs in tests
+        if not self.server.quiet:  # type: ignore[attr-defined]
+            super().log_message(format, *args)
 
     def _send_json(self, status, body):
         data = json.dumps(body).encode()
@@ -54,6 +58,16 @@ class _LibreNMSHandler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         path = parsed.path
         query = parsed.query
+
+        if path == "/healthz":
+            self._send_json(200, {"status": "ok"})
+            return
+
+        api_token = self.server.api_token  # type: ignore[attr-defined]
+        if api_token and self.headers.get("X-Auth-Token") != api_token:
+            self._send_json(401, {"status": "error", "message": "Unauthorized"})
+            return
+
         routes = self.server.routes  # type: ignore[attr-defined]
         request = {
             "method": method,
@@ -91,26 +105,27 @@ class _LibreNMSHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self._handle_request("GET")
 
-    def _read_json_body(self):
+    def _handle_request_with_body(self, method):
         length = int(self.headers.get("Content-Length", 0))
         raw_body = self.rfile.read(length) if length else b""
         try:
-            return json.loads(raw_body) if raw_body else None
+            body = json.loads(raw_body) if raw_body else None
         except (json.JSONDecodeError, UnicodeDecodeError):
-            return raw_body.decode(errors="replace")
+            body = raw_body.decode(errors="replace")
+        self._handle_request(method, body=body)
 
     def do_POST(self):
-        self._handle_request("POST", body=self._read_json_body())
+        self._handle_request_with_body("POST")
 
     def do_PATCH(self):
-        self._handle_request("PATCH", body=self._read_json_body())
+        self._handle_request_with_body("PATCH")
 
 
 class MockLibreNMSServer:
     """Wrap a simple HTTP mock server with route registration and context management."""
 
-    def __init__(self):
-        self._server = ThreadingHTTPServer(("127.0.0.1", 0), _LibreNMSHandler)
+    def __init__(self, host="127.0.0.1", port=0, *, api_token=None, quiet=True):
+        self._server = ThreadingHTTPServer((host, port), _LibreNMSHandler)
         # A real LibreNMS always serves /system, and the settings page reads it to report the
         # server version. Seed a default so a test only registers it to assert something
         # specific, and can still override it to simulate an unhealthy server.
@@ -118,11 +133,14 @@ class MockLibreNMSServer:
             "/api/v0/system": (200, {"status": "ok", "system": [{"local_ver": "24.1.0"}]}),
         }
         self._server.requests = []
+        self._server.api_token = api_token
+        self._server.quiet = quiet
         self.routes = self._server.routes  # expose on wrapper as documented
         self.requests = self._server.requests
         self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
-        _, port = self._server.server_address
-        self.url = f"http://127.0.0.1:{port}"
+        _, bound_port = self._server.server_address
+        client_host = "127.0.0.1" if host in ("", "0.0.0.0", "::") else host
+        self.url = f"http://{client_host}:{bound_port}"
 
     def register(self, path: str, body, status: int = 200, method: str | None = None):
         """Register a path response, optionally restricted to one HTTP method."""
@@ -297,6 +315,529 @@ class MockLibreNMSServer:
         self.register(f"/api/v0/inventory/{device_id}/all", _handler, method="GET")
 
 
+DEFAULT_STUB_RECORDINGS = (
+    "cisco-stackwise-3member",
+    "arcos-lag-transceivers",
+    "avocent-serial-ports",
+    "linux-host",
+    "linux-host-oob",
+    "linux-virtual-machine",
+)
+DEFAULT_RECORDINGS_DIR = Path(__file__).resolve().parents[1] / "data_shapes" / "recordings"
+
+
+def _unwrap_recorded_response(value):
+    """Return the JSON body from a recording response value."""
+    if isinstance(value, list) and len(value) == 2 and isinstance(value[0], int):
+        return value[1]
+    return value
+
+
+class LibreNMSStubServer(MockLibreNMSServer):
+    """Data-shape-backed LibreNMS API stub for the development container.
+
+    Recorded structural responses remain the source for device, inventory, port,
+    port-stack, transceiver, and serial-sensor data. The server derives the
+    instance-wide endpoints that data-shape capture does not record and keeps
+    device/location writes in memory until the process restarts.
+    """
+
+    def __init__(self, recordings, *, api_token, host="127.0.0.1", port=0, quiet=True):
+        super().__init__(host, port, api_token=api_token, quiet=quiet)
+        self._lock = threading.RLock()
+        self.devices = {}
+        self.ports_by_device = {}
+        self.inventory_by_device = {}
+        self.sensors = []
+        self.vlans = []
+        self.links_by_device = {}
+        self.locations = []
+        self._aliases = {}
+
+        recordings = list(recordings)
+        seen_device_ids = set()
+        for recording in recordings:
+            device_id = recording.get("device_id")
+            if device_id in seen_device_ids or device_id in self.devices:
+                self._server.server_close()
+                raise ValueError(f"Duplicate recording device_id {device_id}")
+            seen_device_ids.add(device_id)
+            self.load_recording(recording)
+            self._load_stub_recording(recording)
+
+        if not self.devices:
+            self._server.server_close()
+            raise ValueError("At least one recording with a device response is required")
+
+        self._next_device_id = max(self.devices) + 1
+        self._install_instance_routes()
+
+    @staticmethod
+    def _find_response(recording, route):
+        """Return the first recorded body whose request key has the given route."""
+        for key, value in recording.get("responses", {}).items():
+            request_route = key.partition(" ")[2].split("?", 1)[0]
+            if request_route == route:
+                return _unwrap_recorded_response(value)
+        return None
+
+    @staticmethod
+    def _normalise_device(device, device_id):
+        """Add deterministic fields that the discovery screens require."""
+        normalised = copy.deepcopy(device) if isinstance(device, dict) else {}
+        normalised["device_id"] = device_id
+        normalised["hostname"] = normalised.get("hostname") or f"device-{device_id}.example.test"
+        normalised["sysName"] = normalised.get("sysName") or normalised["hostname"].split(".", 1)[0]
+        normalised["ip"] = normalised.get("ip") or f"198.51.100.{device_id % 254 + 1}"
+        normalised["hardware"] = normalised.get("hardware") or f"MODEL-STUB-{device_id}"
+        normalised["os"] = normalised.get("os") or "stub-os"
+        normalised["serial"] = normalised.get("serial") or f"SN-STUB-{device_id}"
+        normalised["type"] = normalised.get("type") or "network"
+        normalised["location"] = normalised.get("location") or "Lab"
+        normalised["location_id"] = normalised.get("location_id") or 1
+        status = normalised.get("status", 1)
+        normalised["status"] = 1 if status in (True, 1, "1", "up") else 0
+        normalised["disabled"] = int(bool(normalised.get("disabled", 0)))
+        normalised["ignore"] = int(bool(normalised.get("ignore", 0)))
+        return normalised
+
+    @staticmethod
+    def _add_approximate_vlans(ports):
+        """Add a small VLAN scenario when a recording contains no VLAN data."""
+        prepared = copy.deepcopy(ports) if isinstance(ports, list) else []
+        if any(port.get("ifVlan") not in (None, "", 0, "0") or port.get("vlans") for port in prepared):
+            return prepared
+
+        candidates = [
+            port
+            for port in prepared
+            if isinstance(port, dict)
+            and port.get("port_id") is not None
+            and port.get("ifType") in ("ethernetCsmacd", "ieee8023adLag")
+        ]
+        if not candidates:
+            return prepared
+
+        candidates[0]["ifVlan"] = 100
+        candidates[0]["ifTrunk"] = 0
+        candidates[0]["vlans"] = [{"vlan": 100, "untagged": 1, "state": "forwarding"}]
+        if len(candidates) > 1:
+            candidates[1]["ifVlan"] = 100
+            candidates[1]["ifTrunk"] = "dot1Q"
+            candidates[1]["vlans"] = [
+                {"vlan": 100, "untagged": 1, "state": "forwarding"},
+                {"vlan": 200, "untagged": 0, "state": "forwarding"},
+            ]
+        return prepared
+
+    def _load_stub_recording(self, recording):
+        device_id = recording.get("device_id")
+        device_body = self._find_response(recording, f"/api/v0/devices/{device_id}")
+        raw_devices = device_body.get("devices") if isinstance(device_body, dict) else None
+        if not isinstance(raw_devices, list) or not raw_devices or not isinstance(raw_devices[0], dict):
+            return
+
+        device = self._normalise_device(raw_devices[0], device_id)
+        self.devices[device_id] = device
+
+        ports_body = self._find_response(recording, f"/api/v0/devices/{device_id}/ports")
+        recorded_ports = ports_body.get("ports") if isinstance(ports_body, dict) else []
+        ports = self._add_approximate_vlans(recorded_ports)
+        self.ports_by_device[device_id] = ports
+        normalised_ports_body = copy.deepcopy(ports_body) if isinstance(ports_body, dict) else {"status": "ok"}
+        normalised_ports_body["status"] = "ok"
+        normalised_ports_body["ports"] = ports
+        self.register(f"/api/v0/devices/{device_id}/ports", normalised_ports_body, method="GET")
+
+        inventory = []
+        seen_inventory = set()
+        for key, value in recording.get("responses", {}).items():
+            route = key.partition(" ")[2].split("?", 1)[0]
+            if route not in (f"/api/v0/inventory/{device_id}", f"/api/v0/inventory/{device_id}/all"):
+                continue
+            body = _unwrap_recorded_response(value)
+            items = body.get("inventory") if isinstance(body, dict) else None
+            for item in items if isinstance(items, list) else []:
+                if not isinstance(item, dict):
+                    continue
+                identity = (
+                    item.get("entPhysicalIndex"),
+                    item.get("entPhysicalClass"),
+                    item.get("entPhysicalName"),
+                )
+                if identity not in seen_inventory:
+                    seen_inventory.add(identity)
+                    inventory.append(copy.deepcopy(item))
+        self.inventory_by_device[device_id] = inventory
+
+        sensors_body = self._find_response(recording, "/api/v0/resources/sensors")
+        sensors = sensors_body.get("sensors") if isinstance(sensors_body, dict) else None
+        if not isinstance(sensors, list) and isinstance(sensors_body, dict):
+            sensors = sensors_body.get("resources")
+        if isinstance(sensors, list):
+            self.sensors.extend(copy.deepcopy(item) for item in sensors if isinstance(item, dict))
+
+        self._load_oob_controller(recording, device)
+
+    def _load_oob_controller(self, recording, host_device):
+        meta = recording.get("meta")
+        oob_id = meta.get("oob_id") if isinstance(meta, dict) else None
+        if not isinstance(oob_id, int) or isinstance(oob_id, bool):
+            return
+        if oob_id in self.devices:
+            raise ValueError(f"Duplicate recording device_id {oob_id}")
+
+        ports_body = self._find_response(recording, f"/api/v0/devices/{oob_id}/ports")
+        ports = ports_body.get("ports") if isinstance(ports_body, dict) else None
+        if not isinstance(ports, list):
+            raise ValueError(f"OOB recording for device_id {oob_id} has no ports response")
+
+        host_name = host_device.get("sysName") or host_device["hostname"].split(".", 1)[0]
+        controller = self._normalise_device(
+            {
+                "hostname": f"{host_name}-oob.example.test",
+                "sysName": f"{host_name}-oob",
+                "ip": f"198.51.100.{oob_id % 254 + 1}",
+                "hardware": "OOB Stub Controller",
+                "os": "idrac",
+                "serial": host_device["serial"],
+                "type": "management",
+                "location": host_device["location"],
+                "location_id": host_device["location_id"],
+                "status": 1,
+            },
+            oob_id,
+        )
+        self.devices[oob_id] = controller
+        self.ports_by_device[oob_id] = copy.deepcopy(ports)
+        self.inventory_by_device[oob_id] = []
+
+    def _install_instance_routes(self):
+        self._build_locations()
+        self._build_vlans()
+        self._build_links()
+
+        self.register(
+            "/api/v0/system",
+            {"status": "ok", "system": [{"version": "development-stub"}]},
+            method="GET",
+        )
+        self.register("/api/v0/devices", self._list_devices, method="GET")
+        self.register("/api/v0/devices", self._add_device, method="POST")
+        self.register("/api/v0/resources/locations", self._get_locations, method="GET")
+        self.register("/api/v0/locations", self._add_location, method="POST")
+        self.register(
+            "/api/v0/poller_group",
+            {
+                "status": "ok",
+                "get_poller_group": [{"id": 0, "group_name": "default", "descr": "Development stub"}],
+            },
+            method="GET",
+        )
+        self.register("/api/v0/resources/sensors", self._get_sensors, method="GET")
+        self.register("/api/v0/resources/vlans", self._get_vlans, method="GET")
+
+        for device_id in self.devices:
+            self._register_device_routes(device_id)
+
+    def _register_device_routes(self, device_id):
+        device = self.devices[device_id]
+        aliases = (device_id, device.get("hostname"), device.get("sysName"), device.get("ip"))
+        for alias in aliases:
+            if alias in (None, ""):
+                continue
+            alias_key = str(alias)
+            other_id = self._aliases.get(alias_key)
+            if other_id is not None and other_id != device_id:
+                raise ValueError(f"Duplicate device lookup alias {alias_key!r}")
+            self._aliases[alias_key] = device_id
+            self.register(
+                f"/api/v0/devices/{alias_key}",
+                self._device_info_handler(device_id),
+                method="GET",
+            )
+
+        self.register(
+            f"/api/v0/devices/{device_id}",
+            self._update_device_handler(device_id),
+            method="PATCH",
+        )
+        self.register(
+            f"/api/v0/devices/{device_id}/links",
+            self._device_links_handler(device_id),
+            method="GET",
+        )
+        self.register(
+            f"/api/v0/devices/{device_id}/ip",
+            self._device_ips_handler(device_id),
+            method="GET",
+        )
+        self.register(
+            f"/api/v0/devices/{device_id}/ports",
+            {"status": "ok", "ports": self.ports_by_device.get(device_id, [])},
+            method="GET",
+        )
+        self.register(
+            f"/api/v0/inventory/{device_id}",
+            self._inventory_handler(device_id),
+            method="GET",
+        )
+        self.register(
+            f"/api/v0/inventory/{device_id}/all",
+            {"status": "ok", "inventory": self.inventory_by_device.get(device_id, [])},
+            method="GET",
+        )
+
+        for suffix, empty_body in (
+            ("port_stack", {"status": "ok", "mappings": []}),
+            ("transceivers", {"status": "ok", "transceivers": []}),
+        ):
+            route = f"/api/v0/devices/{device_id}/{suffix}"
+            if f"GET {route}" not in self.routes:
+                self.register(route, empty_body, method="GET")
+
+        ports = self.ports_by_device.get(device_id, [])
+        for port in ports:
+            port_id = port.get("port_id") if isinstance(port, dict) else None
+            if port_id is not None:
+                self.register(
+                    f"/api/v0/ports/{port_id}",
+                    {"status": "ok", "port": [port]},
+                    method="GET",
+                )
+
+    def _device_info_handler(self, device_id):
+        def _handler(method, path, query, headers, body):
+            with self._lock:
+                return 200, {"status": "ok", "devices": [copy.deepcopy(self.devices[device_id])], "count": 1}
+
+        return _handler
+
+    def _list_devices(self, method, path, query, headers, body):
+        with self._lock:
+            devices = [copy.deepcopy(self.devices[device_id]) for device_id in sorted(self.devices)]
+
+        filter_type = (query.get("type") or [None])[0]
+        filter_value = (query.get("query") or [None])[0]
+        if filter_type == "up":
+            devices = [device for device in devices if device.get("status") == 1]
+        elif filter_type == "down":
+            devices = [device for device in devices if device.get("status") == 0]
+        elif filter_type and filter_value:
+            field_by_type = {
+                "device_id": "device_id",
+                "hostname": "hostname",
+                "location_id": "location_id",
+                "os": "os",
+                "sysName": "sysName",
+                "type": "type",
+            }
+            field = field_by_type.get(filter_type)
+            if field:
+                needle = str(filter_value).casefold()
+                devices = [device for device in devices if needle in str(device.get(field, "")).casefold()]
+
+        return 200, {"status": "ok", "count": len(devices), "devices": devices}
+
+    def _add_device(self, method, path, query, headers, body):
+        if not isinstance(body, dict) or not isinstance(body.get("hostname"), str) or not body["hostname"].strip():
+            return 422, {"status": "error", "message": "hostname is required"}
+
+        hostname = body["hostname"].strip()
+        with self._lock:
+            if hostname in self._aliases:
+                return 409, {"status": "error", "message": "Device already exists"}
+            device_id = self._next_device_id
+            self._next_device_id += 1
+            device = self._normalise_device(
+                {
+                    "hostname": hostname,
+                    "sysName": hostname.split(".", 1)[0],
+                    "os": "stub-os",
+                    "hardware": "MODEL-STUB",
+                    "location": "Lab",
+                    "status": 1,
+                    "type": "network",
+                },
+                device_id,
+            )
+            self.devices[device_id] = device
+            self.ports_by_device[device_id] = []
+            self.inventory_by_device[device_id] = []
+            self.links_by_device[device_id] = []
+            self._register_device_routes(device_id)
+        return 200, {"status": "ok", "message": f"Device added successfully (#{device_id})"}
+
+    def _update_device_handler(self, device_id):
+        def _handler(method, path, query, headers, body):
+            fields = body.get("field") if isinstance(body, dict) else None
+            values = body.get("data") if isinstance(body, dict) else None
+            if not isinstance(fields, list) or not isinstance(values, list) or len(fields) != len(values):
+                return 422, {"status": "error", "message": "field and data must be equal-length lists"}
+            if any(not isinstance(field, str) or not field for field in fields):
+                return 422, {"status": "error", "message": "field names must be non-empty strings"}
+            with self._lock:
+                self.devices[device_id].update(zip(fields, values, strict=True))
+                self._register_device_routes(device_id)
+            return 200, {"status": "ok", "message": "Device fields updated"}
+
+        return _handler
+
+    def _device_ips_handler(self, device_id):
+        def _handler(method, path, query, headers, body):
+            device = self.devices[device_id]
+            ports = self.ports_by_device.get(device_id, [])
+            first_port = next((port for port in ports if port.get("port_id") is not None), None)
+            addresses = []
+            if first_port and device.get("ip"):
+                addresses.append(
+                    {
+                        "ipv4_address": device["ip"],
+                        "ipv4_prefixlen": 32,
+                        "port_id": first_port["port_id"],
+                    }
+                )
+            return 200, {"status": "ok", "addresses": addresses}
+
+        return _handler
+
+    def _device_links_handler(self, device_id):
+        def _handler(method, path, query, headers, body):
+            return 200, {"status": "ok", "links": copy.deepcopy(self.links_by_device.get(device_id, []))}
+
+        return _handler
+
+    def _inventory_handler(self, device_id):
+        def _handler(method, path, query, headers, body):
+            inventory = copy.deepcopy(self.inventory_by_device.get(device_id, []))
+            physical_class = (query.get("entPhysicalClass") or [None])[0]
+            contained_in = (query.get("entPhysicalContainedIn") or [None])[0]
+            if physical_class is not None:
+                inventory = [item for item in inventory if item.get("entPhysicalClass") == physical_class]
+            if contained_in is not None:
+                inventory = [item for item in inventory if str(item.get("entPhysicalContainedIn")) == str(contained_in)]
+            return 200, {"status": "ok", "inventory": inventory}
+
+        return _handler
+
+    def _build_locations(self):
+        names = []
+        for device in self.devices.values():
+            name = device.get("location") or "Lab"
+            if name not in names:
+                names.append(name)
+        self.locations = [
+            {"id": index, "location": name, "lat": None, "lng": None} for index, name in enumerate(names, start=1)
+        ]
+        for location in self.locations:
+            self._register_location_patch(location["location"])
+
+    def _get_locations(self, method, path, query, headers, body):
+        with self._lock:
+            return 200, {"status": "ok", "locations": copy.deepcopy(self.locations)}
+
+    def _add_location(self, method, path, query, headers, body):
+        name = body.get("location") if isinstance(body, dict) else None
+        if not isinstance(name, str) or not name.strip():
+            return 422, {"status": "error", "message": "location is required"}
+        name = name.strip()
+        with self._lock:
+            existing = next((item for item in self.locations if item["location"] == name), None)
+            if existing:
+                return 409, {"status": "error", "message": "Location already exists"}
+            location = {
+                "id": max((item["id"] for item in self.locations), default=0) + 1,
+                "location": name,
+                "lat": body.get("lat"),
+                "lng": body.get("lng"),
+            }
+            self.locations.append(location)
+            self._register_location_patch(name)
+        return 200, {"status": "ok", "message": f"Location added successfully #{location['id']}"}
+
+    def _register_location_patch(self, location_name):
+        self.register(
+            f"/api/v0/locations/{quote(location_name)}",
+            self._update_location_handler(location_name),
+            method="PATCH",
+        )
+
+    def _update_location_handler(self, location_name):
+        def _handler(method, path, query, headers, body):
+            if not isinstance(body, dict):
+                return 422, {"status": "error", "message": "JSON object required"}
+            with self._lock:
+                location = next((item for item in self.locations if item["location"] == location_name), None)
+                if location is None:
+                    return 404, {"status": "error", "message": "Location not found"}
+                for field in ("lat", "lng"):
+                    if field in body:
+                        location[field] = body[field]
+            return 200, {"status": "ok", "message": "Location updated"}
+
+        return _handler
+
+    def _get_sensors(self, method, path, query, headers, body):
+        return 200, {"status": "ok", "sensors": copy.deepcopy(self.sensors)}
+
+    def _build_vlans(self):
+        vlans = {}
+        for device_id, ports in self.ports_by_device.items():
+            for port in ports:
+                port_vlans = port.get("vlans") if isinstance(port, dict) else None
+                for item in port_vlans if isinstance(port_vlans, list) else []:
+                    vlan_number = item.get("vlan") if isinstance(item, dict) else None
+                    if vlan_number in (None, ""):
+                        continue
+                    try:
+                        vlan_number = int(vlan_number)
+                    except (TypeError, ValueError):
+                        continue
+                    vlans[(device_id, vlan_number)] = {
+                        "vlan_id": len(vlans) + 1,
+                        "device_id": device_id,
+                        "vlan_vlan": vlan_number,
+                        "vlan_domain": 1,
+                        "vlan_name": f"Stub VLAN {vlan_number}",
+                        "vlan_type": "ethernet",
+                        "vlan_state": 1,
+                    }
+        self.vlans = list(vlans.values())
+
+    def _get_vlans(self, method, path, query, headers, body):
+        return 200, {"status": "ok", "vlans": copy.deepcopy(self.vlans)}
+
+    def _build_links(self):
+        endpoints = []
+        for device_id in sorted(self.devices):
+            port = next(
+                (
+                    item
+                    for item in self.ports_by_device.get(device_id, [])
+                    if isinstance(item, dict) and item.get("port_id") is not None and item.get("ifName")
+                ),
+                None,
+            )
+            if port:
+                endpoints.append((device_id, port))
+
+        self.links_by_device = {device_id: [] for device_id in self.devices}
+        if len(endpoints) < 2:
+            return
+        for index, (device_id, local_port) in enumerate(endpoints):
+            remote_device_id, remote_port = endpoints[(index + 1) % len(endpoints)]
+            self.links_by_device[device_id].append(
+                {
+                    "local_port_id": local_port["port_id"],
+                    "local_port": local_port.get("ifName"),
+                    "remote_port_id": remote_port["port_id"],
+                    "remote_port": remote_port.get("ifName"),
+                    "remote_device_id": remote_device_id,
+                    "remote_hostname": self.devices[remote_device_id]["hostname"],
+                }
+            )
+
+
 def _recording_variant_handler(path: str, variants: list):
     """Build a route handler that returns only an exact recorded query variant."""
 
@@ -322,3 +863,61 @@ def librenms_mock_server():
         yield server
     finally:
         server.stop()
+
+
+def load_stub_recordings(recording_names, recordings_dir=DEFAULT_RECORDINGS_DIR):
+    """Load named source-tree recordings for the development stub."""
+    recordings_dir = Path(recordings_dir).resolve()
+    recordings = []
+    for name in recording_names:
+        if Path(name).name != name or name in ("", ".", ".."):
+            raise ValueError(f"Invalid recording name: {name!r}")
+        filename = name if name.endswith(".json") else f"{name}.json"
+        path = (recordings_dir / filename).resolve()
+        try:
+            path.relative_to(recordings_dir)
+        except ValueError as exc:
+            raise ValueError(f"Invalid recording name: {name!r}") from exc
+        if path.name == "manifest.json":
+            raise ValueError("manifest.json is not a recording")
+        recording = json.loads(path.read_text())
+        if not isinstance(recording, dict):
+            raise ValueError(f"{filename!r} is not a recording object")
+        recordings.append(recording)
+    return recordings
+
+
+def main(argv=None):
+    """Run the persistent development stub used by the devcontainer service."""
+    parser = argparse.ArgumentParser(description="Serve anonymized LibreNMS data-shape recordings over HTTP")
+    parser.add_argument("--host", default="0.0.0.0")
+    parser.add_argument("--port", type=int, default=8001)
+    parser.add_argument("--token", default="dev-stub-token")
+    parser.add_argument("--recordings-dir", default=str(DEFAULT_RECORDINGS_DIR))
+    parser.add_argument("--recording", action="append", dest="recordings")
+    args = parser.parse_args(argv)
+
+    names = args.recordings or list(DEFAULT_STUB_RECORDINGS)
+    recordings = load_stub_recordings(names, args.recordings_dir)
+    server = LibreNMSStubServer(
+        recordings=recordings,
+        api_token=args.token,
+        host=args.host,
+        port=args.port,
+        quiet=False,
+    )
+    print(
+        f"LibreNMS development stub listening on {args.host}:{server._server.server_address[1]} "
+        f"with recordings: {', '.join(names)}",
+        flush=True,
+    )
+    try:
+        server._server.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        server._server.server_close()
+
+
+if __name__ == "__main__":
+    main()

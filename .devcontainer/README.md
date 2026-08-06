@@ -68,7 +68,7 @@ If you need to test with a LibreNMS instance on a private network (local lab, co
 
 ### 📡 LibreNMS Server Configuration
 
-You need a LibreNMS instance to use this plugin. Configure your LibreNMS server(s) in `plugin-config.py`:
+The devcontainer includes a small LibreNMS API stub. You can also configure one or more real LibreNMS servers in `plugin-config.py`:
 
 1. Copy the example config:
 
@@ -78,6 +78,30 @@ You need a LibreNMS instance to use this plugin. Configure your LibreNMS server(
 
 2. Edit it with your LibreNMS server URL(s) and API token(s)
 3. Restart NetBox: `netbox-restart`
+
+### Development LibreNMS stub
+
+The `librenms-stub` Compose service serves anonymized data-shape recordings over the real HTTP boundary. It does not run LibreNMS, poll devices, or use SNMP. The example plugin configuration registers it as the `stub` server at `http://librenms-stub:8001`.
+
+The default catalog contains these scenarios:
+
+- Cisco StackWise virtual chassis
+- Arcos LAGs and transceivers
+- Avocent serial ports
+- Plain Linux host
+- Linux host with a paired OOB controller
+- Synthetic minimal Linux virtual machine
+
+The structural device, port, inventory, port-stack, transceiver, and sensor responses come from the committed recordings. For the OOB pair, the controller ports come from the host recording and the stub derives the missing controller device row with the same chassis serial. The stub also adds deterministic development data for API areas that the recordings do not capture. This includes discovery lists, VLANs 100 and 200, IP-to-port associations, one LLDP-style link per device, locations, and poller groups.
+
+Device and location writes remain in memory. Restart the service to restore the recording-backed state:
+
+```bash
+cd .devcontainer
+docker compose restart librenms-stub
+```
+
+Use a different local token by setting `LIBRENMS_STUB_TOKEN` in `.devcontainer/.env` and using the same value in `plugin-config.py`. Keep `librenms-stub` in `NO_PROXY` when a proxy is configured. The devcontainer configuration adds it automatically.
 
 ## Out-of-the-box defaults
 
