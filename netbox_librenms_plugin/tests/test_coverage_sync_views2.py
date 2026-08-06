@@ -1924,6 +1924,43 @@ class TestSyncIPAddressesViewInterfaceResolution:
         assert address_writes, "the address must be written"
         assert min(device_locks) < min(address_writes), "the device lock must precede the address write"
 
+    def test_primary_ip_row_fails_if_owner_disappears_before_lock(self):
+        """A concurrent owner deletion must not write an orphan address or recreate stale owner data."""
+        from ipam.models import IPAddress
+
+        from netbox_librenms_plugin.utils import set_librenms_device_id
+
+        dev = make_device("ipres-owner-gone")
+        iface = make_interface(dev, "eth0")
+        set_librenms_device_id(iface, 5, "default")
+        iface.save()
+
+        view = self._view()
+        view._post_server_key = "default"
+        view.get_management_ip = MagicMock(return_value="10.0.0.1")
+        ip_data = {
+            "ip_address": "10.0.0.1",
+            "ip_with_mask": "10.0.0.1/24",
+            "interface_url": None,
+            "port_id": 5,
+            "interface_name": "eth0",
+        }
+        request = _make_request(post_data={"select": ["10.0.0.1"]})
+
+        with (
+            patch(
+                "netbox_librenms_plugin.views.sync.ip_addresses.resolve_set_primary_ip",
+                return_value=True,
+            ),
+            patch.object(type(dev).objects, "select_for_update") as select_for_update,
+        ):
+            select_for_update.return_value.filter.return_value.first.return_value = None
+            results = view.process_ip_sync(request, ["10.0.0.1"], [ip_data], dev, "device")
+
+        assert results["failed"] == ["10.0.0.1"]
+        assert "no longer exists" in results["errors"]["10.0.0.1"]
+        assert not IPAddress.objects.filter(address="10.0.0.1/24").exists()
+
     def test_build_interface_maps_vc_shared_name_prefers_viewed_member(self):
         """A name shared across VC members resolves to the VIEWED member's own interface (matching the rendered table), not ambiguous."""
         _vc, members = self._make_vc("ipres-vcdup", [1, 2])

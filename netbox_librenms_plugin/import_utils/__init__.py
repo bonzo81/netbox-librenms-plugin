@@ -42,7 +42,7 @@ from .filters import (  # noqa: F401
     get_device_count_for_filters,
     get_librenms_devices_for_import,
 )
-from .permissions import check_user_permissions, require_permissions  # noqa: F401
+from .permissions import check_user_permissions, require_permissions, required_import_permissions  # noqa: F401
 from .virtual_chassis import (  # noqa: F401
     _clone_virtual_chassis_data,
     _generate_vc_member_name,

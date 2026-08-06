@@ -319,8 +319,8 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
 
         # Name/model hint fallback: common "<position>/..." prefixes.
         hints = [
-            (item.get("entPhysicalName") or "").strip(),
-            (item.get("entPhysicalDescr") or "").strip(),
+            _normalize_librenms_text(item.get("entPhysicalName")),
+            _normalize_librenms_text(item.get("entPhysicalDescr")),
             _normalize_librenms_text(item.get("entPhysicalModelName")),
         ]
         for hint in hints:

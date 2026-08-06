@@ -189,6 +189,7 @@ class ImportDevicesJob(JobRunner):
             classify_bulk_precheck,
             detect_collisions_for_device_ids,
             require_permissions,
+            required_import_permissions,
         )
         from netbox_librenms_plugin.import_utils.bulk_import import _is_job_cancelled
         from netbox_librenms_plugin.librenms_api import LibreNMSAPI
@@ -205,13 +206,9 @@ class ImportDevicesJob(JobRunner):
         # only run after it. The job executes outside any view's permission gate, so a
         # submitter whose import rights were revoked after enqueueing must be rejected
         # here, with the same standalone helper and perm sets the import paths enforce.
-        required_permissions = set()
-        if device_ids:
-            required_permissions.update({"dcim.add_device", "dcim.change_device"})
-        if vm_imports:
-            required_permissions.add("virtualization.add_virtualmachine")
+        required_permissions = required_import_permissions(device_ids, vm_imports)
         if required_permissions:
-            require_permissions(self.job.user, sorted(required_permissions), "import devices and VMs")
+            require_permissions(self.job.user, required_permissions, "import devices and VMs")
 
         # Initialize API client
         api = LibreNMSAPI(server_key=server_key)

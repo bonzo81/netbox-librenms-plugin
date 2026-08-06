@@ -5344,3 +5344,15 @@ class TestInferVcMemberSerialNormalization:
 
         assert target.pk == master.pk
         assert source == "serial"
+
+    @pytest.mark.parametrize("field", ["entPhysicalName", "entPhysicalDescr"])
+    def test_numeric_name_hints_do_not_crash(self, field):
+        """Numeric ENTITY hint fields are normalized before prefix matching."""
+        view = _make_view()
+        master, member2 = self._vc_members(["100004", "100005"])
+        item = {"entPhysicalIndex": 3, field: 2, "entPhysicalContainedIn": 0}
+
+        target, source = view._infer_vc_member_for_item(master, item, {}, [master, member2])
+
+        assert target.pk == master.pk
+        assert source == "default"

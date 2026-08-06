@@ -335,6 +335,24 @@ class TestObjectPermissionHelpers:
         assert "dcim.add_device" in error_msg
         assert "dcim.add_interface" in error_msg
 
+    @pytest.mark.parametrize(
+        ("device_ids", "vm_imports", "expected"),
+        [
+            ([], {}, []),
+            ([1], {}, ["dcim.add_device", "dcim.change_device"]),
+            ([], {2: {}}, ["virtualization.add_virtualmachine"]),
+            (
+                [1],
+                {2: {}},
+                ["dcim.add_device", "dcim.change_device", "virtualization.add_virtualmachine"],
+            ),
+        ],
+    )
+    def test_required_import_permissions(self, device_ids, vm_imports, expected):
+        from netbox_librenms_plugin.import_utils import required_import_permissions
+
+        assert required_import_permissions(device_ids, vm_imports) == expected
+
 
 class TestNetBoxObjectPermissionMixin:
     """Tests for the NetBoxObjectPermissionMixin class."""

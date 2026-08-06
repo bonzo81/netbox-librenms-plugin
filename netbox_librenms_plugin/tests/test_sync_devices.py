@@ -304,5 +304,6 @@ class TestRemoveServerMappingViewWiring:
 
         # required_object_permissions must be scoped to VirtualMachine, not Device
         assert ("change", VirtualMachine) in permissions_at_check.get("POST", [])
+        mock_model.objects.restrict.assert_called_once_with(request.user, "change")
         # Response must redirect to the VM-specific sync URL
         mock_redirect.assert_called_with("plugins:netbox_librenms_plugin:vm_librenms_sync", pk=10)

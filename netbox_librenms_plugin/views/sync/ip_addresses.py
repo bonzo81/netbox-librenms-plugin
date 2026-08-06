@@ -401,10 +401,11 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
                         # Lock obj's row BEFORE the address write, so this path takes the same
                         # Device -> IPAddress lock order as the migrate move views. The reverse
                         # order closes a deadlock cycle with a concurrent donor move.
-                        if type(obj).objects.select_for_update().filter(pk=obj.pk).first() is not None:
-                            # Re-read the primary_ip ids from the locked row: a stale in-memory
-                            # value would make _set_primary_ip skip a set it must perform.
-                            obj.refresh_from_db()
+                        if type(obj).objects.select_for_update().filter(pk=obj.pk).first() is None:
+                            raise type(obj).DoesNotExist(f"{type(obj).__name__} {obj.pk} no longer exists")
+                        # Re-read the primary_ip ids from the locked row. A stale in-memory value
+                        # would make _set_primary_ip skip a set it must perform.
+                        obj.refresh_from_db()
 
                     ip_with_mask = ip_data["ip_with_mask"]
 

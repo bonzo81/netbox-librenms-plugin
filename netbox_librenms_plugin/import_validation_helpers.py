@@ -27,7 +27,9 @@ def merge_candidate_pks(validation: dict) -> set:
     """
     from netbox_librenms_plugin.utils import coerce_positive_int
 
-    merge = (validation or {}).get("merge_candidates") or {}
+    if not isinstance(validation, dict):
+        return set()
+    merge = validation.get("merge_candidates") or {}
     if not isinstance(merge, dict):
         return set()
     pks = set()

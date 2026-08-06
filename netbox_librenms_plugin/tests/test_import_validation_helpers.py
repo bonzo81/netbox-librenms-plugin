@@ -719,3 +719,9 @@ class TestMergeCandidatePks:
 
         validation = {"merge_candidates": {"host_named": {"pk": 0}, "oob_named": {"pk": "not-int"}}}
         assert merge_candidate_pks(validation) == set()
+
+    def test_non_dict_validation_is_rejected(self):
+        from netbox_librenms_plugin.import_validation_helpers import merge_candidate_pks
+
+        assert merge_candidate_pks(["malformed"]) == set()
+        assert merge_candidate_pks("malformed") == set()

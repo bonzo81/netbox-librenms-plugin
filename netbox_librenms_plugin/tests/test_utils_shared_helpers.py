@@ -37,10 +37,8 @@ class TestCachedRowMatches:
     def test_none_row_never_matches(self):
         assert cached_row_matches(None, 12) is False
 
-    def test_non_dict_row_stays_trusted(self):
-        # Pre-existing behavior preserved by the extraction: a non-dict payload has no readable
-        # device_id, so it is left trusted (downstream shape gates reject it where it matters).
-        assert cached_row_matches(["not-a-dict"], 12) is True
+    def test_non_dict_row_is_rejected(self):
+        assert cached_row_matches(["not-a-dict"], 12) is False
 
     def test_two_invalid_ids_do_not_match(self):
         # Both ids un-coercible must not compare equal as None == None; fail closed.

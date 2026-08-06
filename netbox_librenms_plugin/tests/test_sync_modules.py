@@ -2808,15 +2808,21 @@ class TestAncestorWalkGenericContainerModel:
         assert top == [parent]
 
     def test_unknown_model_remains_visible_for_no_type_diagnosis(self):
-        """Placeholder policy stays unchanged: Unknown is not a generic container model."""
-        item = {
+        """Unknown is a real ancestor model, so its child stays nested below it."""
+        parent = {
             "entPhysicalIndex": 1,
             "entPhysicalClass": "module",
             "entPhysicalModelName": "Unknown",
             "entPhysicalContainedIn": 0,
         }
+        child = {
+            "entPhysicalIndex": 2,
+            "entPhysicalClass": "module",
+            "entPhysicalModelName": "CHILD-MODULE",
+            "entPhysicalContainedIn": 1,
+        }
 
-        assert self._run_top_items([item]) == [item]
+        assert self._run_top_items([parent, child]) == [parent]
 
 
 # ---------------------------------------------------------------------------

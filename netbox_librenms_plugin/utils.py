@@ -1340,13 +1340,10 @@ def cached_row_matches(cached_row, device_id) -> bool:
     """
     Decide whether a cached LibreNMS device row may be served for *device_id*.
 
-    A row whose OWN ``device_id`` contradicts the requested id (a mis-keyed or stale
-    cache entry — another device's row stored under this key) must not be served AS
-    this device. A row without a readable ``device_id`` stays trusted (a real LibreNMS
-    row always carries one), and ``None`` (no cached row) never matches. An un-coercible
-    requested id never matches either — it can't be identity-checked, and two invalid ids
-    must not compare equal as ``None == None``. Shared by the single-import and
-    bulk-import cache reads so the acceptance rule can't drift.
+    A non-dictionary row or a row whose own ``device_id`` contradicts the requested id
+    must not be served as this device. A dictionary without a readable ``device_id`` stays
+    trusted, and ``None`` never matches. An uncoercible requested id never matches either.
+    Shared by the single-import and bulk-import cache reads so the acceptance rule cannot drift.
 
     Args:
         cached_row: The cached payload for *device_id* (usually a dict, possibly None).
@@ -1355,12 +1352,12 @@ def cached_row_matches(cached_row, device_id) -> bool:
     Returns:
         bool: True when the cached row may be used for *device_id*.
     """
-    if cached_row is None:
+    if not isinstance(cached_row, dict):
         return False
     requested_id = coerce_librenms_id(device_id)
     if requested_id is None:
         return False
-    cached_row_id = cached_row.get("device_id") if isinstance(cached_row, dict) else None
+    cached_row_id = cached_row.get("device_id")
     return cached_row_id is None or coerce_librenms_id(cached_row_id) == requested_id
 
 

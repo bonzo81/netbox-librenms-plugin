@@ -32,6 +32,7 @@ from netbox_librenms_plugin.import_utils import (
     get_import_device_cache_key,
     get_librenms_device_by_id,
     get_virtual_chassis_data,
+    required_import_permissions,
     update_vc_member_suggested_names,
     validate_device_for_import,
 )
@@ -1047,12 +1048,8 @@ class BulkImportDevicesView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
         # "Import job started" message. The pre-check likewise surfaces NetBox collision details
         # (object names + pks) in its modal. Enforce the same perm sets the import paths do, for
         # every import, before either path starts.
-        required_import_perms = set()
-        if device_ids_to_import:
-            required_import_perms.update({"dcim.add_device", "dcim.change_device"})
-        if vm_imports:
-            required_import_perms.add("virtualization.add_virtualmachine")
-        missing_import_perms = [p for p in sorted(required_import_perms) if not request.user.has_perm(p)]
+        required_import_perms = required_import_permissions(device_ids_to_import, vm_imports)
+        missing_import_perms = [p for p in required_import_perms if not request.user.has_perm(p)]
         if missing_import_perms:
             deny_msg = f"You do not have permission to import these rows (missing: {', '.join(missing_import_perms)})."
             messages.error(request, deny_msg)

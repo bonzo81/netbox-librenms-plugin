@@ -5,7 +5,7 @@ Phase 2 tests covering cache key generation, device name determination,
 device retrieval, and device validation functions.
 """
 
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, call, patch
 
 import pytest
 
@@ -2298,6 +2298,10 @@ class TestDeviceConflictActionView:
         assert existing_device.custom_field_data["librenms_id"] == {"default": 10}
         assert existing_device.name == "switch-01.example.com"
         existing_device.save.assert_called_once()
+        assert mock_device_cls.objects.restrict.call_args_list == [
+            call(request.user, "change"),
+            call(request.user, "change"),
+        ]
 
     @patch("netbox_librenms_plugin.views.imports.actions.cache")
     @patch("netbox_librenms_plugin.views.imports.actions.get_import_device_cache_key")

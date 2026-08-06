@@ -53,6 +53,9 @@ def test_form_actions_ignores_data_attributes():
 
 def test_mapping_writing_conflict_forms_include_server_key():
     src = pathlib.Path(get_template(TEMPLATE).origin.name).read_text()
+    partial = pathlib.Path(get_template("netbox_librenms_plugin/inc/_hidden_server_key.html").origin.name).read_text()
+    assert 'name="server_key"' in partial
+
     forms = [f for f in re.findall(r"<form\b.*?</form>", src, re.DOTALL) if "device_conflict_action" in f]
 
     mapping_forms = [f for f in forms if _form_actions(f) & MAPPING_ACTIONS]
