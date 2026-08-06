@@ -1026,8 +1026,7 @@ class TestVerifyVlanSyncGroupView:
         VLAN.objects.create(vid=10, name="vlan10", group=group)
 
         view = self._make_view()
-        request = MagicMock()
-        request.body = json.dumps({"vid": "10", "vlan_group_id": group.pk, "name": "vlan10"}).encode()
+        request = _real_verify_request({"vid": "10", "vlan_group_id": group.pk, "name": "vlan10"}, "sync-group-with")
         response = _post(view, request)
 
         assert isinstance(response, JsonResponse)
@@ -1046,8 +1045,7 @@ class TestVerifyVlanSyncGroupView:
         from django.http import JsonResponse
 
         view = self._make_view()
-        request = MagicMock()
-        request.body = json.dumps({"vid": "20", "name": "vlan20"}).encode()
+        request = _real_verify_request({"vid": "20", "name": "vlan20"}, "sync-group-without")
         response = _post(view, request)
 
         assert isinstance(response, JsonResponse)
