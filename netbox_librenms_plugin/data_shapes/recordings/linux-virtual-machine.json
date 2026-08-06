@@ -1,0 +1,88 @@
+{
+  "schema_version": 1,
+  "name": "linux-virtual-machine",
+  "description": "Synthetic minimal Linux virtual machine for development replay and VM import UI testing.",
+  "meta": {
+    "os": "os-9bf16a",
+    "synthetic": true
+  },
+  "device_id": 2000,
+  "responses": {
+    "GET /api/v0/devices/2000": {
+      "status": "ok",
+      "devices": [
+        {
+          "device_id": 2000,
+          "hostname": "device-vm0001",
+          "sysName": "device-vm0001",
+          "display": "device-vm0001",
+          "ip": "192.0.2.200",
+          "hardware": "KVM Virtual Machine",
+          "version": "stub-linux-1",
+          "features": "virtual",
+          "location_id": 1,
+          "location": "Lab",
+          "os": "os-9bf16a",
+          "status": true,
+          "status_reason": "",
+          "ignore": false,
+          "disabled": false,
+          "type": "server",
+          "serial": "SN-000001",
+          "icon": "images/os/generic.svg",
+          "poller_group": 0
+        }
+      ],
+      "count": 1
+    },
+    "GET /api/v0/inventory/2000?entPhysicalContainedIn=0": {
+      "status": "ok",
+      "inventory": [],
+      "count": 0
+    },
+    "GET /api/v0/devices/2000/ports": {
+      "status": "ok",
+      "ports": [
+        {
+          "port_id": 20001,
+          "ifName": "lo",
+          "ifType": "softwareLoopback",
+          "ifSpeed": 10000000,
+          "ifAdminStatus": "up",
+          "ifDescr": "lo",
+          "ifAlias": "",
+          "ifPhysAddress": null,
+          "ifMtu": 65536,
+          "ifVlan": null,
+          "ifTrunk": null,
+          "vlans": []
+        },
+        {
+          "port_id": 20002,
+          "ifName": "ens3",
+          "ifType": "ethernetCsmacd",
+          "ifSpeed": 10000000000,
+          "ifAdminStatus": "up",
+          "ifDescr": "ens3",
+          "ifAlias": "primary",
+          "ifPhysAddress": "02:00:00:00:20:00",
+          "ifMtu": 1500,
+          "ifVlan": null,
+          "ifTrunk": null,
+          "vlans": []
+        }
+      ]
+    },
+    "GET /api/v0/devices/2000/port_stack": {
+      "status": "ok",
+      "mappings": []
+    },
+    "GET /api/v0/devices/2000/transceivers": {
+      "status": "ok",
+      "transceivers": []
+    }
+  },
+  "expected": {
+    "virtual_chassis": null
+  }
+}

@@ -242,6 +242,32 @@
     }
   },
   {
+    "name": "linux-virtual-machine",
+    "signature": {
+      "os": "os-9bf16a",
+      "virtual_chassis": {
+        "present": false,
+        "root_class": null,
+        "member_count": 0,
+        "position_base": null
+      },
+      "lag": {
+        "present": false,
+        "ieee8023ad": false,
+        "name_prefix": null
+      },
+      "sub_interfaces": {
+        "present": false,
+        "styles": []
+      },
+      "port_stack": false,
+      "vlans": false,
+      "transceivers": false,
+      "serial": false,
+      "oob": false
+    }
+  },
+  {
     "name": "nokia-timos-transceivers",
     "signature": {
       "os": "os-57cfb3",
