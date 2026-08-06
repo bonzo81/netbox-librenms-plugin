@@ -424,15 +424,12 @@ class TestLagPatternSharedLoad:
 
         assert self._no_pattern_query(ctx)
 
-    def test_resolver_reuses_supplied_compiled_patterns_without_db(self):
+    def test_resolver_reuses_supplied_compiled_patterns_without_db(self, mock_librenms_api):
         """resolve_port_relationships(compiled_lag_patterns=...) resolves without re-loading patterns."""
         from django.db import connection
         from django.test.utils import CaptureQueriesContext
 
-        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
-
         compiled = self._seed_and_compile()
-        api = LibreNMSAPI(server_key="default")
         ports = [
             {"port_id": 11, "ifName": "Gi0/1", "ifType": "ethernetCsmacd"},
             {"port_id": 12, "ifName": "Po1", "ifType": "propVirtual"},
@@ -440,7 +437,7 @@ class TestLagPatternSharedLoad:
         port_stack = [{"high_port_id": 11, "low_port_id": 12}]
 
         with CaptureQueriesContext(connection) as ctx:
-            result = api.resolve_port_relationships(
+            result = mock_librenms_api.resolve_port_relationships(
                 ports, port_stack, device_os="sharedos", compiled_lag_patterns=compiled
             )
 
@@ -448,12 +445,9 @@ class TestLagPatternSharedLoad:
         assert result["lag_members"] == {11: 12}
         assert self._no_pattern_query(ctx)
 
-    def test_string_zero_high_id_sentinel_is_skipped(self):
+    def test_string_zero_high_id_sentinel_is_skipped(self, mock_librenms_api):
         """A string "0" high/low_port_id (the ifStack 'no port' sentinel) is skipped, not looked up — a bare truthy check would let it match a real port_id 0 row and fabricate a relationship."""
-        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
-
         compiled = self._seed_and_compile()
-        api = LibreNMSAPI(server_key="default")
         # A port whose id is 0 exists in by_id (keyed "0"); the sentinel entry references it as the
         # STRING "0". `not "0"` is False, so the old check would look it up and relate it to Po1.
         ports = [
@@ -462,7 +456,9 @@ class TestLagPatternSharedLoad:
         ]
         port_stack = [{"high_port_id": "0", "low_port_id": 12}]
 
-        result = api.resolve_port_relationships(ports, port_stack, device_os="sharedos", compiled_lag_patterns=compiled)
+        result = mock_librenms_api.resolve_port_relationships(
+            ports, port_stack, device_os="sharedos", compiled_lag_patterns=compiled
+        )
 
         # The sentinel entry created no relationship at all (nothing references the phantom port 0).
         assert result["lag_members"] == {}
