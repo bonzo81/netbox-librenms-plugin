@@ -5,9 +5,9 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from netbox_librenms_plugin.tests.conftest import make_device, make_interface, make_ip, make_vm
-
-
-from netbox_librenms_plugin.tests.view_test_helpers import make_view, missing_pk
+from netbox_librenms_plugin.tests.view_test_helpers import grant
+from netbox_librenms_plugin.tests.view_test_helpers import make_request as make_real_request
+from netbox_librenms_plugin.tests.view_test_helpers import make_user_with_perms, make_view, missing_pk
 from netbox_librenms_plugin.tests.view_test_helpers import post as _post
 
 
@@ -1312,14 +1312,12 @@ class TestSyncInterfacesViewSyncInterface:
         assert raised
 
 
+@pytest.mark.django_db
 class TestDeleteNetBoxInterfacesViewPost:
-    def _make_view(self):
+    def _make_view(self, request=None):
         from netbox_librenms_plugin.views.sync.interfaces import DeleteNetBoxInterfacesView
 
-        view = object.__new__(DeleteNetBoxInterfacesView)
-        view._librenms_api = MagicMock()
-        view.request = _make_request()
-        return view
+        return make_view(DeleteNetBoxInterfacesView, request or make_real_request("post"))
 
     def test_permission_denied_returns_json_403(self):
         view = self._make_view()
@@ -1343,26 +1341,27 @@ class TestDeleteNetBoxInterfacesViewPost:
 
     @pytest.mark.django_db
     def test_no_interface_ids_returns_400(self):
-        view = self._make_view()
         obj = make_device("del-noids-dev")
-        req = _make_request({"interface_ids": []})
-        with patch.object(view, "require_all_permissions_json", return_value=None):
-            view.request = req
-            result = view.post(req, object_type="device", object_id=obj.pk)
+        req = make_real_request("post", {"interface_ids": []})
+        view = self._make_view(req)
+        result = _post(view, req, object_type="device", object_id=obj.pk)
         assert result.status_code == 400
 
     @pytest.mark.django_db
     def test_device_interface_wrong_device_skipped(self):
         import json
 
-        view = self._make_view()
+        from dcim.models import Device, Interface
+
         obj = make_device("del-wrongdev-target")
         other = make_device("del-wrongdev-other")
         iface = make_interface(other, "eth0")  # belongs to a different device
-        req = _make_request({"interface_ids": [str(iface.pk)]})
-        with patch.object(view, "require_all_permissions_json", return_value=None):
-            view.request = req
-            result = view.post(req, object_type="device", object_id=obj.pk)
+        user = make_user_with_perms("del-wrongdev-user", [])
+        user = grant(user, "view", Device, constraints={"pk": obj.pk})
+        user = grant(user, "delete", Interface, constraints={"pk": iface.pk})
+        req = make_real_request("post", {"interface_ids": [str(iface.pk)]}, user=user)
+        view = self._make_view(req)
+        result = _post(view, req, object_type="device", object_id=obj.pk)
         data = json.loads(result.content)
         assert data["deleted_count"] == 0
         assert other.interfaces.filter(pk=iface.pk).exists()  # not deleted
@@ -1371,16 +1370,17 @@ class TestDeleteNetBoxInterfacesViewPost:
     def test_vm_interface_wrong_vm_skipped(self):
         import json
 
-        from virtualization.models import VMInterface
+        from virtualization.models import VirtualMachine, VMInterface
 
-        view = self._make_view()
         vm = make_vm("del-wrongvm-target")
         other_vm = make_vm("del-wrongvm-other")
         vmiface = VMInterface.objects.create(virtual_machine=other_vm, name="eth0")
-        req = _make_request({"interface_ids": [str(vmiface.pk)]})
-        with patch.object(view, "require_all_permissions_json", return_value=None):
-            view.request = req
-            result = view.post(req, object_type="virtualmachine", object_id=vm.pk)
+        user = make_user_with_perms("del-wrongvm-user", [])
+        user = grant(user, "view", VirtualMachine, constraints={"pk": vm.pk})
+        user = grant(user, "delete", VMInterface, constraints={"pk": vmiface.pk})
+        req = make_real_request("post", {"interface_ids": [str(vmiface.pk)]}, user=user)
+        view = self._make_view(req)
+        result = _post(view, req, object_type="virtualmachine", object_id=vm.pk)
         data = json.loads(result.content)
         assert data["deleted_count"] == 0
         assert VMInterface.objects.filter(pk=vmiface.pk).exists()
@@ -1391,13 +1391,11 @@ class TestDeleteNetBoxInterfacesViewPost:
 
         from dcim.models import Interface
 
-        view = self._make_view()
         obj = make_device("del-ok-dev")
         iface = make_interface(obj, "eth0")
-        req = _make_request({"interface_ids": [str(iface.pk)]})
-        with patch.object(view, "require_all_permissions_json", return_value=None):
-            view.request = req
-            result = view.post(req, object_type="device", object_id=obj.pk)
+        req = make_real_request("post", {"interface_ids": [str(iface.pk)]})
+        view = self._make_view(req)
+        result = _post(view, req, object_type="device", object_id=obj.pk)
         data = json.loads(result.content)
         assert data["deleted_count"] == 1
         assert not Interface.objects.filter(pk=iface.pk).exists()  # actually deleted
@@ -1408,13 +1406,11 @@ class TestDeleteNetBoxInterfacesViewPost:
 
         from virtualization.models import VMInterface
 
-        view = self._make_view()
         vm = make_vm("del-ok-vm")
         vmiface = VMInterface.objects.create(virtual_machine=vm, name="eth0")
-        req = _make_request({"interface_ids": [str(vmiface.pk)]})
-        with patch.object(view, "require_all_permissions_json", return_value=None):
-            view.request = req
-            result = view.post(req, object_type="virtualmachine", object_id=vm.pk)
+        req = make_real_request("post", {"interface_ids": [str(vmiface.pk)]})
+        view = self._make_view(req)
+        result = _post(view, req, object_type="virtualmachine", object_id=vm.pk)
         data = json.loads(result.content)
         assert data["deleted_count"] == 1
         assert not VMInterface.objects.filter(pk=vmiface.pk).exists()
@@ -1423,13 +1419,11 @@ class TestDeleteNetBoxInterfacesViewPost:
     def test_interface_not_found_adds_error(self):
         import json
 
-        view = self._make_view()
         obj = make_device("del-notfound-dev")
         # An interface id that does not exist → real Interface.DoesNotExist → recorded error.
-        req = _make_request({"interface_ids": ["999999"]})
-        with patch.object(view, "require_all_permissions_json", return_value=None):
-            view.request = req
-            result = view.post(req, object_type="device", object_id=obj.pk)
+        req = make_real_request("post", {"interface_ids": ["999999"]})
+        view = self._make_view(req)
+        result = _post(view, req, object_type="device", object_id=obj.pk)
         data = json.loads(result.content)
         assert "errors" in data
         assert data["deleted_count"] == 0
@@ -1440,7 +1434,6 @@ class TestDeleteNetBoxInterfacesViewPost:
 
         from dcim.models import Interface, VirtualChassis
 
-        view = self._make_view()
         vc = VirtualChassis.objects.create(name="vc-del")
         member = make_device("del-vc-member")
         member.virtual_chassis = vc
@@ -1448,10 +1441,9 @@ class TestDeleteNetBoxInterfacesViewPost:
         member.save()
         outsider = make_device("del-vc-outsider")  # not part of the VC
         iface = make_interface(outsider, "eth0")
-        req = _make_request({"interface_ids": [str(iface.pk)]})
-        with patch.object(view, "require_all_permissions_json", return_value=None):
-            view.request = req
-            result = view.post(req, object_type="device", object_id=member.pk)
+        req = make_real_request("post", {"interface_ids": [str(iface.pk)]})
+        view = self._make_view(req)
+        result = _post(view, req, object_type="device", object_id=member.pk)
         data = json.loads(result.content)
         assert data["deleted_count"] == 0
         assert Interface.objects.filter(pk=iface.pk).exists()  # not deleted (not a VC member's)
