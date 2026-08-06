@@ -438,7 +438,7 @@ class CreateAndAssignPlatformView(LibreNMSPermissionMixin, NetBoxObjectPermissio
         if manufacturer_id:
             try:
                 manufacturer = self.restricted_queryset(Manufacturer).get(pk=manufacturer_id)
-            except Manufacturer.DoesNotExist:
+            except (Manufacturer.DoesNotExist, ValueError):
                 pass
 
         with transaction.atomic():
@@ -499,7 +499,7 @@ class CreateAndAssignPlatformView(LibreNMSPermissionMixin, NetBoxObjectPermissio
                 platform = existing_platform
 
             try:
-                device = self.restricted_queryset(Device, "change").select_for_update().get(pk=pk)
+                device = self.restricted_queryset(Device, "change").select_for_update(of=("self",)).get(pk=pk)
             except Device.DoesNotExist:
                 transaction.set_rollback(True)
                 messages.error(request, "Device no longer exists.")
@@ -818,7 +818,7 @@ class RemoveServerMappingView(LibreNMSPermissionMixin, NetBoxObjectPermissionMix
 
         with transaction.atomic():
             try:
-                obj_locked = self.restricted_queryset(model, "change").select_for_update().get(pk=pk)
+                obj_locked = self.restricted_queryset(model, "change").select_for_update(of=("self",)).get(pk=pk)
             except model.DoesNotExist:
                 messages.error(request, f"{model.__name__} no longer exists.")
                 return redirect(sync_url, pk=pk)
@@ -958,7 +958,7 @@ class ConvertLegacyLibreNMSIdView(LibreNMSPermissionMixin, NetBoxObjectPermissio
 
         with transaction.atomic():
             try:
-                locked = self.restricted_queryset(model, "change").select_for_update().get(pk=pk)
+                locked = self.restricted_queryset(model, "change").select_for_update(of=("self",)).get(pk=pk)
             except model.DoesNotExist:
                 messages.error(request, f"{model.__name__} no longer exists.")
                 return self._sync_url(object_type, pk)

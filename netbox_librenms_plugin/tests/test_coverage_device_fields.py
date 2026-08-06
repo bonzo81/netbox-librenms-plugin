@@ -1019,6 +1019,20 @@ class TestCreateAndAssignPlatformView:
         mock_msg.error.assert_called_once()
         assert "required" in mock_msg.error.call_args[0][1].lower()
 
+    def test_non_numeric_manufacturer_is_treated_as_unresolved(self):
+        """A stale or forged manufacturer value must not crash platform creation."""
+        from dcim.models import Device, Platform
+
+        device = make_device("plat-invalid-manufacturer")
+        request = _make_request({"platform_name": "Invalid Manufacturer Platform", "manufacturer": "not-a-pk"})
+        view = self._view(request)
+
+        _post(view, request, pk=device.pk)
+
+        platform = Platform.objects.get(name="Invalid Manufacturer Platform")
+        assert platform.manufacturer_id is None
+        assert Device.objects.get(pk=device.pk).platform_id == platform.pk
+
     @pytest.mark.django_db
     def test_rebinds_to_posted_server_for_redirect_fallback(self):
         """The view rebinds to the POSTed server so the _sync_redirect server_key fallback is live, not a dead None."""

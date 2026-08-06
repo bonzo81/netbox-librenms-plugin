@@ -5,7 +5,7 @@ from django.core.cache import cache
 from django.http import JsonResponse
 from django.urls import reverse
 from django.views import View
-from ipam.models import VLAN
+from ipam.models import VLAN, VLANGroup
 from utilities.views import ViewTab, register_model_view
 
 from netbox_librenms_plugin.constants import PERM_VIEW_PLUGIN
@@ -374,11 +374,9 @@ class SingleVlanGroupVerifyView(LibreNMSPermissionMixin, NetBoxObjectPermissionM
 
     # Read-only verify endpoint that surfaces a device's interface VLAN assignments —
     # require object-view permission on the underlying Device (mirrors the other verify views).
-    required_object_permissions = {"POST": [("view", Device)]}
+    required_object_permissions = {"POST": [("view", Device), ("view", VLANGroup)]}
 
     def post(self, request):
-        from ipam.models import VLANGroup
-
         data, err = parse_request_json(request)
         if err:
             return err
@@ -513,11 +511,9 @@ class VerifyVlanSyncGroupView(LibreNMSPermissionMixin, NetBoxObjectPermissionMix
     # Read-only verify endpoint that surfaces NetBox VLAN existence + names — require
     # object-view permission on VLAN (there is no device in scope here, unlike the other
     # verify views), so an unauthorized caller can't enumerate VLANs/groups.
-    required_object_permissions = {"POST": [("view", VLAN)]}
+    required_object_permissions = {"POST": [("view", VLAN), ("view", VLANGroup)]}
 
     def post(self, request):
-        from ipam.models import VLANGroup
-
         data, err = parse_request_json(request)
         if err:
             return err

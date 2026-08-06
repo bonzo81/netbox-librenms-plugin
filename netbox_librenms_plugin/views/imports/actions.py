@@ -1696,7 +1696,9 @@ class DeviceConflictActionView(
                 # would be needed for full protection.
                 try:
                     existing_device = (
-                        self.restricted_queryset(Device, "change").select_for_update().get(pk=existing_device.pk)
+                        self.restricted_queryset(Device, "change")
+                        .select_for_update(of=("self",))
+                        .get(pk=existing_device.pk)
                     )
                 except Device.DoesNotExist:
                     return _htmx_error_response("Device no longer exists; it may have been deleted concurrently.")
@@ -1807,7 +1809,9 @@ class DeviceConflictActionView(
                 with transaction.atomic():
                     try:
                         locked_device = (
-                            self.restricted_queryset(Device, "change").select_for_update().get(pk=existing_device.pk)
+                            self.restricted_queryset(Device, "change")
+                            .select_for_update(of=("self",))
+                            .get(pk=existing_device.pk)
                         )
                     except Device.DoesNotExist:
                         return _htmx_error_response("Device no longer exists; it may have been deleted concurrently.")
@@ -1889,7 +1893,7 @@ class DeviceConflictActionView(
                 try:
                     locked_device = (
                         self.restricted_queryset(existing_model, "change")
-                        .select_for_update()
+                        .select_for_update(of=("self",))
                         .get(pk=existing_device.pk)
                     )
                 except existing_model.DoesNotExist:
@@ -2007,11 +2011,6 @@ class AddDeviceTypeMappingView(
         except (ValueError, TypeError):
             return _htmx_error_response("Invalid device type selection.")
 
-        try:
-            device_type = self.restricted_queryset(DeviceType).get(pk=device_type_id)
-        except DeviceType.DoesNotExist:
-            return _htmx_error_response("Selected device type not found.")
-
         # Reject ambiguous state up front: multiple case-variant rows for the same hardware
         # string mean .first() would silently mutate an arbitrary one and leave the duplicate
         # unresolved. Fetch [:2] once and reuse it for both the ambiguity check and the
@@ -2027,11 +2026,16 @@ class AddDeviceTypeMappingView(
         # actually needed: "add" for a new mapping, "change" for an update.
         existing_mapping = upfront_rows[0] if upfront_rows else None
         if existing_mapping:
-            self.required_object_permissions = {"POST": [("change", DeviceTypeMapping)]}
+            self.required_object_permissions = {"POST": [("view", DeviceType), ("change", DeviceTypeMapping)]}
         else:
-            self.required_object_permissions = {"POST": [("add", DeviceTypeMapping)]}
+            self.required_object_permissions = {"POST": [("view", DeviceType), ("add", DeviceTypeMapping)]}
         if error := self.require_object_permissions("POST"):
             return error
+
+        try:
+            device_type = self.restricted_queryset(DeviceType).get(pk=device_type_id)
+        except DeviceType.DoesNotExist:
+            return _htmx_error_response("Selected device type not found.")
 
         try:
             with transaction.atomic():
@@ -2056,13 +2060,15 @@ class AddDeviceTypeMappingView(
                     # if the locked row already maps to the same device type this is a no-op
                     # and the caller needs only the add permission they already passed above.
                     if locked.netbox_device_type_id != device_type_id:
-                        self.required_object_permissions = {"POST": [("change", DeviceTypeMapping)]}
+                        self.required_object_permissions = {
+                            "POST": [("view", DeviceType), ("change", DeviceTypeMapping)]
+                        }
                         if error := self.require_object_permissions("POST"):
                             return error
                 if existing_mapping and not locked:
                     # The mapping was deleted between our upfront read and the lock.
                     # We are about to CREATE a new row, so require add permission.
-                    self.required_object_permissions = {"POST": [("add", DeviceTypeMapping)]}
+                    self.required_object_permissions = {"POST": [("view", DeviceType), ("add", DeviceTypeMapping)]}
                     if error := self.require_object_permissions("POST"):
                         return error
                 if locked:
@@ -2411,7 +2417,11 @@ class CreatePlatformFromImportView(
         if target_model is not None and target_pk is not None:
             try:
                 with transaction.atomic():
-                    target = self.restricted_queryset(target_model, "change").select_for_update().get(pk=target_pk)
+                    target = (
+                        self.restricted_queryset(target_model, "change")
+                        .select_for_update(of=("self",))
+                        .get(pk=target_pk)
+                    )
                     target.platform = platform
                     target.full_clean()
                     target.save()
@@ -2581,7 +2591,9 @@ class AddAsOOBView(
 
         with transaction.atomic():
             try:
-                sync_device = self.restricted_queryset(Device, "change").select_for_update().get(pk=sync_device.pk)
+                sync_device = (
+                    self.restricted_queryset(Device, "change").select_for_update(of=("self",)).get(pk=sync_device.pk)
+                )
             except Device.DoesNotExist:
                 return _htmx_error_response("Device no longer exists; it may have been deleted concurrently.")
 
@@ -2973,7 +2985,7 @@ class AddAsOOBView(
                 # interface sits, not that the caller's grant covers it.
                 return (
                     Interface.objects.restrict(request.user, "view")
-                    .select_for_update()
+                    .select_for_update(of=("self",))
                     .get(pk=int(iface_id), device=device),
                     None,
                 )
@@ -3663,11 +3675,6 @@ class AddPlatformMappingView(
         except (ValueError, TypeError):
             return _htmx_error_response("Invalid platform selection.")
 
-        try:
-            platform = self.restricted_queryset(Platform).get(pk=platform_id)
-        except Platform.DoesNotExist:
-            return _htmx_error_response("Selected platform not found.")
-
         # Fetch [:2] once and reuse it for both the ambiguity check and the existing-mapping
         # resolution rather than a separate count() + first() (two queries for the same filter).
         # Mirrors AddDeviceTypeMappingView and the locked read below.
@@ -3678,10 +3685,18 @@ class AddPlatformMappingView(
             )
         existing_mapping = upfront_rows[0] if upfront_rows else None
         self.required_object_permissions = {
-            "POST": [("change", PlatformMapping) if existing_mapping else ("add", PlatformMapping)]
+            "POST": [
+                ("view", Platform),
+                ("change", PlatformMapping) if existing_mapping else ("add", PlatformMapping),
+            ]
         }
         if error := self.require_object_permissions("POST"):
             return error
+
+        try:
+            platform = self.restricted_queryset(Platform).get(pk=platform_id)
+        except Platform.DoesNotExist:
+            return _htmx_error_response("Selected platform not found.")
 
         try:
             with transaction.atomic():
@@ -3702,13 +3717,13 @@ class AddPlatformMappingView(
                     # Concurrent request created the mapping after our upfront read.
                     # Only escalate to change permission if we would actually mutate.
                     if locked.netbox_platform_id != platform_id:
-                        self.required_object_permissions = {"POST": [("change", PlatformMapping)]}
+                        self.required_object_permissions = {"POST": [("view", Platform), ("change", PlatformMapping)]}
                         if error := self.require_object_permissions("POST"):
                             return error
                 if existing_mapping and not locked:
                     # Mapping was deleted between our upfront read and the lock.
                     # We are about to CREATE a new row, so require add permission.
-                    self.required_object_permissions = {"POST": [("add", PlatformMapping)]}
+                    self.required_object_permissions = {"POST": [("view", Platform), ("add", PlatformMapping)]}
                     if error := self.require_object_permissions("POST"):
                         return error
                 if locked:

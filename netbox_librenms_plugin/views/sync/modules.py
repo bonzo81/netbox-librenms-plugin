@@ -564,7 +564,15 @@ class InstallModuleView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
         from dcim.models import Device, Interface, Module, ModuleBay, ModuleType
 
         self.required_object_permissions = {
-            "POST": [("add", Module), ("add", Interface), ("change", Interface), ("delete", Interface)]
+            "POST": [
+                ("view", Device),
+                ("view", ModuleBay),
+                ("view", ModuleType),
+                ("add", Module),
+                ("add", Interface),
+                ("change", Interface),
+                ("delete", Interface),
+            ]
         }
         if error := self.require_all_permissions("POST"):
             return error
@@ -602,7 +610,7 @@ class InstallModuleView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
         try:
             with transaction.atomic():
                 # Re-fetch bay under lock to prevent TOCTOU race with concurrent installs.
-                locked_bay = self.restricted_queryset(ModuleBay).select_for_update().get(pk=module_bay_id)
+                locked_bay = self.restricted_queryset(ModuleBay).select_for_update(of=("self",)).get(pk=module_bay_id)
                 if hasattr(locked_bay, "installed_module") and locked_bay.installed_module:
                     messages.warning(request, f"Module bay '{locked_bay.name}' already has a module installed.")
                     return _modules_redirect_response(request, sync_url, server_key)
@@ -675,6 +683,7 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
 
         self.required_object_permissions = {
             "POST": [
+                ("view", Device),
                 ("add", Module),
                 ("add", Interface),
                 ("change", Interface),
@@ -1232,6 +1241,7 @@ class InstallSelectedView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
 
         self.required_object_permissions = {
             "POST": [
+                ("view", Device),
                 ("add", Module),
                 ("add", Interface),
                 ("change", Interface),
@@ -1368,7 +1378,7 @@ class UpdateModuleSerialView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixi
     def post(self, request, pk):
         from dcim.models import Device, Module
 
-        self.required_object_permissions = {"POST": [("change", Module)]}
+        self.required_object_permissions = {"POST": [("view", Device), ("change", Module)]}
         if error := self.require_all_permissions("POST"):
             return error
 
@@ -1393,7 +1403,7 @@ class UpdateModuleSerialView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixi
             with transaction.atomic():
                 module = (
                     self.restricted_queryset(Module, "change")
-                    .select_for_update()
+                    .select_for_update(of=("self",))
                     .select_related("module_type", "module_bay")
                     .filter(pk=module_id, device=target_device)
                     .first()
@@ -1422,7 +1432,7 @@ class UpdateModuleInterfaceView(
     def post(self, request, pk):
         from dcim.models import Device, Interface, Module
 
-        self.required_object_permissions = {"POST": [("change", Interface)]}
+        self.required_object_permissions = {"POST": [("view", Device), ("view", Module), ("change", Interface)]}
         if error := self.require_all_permissions("POST"):
             return error
 
@@ -1447,7 +1457,7 @@ class UpdateModuleInterfaceView(
             messages.error(request, "Missing or invalid module ID.")
             return _modules_redirect_response(request, sync_url, server_key)
 
-        module = self.restrict_object_or_404(Module, "change", pk=module_id, device=target_device)
+        module = self.restrict_object_or_404(Module, "view", pk=module_id, device=target_device)
 
         bind_result = None
         # A primary interface is bindable only with both a cache-resolved item AND a server
@@ -1720,6 +1730,7 @@ class ReplaceModuleView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjectP
 
         self.required_object_permissions = {
             "POST": [
+                ("view", Device),
                 ("add", Module),
                 ("change", Module),
                 ("delete", Module),
@@ -1794,7 +1805,7 @@ class ReplaceModuleView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjectP
                 # Re-fetch with row lock to prevent concurrent modifications
                 installed_module = (
                     self.restricted_queryset(Module, "change")
-                    .select_for_update()
+                    .select_for_update(of=("self",))
                     .filter(pk=module_id, device=target_device)
                     .select_related("module_type", "module_bay")
                     .first()
@@ -1927,7 +1938,14 @@ class MoveModuleView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, View)
     def post(self, request, pk):
         from dcim.models import Device, Module, ModuleBay
 
-        self.required_object_permissions = {"POST": [("change", Module), ("delete", Module)]}
+        self.required_object_permissions = {
+            "POST": [
+                ("view", Device),
+                ("view", ModuleBay),
+                ("change", Module),
+                ("delete", Module),
+            ]
+        }
         if error := self.require_all_permissions("POST"):
             return error
 
@@ -1960,7 +1978,9 @@ class MoveModuleView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, View)
             with transaction.atomic():
                 # Lock target bay to prevent concurrent modifications
                 target_bay = (
-                    self.restricted_queryset(ModuleBay).select_for_update().get(pk=target_bay_id, device=target_device)
+                    self.restricted_queryset(ModuleBay)
+                    .select_for_update(of=("self",))
+                    .get(pk=target_bay_id, device=target_device)
                 )
 
                 # Re-fetch with row lock to prevent concurrent modifications. Scoped like the
@@ -1969,7 +1989,7 @@ class MoveModuleView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, View)
                 # user's grant does not cover.
                 conflict_module = (
                     self.restricted_queryset(Module, "change")
-                    .select_for_update()
+                    .select_for_update(of=("self",))
                     .filter(pk=conflict_module_id)
                     .select_related("module_type", "module_bay", "device")
                     .first()
@@ -1984,7 +2004,7 @@ class MoveModuleView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, View)
                 if module_id:
                     occupant = (
                         self.restricted_queryset(Module, "delete")
-                        .select_for_update()
+                        .select_for_update(of=("self",))
                         .filter(pk=module_id, device=target_device, module_bay=target_bay)
                         .first()
                     )
@@ -2216,22 +2236,31 @@ class AddBayTemplateView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, V
         return qs.exists()
 
     def get(self, request, pk):
-        from dcim.models import Device, ModuleBay, ModuleBayTemplate
+        from dcim.models import Device, DeviceType, ModuleBay, ModuleBayTemplate, ModuleType
+
+        target_kind = request.GET.get("target_kind", "")
+        if target_kind not in self.TARGET_KINDS:
+            return HttpResponse("Invalid target_kind.", status=400)
+        target_model = DeviceType if target_kind == "device_type" else ModuleType
 
         # Read-only modal render — only require plugin view permission and
         # NetBox add-permission on ModuleBayTemplate so users without it never
         # see a form they cannot submit. POST also instantiates live ModuleBay
         # rows via _instantiate_template_on_existing(), so require add_modulebay
         # here too to keep the GET/POST permission contract aligned.
-        self.required_object_permissions = {"GET": [("add", ModuleBayTemplate), ("add", ModuleBay)]}
+        self.required_object_permissions = {
+            "GET": [
+                ("view", Device),
+                ("view", target_model),
+                ("add", ModuleBayTemplate),
+                ("add", ModuleBay),
+            ]
+        }
         if error := self.require_all_permissions("GET"):
             return error
 
         device = self.restrict_object_or_404(Device, pk=pk)
 
-        target_kind = request.GET.get("target_kind", "")
-        if target_kind not in self.TARGET_KINDS:
-            return HttpResponse("Invalid target_kind.", status=400)
         try:
             target_pk = int(request.GET.get("target_pk", ""))
         except (TypeError, ValueError):
@@ -2278,24 +2307,34 @@ class AddBayTemplateView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, V
         return render(request, "netbox_librenms_plugin/htmx/add_bay_template_modal.html", context)
 
     def post(self, request, pk):
-        from dcim.models import Device, ModuleBay, ModuleBayTemplate
+        from dcim.models import Device, DeviceType, ModuleBay, ModuleBayTemplate, ModuleType
 
         from netbox_librenms_plugin.models import ModuleBayMapping
+
+        target_kind = request.POST.get("target_kind", "")
+        if target_kind not in self.TARGET_KINDS:
+            messages.error(request, "Invalid target_kind for bay template.")
+            sync_url = reverse("plugins:netbox_librenms_plugin:device_librenms_sync", kwargs={"pk": pk})
+            return _modules_redirect_response(request, sync_url)
+        target_model = DeviceType if target_kind == "device_type" else ModuleType
 
         # POST creates the template AND instantiates live ModuleBay rows on
         # existing devices/modules via _instantiate_template_on_existing(), so
         # gate on add_modulebay in addition to add_modulebaytemplate.
-        self.required_object_permissions = {"POST": [("add", ModuleBayTemplate), ("add", ModuleBay)]}
+        self.required_object_permissions = {
+            "POST": [
+                ("view", Device),
+                ("view", target_model),
+                ("add", ModuleBayTemplate),
+                ("add", ModuleBay),
+            ]
+        }
         if error := self.require_all_permissions("POST"):
             return error
 
         device = self.restrict_object_or_404(Device, pk=pk)
         sync_url = reverse("plugins:netbox_librenms_plugin:device_librenms_sync", kwargs={"pk": pk})
 
-        target_kind = request.POST.get("target_kind", "")
-        if target_kind not in self.TARGET_KINDS:
-            messages.error(request, "Invalid target_kind for bay template.")
-            return _modules_redirect_response(request, sync_url)
         try:
             target_pk = int(request.POST.get("target_pk", ""))
         except (TypeError, ValueError):

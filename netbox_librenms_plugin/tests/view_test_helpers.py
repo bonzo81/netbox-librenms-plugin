@@ -18,7 +18,7 @@ from netbox_librenms_plugin.tests.conftest import make_superuser
 
 def bind_and_call(view, request, method, **kwargs):
     """Call ``view.<method>(request, **kwargs)`` with the request bound as ``setup()`` binds it."""
-    view.setup(request)
+    view.setup(request, **kwargs)
     return getattr(view, method)(request, **kwargs)
 
 
@@ -144,9 +144,16 @@ def _message_level(name):
     """
     from django.contrib import messages
 
+    levels = {
+        "debug": messages.DEBUG,
+        "info": messages.INFO,
+        "success": messages.SUCCESS,
+        "warning": messages.WARNING,
+        "error": messages.ERROR,
+    }
     try:
-        return getattr(messages, name.upper())
-    except AttributeError:
+        return levels[name.lower()]
+    except (AttributeError, KeyError):
         raise ValueError(f"unknown message level {name!r}") from None
 
 

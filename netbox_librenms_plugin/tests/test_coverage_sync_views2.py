@@ -178,6 +178,42 @@ class TestSyncCablesViewSuccessPath:
         assert local.cable_id == remote.cable_id
         assert Cable.objects.filter(pk=local.cable_id).exists()
 
+    def test_unrelated_posted_device_cannot_redirect_the_local_termination(self):
+        """A forged VC selection must keep the cached local interface on the page device."""
+        page_device = make_device("cable-page-device")
+        unrelated_device = make_device("cable-unrelated-device")
+        remote_device = make_device("cable-forged-remote")
+        cached_local = make_interface(page_device, "Gi0/1")
+        unrelated_local = make_interface(unrelated_device, "Gi0/1")
+        remote = make_interface(remote_device, "Gi0/2")
+        request = _make_request(
+            post_data={
+                "select": ["port1"],
+                "device_selection_port1": str(unrelated_device.pk),
+            }
+        )
+        view = _cables_view(
+            request,
+            page_device,
+            [
+                {
+                    "local_port_id": "port1",
+                    "local_port": "Gi0/1",
+                    "netbox_local_interface_id": cached_local.pk,
+                    "netbox_remote_interface_id": remote.pk,
+                }
+            ],
+        )
+
+        with patch.object(view, "create_cable", return_value=True) as create_cable:
+            _post(view, request, pk=page_device.pk)
+
+        used_local, used_remote, used_request = create_cable.call_args.args
+        assert used_local == cached_local
+        assert used_local != unrelated_local
+        assert used_remote == remote
+        assert used_request is request
+
 
 class TestSyncCablesViewSkipsOOBRows:
     def test_oob_sourced_link_is_never_cabled(self):
@@ -322,7 +358,7 @@ class TestSyncCablesViewMissingRemote:
         _post(view, req, pk=dev.pk)
 
         assert any("Remote device or interface not found" in t for t in message_texts(req, "error"))
-        assert not Cable.objects.filter(terminations__interface=remote_iface).exists()
+        assert not remote_iface.cable_terminations.exists()
 
 
 class TestSyncCablesViewMissingLinkData:
@@ -2070,6 +2106,19 @@ class TestSyncSiteLocationViewPost:
 
         view._librenms_api.add_location.assert_not_called()
 
+    def test_site_view_permission_is_required_before_post_processing(self):
+        """Plugin write permission alone must not authorize reading the posted Site."""
+        site = _make_site("No Site Read", latitude=1.0, longitude=1.0)
+        user = make_user_with_perms("loc-no-site-read", [])
+        req = _make_request(post_data={"action": "create", "pk": str(site.pk)}, user=user)
+        view = _location_view(req)
+
+        response = _post(view, req)
+
+        assert response.status_code == 302
+        assert any("dcim.view_site" in text for text in message_texts(req, "error"))
+        view._librenms_api.add_location.assert_not_called()
+
     def test_missing_pk_shows_error(self):
         req = _make_request(post_data={"action": "create"})
         view = _location_view(req)
@@ -2345,3 +2394,19 @@ class TestSyncSiteLocationViewGetQuerysetFilterset:
 
         assert len(result) == Site.objects.count()
         assert {row.netbox_site.name for row in result} >= {"London", "Paris"}
+
+    def test_get_queryset_lists_only_sites_in_the_users_grant(self):
+        """A constrained Site grant must hide all other rows from the sync table."""
+        from dcim.models import Site
+
+        mine = _make_site("Location List Mine")
+        _make_site("Location List Theirs")
+        user = make_user_with_perms(
+            "loc-list-scoped",
+            [("view", Site)],
+            constraints={"pk": mine.pk},
+            plugin_write=False,
+        )
+        view = _location_view(_make_request(user=user), locations=[])
+
+        assert [row.netbox_site.pk for row in view.get_queryset()] == [mine.pk]

@@ -432,7 +432,7 @@ class _BaseMoveToWinnerView(LibreNMSAPIMixin, LibreNMSPermissionMixin, NetBoxObj
         locked = {
             d.pk: d
             for d in self.restricted_queryset(Device, "change")
-            .select_for_update()
+            .select_for_update(of=("self",))
             .filter(pk__in=ordered)
             .order_by("pk")
         }
@@ -556,7 +556,7 @@ class MoveInterfaceToWinnerView(_BaseMoveToWinnerView):
             # collision check below while the row is still moved by pk.
             interface = (
                 self.restricted_queryset(Interface, "change")
-                .select_for_update()
+                .select_for_update(of=("self",))
                 .filter(pk=interface.pk, device=donor)
                 .first()
             )
@@ -780,7 +780,7 @@ class MoveIPAddressToWinnerView(_BaseMoveToWinnerView):
             donor, winner, err = self._lock_donor_winner_and_reverify(request, donor, winner, server_key)
             if err is not None:
                 return err
-            ip = self.restricted_queryset(IPAddress, "change").select_for_update().filter(pk=ip.pk).first()
+            ip = self.restricted_queryset(IPAddress, "change").select_for_update(of=("self",)).filter(pk=ip.pk).first()
             if ip is None:
                 return self._fail(request, "IP address no longer exists.", status=410)
             assigned = ip.assigned_object

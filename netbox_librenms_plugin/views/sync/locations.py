@@ -24,6 +24,16 @@ class SyncSiteLocationView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin,
 
     COORDINATE_TOLERANCE = 0.0001
     SyncData = namedtuple("SyncData", ["netbox_site", "librenms_location", "is_synced"])
+    required_object_permissions = {
+        "GET": [("view", Site)],
+        "POST": [("view", Site)],
+    }
+
+    def get(self, request, *args, **kwargs):
+        """Render only after checking the declared Site read permission."""
+        if error := self.require_all_permissions("GET"):
+            return error
+        return super().get(request, *args, **kwargs)
 
     def get_table(self, *args, **kwargs):
         """Return the configured sync table."""
@@ -40,7 +50,7 @@ class SyncSiteLocationView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin,
 
     def get_queryset(self):
         """Return sync data pairing NetBox sites with LibreNMS locations."""
-        netbox_sites = Site.objects.all()
+        netbox_sites = self.restricted_queryset(Site)
         success, librenms_locations = self.get_librenms_locations()
         if not success or not isinstance(librenms_locations, list):
             return []
@@ -86,8 +96,8 @@ class SyncSiteLocationView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin,
 
     def post(self, request):
         """Handle create or update of a LibreNMS location from a NetBox site."""
-        # Check write permission before modifying LibreNMS locations
-        if error := self.require_write_permission():
+        # Check plugin write and Site view permissions before modifying LibreNMS locations.
+        if error := self.require_all_permissions("POST"):
             return error
 
         action = request.POST.get("action")

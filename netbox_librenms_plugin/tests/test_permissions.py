@@ -339,6 +339,32 @@ class TestObjectPermissionHelpers:
 class TestNetBoxObjectPermissionMixin:
     """Tests for the NetBoxObjectPermissionMixin class."""
 
+    @pytest.mark.django_db
+    def test_restricted_queryset_locks_only_model_row_with_nullable_constraint(self):
+        """A PostgreSQL lock must exclude nullable joins added by object permission constraints."""
+        from types import SimpleNamespace
+
+        from dcim.models import Device
+        from django.db import transaction
+
+        from netbox_librenms_plugin.tests.conftest import make_device
+        from netbox_librenms_plugin.tests.view_test_helpers import make_user_with_perms
+        from netbox_librenms_plugin.views.mixins import NetBoxObjectPermissionMixin
+
+        device = make_device("permission-lock-nullable")
+        user = make_user_with_perms(
+            "permission-lock-nullable",
+            [("change", Device)],
+            constraints={"site__region": None},
+        )
+        view = NetBoxObjectPermissionMixin()
+        view.request = SimpleNamespace(user=user)
+
+        with transaction.atomic():
+            locked = view.restricted_queryset(Device, "change").select_for_update(of=("self",)).get(pk=device.pk)
+
+        assert locked == device
+
     def test_check_object_permissions_all_granted(self):
         """Returns True when user has all object permissions."""
         from netbox_librenms_plugin.views.mixins import NetBoxObjectPermissionMixin

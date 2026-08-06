@@ -144,6 +144,20 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libre
 
         return all(link_data.get(field) for field in required_fields)
 
+    def _selected_device_is_in_page_context(self, selected_device_id):
+        """Return whether a posted device is the page device or one of its VC members."""
+        initial_device = getattr(self, "_initial_device", None)
+        if initial_device is None:
+            return False
+        try:
+            selected_device_id = int(selected_device_id)
+        except (TypeError, ValueError):
+            return False
+        if selected_device_id == initial_device.pk:
+            return True
+        virtual_chassis = getattr(initial_device, "virtual_chassis", None)
+        return bool(virtual_chassis and virtual_chassis.members.filter(pk=selected_device_id).exists())
+
     def handle_cable_creation(self, link_data, interface):
         """Create a cable from link data and return the operation result."""
         display_name = link_data.get("local_port") or interface.get("local_port_id", "")
@@ -158,7 +172,11 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libre
             # Honour user's VC member selection: if the selected device_id differs from
             # the cached interface's device, look up the same port name on that device.
             selected_device_id = interface.get("device_id")
-            if selected_device_id and str(local_interface.device_id) != str(selected_device_id):
+            if (
+                selected_device_id
+                and str(local_interface.device_id) != str(selected_device_id)
+                and self._selected_device_is_in_page_context(selected_device_id)
+            ):
                 port_name = link_data.get("local_port") or local_interface.name
                 try:
                     local_interface = self.restricted_queryset(Interface).get(

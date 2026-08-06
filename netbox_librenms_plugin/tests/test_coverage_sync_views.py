@@ -2386,13 +2386,14 @@ class TestSyncVLANsViewStructure:
         assert CacheMixin in mro
 
     def test_required_object_permissions(self):
-        from ipam.models import VLAN
+        from ipam.models import VLAN, VLANGroup
 
         from netbox_librenms_plugin.views.sync.vlans import SyncVLANsView
 
         perms = SyncVLANsView.required_object_permissions["POST"]
         assert ("add", VLAN) in perms
         assert ("change", VLAN) in perms
+        assert ("view", VLANGroup) in perms
 
 
 class TestSyncVLANsViewGetObject:

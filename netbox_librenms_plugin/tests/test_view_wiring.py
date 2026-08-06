@@ -492,6 +492,10 @@ class TestGatedViewsResolveThroughRestrictedQuerysets:
                 for inner in ast.walk(node)
             )
 
+        def _has_scoped_relationship_filter(call):
+            """Whether an ``__in`` relationship value is a restricted queryset."""
+            return any(kw.arg and kw.arg.endswith("__in") and _is_scoped(kw.value) for kw in call.keywords)
+
         def _through_manager(node):
             """Whether *node* is an unscoped ``<Model>.objects`` chain."""
             saw_objects = False
@@ -558,7 +562,11 @@ class TestGatedViewsResolveThroughRestrictedQuerysets:
                 # A scoped queryset can also arrive as an ARGUMENT rather than the receiver:
                 # `Port.objects.filter(pk=..., device__in=self.restricted_queryset(Device))`
                 # constrains by owner visibility, which is a deliberate and sufficient scoping.
-                if _through_manager(sub.func.value) and not _is_scoped(sub):
+                if (
+                    _through_manager(sub.func.value)
+                    and not _is_scoped(sub.func.value)
+                    and not _has_scoped_relationship_filter(sub)
+                ):
                     offenders.add((label, node.name, sub.lineno))
         return offenders
 
@@ -670,6 +678,20 @@ class TestGatedViewsResolveThroughRestrictedQuerysets:
         )
         assert not self._scan_tree(ast.parse(source), "<fixture>")
 
+    def test_the_scan_rejects_an_unrelated_nested_scope_call(self):
+        """A scope call in an unrelated filter value must not bless a raw primary-key lookup."""
+        import ast
+
+        source = (
+            "class V:\n"
+            "    required_object_permissions = {'POST': []}\n"
+            "    def post(self, request, pk):\n"
+            "        return Interface.objects.filter(\n"
+            "            pk=remote_pk, audit=self.restricted_queryset(Device).count()\n"
+            "        ).first()\n"
+        )
+        assert self._scan_tree(ast.parse(source), "<fixture>"), "an unrelated scope call must not hide a raw lookup"
+
     def test_the_scan_exempts_a_relock_of_an_already_resolved_object(self):
         """Re-locking a row already resolved through a scoped queryset must not demand a new permission."""
         import ast
@@ -694,6 +716,157 @@ class TestGatedViewsResolveThroughRestrictedQuerysets:
             "        return Device.objects.filter(pk=object_id).exists()\n"
         )
         assert not self._scan_tree(ast.parse(source), "<fixture>")
+
+
+class TestViewTestHelpers:
+    def test_bind_and_call_populates_view_kwargs(self):
+        """The direct-call helper must bind URL kwargs exactly as Django dispatch does."""
+        from django.http import HttpResponse
+        from django.test import RequestFactory
+        from django.views import View
+
+        from netbox_librenms_plugin.tests.view_test_helpers import bind_and_call
+
+        class KwargView(View):
+            def post(self, request, **kwargs):
+                assert self.kwargs == kwargs
+                return HttpResponse()
+
+        bind_and_call(KwargView(), RequestFactory().post("/"), "post", pk=17)
+
+    def test_message_level_rejects_non_level_message_attributes(self):
+        from netbox_librenms_plugin.tests.view_test_helpers import _message_level
+
+        with pytest.raises(ValueError, match="unknown message level"):
+            _message_level("add_message")
+
+
+class TestModuleWriteViewPermissionDeclarations:
+    @pytest.mark.parametrize(
+        ("view_name", "expected"),
+        [
+            ("InstallModuleView", ("view", "Device")),
+            ("InstallModuleView", ("view", "ModuleBay")),
+            ("InstallModuleView", ("view", "ModuleType")),
+            ("InstallBranchView", ("view", "Device")),
+            ("InstallSelectedView", ("view", "Device")),
+            ("UpdateModuleSerialView", ("view", "Device")),
+            ("UpdateModuleInterfaceView", ("view", "Device")),
+            ("UpdateModuleInterfaceView", ("view", "Module")),
+            ("ReplaceModuleView", ("view", "Device")),
+            ("MoveModuleView", ("view", "Device")),
+            ("MoveModuleView", ("view", "ModuleBay")),
+        ],
+    )
+    def test_write_gate_declares_each_restricted_read(self, view_name, expected):
+        """Each dynamic gate must declare every model read before the first lookup."""
+        from types import SimpleNamespace
+        from unittest.mock import MagicMock
+
+        from netbox_librenms_plugin.views.sync import modules
+
+        view = getattr(modules, view_name)()
+        denied = object()
+        view.require_all_permissions = MagicMock(return_value=denied)
+        request = SimpleNamespace(POST={})
+
+        assert view.post(request, pk=1) is denied
+        assert any(
+            action == expected[0] and model.__name__ == expected[1]
+            for action, model in view.required_object_permissions["POST"]
+        )
+
+    @pytest.mark.parametrize(
+        ("method", "target_kind", "target_model"),
+        [("get", "device_type", "DeviceType"), ("post", "module_type", "ModuleType")],
+    )
+    def test_add_bay_template_gate_declares_device_and_dynamic_target_reads(self, method, target_kind, target_model):
+        from types import SimpleNamespace
+        from unittest.mock import MagicMock
+
+        from netbox_librenms_plugin.views.sync.modules import AddBayTemplateView
+
+        view = AddBayTemplateView()
+        denied = object()
+        view.require_all_permissions = MagicMock(return_value=denied)
+        request = SimpleNamespace(GET={"target_kind": target_kind}, POST={"target_kind": target_kind})
+
+        assert getattr(view, method)(request, pk=1) is denied
+        declared = {(action, model.__name__) for action, model in view.required_object_permissions[method.upper()]}
+        assert ("view", "Device") in declared
+        assert ("view", target_model) in declared
+
+
+class TestImportMappingPermissionOrder:
+    @pytest.mark.parametrize(
+        ("view_name", "target_model"),
+        [("AddDeviceTypeMappingView", "DeviceType"), ("AddPlatformMappingView", "Platform")],
+    )
+    def test_target_read_is_declared_and_gated_before_restricted_lookup(self, view_name, target_model):
+        """Posted mapping targets must not be resolved before their view-permission gate."""
+        import ast
+        import inspect
+        import textwrap
+
+        from netbox_librenms_plugin.views.imports import actions
+
+        tree = ast.parse(textwrap.dedent(inspect.getsource(getattr(actions, view_name).post)))
+        calls = [node for node in ast.walk(tree) if isinstance(node, ast.Call)]
+        gate_line = min(node.lineno for node in calls if getattr(node.func, "attr", "") == "require_object_permissions")
+        target_lookup_line = min(
+            node.lineno
+            for node in calls
+            if getattr(node.func, "attr", "") == "get"
+            and isinstance(node.func.value, ast.Call)
+            and getattr(node.func.value.func, "attr", "") == "restricted_queryset"
+            and node.func.value.args
+            and getattr(node.func.value.args[0], "id", "") == target_model
+        )
+        declared_read = any(
+            isinstance(node, ast.Tuple)
+            and len(node.elts) == 2
+            and isinstance(node.elts[0], ast.Constant)
+            and node.elts[0].value == "view"
+            and getattr(node.elts[1], "id", "") == target_model
+            for node in ast.walk(tree)
+        )
+
+        assert declared_read
+        assert gate_line < target_lookup_line
+
+
+class TestScopedRowLocks:
+    def test_restricted_queryset_locks_only_the_target_table(self):
+        """Permission joins must not become PostgreSQL row-lock targets."""
+        import ast
+        import pathlib
+
+        import netbox_librenms_plugin
+
+        views_root = pathlib.Path(netbox_librenms_plugin.__file__).parent / "views"
+        offenders = []
+        for path in sorted(views_root.rglob("*.py")):
+            tree = ast.parse(path.read_text(encoding="utf-8"), str(path))
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.Call) or getattr(node.func, "attr", "") != "select_for_update":
+                    continue
+                receiver = node.func.value
+                is_restricted = any(
+                    isinstance(inner, ast.Call)
+                    and getattr(inner.func, "attr", "") in {"restricted_queryset", "restrict"}
+                    for inner in ast.walk(receiver)
+                )
+                if not is_restricted:
+                    continue
+                of_keyword = next((kw for kw in node.keywords if kw.arg == "of"), None)
+                if not (
+                    of_keyword
+                    and isinstance(of_keyword.value, (ast.Tuple, ast.List))
+                    and [getattr(item, "value", None) for item in of_keyword.value.elts] == ["self"]
+                ):
+                    offenders.append((str(path.relative_to(views_root)), node.lineno))
+
+        assert not offenders, f"restricted row locks must use select_for_update(of=('self',)): {offenders}"
 
 
 @pytest.mark.django_db
@@ -789,7 +962,7 @@ class TestGatedViewsRefuseOutOfScopeObjects:
 
     def test_module_install_404s_a_page_device_outside_the_grant(self):
         """InstallModuleView resolves the page device by URL pk before touching modules."""
-        from dcim.models import Device, Interface, Module
+        from dcim.models import Device, Interface, Module, ModuleBay, ModuleType
         from django.http import Http404
 
         from netbox_librenms_plugin.tests.conftest import make_device
@@ -801,6 +974,8 @@ class TestGatedViewsRefuseOutOfScopeObjects:
             "scope-modinstall",
             [
                 (Device, "view", {"pk": in_scope.pk}),
+                (ModuleBay, "view", None),
+                (ModuleType, "view", None),
                 (Module, "add", None),
                 (Interface, "add", None),
                 (Interface, "change", None),

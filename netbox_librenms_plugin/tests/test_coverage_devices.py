@@ -727,6 +727,13 @@ class TestSingleVlanGroupVerifyView:
         assert response.status_code == 403
         mock_get_obj.assert_not_called()  # device never resolved → no arbitrary-ID probing
 
+    def test_declares_vlan_group_read_permission(self):
+        from ipam.models import VLANGroup
+
+        from netbox_librenms_plugin.views.object_sync.devices import SingleVlanGroupVerifyView
+
+        assert ("view", VLANGroup) in SingleVlanGroupVerifyView.required_object_permissions["POST"]
+
     def test_returns_400_when_no_device_id(self):
         """Returns 400 when no device_id provided."""
         import json
@@ -879,6 +886,13 @@ class TestVerifyVlanSyncGroupView:
         # gate here; the dedicated perm test exercises the real gate. Mirrors the other harnesses.
         view.require_object_permissions_json = MagicMock(return_value=None)
         return view
+
+    def test_declares_vlan_group_read_permission(self):
+        from ipam.models import VLANGroup
+
+        from netbox_librenms_plugin.views.object_sync.devices import VerifyVlanSyncGroupView
+
+        assert ("view", VLANGroup) in VerifyVlanSyncGroupView.required_object_permissions["POST"]
 
     def test_checks_permission_before_resolving_group(self):
         """The object-view gate (on VLAN — no device here) must run BEFORE get_object_or_404 so an unauthorized caller can't enumerate VLANs/groups (existence via 404). Exercises the real require_object_permissions_json (only request.user.has_perm is mocked)."""

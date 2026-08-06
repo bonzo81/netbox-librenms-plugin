@@ -28,6 +28,7 @@ class SyncVLANsView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreN
             # The owner device is resolved through a restricted queryset (see get_object), so
             # state that read here: a missing grant is an explicit 403, not a 404 at the lookup.
             ("view", Device),
+            ("view", VLANGroup),
             ("add", VLAN),
             ("change", VLAN),
         ],
