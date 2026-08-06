@@ -248,7 +248,7 @@ class BulkPrecheckOutcome:
         collisions: The collision groups (for the HTMX modal / job log).
         block_message: Shared collision-block copy (``""`` when not blocked).
         skipped_ids: Unresolved ids to skip (import the rest).
-        skip_message: Shared copy naming the skipped rows (``""`` when none).
+        skip_message: Shared copy naming skipped rows in an unblocked batch (``""`` otherwise).
         importable_device_ids: ``device_ids`` minus ``skipped_ids``.
         importable_vm_imports: ``vm_imports`` minus ``skipped_ids``.
     """
@@ -284,7 +284,7 @@ def classify_bulk_precheck(collisions, unresolved, device_ids, vm_imports) -> Bu
     importable_vm_imports = {d: v for d, v in vm_imports.items() if d not in unresolved_set}
 
     skip_message = ""
-    if unresolved:
+    if unresolved and not collisions:
         ids = ", ".join(str(d) for d in unresolved)
         skip_message = (
             f"Skipped {len(unresolved)} selected row(s) (id(s): {ids}): their LibreNMS device info "

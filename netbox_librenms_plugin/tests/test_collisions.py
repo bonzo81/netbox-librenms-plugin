@@ -452,3 +452,17 @@ def test_classify_collisions_block_whole_batch():
     assert "pk(s): 7" in outcome.block_message
     # Object-neutral: never mislabel a VM collision as a "NetBox device".
     assert "NetBox device collision" not in outcome.block_message
+
+
+def test_classify_blocked_batch_omits_imported_rows_message():
+    """A collision blocks every row, so unresolved-row copy must not claim that rows imported."""
+    outcome = classify_bulk_precheck(
+        [{"nb_device_pk": 7}],
+        [2],
+        device_ids=[1, 2],
+        vm_imports={},
+    )
+
+    assert outcome.blocked is True
+    assert outcome.skipped_ids == [2]
+    assert outcome.skip_message == ""

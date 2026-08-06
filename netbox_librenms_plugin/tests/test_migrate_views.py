@@ -905,6 +905,7 @@ class TestTransferDeviceIPView:
         winner.refresh_from_db()
         assert winner.oob_ip_id == oob_ip.pk
         assert donor.oob_ip_id is None
+        assert state["moved"], "the injected interface move did not run"
 
     def test_rejects_when_address_still_attached_to_donor(self):
         """The transfer only flips the FK (save skips full_clean), so it must refuse to point the winner at an address still assigned to a DONOR interface — otherwise the winner would own an oob_ip that isn't on one of its interfaces."""
