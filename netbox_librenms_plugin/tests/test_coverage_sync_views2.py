@@ -194,6 +194,30 @@ class TestSyncCablesViewSuccessPath:
         assert local.cable_id == remote.cable_id
         assert Cable.objects.filter(pk=local.cable_id).exists()
 
+    def test_missing_local_interface_is_invalid_not_missing_remote(self):
+        """A stale local ID must not be reported as a missing remote endpoint."""
+        from dcim.models import Interface
+
+        from netbox_librenms_plugin.views.sync.cables import SyncCablesView
+
+        device = make_device("cable-missing-local-id")
+        remote = make_interface(device, "Gi0/2")
+        missing_local_pk = Interface.objects.order_by("-pk").first().pk + 1000
+        request = _make_request()
+        view = make_view(SyncCablesView, request)
+
+        result = view.handle_cable_creation(
+            {
+                "local_port": "Gi0/1",
+                "netbox_local_interface_id": missing_local_pk,
+                "netbox_remote_interface_id": remote.pk,
+                "netbox_remote_device_id": device.pk,
+            },
+            {"local_port_id": "1"},
+        )
+
+        assert result == {"status": "invalid", "interface": "Gi0/1"}
+
     def test_unrelated_posted_device_cannot_redirect_the_local_termination(self):
         """A forged VC selection must reject the row, not cable the cached page interface."""
         from dcim.models import Cable
