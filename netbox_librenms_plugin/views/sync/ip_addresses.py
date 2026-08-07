@@ -68,16 +68,16 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
         return [x for x in request.POST.getlist("select") if x]
 
     def get_vrf_selection(self, request, ip_address):
-        """Return the VRF selected for a given IP address, or None."""
+        """Return the selected VRF, or None only when the row requests no VRF."""
         vrf_id = request.POST.get(f"vrf_{ip_address}")
 
-        if vrf_id:
-            try:
-                return self.restricted_queryset(VRF).get(pk=vrf_id)
-            except (VRF.DoesNotExist, TypeError, ValueError):
-                pass
+        if not vrf_id:
+            return None
 
-        return None
+        try:
+            return self.restricted_queryset(VRF).get(pk=vrf_id)
+        except (VRF.DoesNotExist, TypeError, ValueError):
+            raise ValueError("Selected VRF is no longer available or you do not have permission to view it.") from None
 
     def get_cached_ip_data(self, request, obj):
         """Return cached LibreNMS IP address data for the given object."""

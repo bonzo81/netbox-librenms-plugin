@@ -779,6 +779,226 @@ class TestGatedViewsResolveThroughRestrictedQuerysets:
         assert not self._scan_tree(ast.parse(source), "<fixture>")
 
 
+class TestPostedSelectionsFailClosed:
+    """Prevent an explicit object selection from degrading to an absent selection."""
+
+    LOOKUP_ERRORS = frozenset({"DoesNotExist", "ObjectDoesNotExist", "TypeError", "ValueError"})
+
+    @staticmethod
+    def _exception_names(node):
+        """Return the exception names handled by an except clause."""
+        import ast
+
+        if isinstance(node, ast.Tuple):
+            return {name for element in node.elts for name in TestPostedSelectionsFailClosed._exception_names(element)}
+        if isinstance(node, ast.Name):
+            return {node.id}
+        if isinstance(node, ast.Attribute):
+            return {node.attr}
+        return set()
+
+    @staticmethod
+    def _is_post_get(node):
+        """Whether *node* reads a value from request.POST."""
+        import ast
+
+        return (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "get"
+            and isinstance(node.func.value, ast.Attribute)
+            and node.func.value.attr == "POST"
+        )
+
+    @staticmethod
+    def _is_restricted_get(node):
+        """Whether *node* gets one object from a permission-restricted queryset."""
+        import ast
+
+        return (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "get"
+            and any(
+                isinstance(call, ast.Call)
+                and isinstance(call.func, ast.Attribute)
+                and call.func.attr == "restricted_queryset"
+                for call in ast.walk(node.func.value)
+            )
+        )
+
+    @staticmethod
+    def _returns_none(statement):
+        """Whether *statement* is ``return None``."""
+        import ast
+
+        return isinstance(statement, ast.Return) and (
+            statement.value is None or isinstance(statement.value, ast.Constant) and statement.value.value is None
+        )
+
+    @staticmethod
+    def _is_none_guard(node, name):
+        """Whether *node* checks that *name* is None."""
+        import ast
+
+        return (
+            isinstance(node, ast.Compare)
+            and isinstance(node.left, ast.Name)
+            and node.left.id == name
+            and len(node.ops) == 1
+            and isinstance(node.ops[0], ast.Is)
+            and len(node.comparators) == 1
+            and isinstance(node.comparators[0], ast.Constant)
+            and node.comparators[0].value is None
+        )
+
+    @staticmethod
+    def _stops_current_path(statements):
+        """Whether *statements* stop the current path before the selected object can be used."""
+        import ast
+
+        return bool(statements) and isinstance(statements[-1], (ast.Break, ast.Continue, ast.Raise, ast.Return))
+
+    @classmethod
+    def _statement_lists(cls, node):
+        """Yield each ordered statement list nested below *node*."""
+        import ast
+
+        for _field, value in ast.iter_fields(node):
+            if isinstance(value, list) and value and all(isinstance(item, ast.stmt) for item in value):
+                yield value
+                for statement in value:
+                    yield from cls._statement_lists(statement)
+            elif isinstance(value, ast.AST):
+                yield from cls._statement_lists(value)
+
+    @classmethod
+    def _calls_reject_none(cls, tree, helper_name):
+        """Whether every local call to *helper_name* stops when its result is None."""
+        import ast
+
+        found_call = False
+        for statements in cls._statement_lists(tree):
+            for index, statement in enumerate(statements):
+                if not isinstance(statement, ast.Assign) or not isinstance(statement.value, ast.Call):
+                    continue
+                function = statement.value.func
+                if not isinstance(function, ast.Attribute) or function.attr != helper_name:
+                    continue
+                found_call = True
+                if len(statement.targets) != 1 or not isinstance(statement.targets[0], ast.Name):
+                    return False
+                if index + 1 >= len(statements):
+                    return False
+                guard = statements[index + 1]
+                if not isinstance(guard, ast.If) or not cls._is_none_guard(guard.test, statement.targets[0].id):
+                    return False
+                if not cls._stops_current_path(guard.body):
+                    return False
+        return found_call
+
+    @classmethod
+    def _scan_tree(cls, tree, label):
+        """Return posted restricted lookups whose failure becomes no selection."""
+        import ast
+
+        offenders = set()
+        for function in (node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef)):
+            posted_names = {
+                target.id
+                for assignment in ast.walk(function)
+                if isinstance(assignment, ast.Assign) and cls._is_post_get(assignment.value)
+                for target in assignment.targets
+                if isinstance(target, ast.Name)
+            }
+            if not posted_names:
+                continue
+
+            terminal_none = bool(function.body and cls._returns_none(function.body[-1]))
+            for try_node in (node for node in ast.walk(function) if isinstance(node, ast.Try)):
+                restricted_gets = [
+                    call
+                    for statement in try_node.body
+                    for call in ast.walk(statement)
+                    if cls._is_restricted_get(call)
+                    and any(isinstance(node, ast.Name) and node.id in posted_names for node in ast.walk(call))
+                ]
+                if not restricted_gets:
+                    continue
+
+                for handler in try_node.handlers:
+                    catches_lookup_error = bool(cls._exception_names(handler.type) & cls.LOOKUP_ERRORS)
+                    passes_to_terminal_none = (
+                        terminal_none and len(handler.body) == 1 and isinstance(handler.body[0], ast.Pass)
+                    )
+                    returns_none = len(handler.body) == 1 and cls._returns_none(handler.body[0])
+                    if catches_lookup_error and (passes_to_terminal_none or returns_none):
+                        if not cls._calls_reject_none(tree, function.name):
+                            offenders.add((label, function.name, restricted_gets[0].lineno))
+
+        return offenders
+
+    @classmethod
+    def _scan(cls):
+        """Run the fail-open selection scan over every view module."""
+        import ast
+        import pathlib
+
+        import netbox_librenms_plugin
+
+        views_root = pathlib.Path(netbox_librenms_plugin.__file__).parent / "views"
+        offenders = set()
+        for path in sorted(views_root.rglob("*.py")):
+            tree = ast.parse(path.read_text(encoding="utf-8"), str(path))
+            offenders |= cls._scan_tree(tree, str(path.relative_to(views_root)))
+        return offenders
+
+    def test_no_posted_restricted_selection_fails_open(self):
+        offenders = sorted(self._scan())
+        assert not offenders, (
+            "posted object selection(s) degrade to no selection after a restricted lookup fails; "
+            f"raise or report the invalid selection instead: {offenders}"
+        )
+
+    def test_the_scan_flags_the_old_vrf_pattern(self):
+        """Guard the guard with the fail-open structure that caused the VRF defect."""
+        import ast
+
+        source = (
+            "class V:\n"
+            "    def get_selection(self, request):\n"
+            "        selected_id = request.POST.get('selection')\n"
+            "        if selected_id:\n"
+            "            try:\n"
+            "                return self.restricted_queryset(VRF).get(pk=selected_id)\n"
+            "            except (VRF.DoesNotExist, TypeError, ValueError):\n"
+            "                pass\n"
+            "        return None\n"
+        )
+        assert self._scan_tree(ast.parse(source), "<fixture>")
+
+    def test_the_scan_accepts_an_explicit_invalid_selection_sentinel(self):
+        """A None sentinel is safe when every caller stops before it can reach a write."""
+        import ast
+
+        source = (
+            "class V:\n"
+            "    def get_selection(self, request):\n"
+            "        selected_id = request.POST.get('selection')\n"
+            "        try:\n"
+            "            return self.restricted_queryset(Device).get(pk=selected_id)\n"
+            "        except Device.DoesNotExist:\n"
+            "            return None\n"
+            "    def sync(self, request):\n"
+            "        selected = self.get_selection(request)\n"
+            "        if selected is None:\n"
+            "            self.record_invalid_selection()\n"
+            "            return\n"
+            "        self.write(selected)\n"
+        )
+        assert not self._scan_tree(ast.parse(source), "<fixture>")
+
+
 class TestViewTestHelpers:
     def test_bind_and_call_populates_view_kwargs(self):
         """The direct-call helper must bind URL kwargs exactly as Django dispatch does."""

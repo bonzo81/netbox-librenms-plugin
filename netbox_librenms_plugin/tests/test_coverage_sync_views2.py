@@ -1388,23 +1388,25 @@ class TestSyncIPAddressesViewHelpers:
 
         assert view.get_vrf_selection(req, "10.0.0.1") == vrf
 
-    def test_get_vrf_selection_not_found_returns_none(self):
+    def test_get_vrf_selection_fails_when_requested_vrf_is_missing(self):
         from ipam.models import VRF
 
         absent_pk = missing_pk(VRF)
         req = _make_request(post_data={"vrf_10.0.0.1": str(absent_pk)})
         view = make_view(_sync_ip_view_class(), req)
 
-        assert view.get_vrf_selection(req, "10.0.0.1") is None
+        with pytest.raises(ValueError, match="Selected VRF"):
+            view.get_vrf_selection(req, "10.0.0.1")
 
-    def test_get_vrf_selection_invalid_id_returns_none(self):
+    def test_get_vrf_selection_fails_when_id_is_invalid(self):
         req = _make_request(post_data={"vrf_10.0.0.1": "not-an-id"})
         view = make_view(_sync_ip_view_class(), req)
 
-        assert view.get_vrf_selection(req, "10.0.0.1") is None
+        with pytest.raises(ValueError, match="Selected VRF"):
+            view.get_vrf_selection(req, "10.0.0.1")
 
-    def test_get_vrf_selection_returns_none_for_a_vrf_outside_the_grant(self):
-        """The VRF id is posted by the client, so a constrained grant must not resolve it."""
+    def test_get_vrf_selection_fails_for_a_vrf_outside_the_grant(self):
+        """A constrained grant must not turn a requested VRF into global scope."""
         from ipam.models import VRF
 
         VRF.objects.create(name="Mine")
@@ -1413,7 +1415,33 @@ class TestSyncIPAddressesViewHelpers:
         req = _make_request(post_data={"vrf_10.0.0.1": str(theirs.pk)}, user=user)
         view = make_view(_sync_ip_view_class(), req)
 
-        assert view.get_vrf_selection(req, "10.0.0.1") is None
+        with pytest.raises(ValueError, match="Selected VRF"):
+            view.get_vrf_selection(req, "10.0.0.1")
+
+    def test_out_of_scope_vrf_fails_the_row_without_writing_a_global_ip(self):
+        """A restricted requested VRF must not silently create the address without a VRF."""
+        from ipam.models import IPAddress, VRF
+
+        from netbox_librenms_plugin.utils import set_librenms_device_id
+
+        mine = VRF.objects.create(name="VRF Mine")
+        theirs = VRF.objects.create(name="VRF Theirs")
+        user = make_user_with_perms("vrf-row-scoped", [("view", VRF)], constraints={"pk": mine.pk})
+        req = _make_request(post_data={"vrf_10.0.0.2": str(theirs.pk)}, user=user)
+        view = make_view(_sync_ip_view_class(), req)
+        view._post_server_key = "default"
+        device = make_device("vrf-row-device")
+        interface = make_interface(device, "eth0")
+        set_librenms_device_id(interface, 5, "default")
+        interface.save()
+        cached = [{"ip_address": "10.0.0.2", "ip_with_mask": "10.0.0.2/24", "port_id": 5}]
+
+        with patch("netbox_librenms_plugin.views.sync.ip_addresses.resolve_set_primary_ip", return_value=False):
+            results = view.process_ip_sync(req, ["10.0.0.2"], cached, device, "device")
+
+        assert results["failed"] == ["10.0.0.2"]
+        assert "Selected VRF" in results["errors"]["10.0.0.2"]
+        assert not IPAddress.objects.filter(address="10.0.0.2/24").exists()
 
     def test_get_ip_tab_url_device(self):
         from dcim.models import Device
