@@ -213,11 +213,16 @@ class SyncInterfacesView(
                     if hasattr(obj, "virtual_chassis") and obj.virtual_chassis:
                         valid_ids = set(obj.virtual_chassis.members.values_list("id", flat=True))
                         if target_device.id not in valid_ids:
-                            target_device = obj
+                            self._record_skipped_conflict(interface_name)
+                            return
                     elif target_device.id != obj.id:
-                        target_device = obj
+                        self._record_skipped_conflict(interface_name)
+                        return
                 except (Device.DoesNotExist, ValueError, TypeError):
-                    target_device = obj
+                    # The user explicitly selected a target. If it is stale or outside the
+                    # caller's grant, do not silently sync the row onto the page device.
+                    self._record_skipped_conflict(interface_name)
+                    return
             else:
                 target_device = obj
 
@@ -236,9 +241,7 @@ class SyncInterfacesView(
             )
             # Record for the user-facing summary in post(). Defensive getattr: sync_interface
             # may be exercised directly (without post() initialising the list).
-            skipped = getattr(self, "_skipped_conflicts", None)
-            if skipped is not None:
-                skipped.append(interface_name or "(unnamed)")
+            self._record_skipped_conflict(interface_name)
             return
 
         netbox_type = None
@@ -256,6 +259,12 @@ class SyncInterfacesView(
         # Sync VLANs if not excluded
         if "vlans" not in exclude_columns:
             self._sync_interface_vlans(interface, librenms_interface, interface_name)
+
+    def _record_skipped_conflict(self, interface_name):
+        """Record a row that cannot be synced to its requested target."""
+        skipped = getattr(self, "_skipped_conflicts", None)
+        if skipped is not None:
+            skipped.append(interface_name or "(unnamed)")
 
     def _resolve_device_interface(self, target_device, interface_name, port_id, server_key):
         """Resolve a device interface using port_id first, then safe name fallback."""

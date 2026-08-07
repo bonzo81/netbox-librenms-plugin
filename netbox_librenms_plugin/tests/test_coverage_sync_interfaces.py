@@ -10,7 +10,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from netbox_librenms_plugin.tests.conftest import make_device, make_interface, make_vm
-from netbox_librenms_plugin.tests.view_test_helpers import make_request, make_view, missing_pk
+from netbox_librenms_plugin.tests.view_test_helpers import make_request, make_user_with_perms, make_view, missing_pk
 
 # The views here are built with real requests and real users, so the whole file needs the DB.
 pytestmark = pytest.mark.django_db
@@ -748,7 +748,7 @@ class TestSyncInterfacesViewSyncInterfaceDevice:
         assert Interface.objects.filter(device=sibling, name="Gi0/1").exists()
         assert not Interface.objects.filter(device=host, name="Gi0/1").exists()
 
-    def test_device_selection_invalid_defaults_to_obj(self):
+    def test_device_selection_invalid_is_skipped(self):
         """A device that is neither the page device nor a VC sibling is refused."""
         from dcim.models import Interface
 
@@ -758,10 +758,10 @@ class TestSyncInterfacesViewSyncInterfaceDevice:
 
         view.sync_interface(dev, {"ifName": "Gi0/1", "port_id": None}, [], "ifName")
 
-        assert Interface.objects.filter(device=dev, name="Gi0/1").exists()
+        assert not Interface.objects.filter(device=dev, name="Gi0/1").exists()
         assert not Interface.objects.filter(device=other, name="Gi0/1").exists()
 
-    def test_device_selection_does_not_exist_defaults_to_obj(self):
+    def test_device_selection_does_not_exist_is_skipped(self):
         from dcim.models import Device, Interface
 
         dev = make_device("selgone-page")
@@ -770,7 +770,29 @@ class TestSyncInterfacesViewSyncInterfaceDevice:
 
         view.sync_interface(dev, {"ifName": "Gi0/1", "port_id": None}, [], "ifName")
 
-        assert Interface.objects.filter(device=dev, name="Gi0/1").exists()
+        assert not Interface.objects.filter(device=dev, name="Gi0/1").exists()
+
+    def test_explicit_vc_member_outside_grant_is_skipped(self):
+        """A hidden posted target must not silently sync the row onto the page device."""
+        from dcim.models import Device, Interface
+
+        _vc, (host, sibling) = self._vc("selhidden")
+        user = make_user_with_perms(
+            "selhidden-user",
+            [("view", Device)],
+            constraints={"pk": host.pk},
+        )
+        request = _make_request(
+            post_data={"device_selection_Gi0/1": str(sibling.pk)},
+            user=user,
+        )
+        view = self._make_view(request)
+        view._skipped_conflicts = []
+
+        view.sync_interface(host, {"ifName": "Gi0/1", "port_id": None}, [], "ifName")
+
+        assert not Interface.objects.filter(name="Gi0/1").exists()
+        assert view._skipped_conflicts == ["Gi0/1"]
 
     @pytest.mark.django_db
     def test_device_port_id_prefers_existing_librenms_id_match(self):
