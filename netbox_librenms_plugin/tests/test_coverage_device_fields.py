@@ -1986,22 +1986,26 @@ class TestConvertLegacyLibreNMSIdViewHelpers:
 
     def test_sync_url_device(self):
         """Invoked outside dispatch (no bound request) the helper emits the bare sync URL."""
+        from django.urls import reverse
+
         view = self._view()
         del view.request
 
         response = view._sync_url("device", 1)
 
         assert "server_key" not in response["Location"]
-        assert response["Location"].endswith("/1/librenms-sync/")
+        assert response["Location"] == reverse("plugins:netbox_librenms_plugin:device_librenms_sync", kwargs={"pk": 1})
 
     def test_sync_url_vm(self):
+        from django.urls import reverse
+
         view = self._view()
         del view.request
 
         response = view._sync_url("vm", 1)
 
         assert "server_key" not in response["Location"]
-        assert response["Location"].endswith("/1/librenms-sync/")
+        assert response["Location"] == reverse("plugins:netbox_librenms_plugin:vm_librenms_sync", kwargs={"pk": 1})
 
     @staticmethod
     def _request(post):

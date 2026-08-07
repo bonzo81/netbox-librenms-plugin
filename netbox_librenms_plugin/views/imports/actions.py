@@ -1180,7 +1180,7 @@ class BulkImportDevicesView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
                     return render(
                         request,
                         "netbox_librenms_plugin/htmx/bulk_import_collision.html",
-                        {"collisions": outcome.collisions},
+                        {"collisions": outcome.collisions, "oob": True},
                     )
                 messages.error(request, outcome.block_message)
                 return redirect("plugins:netbox_librenms_plugin:librenms_import")

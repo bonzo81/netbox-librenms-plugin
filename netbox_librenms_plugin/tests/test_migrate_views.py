@@ -895,6 +895,7 @@ class TestTransferDeviceIPView:
             return queryset
 
         req = _hx_request({"server_key": "default"})
+        view.request = req
         with patch.object(Interface.objects, "select_for_update", moving_sfu):
             resp = view.post(req, pk=donor.pk, ip_kind="oob")
 

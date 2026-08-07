@@ -1,4 +1,5 @@
 {# Bulk-import collision warning: shown when two or more selected LibreNMS rows resolve to the same NetBox device. #}
+{% if oob %}<div id="htmx-modal-content" hx-swap-oob="innerHTML">{% endif %}
 <div class="modal-header">
   <h5 class="modal-title text-danger">
     <i class="mdi mdi-alert-octagon"></i>
@@ -65,3 +66,4 @@
     <i class="mdi mdi-close"></i> Close
   </button>
 </div>
+{% if oob %}</div>{% endif %}

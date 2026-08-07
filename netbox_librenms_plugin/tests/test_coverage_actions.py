@@ -5719,6 +5719,8 @@ class TestBulkImportDevicesViewCollisionGate:
         html = response.content.decode()
         assert "Bulk import blocked" in html
         assert reverse("dcim:device", kwargs={"pk": nb.pk}) in html
+        assert 'id="htmx-modal-content"' in html
+        assert 'hx-swap-oob="innerHTML"' in html
         mock_import.assert_not_called()
 
     def test_clean_batch_passes_gate_and_imports(self):

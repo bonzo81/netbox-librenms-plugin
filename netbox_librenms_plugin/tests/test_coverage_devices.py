@@ -801,6 +801,23 @@ class TestSingleVlanGroupVerifyView:
         assert response.status_code == 200
         assert json.loads(response.content)["is_missing"] is True
 
+        visible_request = _real_verify_request(
+            {
+                "device_id": device.pk,
+                "vid": str(visible.vid),
+                "vlan_group_id": group.pk,
+                "vlan_type": "U",
+            },
+            "vg-visible-request",
+        )
+        visible_request.user = user
+        visible_view = SingleVlanGroupVerifyView()
+        visible_view.setup(visible_request)
+
+        visible_response = visible_view.post(visible_request)
+
+        assert json.loads(visible_response.content)["is_missing"] is False
+
     def test_returns_400_when_no_device_id(self):
         """Returns 400 when no device_id provided."""
         import json
@@ -1082,6 +1099,18 @@ class TestVerifyVlanSyncGroupView:
         assert response.status_code == 200
         assert data["exists_in_netbox"] is False
         assert data["name_matches"] is False
+
+        visible_request = _real_verify_request(
+            {"vid": str(visible.vid), "vlan_group_id": group.pk, "name": visible.name},
+            "sync-visible-request",
+        )
+        visible_request.user = user
+        visible_view = VerifyVlanSyncGroupView()
+        visible_view.setup(visible_request)
+
+        visible_response = visible_view.post(visible_request)
+
+        assert json.loads(visible_response.content)["exists_in_netbox"] is True
 
 
 class TestSaveVlanGroupOverridesView:

@@ -725,3 +725,14 @@ class TestMergeCandidatePks:
 
         assert merge_candidate_pks(["malformed"]) == set()
         assert merge_candidate_pks("malformed") == set()
+
+    def test_non_dict_merge_candidates_is_rejected(self):
+        from netbox_librenms_plugin.import_validation_helpers import merge_candidate_pks
+
+        assert merge_candidate_pks({"merge_candidates": ["host_named"]}) == set()
+
+    def test_non_dict_slot_entry_is_skipped(self):
+        from netbox_librenms_plugin.import_validation_helpers import merge_candidate_pks
+
+        validation = {"merge_candidates": {"host_named": "corrupt", "oob_named": {"pk": 3}}}
+        assert merge_candidate_pks(validation) == {3}

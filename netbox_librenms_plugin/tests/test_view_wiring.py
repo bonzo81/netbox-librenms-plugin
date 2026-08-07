@@ -1111,7 +1111,9 @@ class TestViewTestHelpers:
                 assert self.kwargs == kwargs
                 return HttpResponse()
 
-        bind_and_call(KwargView(), RequestFactory().post("/"), "post", pk=17)
+        response = bind_and_call(KwargView(), RequestFactory().post("/"), "post", pk=17)
+
+        assert isinstance(response, HttpResponse)
 
     def test_message_level_rejects_non_level_message_attributes(self):
         from netbox_librenms_plugin.tests.view_test_helpers import _message_level
