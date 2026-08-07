@@ -24,6 +24,20 @@ from netbox_librenms_plugin.tests.view_test_helpers import post as _post
 # The views here are built with real requests and real users, so the whole file needs the DB.
 pytestmark = pytest.mark.django_db
 
+_seeded_cache_keys = set()
+
+
+@pytest.fixture(autouse=True)
+def _clear_seeded_cache_keys():
+    """Delete the real-cache snapshots seeded by this module's view helpers."""
+    yield
+
+    from django.core.cache import cache
+
+    for key in _seeded_cache_keys:
+        cache.delete(key)
+    _seeded_cache_keys.clear()
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -328,7 +342,9 @@ def _cables_view(request, device, links):
 
     view = make_view(SyncCablesView, request)
     view._post_server_key = "default"
-    cache.set(view.get_cache_key(device, "links", "default"), {"links": links})
+    key = view.get_cache_key(device, "links", "default")
+    _seeded_cache_keys.add(key)
+    cache.set(key, {"links": links})
     return view
 
 
@@ -1309,6 +1325,17 @@ class TestSyncIPAddressesViewHelpers:
 
         assert ("view", VRF) in view._required_permissions("device")["POST"]
 
+    def test_required_permissions_are_stable_across_repeated_posts(self):
+        """Reusing a view instance must not accumulate duplicate owner or VRF permissions."""
+        req = _make_request(post_data={"vrf_10.0.0.1": "1"})
+        view = make_view(_sync_ip_view_class(), req)
+
+        first = view._required_permissions("device")
+        view.required_object_permissions = first
+        second = view._required_permissions("device")
+
+        assert second == first
+
     def test_get_object_device(self):
         from netbox_librenms_plugin.views.sync.ip_addresses import SyncIPAddressesView
 
@@ -1995,7 +2022,9 @@ def _vlan_view(request, device, cached_vlans):
 
     view = make_view(SyncVLANsView, request)
     view._post_server_key = "default"
-    cache.set(view.get_cache_key(device, "vlans", "default"), cached_vlans)
+    key = view.get_cache_key(device, "vlans", "default")
+    _seeded_cache_keys.add(key)
+    cache.set(key, cached_vlans)
     return view
 
 
@@ -2083,6 +2112,30 @@ class TestSyncVLANsViewWithGroup:
         hidden.refresh_from_db()
         assert hidden.name == "Keep this name"
         assert any("permission" in text.lower() for text in message_texts(req, "error"))
+
+    def test_duplicate_global_vid_is_skipped_without_aborting_the_batch(self):
+        """An ambiguous global VID must not pick one row or roll back later valid rows."""
+        from ipam.models import VLAN
+
+        dev = make_device("vlan-duplicate-global")
+        VLAN.objects.create(vid=300, name="First", status="active")
+        VLAN.objects.create(vid=300, name="Second", status="active")
+        req = _make_request(post_data={"action": "create_vlans", "select": ["300", "301"]})
+        view = _vlan_view(
+            req,
+            dev,
+            [
+                {"vlan_vlan": 300, "vlan_name": "Ambiguous rename"},
+                {"vlan_vlan": 301, "vlan_name": "Unambiguous"},
+            ],
+        )
+
+        _post(view, req, object_type="device", object_id=dev.pk)
+
+        assert set(VLAN.objects.filter(vid=300).values_list("name", flat=True)) == {"First", "Second"}
+        assert VLAN.objects.filter(vid=301, name="Unambiguous").exists()
+        assert any("several VLANs" in text for text in message_texts(req, "error"))
+        assert any("1 skipped (VLAN match ambiguous)" in text for text in message_texts(req, "success"))
 
     def test_invalid_vid_string_skipped(self):
         """A non-numeric selection is skipped, and the rest of the batch still syncs.

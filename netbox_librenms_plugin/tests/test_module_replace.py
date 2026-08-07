@@ -665,7 +665,6 @@ class TestMoveModuleView:
             mock_tx.atomic.return_value.__enter__ = lambda context: context
             mock_tx.atomic.return_value.__exit__ = MagicMock(return_value=False)
             bay_qs = MagicMock()
-            bay_qs.select_for_update.return_value.get.side_effect = ModuleBay.DoesNotExist
             bay_qs.select_for_update.return_value.filter.return_value.first.return_value = None
             module_qs = MagicMock()
             mock_scoped.side_effect = lambda model, *args, **kwargs: bay_qs if model is ModuleBay else module_qs

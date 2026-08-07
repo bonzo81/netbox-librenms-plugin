@@ -2635,7 +2635,6 @@ class TestUpdateDeviceFieldsServerRebind:
             patch("netbox_librenms_plugin.views.sync.device_fields.messages"),
             patch("netbox_librenms_plugin.views.sync.device_fields.redirect"),
         ):
-            view.request = request
             view.post(request, pk=pk)
 
     def test_update_name_rebinds_and_renames_from_posted_server(self):

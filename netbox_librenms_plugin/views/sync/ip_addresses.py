@@ -55,7 +55,7 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
             dict: The ``required_object_permissions`` mapping for this request.
         """
         owner_model = VirtualMachine if object_type == "virtualmachine" else Device
-        perms = [("view", owner_model), *self.required_object_permissions["POST"]]
+        perms = [("view", owner_model), *type(self).required_object_permissions["POST"]]
         # A per-row VRF is resolved by client-supplied id through a restricted queryset. Only
         # demand its view permission when one is actually posted, so the common no-VRF sync
         # is not gated on a permission it never uses.

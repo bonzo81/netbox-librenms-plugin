@@ -104,6 +104,7 @@ class SyncVLANsView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreN
         skipped_count = 0
         group_missing_count = 0
         permission_skipped_count = 0
+        ambiguous_count = 0
         changeable_vlans = self.restricted_queryset(VLAN, "change")
 
         with transaction.atomic():
@@ -144,6 +145,13 @@ class SyncVLANsView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreN
                 try:
                     vlan = changeable_vlans.get(**lookup)
                     created = False
+                except VLAN.MultipleObjectsReturned:
+                    messages.error(
+                        request,
+                        f"VLAN {vid}: several VLANs match this VID and scope; skipped to avoid renaming the wrong one.",
+                    )
+                    ambiguous_count += 1
+                    continue
                 except VLAN.DoesNotExist:
                     # A matching row can exist outside the caller's constrained change grant.
                     # Do not let an unrestricted get_or_create return that row for mutation.
@@ -169,6 +177,14 @@ class SyncVLANsView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreN
                         try:
                             vlan = changeable_vlans.get(**lookup)
                             created = False
+                        except VLAN.MultipleObjectsReturned:
+                            messages.error(
+                                request,
+                                f"VLAN {vid}: several VLANs match this VID and scope; skipped to avoid "
+                                "renaming the wrong one.",
+                            )
+                            ambiguous_count += 1
+                            continue
                         except VLAN.DoesNotExist:
                             messages.error(
                                 request,
@@ -203,14 +219,18 @@ class SyncVLANsView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreN
                 parts.append(f"{group_missing_count} skipped (VLAN group missing)")
             if permission_skipped_count > 0:
                 parts.append(f"{permission_skipped_count} skipped (change permission missing)")
+            if ambiguous_count > 0:
+                parts.append(f"{ambiguous_count} skipped (VLAN match ambiguous)")
             messages.success(request, f"VLANs synced: {', '.join(parts)}.")
-        elif group_missing_count > 0 or permission_skipped_count > 0:
+        elif group_missing_count > 0 or permission_skipped_count > 0 or ambiguous_count > 0:
             # Nothing actually synced. Do not claim success for rows rejected by a scope check.
             reasons = []
             if group_missing_count > 0:
                 reasons.append(f"{group_missing_count} skipped (VLAN group missing)")
             if permission_skipped_count > 0:
                 reasons.append(f"{permission_skipped_count} skipped (change permission missing)")
+            if ambiguous_count > 0:
+                reasons.append(f"{ambiguous_count} skipped (VLAN match ambiguous)")
             messages.warning(request, f"No VLANs synced: {', '.join(reasons)}.")
         else:
             messages.warning(request, "No VLANs were created or updated.")

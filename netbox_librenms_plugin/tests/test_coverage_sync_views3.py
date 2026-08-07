@@ -304,6 +304,7 @@ class TestSyncInterface:
         v.update_interface_attributes = MagicMock()
         v._sync_interface_vlans = MagicMock()
         v._lookup_maps = {}
+        v._skipped_conflicts = []
         return v
 
     @staticmethod
@@ -345,8 +346,8 @@ class TestSyncInterface:
         assert Interface.objects.filter(device=sibling, name="eth0").exists()
         assert not Interface.objects.filter(device=host, name="eth0").exists()
 
-    def test_device_vc_target_not_in_valid_ids_falls_back(self):
-        """A device outside the chassis is refused; the row lands on the page device."""
+    def test_device_vc_target_not_in_valid_ids_is_skipped(self):
+        """A device outside the chassis is refused without writing to the page device."""
         from dcim.models import Interface
 
         _vc, (host, _sibling) = self._vc("sync-vc-outsider")
@@ -356,10 +357,11 @@ class TestSyncInterface:
 
         v.sync_interface(host, {"ifName": "eth0"}, [], "ifName")
 
-        assert Interface.objects.filter(device=host, name="eth0").exists()
+        assert not Interface.objects.filter(device=host, name="eth0").exists()
         assert not Interface.objects.filter(device=outsider, name="eth0").exists()
+        assert v._skipped_conflicts == ["eth0"]
 
-    def test_device_no_vc_wrong_selection_falls_back(self):
+    def test_device_no_vc_wrong_selection_is_skipped(self):
         from dcim.models import Interface
 
         dev = make_device("sync-novc-self")
@@ -369,10 +371,11 @@ class TestSyncInterface:
 
         v.sync_interface(dev, {"ifName": "eth0"}, [], "ifName")
 
-        assert Interface.objects.filter(device=dev, name="eth0").exists()
+        assert not Interface.objects.filter(device=dev, name="eth0").exists()
         assert not Interface.objects.filter(device=other, name="eth0").exists()
+        assert v._skipped_conflicts == ["eth0"]
 
-    def test_device_selection_does_not_exist_falls_back(self):
+    def test_device_selection_does_not_exist_is_skipped(self):
         from dcim.models import Device, Interface
 
         dev = make_device("sync-gone")
@@ -382,9 +385,10 @@ class TestSyncInterface:
 
         v.sync_interface(dev, {"ifName": "eth0"}, [], "ifName")
 
-        assert Interface.objects.filter(device=dev, name="eth0").exists()
+        assert not Interface.objects.filter(device=dev, name="eth0").exists()
+        assert v._skipped_conflicts == ["eth0"]
 
-    def test_device_selection_outside_the_grant_falls_back(self):
+    def test_device_selection_outside_the_grant_is_skipped(self):
         """The posted id is client-supplied, so a constrained grant must not reach the sibling."""
         from dcim.models import Device, Interface
 
@@ -395,8 +399,9 @@ class TestSyncInterface:
 
         v.sync_interface(host, {"ifName": "eth0"}, [], "ifName")
 
-        assert Interface.objects.filter(device=host, name="eth0").exists()
+        assert not Interface.objects.filter(device=host, name="eth0").exists()
         assert not Interface.objects.filter(device=sibling, name="eth0").exists()
+        assert v._skipped_conflicts == ["eth0"]
 
     def test_vm_uses_vminterface(self):
         from virtualization.models import VMInterface
