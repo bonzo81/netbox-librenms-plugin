@@ -2137,6 +2137,30 @@ class TestSyncVLANsViewWithGroup:
         assert any("several VLANs" in text for text in message_texts(req, "error"))
         assert any("1 skipped (VLAN match ambiguous)" in text for text in message_texts(req, "success"))
 
+    def test_duplicate_global_vid_is_ambiguous_before_change_scope_is_applied(self):
+        """A constrained grant must not make an ambiguous VID look unique."""
+        from dcim.models import Device
+        from ipam.models import VLAN, VLANGroup
+
+        dev = make_device("vlan-duplicate-scoped")
+        permitted = VLAN.objects.create(vid=302, name="Permitted", status="active")
+        hidden = VLAN.objects.create(vid=302, name="Hidden", status="active")
+        user = make_user_with_perms(
+            "vlan-duplicate-scoped",
+            [("view", Device), ("view", VLANGroup), ("add", VLAN)],
+        )
+        user = grant(user, "change", VLAN, constraints={"pk": permitted.pk})
+        req = _make_request(post_data={"action": "create_vlans", "select": ["302"]}, user=user)
+        view = _vlan_view(req, dev, [{"vlan_vlan": 302, "vlan_name": "Ambiguous rename"}])
+
+        _post(view, req, object_type="device", object_id=dev.pk)
+
+        permitted.refresh_from_db()
+        hidden.refresh_from_db()
+        assert permitted.name == "Permitted"
+        assert hidden.name == "Hidden"
+        assert any("several VLANs" in text for text in message_texts(req, "error"))
+
     def test_invalid_vid_string_skipped(self):
         """A non-numeric selection is skipped, and the rest of the batch still syncs.
 
