@@ -91,7 +91,11 @@ class SyncInterfacesView(
         # Stable LibreNMS port_ids selected directly (e.g. cross-page parents auto-included
         # by the LAG/parent JS). Display names ("select") can collide in ifDescr mode, so
         # the relationship sync keys on these ids to avoid binding the wrong port.
-        self._selected_port_ids = {pid for pid in request.POST.getlist("select_port_id") if pid}
+        self._selected_port_ids = {
+            port_id
+            for raw_port_id in request.POST.getlist("select_port_id")
+            if (port_id := normalize_librenms_port_id(raw_port_id)) is not None
+        }
         exclude_columns = request.POST.getlist("exclude_columns")
 
         redirect_url = (
@@ -496,9 +500,9 @@ class SyncInterfacesView(
                     if port.get("_source") == "oob":
                         continue
                     port_name = port.get(interface_name_field)
-                    port_id = port.get("port_id")
+                    port_id = normalize_librenms_port_id(port.get("port_id"))
 
-                    if port_name in selected_interfaces or (port_id is not None and str(port_id) in selected_port_ids):
+                    if port_name in selected_interfaces or port_id in selected_port_ids:
                         self.sync_interface(obj, port, exclude_columns, interface_name_field)
             finally:
                 self.__dict__.pop("_locked_target_devices", None)
@@ -517,12 +521,12 @@ class SyncInterfacesView(
             if port.get("_source") == "oob":
                 continue
             interface_name = port.get(interface_name_field)
-            port_id = port.get("port_id")
-            if interface_name not in selected_interfaces and (
-                port_id is None or str(port_id) not in selected_port_ids
-            ):
+            port_id = normalize_librenms_port_id(port.get("port_id"))
+            if interface_name not in selected_interfaces and port_id not in selected_port_ids:
                 continue
-            selected_id = self.request.POST.get(f"device_selection_{interface_name}")
+            selected_id = self.request.POST.get(f"device_selection_port_{port_id}") if port_id is not None else None
+            if not selected_id:
+                selected_id = self.request.POST.get(f"device_selection_{interface_name}")
             if selected_id:
                 try:
                     target_ids.add(int(selected_id))

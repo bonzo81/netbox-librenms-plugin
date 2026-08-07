@@ -741,7 +741,13 @@ class TestSyncInterfacesViewPost:
 
         mock_device = MagicMock(pk=1)
         ports = [{"ifName": "Gi0/1", "port_id": 10}]
-        req = _make_request(post_data={"select": ["Gi0/1"], "server_key": "default"})
+        req = _make_request(
+            post_data={
+                "select": ["cross-page-parent"],
+                "select_port_id": ["0010"],
+                "server_key": "default",
+            }
+        )
 
         with (
             patch(
@@ -1487,7 +1493,7 @@ class TestSyncInterfacesViewSyncSelected:
         view = object.__new__(SyncInterfacesView)
         view.interface_name_field = "ifName"
         view.sync_interface = MagicMock()
-        view._selected_port_ids = {"42"}
+        view._selected_port_ids = {42}
 
         ports_data = [{"ifName": "Gi0/1", "port_id": 7}, {"ifName": "Gi0/2", "port_id": 42}]
         selected = ["Gi0/1"]  # Gi0/2 is selected only by stable port_id, not by name
