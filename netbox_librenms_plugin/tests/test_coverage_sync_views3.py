@@ -333,7 +333,7 @@ class TestSyncInterface:
         assert not Interface.objects.filter(device=host, name="eth0").exists()
 
     def test_device_vc_target_not_in_valid_ids_is_skipped(self):
-        """A device outside the chassis is refused without writing to the page device."""
+        """An explicit device outside the chassis is refused without a fallback write."""
         from dcim.models import Interface
 
         _vc, (host, _sibling) = make_virtual_chassis_members("sync-vc-outsider")
