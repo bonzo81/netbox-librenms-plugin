@@ -2391,6 +2391,20 @@ class TestBaseInterfaceTableViewGetContextData:
         view.interface_name_field = None
         return view
 
+    def test_vm_interface_lookup_selects_parent(self):
+        """VM relationship rendering must not fetch each parent in a separate query."""
+        view = self._make_view()
+        view.model.__name__ = "virtualmachine"
+        interface = MagicMock()
+        interface.name = "eth0"
+        interfaces = MagicMock()
+        interfaces.select_related.return_value.prefetch_related.return_value = [interface]
+
+        with patch.object(view, "get_interfaces", return_value=interfaces):
+            view._build_interface_lookup_maps(MagicMock())
+
+        interfaces.select_related.assert_called_once_with("virtual_machine", "parent")
+
     def test_cache_miss_returns_empty_table(self):
         """When no cached data, table is None."""
         view = self._make_view()

@@ -9,8 +9,20 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from netbox_librenms_plugin.tests.conftest import make_device, make_interface, make_virtual_chassis_members, make_vm
-from netbox_librenms_plugin.tests.view_test_helpers import make_request, make_user_with_perms, make_view, missing_pk
+from netbox_librenms_plugin.tests.conftest import (
+    make_device,
+    make_interface,
+    make_virtual_chassis_members,
+    make_vm,
+)
+from netbox_librenms_plugin.tests.view_test_helpers import (
+    grant,
+    make_request,
+    make_user_with_perms,
+    make_view,
+    missing_pk,
+    post as _post,
+)
 
 # The views here are built with real requests and real users, so the whole file needs the DB.
 pytestmark = pytest.mark.django_db
@@ -37,12 +49,6 @@ def _sync_view(request=None):
     view = make_view(SyncInterfacesView, request)
     view._post_server_key = "default"
     return view
-
-
-def _post(view, req, **kwargs):
-    """POST straight into *view*, binding *req* the way ``View.setup()`` does under dispatch()."""
-    view.setup(req)
-    return view.post(req, **kwargs)
 
 
 def _denied_response():
@@ -2393,26 +2399,16 @@ class TestRelationshipSyncObjectScope:
     @staticmethod
     def _writer(username, specs):
         """A real non-superuser with plugin write access plus ``specs`` = [(model, action, constraints)] grants."""
-        from core.models import ObjectType
-        from django.apps import apps
-        from django.contrib.auth import get_user_model
-        from users.models import ObjectPermission
-
-        LibreNMSSettings = apps.get_model("netbox_librenms_plugin", "LibreNMSSettings")
-
-        user = get_user_model().objects.create_user(username=username, password="x")
-        write = ObjectPermission.objects.create(name=f"{username}-plugin-write", actions=["change"])
-        write.object_types.set([ObjectType.objects.get_for_model(LibreNMSSettings)])
-        write.users.set([user])
-
+        user = make_user_with_perms(username, [])
         for i, (model, action, constraints) in enumerate(specs):
-            perm = ObjectPermission.objects.create(
-                name=f"{username}-{action}-{i}", actions=[action], constraints=constraints
+            user = grant(
+                user,
+                action,
+                model,
+                constraints=constraints,
+                name=f"{username}-{action}-{i}",
             )
-            perm.object_types.set([ObjectType.objects.get_for_model(model)])
-            perm.users.set([user])
-
-        return get_user_model().objects.get(pk=user.pk)  # clear the per-request perm cache
+        return user
 
     @staticmethod
     def _iface(device, name, port_id):
@@ -2435,8 +2431,7 @@ class TestRelationshipSyncObjectScope:
         )
         request.user = user
         view = SyncInterfaceLagView()
-        view.setup(request)
-        return view.post(request, object_type="device", object_id=device.pk)
+        return _post(view, request, object_type="device", object_id=device.pk)
 
     def test_lag_sync_refuses_an_out_of_scope_interface(self):
         from dcim.models import Device, Interface

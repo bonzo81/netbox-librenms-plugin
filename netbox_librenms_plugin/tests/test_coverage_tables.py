@@ -3261,7 +3261,9 @@ class TestVCInterfaceTable:
         record = {"ifName": "Vlan2", "ifType": "l3ipvlan"}  # digit 2 == sw2's vc_position
 
         assert table._resolve_row_member_id(record) == sw1.pk  # viewed member, not sw2
-        assert f'value="{sw1.pk}" selected' in str(table.render_device_selection(value=None, record=record))
+        dropdown = str(table.render_device_selection(value=None, record=record))
+        assert f'value="{sw1.pk}" selected' in dropdown
+        assert f'value="{sw2.pk}" selected' not in dropdown
 
     @pytest.mark.django_db
     def test_render_device_selection_physical_and_subiface_use_name_heuristic(self):
@@ -3724,6 +3726,7 @@ class TestRelationshipOwnerResolutionConsistency:
         dropdown = str(table.render_device_selection(None, record))
         button = str(table.render_parent(None, record))
         assert f'value="{m2.id}" selected' in dropdown  # dropdown defaults to the true owner
+        assert f'value="{m1.id}" selected' not in dropdown
         assert f'data-object-id="{m2.id}"' in button  # button agrees
         assert f'data-object-id="{m1.id}"' not in button  # not the viewed member
 

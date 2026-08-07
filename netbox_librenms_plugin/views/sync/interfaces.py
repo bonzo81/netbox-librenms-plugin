@@ -1158,10 +1158,7 @@ def _interfaces_same_owner(a, b) -> bool:
     Returns:
         bool: True when *a* and *b* share the same owning Device or VM.
     """
-    return (getattr(a, "device_id", None), getattr(a, "virtual_machine_id", None)) == (
-        getattr(b, "device_id", None),
-        getattr(b, "virtual_machine_id", None),
-    )
+    return _interface_owner(a) == _interface_owner(b)
 
 
 def _promote_lag_aggregate(agg, *, with_restore):

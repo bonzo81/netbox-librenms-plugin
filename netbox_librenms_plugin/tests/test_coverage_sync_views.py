@@ -7,7 +7,7 @@ import pytest
 from netbox_librenms_plugin.tests.conftest import make_device, make_interface, make_ip, make_vm
 from netbox_librenms_plugin.tests.view_test_helpers import grant
 from netbox_librenms_plugin.tests.view_test_helpers import make_request as make_real_request
-from netbox_librenms_plugin.tests.view_test_helpers import make_user_with_perms, make_view, missing_pk
+from netbox_librenms_plugin.tests.view_test_helpers import make_user_with_perms, make_view, message_texts, missing_pk
 from netbox_librenms_plugin.tests.view_test_helpers import post as _post
 
 
@@ -2537,15 +2537,15 @@ class TestSyncVLANsViewPost:
         )
         request = make_real_request(
             "post",
-            {"action": "invalid", "server_key": "default", "select": ["100"], "vlan_group_100": ""},
+            {"action": "create_vlans", "server_key": "default", "select": ["100"], "vlan_group_100": ""},
             user=user,
         )
         view = make_view(SyncVLANsView, request)
 
-        response = view.post(request, object_type="device", object_id=device.pk)
+        response = _post(view, request, object_type="device", object_id=device.pk)
 
         assert response.status_code == 302
-        assert not any("ipam.view_vlangroup" in str(message) for message in request._messages._queued_messages)
+        assert not any("ipam.view_vlangroup" in text for text in message_texts(request, "error"))
 
     @pytest.mark.django_db
     def test_grouped_vlan_sync_still_requires_vlan_group_permission(self):
@@ -2573,10 +2573,10 @@ class TestSyncVLANsViewPost:
         )
         view = make_view(SyncVLANsView, request)
 
-        response = view.post(request, object_type="device", object_id=device.pk)
+        response = _post(view, request, object_type="device", object_id=device.pk)
 
         assert response.status_code == 302
-        assert any("ipam.view_vlangroup" in str(message) for message in request._messages._queued_messages)
+        assert any("ipam.view_vlangroup" in text for text in message_texts(request, "error"))
 
 
 @pytest.mark.django_db

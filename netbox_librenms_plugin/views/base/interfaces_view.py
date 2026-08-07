@@ -122,9 +122,8 @@ class BaseInterfaceTableView(
         """
         Build name and LibreNMS ID indexes, dropping conflicting IDs entirely.
 
-        For device interfaces (not VMs), also select_related the lag/parent FKs so
-        _enrich_port_with_lag_parent() doesn't issue N+1 queries when reading
-        nb_iface.lag / nb_iface.parent for each port. VMInterface has no such FKs.
+        Also select the relationship fields used during enrichment. Device interfaces have
+        ``lag`` and ``parent``. VM interfaces have ``parent``.
 
         Args:
             obj: The NetBox device (or VM) whose interfaces are indexed.
@@ -140,9 +139,9 @@ class BaseInterfaceTableView(
         # Prefetch the M2M relations the table renderers dereference per matched row
         # (render_vlans -> tagged_vlans, render_mac_address -> mac_addresses); without this each
         # rendered interface row issues its own query for these. Also select_related the lag/parent
-        # FKs (render_parent dereferences them) — skipped for VMs, which have no such fields.
+        # FKs that render_parent and render_lag dereference.
         related_field = self.get_select_related_field(obj)
-        extra_related = [] if related_field == "virtual_machine" else ["lag", "parent"]
+        extra_related = ["parent"] if related_field == "virtual_machine" else ["lag", "parent"]
         interfaces = (
             self.get_interfaces(obj)
             .select_related(related_field, *extra_related)

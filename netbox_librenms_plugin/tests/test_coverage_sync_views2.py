@@ -734,17 +734,12 @@ class TestSyncCablesViewProcessInterfaceSyncException:
         assert "port1" in results["invalid"]
 
 
-def _add_device_view(request, *, add_result=(True, "Device added"), poller_choices=()):
-    """The real AddDeviceToLibreNMSView; only the LibreNMS calls are stubbed.
-
-    ``poller_choices`` seeds the poller-group ChoiceField, whose options production fetches
-    from LibreNMS — that fetch is the external boundary, the form validation is not.
-    """
+def _add_device_view(request, *, add_result=(True, "Device added")):
+    """The real AddDeviceToLibreNMSView; only the LibreNMS calls are stubbed."""
     from netbox_librenms_plugin.views.sync.devices import AddDeviceToLibreNMSView
 
     view = make_view(AddDeviceToLibreNMSView, request)
     view._librenms_api.add_device.return_value = add_result
-    view._poller_choices = list(poller_choices)
     return view
 
 
