@@ -1248,7 +1248,7 @@ class TestSyncInterfacesViewSyncInterface:
         assert member2.interfaces.filter(name="eth0").exists()
         assert not master.interfaces.filter(name="eth0").exists()
 
-    def test_device_with_invalid_vc_member_falls_back_to_obj(self):
+    def test_device_with_invalid_vc_member_is_skipped(self):
         from dcim.models import VirtualChassis
 
         from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
@@ -1261,7 +1261,7 @@ class TestSyncInterfacesViewSyncInterface:
         master.virtual_chassis = vc
         master.vc_position = 1
         master.save()
-        # An existing device that is NOT a member of this VC → not in valid_ids → fall back to master.
+        # An existing device that is not a member of this VC is an invalid explicit target.
         outsider = make_device("vc-sync-outsider")
         view.request = _make_request({"device_selection_eth0": str(outsider.id)})
         librenms_if = {"ifName": "eth0"}
@@ -1270,10 +1270,10 @@ class TestSyncInterfacesViewSyncInterface:
         with p_type, p_attrs, p_vlans:
             view.sync_interface(master, librenms_if, [], "ifName")
 
-        assert master.interfaces.filter(name="eth0").exists()
+        assert not master.interfaces.filter(name="eth0").exists()
         assert not outsider.interfaces.filter(name="eth0").exists()
 
-    def test_device_with_device_selection_wrong_device_falls_back(self):
+    def test_device_with_device_selection_wrong_device_is_skipped(self):
         from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
 
         view = _make_view(SyncInterfacesView)
@@ -1281,7 +1281,7 @@ class TestSyncInterfacesViewSyncInterface:
         view._lookup_maps = {}
         device = make_device("sync-iface-noVC")  # no virtual_chassis
         other = make_device("sync-iface-other")
-        # Selection points at another existing device but there's no VC → target.id != obj.id → fall back.
+        # A selection for another device is invalid when the page device has no chassis.
         view.request = _make_request({"device_selection_eth0": str(other.id)})
         librenms_if = {"ifName": "eth0"}
 
@@ -1289,7 +1289,7 @@ class TestSyncInterfacesViewSyncInterface:
         with p_type, p_attrs, p_vlans:
             view.sync_interface(device, librenms_if, [], "ifName")
 
-        assert device.interfaces.filter(name="eth0").exists()
+        assert not device.interfaces.filter(name="eth0").exists()
         assert not other.interfaces.filter(name="eth0").exists()
 
     def test_invalid_object_type_raises_value_error(self):
