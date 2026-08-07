@@ -613,6 +613,26 @@ class TestSyncCablesViewHelpers:
 
         assert view.check_existing_cable(local, free) is True
 
+    def test_missing_local_interface_is_invalid_not_missing_remote(self):
+        """A stale local interface ID must not be reported as missing remote data."""
+        from dcim.models import Interface
+
+        from netbox_librenms_plugin.views.sync.cables import SyncCablesView
+
+        remote = make_interface(make_device("cable-stale-local-remote"), "Gi0/2")
+        view = make_view(SyncCablesView)
+
+        result = view.handle_cable_creation(
+            {
+                "local_port": "Gi0/1",
+                "netbox_local_interface_id": missing_pk(Interface),
+                "netbox_remote_interface_id": remote.pk,
+            },
+            {"local_port_id": "port1"},
+        )
+
+        assert result == {"status": "invalid", "interface": "Gi0/1"}
+
 
 def _sync_cables_view_class():
     from netbox_librenms_plugin.views.sync.cables import SyncCablesView
@@ -2038,6 +2058,31 @@ class TestSyncVLANsViewWithGroup:
 
         assert not VLAN.objects.filter(vid=200).exists()
         assert any("no longer exists" in t for t in message_texts(req, "error"))
+
+    def test_existing_vlan_outside_change_grant_is_not_renamed(self):
+        """A matching hidden VLAN must not be changed through the unrestricted manager."""
+        from dcim.models import Device
+        from ipam.models import VLAN, VLANGroup
+
+        dev = make_device("vlan-hidden-existing")
+        visible = VLAN.objects.create(vid=300, name="Visible", status="active")
+        hidden = VLAN.objects.create(vid=301, name="Keep this name", status="active")
+        user = make_user_with_perms(
+            "vlan-hidden-existing",
+            [("view", Device), ("view", VLANGroup), ("add", VLAN)],
+        )
+        user = grant(user, "change", VLAN, constraints={"pk": visible.pk})
+        req = _make_request(
+            post_data={"action": "create_vlans", "select": ["301"]},
+            user=user,
+        )
+        view = _vlan_view(req, dev, [{"vlan_vlan": 301, "vlan_name": "Unauthorized rename"}])
+
+        _post(view, req, object_type="device", object_id=dev.pk)
+
+        hidden.refresh_from_db()
+        assert hidden.name == "Keep this name"
+        assert any("permission" in text.lower() for text in message_texts(req, "error"))
 
     def test_invalid_vid_string_skipped(self):
         """A non-numeric selection is skipped, and the rest of the batch still syncs.

@@ -168,41 +168,41 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libre
 
         try:
             local_interface = self.restricted_queryset(Interface).get(pk=link_data["netbox_local_interface_id"])
+        except Interface.DoesNotExist:
+            return {"status": "invalid", "interface": display_name}
 
-            # Honour user's VC member selection: if the selected device_id differs from
-            # the cached interface's device, look up the same port name on that device.
-            selected_device_id = interface.get("device_id")
-            if selected_device_id and str(local_interface.device_id) != str(selected_device_id):
-                if not self._selected_device_is_in_page_context(selected_device_id):
-                    logger.debug(
-                        "Selected device %s is outside the cable-sync page context; rejecting cable creation",
-                        selected_device_id,
-                    )
-                    return {"status": "rejected_selection", "interface": display_name}
-                port_name = link_data.get("local_port") or local_interface.name
-                try:
-                    local_interface = self.restricted_queryset(Interface).get(
-                        device_id=selected_device_id, name=port_name
-                    )
-                except Interface.DoesNotExist:
-                    logger.debug(
-                        "Port %s not found on selected device %s; rejecting cable creation",
-                        port_name,
-                        selected_device_id,
-                    )
-                    return {"status": "invalid", "interface": display_name}
+        # Honour user's VC member selection: if the selected device_id differs from
+        # the cached interface's device, look up the same port name on that device.
+        selected_device_id = interface.get("device_id")
+        if selected_device_id and str(local_interface.device_id) != str(selected_device_id):
+            if not self._selected_device_is_in_page_context(selected_device_id):
+                logger.debug(
+                    "Selected device %s is outside the cable-sync page context; rejecting cable creation",
+                    selected_device_id,
+                )
+                return {"status": "rejected_selection", "interface": display_name}
+            port_name = link_data.get("local_port") or local_interface.name
+            try:
+                local_interface = self.restricted_queryset(Interface).get(device_id=selected_device_id, name=port_name)
+            except Interface.DoesNotExist:
+                logger.debug(
+                    "Port %s not found on selected device %s; rejecting cable creation",
+                    port_name,
+                    selected_device_id,
+                )
+                return {"status": "invalid", "interface": display_name}
 
+        try:
             remote_interface = self.restricted_queryset(Interface).get(pk=link_data["netbox_remote_interface_id"])
-
-            if self.check_existing_cable(local_interface, remote_interface):
-                return {"status": "duplicate", "interface": display_name}
-
-            if self.create_cable(local_interface, remote_interface, self.request):
-                return {"status": "valid", "interface": display_name}
-            return {"status": "invalid", "interface": display_name}  # pragma: no cover
-
         except Interface.DoesNotExist:
             return {"status": "missing_remote", "interface": display_name}
+
+        if self.check_existing_cable(local_interface, remote_interface):
+            return {"status": "duplicate", "interface": display_name}
+
+        if self.create_cable(local_interface, remote_interface, self.request):
+            return {"status": "valid", "interface": display_name}
+        return {"status": "invalid", "interface": display_name}  # pragma: no cover
 
     def process_interface_sync(self, selected_interfaces, cached_links):
         """
