@@ -927,7 +927,12 @@ class TestPostedSelectionsFailClosed:
                     continue
 
                 for handler in try_node.handlers:
-                    catches_lookup_error = bool(cls._exception_names(handler.type) & cls.LOOKUP_ERRORS)
+                    handled = cls._exception_names(handler.type)
+                    catches_lookup_error = (
+                        handler.type is None
+                        or bool(handled & cls.LOOKUP_ERRORS)
+                        or bool(handled & {"Exception", "BaseException"})
+                    )
                     passes_to_terminal_none = (
                         terminal_none and len(handler.body) == 1 and isinstance(handler.body[0], ast.Pass)
                     )
@@ -974,6 +979,22 @@ class TestPostedSelectionsFailClosed:
             "            except (VRF.DoesNotExist, TypeError, ValueError):\n"
             "                pass\n"
             "        return None\n"
+        )
+        assert self._scan_tree(ast.parse(source), "<fixture>")
+
+    @pytest.mark.parametrize("handler", ["except:", "except Exception:", "except BaseException:"])
+    def test_the_scan_flags_broad_exception_handlers(self, handler):
+        """Broad handlers must not hide a restricted lookup that fails open."""
+        import ast
+
+        source = (
+            "class V:\n"
+            "    def get_selection(self, request):\n"
+            "        selected_id = request.POST.get('selection')\n"
+            "        try:\n"
+            "            return self.restricted_queryset(Device).get(pk=selected_id)\n"
+            f"        {handler}\n"
+            "            return None\n"
         )
         assert self._scan_tree(ast.parse(source), "<fixture>")
 
