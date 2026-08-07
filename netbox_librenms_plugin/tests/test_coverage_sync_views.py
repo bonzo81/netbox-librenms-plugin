@@ -1419,9 +1419,11 @@ class TestDeleteNetBoxInterfacesViewPost:
     def test_interface_not_found_adds_error(self):
         import json
 
+        from dcim.models import Interface
+
         obj = make_device("del-notfound-dev")
-        # An interface id that does not exist → real Interface.DoesNotExist → recorded error.
-        req = make_real_request("post", {"interface_ids": ["999999"]})
+        absent_pk = missing_pk(Interface)
+        req = make_real_request("post", {"interface_ids": [str(absent_pk)]})
         view = self._make_view(req)
         result = _post(view, req, object_type="device", object_id=obj.pk)
         data = json.loads(result.content)
