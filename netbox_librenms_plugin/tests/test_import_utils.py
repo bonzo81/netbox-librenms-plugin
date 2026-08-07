@@ -4543,9 +4543,9 @@ class TestBulkImportCancellation:
             mock_api.server_key = "default"
             # Echo the requested id like the real API — the import loop's identity check
             # (row_identity_matches) rejects a payload describing another device.
-            mock_api.get_device_info.side_effect = lambda did, **_kwargs: (
+            mock_api.get_device_info.side_effect = lambda device_id, **_kwargs: (
                 True,
-                {"device_id": did, "hostname": "sw"},
+                {"device_id": device_id, "hostname": "sw"},
             )
             mock_api_cls.return_value = mock_api
             mock_import.return_value = {"success": True, "device": MagicMock(), "is_vm": False}
