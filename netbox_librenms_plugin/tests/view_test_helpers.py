@@ -173,6 +173,12 @@ def message_texts(request, level=None):
     return [str(m.message) for m in get_messages(request) if wanted is None or m.level == wanted]
 
 
+def missing_pk(model, offset=1000):
+    """Return a primary key that is above every current row for *model*."""
+    highest_pk = model.objects.order_by("-pk").values_list("pk", flat=True).first()
+    return (highest_pk or 0) + offset
+
+
 # =============================================================================
 # Real views
 # =============================================================================

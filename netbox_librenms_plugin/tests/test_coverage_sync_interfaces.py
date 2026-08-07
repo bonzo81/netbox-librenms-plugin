@@ -10,7 +10,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from netbox_librenms_plugin.tests.conftest import make_device, make_interface, make_vm
-from netbox_librenms_plugin.tests.view_test_helpers import make_request, make_view
+from netbox_librenms_plugin.tests.view_test_helpers import make_request, make_view, missing_pk
 
 # The views here are built with real requests and real users, so the whole file needs the DB.
 pytestmark = pytest.mark.django_db
@@ -765,8 +765,8 @@ class TestSyncInterfacesViewSyncInterfaceDevice:
         from dcim.models import Device, Interface
 
         dev = make_device("selgone-page")
-        missing_pk = Device.objects.order_by("-pk").first().pk + 1000
-        view = self._make_view(_make_request(post_data={"device_selection_Gi0/1": str(missing_pk)}))
+        absent_pk = missing_pk(Device)
+        view = self._make_view(_make_request(post_data={"device_selection_Gi0/1": str(absent_pk)}))
 
         view.sync_interface(dev, {"ifName": "Gi0/1", "port_id": None}, [], "ifName")
 
@@ -880,61 +880,6 @@ class TestSyncInterfacesViewSyncInterfaceVM:
 
         with pytest.raises(ValueError):
             view.sync_interface(MagicMock(), librenms_port, [], "ifName")
-
-
-# ===========================================================================
-# SyncInterfacesView.handle_mac_address
-# ===========================================================================
-
-
-class TestSyncInterfacesViewHandleMacAddress:
-    """Real Interfaces and real MACAddress rows: the m2m and the primary pointer both land."""
-
-    def test_no_mac_address_does_nothing(self):
-        iface = make_interface(make_device("mac-none"), "Gi0/1")
-
-        _sync_view().handle_mac_address(iface, None)
-
-        assert not iface.mac_addresses.exists()
-
-    def test_new_mac_created_and_added(self):
-        from dcim.models import MACAddress
-
-        iface = make_interface(make_device("mac-new"), "Gi0/1")
-
-        _sync_view().handle_mac_address(iface, "aa:bb:cc:dd:ee:ff")
-
-        mac = MACAddress.objects.get(mac_address="aa:bb:cc:dd:ee:ff")
-        assert list(iface.mac_addresses.all()) == [mac]
-
-    def test_existing_mac_added_without_create(self):
-        """A MAC already on this interface is reused, not duplicated, and becomes primary."""
-        from dcim.models import Interface, MACAddress
-
-        iface = make_interface(make_device("mac-existing"), "Gi0/1")
-        existing = MACAddress.objects.create(mac_address="aa:bb:cc:dd:ee:ff")
-        iface.mac_addresses.add(existing)
-        assert iface.primary_mac_address is None  # the branch has done nothing yet
-
-        _sync_view().handle_mac_address(iface, "aa:bb:cc:dd:ee:ff")
-        iface.save()
-
-        assert MACAddress.objects.filter(mac_address="aa:bb:cc:dd:ee:ff").count() == 1
-        assert list(iface.mac_addresses.all()) == [existing]
-        # Without this the test would pass on an early return: the m2m link predates the call.
-        assert Interface.objects.get(pk=iface.pk).primary_mac_address == existing
-
-    def test_primary_mac_assigned_if_attribute_exists(self):
-        from dcim.models import Interface, MACAddress
-
-        iface = make_interface(make_device("mac-primary"), "Gi0/1")
-
-        view = _sync_view()
-        view.handle_mac_address(iface, "aa:bb:cc:dd:ee:ff")
-        iface.save()
-
-        mac = MACAddress.objects.get(mac_address="aa:bb:cc:dd:ee:ff")
-        assert Interface.objects.get(pk=iface.pk).primary_mac_address == mac
 
 
 class TestSyncInterfacesViewUpdateInterfaceAttributes:

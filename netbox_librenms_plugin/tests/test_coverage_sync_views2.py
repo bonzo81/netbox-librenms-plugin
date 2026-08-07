@@ -16,6 +16,7 @@ from netbox_librenms_plugin.tests.view_test_helpers import (
     make_user_with_perms,
     make_view,
     message_texts,
+    missing_pk,
 )
 from netbox_librenms_plugin.tests.view_test_helpers import get as _get
 from netbox_librenms_plugin.tests.view_test_helpers import post as _post
@@ -365,7 +366,7 @@ class TestSyncCablesViewMissingRemote:
 
         dev = make_device("cable-missing-local")
         local_iface = make_interface(dev, "Gi0/1")
-        gone_pk = Interface.objects.order_by("-pk").first().pk + 1000
+        gone_pk = missing_pk(Interface)
         req = _make_request(post_data={"select": ["port1"]})
         view = _cables_view(
             req,
@@ -1343,8 +1344,8 @@ class TestSyncIPAddressesViewHelpers:
     def test_get_vrf_selection_not_found_returns_none(self):
         from ipam.models import VRF
 
-        missing_pk = (VRF.objects.order_by("-pk").first().pk if VRF.objects.exists() else 0) + 1000
-        req = _make_request(post_data={"vrf_10.0.0.1": str(missing_pk)})
+        absent_pk = missing_pk(VRF)
+        req = _make_request(post_data={"vrf_10.0.0.1": str(absent_pk)})
         view = make_view(_sync_ip_view_class(), req)
 
         assert view.get_vrf_selection(req, "10.0.0.1") is None
@@ -2004,8 +2005,8 @@ class TestSyncVLANsViewWithGroup:
         from ipam.models import VLAN, VLANGroup
 
         dev = make_device("vlan-grp-missing")
-        missing_pk = (VLANGroup.objects.order_by("-pk").first().pk if VLANGroup.objects.exists() else 0) + 1000
-        req = _make_request(post_data={"action": "create_vlans", "select": ["200"], "vlan_group_200": str(missing_pk)})
+        absent_pk = missing_pk(VLANGroup)
+        req = _make_request(post_data={"action": "create_vlans", "select": ["200"], "vlan_group_200": str(absent_pk)})
         view = _vlan_view(req, dev, [{"vlan_vlan": 200, "vlan_name": "Production"}])
 
         _post(view, req, object_type="device", object_id=dev.pk)
@@ -2206,8 +2207,8 @@ class TestSyncSiteLocationViewPost:
     def test_site_not_found_shows_error(self):
         from dcim.models import Site
 
-        missing_pk = (Site.objects.order_by("-pk").first().pk if Site.objects.exists() else 0) + 1000
-        req = _make_request(post_data={"action": "create", "pk": str(missing_pk)})
+        absent_pk = missing_pk(Site)
+        req = _make_request(post_data={"action": "create", "pk": str(absent_pk)})
         view = _location_view(req)
 
         _post(view, req)
@@ -2374,9 +2375,9 @@ class TestSyncSiteLocationViewHelpers:
     def test_get_site_by_pk_returns_none_on_not_found(self):
         from dcim.models import Site
 
-        missing_pk = (Site.objects.order_by("-pk").first().pk if Site.objects.exists() else 0) + 1000
+        absent_pk = missing_pk(Site)
 
-        assert _location_view().get_site_by_pk(missing_pk) is None
+        assert _location_view().get_site_by_pk(absent_pk) is None
 
     def test_get_site_by_pk_returns_none_for_a_site_outside_the_grant(self):
         from dcim.models import Site

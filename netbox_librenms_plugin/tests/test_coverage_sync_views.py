@@ -7,7 +7,7 @@ import pytest
 from netbox_librenms_plugin.tests.conftest import make_device, make_interface, make_ip, make_vm
 
 
-from netbox_librenms_plugin.tests.view_test_helpers import make_view
+from netbox_librenms_plugin.tests.view_test_helpers import make_view, missing_pk
 from netbox_librenms_plugin.tests.view_test_helpers import post as _post
 
 
@@ -2129,9 +2129,9 @@ class TestSyncSiteLocationViewGetSiteByPk:
     def test_not_found_returns_none(self):
         from dcim.models import Site
 
-        missing_pk = (Site.objects.order_by("-pk").first().pk if Site.objects.exists() else 0) + 1000
+        absent_pk = missing_pk(Site)
 
-        assert self._make_view().get_site_by_pk(missing_pk) is None
+        assert self._make_view().get_site_by_pk(absent_pk) is None
 
 
 class TestSyncSiteLocationViewPost:

@@ -20,6 +20,7 @@ from netbox_librenms_plugin.tests.view_test_helpers import (
     make_user_with_perms,
     make_view,
     message_texts,
+    missing_pk,
 )
 from netbox_librenms_plugin.tests.view_test_helpers import post as _post
 
@@ -375,8 +376,8 @@ class TestSyncInterface:
         from dcim.models import Device, Interface
 
         dev = make_device("sync-gone")
-        missing_pk = Device.objects.order_by("-pk").first().pk + 1000
-        req = make_request("post", {"device_selection_eth0": str(missing_pk)})
+        absent_pk = missing_pk(Device)
+        req = make_request("post", {"device_selection_eth0": str(absent_pk)})
         v = self._v(req)
 
         v.sync_interface(dev, {"ifName": "eth0"}, [], "ifName")
@@ -704,7 +705,7 @@ class TestDeleteNetBoxInterfacesPost:
         from dcim.models import Interface
 
         dev = make_device("del-missing")
-        gone_pk = (Interface.objects.order_by("-pk").first().pk if Interface.objects.exists() else 0) + 1000
+        gone_pk = missing_pk(Interface)
         req = make_request("post", {"interface_ids": [str(gone_pk)]})
 
         response = _post(_make_dv(req), req, object_type="device", object_id=dev.pk)

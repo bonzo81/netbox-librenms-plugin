@@ -1319,6 +1319,8 @@ class TestCreateAndAssignPlatformView:
         # the DB's unique constraint, and the re-query that follows is entirely real.
         with (
             _before_restricted_read(view, _rival_commits_first, on_call=1),
+            # Skip validation only for the simulated rival insert. The view's candidate still
+            # reaches the unique constraint and exercises its IntegrityError recovery path.
             patch.object(Platform, "full_clean", _skip_once(Platform.full_clean)),
         ):
             _post(view, req, pk=dev.pk)
