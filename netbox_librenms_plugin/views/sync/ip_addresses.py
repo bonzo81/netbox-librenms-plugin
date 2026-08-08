@@ -10,7 +10,7 @@ from django.shortcuts import redirect
 from django.urls import reverse
 from django.views import View
 from ipam.models import VRF, IPAddress
-from virtualization.models import VirtualMachine
+from virtualization.models import VirtualMachine, VMInterface
 
 from netbox_librenms_plugin.utils import (
     get_librenms_device_id,
@@ -43,10 +43,9 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
         """
         Return the POST permissions, narrowed to the owner model this request targets.
 
-        The owner is resolved through a restricted queryset (:meth:`get_object`), so its view
-        permission belongs in the gate: a missing grant is then an explicit 403 instead of a
-        puzzling 404 at the lookup. It cannot be declared statically because one view serves both
-        Devices and VirtualMachines.
+        The owner and target interfaces are resolved through restricted querysets, so their view
+        permissions belong in the gate. They cannot be declared statically because one view serves
+        both Devices and VirtualMachines.
 
         Args:
             object_type (str): ``"device"`` or ``"virtualmachine"`` from the URL.
@@ -54,8 +53,20 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
         Returns:
             dict: The ``required_object_permissions`` mapping for this request.
         """
-        owner_model = VirtualMachine if object_type == "virtualmachine" else Device
-        perms = [("view", owner_model), *type(self).required_object_permissions["POST"]]
+        if object_type == "device":
+            owner_model = Device
+            interface_model = Interface
+        elif object_type == "virtualmachine":
+            owner_model = VirtualMachine
+            interface_model = VMInterface
+        else:
+            raise Http404("Invalid object type.")
+
+        perms = [
+            ("view", owner_model),
+            ("view", interface_model),
+            *type(self).required_object_permissions["POST"],
+        ]
         # A per-row VRF is resolved by client-supplied id through a restricted queryset. Only
         # demand its view permission when one is actually posted, so the common no-VRF sync
         # is not gated on a permission it never uses.
@@ -197,15 +208,13 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
         Used to re-resolve the target interface at sync time instead of trusting the cached
         ``interface_url`` (see ``_match_interface``).
 
-        For a Device in a Virtual Chassis, all member interfaces are indexed (not just the viewed
-        member's), mirroring ``_resolve_interface_by_port_id`` in ``views/sync/interfaces``: LibreNMS
-        treats a VC as one logical device, so a VC member IP can legitimately resolve to an interface
-        on another member by stable port id. For the name fallback the viewed object's own interface
-        wins — that's exactly what the rendered IP table binds to (the render indexes only
-        ``obj.interfaces``; see ``ip_addresses_view._prefetch_netbox_data``), so the sync must agree
-        rather than skip what the user sees linked. A name shared only by sibling members (none on the
-        viewed object) stays ambiguous (None) so the address can't silently rebind to an arbitrary
-        member; duplicate port ids are always ambiguous.
+        For a Device in a Virtual Chassis, authorized member interfaces are indexed (not just the
+        viewed member's), mirroring ``_resolve_interface_by_port_id`` in ``views/sync/interfaces``:
+        LibreNMS treats a VC as one logical device, so a VC member IP can legitimately resolve to an
+        interface on another member by stable port id. For the name fallback the viewed object's own
+        interface wins. A name shared only by sibling members (none on the viewed object) stays
+        ambiguous (None) so the address can't silently rebind to an arbitrary member; duplicate port
+        ids are always ambiguous.
 
         Args:
             obj (Device | VirtualMachine): The synced object whose current interfaces to index.
@@ -220,10 +229,10 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
             # Route member expansion through the shared helper (returns [obj] when not in a VC)
             # so this can't drift from the VC member set used by the interface-sync path.
             member_devices = get_virtual_chassis_members(obj)
-            interfaces = list(Interface.objects.filter(device__in=member_devices))
+            interfaces = list(self.restricted_queryset(Interface).filter(device__in=member_devices))
             obj_device_id = obj.pk
         else:
-            interfaces = list(obj.interfaces.all())
+            interfaces = list(self.restricted_queryset(VMInterface).filter(virtual_machine=obj))
             obj_device_id = None
         by_librenms_id = {}
         by_name = {}

@@ -1648,6 +1648,18 @@ class TestSyncIPAddressesViewGetIpTabUrl:
 
 
 class TestSyncIPAddressesViewPost:
+    def test_invalid_object_type_raises_404_before_permission_check(self):
+        from django.http import Http404
+
+        from netbox_librenms_plugin.views.sync.ip_addresses import SyncIPAddressesView
+
+        view = _make_view(SyncIPAddressesView)
+        with patch.object(view, "require_all_permissions") as permission_check:
+            with pytest.raises(Http404, match="Invalid object type"):
+                view.post(view.request, object_type="rack", pk=1)
+
+        permission_check.assert_not_called()
+
     def test_permission_denied_returns_early(self):
         from netbox_librenms_plugin.views.sync.ip_addresses import SyncIPAddressesView
 

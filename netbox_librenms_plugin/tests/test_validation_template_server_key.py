@@ -22,9 +22,13 @@ MAPPING_ACTIONS = {"link", "update", "update_serial", "migrate_librenms_id"}
 def _form_actions(form_html):
     actions = set()
     for tag in re.findall(r"<(?:input|button)\b[^>]*>", form_html, re.DOTALL | re.IGNORECASE):
-        if not re.search(r"\bname\s*=\s*(['\"])action\1", tag, re.IGNORECASE):
+        if not re.search(r"(?:^|\s)name\s*=\s*(['\"])action\1(?=\s|/?>)", tag, re.IGNORECASE):
             continue
-        value = re.search(r"\bvalue\s*=\s*(['\"])(.*?)\1", tag, re.DOTALL | re.IGNORECASE)
+        value = re.search(
+            r"(?:^|\s)value\s*=\s*(['\"])(.*?)\1(?=\s|/?>)",
+            tag,
+            re.DOTALL | re.IGNORECASE,
+        )
         if value:
             actions.add(value.group(2))
     return actions
@@ -35,6 +39,13 @@ def test_form_actions_accepts_attributes_between_name_and_value():
     form = '<input type="hidden" name="action" class="mapping-action" value="link">'
 
     assert _form_actions(form) == {"link"}
+
+
+def test_form_actions_ignores_data_attributes():
+    """Metadata attributes must not make a non-action input look like an action control."""
+    form = '<input type="hidden" data-name="action" data-value="link">'
+
+    assert _form_actions(form) == set()
 
 
 def test_mapping_writing_conflict_forms_include_server_key():

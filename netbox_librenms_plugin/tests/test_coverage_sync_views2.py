@@ -410,7 +410,7 @@ class TestSyncCablesViewMissingRemote:
         local_iface = make_interface(dev, "Gi0/1")
         remote_iface = make_interface(remote, "Gi0/2")
         user = make_user_with_perms("cable-scoped", [("view", Device), ("add", Cable), ("change", Cable)])
-        user = grant(user, "view", Interface, constraints={"device__name": "cable-scoped-local"})
+        user = grant(user, "change", Interface, constraints={"device__name": "cable-scoped-local"})
         req = _make_request(post_data={"select": ["port1"]}, user=user)
         view = _cables_view(
             req,
@@ -1337,6 +1337,20 @@ class TestSyncIPAddressesViewIPWrites:
 
 
 class TestSyncIPAddressesViewHelpers:
+    def test_device_sync_declares_interface_view_permission(self):
+        from dcim.models import Interface
+
+        view = make_view(_sync_ip_view_class(), _make_request())
+
+        assert ("view", Interface) in view._required_permissions("device")["POST"]
+
+    def test_vm_sync_declares_interface_view_permission(self):
+        from virtualization.models import VMInterface
+
+        view = make_view(_sync_ip_view_class(), _make_request())
+
+        assert ("view", VMInterface) in view._required_permissions("virtualmachine")["POST"]
+
     def test_blank_vrf_selection_does_not_require_vrf_permission(self):
         from ipam.models import VRF
 
@@ -1583,7 +1597,7 @@ class TestSyncIPAddressesViewInterfaceResolution:
     def _view(self):
         from netbox_librenms_plugin.views.sync.ip_addresses import SyncIPAddressesView
 
-        return object.__new__(SyncIPAddressesView)
+        return make_view(SyncIPAddressesView)
 
     def test_match_interface_by_port_id(self):
         dev = make_device("ipres-byid")
@@ -1746,6 +1760,42 @@ class TestSyncIPAddressesViewInterfaceResolution:
         assert by_id["202"].pk == i2.pk  # cross-member: resolved from a different member
         assert by_name["Ethernet1"].pk == i1.pk
         assert by_name["Ethernet2"].pk == i2.pk
+
+    def test_ip_sync_skips_vc_interface_outside_the_users_grant(self):
+        """A cached sibling port must not bypass a constrained Interface view grant."""
+        from dcim.models import Device, Interface
+        from ipam.models import IPAddress
+
+        from netbox_librenms_plugin.utils import set_librenms_device_id
+
+        _vc, members = self._make_vc("ipres-vc-scoped", [1, 2])
+        visible = make_interface(members[1], "Ethernet1")
+        hidden = make_interface(members[2], "Ethernet2")
+        set_librenms_device_id(hidden, 202, "default")
+        hidden.save()
+
+        user = make_user_with_perms(
+            "ipres-vc-scoped",
+            [("view", Device), ("add", IPAddress), ("change", IPAddress)],
+        )
+        user = grant(user, "view", Interface, constraints={"pk": visible.pk})
+        request = _make_request(post_data={"select": ["10.0.0.2"]}, user=user)
+        view = make_view(_sync_ip_view_class(), request)
+        view._post_server_key = "default"
+        cached = [
+            {
+                "ip_address": "10.0.0.2",
+                "ip_with_mask": "10.0.0.2/24",
+                "port_id": 202,
+                "interface_name": "Ethernet2",
+            }
+        ]
+
+        with patch("netbox_librenms_plugin.views.sync.ip_addresses.resolve_set_primary_ip", return_value=False):
+            results = view.process_ip_sync(request, ["10.0.0.2"], cached, members[1], "device")
+
+        assert results["skipped_no_interface"] == ["10.0.0.2"]
+        assert not IPAddress.objects.filter(address="10.0.0.2/24").exists()
 
     def test_primary_ip_set_from_sibling_vc_member_interface(self):
         """Because _build_interface_maps indexes every VC member, a synced IP can resolve to a SIBLING member's interface — and NetBox's Device.clean() explicitly ACCEPTS a primary IP on any same-VC member's non-mgmt-only interface (vc_interfaces(if_master=False)), so the sync must set it rather than warn 'sync interfaces first' forever."""
