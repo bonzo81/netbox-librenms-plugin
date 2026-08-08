@@ -218,6 +218,53 @@ class TestSyncCablesViewSuccessPath:
 
         assert result == {"status": "invalid", "interface": "Gi0/1"}
 
+    def test_normal_cable_action_does_not_mask_nested_does_not_exist(self):
+        """Only a failed remote termination lookup is reported as missing remote."""
+        from dcim.models import Interface
+
+        from netbox_librenms_plugin.views.sync.cables import SyncCablesView
+
+        local = make_interface(make_device("cable-action-local"), "Gi0/1")
+        remote = make_interface(make_device("cable-action-remote"), "Gi0/2")
+        view = make_view(SyncCablesView)
+
+        with (
+            patch.object(view, "_apply_cable_action", side_effect=Interface.DoesNotExist("nested lookup")),
+            pytest.raises(Interface.DoesNotExist, match="nested lookup"),
+        ):
+            view.handle_cable_creation(
+                {
+                    "local_port": "Gi0/1",
+                    "netbox_local_interface_id": local.pk,
+                    "netbox_remote_interface_id": remote.pk,
+                },
+                {"local_port_id": "1"},
+            )
+
+    def test_serial_cable_action_does_not_mask_nested_does_not_exist(self):
+        """A nested serial action failure is not reported as a missing termination."""
+        from dcim.models import ConsolePort
+
+        from netbox_librenms_plugin.tests.conftest import make_serial_device
+        from netbox_librenms_plugin.views.sync.cables import SyncCablesView
+
+        _server, server_ports, _ = make_serial_device("cable-action-server", csp_names=["ttyS1"])
+        _client, _, console_ports = make_serial_device("cable-action-client", cp_names=["console"])
+        view = make_view(SyncCablesView)
+
+        with (
+            patch.object(view, "_apply_cable_action", side_effect=ConsolePort.DoesNotExist("nested lookup")),
+            pytest.raises(ConsolePort.DoesNotExist, match="nested lookup"),
+        ):
+            view.handle_serial_cable_creation(
+                {
+                    "local_port": "ttyS1",
+                    "netbox_local_interface_id": server_ports[0].pk,
+                    "netbox_remote_interface_id": console_ports[0].pk,
+                },
+                {"local_port_id": "serial:1"},
+            )
+
     def test_unrelated_posted_device_cannot_redirect_the_local_termination(self):
         """A forged VC selection must reject the row, not cable the cached page interface."""
         from dcim.models import Cable

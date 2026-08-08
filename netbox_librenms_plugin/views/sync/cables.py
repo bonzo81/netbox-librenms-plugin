@@ -312,9 +312,9 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libre
             remote_interface = self.restricted_queryset(Interface, "change").get(
                 pk=link_data["netbox_remote_interface_id"]
             )
-            return self._apply_cable_action(local_interface, remote_interface, link_data, display_name, force)
         except Interface.DoesNotExist:
             return {"status": "missing_remote", "interface": display_name}
+        return self._apply_cable_action(local_interface, remote_interface, link_data, display_name, force)
 
     def handle_serial_cable_creation(self, link_data, interface, force=False):
         """Create a ConsoleServerPort ↔ ConsolePort cable for a serial row."""
@@ -330,10 +330,9 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libre
             # the POST selected, so a constrained grant must not cable an out-of-scope port.
             csp = self.restricted_queryset(ConsoleServerPort, "change").get(pk=csp_id)
             cp = self.restricted_queryset(ConsolePort, "change").get(pk=cp_id)
-            return self._apply_cable_action(csp, cp, link_data, display_name, force)
-
         except (ConsoleServerPort.DoesNotExist, ConsolePort.DoesNotExist):
             return {"status": "missing_remote", "interface": display_name}
+        return self._apply_cable_action(csp, cp, link_data, display_name, force)
 
     def process_interface_sync(self, selected_interfaces, cached_links, force=False):
         """
