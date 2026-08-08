@@ -1,10 +1,11 @@
+import hashlib
 from urllib.parse import quote_plus
 
 from dcim.models import Device
 from django.contrib import messages
 from django.core.cache import cache
 from django.core.exceptions import ValidationError
-from django.db import IntegrityError, transaction
+from django.db import IntegrityError, connection, transaction
 from django.http import Http404
 from django.shortcuts import redirect
 from django.urls import reverse
@@ -17,6 +18,24 @@ from netbox_librenms_plugin.views.mixins import (
     LibreNMSPermissionMixin,
     NetBoxObjectPermissionMixin,
 )
+
+
+def _acquire_global_vlan_locks(vids):
+    """Lock global VLAN VIDs in stable order for the current transaction."""
+    if not connection.in_atomic_block:
+        raise RuntimeError("_acquire_global_vlan_locks() requires an open transaction")
+
+    with connection.cursor() as cursor:
+        for vid in sorted(set(vids)):
+            lock_key = int.from_bytes(
+                hashlib.blake2b(
+                    f"netbox-librenms-plugin:global-vlan:{vid}".encode(),
+                    digest_size=8,
+                ).digest(),
+                byteorder="big",
+                signed=True,
+            )
+            cursor.execute("SELECT pg_advisory_xact_lock(%s)", [lock_key])
 
 
 class SyncVLANsView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreNMSAPIMixin, CacheMixin, View):
@@ -111,6 +130,20 @@ class SyncVLANsView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreN
         changeable_vlans = self.restricted_queryset(VLAN, "change")
 
         with transaction.atomic():
+            # A global VLAN has no parent row to lock, and PostgreSQL treats NULL
+            # group values as distinct in the VLAN uniqueness constraint. Lock all
+            # selected global VIDs before lookup so concurrent batches cannot both
+            # observe a missing row. Stable ordering prevents cross-batch deadlocks.
+            global_vids = []
+            for vid_str in selected_vlans:
+                try:
+                    vid = int(vid_str)
+                except ValueError:
+                    continue
+                if vid_str in librenms_vlans and not request.POST.get(f"vlan_group_{vid}", ""):
+                    global_vids.append(vid)
+            _acquire_global_vlan_locks(global_vids)
+
             for vid_str in selected_vlans:
                 try:
                     vid = int(vid_str)
