@@ -218,33 +218,21 @@ class SyncVLANsView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreN
         if skipped_count > 0:
             parts.append(f"{skipped_count} unchanged")
 
+        skip_reasons = []
+        if group_missing_count > 0:
+            skip_reasons.append(f"{group_missing_count} skipped (VLAN group missing)")
+        if permission_skipped_count > 0:
+            skip_reasons.append(f"{permission_skipped_count} skipped (change permission missing)")
+        if ambiguous_count > 0:
+            skip_reasons.append(f"{ambiguous_count} skipped (VLAN match ambiguous)")
+        if concurrent_change_count > 0:
+            skip_reasons.append(f"{concurrent_change_count} skipped (concurrent VLAN change)")
+
         if parts:
-            if group_missing_count > 0:
-                parts.append(f"{group_missing_count} skipped (VLAN group missing)")
-            if permission_skipped_count > 0:
-                parts.append(f"{permission_skipped_count} skipped (change permission missing)")
-            if ambiguous_count > 0:
-                parts.append(f"{ambiguous_count} skipped (VLAN match ambiguous)")
-            if concurrent_change_count > 0:
-                parts.append(f"{concurrent_change_count} skipped (concurrent VLAN change)")
-            messages.success(request, f"VLANs synced: {', '.join(parts)}.")
-        elif (
-            group_missing_count > 0
-            or permission_skipped_count > 0
-            or ambiguous_count > 0
-            or concurrent_change_count > 0
-        ):
+            messages.success(request, f"VLANs synced: {', '.join(parts + skip_reasons)}.")
+        elif skip_reasons:
             # Nothing actually synced. Do not claim success for rows rejected by a scope check.
-            reasons = []
-            if group_missing_count > 0:
-                reasons.append(f"{group_missing_count} skipped (VLAN group missing)")
-            if permission_skipped_count > 0:
-                reasons.append(f"{permission_skipped_count} skipped (change permission missing)")
-            if ambiguous_count > 0:
-                reasons.append(f"{ambiguous_count} skipped (VLAN match ambiguous)")
-            if concurrent_change_count > 0:
-                reasons.append(f"{concurrent_change_count} skipped (concurrent VLAN change)")
-            messages.warning(request, f"No VLANs synced: {', '.join(reasons)}.")
+            messages.warning(request, f"No VLANs synced: {', '.join(skip_reasons)}.")
         else:
             messages.warning(request, "No VLANs were created or updated.")
 

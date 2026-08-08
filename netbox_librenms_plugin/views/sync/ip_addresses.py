@@ -345,6 +345,7 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
             "failed": [],
             "primary_set": [],
             "primary_no_interface": [],
+            "primary_interface_not_eligible": [],
             "skipped_no_interface": [],
             "errors": {},
         }
@@ -430,7 +431,7 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
                                 and not interface.mgmt_only
                             )
                         ):
-                            results["primary_no_interface"].append(ip_address)
+                            results["primary_interface_not_eligible"].append(ip_address)
                         elif self._set_primary_ip(obj, ip_obj):
                             results["primary_set"].append(ip_address)
 
@@ -455,6 +456,13 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
                 "Primary IP not set for "
                 f"{', '.join(results['primary_no_interface'])} — no NetBox interface for this IP. "
                 "Sync interfaces first, then re-run.",
+            )
+        if results.get("primary_interface_not_eligible"):
+            messages.warning(
+                request,
+                "Primary IP not set for "
+                f"{', '.join(results['primary_interface_not_eligible'])} — the matched interface is not eligible "
+                "(it is outside this virtual chassis or is a management-only interface).",
             )
         if results.get("skipped_no_interface"):
             messages.warning(

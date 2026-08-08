@@ -2588,27 +2588,21 @@ class TestGetInterfaceMapping:
         )
 
     def test_exact_match_returned(self):
-        from netbox_librenms_plugin.tables.interfaces import LibreNMSInterfaceTable
-
-        table = object.__new__(LibreNMSInterfaceTable)
+        table = self._table()
         mapping = self._mapping("ethernetCsmacd", 1000000)
         self._mapping("ethernetCsmacd", None, netbox_type="virtual")  # type-only fallback
 
         assert table.get_interface_mapping("ethernetCsmacd", 1000000) == mapping
 
     def test_fallback_type_only_match(self):
-        from netbox_librenms_plugin.tables.interfaces import LibreNMSInterfaceTable
-
-        table = object.__new__(LibreNMSInterfaceTable)
+        table = self._table()
         # Only a type-only (speed is None) mapping exists; the exact (type, speed) lookup misses.
         fallback = self._mapping("ethernetCsmacd", None, netbox_type="virtual")
 
         assert table.get_interface_mapping("ethernetCsmacd", 1000000) == fallback
 
     def test_no_match_returns_none(self):
-        from netbox_librenms_plugin.tables.interfaces import LibreNMSInterfaceTable
-
-        table = object.__new__(LibreNMSInterfaceTable)
+        table = self._table()
         self._mapping("ethernetCsmacd", 1000000)  # a mapping exists, but not for this type
 
         assert table.get_interface_mapping("unknown_type", 0) is None
@@ -2618,9 +2612,7 @@ class TestGetInterfaceMapping:
         from django.test.utils import CaptureQueriesContext
         from django.db import connection
 
-        from netbox_librenms_plugin.tables.interfaces import LibreNMSInterfaceTable
-
-        table = object.__new__(LibreNMSInterfaceTable)
+        table = self._table()
         self._mapping("ethernetCsmacd", 1000000)
         self._mapping("ethernetCsmacd", None, netbox_type="virtual")
 

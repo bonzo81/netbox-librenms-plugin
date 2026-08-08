@@ -20,10 +20,21 @@ MAPPING_ACTIONS = {"link", "update", "update_serial", "migrate_librenms_id"}
 
 
 def _form_actions(form_html):
-    return set(
-        re.findall(r'name="action"\s+value="([^"]+)"', form_html)
-        + re.findall(r'value="([^"]+)"\s+name="action"', form_html)
-    )
+    actions = set()
+    for tag in re.findall(r"<(?:input|button)\b[^>]*>", form_html, re.DOTALL | re.IGNORECASE):
+        if not re.search(r"\bname\s*=\s*(['\"])action\1", tag, re.IGNORECASE):
+            continue
+        value = re.search(r"\bvalue\s*=\s*(['\"])(.*?)\1", tag, re.DOTALL | re.IGNORECASE)
+        if value:
+            actions.add(value.group(2))
+    return actions
+
+
+def test_form_actions_accepts_attributes_between_name_and_value():
+    """An action input stays visible to the server-key scan when it gains another attribute."""
+    form = '<input type="hidden" name="action" class="mapping-action" value="link">'
+
+    assert _form_actions(form) == {"link"}
 
 
 def test_mapping_writing_conflict_forms_include_server_key():

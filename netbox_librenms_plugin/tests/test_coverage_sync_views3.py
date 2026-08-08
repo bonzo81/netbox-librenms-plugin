@@ -902,7 +902,7 @@ class TestVlansGroupedUpdateAndSkip:
         )
         return view, req, dev, vlan
 
-    def test_grouped_update_path_lines_134_to_137(self):
+    def test_grouped_vlan_with_different_name_is_renamed(self):
         """A grouped VLAN whose LibreNMS name differs is renamed and persisted."""
         from ipam.models import VLAN
 
@@ -913,7 +913,7 @@ class TestVlansGroupedUpdateAndSkip:
         assert VLAN.objects.get(pk=vlan.pk).name == "NewName"
         assert any("updated" in t for t in message_texts(req, "success"))
 
-    def test_grouped_skip_path_lines_138_to_139(self):
+    def test_grouped_vlan_with_matching_name_is_unchanged(self):
         """A grouped VLAN already carrying the LibreNMS name is left untouched."""
         from ipam.models import VLAN
 

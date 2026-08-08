@@ -430,6 +430,34 @@ class TestSyncCablesViewMissingRemote:
         assert any("Remote device or interface not found" in t for t in message_texts(req, "error"))
         assert not remote_iface.cable_terminations.exists()
 
+    def test_view_only_interface_grant_cannot_create_a_cable(self):
+        """Cable creation changes both terminations, so a view-only grant must not resolve them."""
+        from dcim.models import Cable, Interface
+
+        from netbox_librenms_plugin.views.sync.cables import SyncCablesView
+
+        local_device = make_device("cable-view-only-local")
+        remote_device = make_device("cable-view-only-remote")
+        local_iface = make_interface(local_device, "Gi0/1")
+        remote_iface = make_interface(remote_device, "Gi0/2")
+        user = make_user_with_perms("cable-view-only", [("view", Interface)])
+        request = _make_request(user=user)
+        view = SyncCablesView()
+        view.setup(request)
+        view._post_server_key = "default"
+
+        result = view.handle_cable_creation(
+            {
+                "local_port": "Gi0/1",
+                "netbox_local_interface_id": local_iface.pk,
+                "netbox_remote_interface_id": remote_iface.pk,
+            },
+            {"local_port_id": "1"},
+        )
+
+        assert result["status"] == "invalid"
+        assert not Cable.objects.filter(terminations__termination_id=local_iface.pk).exists()
+
 
 class TestSyncCablesViewMissingLinkData:
     def test_no_matching_link_data_reports_invalid(self):
@@ -1798,7 +1826,12 @@ class TestSyncIPAddressesViewInterfaceResolution:
         m1.refresh_from_db()
         assert m1.primary_ip4_id is None
         assert results["primary_set"] == []
-        assert results["primary_no_interface"] == ["10.0.0.2"]
+        assert results["primary_interface_not_eligible"] == ["10.0.0.2"]
+
+        view.display_sync_results(request, results)
+        warnings = message_texts(request, "warning")
+        assert any("matched interface is not eligible" in text for text in warnings)
+        assert all("Sync interfaces first" not in text for text in warnings)
 
     def test_build_interface_maps_vc_shared_name_prefers_viewed_member(self):
         """A name shared across VC members resolves to the VIEWED member's own interface (matching the rendered table), not ambiguous."""

@@ -856,7 +856,6 @@ class TestInstallSingleStatus:
         locked_bay.installed_module = None
         locked_bay.pk = bay.pk
         locked_bay.module_id = None
-        ModuleBay.objects.restrict.return_value = ModuleBay.objects
         ModuleBay.objects.select_for_update.return_value.select_related.return_value.get.return_value = locked_bay
         ModuleType = MagicMock()
         Module = MagicMock()
@@ -1062,7 +1061,6 @@ class TestInstallSingleStatus:
         locked_bay.pk = bay.pk
         locked_bay.module_id = None
         locked_bay.installed_module = None
-        ModuleBay.objects.restrict.return_value = ModuleBay.objects
         ModuleBay.objects.select_for_update.return_value.select_related.return_value.get.return_value = locked_bay
 
         module_instance = MagicMock()
@@ -4358,8 +4356,6 @@ class TestInstallModuleViewBehavior:
             mock_tx.atomic = noop_atomic
             # The module is read through restrict(user, "change"), so hand back the same manager.
             mock_objects.restrict.return_value = mock_objects
-            # The locked re-fetch goes through restrict(user, ...), so hand back the same manager.
-            mock_objects.restrict.return_value = mock_objects
             mock_objects.select_for_update.return_value = mock_qs
             view.request = request
             view.post(request, pk=24)
@@ -4388,7 +4384,6 @@ class TestInstallModuleViewBehavior:
             yield
 
         mock_qs = MagicMock()
-        mock_qs.get.side_effect = ModuleBay.DoesNotExist
         mock_qs.filter.return_value.first.return_value = None
 
         with (
@@ -4537,8 +4532,6 @@ class TestUpdateModuleSerialViewBehavior:
         ):
             mock_tx.atomic = noop_atomic
             # The module is read through restrict(user, "change"), so hand back the same manager.
-            mock_objects.restrict.return_value = mock_objects
-            # The locked re-fetch goes through restrict(user, ...), so hand back the same manager.
             mock_objects.restrict.return_value = mock_objects
             mock_objects.select_for_update.return_value = mock_qs
             view.request = request

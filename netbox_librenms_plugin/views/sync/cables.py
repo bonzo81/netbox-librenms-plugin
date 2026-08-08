@@ -31,9 +31,9 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libre
             # queryset, so state that read here: a missing grant is then an explicit 403
             # rather than a puzzling 404 at the lookup.
             ("view", Device),
-            # Both cable terminations are resolved by client-supplied id below, through a
-            # restricted queryset for the same reason.
-            ("view", Interface),
+            # Creating a cable changes the cable state of both terminations. Resolve the
+            # client-supplied ids through the same change scope NetBox's cable form uses.
+            ("change", Interface),
             ("add", Cable),
             ("change", Cable),
         ],
@@ -167,7 +167,9 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libre
             return {"status": "invalid", "interface": display_name}
 
         try:
-            local_interface = self.restricted_queryset(Interface).get(pk=link_data["netbox_local_interface_id"])
+            local_interface = self.restricted_queryset(Interface, "change").get(
+                pk=link_data["netbox_local_interface_id"]
+            )
         except Interface.DoesNotExist:
             return {"status": "invalid", "interface": display_name}
 
@@ -183,7 +185,10 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libre
                 return {"status": "rejected_selection", "interface": display_name}
             port_name = link_data.get("local_port") or local_interface.name
             try:
-                local_interface = self.restricted_queryset(Interface).get(device_id=selected_device_id, name=port_name)
+                local_interface = self.restricted_queryset(Interface, "change").get(
+                    device_id=selected_device_id,
+                    name=port_name,
+                )
             except Interface.DoesNotExist:
                 logger.debug(
                     "Port %s not found on selected device %s; rejecting cable creation",
@@ -193,7 +198,9 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libre
                 return {"status": "invalid", "interface": display_name}
 
         try:
-            remote_interface = self.restricted_queryset(Interface).get(pk=link_data["netbox_remote_interface_id"])
+            remote_interface = self.restricted_queryset(Interface, "change").get(
+                pk=link_data["netbox_remote_interface_id"]
+            )
         except Interface.DoesNotExist:
             return {"status": "missing_remote", "interface": display_name}
 

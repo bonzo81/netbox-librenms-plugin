@@ -780,7 +780,11 @@ class TestGatedViewsResolveThroughRestrictedQuerysets:
 
 
 class TestPostedSelectionsFailClosed:
-    """Prevent an explicit object selection from degrading to an absent selection."""
+    """Prevent an explicit object selection from degrading to an absent selection.
+
+    The scanner recognizes assignments from ``request.POST.get()`` and attribute-based local
+    helper calls. It does not model subscription reads, ``request.data``, or module-level callers.
+    """
 
     LOOKUP_ERRORS = frozenset({"DoesNotExist", "ObjectDoesNotExist", "TypeError", "ValueError"})
 
@@ -837,6 +841,19 @@ class TestPostedSelectionsFailClosed:
         )
 
     @staticmethod
+    def _reports_rejected_selection(statements):
+        """Whether the handler records the invalid selection before it returns."""
+        import ast
+
+        return any(
+            isinstance(call, ast.Call)
+            and isinstance(call.func, ast.Attribute)
+            and call.func.attr == "_record_skipped_conflict"
+            for statement in statements
+            for call in ast.walk(statement)
+        )
+
+    @staticmethod
     def _is_none_guard(node, name):
         """Whether *node* checks that *name* is None."""
         import ast
@@ -869,6 +886,10 @@ class TestPostedSelectionsFailClosed:
                 yield value
                 for statement in value:
                     yield from cls._statement_lists(statement)
+            elif isinstance(value, list):
+                for item in value:
+                    if isinstance(item, ast.AST):
+                        yield from cls._statement_lists(item)
             elif isinstance(value, ast.AST):
                 yield from cls._statement_lists(value)
 
@@ -903,7 +924,7 @@ class TestPostedSelectionsFailClosed:
         import ast
 
         offenders = set()
-        for function in (node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef)):
+        for function in (node for node in ast.walk(tree) if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))):
             posted_names = {
                 target.id
                 for assignment in ast.walk(function)
@@ -933,11 +954,12 @@ class TestPostedSelectionsFailClosed:
                         or bool(handled & cls.LOOKUP_ERRORS)
                         or bool(handled & {"Exception", "BaseException"})
                     )
-                    passes_to_terminal_none = (
-                        terminal_none and len(handler.body) == 1 and isinstance(handler.body[0], ast.Pass)
-                    )
-                    returns_none = len(handler.body) == 1 and cls._returns_none(handler.body[0])
-                    if catches_lookup_error and (passes_to_terminal_none or returns_none):
+                    last_statement = handler.body[-1] if handler.body else None
+                    passes_to_terminal_none = terminal_none and isinstance(last_statement, ast.Pass)
+                    returns_none = cls._returns_none(last_statement)
+                    rejects_selection = passes_to_terminal_none or returns_none
+                    reports_rejection = cls._reports_rejected_selection(handler.body[:-1])
+                    if catches_lookup_error and rejects_selection and not reports_rejection:
                         if not cls._calls_reject_none(tree, function.name):
                             offenders.add((label, function.name, restricted_gets[0].lineno))
 
@@ -997,6 +1019,61 @@ class TestPostedSelectionsFailClosed:
             "            return None\n"
         )
         assert self._scan_tree(ast.parse(source), "<fixture>")
+
+    def test_the_scan_checks_async_view_helpers(self):
+        """An async helper must not escape the posted-selection scan."""
+        import ast
+
+        source = (
+            "class V:\n"
+            "    async def get_selection(self, request):\n"
+            "        selected_id = request.POST.get('selection')\n"
+            "        try:\n"
+            "            return self.restricted_queryset(Device).get(pk=selected_id)\n"
+            "        except Device.DoesNotExist:\n"
+            "            return None\n"
+        )
+        assert self._scan_tree(ast.parse(source), "<fixture>")
+
+    def test_the_scan_flags_a_logging_handler_that_falls_through(self):
+        """Logging before ``pass`` must not hide a lookup that still degrades to None."""
+        import ast
+
+        source = (
+            "class V:\n"
+            "    def get_selection(self, request):\n"
+            "        selected_id = request.POST.get('selection')\n"
+            "        try:\n"
+            "            return self.restricted_queryset(Device).get(pk=selected_id)\n"
+            "        except Device.DoesNotExist:\n"
+            "            logger.debug('missing')\n"
+            "            pass\n"
+            "        return None\n"
+        )
+        assert self._scan_tree(ast.parse(source), "<fixture>")
+
+    def test_the_scan_finds_a_guarded_helper_call_inside_an_except_block(self):
+        """A helper call inside an except handler must count when its None result stops the path."""
+        import ast
+
+        source = (
+            "class V:\n"
+            "    def get_selection(self, request):\n"
+            "        selected_id = request.POST.get('selection')\n"
+            "        try:\n"
+            "            return self.restricted_queryset(Device).get(pk=selected_id)\n"
+            "        except Device.DoesNotExist:\n"
+            "            return None\n"
+            "    def post(self, request):\n"
+            "        try:\n"
+            "            work()\n"
+            "        except ValueError:\n"
+            "            selected = self.get_selection(request)\n"
+            "            if selected is None:\n"
+            "                return None\n"
+            "        return selected\n"
+        )
+        assert not self._scan_tree(ast.parse(source), "<fixture>")
 
     def test_the_scan_accepts_an_explicit_invalid_selection_sentinel(self):
         """A None sentinel is safe when every caller stops before it can reach a write."""
@@ -1191,36 +1268,24 @@ class TestGatedViewsRefuseOutOfScopeObjects:
     @staticmethod
     def _user(username, model_grants):
         """A real non-superuser with plugin write plus ``model_grants`` = [(model, action, constraints)]."""
-        from core.models import ObjectType
-        from django.apps import apps
-        from django.contrib.auth import get_user_model
-        from users.models import ObjectPermission
+        from netbox_librenms_plugin.tests.view_test_helpers import grant, make_user_with_perms
 
-        LibreNMSSettings = apps.get_model("netbox_librenms_plugin", "LibreNMSSettings")
-
-        user = get_user_model().objects.create_user(username=username, password="x")
-        plugin = ObjectPermission.objects.create(name=f"{username}-plugin", actions=["view", "change"])
-        plugin.object_types.set([ObjectType.objects.get_for_model(LibreNMSSettings)])
-        plugin.users.set([user])
+        user = make_user_with_perms(username, [])
         for i, (model, action, constraints) in enumerate(model_grants):
-            perm = ObjectPermission.objects.create(
-                name=f"{username}-{action}-{i}", actions=[action], constraints=constraints
+            user = grant(
+                user,
+                action,
+                model,
+                constraints=constraints,
+                name=f"{username}-{action}-{i}",
             )
-            perm.object_types.set([ObjectType.objects.get_for_model(model)])
-            perm.users.set([user])
-        return get_user_model().objects.get(pk=user.pk)  # reload to clear the perm cache
+        return user
 
     @staticmethod
     def _request(user, data, method="post"):
-        from django.contrib.messages.storage.fallback import FallbackStorage
-        from django.test import RequestFactory
+        from netbox_librenms_plugin.tests.view_test_helpers import make_request
 
-        factory = RequestFactory()
-        request = getattr(factory, method)("/x/", data)
-        request.user = user
-        request.session = {}
-        request._messages = FallbackStorage(request)
-        return request
+        return make_request(method, data, user=user, path="/x/")
 
     def test_device_field_write_404s_a_device_outside_the_grant(self):
         """UpdateDeviceNameView writes the device itself, so a pk-constrained change_device must not reach another one."""
