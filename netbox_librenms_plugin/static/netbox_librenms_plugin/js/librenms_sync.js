@@ -429,7 +429,7 @@ document.addEventListener('change', function (e) {
     // cascading it through here would only redundantly re-toggle the aggregate's members.
     const portId = row.dataset.portId;
     if (autoSelectEnabled && portId && !(e.detail && e.detail.lnmsParentUnwind)) {
-        const memberRows = document.querySelectorAll('tr[data-member-of-lag="' + portId + '"]');
+        const memberRows = document.querySelectorAll('tr[data-member-of-lag="' + CSS.escape(portId) + '"]');
         memberRows.forEach(function (memberRow) {
             const memberCheckbox = memberRow.querySelector('input[name="select"]');
             if (!memberCheckbox) return;
@@ -459,7 +459,7 @@ document.addEventListener('change', function (e) {
     // --- Sub-interface: select parent when checking ---
     const parentPortId = row.dataset.parentPortId;
     if (autoSelectEnabled && parentPortId && checkbox.checked) {
-        const parentRow = document.querySelector('tr[data-port-id="' + parentPortId + '"]');
+        const parentRow = document.querySelector('tr[data-port-id="' + CSS.escape(parentPortId) + '"]');
         if (parentRow) {
             // Parent is on the same page - check it directly
             const parentCheckbox = parentRow.querySelector('input[name="select"]');
@@ -537,7 +537,7 @@ document.addEventListener('change', function (e) {
             // CustomEvent flagged lnmsParentUnwind so the LAG member propagation ignores it (it
             // would otherwise uncheck manually-selected member rows of an aggregate parent).
             if (autoSelectEnabled) {
-                const parentRow = document.querySelector('tr[data-port-id="' + parentPortId + '"]');
+                const parentRow = document.querySelector('tr[data-port-id="' + CSS.escape(parentPortId) + '"]');
                 if (parentRow) {
                     const parentCheckbox = parentRow.querySelector('input[name="select"]');
                     if (parentCheckbox && parentCheckbox.checked && parentCheckbox.dataset.autoSelected) {

@@ -47,6 +47,11 @@ def _guard_precedes_all(src, needle):
     # so the spent condition must stop counting as protection there.
     import re
 
+    comment_re = re.compile(
+        r"{%-?\s*comment\s*-?%}.*?{%-?\s*endcomment\s*-?%}|{#.*?#}",
+        re.DOTALL,
+    )
+    src = comment_re.sub(lambda match: " " * len(match.group()), src)
     tag_re = re.compile(
         r"{%-?\s*if\s+(?P<if>.*?)\s*-?%}"
         r"|{%-?\s*elif\s+(?P<elif>.*?)\s*-?%}"
@@ -112,6 +117,15 @@ def test_guard_scan_is_block_depth_aware():
     unguarded = "{% if not migrated_to_marker %}ok{% endif %}{% if other %}NEEDLE{% endif %}"
     with pytest.raises(AssertionError):
         _guard_precedes_all(unguarded, "NEEDLE")
+
+
+def test_guard_scan_ignores_template_tags_inside_comments():
+    """Template tags inside either Django comment form do not change the active guard."""
+    block_comment = "{% if not migrated_to_marker %}{% comment %}{% endif %}{% endcomment %}NEEDLE{% endif %}"
+    inline_comment = "{% if not migrated_to_marker %}{# {% endif %} #}NEEDLE{% endif %}"
+
+    assert _guard_precedes_all(block_comment, "NEEDLE")
+    assert _guard_precedes_all(inline_comment, "NEEDLE")
 
 
 def test_guard_scan_tracks_else_and_elif_branches():

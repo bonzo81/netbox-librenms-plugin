@@ -214,6 +214,13 @@ def test_cross_page_parent_selectors_are_css_escaped():
         "// --- Sub-interface: select parent when checking ---",
         "// Keep injected cross-page parents symmetric",
     )
+    source = _js_source()
+    assert 'data-member-of-lag="' + "' + CSS.escape(portId)" in source, (
+        "the LAG-member selector must CSS.escape the port id"
+    )
+    assert source.count('data-port-id="' + "' + CSS.escape(parentPortId)") == 2, (
+        "both parent-row selectors must CSS.escape the port id"
+    )
     assert re.search(r"querySelector\(\s*'#'\s*\+\s*CSS\.escape\(", handler), (
         "id selectors for injected parents must be CSS.escape'd"
     )

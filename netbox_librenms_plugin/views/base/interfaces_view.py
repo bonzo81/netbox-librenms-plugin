@@ -395,11 +395,13 @@ class BaseInterfaceTableView(
             # patterns (an unknown OS must not re-globalize every vendor's regex and infer a wrong
             # LAG), so the signal re-check finds nothing and the port_stack fetch is skipped.
             device_os = ""
+            device_os_known = False
             info_success, device_info = self.librenms_api.get_device_info(self.librenms_id)
             if info_success and isinstance(device_info, dict):
                 raw_device_os = device_info.get("os")
-                if isinstance(raw_device_os, str):
+                if isinstance(raw_device_os, str) and raw_device_os.strip():
                     device_os = raw_device_os
+                    device_os_known = True
             # Load + compile the OS-scoped patterns ONCE and share them with both the scoped signal
             # re-check and resolve_port_relationships, instead of each re-querying + re-compiling.
             from netbox_librenms_plugin.models import PortStackLagPattern
@@ -432,6 +434,14 @@ class BaseInterfaceTableView(
                         "fetched from LibreNMS; the Parent / LAG column may be incomplete. "
                         "See server logs for details.",
                     )
+            elif not device_os_known:
+                logger.warning("Could not determine the LibreNMS device OS for device %s", self.librenms_id)
+                librenms_data["relationship_data_incomplete"] = True
+                messages.warning(
+                    request,
+                    "Interfaces refreshed, but the device OS could not be determined from LibreNMS. "
+                    "The Parent / LAG column may be incomplete. See server logs for details.",
+                )
 
         # On an OOB-ports fetch failure the snapshot is host-only. Rather than dropping it
         # (which would leave downstream views — SingleInterfaceVerifyView,

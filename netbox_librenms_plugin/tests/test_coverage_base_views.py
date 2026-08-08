@@ -1845,7 +1845,7 @@ class TestBaseInterfaceTableViewPost:
             patch.object(view, "_enrich_ports_with_vlan_data", side_effect=lambda ports, field: ports),
             # Force past the cheap UNscoped preliminary gate (which legitimately loads all patterns)
             # so the OS-SCOPED lookup — the one this fix governs — actually runs.
-            patch.object(view, "_has_lag_signals", return_value=True),
+            patch.object(view, "_has_lag_signals", side_effect=[True, False]),
             patch.object(view, "get_context_data", return_value={}),
             patch.object(view, "get_cache_key", return_value="cache-key"),
             patch.object(view, "get_last_fetched_key", return_value="last-key"),
@@ -1855,9 +1855,9 @@ class TestBaseInterfaceTableViewPost:
             patch("netbox_librenms_plugin.views.base.interfaces_view.get_interface_name_field", return_value="ifName"),
             patch("netbox_librenms_plugin.views.base.interfaces_view.get_librenms_sync_device", return_value=obj),
             patch("netbox_librenms_plugin.views.base.interfaces_view.get_librenms_oob", return_value=None),
-            patch("netbox_librenms_plugin.views.base.interfaces_view.messages"),
+            patch("netbox_librenms_plugin.views.base.interfaces_view.messages") as mock_messages,
             patch("netbox_librenms_plugin.views.mixins.render") as mock_render,
-            patch("netbox_librenms_plugin.views.base.interfaces_view.cache"),
+            patch("netbox_librenms_plugin.views.base.interfaces_view.cache") as mock_cache,
             patch("netbox_librenms_plugin.views.base.interfaces_view.timezone"),
         ):
             mock_render.return_value = MagicMock()
@@ -1870,6 +1870,12 @@ class TestBaseInterfaceTableViewPost:
         )
         assert all(call.args[0] is not None for call in mock_compiled.call_args_list), (
             "the scoped lookup must never pass device_os=None (which loads every vendor pattern)"
+        )
+        ports_set_calls = [call for call in mock_cache.set.call_args_list if call.args and call.args[0] == "cache-key"]
+        assert len(ports_set_calls) == 1
+        assert ports_set_calls[0].args[1]["relationship_data_incomplete"] is True
+        assert any(
+            "device OS could not be determined" in str(call.args[1]) for call in mock_messages.warning.call_args_list
         )
 
     def test_post_oob_malformed_but_successful_payload_treated_as_incomplete(self):
