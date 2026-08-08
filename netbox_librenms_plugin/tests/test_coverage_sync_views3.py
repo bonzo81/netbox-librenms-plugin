@@ -13,7 +13,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from netbox_librenms_plugin.tests.conftest import make_device, make_interface, make_virtual_chassis, make_vm
+from netbox_librenms_plugin.tests.conftest import make_device, make_interface, make_virtual_chassis_members, make_vm
 from netbox_librenms_plugin.tests.view_test_helpers import (
     grant,
     make_request,
@@ -322,7 +322,7 @@ class TestSyncInterface:
         """A posted sibling of the same chassis is honoured: the interface lands on the sibling."""
         from dcim.models import Interface
 
-        _vc, (host, sibling) = make_virtual_chassis("sync-vc-ok")
+        _vc, (host, sibling) = make_virtual_chassis_members("sync-vc-ok")
         req = make_request("post", {"device_selection_eth0": str(sibling.pk)})
         v = self._v(req)
 
@@ -335,7 +335,7 @@ class TestSyncInterface:
         """A device outside the chassis is refused without writing to the page device."""
         from dcim.models import Interface
 
-        _vc, (host, _sibling) = make_virtual_chassis("sync-vc-outsider")
+        _vc, (host, _sibling) = make_virtual_chassis_members("sync-vc-outsider")
         outsider = make_device("sync-vc-outsider-x")
         req = make_request("post", {"device_selection_eth0": str(outsider.pk)})
         v = self._v(req)
@@ -377,7 +377,7 @@ class TestSyncInterface:
         """The posted id is client-supplied, so a constrained grant must not reach the sibling."""
         from dcim.models import Device, Interface
 
-        _vc, (host, sibling) = make_virtual_chassis("sync-vc-scoped")
+        _vc, (host, sibling) = make_virtual_chassis_members("sync-vc-scoped")
         user = make_user_with_perms("sync-scoped", [("view", Device)], constraints={"name": "sync-vc-scoped-m1"})
         req = make_request("post", {"device_selection_eth0": str(sibling.pk)}, user=user)
         v = self._v(req)

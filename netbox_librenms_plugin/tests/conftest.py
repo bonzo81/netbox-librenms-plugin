@@ -61,7 +61,7 @@ def make_device(name, *, serial="", librenms_cf=None):
     return dev
 
 
-def make_virtual_chassis(tag, count=2):
+def make_virtual_chassis_members(tag, count=2):
     """Create a VirtualChassis with members at consecutive positions."""
     from dcim.models import VirtualChassis
 

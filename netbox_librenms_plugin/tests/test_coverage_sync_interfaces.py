@@ -9,7 +9,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from netbox_librenms_plugin.tests.conftest import make_device, make_interface, make_virtual_chassis, make_vm
+from netbox_librenms_plugin.tests.conftest import make_device, make_interface, make_virtual_chassis_members, make_vm
 from netbox_librenms_plugin.tests.view_test_helpers import make_request, make_user_with_perms, make_view, missing_pk
 
 # The views here are built with real requests and real users, so the whole file needs the DB.
@@ -725,7 +725,7 @@ class TestSyncInterfacesViewSyncInterfaceDevice:
         """A posted sibling of the same chassis receives the interface."""
         from dcim.models import Interface
 
-        _vc, (host, sibling) = make_virtual_chassis("selvalid")
+        _vc, (host, sibling) = make_virtual_chassis_members("selvalid")
         view = self._make_view(_make_request(post_data={"device_selection_Gi0/1": str(sibling.pk)}))
 
         view.sync_interface(host, {"ifName": "Gi0/1", "port_id": None}, [], "ifName")
@@ -763,7 +763,7 @@ class TestSyncInterfacesViewSyncInterfaceDevice:
         """A hidden posted target must not silently sync the row onto the page device."""
         from dcim.models import Device, Interface
 
-        _vc, (host, sibling) = make_virtual_chassis("selhidden")
+        _vc, (host, sibling) = make_virtual_chassis_members("selhidden")
         user = make_user_with_perms(
             "selhidden-user",
             [("view", Device)],
