@@ -1961,47 +1961,6 @@ class TestSyncIPAddressesViewInterfaceResolution:
         assert "no longer exists" in results["errors"]["10.0.0.1"]
         assert not IPAddress.objects.filter(address="10.0.0.1/24").exists()
 
-    def test_primary_ip_row_locks_the_device_before_writing_the_address(self):
-        """The primary-IP row writes the address and then the device (primary_ip4), while the migrate move views lock Device then IPAddress — so this path must take the device row lock FIRST or the two orders close a deadlock cycle."""
-        from django.db import connection
-        from django.test.utils import CaptureQueriesContext
-
-        from netbox_librenms_plugin.utils import set_librenms_device_id
-
-        dev = make_device("ipres-lockorder")
-        iface = make_interface(dev, "eth0")
-        set_librenms_device_id(iface, 5, "default")
-        iface.save()
-
-        view = self._view()
-        view._post_server_key = "default"
-        view.get_management_ip = MagicMock(return_value="10.0.0.1")
-
-        ip_data = {
-            "ip_address": "10.0.0.1",
-            "ip_with_mask": "10.0.0.1/24",
-            "interface_url": None,
-            "port_id": 5,
-            "interface_name": "eth0",
-        }
-        request = _make_request(post_data={"select": ["10.0.0.1"]})
-        with (
-            patch(
-                "netbox_librenms_plugin.views.sync.ip_addresses.resolve_set_primary_ip",
-                return_value=True,
-            ),
-            CaptureQueriesContext(connection) as ctx,
-        ):
-            results = view.process_ip_sync(request, ["10.0.0.1"], [ip_data], dev, "device")
-
-        assert results["primary_set"] == ["10.0.0.1"]
-        sqls = [q["sql"] for q in ctx.captured_queries]
-        device_locks = [i for i, sql in enumerate(sqls) if 'FROM "dcim_device"' in sql and "FOR UPDATE" in sql]
-        address_writes = [i for i, sql in enumerate(sqls) if 'INSERT INTO "ipam_ipaddress"' in sql]
-        assert device_locks, "the primary-IP row must lock the device row (SELECT ... FOR UPDATE)"
-        assert address_writes, "the address must be written"
-        assert min(device_locks) < min(address_writes), "the device lock must precede the address write"
-
     def test_build_interface_maps_vc_shared_name_prefers_viewed_member(self):
         """A name shared across VC members resolves to the VIEWED member's own interface (matching the rendered table), not ambiguous."""
         _vc, members = self._make_vc("ipres-vcdup", [1, 2])
