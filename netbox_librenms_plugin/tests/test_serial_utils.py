@@ -484,6 +484,16 @@ class TestSerialSensorTypePatternModel:
         with pytest.raises(ValidationError):
             padded.validate_constraints()
 
+    def test_tab_padded_duplicate_rejected_by_database_constraint(self):
+        """The database canonicalizes the same whitespace as ``str.strip()``."""
+        from django.db import IntegrityError, transaction
+
+        from netbox_librenms_plugin.models import SerialSensorTypePattern
+
+        duplicate = SerialSensorTypePattern(sensor_type="\tacsSerialPortTable\t", port_name_pattern="tty{N}")
+        with pytest.raises(IntegrityError), transaction.atomic():
+            SerialSensorTypePattern.objects.bulk_create([duplicate])
+
 
 @pytest.mark.django_db  # the default sensor-type map is read from SerialSensorTypePattern rows
 class TestMapSensorsWithFixture:

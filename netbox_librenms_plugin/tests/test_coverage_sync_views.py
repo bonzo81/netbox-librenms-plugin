@@ -65,7 +65,7 @@ class TestSyncCablesViewStructure:
         assert CacheMixin in mro
 
     def test_required_object_permissions(self):
-        from dcim.models import Cable, Device, Interface
+        from dcim.models import Cable, ConsolePort, ConsoleServerPort, Device, Interface
 
         from netbox_librenms_plugin.views.sync.cables import SyncCablesView
 
@@ -74,6 +74,8 @@ class TestSyncCablesViewStructure:
         assert ("add", Cable) in perms
         assert ("change", Cable) in perms
         assert ("change", Interface) in perms
+        assert ("change", ConsoleServerPort) in perms
+        assert ("change", ConsolePort) in perms
 
 
 class TestSyncCablesViewGetSelectedInterfaces:

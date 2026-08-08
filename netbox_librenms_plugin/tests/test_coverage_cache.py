@@ -37,6 +37,15 @@ def _store_indexed_search(server_key, metadata, *, cache_key=None):
     return cache_key
 
 
+def test_global_cache_clear_depends_on_cache_isolation():
+    """The global clear must run after the test cache has moved off the dev-server database."""
+    import inspect
+
+    from netbox_librenms_plugin.tests import conftest
+
+    assert "_isolate_test_cache" in inspect.signature(conftest._clear_device_info_cache).parameters
+
+
 class TestCacheKeyContracts:
     def test_location_and_index_keys_are_scoped_to_the_server(self):
         from netbox_librenms_plugin.import_utils.cache import (

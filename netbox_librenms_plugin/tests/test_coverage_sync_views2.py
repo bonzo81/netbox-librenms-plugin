@@ -548,8 +548,8 @@ class TestSyncCablesViewMissingRemote:
                 ("view", Device),
                 ("add", Cable),
                 ("change", Cable),
-                ("view", ConsoleServerPort),
-                ("view", ConsolePort),
+                ("change", ConsoleServerPort),
+                ("change", ConsolePort),
             ],
         )
         user = grant(user, "change", Interface, constraints={"device__name": "cable-scoped-local"})

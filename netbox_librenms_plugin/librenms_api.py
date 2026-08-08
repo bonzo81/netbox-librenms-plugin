@@ -1356,14 +1356,17 @@ class LibreNMSAPI:
             response.raise_for_status()
             return True, response.json()
         except requests.exceptions.HTTPError as e:
-            # LibreNMS returns HTTP 404 for a device that simply has no links (e.g. a console/
-            # terminal server with no LLDP neighbours). That is a successful empty result, not a
-            # fetch failure — surfacing it as one makes the cable view flag the whole snapshot
-            # "partial" and drop the (independently-fetched, valid) serial rows from the cache,
-            # which breaks serial cable sync for exactly those devices. Any other HTTP status is a
-            # genuine failure.
             if e.response is not None and e.response.status_code == 404:
-                return True, {"status": "ok", "links": []}
+                try:
+                    error_data = e.response.json()
+                except ValueError:
+                    error_data = {}
+                message = error_data.get("message") if isinstance(error_data, dict) else None
+                normalized_message = message.casefold() if isinstance(message, str) else ""
+                no_links_messages = ("does not have any links", "links do not exist")
+                if any(text in normalized_message for text in no_links_messages):
+                    return True, {"status": "ok", "links": []}
+                return False, message if isinstance(message, str) and message else str(e)
             return False, str(e)
         except requests.exceptions.RequestException as e:
             return False, str(e)

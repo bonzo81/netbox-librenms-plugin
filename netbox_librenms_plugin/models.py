@@ -10,7 +10,7 @@ from django.contrib.contenttypes.models import ContentType
 from django.core.exceptions import ValidationError
 from django.db import models
 from django.db.models import Q
-from django.db.models.functions import Lower, Trim
+from django.db.models.functions import Lower
 from django.urls import reverse
 from netbox.models import NetBoxModel
 from utilities.fields import ColorField
@@ -1507,10 +1507,13 @@ class SerialSensorTypePattern(FullCleanOnSaveMixin, NetBoxModel):
             # Case-insensitive uniqueness even though matching is exact-case: a case-variant of
             # an existing type could never match real payloads alongside it, so the near-dupe is
             # almost certainly a typo — refuse it at the DB level instead of silently keeping a
-            # row that can never fire. Trim like PortStackLagPattern's 0012 constraint: clean()
-            # strips whitespace, but a clean-bypassing write (queryset.update, bulk_create)
-            # could otherwise park a padded near-dupe next to the real row.
-            models.UniqueConstraint(Lower(Trim("sensor_type")), name="unique_serialsensortypepattern_sensor_type_ci"),
+            # row that can never fire. Use the same trim expression as PortStackLagPattern's
+            # migration 0014 constraint. A write that skips clean(), such as bulk_create, could
+            # otherwise park a padded near-duplicate next to the real row.
+            models.UniqueConstraint(
+                Lower(_trim_python_whitespace("sensor_type")),
+                name="unique_serialsensortypepattern_sensor_type_ci",
+            ),
         ]
 
     def __str__(self):

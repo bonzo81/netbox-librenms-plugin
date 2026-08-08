@@ -1,10 +1,15 @@
-import django.db.models.functions.text
 import netbox.models.deletion
 import taggit.managers
 import utilities.json
 from django.db import migrations, models
+from django.db.models.functions import Lower
 
 import netbox_librenms_plugin.models
+
+_PYTHON_STRIP_WHITESPACE = (
+    "\t\n\v\f\r\x1c\x1d\x1e\x1f \x85\xa0"
+    "\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a\u2028\u2029\u202f\u205f\u3000"
+)
 
 # The two vendors the serial cable-sync mapper shipped with while the map was a plugin
 # setting. Seeded here so upgrades keep recognizing them; deleting a row is the supported
@@ -95,7 +100,7 @@ class Migration(migrations.Migration):
         migrations.AddConstraint(
             model_name="serialsensortypepattern",
             constraint=models.UniqueConstraint(
-                django.db.models.functions.text.Lower(django.db.models.functions.text.Trim("sensor_type")),
+                Lower(models.Func("sensor_type", models.Value(_PYTHON_STRIP_WHITESPACE), function="BTRIM")),
                 name="unique_serialsensortypepattern_sensor_type_ci",
             ),
         ),

@@ -506,10 +506,10 @@ class TestOverwriteRequiresDeletePermission:
             )
             op.object_types.add(ObjectType.objects.get_for_model(Cable))
             op.users.add(user)
-        # The terminations are resolved through a restricted queryset, so the user needs to see
-        # them; these tests vary the CABLE grant, so keep the port grant unconstrained.
+        # The terminations are resolved through a change-restricted queryset. These tests vary
+        # the cable grant, so keep the port grant unconstrained.
         ports = ObjectPermission.objects.create(
-            name=f"ports-view{suffix}-{'-'.join(actions) or 'none'}", actions=["view"]
+            name=f"ports-change{suffix}-{'-'.join(actions) or 'none'}", actions=["change"]
         )
         ports.object_types.add(ObjectType.objects.get_for_model(ConsoleServerPort))
         ports.object_types.add(ObjectType.objects.get_for_model(ConsolePort))

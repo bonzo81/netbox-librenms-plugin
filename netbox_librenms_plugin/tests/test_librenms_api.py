@@ -1355,7 +1355,7 @@ class TestLibreNMSAPIPortsAndInventory:
         assert len(links_dict["links"]) == 1
 
     @patch("netbox_librenms_plugin.librenms_api.requests.get")
-    def test_get_device_links_404_is_empty_not_failure(self, mock_get, mock_librenms_config):
+    def test_get_device_links_no_links_404_is_empty_not_failure(self, mock_get, mock_librenms_config):
         """A 404 from /links is LibreNMS's 'device has no links' — a successful empty result, NOT a fetch failure.
 
         A terminal/console server has no LLDP neighbours, so this endpoint always 404s for it.
@@ -1367,6 +1367,44 @@ class TestLibreNMSAPIPortsAndInventory:
         resp = _requests.models.Response()
         resp.status_code = 404
         resp._content = b'{"status":"error","message":"Device does not have any links"}'
+        resp.url = "https://example/api/v0/devices/13/links"
+        mock_get.return_value = resp
+
+        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+
+        api = LibreNMSAPI(server_key="default")
+        success, data = api.get_device_links(device_id=13)
+
+        assert success is True
+        assert data == {"status": "ok", "links": []}
+
+    @patch("netbox_librenms_plugin.librenms_api.requests.get")
+    def test_get_device_links_missing_device_404_is_a_failure(self, mock_get, mock_librenms_config):
+        """A 404 for an unknown device must not be converted to an empty link list."""
+        import requests as _requests
+
+        resp = _requests.models.Response()
+        resp.status_code = 404
+        resp._content = b'{"status":"error","message":"Device not found"}'
+        resp.url = "https://example/api/v0/devices/13/links"
+        mock_get.return_value = resp
+
+        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+
+        api = LibreNMSAPI(server_key="default")
+        success, data = api.get_device_links(device_id=13)
+
+        assert success is False
+        assert data == "Device not found"
+
+    @patch("netbox_librenms_plugin.librenms_api.requests.get")
+    def test_get_device_links_librenms_no_links_message_is_empty_success(self, mock_get, mock_librenms_config):
+        """LibreNMS also reports an empty link set as ``Links do not exist``."""
+        import requests as _requests
+
+        resp = _requests.models.Response()
+        resp.status_code = 404
+        resp._content = b'{"status":"error","message":"Links do not exist"}'
         resp.url = "https://example/api/v0/devices/13/links"
         mock_get.return_value = resp
 
