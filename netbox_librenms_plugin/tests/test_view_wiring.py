@@ -1311,7 +1311,7 @@ class TestGatedViewsRefuseOutOfScopeObjects:
 
     def test_ip_sync_404s_an_owner_outside_the_grant(self):
         """SyncIPAddressesView resolves the owner device by URL pk; a scoped view_device must not reach another."""
-        from dcim.models import Device
+        from dcim.models import Device, Interface
         from django.http import Http404
         from ipam.models import IPAddress
 
@@ -1324,6 +1324,7 @@ class TestGatedViewsRefuseOutOfScopeObjects:
             "scope-ipsync",
             [
                 (Device, "view", {"pk": in_scope.pk}),
+                (Interface, "view", None),
                 (IPAddress, "add", None),
                 (IPAddress, "change", None),
             ],
