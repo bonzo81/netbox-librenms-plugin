@@ -3239,6 +3239,23 @@ class TestGetSerialPortSensors:
             "group": "Serial Ports",
         }
 
+    def _cache_key(self, api):
+        from netbox_librenms_plugin.librenms_api import _serial_sensor_cache_key
+        from netbox_librenms_plugin.serial_utils import get_serial_sensor_type_patterns
+
+        return _serial_sensor_cache_key(api.server_key, get_serial_sensor_type_patterns())
+
+    def test_cache_key_fingerprints_the_equivalent_map(self):
+        """Map order is irrelevant, but a pattern edit changes the cache identity."""
+        from netbox_librenms_plugin.librenms_api import _serial_sensor_cache_key
+
+        first = _serial_sensor_cache_key("default", {"type-a": "tty{N}", "type-b": "line{N}"})
+        reordered = _serial_sensor_cache_key("default", {"type-b": "line{N}", "type-a": "tty{N}"})
+        modified = _serial_sensor_cache_key("default", {"type-a": "console{N}", "type-b": "line{N}"})
+
+        assert first == reordered
+        assert first != modified
+
     def test_success_filters_by_device_and_type(self, mock_librenms_api, mock_response_factory):
         import unittest.mock as mock
 
@@ -3428,6 +3445,25 @@ class TestGetSerialPortSensors:
         assert ok1 is True and [s["device_id"] for s in data1] == [12]
         assert ok2 is True and [s["device_id"] for s in data2] == [99]
 
+    def test_recognized_type_change_invalidates_shared_cache(self, mock_librenms_api, mock_response_factory):
+        """Adding a recognized sensor type must not reuse a subset that discarded it."""
+        import unittest.mock as mock
+
+        from netbox_librenms_plugin.models import SerialSensorTypePattern
+
+        sensor_type = "reviewSerialTable"
+        sensors = [self._make_sensor(12, sensor_type=sensor_type, port_num=7)]
+        mock_resp = mock_response_factory(status_code=200, json_data={"status": "ok", "sensors": sensors})
+
+        with mock.patch("netbox_librenms_plugin.librenms_api.requests.get", return_value=mock_resp) as mock_get:
+            first_success, first_data = mock_librenms_api.get_serial_port_sensors(device_id=12)
+            SerialSensorTypePattern.objects.create(sensor_type=sensor_type, port_name_pattern="console{N}")
+            second_success, second_data = mock_librenms_api.get_serial_port_sensors(device_id=12)
+
+        assert first_success is True and first_data == []
+        assert second_success is True and [sensor["sensor_type"] for sensor in second_data] == [sensor_type]
+        assert mock_get.call_count == 2
+
     def test_failed_fetch_is_not_cached(self, mock_librenms_api, mock_response_factory):
         """A failed fetch must not populate the cache: a subsequent call has to retry the HTTP request (otherwise a transient error would poison serial sync until the TTL elapsed)."""
         import unittest.mock as mock
@@ -3451,7 +3487,7 @@ class TestGetSerialPortSensors:
 
         from django.core.cache import cache
 
-        cache_key = f"librenms_serial_sensors_{mock_librenms_api.server_key}"
+        cache_key = self._cache_key(mock_librenms_api)
         cache.set(cache_key, ["not-a-dict", 123])  # passes `is not None` + isinstance(list); items aren't dicts
 
         good = [self._make_sensor(12, port_num=7)]
@@ -3472,7 +3508,7 @@ class TestGetSerialPortSensors:
 
         from django.core.cache import cache
 
-        cache_key = f"librenms_serial_sensors_{mock_librenms_api.server_key}"
+        cache_key = self._cache_key(mock_librenms_api)
         stale = [self._make_sensor(12, port_num=7)]
         stale[0]["sensor_descr"] = "STALE"
         cache.set(cache_key, stale)

@@ -1,3 +1,4 @@
+import hashlib
 import logging
 import math
 import urllib.parse
@@ -69,6 +70,12 @@ def configured_cache_timeout(server_key):
     if not math.isfinite(timeout) or timeout <= 0:
         return DEFAULT_CACHE_TIMEOUT
     return max(1, int(timeout))
+
+
+def _serial_sensor_cache_key(server_key, sensor_types):
+    """Return the cache key for one server and sensor-type map."""
+    map_fingerprint = hashlib.sha256(repr(tuple(sorted(sensor_types.items()))).encode()).hexdigest()
+    return f"librenms_serial_sensors_{server_key}_{map_fingerprint}"
 
 
 def build_librenms_api(server_key):
@@ -1854,7 +1861,10 @@ class LibreNMSAPI:
                 return False, all_serial_sensors
             return True, [s for s in all_serial_sensors if str(s.get("device_id")) == str(device_id)]
 
-        cache_key = f"librenms_serial_sensors_{self.server_key}"
+        from netbox_librenms_plugin.serial_utils import get_serial_sensor_type_patterns
+
+        serial_types = get_serial_sensor_type_patterns()
+        cache_key = _serial_sensor_cache_key(self.server_key, serial_types)
         all_serial_sensors = None
         # use_cache=False forces a fresh pull (a user-initiated Cables "Refresh" wants current
         # data — host LLDP/OOB are re-fetched too). The per-server cache only exists to stop a
@@ -1879,7 +1889,7 @@ class LibreNMSAPI:
                 cache.delete(cache_key)
 
         if all_serial_sensors is None:
-            success, all_serial_sensors = self._fetch_serial_port_sensors()
+            success, all_serial_sensors = self._fetch_serial_port_sensors(sensor_types=serial_types)
             if not success:
                 # all_serial_sensors is the error string here; never cache a failure so a
                 # transient error doesn't poison serial sync until the TTL elapses.
