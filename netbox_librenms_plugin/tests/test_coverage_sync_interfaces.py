@@ -205,6 +205,21 @@ def test_reenabling_relationship_autoselect_replays_checked_rows():
     )
 
 
+def test_cross_page_parent_notice_close_button_has_accessible_name():
+    """The icon-only notice close button must expose its purpose to screen readers."""
+    import re
+
+    notice = _js_block(
+        _js_source(),
+        "function _showParentCrossPageNotice(parentName)",
+        "// VIRTUAL CHASSIS & VRF HANDLING",
+    )
+    assert re.search(
+        r"closeBtn\.setAttribute\(\s*['\"]aria-label['\"]\s*,\s*['\"]Close['\"]\s*\)",
+        notice,
+    )
+
+
 def test_cross_page_parent_selectors_are_css_escaped():
     """The injected-parent lookups build selectors from data-parent-port-id; they must go through CSS.escape (like the notice code) so an unexpected id value can't throw a SyntaxError and abort the handler."""
     import re

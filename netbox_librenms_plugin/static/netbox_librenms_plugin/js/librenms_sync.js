@@ -626,6 +626,7 @@ function _showParentCrossPageNotice(parentName) {
     closeBtn.type = 'button';
     closeBtn.className = 'btn-close btn-sm';
     closeBtn.setAttribute('data-bs-dismiss', 'alert');
+    closeBtn.setAttribute('aria-label', 'Close');
     notice.appendChild(closeBtn);
 
     container.appendChild(notice);
