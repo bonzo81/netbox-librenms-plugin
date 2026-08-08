@@ -9,7 +9,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from netbox_librenms_plugin.tests.conftest import make_device, make_interface, make_vm
+from netbox_librenms_plugin.tests.conftest import make_device, make_interface, make_virtual_chassis, make_vm
 from netbox_librenms_plugin.tests.view_test_helpers import make_request, make_user_with_perms, make_view, missing_pk
 
 # The views here are built with real requests and real users, so the whole file needs the DB.
@@ -544,7 +544,7 @@ class TestSyncInterfacesViewPost:
         req = _make_request(post_data={"select": ["Gi0/1"], "server_key": "default"})
 
         def _record_skip(*args, **kwargs):
-            view._skipped_conflicts.append("Gi0/1")
+            view._skipped_conflicts.append("Gi0/1 (selected target unavailable)")
 
         with (
             patch(
@@ -570,8 +570,8 @@ class TestSyncInterfacesViewPost:
         mock_msgs.warning.assert_called_once()
         warning_msg = mock_msgs.warning.call_args[0][1]
         assert "Gi0/1" in warning_msg
-        # Generic reason covers both "mapped elsewhere" and ambiguous-port_id skips.
-        assert "could not be safely matched" in warning_msg
+        assert "selected target unavailable" in warning_msg
+        assert "could not be safely matched" not in warning_msg
         mock_msgs.success.assert_called_once()
 
 
@@ -718,29 +718,14 @@ class TestSyncInterfacesViewSyncInterfaceDevice:
 
         view.sync_interface(mock_device, librenms_port, [], "ifName")
 
-        assert view._skipped_conflicts == ["Gi0/1"]
+        assert view._skipped_conflicts == ["Gi0/1 (port already mapped elsewhere or ambiguous)"]
         view.update_interface_attributes.assert_not_called()
-
-    @staticmethod
-    def _vc(tag, count=2):
-        """A real VirtualChassis with *count* members at consecutive positions."""
-        from dcim.models import VirtualChassis
-
-        vc = VirtualChassis.objects.create(name=f"vc-{tag}")
-        members = []
-        for position in range(1, count + 1):
-            member = make_device(f"{tag}-m{position}")
-            member.virtual_chassis = vc
-            member.vc_position = position
-            member.save()
-            members.append(member)
-        return vc, members
 
     def test_device_selection_with_vc_valid(self):
         """A posted sibling of the same chassis receives the interface."""
         from dcim.models import Interface
 
-        _vc, (host, sibling) = self._vc("selvalid")
+        _vc, (host, sibling) = make_virtual_chassis("selvalid")
         view = self._make_view(_make_request(post_data={"device_selection_Gi0/1": str(sibling.pk)}))
 
         view.sync_interface(host, {"ifName": "Gi0/1", "port_id": None}, [], "ifName")
@@ -755,11 +740,13 @@ class TestSyncInterfacesViewSyncInterfaceDevice:
         dev = make_device("selinvalid-page")
         other = make_device("selinvalid-other")
         view = self._make_view(_make_request(post_data={"device_selection_Gi0/1": str(other.pk)}))
+        view._skipped_conflicts = []
 
         view.sync_interface(dev, {"ifName": "Gi0/1", "port_id": None}, [], "ifName")
 
         assert not Interface.objects.filter(device=dev, name="Gi0/1").exists()
         assert not Interface.objects.filter(device=other, name="Gi0/1").exists()
+        assert view._skipped_conflicts == ["Gi0/1 (selected target unavailable)"]
 
     def test_device_selection_does_not_exist_is_skipped(self):
         from dcim.models import Device, Interface
@@ -776,7 +763,7 @@ class TestSyncInterfacesViewSyncInterfaceDevice:
         """A hidden posted target must not silently sync the row onto the page device."""
         from dcim.models import Device, Interface
 
-        _vc, (host, sibling) = self._vc("selhidden")
+        _vc, (host, sibling) = make_virtual_chassis("selhidden")
         user = make_user_with_perms(
             "selhidden-user",
             [("view", Device)],
@@ -792,7 +779,7 @@ class TestSyncInterfacesViewSyncInterfaceDevice:
         view.sync_interface(host, {"ifName": "Gi0/1", "port_id": None}, [], "ifName")
 
         assert not Interface.objects.filter(name="Gi0/1").exists()
-        assert view._skipped_conflicts == ["Gi0/1"]
+        assert view._skipped_conflicts == ["Gi0/1 (selected target unavailable)"]
 
     @pytest.mark.django_db
     def test_device_port_id_prefers_existing_librenms_id_match(self):
@@ -855,7 +842,7 @@ class TestSyncInterfacesViewSyncInterfaceDevice:
         view.sync_interface(dev, librenms_port, ["vlans"], "ifName")
 
         # No same-named local interface to fall back to, and we never get_or_create one here.
-        assert view._skipped_conflicts == ["Gi0/1"]
+        assert view._skipped_conflicts == ["Gi0/1 (port already mapped elsewhere or ambiguous)"]
         assert not Interface.objects.filter(device=dev, name="Gi0/1").exists()
 
 

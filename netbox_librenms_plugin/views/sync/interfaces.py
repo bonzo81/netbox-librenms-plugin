@@ -116,10 +116,7 @@ class SyncInterfacesView(
             skipped = ", ".join(self._skipped_conflicts)
             messages.warning(
                 request,
-                # Generic reason: the skip list covers both "port already mapped to a different
-                # interface" and ambiguous-port_id cases, so don't claim a single cause.
-                f"{len(self._skipped_conflicts)} interface(s) skipped — their LibreNMS port could not "
-                f"be safely matched to a NetBox interface (already mapped elsewhere, or ambiguous): {skipped}.",
+                f"{len(self._skipped_conflicts)} interface(s) skipped: {skipped}.",
             )
         messages.success(request, "Selected interfaces synced successfully.")
         return redirect(redirect_url)
@@ -213,15 +210,15 @@ class SyncInterfacesView(
                     if hasattr(obj, "virtual_chassis") and obj.virtual_chassis:
                         valid_ids = set(obj.virtual_chassis.members.values_list("id", flat=True))
                         if target_device.id not in valid_ids:
-                            self._record_skipped_conflict(interface_name)
+                            self._record_skipped_conflict(interface_name, "selected target unavailable")
                             return
                     elif target_device.id != obj.id:
-                        self._record_skipped_conflict(interface_name)
+                        self._record_skipped_conflict(interface_name, "selected target unavailable")
                         return
                 except (Device.DoesNotExist, ValueError, TypeError):
                     # The user explicitly selected a target. If it is stale or outside the
                     # caller's grant, do not silently sync the row onto the page device.
-                    self._record_skipped_conflict(interface_name)
+                    self._record_skipped_conflict(interface_name, "selected target unavailable")
                     return
             else:
                 target_device = obj
@@ -241,7 +238,7 @@ class SyncInterfacesView(
             )
             # Record for the user-facing summary in post(). Defensive getattr: sync_interface
             # may be exercised directly (without post() initialising the list).
-            self._record_skipped_conflict(interface_name)
+            self._record_skipped_conflict(interface_name, "port already mapped elsewhere or ambiguous")
             return
 
         netbox_type = None
@@ -260,11 +257,11 @@ class SyncInterfacesView(
         if "vlans" not in exclude_columns:
             self._sync_interface_vlans(interface, librenms_interface, interface_name)
 
-    def _record_skipped_conflict(self, interface_name):
+    def _record_skipped_conflict(self, interface_name, reason):
         """Record a row that cannot be synced to its requested target."""
         skipped = getattr(self, "_skipped_conflicts", None)
         if skipped is not None:
-            skipped.append(interface_name or "(unnamed)")
+            skipped.append(f"{interface_name or '(unnamed)'} ({reason})")
 
     def _resolve_device_interface(self, target_device, interface_name, port_id, server_key):
         """Resolve a device interface using port_id first, then safe name fallback."""

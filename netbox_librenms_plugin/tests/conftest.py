@@ -61,6 +61,21 @@ def make_device(name, *, serial="", librenms_cf=None):
     return dev
 
 
+def make_virtual_chassis(tag, count=2):
+    """Create a VirtualChassis with members at consecutive positions."""
+    from dcim.models import VirtualChassis
+
+    virtual_chassis = VirtualChassis.objects.create(name=f"vc-{tag}")
+    members = []
+    for position in range(1, count + 1):
+        member = make_device(f"{tag}-m{position}")
+        member.virtual_chassis = virtual_chassis
+        member.vc_position = position
+        member.save()
+        members.append(member)
+    return virtual_chassis, members
+
+
 def make_cluster(name):
     """Create a real Cluster on a shared ClusterType."""
     from virtualization.models import Cluster, ClusterType

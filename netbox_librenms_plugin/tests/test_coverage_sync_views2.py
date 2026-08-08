@@ -2302,6 +2302,30 @@ class TestSyncVLANsViewWithGroup:
         assert not VLAN.objects.filter(vid=999).exists()
         assert VLAN.objects.filter(vid=100, name="Mgmt").exists()
 
+    def test_invalid_vlan_name_does_not_abort_the_batch(self):
+        """An invalid LibreNMS name is skipped while the next valid VLAN is created."""
+        from ipam.models import VLAN
+
+        dev = make_device("vlan-invalid-name")
+        max_length = VLAN._meta.get_field("name").max_length
+        invalid_name = "x" * (max_length + 1)
+        req = _make_request(post_data={"action": "create_vlans", "select": ["400", "401"]})
+        view = _vlan_view(
+            req,
+            dev,
+            [
+                {"vlan_vlan": 400, "vlan_name": invalid_name},
+                {"vlan_vlan": 401, "vlan_name": "Valid name"},
+            ],
+        )
+
+        _post(view, req, object_type="device", object_id=dev.pk)
+
+        assert not VLAN.objects.filter(vid=400).exists()
+        assert VLAN.objects.filter(vid=401, name="Valid name").exists()
+        assert any("name is invalid" in text for text in message_texts(req, "error"))
+        assert any("1 skipped (invalid VLAN name)" in text for text in message_texts(req, "success"))
+
 
 class TestSyncVLANsViewGroupedUpdateSkip:
     """Lines 134-139: grouped VLAN update (elif) and unchanged (else) paths."""

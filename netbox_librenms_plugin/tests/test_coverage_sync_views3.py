@@ -13,7 +13,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from netbox_librenms_plugin.tests.conftest import make_device, make_interface, make_vm
+from netbox_librenms_plugin.tests.conftest import make_device, make_interface, make_virtual_chassis, make_vm
 from netbox_librenms_plugin.tests.view_test_helpers import (
     grant,
     make_request,
@@ -307,21 +307,6 @@ class TestSyncInterface:
         v._skipped_conflicts = []
         return v
 
-    @staticmethod
-    def _vc(tag, count=2):
-        """A real VirtualChassis with *count* members at consecutive positions."""
-        from dcim.models import VirtualChassis
-
-        vc = VirtualChassis.objects.create(name=f"vc-{tag}")
-        members = []
-        for position in range(1, count + 1):
-            member = make_device(f"{tag}-m{position}")
-            member.virtual_chassis = vc
-            member.vc_position = position
-            member.save()
-            members.append(member)
-        return vc, members
-
     def test_device_no_vc_uses_obj(self):
         from dcim.models import Interface
 
@@ -337,7 +322,7 @@ class TestSyncInterface:
         """A posted sibling of the same chassis is honoured: the interface lands on the sibling."""
         from dcim.models import Interface
 
-        _vc, (host, sibling) = self._vc("sync-vc-ok")
+        _vc, (host, sibling) = make_virtual_chassis("sync-vc-ok")
         req = make_request("post", {"device_selection_eth0": str(sibling.pk)})
         v = self._v(req)
 
@@ -350,7 +335,7 @@ class TestSyncInterface:
         """A device outside the chassis is refused without writing to the page device."""
         from dcim.models import Interface
 
-        _vc, (host, _sibling) = self._vc("sync-vc-outsider")
+        _vc, (host, _sibling) = make_virtual_chassis("sync-vc-outsider")
         outsider = make_device("sync-vc-outsider-x")
         req = make_request("post", {"device_selection_eth0": str(outsider.pk)})
         v = self._v(req)
@@ -359,7 +344,7 @@ class TestSyncInterface:
 
         assert not Interface.objects.filter(device=host, name="eth0").exists()
         assert not Interface.objects.filter(device=outsider, name="eth0").exists()
-        assert v._skipped_conflicts == ["eth0"]
+        assert v._skipped_conflicts == ["eth0 (selected target unavailable)"]
 
     def test_device_no_vc_wrong_selection_is_skipped(self):
         from dcim.models import Interface
@@ -373,7 +358,7 @@ class TestSyncInterface:
 
         assert not Interface.objects.filter(device=dev, name="eth0").exists()
         assert not Interface.objects.filter(device=other, name="eth0").exists()
-        assert v._skipped_conflicts == ["eth0"]
+        assert v._skipped_conflicts == ["eth0 (selected target unavailable)"]
 
     def test_device_selection_does_not_exist_is_skipped(self):
         from dcim.models import Device, Interface
@@ -386,13 +371,13 @@ class TestSyncInterface:
         v.sync_interface(dev, {"ifName": "eth0"}, [], "ifName")
 
         assert not Interface.objects.filter(device=dev, name="eth0").exists()
-        assert v._skipped_conflicts == ["eth0"]
+        assert v._skipped_conflicts == ["eth0 (selected target unavailable)"]
 
     def test_device_selection_outside_the_grant_is_skipped(self):
         """The posted id is client-supplied, so a constrained grant must not reach the sibling."""
         from dcim.models import Device, Interface
 
-        _vc, (host, sibling) = self._vc("sync-vc-scoped")
+        _vc, (host, sibling) = make_virtual_chassis("sync-vc-scoped")
         user = make_user_with_perms("sync-scoped", [("view", Device)], constraints={"name": "sync-vc-scoped-m1"})
         req = make_request("post", {"device_selection_eth0": str(sibling.pk)}, user=user)
         v = self._v(req)
@@ -401,7 +386,7 @@ class TestSyncInterface:
 
         assert not Interface.objects.filter(device=host, name="eth0").exists()
         assert not Interface.objects.filter(device=sibling, name="eth0").exists()
-        assert v._skipped_conflicts == ["eth0"]
+        assert v._skipped_conflicts == ["eth0 (selected target unavailable)"]
 
     def test_vm_uses_vminterface(self):
         from virtualization.models import VMInterface

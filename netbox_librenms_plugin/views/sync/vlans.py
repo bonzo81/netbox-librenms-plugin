@@ -3,6 +3,7 @@ from urllib.parse import quote_plus
 from dcim.models import Device
 from django.contrib import messages
 from django.core.cache import cache
+from django.core.exceptions import ValidationError
 from django.db import IntegrityError, transaction
 from django.http import Http404
 from django.shortcuts import redirect
@@ -106,6 +107,7 @@ class SyncVLANsView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreN
         permission_skipped_count = 0
         ambiguous_count = 0
         concurrent_change_count = 0
+        invalid_name_count = 0
         changeable_vlans = self.restricted_queryset(VLAN, "change")
 
         with transaction.atomic():
@@ -141,6 +143,12 @@ class SyncVLANsView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreN
                         continue
 
                 librenms_name = vlan_data.get("vlan_name", f"VLAN {vid}")
+                try:
+                    VLAN._meta.get_field("name").clean(librenms_name, None)
+                except ValidationError:
+                    messages.error(request, f"VLAN {vid}: the LibreNMS name is invalid; skipped.")
+                    invalid_name_count += 1
+                    continue
 
                 lookup = {"vid": vid, "group": row_vlan_group}
                 try:
@@ -227,6 +235,8 @@ class SyncVLANsView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreN
             skip_reasons.append(f"{ambiguous_count} skipped (VLAN match ambiguous)")
         if concurrent_change_count > 0:
             skip_reasons.append(f"{concurrent_change_count} skipped (concurrent VLAN change)")
+        if invalid_name_count > 0:
+            skip_reasons.append(f"{invalid_name_count} skipped (invalid VLAN name)")
 
         if parts:
             messages.success(request, f"VLANs synced: {', '.join(parts + skip_reasons)}.")
