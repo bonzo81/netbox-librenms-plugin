@@ -281,13 +281,24 @@ def _restricted_module_component_querysets(view):
     return {model: view.restricted_queryset(model, "change") for _, _, model in _module_component_specs()}
 
 
+def _module_template_adoption_name(template_attribute, template, module):
+    """Return the exact name that the running NetBox version uses for adoption."""
+    if template_attribute == "modulebaytemplates":
+        # NetBox 4.4.0 through 4.4.7 instantiate module-bay names without resolving
+        # placeholders. This template has no dependent lookup, so it is safe before save.
+        return template.instantiate(device=module.device, module=module).name
+    # NetBox 4.4 and 4.5 accept only the module argument. Newer releases also
+    # resolve the device through module.device, so the compatible call is exact.
+    return template.resolve_name(module)
+
+
 def _authorize_adoptable_module_components(module, component_querysets):
     """Lock and authorize the exact standalone components NetBox can adopt."""
     expected_ids = {}
 
     for template_attribute, component_attribute, component_model in _module_component_specs():
         names = [
-            template.resolve_name(device=module.device, module=module)
+            _module_template_adoption_name(template_attribute, template, module)
             for template in getattr(module.module_type, template_attribute).all()
         ]
         if not names:
