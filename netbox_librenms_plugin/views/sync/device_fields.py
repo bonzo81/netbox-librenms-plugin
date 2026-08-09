@@ -403,6 +403,8 @@ class CreateAndAssignPlatformView(LibreNMSPermissionMixin, NetBoxObjectPermissio
         required = [("change", Device)]
         if existing_platform is None:
             required.append(("add", Platform))
+        else:
+            required.append(("view", Platform))
         # The manufacturer is optional, but when one IS posted it is resolved by client-supplied
         # id through a restricted queryset — so state that read in the gate.
         if (request.POST.get("manufacturer") or "").strip():
@@ -418,6 +420,16 @@ class CreateAndAssignPlatformView(LibreNMSPermissionMixin, NetBoxObjectPermissio
         # Check both plugin write and NetBox object permissions
         if error := self.require_all_permissions("POST"):
             return error
+
+        if existing_platform is not None:
+            existing_platform = self.restricted_queryset(Platform).filter(pk=existing_platform.pk).first()
+            if existing_platform is None:
+                messages.error(request, "Selected platform is not available.")
+                return self._sync_redirect(
+                    request,
+                    pk,
+                    getattr(getattr(self, "_librenms_api", None), "server_key", None),
+                )
 
         device = self.restrict_object_or_404(Device, "change", pk=pk)
 
@@ -483,8 +495,8 @@ class CreateAndAssignPlatformView(LibreNMSPermissionMixin, NetBoxObjectPermissio
                     # check and our save. Reuse the winner (the goal is reuse-or-create)
                     # instead of failing the whole assign; only abort if the re-query
                     # finds nothing (the IntegrityError was for some other reason).
-                    platform = Platform.objects.filter(name__iexact=platform_name).first()
-                    if platform is None:
+                    winner = Platform.objects.filter(name__iexact=platform_name).first()
+                    if winner is None:
                         transaction.set_rollback(True)
                         logger.exception(
                             "IntegrityError creating platform '%s' for device pk=%s",
@@ -495,6 +507,13 @@ class CreateAndAssignPlatformView(LibreNMSPermissionMixin, NetBoxObjectPermissio
                             request,
                             f"Platform '{platform_name}' could not be created: {e}",
                         )
+                        return self._sync_redirect(
+                            request, pk, getattr(getattr(self, "_librenms_api", None), "server_key", None)
+                        )
+                    platform = self.restricted_queryset(Platform).filter(pk=winner.pk).first()
+                    if platform is None:
+                        transaction.set_rollback(True)
+                        messages.error(request, "Selected platform is not available.")
                         return self._sync_redirect(
                             request, pk, getattr(getattr(self, "_librenms_api", None), "server_key", None)
                         )

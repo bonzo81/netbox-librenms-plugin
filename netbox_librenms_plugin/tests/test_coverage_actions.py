@@ -7393,17 +7393,48 @@ class TestResolveOOBInterface:
 
     def test_new_reuses_existing_locked_interface(self):
         """An interface with the requested (device, name) already exists → it is reused, no create, regardless of the 'add' permission."""
+        from dcim.models import Interface
         from django.db import transaction
+
+        from netbox_librenms_plugin.tests.view_test_helpers import make_request, make_user_with_perms
 
         view = self._view()
         dev = make_device("oob-res-reuse")
         existing = make_interface(dev, "idrac0")
-        req = _make_request(post={"oob_interface_id": "__new__", "oob_new_interface_name": "idrac0"})
-        # Deny add to prove the reuse path never needs it.
-        req.user.has_perm.side_effect = lambda perm: "add_interface" not in perm
+        user = make_user_with_perms("oob-res-reuse", [("view", Interface)])
+        req = make_request(
+            "post",
+            {"oob_interface_id": "__new__", "oob_new_interface_name": "idrac0"},
+            user=user,
+        )
+        assert not user.has_perm("dcim.add_interface")
         with transaction.atomic():
             result_iface, reason = view._resolve_oob_interface(req, dev)
         assert result_iface.pk == existing.pk and reason is None
+
+    def test_new_does_not_reuse_an_interface_outside_the_view_grant(self):
+        """The name-based reuse path must match the scoped explicit-PK path."""
+        from dcim.models import Interface
+        from django.db import transaction
+
+        from netbox_librenms_plugin.tests.view_test_helpers import grant, make_request, make_user_with_perms
+
+        view = self._view()
+        device = make_device("oob-res-name-scope")
+        hidden = make_interface(device, "idrac0")
+        allowed = make_interface(device, "eth0")
+        user = make_user_with_perms("oob-interface-view-scope", [("add", Interface)])
+        user = grant(user, "view", Interface, constraints={"pk": allowed.pk})
+        request = make_request(
+            "post",
+            {"oob_interface_id": "__new__", "oob_new_interface_name": hidden.name},
+            user=user,
+        )
+
+        with transaction.atomic():
+            result_iface, reason = view._resolve_oob_interface(request, device)
+
+        assert result_iface is None and reason is None
 
     def test_create_without_add_perm_returns_permission_add(self):
         """No existing row + user lacks Interface 'add' → the write-time re-check refuses the create rather than silently creating it."""
@@ -7458,13 +7489,17 @@ class TestAttachOOBIp:
 
     def test_rehomes_existing_unassigned_ip(self):
         from django.db import transaction
+        from ipam.models import IPAddress
+
+        from netbox_librenms_plugin.tests.view_test_helpers import make_request, make_user_with_perms
 
         view = self._view()
         dev = make_device("oob-ip-rehome")
         iface = make_interface(dev, "idrac0")
         existing = make_ip("10.0.0.9/24")  # unassigned host match
+        user = make_user_with_perms("oob-ip-rehome", [("change", IPAddress)])
         with transaction.atomic():
-            ip, reason = view._attach_oob_ip(_make_request(post={}), "10.0.0.9", iface)
+            ip, reason = view._attach_oob_ip(make_request("post", user=user), "10.0.0.9", iface)
         assert ip.pk == existing.pk and reason is None
         existing.refresh_from_db()
         assert existing.assigned_object == iface
@@ -7498,13 +7533,16 @@ class TestAttachOOBIp:
 
         from ipam.models import VRF, IPAddress
 
+        from netbox_librenms_plugin.tests.view_test_helpers import make_request, make_user_with_perms
+
         view = self._view()
         dev = make_device("oob-ip-vrf-ambig")
         iface = make_interface(dev, "idrac0")
         existing = make_ip("10.0.0.9/24")  # global, unassigned → the legitimate candidate
         IPAddress.objects.create(address="10.0.0.9/24", vrf=VRF.objects.create(name="cust-b"), status="active")
+        user = make_user_with_perms("oob-ip-vrf-ambig", [("change", IPAddress)])
         with transaction.atomic():
-            ip, reason = view._attach_oob_ip(_make_request(post={}), "10.0.0.9", iface)
+            ip, reason = view._attach_oob_ip(make_request("post", user=user), "10.0.0.9", iface)
         assert reason is None and ip.pk == existing.pk
         existing.refresh_from_db()
         assert existing.assigned_object == iface
@@ -7554,6 +7592,29 @@ class TestAttachOOBIp:
         assert ip is None and reason == "permission_change"
         existing.refresh_from_db()
         assert existing.assigned_object is None  # not re-homed
+
+    def test_rehome_denied_outside_the_constrained_change_grant(self):
+        """A model-level change permission must not re-home an excluded IP row."""
+        from django.db import transaction
+        from ipam.models import IPAddress
+
+        from netbox_librenms_plugin.tests.view_test_helpers import grant, make_request, make_user_with_perms
+
+        view = self._view()
+        device = make_device("oob-ip-change-scope")
+        interface = make_interface(device, "idrac0")
+        hidden = make_ip("10.0.0.9/24")
+        allowed = make_ip("10.0.0.10/24")
+        user = make_user_with_perms("oob-ip-change-scope", [])
+        user = grant(user, "change", IPAddress, constraints={"pk": allowed.pk})
+        request = make_request("post", user=user)
+
+        with transaction.atomic():
+            ip, reason = view._attach_oob_ip(request, "10.0.0.9", interface)
+
+        assert ip is None and reason == "permission_change"
+        hidden.refresh_from_db()
+        assert hidden.assigned_object is None
 
     def test_create_denied_without_add_permission(self):
         """TOCTOU backstop on the create path: the locked create re-verifies 'add' and refuses an add-lacking user rather than creating the IP."""
@@ -8134,6 +8195,96 @@ class TestAddDeviceTypeMappingSingleUpfrontQuery:
         assert not count_qs, f"upfront ambiguity check must use [:2], not COUNT(): {count_qs}"
         # Sanity: the path ran to completion and created the mapping (normalized to lowercase).
         assert DeviceTypeMapping.objects.filter(librenms_hardware="widgetx").exists()
+
+
+@pytest.mark.django_db
+class TestMappingChangeScope:
+    """Natural-key mapping updates must remain inside constrained change grants."""
+
+    @staticmethod
+    def _request(user, **data):
+        from netbox_librenms_plugin.tests.view_test_helpers import make_request
+
+        return make_request("post", data, user=user)
+
+    def test_device_type_mapping_outside_change_grant_is_not_updated(self):
+        from dcim.models import DeviceType
+        from django.http import HttpResponse
+
+        from netbox_librenms_plugin.models import DeviceTypeMapping
+        from netbox_librenms_plugin.tests.view_test_helpers import grant, make_user_with_perms
+        from netbox_librenms_plugin.utils import apply_normalization_rules
+        from netbox_librenms_plugin.views.imports.actions import AddDeviceTypeMappingView
+
+        old_type = make_device("mapping-scope-old").device_type
+        new_type = DeviceType.objects.create(
+            manufacturer=old_type.manufacturer,
+            model="Mapping Scope New Type",
+            slug="mapping-scope-new-type",
+        )
+        allowed = DeviceTypeMapping.objects.create(librenms_hardware="allowed-hw", netbox_device_type=old_type)
+        raw_hardware = "Hidden Hardware Scope"
+        mapping_hardware = apply_normalization_rules(value=raw_hardware, scope="device_type")
+        hidden = DeviceTypeMapping.objects.create(librenms_hardware=mapping_hardware, netbox_device_type=old_type)
+        user = make_user_with_perms("mapping-change-scope", [("view", type(old_type))])
+        user = grant(user, "change", DeviceTypeMapping, constraints={"pk": allowed.pk})
+        request = self._request(user, device_type_id=str(new_type.pk), server_key="default")
+        view = AddDeviceTypeMappingView()
+        view.setup(request)
+        view._librenms_api = MagicMock(server_key="default", cache_timeout=300)
+
+        with (
+            patch.object(view, "rebind_api_for_server", return_value="default"),
+            patch(
+                "netbox_librenms_plugin.views.imports.actions.fetch_device_with_cache",
+                return_value={"hardware": raw_hardware},
+            ),
+            patch(
+                "netbox_librenms_plugin.views.imports.actions.DeviceValidationDetailsView.get",
+                return_value=HttpResponse(b"<div></div>"),
+            ),
+            patch.object(view, "validate_and_apply_selections", return_value=(None, None)),
+        ):
+            view.post(request, device_id=1)
+
+        hidden.refresh_from_db()
+        assert hidden.netbox_device_type_id == old_type.pk
+
+    def test_platform_mapping_outside_change_grant_is_not_updated(self):
+        from dcim.models import Platform
+        from django.http import HttpResponse
+
+        from netbox_librenms_plugin.models import PlatformMapping
+        from netbox_librenms_plugin.tests.view_test_helpers import grant, make_user_with_perms
+        from netbox_librenms_plugin.views.imports.actions import AddPlatformMappingView
+
+        old_platform = Platform.objects.create(name="Mapping Scope Old", slug="mapping-scope-old")
+        new_platform = Platform.objects.create(name="Mapping Scope New", slug="mapping-scope-new")
+        allowed = PlatformMapping.objects.create(librenms_os="allowed-os", netbox_platform=old_platform)
+        hidden = PlatformMapping.objects.create(librenms_os="hidden-os", netbox_platform=old_platform)
+        user = make_user_with_perms("platform-mapping-change-scope", [("view", Platform)])
+        user = grant(user, "change", PlatformMapping, constraints={"pk": allowed.pk})
+        request = self._request(user, platform_id=str(new_platform.pk), server_key="default")
+        view = AddPlatformMappingView()
+        view.setup(request)
+        view._librenms_api = MagicMock(server_key="default", cache_timeout=300)
+
+        with (
+            patch.object(view, "rebind_api_for_server", return_value="default"),
+            patch(
+                "netbox_librenms_plugin.views.imports.actions.fetch_device_with_cache",
+                return_value={"os": "hidden-os"},
+            ),
+            patch(
+                "netbox_librenms_plugin.views.imports.actions.DeviceValidationDetailsView.get",
+                return_value=HttpResponse(b"<div></div>"),
+            ),
+            patch.object(view, "get_validated_device_with_selections", return_value=(None, None, None)),
+        ):
+            view.post(request, device_id=1)
+
+        hidden.refresh_from_db()
+        assert hidden.netbox_platform_id == old_platform.pk
 
 
 # ---------------------------------------------------------------------------

@@ -303,6 +303,7 @@ class SyncInterfacesView(
 
     def _resolve_device_interface(self, target_device, interface_name, port_id, server_key):
         """Resolve a device interface using port_id first, then safe name fallback."""
+        changeable = self.restricted_queryset(Interface, "change")
         if port_id:
             try:
                 by_id = find_by_librenms_id(Interface, port_id, server_key)
@@ -312,6 +313,8 @@ class SyncInterfacesView(
                 logger.warning("Skipping interface row — port_id %s is ambiguous (multiple matches).", port_id)
                 return None
             if by_id is not None:
+                if not changeable.filter(pk=by_id.pk).exists():
+                    return None
                 if by_id.device_id == target_device.id:
                     return by_id
                 # The port_id resolves to an interface on a DIFFERENT device (a stale or
@@ -324,13 +327,14 @@ class SyncInterfacesView(
                 # interface (its existing_owner guard), so the foreign binding stays intact.
                 existing_by_name = Interface.objects.filter(device=target_device, name=interface_name).first()
                 if existing_by_name:
-                    return existing_by_name
+                    return existing_by_name if changeable.filter(pk=existing_by_name.pk).exists() else None
                 return None
-        interface, _ = Interface.objects.get_or_create(device=target_device, name=interface_name)
-        return interface
+        interface, created = Interface.objects.get_or_create(device=target_device, name=interface_name)
+        return interface if created or changeable.filter(pk=interface.pk).exists() else None
 
     def _resolve_vm_interface(self, vm, interface_name, port_id, server_key):
         """Resolve a VM interface using port_id first, then safe name fallback."""
+        changeable = self.restricted_queryset(VMInterface, "change")
         if port_id:
             try:
                 by_id = find_by_librenms_id(VMInterface, port_id, server_key)
@@ -338,6 +342,8 @@ class SyncInterfacesView(
                 logger.warning("Skipping VM interface row — port_id %s is ambiguous (multiple matches).", port_id)
                 return None
             if by_id is not None:
+                if not changeable.filter(pk=by_id.pk).exists():
+                    return None
                 if by_id.virtual_machine_id == vm.id:
                     return by_id
                 # The port_id resolves to an interface on a DIFFERENT VM (a stale or duplicate
@@ -348,10 +354,10 @@ class SyncInterfacesView(
                 # reassign the port_id off the other interface (its existing_owner guard).
                 existing_by_name = VMInterface.objects.filter(virtual_machine=vm, name=interface_name).first()
                 if existing_by_name:
-                    return existing_by_name
+                    return existing_by_name if changeable.filter(pk=existing_by_name.pk).exists() else None
                 return None
-        interface, _ = VMInterface.objects.get_or_create(virtual_machine=vm, name=interface_name)
-        return interface
+        interface, created = VMInterface.objects.get_or_create(virtual_machine=vm, name=interface_name)
+        return interface if created or changeable.filter(pk=interface.pk).exists() else None
 
     def get_netbox_interface_type(self, librenms_interface):
         """Return the NetBox interface type mapped from LibreNMS type and speed."""

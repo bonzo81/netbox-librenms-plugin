@@ -239,6 +239,11 @@ def _rebind_or_htmx_error(view, request) -> HttpResponse | None:
     return None
 
 
+def _mapping_change_is_allowed(view, model, pk) -> bool:
+    """Return whether the current user may change the resolved mapping row."""
+    return view.restricted_queryset(model, "change").filter(pk=pk).exists()
+
+
 def _acquire_serial_assignment_lock(serial: str) -> None:
     """
     Serialize serial-assignment guards on the serial value (transaction-scoped advisory lock).
@@ -2116,6 +2121,8 @@ class AddDeviceTypeMappingView(
             self.required_object_permissions = {"POST": [("view", DeviceType), ("add", DeviceTypeMapping)]}
         if error := self.require_object_permissions("POST"):
             return error
+        if existing_mapping and not _mapping_change_is_allowed(self, DeviceTypeMapping, existing_mapping.pk):
+            return _htmx_error_response("Existing mapping is no longer available.")
 
         try:
             device_type = self.restricted_queryset(DeviceType).get(pk=device_type_id)
@@ -2158,6 +2165,8 @@ class AddDeviceTypeMappingView(
                         return error
                 if locked:
                     if locked.netbox_device_type_id != device_type_id:
+                        if not _mapping_change_is_allowed(self, DeviceTypeMapping, locked.pk):
+                            return _htmx_error_response("Existing mapping is no longer available.")
                         locked.netbox_device_type = device_type
                         locked.full_clean()
                         locked.save()
@@ -3040,7 +3049,9 @@ class AddAsOOBView(
             # between this check and the create below.
             existing = Interface.objects.select_for_update().filter(device=device, name=name).first()
             if existing is not None:
-                return existing, None
+                if Interface.objects.restrict(request.user, "view").filter(pk=existing.pk).exists():
+                    return existing, None
+                return None, None
             if not request.user.has_perm(get_permission_for_model(Interface, "add")):
                 return None, "permission_add"
             # Nested savepoint: catching IntegrityError without one would poison the outer
@@ -3146,7 +3157,7 @@ class AddAsOOBView(
                 # decision can only be made from the locked row: the unlocked pre-flight
                 # in _missing_oob_ip_permissions can race a concurrent create and wave
                 # through an 'add'-only user, so verify 'change' here before saving.
-                if not request.user.has_perm(get_permission_for_model(IPAddress, "change")):
+                if not IPAddress.objects.restrict(request.user, "change").filter(pk=existing.pk).exists():
                     return None, "permission_change"
                 existing.assigned_object = interface
                 existing.save()
@@ -3781,6 +3792,8 @@ class AddPlatformMappingView(
         }
         if error := self.require_object_permissions("POST"):
             return error
+        if existing_mapping and not _mapping_change_is_allowed(self, PlatformMapping, existing_mapping.pk):
+            return _htmx_error_response("Existing mapping is no longer available.")
 
         try:
             platform = self.restricted_queryset(Platform).get(pk=platform_id)
@@ -3817,6 +3830,8 @@ class AddPlatformMappingView(
                         return error
                 if locked:
                     if locked.netbox_platform_id != platform_id:
+                        if not _mapping_change_is_allowed(self, PlatformMapping, locked.pk):
+                            return _htmx_error_response("Existing mapping is no longer available.")
                         locked.netbox_platform = platform
                         locked.full_clean()
                         locked.save()

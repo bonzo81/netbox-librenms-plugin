@@ -1319,6 +1319,37 @@ class TestSyncIPAddressesViewIPWrites:
         ip.refresh_from_db()
         assert ip.assigned_object_id == eth0.pk  # re-homed to the port_id-resolved interface
 
+    def test_existing_ip_outside_the_change_grant_is_not_rehomed(self):
+        """An address matched by natural key must remain outside a constrained change grant."""
+        from dcim.models import Interface
+        from ipam.models import IPAddress
+
+        from netbox_librenms_plugin.utils import set_librenms_device_id
+
+        device = make_device("ip-update-change-scope")
+        target = make_interface(device, "eth0")
+        original = make_interface(device, "eth1")
+        set_librenms_device_id(target, 5, "default")
+        target.save()
+        hidden_ip = IPAddress.objects.create(address="10.0.0.1/24", assigned_object=original, status="active")
+        allowed_ip = IPAddress.objects.create(address="10.0.0.2/24", status="active")
+        user = make_user_with_perms(
+            "ip-update-change-scope",
+            [("view", Interface), ("add", IPAddress)],
+        )
+        user = grant(user, "change", IPAddress, constraints={"pk": allowed_ip.pk})
+        request = _make_request(post_data={"select": ["10.0.0.1"]}, user=user)
+        view = make_view(_sync_ip_view_class(), request)
+        view._post_server_key = "default"
+        cached = [{"ip_address": "10.0.0.1", "ip_with_mask": "10.0.0.1/24", "port_id": 5}]
+
+        with patch("netbox_librenms_plugin.views.sync.ip_addresses.resolve_set_primary_ip", return_value=False):
+            results = view.process_ip_sync(request, ["10.0.0.1"], cached, device, "device")
+
+        hidden_ip.refresh_from_db()
+        assert hidden_ip.assigned_object_id == original.pk
+        assert results["failed"] == ["10.0.0.1"]
+
     def test_unchanged_ip_shows_warning(self):
         from ipam.models import IPAddress
 
@@ -1377,6 +1408,33 @@ class TestSyncIPAddressesViewHelpers:
         second = view._required_permissions("device")
 
         assert second == first
+
+    def test_set_primary_requires_change_scope_on_the_owner(self):
+        """The primary-IP toggle must resolve the owner through its change grant."""
+        from dcim.models import Device, Interface
+        from django.core.cache import cache
+        from django.http import Http404
+        from ipam.models import IPAddress
+
+        target = make_device("primary-owner-hidden")
+        decoy = make_device("primary-owner-allowed")
+        user = make_user_with_perms(
+            "primary-owner-change-scope",
+            [("add", IPAddress), ("change", IPAddress), ("view", Interface)],
+        )
+        user = grant(user, "view", Device, constraints={"pk": target.pk})
+        user = grant(user, "change", Device, constraints={"pk": decoy.pk})
+        request = _make_request(
+            post_data={"select": ["10.0.0.1"], "set-primary-ip-toggle": "on"},
+            user=user,
+        )
+        view = make_view(_sync_ip_view_class(), request)
+        view.rebind_api_for_server = MagicMock(return_value="default")
+        view.get_cache_key = MagicMock(return_value="primary-owner-change-scope")
+        cache.delete("primary-owner-change-scope")
+
+        with pytest.raises(Http404):
+            _post(view, request, object_type="device", pk=target.pk)
 
     def test_get_object_device(self):
         from netbox_librenms_plugin.views.sync.ip_addresses import SyncIPAddressesView

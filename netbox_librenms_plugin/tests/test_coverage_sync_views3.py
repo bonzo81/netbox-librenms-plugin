@@ -386,6 +386,26 @@ class TestSyncInterface:
         assert not Interface.objects.filter(device=sibling, name="eth0").exists()
         assert v._skipped_conflicts == ["eth0 (selected target unavailable)"]
 
+    def test_existing_interface_outside_the_change_grant_is_skipped(self):
+        """A natural-key match must not bypass the caller's constrained change grant."""
+        from dcim.models import Device, Interface
+
+        device = make_device("sync-interface-change-scope")
+        hidden = make_interface(device, "eth0")
+        allowed = make_interface(device, "eth1")
+        user = make_user_with_perms(
+            "sync-interface-change-scope",
+            [("view", Device), ("add", Interface)],
+        )
+        user = grant(user, "change", Interface, constraints={"pk": allowed.pk})
+        request = make_request("post", user=user)
+        view = self._v(request)
+
+        view.sync_interface(device, {"ifName": hidden.name}, [], "ifName")
+
+        view.update_interface_attributes.assert_not_called()
+        assert view._skipped_conflicts == ["eth0 (port already mapped elsewhere or ambiguous)"]
+
     def test_vm_uses_vminterface(self):
         from virtualization.models import VMInterface
 
