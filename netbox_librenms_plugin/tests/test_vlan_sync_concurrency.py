@@ -6,12 +6,11 @@ from threading import Barrier, BrokenBarrierError
 import pytest
 from django.apps import apps
 from django.contrib.auth import get_user_model
-from django.contrib.messages.storage.fallback import FallbackStorage
 from django.core.cache import cache
 from django.db import close_old_connections, connection
-from django.test import RequestFactory
 
 from netbox_librenms_plugin.tests.conftest import make_device
+from netbox_librenms_plugin.tests.view_test_helpers import make_request
 
 
 class _GlobalVLANLookupBarrier:
@@ -40,28 +39,30 @@ class _GlobalVLANLookupBarrier:
         return result
 
 
-def _sync_global_vlan(device, user, vid, lookup_barrier):
+def _sync_global_vlan(device, user, vid, lookup_wrapper):
     from netbox_librenms_plugin.views.sync.vlans import SyncVLANsView
 
     close_old_connections()
     try:
-        request = RequestFactory().post(
-            "/sync/vlans/",
+        with connection.cursor() as cursor:
+            cursor.execute("SET lock_timeout = '5s'")
+            cursor.execute("SET statement_timeout = '5s'")
+
+        request = make_request(
             data={"action": "create_vlans", "select": [str(vid)], "server_key": "default"},
+            user=user,
+            path="/sync/vlans/",
         )
-        request.user = user
-        request.session = {}
-        setattr(request, "_messages", FallbackStorage(request))
 
         view = SyncVLANsView()
         view.request = request
         cache_key = view.get_cache_key(device, "vlans", "default")
         cache.set(cache_key, [{"vlan_vlan": vid, "vlan_name": "Concurrent global VLAN"}], timeout=60)
 
-        with connection.execute_wrapper(_GlobalVLANLookupBarrier(lookup_barrier)):
+        with connection.execute_wrapper(lookup_wrapper):
             view.post(request, object_type="device", object_id=device.pk)
     finally:
-        close_old_connections()
+        connection.close()
 
 
 @pytest.mark.django_db(
@@ -81,10 +82,15 @@ def test_concurrent_global_vlan_sync_creates_one_vlan():
     )
     devices = [make_device("global-vlan-device-a"), make_device("global-vlan-device-b")]
     lookup_barrier = Barrier(2)
+    lookup_wrappers = [_GlobalVLANLookupBarrier(lookup_barrier) for _device in devices]
 
     with ThreadPoolExecutor(max_workers=2) as executor:
-        futures = [executor.submit(_sync_global_vlan, device, user, 321, lookup_barrier) for device in devices]
+        futures = [
+            executor.submit(_sync_global_vlan, device, user, 321, lookup_wrapper)
+            for device, lookup_wrapper in zip(devices, lookup_wrappers, strict=True)
+        ]
         for future in futures:
             future.result(timeout=10)
 
+    assert all(wrapper.lookup_seen for wrapper in lookup_wrappers)
     assert VLAN.objects.filter(vid=321, group__isnull=True).count() == 1
