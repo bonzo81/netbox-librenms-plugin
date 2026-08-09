@@ -141,7 +141,7 @@ class SyncVLANsView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreN
                     vid = int(vid_str)
                 except ValueError:
                     continue
-                if vid_str in librenms_vlans and not request.POST.get(f"vlan_group_{vid}", ""):
+                if str(vid) in librenms_vlans and not request.POST.get(f"vlan_group_{vid}", ""):
                     global_vids.append(vid)
             _acquire_global_vlan_locks(global_vids)
 
@@ -151,7 +151,7 @@ class SyncVLANsView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreN
                 except ValueError:
                     continue
 
-                vlan_data = librenms_vlans.get(vid_str)
+                vlan_data = librenms_vlans.get(str(vid))
                 if not vlan_data:
                     continue
 

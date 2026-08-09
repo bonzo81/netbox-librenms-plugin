@@ -2296,6 +2296,19 @@ class TestSyncVLANsViewWithGroup:
         assert vlan.name == "Production"
         assert vlan.status == "active"
 
+    def test_leading_zero_selection_uses_the_canonical_cached_vid(self):
+        """A canonical group field must sync a leading-zero selection."""
+        from ipam.models import VLAN
+
+        dev = make_device("vlan-group-canonical")
+        group = _vlan_group("Canonical Group")
+        req = _make_request(post_data={"action": "create_vlans", "select": ["0200"], "vlan_group_200": str(group.pk)})
+        view = _vlan_view(req, dev, [{"vlan_vlan": 200, "vlan_name": "Canonical"}])
+
+        _post(view, req, object_type="device", object_id=dev.pk)
+
+        assert VLAN.objects.filter(vid=200, group=group, name="Canonical").exists()
+
     def test_invalid_vlan_group_id_is_rejected(self):
         """A requested-but-missing VLAN group fails closed: no VLAN is created (not even a global one) and an error is surfaced."""
         from ipam.models import VLAN, VLANGroup
