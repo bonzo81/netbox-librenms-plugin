@@ -40,9 +40,10 @@ def _run_install_single(device, item, index_map, module_types, **kwargs):
     """Run the shared installer against real NetBox models and querysets."""
     from dcim.models import Interface, ModuleBay
 
-    from netbox_librenms_plugin.views.sync.modules import InstallBranchView
+    from netbox_librenms_plugin.views.sync.modules import InstallBranchView, _module_component_specs
 
     allowed_type_ids = {module_type.pk for module_type in module_types.values()}
+    changeable_components = {model: model.objects.all() for _, _, model in _module_component_specs()}
     return InstallBranchView._install_single(
         device,
         item,
@@ -50,6 +51,7 @@ def _run_install_single(device, item, index_map, module_types, **kwargs):
         module_types,
         module_bays=ModuleBay.objects.all(),
         allowed_module_type_ids=allowed_type_ids,
+        changeable_components=changeable_components,
         changeable_interfaces=Interface.objects.all(),
         deletable_interfaces=Interface.objects.all(),
         **kwargs,
@@ -843,6 +845,35 @@ class TestMatchModuleBayExactFallback:
 class TestInstallSingleStatus:
     """_install_single returns the correct status dict in each path."""
 
+    def test_component_scope_tracks_netbox_module_adoption_models(self):
+        """Fail when a NetBox upgrade adds an adoption path that this scope does not cover."""
+        import ast
+        import inspect
+        import textwrap
+
+        from dcim.models import Module
+
+        from netbox_librenms_plugin.views.sync.modules import _module_component_specs
+
+        tree = ast.parse(textwrap.dedent(inspect.getsource(Module.save)))
+        component_loop = next(
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.For)
+            and isinstance(node.target, ast.Tuple)
+            and [element.id for element in node.target.elts if isinstance(element, ast.Name)]
+            == ["templates", "component_attribute", "component_model"]
+        )
+        netbox_specs = [
+            (entry.elts[0].value, entry.elts[1].value, entry.elts[2].id) for entry in component_loop.iter.elts
+        ]
+        scoped_specs = [
+            (template_attribute, component_attribute, component_model.__name__)
+            for template_attribute, component_attribute, component_model in _module_component_specs()
+        ]
+
+        assert scoped_specs == netbox_specs
+
     @pytest.mark.django_db
     def test_returns_installed_on_success(self):
         """A real Module is created in the matched bay and persisted (the create was faked before)."""
@@ -987,7 +1018,7 @@ class TestInstallSingleStatus:
 
     @pytest.mark.django_db
     def test_installed_name_includes_real_adoption_count(self):
-        from dcim.models import Interface, InterfaceTemplate, Module
+        from dcim.models import Interface, InterfaceTemplate, Module, ModuleBay, ModuleBayTemplate
 
         from netbox_librenms_plugin.tests.conftest import make_device, make_module_bay, make_module_type
         from netbox_librenms_plugin.views.sync.modules import InstallBranchView
@@ -996,7 +1027,9 @@ class TestInstallSingleStatus:
         bay = make_module_bay(device, "Slot 1")
         module_type = make_module_type("ADOPT-MODULE")
         InterfaceTemplate.objects.create(module_type=module_type, name="Te1/1/1", type="10gbase-x-sfpp")
-        standalone = Interface.objects.create(device=device, name="Te1/1/1", type="10gbase-x-sfpp")
+        ModuleBayTemplate.objects.create(module_type=module_type, name="Nested Bay")
+        standalone_interface = Interface.objects.create(device=device, name="Te1/1/1", type="10gbase-x-sfpp")
+        standalone_bay = ModuleBay.objects.create(device=device, name="Nested Bay")
         item = {
             "entPhysicalIndex": 10,
             "entPhysicalModelName": module_type.model,
@@ -1013,9 +1046,11 @@ class TestInstallSingleStatus:
             result = _run_install_single(device, item, {10: item}, {module_type.model: module_type})
 
         assert result["status"] == "installed"
-        assert result["adopted_interfaces"] == 1
-        standalone.refresh_from_db()
-        assert standalone.module_id == result["module_pk"]
+        assert result["adopted_components"] == 2
+        standalone_interface.refresh_from_db()
+        standalone_bay.refresh_from_db()
+        assert standalone_interface.module_id == result["module_pk"]
+        assert standalone_bay.module_id == result["module_pk"]
         assert Module.objects.filter(pk=result["module_pk"]).exists()
 
     @pytest.mark.django_db
@@ -2765,6 +2800,109 @@ class TestModuleMutationScopes:
 
         module = Module.objects.get(device=device, module_bay=bay)
         assert Interface.objects.filter(device=device, module=module, name="Te1/1/1").exists()
+
+    def test_install_does_not_adopt_a_module_bay_without_change_permission(self):
+        from types import SimpleNamespace
+
+        from dcim.models import Device, Interface, Module, ModuleBay, ModuleBayTemplate, ModuleType
+
+        from netbox_librenms_plugin.tests.conftest import make_device
+        from netbox_librenms_plugin.tests.view_test_helpers import make_request, make_user_with_perms
+        from netbox_librenms_plugin.views.sync.modules import InstallModuleView
+
+        device = make_device("module-bay-adoption-scope")
+        install_bay = ModuleBay.objects.create(device=device, name="Install Bay")
+        hidden = ModuleBay.objects.create(device=device, name="Nested Bay")
+        module_type = ModuleType.objects.create(
+            manufacturer=device.device_type.manufacturer,
+            model="Module Bay Adoption Scope Type",
+        )
+        ModuleBayTemplate.objects.create(module_type=module_type, name=hidden.name)
+        user = make_user_with_perms(
+            "module-bay-adoption-scope",
+            [
+                ("view", Device),
+                ("view", ModuleBay),
+                ("view", ModuleType),
+                ("add", Module),
+                ("add", Interface),
+                ("change", Interface),
+                ("delete", Interface),
+            ],
+        )
+        request = make_request(
+            "post",
+            {
+                "module_bay_id": str(install_bay.pk),
+                "module_type_id": str(module_type.pk),
+                "server_key": "default",
+            },
+            user=user,
+        )
+        view = InstallModuleView()
+        view._librenms_api = SimpleNamespace(server_key="default")
+
+        _post(view, request, pk=device.pk)
+
+        hidden.refresh_from_db()
+        assert hidden.module_id is None
+        assert not Module.objects.filter(device=device, module_bay=install_bay).exists()
+
+    def test_install_checks_interface_change_scope_before_adoption(self):
+        from types import SimpleNamespace
+
+        from dcim.models import Device, Interface, InterfaceTemplate, Module, ModuleBay, ModuleType
+
+        from netbox_librenms_plugin.tests.conftest import make_device, make_interface
+        from netbox_librenms_plugin.tests.view_test_helpers import grant, make_request, make_user_with_perms
+        from netbox_librenms_plugin.views.sync.modules import InstallModuleView
+
+        device = make_device("module-pre-adoption-scope")
+        bay = ModuleBay.objects.create(device=device, name="Pre-adoption Scope Bay")
+        module_type = ModuleType.objects.create(
+            manufacturer=device.device_type.manufacturer,
+            model="Pre-adoption Scope Type",
+        )
+        InterfaceTemplate.objects.create(
+            module_type=module_type,
+            name="Te1/1/1",
+            type="10gbase-x-sfpp",
+        )
+        hidden = make_interface(device, "Te1/1/1", iface_type="10gbase-x-sfpp")
+        user = make_user_with_perms(
+            "module-pre-adoption-scope",
+            [
+                ("view", Device),
+                ("view", ModuleBay),
+                ("view", ModuleType),
+                ("add", Module),
+                ("add", Interface),
+                ("delete", Interface),
+            ],
+        )
+        user = grant(
+            user,
+            "change",
+            Interface,
+            constraints={"module__module_type_id": module_type.pk},
+        )
+        request = make_request(
+            "post",
+            {
+                "module_bay_id": str(bay.pk),
+                "module_type_id": str(module_type.pk),
+                "server_key": "default",
+            },
+            user=user,
+        )
+        view = InstallModuleView()
+        view._librenms_api = SimpleNamespace(server_key="default")
+
+        _post(view, request, pk=device.pk)
+
+        hidden.refresh_from_db()
+        assert hidden.module_id is None
+        assert not Module.objects.filter(device=device, module_bay=bay).exists()
 
     @pytest.mark.parametrize("excluded_action", ["change_conflict", "delete_generated"])
     def test_vc_normalization_does_not_cross_interface_grants(self, excluded_action):
