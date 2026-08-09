@@ -1463,7 +1463,7 @@ class TestGatedViewsRefuseOutOfScopeObjects:
 
     def test_module_replace_refuses_to_delete_the_target_outside_the_delete_grant(self):
         """Replace deletes its target, so change access alone must not authorize the operation."""
-        from dcim.models import Device, Interface, Module
+        from dcim.models import Device, Interface, Module, ModuleType
         from django.core.cache import cache
         from django.http import Http404
 
@@ -1487,6 +1487,7 @@ class TestGatedViewsRefuseOutOfScopeObjects:
             "scope-replace-target",
             [
                 (Device, "view", {"pk": device.pk}),
+                (ModuleType, "view", {"pk": module_type.pk}),
                 (Module, "add", None),
                 (Module, "change", {"pk": target.pk}),
                 (Module, "delete", {"pk": decoy.pk}),
@@ -1528,7 +1529,7 @@ class TestGatedViewsRefuseOutOfScopeObjects:
 
     def test_module_replace_fails_closed_on_a_hidden_serial_conflict(self):
         """An existing serial outside delete scope must block replacement, not become a duplicate."""
-        from dcim.models import Device, Interface, Module
+        from dcim.models import Device, Interface, Module, ModuleType
         from django.core.cache import cache
 
         from netbox_librenms_plugin.tests.conftest import make_device, make_module_bay, make_module_type
@@ -1554,6 +1555,7 @@ class TestGatedViewsRefuseOutOfScopeObjects:
             "scope-replace-conflict",
             [
                 (Device, "view", {"pk": device.pk}),
+                (ModuleType, "view", {"pk": module_type.pk}),
                 (Module, "add", None),
                 (Module, "change", {"pk": target.pk}),
                 (Module, "delete", {"pk": target.pk}),
