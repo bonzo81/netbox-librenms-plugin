@@ -4260,7 +4260,8 @@ class TestFindIntegratingAncestor:
 
         assert BaseModuleTableView._find_integrating_ancestor(mda, self._index([xiom, mda])) is xiom
 
-    def test_numeric_model_finds_integrating_ancestor(self):
+    @pytest.mark.parametrize("model", [123456, 0])
+    def test_numeric_model_finds_integrating_ancestor(self, model):
         """Numeric ENTITY models are normalized on both sides of the integrated-card comparison."""
         from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
 
@@ -4268,14 +4269,14 @@ class TestFindIntegratingAncestor:
             "entPhysicalIndex": 100,
             "entPhysicalClass": "xioModule",
             "entPhysicalSerialNum": "NS241462069",
-            "entPhysicalModelName": 123456,
+            "entPhysicalModelName": model,
             "entPhysicalContainedIn": 0,
         }
         mda = {
             "entPhysicalIndex": 200,
             "entPhysicalClass": "mdaModule",
             "entPhysicalSerialNum": "NS241462069",
-            "entPhysicalModelName": 123456,
+            "entPhysicalModelName": model,
             "entPhysicalContainedIn": 100,
         }
 
