@@ -1364,6 +1364,7 @@ class TestDeleteNetBoxInterfacesViewPost:
         result = _post(view, req, object_type="device", object_id=obj.pk)
         data = json.loads(result.content)
         assert data["deleted_count"] == 0
+        assert data["errors"] == [f"Interface {iface.name} does not belong to this device"]
         assert other.interfaces.filter(pk=iface.pk).exists()  # not deleted
 
     @pytest.mark.django_db
@@ -1383,6 +1384,7 @@ class TestDeleteNetBoxInterfacesViewPost:
         result = _post(view, req, object_type="virtualmachine", object_id=vm.pk)
         data = json.loads(result.content)
         assert data["deleted_count"] == 0
+        assert data["errors"] == [f"Interface {vmiface.name} does not belong to this virtual machine"]
         assert VMInterface.objects.filter(pk=vmiface.pk).exists()
 
     @pytest.mark.django_db
@@ -1448,6 +1450,7 @@ class TestDeleteNetBoxInterfacesViewPost:
         result = _post(view, req, object_type="device", object_id=member.pk)
         data = json.loads(result.content)
         assert data["deleted_count"] == 0
+        assert data["errors"] == [f"Interface {iface.name} does not belong to this device or its virtual chassis"]
         assert Interface.objects.filter(pk=iface.pk).exists()  # not deleted (not a VC member's)
 
 

@@ -126,6 +126,7 @@ class SyncVLANsView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreN
         permission_skipped_count = 0
         ambiguous_count = 0
         concurrent_change_count = 0
+        invalid_vid_count = 0
         invalid_name_count = 0
         changeable_vlans = self.restricted_queryset(VLAN, "change")
 
@@ -176,6 +177,12 @@ class SyncVLANsView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreN
                         continue
 
                 librenms_name = vlan_data.get("vlan_name", f"VLAN {vid}")
+                try:
+                    VLAN._meta.get_field("vid").clean(vid, None)
+                except ValidationError:
+                    messages.error(request, f"VLAN {vid}: the LibreNMS VID is invalid; skipped.")
+                    invalid_vid_count += 1
+                    continue
                 try:
                     VLAN._meta.get_field("name").clean(librenms_name, None)
                 except ValidationError:
@@ -268,6 +275,8 @@ class SyncVLANsView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreN
             skip_reasons.append(f"{ambiguous_count} skipped (VLAN match ambiguous)")
         if concurrent_change_count > 0:
             skip_reasons.append(f"{concurrent_change_count} skipped (concurrent VLAN change)")
+        if invalid_vid_count > 0:
+            skip_reasons.append(f"{invalid_vid_count} skipped (invalid VLAN VID)")
         if invalid_name_count > 0:
             skip_reasons.append(f"{invalid_name_count} skipped (invalid VLAN name)")
 

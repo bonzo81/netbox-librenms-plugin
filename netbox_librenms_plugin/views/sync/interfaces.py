@@ -180,18 +180,54 @@ class SyncInterfacesView(
     ):
         """Create or update NetBox interfaces from LibreNMS port data."""
         with transaction.atomic():
-            for port in ports_data:
-                # OOB-controller rows are merged into the host's interface list only for context
-                # (shared-LOM detection) and are never routed to a real target device by
-                # sync_interface(). They must not sync onto the host — and skipping them prevents
-                # a main/OOB interface-name collision (both "eth0") from double-processing one
-                # selection and overwriting the host interface with the OOB row's port_id/attrs.
-                if port.get("_source") == "oob":
-                    continue
-                port_name = port.get(interface_name_field)
+            if isinstance(obj, Device):
+                locked_targets = self._lock_selected_device_targets(
+                    obj,
+                    selected_interfaces,
+                    ports_data,
+                    interface_name_field,
+                )
+                obj = locked_targets.get(obj.pk)
+                if obj is None:
+                    for interface_name in selected_interfaces:
+                        self._record_skipped_conflict(interface_name, "selected target unavailable")
+                    return
+                self._locked_target_devices = locked_targets
 
-                if port_name in selected_interfaces:
-                    self.sync_interface(obj, port, exclude_columns, interface_name_field)
+            try:
+                for port in ports_data:
+                    # OOB-controller rows are merged into the host's interface list only for context
+                    # (shared-LOM detection) and are never routed to a real target device by
+                    # sync_interface(). They must not sync onto the host — and skipping them prevents
+                    # a main/OOB interface-name collision (both "eth0") from double-processing one
+                    # selection and overwriting the host interface with the OOB row's port_id/attrs.
+                    if port.get("_source") == "oob":
+                        continue
+                    port_name = port.get(interface_name_field)
+
+                    if port_name in selected_interfaces:
+                        self.sync_interface(obj, port, exclude_columns, interface_name_field)
+            finally:
+                self.__dict__.pop("_locked_target_devices", None)
+
+    def _lock_selected_device_targets(self, obj, selected_interfaces, ports_data, interface_name_field):
+        """Lock the page device and selected VC targets for the sync transaction."""
+        target_ids = {obj.pk}
+        for port in ports_data:
+            if port.get("_source") == "oob":
+                continue
+            interface_name = port.get(interface_name_field)
+            if interface_name not in selected_interfaces:
+                continue
+            selected_id = self.request.POST.get(f"device_selection_{interface_name}")
+            if selected_id:
+                try:
+                    target_ids.add(int(selected_id))
+                except (TypeError, ValueError):
+                    continue
+
+        queryset = self.restricted_queryset(Device).select_for_update(of=("self",))
+        return {device.pk: device for device in queryset.filter(pk__in=target_ids).order_by("pk")}
 
     def sync_interface(self, obj, librenms_interface, exclude_columns, interface_name_field):
         """Create or update a single NetBox interface from LibreNMS data."""
@@ -205,17 +241,19 @@ class SyncInterfacesView(
 
             if selected_device_id:
                 try:
-                    target_device = self.restricted_queryset(Device).get(id=selected_device_id)
-                    # Validate the target is the current device or a VC member
-                    if hasattr(obj, "virtual_chassis") and obj.virtual_chassis:
-                        valid_ids = set(obj.virtual_chassis.members.values_list("id", flat=True))
-                        if target_device.id not in valid_ids:
-                            self._record_skipped_conflict(interface_name, "selected target unavailable")
-                            return
-                    elif target_device.id != obj.id:
+                    locked_targets = getattr(self, "_locked_target_devices", None)
+                    if locked_targets is None:
+                        target_device = self.restricted_queryset(Device).get(id=selected_device_id)
+                    else:
+                        target_device = locked_targets[int(selected_device_id)]
+                    # Both rows are current and locked in the HTTP sync path. Re-check that the
+                    # selected device is the page device or remains in the same virtual chassis.
+                    if target_device.id != obj.id and (
+                        obj.virtual_chassis_id is None or target_device.virtual_chassis_id != obj.virtual_chassis_id
+                    ):
                         self._record_skipped_conflict(interface_name, "selected target unavailable")
                         return
-                except (Device.DoesNotExist, ValueError, TypeError):
+                except (Device.DoesNotExist, KeyError, ValueError, TypeError):
                     # The user explicitly selected a target. If it is stale or outside the
                     # caller's grant, do not silently sync the row onto the page device.
                     self._record_skipped_conflict(interface_name, "selected target unavailable")
