@@ -275,11 +275,9 @@ class TestSyncInterfacesPost:
 
 class TestSyncSelectedInterfaces:
     def test_only_selected_processed(self):
-        from dcim.models import Device
-
         v = _make_iv()
         v.sync_interface = MagicMock()
-        obj = MagicMock(spec=Device)
+        obj = make_device("sync-selected")
         ports = [{"ifName": "eth0"}, {"ifName": "eth1"}]
         with patch("netbox_librenms_plugin.views.sync.interfaces.transaction"):
             v.sync_selected_interfaces(obj, ["eth0"], ports, [], "ifName")
