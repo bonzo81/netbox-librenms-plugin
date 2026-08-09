@@ -754,10 +754,12 @@ class TestSyncInterfacesViewSyncInterfaceDevice:
         dev = make_device("selgone-page")
         absent_pk = missing_pk(Device)
         view = self._make_view(_make_request(post_data={"device_selection_Gi0/1": str(absent_pk)}))
+        view._skipped_conflicts = []
 
         view.sync_interface(dev, {"ifName": "Gi0/1", "port_id": None}, [], "ifName")
 
         assert not Interface.objects.filter(device=dev, name="Gi0/1").exists()
+        assert view._skipped_conflicts == ["Gi0/1 (selected target unavailable)"]
 
     def test_explicit_vc_member_outside_grant_is_skipped(self):
         """A hidden posted target must not silently sync the row onto the page device."""
