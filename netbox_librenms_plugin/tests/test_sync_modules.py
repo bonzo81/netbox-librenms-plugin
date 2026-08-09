@@ -2603,6 +2603,58 @@ class TestModuleMutationScopes:
         assert hidden.module_id is None
         assert not Module.objects.filter(device=device, module_bay=bay).exists()
 
+    def test_vc_install_does_not_adopt_a_raw_name_outside_change_grant(self):
+        from types import SimpleNamespace
+
+        from dcim.models import Device, Interface, InterfaceTemplate, Module, ModuleBay, ModuleType
+
+        from netbox_librenms_plugin.tests.conftest import make_interface, make_virtual_chassis_members
+        from netbox_librenms_plugin.tests.view_test_helpers import grant, make_request, make_user_with_perms
+        from netbox_librenms_plugin.views.sync.modules import InstallModuleView
+
+        _vc, (_page, device) = make_virtual_chassis_members("module-vc-adoption-scope")
+        bay = ModuleBay.objects.create(device=device, name="VC Adoption Scope Bay")
+        module_type = ModuleType.objects.create(
+            manufacturer=device.device_type.manufacturer,
+            model="VC Adoption Scope Type",
+        )
+        InterfaceTemplate.objects.create(
+            module_type=module_type,
+            name="TenGigabitEthernet1/1/1",
+            type="10gbase-x-sfpp",
+        )
+        hidden = make_interface(device, "TenGigabitEthernet1/1/1", iface_type="10gbase-x-sfpp")
+        allowed = make_interface(device, "TenGigabitEthernet2/1/2", iface_type="10gbase-x-sfpp")
+        user = make_user_with_perms(
+            "module-vc-adoption-scope",
+            [
+                ("view", Device),
+                ("view", ModuleBay),
+                ("view", ModuleType),
+                ("add", Module),
+                ("add", Interface),
+                ("delete", Interface),
+            ],
+        )
+        user = grant(user, "change", Interface, constraints={"pk": allowed.pk})
+        request = make_request(
+            "post",
+            {
+                "module_bay_id": str(bay.pk),
+                "module_type_id": str(module_type.pk),
+                "server_key": "default",
+            },
+            user=user,
+        )
+        view = InstallModuleView()
+        view._librenms_api = SimpleNamespace(server_key="default")
+
+        _post(view, request, pk=device.pk)
+
+        hidden.refresh_from_db()
+        assert hidden.module_id is None
+        assert not Module.objects.filter(device=device, module_bay=bay).exists()
+
     @pytest.mark.parametrize("excluded_action", ["change_conflict", "delete_generated"])
     def test_vc_normalization_does_not_cross_interface_grants(self, excluded_action):
         from dcim.models import Interface

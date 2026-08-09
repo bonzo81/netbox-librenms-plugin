@@ -251,7 +251,9 @@ def _count_adoptable_interfaces(device, module, interfaces):
     """Count adoptable interfaces, or return None if the change scope excludes one."""
     from dcim.models import Interface
 
-    template_names = get_module_template_interface_names(device, module)
+    # NetBox adopts standalone components during Module.save() before this plugin rewrites
+    # interface names for a VC member. Check the raw instantiated names that NetBox will use.
+    template_names = get_module_template_interface_names(device, module, rewrite_for_vc=False)
     if not template_names:
         return 0
 

@@ -3072,7 +3072,12 @@ class AddAsOOBView(
                 # Lock the row we hand back: the OOB-IP assignment is generic-relational,
                 # not FK-protected, so a concurrent delete before the IP save would orphan
                 # oob_ip on a missing interface. select_for_update blocks that delete.
-                existing = Interface.objects.select_for_update().filter(device=device, name=name).first()
+                existing = (
+                    Interface.objects.restrict(request.user, "view")
+                    .select_for_update(of=("self",))
+                    .filter(device=device, name=name)
+                    .first()
+                )
                 return (existing, None) if existing is not None else (None, None)
         if iface_id:
             try:
