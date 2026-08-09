@@ -277,7 +277,12 @@ class TestSyncCablesViewHandleCableCreation:
     @pytest.mark.django_db
     def test_existing_desired_cable_untagged_gets_tagged(self):
         """The exact desired cable already exists but is untagged → add the librenms tag (non-destructive) → 'tagged'."""
-        from netbox_librenms_plugin.tests.conftest import cable_together, make_device, make_interface
+        from netbox_librenms_plugin.tests.conftest import (
+            cable_together,
+            librenms_cable_tag,
+            make_device,
+            make_interface,
+        )
         from netbox_librenms_plugin.views.sync.cables import SyncCablesView
 
         view = _make_view(SyncCablesView)
@@ -296,7 +301,7 @@ class TestSyncCablesViewHandleCableCreation:
         result = view.handle_cable_creation(link_data, interface)
         assert result["status"] == "tagged"
         cable.refresh_from_db()
-        assert "librenms" in set(cable.tags.values_list("slug", flat=True))
+        assert librenms_cable_tag().slug in set(cable.tags.values_list("slug", flat=True))
 
     @pytest.mark.django_db
     def test_creates_cable_returns_valid(self):
