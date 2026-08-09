@@ -57,8 +57,14 @@ class SyncVLANsView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreN
         """Require VLANGroup access only when a selected row names a group."""
         permissions = list(type(self).required_object_permissions["POST"])
         selected_vids = request.POST.getlist("select")
-        if any(request.POST.get(f"vlan_group_{vid}") for vid in selected_vids):
-            permissions.append(("view", VLANGroup))
+        for vid_str in selected_vids:
+            try:
+                vid = int(vid_str)
+            except ValueError:
+                continue
+            if request.POST.get(f"vlan_group_{vid}"):
+                permissions.append(("view", VLANGroup))
+                break
         return permissions
 
     def post(self, request, object_type: str, object_id: int):

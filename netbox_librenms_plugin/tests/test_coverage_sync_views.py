@@ -2578,6 +2578,37 @@ class TestSyncVLANsViewPost:
         assert response.status_code == 302
         assert any("ipam.view_vlangroup" in text for text in message_texts(request, "error"))
 
+    @pytest.mark.django_db
+    def test_grouped_vlan_permission_uses_canonical_vid_field_name(self):
+        """A leading-zero selection must not hide its canonical group field from the gate."""
+        from dcim.models import Device
+        from ipam.models import VLAN, VLANGroup
+
+        from netbox_librenms_plugin.views.sync.vlans import SyncVLANsView
+
+        device = make_device("vlan-grouped-canonical-perm")
+        group = VLANGroup.objects.create(name="Canonical group permission", slug="canonical-group-permission")
+        user = make_user_with_perms(
+            "vlan-grouped-canonical-perm",
+            [("view", Device), ("add", VLAN), ("change", VLAN)],
+        )
+        request = make_real_request(
+            "post",
+            {
+                "action": "create_vlans",
+                "server_key": "default",
+                "select": ["0100"],
+                "vlan_group_100": str(group.pk),
+            },
+            user=user,
+        )
+        view = make_view(SyncVLANsView, request)
+
+        response = _post(view, request, object_type="device", object_id=device.pk)
+
+        assert response.status_code == 302
+        assert any("ipam.view_vlangroup" in text for text in message_texts(request, "error"))
+
 
 @pytest.mark.django_db
 class TestSyncVLANsViewHandleCreateVlans:

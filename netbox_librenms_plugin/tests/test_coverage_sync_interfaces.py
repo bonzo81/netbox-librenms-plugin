@@ -205,6 +205,58 @@ def test_reenabling_relationship_autoselect_replays_checked_rows():
     )
 
 
+def test_cross_page_parent_device_override_tracks_live_member_selection():
+    """An existing hidden parent selection must track later VC member changes."""
+    handler = _js_block(
+        _js_source(),
+        "// --- Sub-interface: select parent when checking ---",
+        "// --- Sub-interface: undo parent auto-selection",
+    )
+
+    assert handler.index("_showParentCrossPageNotice") < handler.index("let devOverride = form.querySelector")
+    assert "devOverride.value = memberSelect.value" in handler
+    assert "else if (devOverride)" in handler
+    assert "devOverride.remove()" in handler
+
+
+def test_successful_member_verify_replays_checked_child_selection():
+    """A verified VC member change must refresh an existing cross-page parent override."""
+    import re
+
+    handler = _js_block(
+        _js_source(),
+        "function handleInterfaceChange(select, value)",
+        "function handleCableChange(select, value)",
+    )
+    assert re.search(
+        r"row\.querySelector\(\s*['\"]input\[name=.select.\]['\"]\s*\).*?"
+        r"\.checked.*?dispatchEvent\(\s*new\s+Event\(\s*['\"]change['\"]",
+        handler,
+        re.DOTALL,
+    )
+
+
+def test_interface_verify_application_failure_is_reported():
+    """A 2xx rejection must expose its server-provided reason before rollback."""
+    rejected = _js_block(
+        _js_source(),
+        "// 2xx with data.status !== 'success'",
+        "rollbackToLastVerified();",
+    )
+    assert "console.error('Interface verification rejected:', data.error || data.message" in rejected
+
+
+def test_relationship_sync_missing_data_shows_alert_icon():
+    """A relationship button with incomplete data must show a visible failure state."""
+    rejected = _js_block(
+        _js_source(),
+        "if (!portId || !relatedPortId || !objectType || !objectId)",
+        "const url = `/plugins/librenms_plugin/",
+    )
+    assert "btn.innerHTML = '<i class=\"mdi mdi-alert text-danger\"></i>'" in rejected
+    assert "Required relationship data is unavailable." in rejected
+
+
 def test_cross_page_parent_notice_close_button_has_accessible_name():
     """The icon-only notice close button must expose its purpose to screen readers."""
     import re

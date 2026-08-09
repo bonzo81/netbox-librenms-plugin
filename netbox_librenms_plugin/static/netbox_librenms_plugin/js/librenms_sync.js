@@ -489,22 +489,25 @@ document.addEventListener('change', function (e) {
                     hidden.value = parentPortId;
                     hidden.id = hiddenId;
                     form.appendChild(hidden);
-                    // Carry the off-page parent's target VC member, derived from THIS child row's
-                    // live member select (a sub-interface shares its parent's member). Keyed by the
-                    // parent's stable port_id so the backend (_resolve_row_target_device) pins the
-                    // parent to that member instead of defaulting to the page device — which would
-                    // skip it or create it on the wrong member.
-                    const memberSelect = row.querySelector('.vc-member-select');
-                    if (memberSelect && memberSelect.value) {
-                        const devOverride = document.createElement('input');
-                        devOverride.type = 'hidden';
-                        devOverride.name = 'device_selection_port_' + parentPortId;
-                        devOverride.value = memberSelect.value;
-                        devOverride.id = 'auto-parent-dev-' + parentPortId;
-                        form.appendChild(devOverride);
-                    }
                     // data-parent-name is human-readable text for the notice only.
                     _showParentCrossPageNotice(row.dataset.parentName || parentPortId);
+                }
+                // Keep the off-page parent's target VC member aligned with this child's live
+                // selection, including after the hidden parent input already exists.
+                const memberSelect = row.querySelector('.vc-member-select');
+                const devOverrideId = 'auto-parent-dev-' + parentPortId;
+                let devOverride = form.querySelector('#' + CSS.escape(devOverrideId));
+                if (memberSelect && memberSelect.value) {
+                    if (!devOverride) {
+                        devOverride = document.createElement('input');
+                        devOverride.type = 'hidden';
+                        devOverride.name = 'device_selection_port_' + parentPortId;
+                        devOverride.id = devOverrideId;
+                        form.appendChild(devOverride);
+                    }
+                    devOverride.value = memberSelect.value;
+                } else if (devOverride) {
+                    devOverride.remove();
                 }
             }
         }
@@ -1419,11 +1422,16 @@ function handleInterfaceChange(select, value) {
                 // re-enable the relationship controls (the row HTML now matches this member).
                 select._lastVerifiedMember = value;
                 reenableRelationshipButtons();
+                const rowCheckbox = row.querySelector('input[name="select"]');
+                if (rowCheckbox && rowCheckbox.checked) {
+                    rowCheckbox.dispatchEvent(new Event('change', { bubbles: true }));
+                }
             } else {
                 // 2xx with data.status !== 'success' (application-level failure/conflict): the
                 // row was NOT repainted, so the verify-locked LAG/parent buttons still carry the
                 // previous member's lag/parent port_id. Roll the dropdown back to the last
                 // confirmed member (restoring a consistent row) before re-enabling.
+                console.error('Interface verification rejected:', data.error || data.message || 'Unknown error');
                 rollbackToLastVerified();
             }
         })
@@ -2512,9 +2520,12 @@ document.addEventListener('click', function (e) {
     const urlSuffix = isLag ? 'sync-interface-lag' : 'sync-interface-parent';
 
     if (!portId || !relatedPortId || !objectType || !objectId) {
-        // A blank objectId on a VC page means no member is selected — tell the user instead of
-        // silently doing nothing (or posting to a stale member).
-        if (vcMemberSelect && !objectId) btn.title = 'Select a VC member first.';
+        btn.innerHTML = '<i class="mdi mdi-alert text-danger"></i>';
+        // A blank objectId on a VC page means no member is selected. Give that case a specific
+        // instruction, and surface malformed relationship metadata with a general explanation.
+        btn.title = vcMemberSelect && !objectId
+            ? 'Select a VC member first.'
+            : 'Required relationship data is unavailable.';
         return;
     }
 
