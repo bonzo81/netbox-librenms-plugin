@@ -2545,7 +2545,7 @@ class TestSyncVLANsViewPost:
         response = _post(view, request, object_type="device", object_id=device.pk)
 
         assert response.status_code == 302
-        assert not any("ipam.view_vlangroup" in text for text in message_texts(request, "error"))
+        assert message_texts(request, "error") == ["No cached VLAN data. Please refresh VLANs first."]
 
     @pytest.mark.django_db
     def test_grouped_vlan_sync_still_requires_vlan_group_permission(self):

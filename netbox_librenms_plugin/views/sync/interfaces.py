@@ -524,9 +524,7 @@ class SyncInterfacesView(
             port_id = normalize_librenms_port_id(port.get("port_id"))
             if interface_name not in selected_interfaces and port_id not in selected_port_ids:
                 continue
-            selected_id = self.request.POST.get(f"device_selection_port_{port_id}") if port_id is not None else None
-            if not selected_id:
-                selected_id = self.request.POST.get(f"device_selection_{interface_name}")
+            selected_id = self._selected_row_target_id(interface_name, port_id)
             if selected_id:
                 try:
                     target_ids.add(int(selected_id))
@@ -535,6 +533,15 @@ class SyncInterfacesView(
 
         queryset = self.restricted_queryset(Device).select_for_update(of=("self",))
         return {device.pk: device for device in queryset.filter(pk__in=target_ids).order_by("pk")}
+
+    def _selected_row_target_id(self, interface_name, port_id=None):
+        """Return the stable-id target override, then the display-name fallback."""
+        selected_device_id = None
+        if port_id is not None:
+            selected_device_id = self.request.POST.get(f"device_selection_port_{port_id}")
+        if not selected_device_id:
+            selected_device_id = self.request.POST.get(f"device_selection_{interface_name}")
+        return selected_device_id
 
     def _resolve_row_target_device(self, obj, interface_name, port_id=None):
         """
@@ -562,11 +569,7 @@ class SyncInterfacesView(
         """
         if not isinstance(obj, Device):
             return obj
-        selected_device_id = None
-        if port_id is not None:
-            selected_device_id = self.request.POST.get(f"device_selection_port_{port_id}")
-        if not selected_device_id:
-            selected_device_id = self.request.POST.get(f"device_selection_{interface_name}")
+        selected_device_id = self._selected_row_target_id(interface_name, port_id)
         if not selected_device_id:
             return obj
         try:
@@ -586,20 +589,6 @@ class SyncInterfacesView(
         ):
             return None
         return target_device
-
-    def _vc_member_ids(self, obj):
-        """
-        VC member-id set for *obj*, computed once per request.
-
-        ``_resolve_row_target_device`` runs once per selected row across two passes
-        (interface sync + the relationship pass); the member set is loop-invariant, so cache it
-        on the (per-request) view instance instead of re-querying ``members.values_list`` per row.
-        """
-        cached = getattr(self, "_vc_member_ids_cache", None)
-        if cached is None:
-            cached = set(obj.virtual_chassis.members.values_list("id", flat=True))
-            self._vc_member_ids_cache = cached
-        return cached
 
     def sync_interface(self, obj, librenms_interface, exclude_columns, interface_name_field):
         """Create or update a single NetBox interface from LibreNMS data."""
