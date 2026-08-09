@@ -346,6 +346,7 @@ def test_collision_template_renders_correct_link_targets_and_escapes():
             "nb_device_name": "srv-collide",
             "nb_model_name": "device",
             "nb_kind": "device",
+            "target_visible": True,
             "librenms_rows": [
                 {"device_id": 1, "hostname": "<script>alpha</script>", "role": "host"},
                 {"device_id": 2, "hostname": "beta", "role": "oob"},
@@ -356,6 +357,7 @@ def test_collision_template_renders_correct_link_targets_and_escapes():
             "nb_device_name": "vm-collide",
             "nb_model_name": "virtualmachine",
             "nb_kind": "VM",
+            "target_visible": True,
             "librenms_rows": [
                 {"device_id": 3, "hostname": "gamma", "role": "merge_host_named"},
                 {"device_id": 4, "hostname": "delta", "role": "merge_oob_named"},
@@ -445,13 +447,28 @@ def test_classify_unresolved_rows_are_skipped_not_blocked():
 
 def test_classify_collisions_block_whole_batch():
     """A genuine collision blocks the whole batch: blocked=True, block_message names the NetBox object pk(s)."""
-    outcome = classify_bulk_precheck([{"nb_device_pk": 7}], [], device_ids=[1, 2], vm_imports={})
+    outcome = classify_bulk_precheck(
+        [{"nb_device_pk": 7, "target_visible": True}],
+        [],
+        device_ids=[1, 2],
+        vm_imports={},
+    )
     assert outcome.blocked is True
     assert "Bulk import blocked" in outcome.block_message
     assert "1 NetBox object collision" in outcome.block_message
-    assert "pk(s): 7" in outcome.block_message
+    assert "Visible pk(s): 7" in outcome.block_message
     # Object-neutral: never mislabel a VM collision as a "NetBox device".
     assert "NetBox device collision" not in outcome.block_message
+
+
+def test_classify_collision_without_visibility_metadata_omits_pk():
+    """An unscoped collision payload must not expose its target PK."""
+    outcome = classify_bulk_precheck([{"nb_device_pk": 77}], [], device_ids=[1, 2], vm_imports={})
+
+    assert outcome.blocked is True
+    assert "Visible pk(s)" not in outcome.block_message
+    assert "77" not in outcome.block_message
+    assert "Target details are omitted" in outcome.block_message
 
 
 def test_classify_blocked_batch_omits_imported_rows_message():

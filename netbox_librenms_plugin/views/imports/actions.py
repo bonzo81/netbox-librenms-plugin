@@ -33,6 +33,7 @@ from netbox_librenms_plugin.import_utils import (
     get_librenms_device_by_id,
     get_virtual_chassis_data,
     required_import_permissions,
+    scope_bulk_collisions,
     update_vc_member_suggested_names,
     validate_device_for_import,
 )
@@ -893,7 +894,7 @@ class BulkImportConfirmView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
             "vc_detection_enabled": vc_detection_enabled,
         }
 
-        collisions = detect_bulk_collisions(devices)
+        collisions = scope_bulk_collisions(detect_bulk_collisions(devices), request.user)
         if collisions:
             # Render at 200 (not 4xx): this is an interstitial modal swapped
             # into #htmx-modal-content, exactly like the confirm step. A non-2xx
@@ -1175,6 +1176,7 @@ class BulkImportDevicesView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
                 # would run the serial/IP matching bulk_import_vms skips and could fabricate a
                 # collision that blocks a valid batch.
                 vm_device_ids=vm_imports,
+                user=request.user,
             )
             outcome = classify_bulk_precheck(collisions, unresolved, device_ids_to_import, vm_imports)
             if outcome.blocked:

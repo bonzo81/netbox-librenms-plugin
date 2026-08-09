@@ -482,6 +482,7 @@ def validate_device_for_import(
     *,
     server_key: str = "default",
     include_vc_detection: bool = True,
+    collision_only: bool = False,
     force_vc_refresh: bool = False,
     use_sysname: bool = True,
     strip_domain: bool = False,
@@ -503,6 +504,8 @@ def validate_device_for_import(
         import_as_vm: If True, validate for VM import instead of device import
         api: Optional LibreNMSAPI instance for virtual chassis detection
         include_vc_detection: Skip VC detection when False to speed up bulk operations
+        collision_only: Return after existing-object and collision-candidate matching. This skips
+            site, device type, role, platform, rack, and virtual-chassis import prerequisites.
         force_vc_refresh: When True, bypass cached VC data and re-query LibreNMS
         use_sysname: If True, prefer sysName over hostname (matches import behaviour)
         strip_domain: If True, strip domain suffix from device name
@@ -1253,6 +1256,9 @@ def validate_device_for_import(
         if result["ambiguous_librenms_id"]:
             result["can_import"] = False
             result["is_ready"] = False
+            return result
+
+        if collision_only:
             return result
 
         # Validate based on import type (Device or VM)

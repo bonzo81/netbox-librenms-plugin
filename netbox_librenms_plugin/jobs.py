@@ -251,6 +251,7 @@ class ImportDevicesJob(JobRunner):
                     # mode would run the serial/IP matching bulk_import_vms skips and could
                     # fabricate a collision that blocks a valid batch.
                     vm_device_ids=vm_imports,
+                    user=self.job.user,
                 )
                 if len(collision_check_ids) >= 2
                 else ([], [])

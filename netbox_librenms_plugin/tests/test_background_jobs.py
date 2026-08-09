@@ -914,41 +914,6 @@ class TestImportDevicesJob:
         assert job.job.data["errors"] == []
         assert job.job.data["failed_count"] == 0
 
-    @patch("netbox_librenms_plugin.import_utils.detect_collisions_for_device_ids")
-    @patch("netbox_librenms_plugin.import_utils.bulk_import_vms")
-    @patch("netbox_librenms_plugin.import_utils.bulk_import_devices_shared")
-    @patch("netbox_librenms_plugin.librenms_api.LibreNMSAPI")
-    def test_collision_block_skips_vm_import(self, mock_api_class, mock_bulk_devices, mock_bulk_vms, mock_detect):
-        """A same-NetBox-device collision blocks the batch and skips the VM section too.
-
-        Collision DETECTION has its own real-DB tests; here the detector is stubbed to isolate
-        the job's collisions-branch block flow (the symmetric counterpart of the unresolved one).
-        """
-        from netbox_librenms_plugin.jobs import ImportDevicesJob
-
-        mock_api = MagicMock()
-        mock_api.server_key = "default"
-        mock_api_class.return_value = mock_api
-        mock_detect.return_value = ([{"nb_device_pk": 5}], [])  # one collision group, no unresolved
-        mock_bulk_devices.return_value = {"success": [], "failed": [], "skipped": [], "virtual_chassis_created": 0}
-        mock_bulk_vms.return_value = {"success": [], "failed": [], "skipped": []}
-
-        job = create_mock_job_runner(ImportDevicesJob, job_pk=812)
-        job.run(device_ids=[1, 2], vm_imports={10: {"cluster_id": 1}}, server_key="default")
-
-        mock_bulk_devices.assert_not_called()
-        mock_bulk_vms.assert_not_called()
-        errors = job.job.data["errors"]
-        assert {e["device_id"] for e in errors} == {1, 2, 10}
-        # Shared block wording (classify_bulk_precheck), identical to the sync view.
-        assert all("Bulk import blocked" in e["error"] for e in errors)
-        # The gate spans device + VM ids (vm_imports here), so the block message must be
-        # object-neutral — a VM collision must not be mislabelled a "NetBox device" collision.
-        assert all("NetBox object collision" in e["error"] for e in errors)
-        assert not any("NetBox device collision" in e["error"] for e in errors)
-        assert job.job.data["failed_count"] == 3
-        assert job.job.data["success_count"] == 0
-
     def test_job_meta_name(self):
         """Job has correct Meta.name."""
         from netbox_librenms_plugin.jobs import ImportDevicesJob

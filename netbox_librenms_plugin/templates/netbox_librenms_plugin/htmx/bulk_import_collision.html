@@ -25,16 +25,20 @@
       <div class="d-flex flex-wrap align-items-center gap-2 mb-2">
         <span class="badge bg-danger text-white">Collision</span>
         <span class="text-muted small">NetBox {{ group.nb_kind }}:</span>
-        {% if group.nb_model_name == 'virtualmachine' %}
-          <a href="{% url 'virtualization:virtualmachine' pk=group.nb_device_pk %}" target="_blank" rel="noopener" class="fw-bold">
-            {{ group.nb_device_name }}
-          </a>
+        {% if group.target_visible %}
+          {% if group.nb_model_name == 'virtualmachine' %}
+            <a href="{% url 'virtualization:virtualmachine' pk=group.nb_device_pk %}" target="_blank" rel="noopener" class="fw-bold">
+              {{ group.nb_device_name }}
+            </a>
+          {% else %}
+            <a href="{% url 'dcim:device' pk=group.nb_device_pk %}" target="_blank" rel="noopener" class="fw-bold">
+              {{ group.nb_device_name }}
+            </a>
+          {% endif %}
+          <span class="text-muted small">(pk {{ group.nb_device_pk }})</span>
         {% else %}
-          <a href="{% url 'dcim:device' pk=group.nb_device_pk %}" target="_blank" rel="noopener" class="fw-bold">
-            {{ group.nb_device_name }}
-          </a>
+          <span class="fw-bold">restricted NetBox object</span>
         {% endif %}
-        <span class="text-muted small">(pk {{ group.nb_device_pk }})</span>
       </div>
       <div class="text-muted small mb-1">Selected LibreNMS rows targeting this {{ group.nb_kind }}:</div>
       <ul class="list-unstyled mb-0 ps-2 small">

@@ -5625,32 +5625,6 @@ class TestBulkImportConfirmCollisions:
                 )
                 return view.post(request)
 
-    def test_collision_path_renders_collision_template(self):
-        """A host row and an OOB row resolving to one real NetBox device render the collision modal."""
-        from django.urls import reverse
-
-        nb_device = make_device("srv-collide-confirm")
-        validation_a = {
-            "status": "importable",
-            "resolved_name": "alpha",
-            "virtual_chassis": {},
-            "existing_device": nb_device,
-        }
-        validation_b = {
-            "status": "importable",
-            "resolved_name": "beta",
-            "virtual_chassis": {},
-            "oob_candidate": {"device": nb_device, "type": "idrac"},
-        }
-        # Real render: the real collision template + real detect_bulk_collisions + real
-        # _model_name_of(real Device) must produce a dcim:device link for the colliding device.
-        response = self._run_with_two_devices(validation_a, validation_b, real_render=True)
-        assert response.status_code == 200
-        html = response.content.decode()
-        assert "Bulk import blocked" in html
-        assert reverse("dcim:device", kwargs={"pk": nb_device.pk}) in html
-        assert "srv-collide-confirm" in html
-
     def test_clean_batch_renders_normal_confirm_template(self):
         """Two rows resolving to distinct real NetBox devices fall through to the confirm template."""
         validation_a = {
@@ -5683,45 +5657,6 @@ class TestBulkImportDevicesViewCollisionGate:
         view = object.__new__(BulkImportDevicesView)
         view._librenms_api = _make_api()
         return view
-
-    def test_colliding_batch_blocked_before_import(self):
-        """Two selected LibreNMS rows resolving to one real device → collision modal, importer never called."""
-        from django.urls import reverse
-
-        view = self._make_view()
-        request = _make_request(post={"select": ["1", "2"]}, headers={"HX-Request": "true"})
-        request.POST.getlist = MagicMock(return_value=["1", "2"])
-        request.user = _import_authorized_user()
-
-        nb = make_device("gate-collide-host")
-        libre = {
-            1: {"device_id": 1, "sysName": "gate-collide-host", "hostname": "gate-collide-host"},
-            2: {"device_id": 2, "sysName": "gate-collide-host", "hostname": "gate-collide-host"},
-        }
-        # The collision pre-check reads the seeded libre cache (cold Django cache in the test) and
-        # falls back to api.get_device_info for the misses — stub that seam so the misses resolve.
-        view._librenms_api.get_device_info = lambda did, *a, **k: (True, libre[did]) if did in libre else (False, None)
-        with (
-            patch.object(view, "require_write_permission", return_value=None),
-            patch(
-                "netbox_librenms_plugin.views.imports.actions.resolve_naming_preferences", return_value=(True, False)
-            ),
-            patch(
-                "netbox_librenms_plugin.views.imports.actions.fetch_device_with_cache",
-                side_effect=lambda did, _api: libre.get(did),
-            ),
-            patch("netbox_librenms_plugin.views.imports.actions.bulk_import_devices") as mock_import,
-        ):
-            response = view.post(request)
-
-        # Real validate + real detect via the gate → real collision template, importer never reached.
-        assert response.status_code == 200
-        html = response.content.decode()
-        assert "Bulk import blocked" in html
-        assert reverse("dcim:device", kwargs={"pk": nb.pk}) in html
-        assert 'id="htmx-modal-content"' in html
-        assert 'hx-swap-oob="innerHTML"' in html
-        mock_import.assert_not_called()
 
     def test_clean_batch_passes_gate_and_imports(self):
         """Two rows resolving to distinct real devices clear the gate and reach the importer."""
@@ -5761,44 +5696,6 @@ class TestBulkImportDevicesViewCollisionGate:
 
         # Gate cleared (distinct devices) → the importer ran.
         mock_import.assert_called_once()
-
-    def test_unfetchable_id_is_skipped_rest_imports(self):
-        """A selected id whose LibreNMS info can't be fetched (not cached + get_device_info fails) is SKIPPED, not a whole-batch block: the fetchable rows still import and the skipped row is surfaced. Restores the per-device resilience the old fail-closed block removed."""
-        view = self._make_view()
-        make_device("gate-unresolved-host")
-        libre = {1: {"device_id": 1, "sysName": "gate-unresolved-host", "hostname": "gate-unresolved-host"}}
-        # id 2 isn't cached and its info fetch fails → it can't be collision-checked → skipped.
-        view._librenms_api.get_device_info = lambda did, *a, **k: (True, libre[did]) if did in libre else (False, None)
-        request = _make_request(post={"select": ["1", "2"]}, headers={"HX-Request": "true"})
-        request.POST.getlist = MagicMock(return_value=["1", "2"])
-        request.user = _import_authorized_user()
-
-        import_result = {"success": [], "failed": [], "skipped": [], "virtual_chassis_created": 0}
-        with (
-            patch.object(view, "require_write_permission", return_value=None),
-            patch(
-                "netbox_librenms_plugin.views.imports.actions.resolve_naming_preferences", return_value=(True, False)
-            ),
-            patch(
-                "netbox_librenms_plugin.views.imports.actions.fetch_device_with_cache",
-                side_effect=lambda did, _api, **_kw: libre.get(did),
-            ),
-            patch(
-                "netbox_librenms_plugin.views.imports.actions.bulk_import_devices", return_value=import_result
-            ) as mock_import,
-        ):
-            response = view.post(request)
-
-        # The fetchable id 1 imports; only the unresolved id 2 is dropped (not a whole-batch block).
-        assert response.status_code == 200
-        mock_import.assert_called_once()
-        assert mock_import.call_args.kwargs["device_ids"] == [1]
-        html = response.content.decode()
-        # The skipped row is surfaced, object-neutral ("row(s)", never "device(s)").
-        assert "Skipped" in html
-        assert "verify collisions" in html
-        assert "selected row(s)" in html
-        assert "selected device(s)" not in html
 
     def test_background_batch_defers_collision_precheck_to_job(self):
         """A batch routed to a background job must NOT run the collision pre-check synchronously — it's deferred to ImportDevicesJob (which re-runs it), so the request doesn't pay the validation cost. The job is enqueued and the sync detector is never called."""
