@@ -287,7 +287,7 @@ def _authorize_adoptable_module_components(module, component_querysets):
 
     for template_attribute, component_attribute, component_model in _module_component_specs():
         names = [
-            template.instantiate(device=module.device, module=module).name
+            template.resolve_name(device=module.device, module=module)
             for template in getattr(module.module_type, template_attribute).all()
         ]
         if not names:
@@ -311,8 +311,8 @@ def _authorize_adoptable_module_components(module, component_querysets):
     return expected_ids
 
 
-def _save_module_with_scoped_component_adoption(module, component_querysets):
-    """Save a module after authorizing and locking every component NetBox can adopt."""
+def _save_module_with_expected_component_adoption(module, expected_ids):
+    """Save a module and verify that NetBox adopted only the expected components."""
     from django.db.models.signals import post_save
 
     component_models = tuple(spec[2] for spec in _module_component_specs())
@@ -328,7 +328,6 @@ def _save_module_with_scoped_component_adoption(module, component_querysets):
             adopted_ids[sender].add(instance.pk)
 
     with transaction.atomic():
-        expected_ids = _authorize_adoptable_module_components(module, component_querysets)
         module._adopt_components = True
         module.full_clean()
         for component_model in component_models:
@@ -347,6 +346,13 @@ def _save_module_with_scoped_component_adoption(module, component_querysets):
         if actual_ids != expected_ids:
             raise _ModuleComponentAdoptionUnavailable
     return sum(len(ids) for ids in actual_ids.values())
+
+
+def _save_module_with_scoped_component_adoption(module, component_querysets):
+    """Authorize, lock, and save every component NetBox can adopt."""
+    with transaction.atomic():
+        expected_ids = _authorize_adoptable_module_components(module, component_querysets)
+        return _save_module_with_expected_component_adoption(module, expected_ids)
 
 
 def _adopt_existing_template_interfaces(device, module, interfaces):
@@ -2031,6 +2037,10 @@ class ReplaceModuleView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjectP
                     serial=serial,
                     status="active",
                 )
+                expected_component_ids = _authorize_adoptable_module_components(
+                    new_module,
+                    changeable_components,
+                )
                 # Re-derive any serial conflict from the database INSIDE the locked
                 # transaction (and lock those rows too) — checking before the lock
                 # opens a TOCTOU window where a concurrent request could change a
@@ -2069,9 +2079,9 @@ class ReplaceModuleView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjectP
                 installed_module.delete()
 
                 # Install fresh module from LibreNMS data
-                adopted_components = _save_module_with_scoped_component_adoption(
+                adopted_components = _save_module_with_expected_component_adoption(
                     new_module,
-                    changeable_components,
+                    expected_component_ids,
                 )
                 vc_adjustments = _normalize_module_interface_names_for_vc_member(
                     target_device,

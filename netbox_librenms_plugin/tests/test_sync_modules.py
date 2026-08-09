@@ -2801,6 +2801,57 @@ class TestModuleMutationScopes:
         module = Module.objects.get(device=device, module_bay=bay)
         assert Interface.objects.filter(device=device, module=module, name="Te1/1/1").exists()
 
+    def test_install_authorizes_dependent_component_templates_without_instantiating_them(self):
+        from types import SimpleNamespace
+
+        from dcim.models import (
+            Module,
+            ModuleBay,
+            ModuleType,
+            PowerOutlet,
+            PowerOutletTemplate,
+            PowerPort,
+            PowerPortTemplate,
+        )
+
+        from netbox_librenms_plugin.tests.conftest import make_device
+        from netbox_librenms_plugin.tests.view_test_helpers import make_request
+        from netbox_librenms_plugin.views.sync.modules import InstallModuleView
+
+        device = make_device("module-dependent-component-template")
+        bay = ModuleBay.objects.create(device=device, name="Dependent Component Bay")
+        module_type = ModuleType.objects.create(
+            manufacturer=device.device_type.manufacturer,
+            model="Dependent Component Type",
+        )
+        power_port_template = PowerPortTemplate.objects.create(module_type=module_type, name="Power In")
+        PowerOutletTemplate.objects.create(
+            module_type=module_type,
+            name="Power Out",
+            power_port=power_port_template,
+        )
+        request = make_request(
+            "post",
+            {
+                "module_bay_id": str(bay.pk),
+                "module_type_id": str(module_type.pk),
+                "server_key": "default",
+            },
+        )
+        view = InstallModuleView()
+        view._librenms_api = SimpleNamespace(server_key="default")
+
+        _post(view, request, pk=device.pk)
+
+        module = Module.objects.get(device=device, module_bay=bay)
+        power_port = PowerPort.objects.get(device=device, module=module, name="Power In")
+        assert PowerOutlet.objects.filter(
+            device=device,
+            module=module,
+            name="Power Out",
+            power_port=power_port,
+        ).exists()
+
     def test_install_does_not_adopt_a_module_bay_without_change_permission(self):
         from types import SimpleNamespace
 

@@ -530,7 +530,7 @@ class TestReplaceModuleView:
         assert any("Removed REPLACE-CONFLICT-SOURCE" in text for text in message_texts(request, "info"))
 
     @pytest.mark.django_db
-    def test_denied_interface_adoption_rolls_back_the_replacement(self):
+    def test_replacement_checks_interface_scope_before_deleting_the_old_module(self):
         from types import SimpleNamespace
 
         from dcim.models import Device, Interface, InterfaceTemplate, Module, ModuleType
@@ -567,7 +567,6 @@ class TestReplaceModuleView:
             serial="REPLACE-ADOPTION-OLD-SERIAL",
         )
         hidden = make_interface(device, "Te1/1/1", iface_type="10gbase-x-sfpp")
-        allowed = make_interface(device, "Te1/1/2", iface_type="10gbase-x-sfpp")
         user = make_user_with_perms(
             "replace-adoption-scope",
             [
@@ -580,7 +579,7 @@ class TestReplaceModuleView:
                 ("delete", Interface),
             ],
         )
-        user = grant(user, "change", Interface, constraints={"pk": allowed.pk})
+        user = grant(user, "change", Interface, constraints={"device__modules__isnull": True})
         request = make_request(
             "post",
             {"module_id": str(installed.pk), "ent_index": "100", "server_key": "default"},
