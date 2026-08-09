@@ -167,6 +167,10 @@ class _SerialConflictUnavailable(Exception):
         self.serial = serial
 
 
+class _InterfaceAdoptionUnavailable(Exception):
+    """Abort a module write that adopted an interface outside the caller's change scope."""
+
+
 def _get_sync_device_for_inventory(device, server_key):
     """Return the VC sync device used for module inventory cache keys."""
     return get_librenms_sync_device(device, server_key=server_key) or device
@@ -247,21 +251,35 @@ def _select_module_interface_by_coordinates(device, module_interfaces, item):
     return scored[0][2]
 
 
-def _count_adoptable_interfaces(device, module, interfaces):
-    """Count adoptable interfaces, or return None if the change scope excludes one."""
+def _save_module_with_scoped_interface_adoption(module, interfaces):
+    """Save a module and verify every interface that NetBox adopted."""
     from dcim.models import Interface
+    from django.db.models.signals import post_save
 
-    # NetBox adopts standalone components during Module.save() before this plugin rewrites
-    # interface names for a VC member. Check the raw instantiated names that NetBox will use.
-    template_names = get_module_template_interface_names(device, module, rewrite_for_vc=False)
-    if not template_names:
-        return 0
+    created_ids = set()
+    adopted_ids = set()
 
-    candidates = Interface.objects.filter(device=device, module__isnull=True, name__in=template_names)
-    candidate_count = candidates.count()
-    if interfaces.filter(pk__in=candidates.values("pk")).count() != candidate_count:
-        return None
-    return candidate_count
+    def capture_interface_save(sender, instance, created, **kwargs):
+        if instance.module_id != module.pk:
+            return
+        if created:
+            created_ids.add(instance.pk)
+        else:
+            adopted_ids.add(instance.pk)
+
+    with transaction.atomic():
+        module._adopt_components = True
+        module.full_clean()
+        post_save.connect(capture_interface_save, sender=Interface, weak=False)
+        try:
+            module.save()
+        finally:
+            post_save.disconnect(capture_interface_save, sender=Interface)
+
+        adopted_ids.difference_update(created_ids)
+        if interfaces.filter(pk__in=adopted_ids).count() != len(adopted_ids):
+            raise _InterfaceAdoptionUnavailable
+    return len(adopted_ids)
 
 
 def _adopt_existing_template_interfaces(device, module, interfaces):
@@ -654,17 +672,7 @@ class InstallModuleView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
                     serial=serial,
                     status="active",
                 )
-                adopted_interfaces = _count_adoptable_interfaces(
-                    target_device,
-                    module,
-                    changeable_interfaces,
-                )
-                if adopted_interfaces is None:
-                    messages.error(request, "A matching interface is not available for module adoption.")
-                    return _modules_redirect_response(request, sync_url, server_key)
-                module._adopt_components = True
-                module.full_clean()
-                module.save()
+                adopted_interfaces = _save_module_with_scoped_interface_adoption(module, changeable_interfaces)
                 vc_adjustments = _normalize_module_interface_names_for_vc_member(
                     target_device,
                     module,
@@ -720,6 +728,8 @@ class InstallModuleView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
                     "Installed module, but interface binding was skipped: "
                     f"{bind_result.get('reason', 'unknown reason')}",
                 )
+        except _InterfaceAdoptionUnavailable:
+            messages.error(request, "A matching interface is not available for module adoption.")
         except (ValidationError, IntegrityError) as e:
             messages.error(request, f"Failed to install module: {e}")
 
@@ -1042,22 +1052,19 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
                     serial=serial,
                     status="active",
                 )
-                adopted_interfaces = _count_adoptable_interfaces(device, module, changeable_interfaces)
-                if adopted_interfaces is None:
-                    return {
-                        "status": "skipped",
-                        "name": name,
-                        "reason": "a matching interface is not available for module adoption",
-                    }
-                module._adopt_components = True
-                module.full_clean()
-                module.save()
+                adopted_interfaces = _save_module_with_scoped_interface_adoption(module, changeable_interfaces)
                 vc_adjustments = _normalize_module_interface_names_for_vc_member(
                     device,
                     module,
                     changeable_interfaces,
                     deletable_interfaces,
                 )
+        except _InterfaceAdoptionUnavailable:
+            return {
+                "status": "skipped",
+                "name": name,
+                "reason": "a matching interface is not available for module adoption",
+            }
         except (ValidationError, IntegrityError) as e:
             error_msg = str(e)
             if "dcim_interface_unique_device_name" in error_msg:
@@ -1950,15 +1957,6 @@ class ReplaceModuleView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjectP
                     serial=serial,
                     status="active",
                 )
-                adopted_interfaces = _count_adoptable_interfaces(
-                    target_device,
-                    new_module,
-                    changeable_interfaces,
-                )
-                if adopted_interfaces is None:
-                    messages.error(request, "A matching interface is not available for module adoption.")
-                    return _modules_redirect_response(request, sync_url, server_key)
-
                 # Re-derive any serial conflict from the database INSIDE the locked
                 # transaction (and lock those rows too) — checking before the lock
                 # opens a TOCTOU window where a concurrent request could change a
@@ -1997,9 +1995,10 @@ class ReplaceModuleView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjectP
                 installed_module.delete()
 
                 # Install fresh module from LibreNMS data
-                new_module._adopt_components = True
-                new_module.full_clean()
-                new_module.save()
+                adopted_interfaces = _save_module_with_scoped_interface_adoption(
+                    new_module,
+                    changeable_interfaces,
+                )
                 vc_adjustments = _normalize_module_interface_names_for_vc_member(
                     target_device,
                     new_module,
@@ -2053,6 +2052,8 @@ class ReplaceModuleView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjectP
                     "Replaced module, but interface binding was skipped: "
                     f"{bind_result.get('reason', 'unknown reason')}",
                 )
+        except _InterfaceAdoptionUnavailable:
+            messages.error(request, "A matching interface is not available for module adoption.")
         except _SerialConflictAmbiguous as exc:
             messages.error(
                 request,

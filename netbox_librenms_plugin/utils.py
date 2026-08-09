@@ -291,8 +291,8 @@ def rewrite_interface_name_for_vc_member(
     return f"{match.group('prefix')}{vc_position}{match.group('suffix')}"
 
 
-def get_module_template_interface_names(device: Device, module, *, rewrite_for_vc=True) -> list[str]:
-    """Return unique instantiated interface-template names, optionally rewritten for VC members."""
+def get_module_template_interface_names(device: Device, module) -> list[str]:
+    """Return unique instantiated interface-template names, rewritten for VC members when needed."""
     if device is None:
         return []
 
@@ -303,7 +303,7 @@ def get_module_template_interface_names(device: Device, module, *, rewrite_for_v
     vc_position = getattr(device, "vc_position", None)
     vc_id = getattr(device, "virtual_chassis_id", None)
     member_positions = None
-    if rewrite_for_vc and isinstance(vc_position, int) and vc_position > 0 and isinstance(vc_id, int):
+    if isinstance(vc_position, int) and vc_position > 0 and isinstance(vc_id, int):
         member_positions = get_vc_member_positions(device)
 
     template_names = []

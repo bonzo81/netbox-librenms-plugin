@@ -404,140 +404,220 @@ class TestReplaceModuleView:
         mock_msg.error.assert_called_once()
         mock_redirect.assert_called_once()
 
+    @pytest.mark.django_db
     def test_replace_deletes_old_and_creates_new(self):
         """POST with valid data deletes old module and creates new one."""
-        view = self._view()
-        device = _make_device()
-        sync_device = _make_device(pk=999, name="vc-sync-device")
-        installed = _make_module(serial="OLD", type_id=5)
-        request = _make_request("POST", data={"module_id": "42", "ent_index": "100", "server_key": "prod"})
-        cached = [{"entPhysicalIndex": 100, "entPhysicalModelName": "XCM-7s", "entPhysicalSerialNum": "NEW"}]
-        matched_type = MagicMock()
-        matched_type.model = "XCM-7s"
+        from types import SimpleNamespace
 
-        new_module = MagicMock()
+        from dcim.models import Module
+        from django.core.cache import cache
 
-        with (
-            patch(
-                "netbox_librenms_plugin.views.mixins.NetBoxObjectPermissionMixin.restrict_object_or_404",
-                side_effect=[device, installed],
-            ),
-            patch.object(view, "require_all_permissions", return_value=None),
-            # "prod" must be a configured server for resolve_posted_server_key to honour the posted key
-            # (else it degrades to the active "default"); mirrors a real multi-server deployment.
-            patch(
-                "netbox_librenms_plugin.librenms_api.LibreNMSAPI.get_available_servers",
-                return_value={"prod": "Prod", "default": "Default"},
-            ),
-            patch.object(view, "get_cache_key", return_value="ck") as mock_get_cache_key,
-            patch(
-                "netbox_librenms_plugin.views.sync.modules._get_sync_device_for_inventory",
-                return_value=sync_device,
-            ) as mock_get_sync_device,
-            patch("netbox_librenms_plugin.views.sync.modules.reverse", return_value="/sync/"),
-            patch("netbox_librenms_plugin.views.sync.modules.cache") as mock_cache,
-            patch(
-                "netbox_librenms_plugin.views.sync.modules.get_module_types_indexed",
-                return_value={"XCM-7s": matched_type},
-            ),
-            patch("netbox_librenms_plugin.utils.apply_normalization_rules", return_value="XCM-7s"),
-            patch("netbox_librenms_plugin.views.sync.modules.transaction") as mock_tx,
-            patch("netbox_librenms_plugin.views.sync.modules.messages") as mock_msg,
-            patch("netbox_librenms_plugin.views.sync.modules.redirect"),
-            patch("dcim.models.Module") as mock_module_cls,
-        ):
-            mock_cache.get.return_value = {"inventory": cached, "librenms_id": "test"}
-            mock_tx.atomic.return_value.__enter__ = lambda s: s
-            mock_tx.atomic.return_value.__exit__ = MagicMock(return_value=False)
-            mock_module_cls.return_value = new_module
-            # New code does TWO select_for_update() calls inside the atomic
-            # block — one for the installed-module re-fetch, one for the
-            # serial-conflict re-derivation (returns empty list here).
-            installed_chain = MagicMock()
-            installed_chain.filter.return_value.select_related.return_value.first.return_value = installed
-            conflict_chain = MagicMock()
-            conflict_chain.filter.return_value.exclude.return_value.select_related.return_value.__iter__ = lambda s: (
-                iter([])
-            )
-            mock_module_cls.objects.restrict.return_value = mock_module_cls.objects
-            mock_module_cls.objects.select_for_update.side_effect = [installed_chain, conflict_chain]
-            mock_module_cls.objects.filter.return_value.exclude.return_value.count.return_value = 0
+        from netbox_librenms_plugin.tests.conftest import make_device, make_module_bay, make_module_type
+        from netbox_librenms_plugin.tests.view_test_helpers import make_request, make_view, message_texts
+        from netbox_librenms_plugin.views.sync.modules import ReplaceModuleView
 
-            _post(view, request, pk=24)
+        device = make_device("replace-real-device")
+        old_type = make_module_type("REPLACE-REAL-OLD")
+        new_type = make_module_type("REPLACE-REAL-NEW")
+        bay = make_module_bay(device, "Replace Real Bay")
+        installed = Module.objects.create(
+            device=device,
+            module_bay=bay,
+            module_type=old_type,
+            serial="REPLACE-REAL-OLD-SERIAL",
+        )
+        request = make_request(
+            "post",
+            {"module_id": str(installed.pk), "ent_index": "100", "server_key": "default"},
+        )
+        view = make_view(
+            ReplaceModuleView,
+            request,
+            librenms_api=SimpleNamespace(server_key="default"),
+        )
+        cache_key = view.get_cache_key(device, "inventory", server_key="default")
+        cache.set(
+            cache_key,
+            {
+                "inventory": [
+                    {
+                        "entPhysicalIndex": 100,
+                        "entPhysicalModelName": new_type.model,
+                        "entPhysicalSerialNum": "REPLACE-REAL-NEW-SERIAL",
+                    }
+                ],
+                "librenms_id": 1,
+            },
+            timeout=300,
+        )
+        try:
+            response = _post(view, request, pk=device.pk)
+        finally:
+            cache.delete(cache_key)
 
-        installed.delete.assert_called_once()
-        new_module.full_clean.assert_called_once()
-        new_module.save.assert_called_once()
-        mock_msg.success.assert_called_once()
-        # server_key from POST must be forwarded to the cache key lookup
-        mock_get_sync_device.assert_called_with(device, "prod")
-        mock_get_cache_key.assert_called_with(sync_device, "inventory", server_key="prod")
+        assert response.status_code == 302
+        assert not Module.objects.filter(pk=installed.pk).exists()
+        replacement = Module.objects.get(device=device, module_bay=bay)
+        assert replacement.module_type == new_type
+        assert replacement.serial == "REPLACE-REAL-NEW-SERIAL"
+        assert any("Replaced REPLACE-REAL-OLD with REPLACE-REAL-NEW" in text for text in message_texts(request))
 
+    @pytest.mark.django_db
     def test_replace_removes_serial_conflict_from_db(self):
         """POST re-derives the conflicting module from serial, not from conflict_module_id."""
-        view = self._view()
-        device = _make_device()
-        installed = _make_module(serial="OLD", type_id=5)
-        # No conflict_module_id in POST — conflict must be derived from serial
-        request = _make_request("POST", data={"module_id": "42", "ent_index": "100", "server_key": "prod"})
-        cached = [
-            {"entPhysicalIndex": 100, "entPhysicalModelName": "XCM-7s", "entPhysicalSerialNum": "CONFLICT_SERIAL"}
-        ]
-        matched_type = MagicMock()
-        matched_type.model = "XCM-7s"
+        from types import SimpleNamespace
 
-        conflict = _make_module(pk=55, serial="CONFLICT_SERIAL", bay_name="Slot 3")
-        new_module = MagicMock()
+        from dcim.models import Module
+        from django.core.cache import cache
 
-        with (
-            patch(
-                "netbox_librenms_plugin.views.mixins.NetBoxObjectPermissionMixin.restrict_object_or_404",
-                side_effect=[device, installed],
-            ),
-            patch.object(view, "require_all_permissions", return_value=None),
-            patch.object(view, "get_cache_key", return_value="ck"),
-            patch("netbox_librenms_plugin.views.sync.modules.reverse", return_value="/sync/"),
-            patch("netbox_librenms_plugin.views.sync.modules.cache") as mock_cache,
-            patch(
-                "netbox_librenms_plugin.views.sync.modules.get_module_types_indexed",
-                return_value={"XCM-7s": matched_type},
-            ),
-            patch("netbox_librenms_plugin.utils.apply_normalization_rules", return_value="XCM-7s"),
-            patch("netbox_librenms_plugin.views.sync.modules.transaction") as mock_tx,
-            patch("netbox_librenms_plugin.views.sync.modules.messages") as mock_msg,
-            patch("netbox_librenms_plugin.views.sync.modules.redirect"),
-            patch("dcim.models.Module") as mock_module_cls,
-        ):
-            mock_cache.get.return_value = {"inventory": cached, "librenms_id": "test"}
-            mock_tx.atomic.return_value.__enter__ = lambda s: s
-            mock_tx.atomic.return_value.__exit__ = MagicMock(return_value=False)
-            mock_module_cls.return_value = new_module
-            # New code: both the installed re-fetch and the serial-conflict
-            # re-derivation use select_for_update() to lock both rows inside
-            # the atomic block.  Configure the chained mocks accordingly:
-            #   1. installed = Module.objects.select_for_update()
-            #                    .filter(pk=, device=).select_related().first()
-            #   2. conflicts = list(Module.objects.select_for_update()
-            #                    .filter(serial=).exclude(pk=).select_related(...))
-            installed_chain = MagicMock()
-            installed_chain.filter.return_value.select_related.return_value.first.return_value = installed
-            conflict_chain = MagicMock()
-            conflict_chain.filter.return_value.exclude.return_value.select_related.return_value.__iter__ = lambda s: (
-                iter([conflict])
-            )
-            mock_module_cls.objects.restrict.return_value = mock_module_cls.objects
-            mock_module_cls.objects.select_for_update.side_effect = [installed_chain, conflict_chain]
-            mock_module_cls.objects.filter.return_value.exclude.return_value.count.return_value = 1
+        from netbox_librenms_plugin.tests.conftest import make_device, make_module_bay, make_module_type
+        from netbox_librenms_plugin.tests.view_test_helpers import make_request, make_view, message_texts
+        from netbox_librenms_plugin.views.sync.modules import ReplaceModuleView
 
-            _post(view, request, pk=24)
+        device = make_device("replace-conflict-target")
+        conflict_device = make_device("replace-conflict-source")
+        old_type = make_module_type("REPLACE-CONFLICT-OLD")
+        new_type = make_module_type("REPLACE-CONFLICT-NEW")
+        conflict_type = make_module_type("REPLACE-CONFLICT-SOURCE")
+        target_bay = make_module_bay(device, "Replace Conflict Target Bay")
+        conflict_bay = make_module_bay(conflict_device, "Replace Conflict Source Bay")
+        installed = Module.objects.create(
+            device=device,
+            module_bay=target_bay,
+            module_type=old_type,
+            serial="REPLACE-CONFLICT-OLD-SERIAL",
+        )
+        conflict = Module.objects.create(
+            device=conflict_device,
+            module_bay=conflict_bay,
+            module_type=conflict_type,
+            serial="REPLACE-CONFLICT-NEW-SERIAL",
+        )
+        request = make_request(
+            "post",
+            {"module_id": str(installed.pk), "ent_index": "100", "server_key": "default"},
+        )
+        view = make_view(
+            ReplaceModuleView,
+            request,
+            librenms_api=SimpleNamespace(server_key="default"),
+        )
+        cache_key = view.get_cache_key(device, "inventory", server_key="default")
+        cache.set(
+            cache_key,
+            {
+                "inventory": [
+                    {
+                        "entPhysicalIndex": 100,
+                        "entPhysicalModelName": new_type.model,
+                        "entPhysicalSerialNum": conflict.serial,
+                    }
+                ],
+                "librenms_id": 1,
+            },
+            timeout=300,
+        )
+        try:
+            response = _post(view, request, pk=device.pk)
+        finally:
+            cache.delete(cache_key)
 
-        # Conflict module must be deleted, then the installed module, then new one saved
-        conflict.delete.assert_called_once()
-        installed.delete.assert_called_once()
-        new_module.save.assert_called_once()
-        mock_module_cls.objects.restrict.assert_any_call(request.user, "delete")
-        mock_msg.info.assert_called_once()
-        mock_msg.success.assert_called_once()
+        assert response.status_code == 302
+        assert not Module.objects.filter(pk__in=[installed.pk, conflict.pk]).exists()
+        replacement = Module.objects.get(device=device, module_bay=target_bay)
+        assert replacement.module_type == new_type
+        assert replacement.serial == "REPLACE-CONFLICT-NEW-SERIAL"
+        assert any("Removed REPLACE-CONFLICT-SOURCE" in text for text in message_texts(request, "info"))
+
+    @pytest.mark.django_db
+    def test_denied_interface_adoption_rolls_back_the_replacement(self):
+        from types import SimpleNamespace
+
+        from dcim.models import Device, Interface, InterfaceTemplate, Module, ModuleType
+        from django.core.cache import cache
+
+        from netbox_librenms_plugin.tests.conftest import (
+            make_device,
+            make_interface,
+            make_module_bay,
+            make_module_type,
+        )
+        from netbox_librenms_plugin.tests.view_test_helpers import (
+            grant,
+            make_request,
+            make_user_with_perms,
+            make_view,
+            message_texts,
+        )
+        from netbox_librenms_plugin.views.sync.modules import ReplaceModuleView
+
+        device = make_device("replace-adoption-scope")
+        old_type = make_module_type("REPLACE-ADOPTION-OLD")
+        new_type = make_module_type("REPLACE-ADOPTION-NEW")
+        InterfaceTemplate.objects.create(
+            module_type=new_type,
+            name="Te1/1/1",
+            type="10gbase-x-sfpp",
+        )
+        bay = make_module_bay(device, "Replace Adoption Scope Bay")
+        installed = Module.objects.create(
+            device=device,
+            module_bay=bay,
+            module_type=old_type,
+            serial="REPLACE-ADOPTION-OLD-SERIAL",
+        )
+        hidden = make_interface(device, "Te1/1/1", iface_type="10gbase-x-sfpp")
+        allowed = make_interface(device, "Te1/1/2", iface_type="10gbase-x-sfpp")
+        user = make_user_with_perms(
+            "replace-adoption-scope",
+            [
+                ("view", Device),
+                ("view", ModuleType),
+                ("add", Module),
+                ("change", Module),
+                ("delete", Module),
+                ("add", Interface),
+                ("delete", Interface),
+            ],
+        )
+        user = grant(user, "change", Interface, constraints={"pk": allowed.pk})
+        request = make_request(
+            "post",
+            {"module_id": str(installed.pk), "ent_index": "100", "server_key": "default"},
+            user=user,
+        )
+        view = make_view(
+            ReplaceModuleView,
+            request,
+            librenms_api=SimpleNamespace(server_key="default"),
+        )
+        cache_key = view.get_cache_key(device, "inventory", server_key="default")
+        cache.set(
+            cache_key,
+            {
+                "inventory": [
+                    {
+                        "entPhysicalIndex": 100,
+                        "entPhysicalModelName": new_type.model,
+                        "entPhysicalSerialNum": "REPLACE-ADOPTION-NEW-SERIAL",
+                    }
+                ],
+                "librenms_id": 1,
+            },
+            timeout=300,
+        )
+        try:
+            response = _post(view, request, pk=device.pk)
+        finally:
+            cache.delete(cache_key)
+
+        assert response.status_code == 302
+        assert Module.objects.filter(pk=installed.pk, module_type=old_type, module_bay=bay).exists()
+        assert not Module.objects.filter(device=device, module_type=new_type).exists()
+        hidden.refresh_from_db()
+        assert hidden.module_id is None
+        recorded_messages = message_texts(request)
+        assert any("not available for module adoption" in text for text in recorded_messages), recorded_messages
 
     def test_requires_all_permissions(self):
         """POST returns early when require_all_permissions returns a response."""

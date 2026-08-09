@@ -2655,6 +2655,117 @@ class TestModuleMutationScopes:
         assert hidden.module_id is None
         assert not Module.objects.filter(device=device, module_bay=bay).exists()
 
+    def test_install_checks_the_interface_adopted_before_prediction_hooks(self):
+        from types import SimpleNamespace
+
+        from dcim.models import Device, Interface, InterfaceTemplate, Module, ModuleBay, ModuleType
+        from django.dispatch import receiver
+
+        from netbox_librenms_plugin.signals import predict_module_interface_names
+        from netbox_librenms_plugin.tests.conftest import make_device, make_interface
+        from netbox_librenms_plugin.tests.view_test_helpers import grant, make_request, make_user_with_perms
+        from netbox_librenms_plugin.views.sync.modules import InstallModuleView
+
+        device = make_device("module-predicted-adoption-scope")
+        bay = ModuleBay.objects.create(device=device, name="Predicted Adoption Scope Bay")
+        module_type = ModuleType.objects.create(
+            manufacturer=device.device_type.manufacturer,
+            model="Predicted Adoption Scope Type",
+        )
+        InterfaceTemplate.objects.create(
+            module_type=module_type,
+            name="Te1/1/1",
+            type="10gbase-x-sfpp",
+        )
+        hidden = make_interface(device, "Te1/1/1", iface_type="10gbase-x-sfpp")
+        allowed = make_interface(device, "Ethernet1/1/1", iface_type="10gbase-x-sfpp")
+        user = make_user_with_perms(
+            "module-predicted-adoption-scope",
+            [
+                ("view", Device),
+                ("view", ModuleBay),
+                ("view", ModuleType),
+                ("add", Module),
+                ("add", Interface),
+                ("delete", Interface),
+            ],
+        )
+        user = grant(user, "change", Interface, constraints={"pk": allowed.pk})
+        request = make_request(
+            "post",
+            {
+                "module_bay_id": str(bay.pk),
+                "module_type_id": str(module_type.pk),
+                "server_key": "default",
+            },
+            user=user,
+        )
+        view = InstallModuleView()
+        view._librenms_api = SimpleNamespace(server_key="default")
+
+        @receiver(predict_module_interface_names)
+        def predict_name(sender, device, module, names, **kwargs):
+            return ["Ethernet1/1/1"]
+
+        try:
+            _post(view, request, pk=device.pk)
+        finally:
+            predict_module_interface_names.disconnect(predict_name)
+
+        hidden.refresh_from_db()
+        assert hidden.module_id is None
+        assert not Module.objects.filter(device=device, module_bay=bay).exists()
+
+    def test_install_does_not_require_change_scope_for_a_new_template_interface(self):
+        from types import SimpleNamespace
+
+        from dcim.models import Device, Interface, InterfaceTemplate, Module, ModuleBay, ModuleType
+
+        from netbox_librenms_plugin.tests.conftest import make_device, make_interface
+        from netbox_librenms_plugin.tests.view_test_helpers import grant, make_request, make_user_with_perms
+        from netbox_librenms_plugin.views.sync.modules import InstallModuleView
+
+        device = make_device("module-created-interface-scope")
+        bay = ModuleBay.objects.create(device=device, name="Created Interface Scope Bay")
+        module_type = ModuleType.objects.create(
+            manufacturer=device.device_type.manufacturer,
+            model="Created Interface Scope Type",
+        )
+        InterfaceTemplate.objects.create(
+            module_type=module_type,
+            name="Te1/1/1",
+            type="10gbase-x-sfpp",
+        )
+        allowed = make_interface(device, "Te1/1/2", iface_type="10gbase-x-sfpp")
+        user = make_user_with_perms(
+            "module-created-interface-scope",
+            [
+                ("view", Device),
+                ("view", ModuleBay),
+                ("view", ModuleType),
+                ("add", Module),
+                ("add", Interface),
+                ("delete", Interface),
+            ],
+        )
+        user = grant(user, "change", Interface, constraints={"pk": allowed.pk})
+        request = make_request(
+            "post",
+            {
+                "module_bay_id": str(bay.pk),
+                "module_type_id": str(module_type.pk),
+                "server_key": "default",
+            },
+            user=user,
+        )
+        view = InstallModuleView()
+        view._librenms_api = SimpleNamespace(server_key="default")
+
+        _post(view, request, pk=device.pk)
+
+        module = Module.objects.get(device=device, module_bay=bay)
+        assert Interface.objects.filter(device=device, module=module, name="Te1/1/1").exists()
+
     @pytest.mark.parametrize("excluded_action", ["change_conflict", "delete_generated"])
     def test_vc_normalization_does_not_cross_interface_grants(self, excluded_action):
         from dcim.models import Interface
