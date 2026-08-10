@@ -218,53 +218,6 @@ class TestSyncCablesViewSuccessPath:
 
         assert result == {"status": "invalid", "interface": "Gi0/1"}
 
-    def test_normal_cable_action_does_not_mask_nested_does_not_exist(self):
-        """Only a failed remote termination lookup is reported as missing remote."""
-        from dcim.models import Interface
-
-        from netbox_librenms_plugin.views.sync.cables import SyncCablesView
-
-        local = make_interface(make_device("cable-action-local"), "Gi0/1")
-        remote = make_interface(make_device("cable-action-remote"), "Gi0/2")
-        view = make_view(SyncCablesView)
-
-        with (
-            patch.object(view, "_apply_cable_action", side_effect=Interface.DoesNotExist("nested lookup")),
-            pytest.raises(Interface.DoesNotExist, match="nested lookup"),
-        ):
-            view.handle_cable_creation(
-                {
-                    "local_port": "Gi0/1",
-                    "netbox_local_interface_id": local.pk,
-                    "netbox_remote_interface_id": remote.pk,
-                },
-                {"local_port_id": "1"},
-            )
-
-    def test_serial_cable_action_does_not_mask_nested_does_not_exist(self):
-        """A nested serial action failure is not reported as a missing termination."""
-        from dcim.models import ConsolePort
-
-        from netbox_librenms_plugin.tests.conftest import make_serial_device
-        from netbox_librenms_plugin.views.sync.cables import SyncCablesView
-
-        _server, server_ports, _ = make_serial_device("cable-action-server", csp_names=["ttyS1"])
-        _client, _, console_ports = make_serial_device("cable-action-client", cp_names=["console"])
-        view = make_view(SyncCablesView)
-
-        with (
-            patch.object(view, "_apply_cable_action", side_effect=ConsolePort.DoesNotExist("nested lookup")),
-            pytest.raises(ConsolePort.DoesNotExist, match="nested lookup"),
-        ):
-            view.handle_serial_cable_creation(
-                {
-                    "local_port": "ttyS1",
-                    "netbox_local_interface_id": server_ports[0].pk,
-                    "netbox_remote_interface_id": console_ports[0].pk,
-                },
-                {"local_port_id": "serial:1"},
-            )
-
     def test_unrelated_posted_device_cannot_redirect_the_local_termination(self):
         """A forged VC selection must reject the row, not cable the cached page interface."""
         from dcim.models import Cable
@@ -354,16 +307,16 @@ class TestSyncCablesViewSuccessPath:
         assert any("Gi0/1" in text for text in message_texts(request, "error"))
 
     def test_interface_cable_gets_provenance_enrichment(self):
-        """The non-serial Interface↔Interface path stamps the same provenance as the serial path: the librenms tag, the configured color, a description carrying the server key, and the REMOTE device's tenant."""
+        """A real Interface cable POST stamps provenance and the remote tenant."""
+        from django.contrib.auth import get_user_model
+        from django.core.cache import cache
+        from django.test import Client
+        from django.urls import reverse
         from dcim.models import Cable
         from tenancy.models import Tenant
 
+        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
         from netbox_librenms_plugin.views.sync.cables import SyncCablesView
-
-        view = object.__new__(SyncCablesView)
-        view.require_all_permissions = MagicMock(return_value=None)
-        view.get_cache_key = MagicMock(return_value="key")
-        view._post_server_key = "default"
 
         dev_local = make_device("cable-enrich-local")
         local = make_interface(dev_local, "Gi0/1")
@@ -371,36 +324,47 @@ class TestSyncCablesViewSuccessPath:
         dev_remote.tenant = Tenant.objects.create(name="Enrich Tenant", slug="enrich-tenant")
         dev_remote.save()
         remote = make_interface(dev_remote, "Gi0/2")
-
-        view.request = _make_request(post_data={"select": ["port1"], "device_selection_port1": str(dev_local.pk)})
-        link_data = {
-            "local_port_id": "port1",
+        server_key = next(iter(LibreNMSAPI.get_available_servers()))
+        row = {
+            "_source": "main",
+            "local_port_id": 10,
             "local_port": "Gi0/1",
-            "netbox_local_interface_id": local.pk,
-            "netbox_remote_interface_id": remote.pk,
+            "remote_device": dev_remote.name,
+            "remote_port": remote.name,
+            "remote_port_id": 20,
         }
+        cache.set(
+            object.__new__(SyncCablesView).get_cache_key(dev_local, "links", server_key),
+            {"links": [row], "snapshot_token": "interface-provenance"},
+            timeout=300,
+        )
+        user = get_user_model().objects.create_superuser("cable-enrich-user", "", "pw")
+        client = Client()
+        client.force_login(user)
+        rendered = client.get(
+            reverse("plugins:netbox_librenms_plugin:device_librenms_sync", args=[dev_local.pk]),
+            {"tab": "cables", "server_key": server_key},
+        )
+        record = next(iter(rendered.context["cable_sync"]["table"].rows)).record
 
-        with (
-            patch(
-                "netbox_librenms_plugin.views.mixins.NetBoxObjectPermissionMixin.restrict_object_or_404",
-                return_value=dev_local,
-            ),
-            patch("netbox_librenms_plugin.views.sync.cables.cache") as mock_cache,
-            patch("netbox_librenms_plugin.views.sync.cables.messages"),
-            patch("netbox_librenms_plugin.views.sync.cables.redirect"),
-            patch("netbox_librenms_plugin.views.sync.cables.reverse", return_value="/sync/"),
-            patch.object(
-                type(view), "librenms_api", new_callable=lambda: property(lambda s: MagicMock(server_key="default"))
-            ),
-        ):
-            mock_cache.get.return_value = {"links": [link_data]}
-            view.post(view.request, pk=dev_local.pk)
+        response = client.post(
+            reverse("plugins:netbox_librenms_plugin:sync_device_cables", args=[dev_local.pk]),
+            {
+                "sync_one": record["row_id"],
+                "server_key": server_key,
+                f"expected_local_id_{record['row_id']}": local.pk,
+                f"expected_local_device_id_{record['row_id']}": dev_local.pk,
+                f"expected_remote_id_{record['row_id']}": remote.pk,
+                f"expected_remote_device_id_{record['row_id']}": dev_remote.pk,
+            },
+        )
 
+        assert response.status_code == 302
         local.refresh_from_db()
         cable = Cable.objects.get(pk=local.cable_id)
         assert "librenms" in set(cable.tags.values_list("slug", flat=True))
         assert cable.color == "009688"
-        assert cable.description == "Synced from LibreNMS (default)"
+        assert cable.description == f"Synced from LibreNMS ({server_key})"
         assert cable.tenant == dev_remote.tenant  # remote side's tenant wins
 
 
@@ -499,59 +463,6 @@ class TestSyncCablesViewDuplicateCable:
         _post(view, req, pk=dev.pk)
 
         assert any("Cable already exists" in t for t in message_texts(req, "warning"))
-
-    def test_conflict_on_foreign_cable_warns_and_does_not_overwrite(self):
-        """A sync that would overwrite a non-managed (foreign-tagged) cable warns the user and leaves it intact."""
-        from django.contrib.messages import get_messages
-        from django.contrib.messages.storage.fallback import FallbackStorage
-        from django.test import RequestFactory
-
-        from dcim.models import Cable
-        from extras.models import Tag
-
-        from netbox_librenms_plugin.tests.conftest import cable_together, make_serial_device
-        from netbox_librenms_plugin.views.sync.cables import SyncCablesView
-
-        acs, csps, _ = make_serial_device("acs-dupwarn", csp_names=["ttyS1"])
-        _r, _, cps = make_serial_device("r-dupwarn", cp_names=["console-A", "console-B"])
-        csp, cp_a, cp_b = csps[0], cps[0], cps[1]
-
-        # csp already terminates a FOREIGN-tagged cable → re-pointing it needs explicit force.
-        old = cable_together(csp, cp_a)
-        old.tags.add(Tag.objects.create(name="foreign-dupwarn", slug="foreign-dupwarn", color="ff0000"))
-
-        from netbox_librenms_plugin.tests.conftest import make_superuser
-
-        view = object.__new__(SyncCablesView)
-        req = RequestFactory().post("/")
-        req.session = {}
-        req._messages = FallbackStorage(req)
-        # The terminations are read through a restricted queryset; this test is about the
-        # foreign-tag conflict, not the object gate.
-        req.user = make_superuser("cable-dupwarn-su")
-        view.request = req
-        view._post_server_key = "default"
-
-        # Drive the real sync pipeline directly with the cached link row (no shared-cache
-        # dependency): process_interface_sync -> handle_serial_cable_creation -> classify -> conflict.
-        link = {
-            "local_port": "ttyS1",
-            "local_port_id": "serial:x",
-            "_source": "serial",
-            "netbox_local_interface_id": csp.pk,
-            "netbox_remote_interface_id": cp_b.pk,  # re-point target
-        }
-        results = view.process_interface_sync([{"local_port_id": "serial:x", "device_id": acs.id}], [link])
-        view.display_sync_results(req, results)
-
-        # The re-point is deferred as a conflict carrying a trace, the foreign cable is untouched,
-        # and the user is warned via the messages framework.
-        assert results["conflict"] == ["ttyS1"]
-        assert view._pending_conflicts and view._pending_conflicts[0]["trace"]
-        assert Cable.objects.filter(pk=old.pk).exists()
-        csp.refresh_from_db()
-        assert csp.cable_id == old.pk
-        assert any("Overwrite protection" in str(m) for m in get_messages(req))
 
 
 class TestSyncCablesViewMissingRemote:

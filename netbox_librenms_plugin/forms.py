@@ -16,8 +16,10 @@ from dcim.models import (
 )
 from django import forms
 from django.core.exceptions import MultipleObjectsReturned
+from django.db import transaction
 from django.db.models import Case, IntegerField, Q, Value, When
 from django.http import QueryDict
+from django.utils.text import slugify
 from django.utils.translation import gettext_lazy as _
 from netbox.forms import (
     NetBoxModelFilterSetForm,
@@ -375,9 +377,62 @@ class CableSyncSettingsForm(NetBoxModelForm):
             "cable_sync_tag_color",
             "cable_sync_description",
         ]
-        # No custom clean needed: forms.CharField strips by default, so a whitespace-only tag
-        # name collapses to "" and the built-in required validation rejects it — a blank tag
-        # (which would slugify to "" and break the provenance get_or_create) can't be saved.
+
+    def __init__(self, *args, **kwargs):
+        self.user = kwargs.pop("user", None)
+        instance = kwargs.get("instance")
+        self._original_tag_name = getattr(instance, "cable_sync_tag", None)
+        super().__init__(*args, **kwargs)
+
+    def clean_cable_sync_tag(self):
+        from extras.models import Tag
+
+        tag_name = self.cleaned_data["cable_sync_tag"]
+        if not slugify(tag_name):
+            raise forms.ValidationError("The tag name must contain letters or numbers.")
+        old_tag = Tag.objects.filter(name=self._original_tag_name).first()
+        if old_tag and Tag.objects.filter(name=tag_name).exclude(pk=old_tag.pk).exists():
+            raise forms.ValidationError("A different tag already uses this name.")
+        return tag_name
+
+    @transaction.atomic
+    def save(self, commit=True):
+        """Persist settings and update the existing provenance Tag in place."""
+        from django.core.exceptions import PermissionDenied
+        from extras.models import Tag
+
+        if not commit:
+            return super().save(commit=False)
+
+        model = self._meta.model
+        locked_settings = model.objects.select_for_update().get(pk=self.instance.pk)
+        old_tag_name = locked_settings.cable_sync_tag
+        new_tag_name = self.cleaned_data["cable_sync_tag"]
+
+        locked_tags = list(Tag.objects.select_for_update().filter(name__in={old_tag_name, new_tag_name}))
+        tag = next((candidate for candidate in locked_tags if candidate.name == old_tag_name), None)
+        if tag is None:
+            tag = next((candidate for candidate in locked_tags if candidate.name == new_tag_name), None)
+        if tag is not None:
+            update_fields = []
+            if tag.name != new_tag_name:
+                tag.name = new_tag_name
+                update_fields.append("name")
+            new_color = self.cleaned_data["cable_sync_tag_color"]
+            if tag.color != new_color:
+                tag.color = new_color
+                update_fields.append("color")
+            if update_fields:
+                if self.user is not None and not Tag.objects.restrict(self.user, "change").filter(pk=tag.pk).exists():
+                    raise PermissionDenied("You do not have permission to change the cable provenance tag.")
+                tag.save(update_fields=update_fields)
+
+        setting_fields = ("cable_sync_tag", "cable_sync_tag_color", "cable_sync_description")
+        for field_name in setting_fields:
+            setattr(locked_settings, field_name, self.cleaned_data[field_name])
+        locked_settings.save(update_fields=setting_fields)
+        self.instance = locked_settings
+        return locked_settings
 
 
 # Keep for backward compatibility if needed elsewhere

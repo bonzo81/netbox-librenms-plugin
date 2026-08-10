@@ -16,7 +16,7 @@ _PYTHON_STRIP_WHITESPACE = (
 # way to disable a vendor (get_serial_sensor_type_patterns has no code-level fallback).
 INITIAL_SERIAL_SENSOR_TYPES = [
     ("acsSerialPortTable", "ttyS{N}"),
-    ("ciscoAsyncLine", "Line {N}"),
+    ("OLD-CISCO-TS-MIB::ltsLineTable", "Line {N}"),
 ]
 
 
@@ -67,7 +67,8 @@ class Migration(migrations.Migration):
                     models.CharField(
                         help_text=(
                             "LibreNMS sensor_type identifying a vendor's serial-port state sensors "
-                            "(e.g. 'acsSerialPortTable', 'ciscoAsyncLine'). Matching is exact, including case."
+                            "(e.g. 'acsSerialPortTable', 'OLD-CISCO-TS-MIB::ltsLineTable'). "
+                            "Matching is exact, including case."
                         ),
                         max_length=100,
                     ),

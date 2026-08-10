@@ -26,7 +26,7 @@ ports_url, initial_devices (label-matched device prefill, may be empty).
 <form hx-post="{{ post_url }}" hx-target="#cable-sync-content" hx-swap="innerHTML"
       hx-disabled-elt="find button[type=submit]">
   {% csrf_token %}
-  <input type="hidden" name="port_id" value="{{ row.local_port_id }}">
+  <input type="hidden" name="row_id" value="{{ row.row_id }}">
   {% if server_key %}<input type="hidden" name="server_key" value="{{ server_key }}">{% endif %}
   <div class="modal-body">
     <p class="small text-muted mb-2">

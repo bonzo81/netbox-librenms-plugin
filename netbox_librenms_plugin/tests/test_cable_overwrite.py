@@ -2,44 +2,103 @@
 Tests for LibreNMS cable-sync overwrite protection.
 
 Covers, against REAL Cable / Tag / ConsoleServerPort / ConsolePort / FrontPort / RearPort rows:
-  - classify_cable_action(): the tag-based decision (create / noop / tag_only / safe_overwrite /
-    needs_force) that gates whether a sync may touch an existing cable.
+  - classify_cable_action(): the decision (create / noop / tag_only / needs_force) that gates
+    whether a sync may touch an existing cable.
   - render_cable_trace(): the full end-to-end path (through patch panels) of a cable that would be
     overwritten, for display in the force-confirm modal.
-  - handle_serial_cable_creation(): the view-level behaviour — silent overwrite of a plugin-owned
-    ({librenms}-only) cable, a blocked "conflict" on a foreign/untagged/mixed-tag cable, and a
-    forced overwrite when the user confirms.
+  - handle_serial_cable_creation(): the view-level behavior for a conflict and an exact confirmed
+    overwrite.
 
-The overwrite gate: a cable may be replaced silently ONLY when its tags are exactly {librenms}.
-Any other tag set (a foreign tag, librenms + another tag, or no tags at all) requires the force
-modal. A purely additive change (just adding the librenms tag, terminations unchanged) is always
-allowed silently.
+Every destructive replacement requires confirmation of the exact current cable topology. A
+purely additive change (adding the librenms tag without changing terminations) does not require
+force.
 """
-
-from unittest.mock import patch
 
 import pytest
 
-from netbox_librenms_plugin.tests.conftest import cable_together, make_patch_panel, make_serial_device
-from netbox_librenms_plugin.tests.test_serial_cables_view import _mock_request
+from netbox_librenms_plugin.tests.conftest import (
+    cable_together,
+    make_device,
+    make_interface,
+    make_patch_panel,
+    make_serial_device,
+    make_serial_row,
+)
 
 
 def _sync_view(server_key="default"):
+    from uuid import uuid4
+
+    from django.contrib.auth import get_user_model
+    from django.test import RequestFactory
+
     from netbox_librenms_plugin.views.sync.cables import SyncCablesView
 
     sync = object.__new__(SyncCablesView)
-    sync.request = _mock_request()
+    sync.request = RequestFactory().post("/")
+    sync.request.session = {}
+    from django.contrib.messages.storage.fallback import FallbackStorage
+
+    sync.request._messages = FallbackStorage(sync.request)
+    sync.request.user = get_user_model().objects.create_superuser(
+        f"cable-overwrite-{uuid4().hex}",
+        password="pw",
+    )
     sync._post_server_key = server_key
     return sync
 
 
 def _serial_link(csp, cp):
+    row_id = f"serial:{csp.pk}"
     return {
         "local_port": csp.name,
-        "local_port_id": f"serial:{csp.pk}",
+        "local_port_id": row_id,
+        "row_id": row_id,
         "_source": "serial",
         "netbox_local_interface_id": csp.pk,
         "netbox_remote_interface_id": cp.pk,
+    }
+
+
+def _confirmed_intent(local_term, remote_term, *cables):
+    """Return the production confirmation token for current cables and endpoints."""
+    from netbox_librenms_plugin.views.sync.cables import SyncCablesView
+
+    state = SyncCablesView._cable_state_token({cable.pk: cable for cable in cables})
+    return SyncCablesView._cable_intent_token(state, local_term, remote_term)
+
+
+def _intent_from_modal(response, row_id):
+    """Return the opaque endpoint-bound intent emitted by the real modal."""
+    import re
+
+    match = re.search(
+        rf'name="expected_cable_intent_{re.escape(str(row_id))}" value="([^"]+)"',
+        response.content.decode(),
+    )
+    assert match is not None
+    return match.group(1)
+
+
+def _rendered_sync_data(client, device, row_id, server_key="default"):
+    """Return the endpoint-bound fields emitted by the real cable table."""
+    from django.urls import reverse
+
+    rendered = client.get(
+        reverse("plugins:netbox_librenms_plugin:device_librenms_sync", args=[device.pk]),
+        {"tab": "cables", "server_key": server_key},
+    )
+    assert rendered.status_code == 200
+    record = next(
+        row.record for row in rendered.context["cable_sync"]["table"].rows if str(row.record["row_id"]) == str(row_id)
+    )
+    return {
+        "select": row_id,
+        "server_key": server_key,
+        f"expected_local_id_{row_id}": record["netbox_local_interface_id"],
+        f"expected_local_device_id_{row_id}": record["netbox_local_device_id"],
+        f"expected_remote_id_{row_id}": record["netbox_remote_interface_id"],
+        f"expected_remote_device_id_{row_id}": record["netbox_remote_device_id"],
     }
 
 
@@ -68,7 +127,7 @@ def _classify(local, remote):
 # ---------------------------------------------------------------------------
 @pytest.mark.django_db
 class TestClassifyCableAction:
-    """The tag-based decision that decides whether a sync may touch an existing cable."""
+    """The decision that controls how sync may touch an existing cable."""
 
     def test_no_existing_cable_is_create(self):
         _acs, csps, _ = make_serial_device("acs-c1", csp_names=["ttyS1"])
@@ -95,7 +154,7 @@ class TestClassifyCableAction:
         decision = _classify(csps[0], cps[0])
         assert decision["action"] == "noop"
 
-    def test_repoint_over_librenms_only_cable_is_safe_overwrite(self):
+    def test_repoint_over_librenms_only_cable_still_requires_confirmation(self):
         from netbox_librenms_plugin.utils import get_librenms_cable_tag
 
         _acs, csps, _ = make_serial_device("acs-c4", csp_names=["ttyS1"])
@@ -103,8 +162,50 @@ class TestClassifyCableAction:
         old = cable_together(csps[0], cps[0])  # csp -> console-A
         old.tags.add(get_librenms_cable_tag())
         decision = _classify(csps[0], cps[1])  # sync now wants csp -> console-B
-        assert decision["action"] == "safe_overwrite"
+        assert decision["action"] == "needs_force"
         assert old in decision["to_remove"]
+
+    def test_existing_provenance_tag_with_custom_slug_remains_owned(self):
+        from extras.models import Tag
+
+        from netbox_librenms_plugin.models import LibreNMSSettings
+
+        settings, _created = LibreNMSSettings.objects.get_or_create(pk=1)
+        settings.cable_sync_tag = "Managed by LibreNMS"
+        settings.save()
+        provenance_tag = Tag.objects.create(
+            name="Managed by LibreNMS",
+            slug="librenms-provenance",
+            color="00ff00",
+        )
+        _acs, csps, _ = make_serial_device("acs-custom-slug", csp_names=["ttyS1"])
+        _remote, _, cps = make_serial_device("remote-custom-slug", cp_names=["console-A", "console-B"])
+        old = cable_together(csps[0], cps[0])
+        old.tags.add(provenance_tag)
+
+        decision = _classify(csps[0], cps[0])
+
+        assert decision["action"] == "noop"
+
+    def test_provenance_tag_uses_an_available_slug_when_default_is_taken(self):
+        from extras.models import Tag
+
+        from netbox_librenms_plugin.models import LibreNMSSettings
+        from netbox_librenms_plugin.utils import get_librenms_cable_tag
+
+        settings, _created = LibreNMSSettings.objects.get_or_create(pk=1)
+        settings.cable_sync_tag = "Managed by LibreNMS"
+        settings.save()
+        existing = Tag.objects.create(
+            name="Different owner",
+            slug="managed-by-librenms",
+            color="ff0000",
+        )
+
+        provenance_tag = get_librenms_cable_tag()
+
+        assert provenance_tag.name == "Managed by LibreNMS"
+        assert provenance_tag.slug != existing.slug
 
     def test_repoint_over_foreign_tagged_cable_needs_force(self):
         _acs, csps, _ = make_serial_device("acs-c5", csp_names=["ttyS1"])
@@ -143,8 +244,22 @@ class TestClassifyCableAction:
         remote_cable = cable_together(cps[0], ocsps[0])  # console already cabled to another CSP
         remote_cable.tags.add(get_librenms_cable_tag())
         decision = _classify(csps[0], cps[0])  # sync wants our-csp -> console
-        assert decision["action"] == "safe_overwrite"
+        assert decision["action"] == "needs_force"
         assert remote_cable in decision["to_remove"]
+
+    def test_same_side_terminations_on_one_breakout_are_not_a_direct_match(self):
+        """Sharing one Cable is not proof that two terminations are connected."""
+        from dcim.models import Cable
+
+        _local, csps, _ = make_serial_device("acs-breakout-classify", csp_names=["ttyS1", "ttyS2"])
+        _remote, _, cps = make_serial_device("remote-breakout-classify", cp_names=["c1", "c2"])
+        cable = Cable(a_terminations=csps, b_terminations=cps, status="connected")
+        cable.save()
+
+        decision = _classify(csps[0], csps[1])
+
+        assert decision["action"] == "unsupported"
+        assert decision["to_remove"] == []
 
 
 # ---------------------------------------------------------------------------
@@ -191,7 +306,7 @@ class TestSerialCableOverwriteBehaviour:
         _r, _, cps = make_serial_device(f"r-{name}", cp_names=["console-A", "console-B"])
         return acs, csps[0], cps[0], cps[1]
 
-    def test_repoint_over_librenms_cable_overwrites_silently(self):
+    def test_repoint_over_librenms_cable_requires_confirmation(self):
         from dcim.models import Cable
         from netbox_librenms_plugin.utils import get_librenms_cable_tag
 
@@ -202,29 +317,100 @@ class TestSerialCableOverwriteBehaviour:
         sync = _sync_view()
         result = sync.handle_serial_cable_creation(_serial_link(csp, cp_b), {"device_id": acs.id})
 
-        assert result["status"] == "overwritten"
-        assert not Cable.objects.filter(pk=old.pk).exists()  # old cable gone
+        assert result["status"] == "conflict"
+        assert Cable.objects.filter(pk=old.pk).exists()
         csp.refresh_from_db()
-        cp_b.refresh_from_db()
-        assert csp.cable_id is not None and csp.cable_id == cp_b.cable_id  # now csp -> console-B
+        assert csp.cable_id == old.pk
+
+    def test_max_length_setting_still_creates_a_keyed_cable_description(self):
+        from dcim.models import Cable
+
+        from netbox_librenms_plugin.models import LibreNMSSettings
+
+        acs, csp, cp_a, _cp_b = self._setup("long-description")
+        settings, _created = LibreNMSSettings.objects.get_or_create(pk=1)
+        settings.cable_sync_description = "x" * 200
+        settings.save()
+
+        result = _sync_view("secondary").handle_serial_cable_creation(
+            _serial_link(csp, cp_a),
+            {"device_id": acs.id},
+        )
+
+        assert result["status"] == "valid"
+        cable = Cable.objects.get()
+        assert len(cable.description) == Cable._meta.get_field("description").max_length
+        assert cable.description.endswith(" (secondary)")
+
+    def test_long_server_key_is_bounded_to_the_cable_description_field(self):
+        from dcim.models import Cable
+
+        acs, csp, cp_a, _cp_b = self._setup("long-server-key")
+        server_key = "placeholder-server-" * 20
+
+        result = _sync_view(server_key).handle_serial_cable_creation(
+            _serial_link(csp, cp_a),
+            {"device_id": acs.id},
+        )
+
+        assert result["status"] == "valid"
+        cable = Cable.objects.get()
+        assert len(cable.description) == Cable._meta.get_field("description").max_length
+
+    def test_each_cable_action_reuses_its_locked_settings_and_request_tag(self):
+        from django.db import connection
+        from django.test.utils import CaptureQueriesContext
+
+        from netbox_librenms_plugin.utils import get_librenms_cable_tag
+
+        get_librenms_cable_tag()
+        sync = _sync_view()
+        rows = []
+        for index in range(3):
+            acs, csp, cp, _unused = self._setup(f"query-{index}")
+            rows.append((acs, csp, cp))
+
+        with CaptureQueriesContext(connection) as captured:
+            results = [
+                sync.handle_serial_cable_creation(_serial_link(csp, cp), {"device_id": acs.id}) for acs, csp, cp in rows
+            ]
+
+        assert [result["status"] for result in results] == ["valid", "valid", "valid"]
+        settings_selects = [
+            query["sql"]
+            for query in captured.captured_queries
+            if query["sql"].lstrip().upper().startswith("SELECT")
+            and "netbox_librenms_plugin_librenmssettings" in query["sql"]
+        ]
+        provenance_tag_selects = [
+            query["sql"]
+            for query in captured.captured_queries
+            if query["sql"].lstrip().upper().startswith("SELECT")
+            and 'FROM "extras_tag"' in query["sql"]
+            and '"extras_tag"."name" =' in query["sql"]
+        ]
+        assert len(settings_selects) == len(rows)
+        assert len(provenance_tag_selects) == 1
 
     def test_tagging_failure_rolls_back_the_cable(self):
         """A provenance-tagging failure must not commit an untagged cable while reporting failure.
 
         An untagged cable isn't recognized as plugin-owned by classify_cable_action, so a
         half-persisted create both contradicts the error toast and turns the user's retry
-        into a force-confirm conflict against their own cable. The tag lookup is patched in
-        the sync.cables namespace only, so classify_cable_action (utils) still runs real.
+        into a force-confirm conflict against their own cable.
         """
         from dcim.models import Cable
+        from django.db import connection
 
         acs, csp, cp_a, _cp_b = self._setup("tagfail")
         sync = _sync_view()
 
-        with patch(
-            "netbox_librenms_plugin.views.sync.cables.get_librenms_cable_tag",
-            side_effect=RuntimeError("tag backend down"),
-        ):
+        def fail_tag_insert(execute, sql, params, many, context):
+            if sql.lstrip().upper().startswith("INSERT") and '"extras_taggeditem"' in sql:
+                raise RuntimeError("tag insert failed")
+            return execute(sql, params, many, context)
+
+        with connection.execute_wrapper(fail_tag_insert):
             result = sync.handle_serial_cable_creation(_serial_link(csp, cp_a), {"device_id": acs.id})
 
         assert result["status"] == "invalid"
@@ -244,7 +430,7 @@ class TestSerialCableOverwriteBehaviour:
         assert Cable.objects.filter(pk=old.pk).exists()  # foreign cable survives
         csp.refresh_from_db()
         assert csp.cable_id == old.pk  # still cabled to console-A
-        assert result.get("port_id") == _serial_link(csp, cp_b)["local_port_id"]
+        assert result.get("row_id") == _serial_link(csp, cp_b)["row_id"]
         assert result.get("trace")  # trace carried for the modal
 
     def test_force_overwrites_foreign_cable(self):
@@ -255,13 +441,41 @@ class TestSerialCableOverwriteBehaviour:
         old.tags.add(_make_tag("dcim-modeled"))
 
         sync = _sync_view()
-        result = sync.handle_serial_cable_creation(_serial_link(csp, cp_b), {"device_id": acs.id}, force=True)
+        link = _serial_link(csp, cp_b)
+        link["expected_cable_intent"] = _confirmed_intent(csp, cp_b, old)
+        result = sync.handle_serial_cable_creation(link, {"device_id": acs.id}, force=True)
 
         assert result["status"] == "overwritten"
         assert not Cable.objects.filter(pk=old.pk).exists()
         csp.refresh_from_db()
         cp_b.refresh_from_db()
         assert csp.cable_id == cp_b.cable_id
+
+    def test_force_rejects_a_multi_termination_cable(self):
+        """Force must not disconnect unrelated terminations on one cable."""
+        from dcim.models import Cable, CableTermination
+
+        acs, csps, _ = make_serial_device("acs-force-breakout", csp_names=["ttyS1", "ttyS2"])
+        _old_remote, _, old_ports = make_serial_device(
+            "remote-force-breakout-old",
+            cp_names=["console1", "console2"],
+        )
+        _target_device, _, (target_port,) = make_serial_device(
+            "remote-force-breakout-target",
+            cp_names=["console"],
+        )
+        old = Cable(a_terminations=csps, b_terminations=old_ports, status="connected")
+        old.save()
+        link = _serial_link(csps[0], target_port)
+        link["expected_cable_intent"] = _confirmed_intent(csps[0], target_port, old)
+
+        result = _sync_view().handle_serial_cable_creation(link, {"device_id": acs.pk}, force=True)
+
+        assert result["status"] == "unsupported"
+        assert Cable.objects.filter(pk=old.pk).exists()
+        assert CableTermination.objects.filter(cable=old).count() == 4
+        target_port.refresh_from_db()
+        assert target_port.cable_id is None
 
     def test_same_connection_untagged_gets_tagged_not_recreated(self):
         acs, csp, cp_a, _cp_b = self._setup("tag")
@@ -297,15 +511,15 @@ class TestCableOverwriteHtmxModal:
         from netbox_librenms_plugin.views.sync.cables import SyncCablesView
 
         acs, csps, _ = make_serial_device(f"acs-{name}", csp_names=["ttyS5"])
-        _r, _, cps = make_serial_device(f"router-{name}", cp_names=["console-A", "console-B"])
-        csp, cp_a, cp_b = csps[0], cps[0], cps[1]
+        _old_router, _, (cp_a,) = make_serial_device(f"router-old-{name}", cp_names=["console-A"])
+        _target_router, _, (cp_b,) = make_serial_device(f"router-{name}", cp_names=["console-B"])
+        csp = csps[0]
 
         # A foreign-tagged cable occupies the CSP -> the sync to console-B must conflict.
         old = cable_together(csp, cp_a)
         old.tags.add(_make_tag(f"dcim-modeled-{name}"))
 
-        # Seed the enriched links cache that "Refresh Cables" would have written, targeting
-        # console-B (a re-point over the foreign cable).
+        # Seed the raw LibreNMS snapshot targeting console-B on another device.
         link = {
             "local_port": "ttyS5",
             "local_port_id": f"serial:{csp.pk}-s",
@@ -331,8 +545,9 @@ class TestCableOverwriteHtmxModal:
     def test_conflict_returns_oob_modal_and_leaves_db_untouched(self):
         from dcim.models import Cable
 
-        client, url, link, old, csp, _cp_b = self._seed("conf")
-        resp = client.post(url, data={"select": link["local_port_id"], "server_key": "default"}, HTTP_HX_REQUEST="true")
+        client, url, link, old, csp, cp_b = self._seed("conf")
+        post_data = _rendered_sync_data(client, csp.device, link["local_port_id"])
+        resp = client.post(url, data=post_data, HTTP_HX_REQUEST="true")
 
         assert resp.status_code == 200
         content = resp.content.decode()
@@ -348,6 +563,8 @@ class TestCableOverwriteHtmxModal:
         # The destructive warning banner announces itself to assistive tech on injection.
         assert 'class="alert alert-danger py-2 d-flex" role="alert"' in content
         assert 'name="force" value="on"' in content  # the re-submit is pre-armed with force
+        expected_intent = _confirmed_intent(csp, cp_b, old)
+        assert f'name="expected_cable_intent_{link["local_port_id"]}" value="{expected_intent}"' in content
         assert 'id="cable-force-submit"' in content  # confirm-gated submit button present
         # The modal's re-submit must carry the row's resolved sync device, so a VC member
         # override can't silently revert to the page device on the forced re-submit.
@@ -361,9 +578,20 @@ class TestCableOverwriteHtmxModal:
         from dcim.models import Cable
 
         client, url, link, old, csp, cp_b = self._seed("force")
+        post_data = _rendered_sync_data(client, csp.device, link["local_port_id"])
+        initial = client.post(
+            url,
+            data=post_data,
+            HTTP_HX_REQUEST="true",
+        )
+        expected_intent = _intent_from_modal(initial, link["local_port_id"])
         resp = client.post(
             url,
-            data={"select": link["local_port_id"], "server_key": "default", "force": "on"},
+            data={
+                **post_data,
+                "force": "on",
+                f"expected_cable_intent_{link['local_port_id']}": expected_intent,
+            },
             HTTP_HX_REQUEST="true",
         )
 
@@ -382,6 +610,256 @@ class TestCableOverwriteHtmxModal:
         cp_b.refresh_from_db()
         assert csp.cable_id is not None
         assert csp.cable_id == cp_b.cable_id
+
+    def test_force_cannot_delete_a_multi_termination_cable(self):
+        """One row must not disconnect unrelated lanes on a breakout cable."""
+        from django.contrib.auth import get_user_model
+        from django.core.cache import cache
+        from django.test import Client
+        from django.urls import reverse
+        from dcim.models import Cable, CableTermination
+
+        from netbox_librenms_plugin.utils import cable_manual_pick_cache_key
+        from netbox_librenms_plugin.views.sync.cables import SyncCablesView
+
+        acs, csps, _ = make_serial_device(
+            "acs-multi-termination",
+            csp_names=["ttyS1", "ttyS2"],
+        )
+        _old_remote, _, old_ports = make_serial_device(
+            "remote-multi-termination-old",
+            cp_names=["console1", "console2"],
+        )
+        target_device, _, (target_port,) = make_serial_device(
+            "remote-multi-termination-target",
+            cp_names=["console"],
+        )
+        old = Cable(a_terminations=csps, b_terminations=old_ports, status="connected")
+        old.save()
+        acs.custom_field_data["librenms_id"] = {"default": 13}
+        acs.save(update_fields=["custom_field_data"])
+        row = make_serial_row(csps[0], target_device.name, acs)
+        snapshot = {"links": [row], "snapshot_token": "multi-termination"}
+        cache_key = object.__new__(SyncCablesView).get_cache_key(acs, "links", "default")
+        cache.set(
+            cache_key,
+            snapshot,
+            timeout=300,
+        )
+        user = get_user_model().objects.create_superuser("multi-termination-admin", "", "pw")
+        cache.set(
+            cable_manual_pick_cache_key(cache_key, snapshot["snapshot_token"], user.pk, row["local_port_id"]),
+            {"manual_remote_id": target_port.pk},
+            timeout=300,
+        )
+        client = Client()
+        client.force_login(user)
+        row_id = row["local_port_id"]
+        cable_state = SyncCablesView._cable_state_token({old.pk: old})
+        intent = SyncCablesView._cable_intent_token(cable_state, csps[0], target_port)
+
+        response = client.post(
+            reverse("plugins:netbox_librenms_plugin:sync_device_cables", args=[acs.pk]),
+            {
+                "sync_one": row_id,
+                "server_key": "default",
+                "force": "on",
+                f"expected_local_id_{row_id}": csps[0].pk,
+                f"expected_local_device_id_{row_id}": acs.pk,
+                f"expected_remote_id_{row_id}": target_port.pk,
+                f"expected_remote_device_id_{row_id}": target_device.pk,
+                f"expected_cable_intent_{row_id}": intent,
+            },
+            HTTP_HX_REQUEST="true",
+        )
+
+        assert response.status_code == 200
+        assert "Multi-termination cables cannot be changed by cable sync" in response.content.decode()
+        assert Cable.objects.filter(pk=old.pk).exists()
+        assert Cable.objects.count() == 1
+        assert CableTermination.objects.filter(cable=old).count() == 4
+        for termination in [*csps, *old_ports]:
+            termination.refresh_from_db()
+            assert termination.cable_id == old.pk
+        target_port.refresh_from_db()
+        assert target_port.cable_id is None
+
+    def test_force_confirmation_rejects_a_replacement_cable(self):
+        from dcim.models import Cable
+
+        client, url, link, old, csp, _target_cp = self._seed("stale")
+        post_data = _rendered_sync_data(client, csp.device, link["local_port_id"])
+        initial = client.post(
+            url,
+            data=post_data,
+            HTTP_HX_REQUEST="true",
+        )
+        expected_intent = _intent_from_modal(initial, link["local_port_id"])
+
+        old.delete()
+        _replacement_device, _, (replacement_remote,) = make_serial_device(
+            "router-stale-replacement",
+            cp_names=["console"],
+        )
+        replacement = cable_together(csp, replacement_remote)
+        replacement.tags.add(_make_tag("replacement-owner"))
+
+        forced = client.post(
+            url,
+            data={
+                **post_data,
+                "force": "on",
+                f"expected_cable_intent_{link['local_port_id']}": expected_intent,
+            },
+            HTTP_HX_REQUEST="true",
+        )
+
+        assert forced.status_code == 200
+        assert "cable state or target changed after confirmation" in forced.content.decode()
+        assert Cable.objects.filter(pk=replacement.pk).exists()
+        csp.refresh_from_db()
+        assert csp.cable_id == replacement.pk
+
+    def test_force_confirmation_rejects_changed_terminations_on_same_cable(self):
+        """The same Cable PK must not hide a different termination topology."""
+        from dcim.models import Cable, CableTermination
+
+        client, url, link, old, csp, target_cp = self._seed("stale-topology")
+        post_data = _rendered_sync_data(client, csp.device, link["local_port_id"])
+        initial = client.post(
+            url,
+            data=post_data,
+            HTTP_HX_REQUEST="true",
+        )
+        expected_intent = _intent_from_modal(initial, link["local_port_id"])
+
+        changed_device, _, (changed_cp,) = make_serial_device(
+            "router-stale-topology-changed",
+            cp_names=["console"],
+        )
+        CableTermination.objects.filter(cable=old, cable_end="B").update(
+            termination_id=changed_cp.pk,
+            _device_id=changed_device.pk,
+            _site_id=changed_device.site_id,
+            _location_id=changed_device.location_id,
+            _rack_id=changed_device.rack_id,
+        )
+
+        forced = client.post(
+            url,
+            data={
+                **post_data,
+                "force": "on",
+                f"expected_cable_intent_{link['local_port_id']}": expected_intent,
+            },
+            HTTP_HX_REQUEST="true",
+        )
+
+        assert forced.status_code == 200
+        assert "cable state or target changed after confirmation" in forced.content.decode()
+        assert Cable.objects.filter(pk=old.pk).exists()
+        csp.refresh_from_db()
+        target_cp.refresh_from_db()
+        assert csp.cable_id == old.pk
+        assert CableTermination.objects.filter(
+            cable=old,
+            cable_end="B",
+            termination_id=changed_cp.pk,
+        ).exists()
+        assert target_cp.cable_id is None
+
+    def test_force_confirmation_rejects_a_changed_manual_target(self):
+        """Confirmation covers the desired endpoint as well as the occupying cable."""
+        from dcim.models import Cable
+        from django.urls import reverse
+
+        client, url, link, old, csp, _initial_target = self._seed("stale-target")
+        post_data = _rendered_sync_data(client, csp.device, link["local_port_id"])
+        first = client.post(
+            url,
+            data=post_data,
+            HTTP_HX_REQUEST="true",
+        )
+        expected_intent = _intent_from_modal(first, link["local_port_id"])
+
+        _other_device, _, (other_target,) = make_serial_device(
+            "router-stale-target-other",
+            cp_names=["console"],
+        )
+        repicked = client.post(
+            reverse("plugins:netbox_librenms_plugin:cable_remote_picker", args=[csp.device_id]),
+            {
+                "row_id": link["local_port_id"],
+                "server_key": "default",
+                "remote_interface_id": other_target.pk,
+            },
+            HTTP_HX_REQUEST="true",
+        )
+        assert repicked.status_code == 200
+
+        forced = client.post(
+            url,
+            data={
+                **post_data,
+                "force": "on",
+                f"expected_cable_intent_{link['local_port_id']}": expected_intent,
+            },
+            HTTP_HX_REQUEST="true",
+        )
+
+        assert forced.status_code == 200
+        assert "cable state or target changed after confirmation" in forced.content.decode()
+        assert Cable.objects.filter(pk=old.pk).exists()
+        csp.refresh_from_db()
+        other_target.refresh_from_db()
+        assert csp.cable_id == old.pk
+        assert other_target.cable_id is None
+
+    def test_force_confirmation_is_stale_when_the_conflict_disappears(self):
+        """A force form must not become an unconfirmed create after its cable is removed."""
+        from django.urls import reverse
+
+        client, url, link, old, csp, _initial_target = self._seed("stale-create")
+        post_data = _rendered_sync_data(client, csp.device, link["local_port_id"])
+        first = client.post(
+            url,
+            data=post_data,
+            HTTP_HX_REQUEST="true",
+        )
+        expected_intent = _intent_from_modal(first, link["local_port_id"])
+
+        _other_device, _, (other_target,) = make_serial_device(
+            "router-stale-create-other",
+            cp_names=["console"],
+        )
+        repicked = client.post(
+            reverse("plugins:netbox_librenms_plugin:cable_remote_picker", args=[csp.device_id]),
+            {
+                "row_id": link["local_port_id"],
+                "server_key": "default",
+                "remote_interface_id": other_target.pk,
+            },
+            HTTP_HX_REQUEST="true",
+        )
+        assert repicked.status_code == 200
+        old.delete()
+
+        forced = client.post(
+            url,
+            data={
+                **post_data,
+                "force": "on",
+                f"expected_cable_intent_{link['local_port_id']}": expected_intent,
+            },
+            HTTP_HX_REQUEST="true",
+        )
+
+        assert forced.status_code == 200
+        assert "cable state or target changed after confirmation" in forced.content.decode()
+        csp.refresh_from_db()
+        other_target.refresh_from_db()
+        assert csp.cable_id is None
+        assert other_target.cable_id is None
 
 
 # ---------------------------------------------------------------------------
@@ -411,6 +889,7 @@ class TestOverwritePreservesMidPathSegments:
         _t, _, (target_cp,) = make_serial_device("midkeep-target", cp_names=["console"])
 
         link = _serial_link(csp, target_cp)
+        link["expected_cable_intent"] = _confirmed_intent(csp, target_cp, c1)
         result = _sync_view().handle_serial_cable_creation(link, {"device_id": acs.id}, force=True)
 
         assert result["status"] == "overwritten"
@@ -446,15 +925,18 @@ class TestOverwritePreservesMidPathSegments:
         link["local_port"] = "ttyS1"
         link["_source"] = "serial"
         link["device_id"] = acs.id
+        link["remote_device"] = target_cp.device.name
+        link["is_configured"] = True
         key_view = object.__new__(SyncCablesView)
         cache.set(key_view.get_cache_key(acs, "links", "default"), {"links": [link]}, timeout=300)
 
         user = get_user_model().objects.create_superuser("midmodal-admin", "midmodal@example.com", "pw")
         client = Client()
         client.force_login(user)
+        post_data = _rendered_sync_data(client, acs, link["local_port_id"])
         resp = client.post(
             reverse("plugins:netbox_librenms_plugin:sync_device_cables", args=[acs.pk]),
-            data={"select": link["local_port_id"], "server_key": "default"},
+            data=post_data,
             HTTP_HX_REQUEST="true",
         )
 
@@ -481,7 +963,7 @@ class TestOverwriteRequiresDeletePermission:
     the destructive branch so create-only syncs keep working for add/change users.
     """
 
-    def _sync_view_with_real_user(self, *actions, constraints=None):
+    def _sync_view_with_real_user(self, *actions, constraints=None, device_ids=None):
         """Build a sync view whose request user holds a REAL NetBox ObjectPermission for Cable
         with the given actions — NetBox's ObjectPermissionBackend ignores Django's
         user_permissions m2m, so has_perm() only honors ObjectPermission assignments.
@@ -509,15 +991,26 @@ class TestOverwriteRequiresDeletePermission:
         # The terminations are resolved through a change-restricted queryset. These tests vary
         # the cable grant, so keep the port grant unconstrained.
         ports = ObjectPermission.objects.create(
-            name=f"ports-change{suffix}-{'-'.join(actions) or 'none'}", actions=["change"]
+            name=f"ports-change{suffix}-{'-'.join(actions) or 'none'}", actions=["view", "change"]
         )
         ports.object_types.add(ObjectType.objects.get_for_model(ConsoleServerPort))
         ports.object_types.add(ObjectType.objects.get_for_model(ConsolePort))
         ports.users.add(user)
+        devices = ObjectPermission.objects.create(
+            name=f"devices-view{suffix}-{'-'.join(actions) or 'none'}",
+            actions=["view"],
+            constraints={"pk__in": device_ids} if device_ids is not None else None,
+        )
+        from dcim.models import Device
+
+        devices.object_types.add(ObjectType.objects.get_for_model(Device))
+        devices.users.add(user)
         user = get_user_model().objects.get(pk=user.pk)  # reload to reset the perm cache
 
         sync = object.__new__(SyncCablesView)
-        sync.request = _mock_request()
+        from django.test import RequestFactory
+
+        sync.request = RequestFactory().post("/")
         sync.request.user = user
         sync._post_server_key = "default"
         return sync
@@ -530,15 +1023,83 @@ class TestOverwriteRequiresDeletePermission:
         acs, (csp,), _ = make_serial_device("permdel", csp_names=["ttyS1"])
         _r, _, (cp_a, cp_b) = make_serial_device("permdel-r", cp_names=["console-A", "console-B"])
         old = cable_together(csp, cp_a)
-        old.tags.add(get_librenms_cable_tag())  # plugin-owned: would be silently overwritten
+        old.tags.add(get_librenms_cable_tag())
 
         sync = self._sync_view_with_real_user("add", "change")  # no delete
-        result = sync.handle_serial_cable_creation(_serial_link(csp, cp_b), {"device_id": acs.id})
+        link = _serial_link(csp, cp_b)
+        link["expected_cable_intent"] = _confirmed_intent(csp, cp_b, old)
+        result = sync.handle_serial_cable_creation(link, {"device_id": acs.id}, force=True)
 
         assert result["status"] == "denied"
         assert Cable.objects.filter(pk=old.pk).exists()  # nothing deleted
         csp.refresh_from_db()
         assert csp.cable_id == old.pk
+
+    def test_tag_only_adoption_respects_the_concrete_cable_change_scope(self):
+        acs, (csp,), _ = make_serial_device("permtag", csp_names=["ttyS1"])
+        _remote, _, (cp,) = make_serial_device("permtag-r", cp_names=["console"])
+        cable = cable_together(csp, cp)
+        _other_acs, (other_csp,), _ = make_serial_device("permtag-other", csp_names=["ttyS2"])
+        _other_remote, _, (other_cp,) = make_serial_device("permtag-other-r", cp_names=["console"])
+        in_scope = cable_together(other_csp, other_cp)
+        sync = self._sync_view_with_real_user("add", "change", constraints={"pk": in_scope.pk})
+
+        result = sync.handle_serial_cable_creation(_serial_link(csp, cp), {"device_id": acs.pk})
+
+        assert result["status"] == "denied"
+        assert not cable.tags.exists()
+
+    def test_tag_only_adoption_requires_view_scope_for_the_existing_cable(self):
+        acs, (csp,), _ = make_serial_device("permtag-hidden", csp_names=["ttyS1"])
+        _remote, _, (cp,) = make_serial_device("permtag-hidden-r", cp_names=["console"])
+        cable = cable_together(csp, cp)
+        sync = self._sync_view_with_real_user("add", "change", constraints={"pk": cable.pk})
+
+        result = sync.handle_serial_cable_creation(_serial_link(csp, cp), {"device_id": acs.pk})
+
+        assert result["status"] == "denied"
+        assert not cable.tags.exists()
+
+    def test_conflict_without_view_cable_permission_is_denied(self):
+        acs, (csp,), _ = make_serial_device("trace-no-view-local", csp_names=["ttyS1"])
+        _current, _, (current_cp,) = make_serial_device(
+            "trace-no-view-current",
+            cp_names=["console"],
+        )
+        _target, _, (target_cp,) = make_serial_device("trace-no-view-target", cp_names=["console"])
+        cable_together(csp, current_cp)
+        sync = self._sync_view_with_real_user("add", "change")
+
+        result = sync.handle_serial_cable_creation(_serial_link(csp, target_cp), {"device_id": acs.pk})
+
+        assert result["status"] == "denied"
+        assert "trace" not in result
+
+    def test_conflict_trace_redacts_topology_outside_view_scope(self):
+        acs, (csp,), _ = make_serial_device("trace-scope-local", csp_names=["ttyS1"])
+        _panel, front, rear = make_patch_panel("trace-scope-hidden-panel")
+        _hidden_end, _, (hidden_cp,) = make_serial_device(
+            "trace-scope-hidden-end",
+            cp_names=["hidden-console"],
+        )
+        cable_together(csp, front)
+        cable_together(rear, hidden_cp)
+        _target, _, (target_cp,) = make_serial_device("trace-scope-target", cp_names=["console"])
+        sync = self._sync_view_with_real_user(
+            "view",
+            "add",
+            "change",
+            device_ids=[acs.pk, target_cp.device_id],
+        )
+
+        result = sync.handle_serial_cable_creation(_serial_link(csp, target_cp), {"device_id": acs.pk})
+
+        rendered_trace = str(result["trace"])
+        assert result["status"] == "conflict"
+        assert "Restricted" in rendered_trace
+        assert "trace-scope-hidden-panel" not in rendered_trace
+        assert "trace-scope-hidden-end" not in rendered_trace
+        assert "hidden-console" not in rendered_trace
 
     def test_overwrite_with_delete_perm_proceeds(self):
         from dcim.models import Cable
@@ -551,7 +1112,9 @@ class TestOverwriteRequiresDeletePermission:
         old.tags.add(get_librenms_cable_tag())
 
         sync = self._sync_view_with_real_user("add", "change", "delete")
-        result = sync.handle_serial_cable_creation(_serial_link(csp, cp_b), {"device_id": acs.id})
+        link = _serial_link(csp, cp_b)
+        link["expected_cable_intent"] = _confirmed_intent(csp, cp_b, old)
+        result = sync.handle_serial_cable_creation(link, {"device_id": acs.id}, force=True)
 
         assert result["status"] == "overwritten"
         assert not Cable.objects.filter(pk=old.pk).exists()
@@ -574,9 +1137,112 @@ class TestOverwriteRequiresDeletePermission:
         in_scope = cable_together(other_csp, other_cp)
 
         sync = self._sync_view_with_real_user("add", "change", "delete", constraints={"pk": in_scope.pk})
-        result = sync.handle_serial_cable_creation(_serial_link(csp, cp_b), {"device_id": acs.id})
+        link = _serial_link(csp, cp_b)
+        link["expected_cable_intent"] = _confirmed_intent(csp, cp_b, old)
+        result = sync.handle_serial_cable_creation(link, {"device_id": acs.id}, force=True)
 
         assert result["status"] == "denied"
         assert Cable.objects.filter(pk=old.pk).exists()  # the out-of-scope cable survives
         csp.refresh_from_db()
         assert csp.cable_id == old.pk
+
+
+@pytest.mark.django_db
+class TestCableSyncLeastPrivilegeByRowType:
+    def _client(self, name, termination_models):
+        from core.models import ObjectType
+        from dcim.models import Cable, Device
+        from django.contrib.auth import get_user_model
+        from django.test import Client
+        from users.models import ObjectPermission
+
+        from netbox_librenms_plugin.models import LibreNMSSettings
+
+        user = get_user_model().objects.create_user(f"cable-row-perms-{name}")
+
+        def grant(label, model, actions):
+            permission = ObjectPermission.objects.create(name=f"{name}-{label}", actions=actions)
+            permission.object_types.add(ObjectType.objects.get_for_model(model))
+            permission.users.add(user)
+
+        grant("plugin", LibreNMSSettings, ["view", "change"])
+        grant("devices", Device, ["view"])
+        grant("cables", Cable, ["add", "change"])
+        for model in termination_models:
+            grant(f"{model._meta.model_name}s", model, ["view", "change"])
+
+        client = Client()
+        client.force_login(user)
+        return client
+
+    @staticmethod
+    def _cache_and_url(device, link):
+        from django.core.cache import cache
+        from django.urls import reverse
+
+        from netbox_librenms_plugin.views.sync.cables import SyncCablesView
+
+        view = object.__new__(SyncCablesView)
+        cache.set(view.get_cache_key(device, "links", "default"), {"links": [link]}, timeout=300)
+        return reverse("plugins:netbox_librenms_plugin:sync_device_cables", args=[device.pk])
+
+    def test_interface_only_user_does_not_need_console_port_permissions(self):
+        from dcim.models import Cable, Interface
+
+        local_device = make_device("least-interface-local")
+        local = make_interface(local_device, "Ethernet1")
+        remote_device = make_device("least-interface-remote")
+        remote = make_interface(remote_device, "Ethernet2")
+        link = {
+            "local_port": local.name,
+            "local_port_id": "101",
+            "device_id": local_device.pk,
+            "remote_device": remote_device.name,
+            "remote_port": remote.name,
+            "netbox_local_interface_id": local.pk,
+            "netbox_remote_interface_id": remote.pk,
+            "netbox_remote_device_id": remote_device.pk,
+        }
+        client = self._client("interface", [Interface])
+        url = self._cache_and_url(local_device, link)
+        post_data = _rendered_sync_data(client, local_device, link["local_port_id"])
+
+        response = client.post(
+            url,
+            post_data,
+            HTTP_HX_REQUEST="true",
+        )
+
+        assert response.status_code == 200
+        assert Cable.objects.count() == 1
+
+    def test_serial_only_user_does_not_need_interface_permissions(self):
+        from dcim.models import Cable, ConsolePort, ConsoleServerPort
+
+        local_device, (local,), _unused = make_serial_device("least-serial-local", csp_names=["ttyS1"])
+        remote_device, _, (remote,) = make_serial_device("least-serial-remote", cp_names=["console"])
+        link = {
+            "_source": "serial",
+            "local_port": local.name,
+            "local_port_id": "serial:201",
+            "device_id": local_device.pk,
+            "remote_device": remote_device.name,
+            "is_configured": True,
+            "sensor_id": 201,
+            "sensor_index_int": 1,
+            "netbox_local_interface_id": local.pk,
+            "netbox_remote_interface_id": remote.pk,
+            "netbox_remote_device_id": remote_device.pk,
+        }
+        client = self._client("serial", [ConsoleServerPort, ConsolePort])
+        url = self._cache_and_url(local_device, link)
+        post_data = _rendered_sync_data(client, local_device, link["local_port_id"])
+
+        response = client.post(
+            url,
+            post_data,
+            HTTP_HX_REQUEST="true",
+        )
+
+        assert response.status_code == 200
+        assert Cable.objects.count() == 1

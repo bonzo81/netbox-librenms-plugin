@@ -13,8 +13,7 @@ ConsoleServerPort / ConsolePort / FrontPort / RearPort / Cable / Tag rows:
   - cabled endpoints whose traced path REACHES the LibreNMS target (a patch-panel remodel):
       -> "Connected via Patch Path", no action (a remodel is a better model of the same link)
   - cabled somewhere that does NOT reach the target:
-      -> "Cable Mismatch", Sync offered -> the classify gate applies (silent overwrite of a
-         plugin-owned cable, force modal otherwise)
+      -> "Cable Mismatch", Sync offered -> the force-confirmation gate applies to every cable
 """
 
 import pytest
@@ -261,7 +260,24 @@ class TestCableAdoptHtmx:
         client = Client()
         client.force_login(user)
         url = reverse("plugins:netbox_librenms_plugin:sync_device_cables", args=[acs.pk])
-        resp = client.post(url, data={"select": link["local_port_id"], "server_key": "default"}, HTTP_HX_REQUEST="true")
+        rendered = client.get(
+            reverse("plugins:netbox_librenms_plugin:device_librenms_sync", args=[acs.pk]),
+            {"tab": "cables", "server_key": "default"},
+        )
+        record = next(iter(rendered.context["cable_sync"]["table"].rows)).record
+        row_id = record["row_id"]
+        resp = client.post(
+            url,
+            data={
+                "sync_one": row_id,
+                "server_key": "default",
+                f"expected_local_id_{row_id}": record["netbox_local_interface_id"],
+                f"expected_local_device_id_{row_id}": record["netbox_local_device_id"],
+                f"expected_remote_id_{row_id}": record["netbox_remote_interface_id"],
+                f"expected_remote_device_id_{row_id}": record["netbox_remote_device_id"],
+            },
+            HTTP_HX_REQUEST="true",
+        )
 
         assert resp.status_code == 200
         content = resp.content.decode()
@@ -272,6 +288,91 @@ class TestCableAdoptHtmx:
         assert "librenms" in set(csp.cable.tags.values_list("slug", flat=True))  # adopted
         # The re-rendered row now shows the tagged state: Cable Found with no Sync button.
         assert "Cable Found" in content
+
+
+@pytest.mark.django_db
+class TestPatchPathSyncGuard:
+    """A correct patch path is display-only, including for crafted sync requests."""
+
+    def test_patch_path_row_cannot_be_replaced_by_a_direct_cable(self):
+        from dcim.models import Cable
+        from django.contrib.auth import get_user_model
+        from django.core.cache import cache
+        from django.test import Client
+        from django.urls import reverse
+
+        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+        from netbox_librenms_plugin.views.sync.cables import SyncCablesView
+
+        local_device = make_device("patch-guard-local")
+        local = make_interface(local_device, "Ethernet1")
+        remote_device = make_device("patch-guard-remote")
+        remote = make_interface(remote_device, "Ethernet1")
+        _panel_device, front_port, rear_port = _panel("patch-guard-panel")
+        local_segment = cable_together(local, front_port)
+        remote_segment = cable_together(rear_port, remote)
+        row = {
+            "local_port": local.name,
+            "local_port_id": 10,
+            "remote_device": remote_device.name,
+            "remote_port": remote.name,
+            "remote_port_id": 20,
+            "_source": "main",
+        }
+        server_key = next(iter(LibreNMSAPI.get_available_servers()))
+        sync_view = object.__new__(SyncCablesView)
+        cache.set(
+            sync_view.get_cache_key(local_device, "links", server_key),
+            {"links": [row], "snapshot_token": "patch-path-guard"},
+            timeout=300,
+        )
+        user = get_user_model().objects.create_superuser(
+            "patch-guard-admin",
+            "patch-guard@example.com",
+            "pw",
+        )
+        client = Client()
+        client.force_login(user)
+
+        rendered = client.get(
+            reverse("plugins:netbox_librenms_plugin:device_librenms_sync", args=[local_device.pk]),
+            {"tab": "cables", "server_key": server_key},
+        )
+
+        assert rendered.status_code == 200
+        table = rendered.context["cable_sync"]["table"]
+        record = next(iter(table.rows)).record
+        content = table.as_html(rendered.wsgi_request)
+        assert "Connected via Patch Path" in content
+        selection = next(part.split(">", 1)[0] for part in content.split("<input") if 'name="select"' in part)
+        assert 'value="10"' in selection
+        assert "disabled" in selection
+
+        cable_state = SyncCablesView._cable_state_token(
+            {local_segment.pk: local_segment, remote_segment.pk: remote_segment}
+        )
+        expected_intent = SyncCablesView._cable_intent_token(cable_state, local, remote)
+        synced = client.post(
+            reverse("plugins:netbox_librenms_plugin:sync_device_cables", args=[local_device.pk]),
+            {
+                "select": "10",
+                "server_key": server_key,
+                "force": "on",
+                "expected_cable_intent_10": expected_intent,
+                "expected_local_id_10": record["netbox_local_interface_id"],
+                "expected_local_device_id_10": record["netbox_local_device_id"],
+                "expected_remote_id_10": record["netbox_remote_interface_id"],
+                "expected_remote_device_id_10": record["netbox_remote_device_id"],
+            },
+            HTTP_HX_REQUEST="true",
+        )
+
+        assert synced.status_code == 200
+        local.refresh_from_db()
+        remote.refresh_from_db()
+        assert local.cable_id == local_segment.pk
+        assert remote.cable_id == remote_segment.pk
+        assert Cable.objects.filter(pk__in=[local_segment.pk, remote_segment.pk]).count() == 2
 
 
 # ---------------------------------------------------------------------------

@@ -19,7 +19,7 @@ class Migration(migrations.Migration):
             name="cable_sync_tag",
             field=models.CharField(
                 default="librenms",
-                help_text="Provenance tag stamped on cables the cable sync creates (the overwrite-protection ownership marker)",
+                help_text="Provenance tag added to cables that cable sync creates or adopts",
                 max_length=100,
             ),
         ),

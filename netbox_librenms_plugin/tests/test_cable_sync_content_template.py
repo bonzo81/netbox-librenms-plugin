@@ -60,6 +60,18 @@ class TestCableSyncContentTemplateMigratedMode:
         assert "csrfmiddlewaretoken" in html
         assert 'name="server_key"' in html
 
+    def test_verify_url_uses_the_active_script_prefix(self):
+        from django.urls import get_script_prefix, set_script_prefix
+
+        previous_prefix = get_script_prefix()
+        try:
+            set_script_prefix("/netbox/")
+            html = self._render(migrated=None)
+        finally:
+            set_script_prefix(previous_prefix)
+
+        assert 'data-cable-verify-url="/netbox/plugins/librenms_plugin/verify-cable/"' in html
+
     def test_render_local_port_link_branch_normalizes_missing_name(self):
         """A linked local port with no name renders empty text, not the literal 'None'."""
         from netbox_librenms_plugin.tables.cables import LibreNMSCableTable

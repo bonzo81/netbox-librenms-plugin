@@ -82,10 +82,11 @@ def _post_with_links(view, request, device, links):
 def _clear_cache_around_each_test():
     """Clear the real cache before and after each test so cache.set() link/port payloads (keyed by device PK, NOT rolled back with the test DB) can't feed a reused PK stale data."""
     from django.core.cache import cache
+    from netbox_librenms_plugin.tests.conftest import clear_test_cache
 
-    cache.clear()
+    clear_test_cache(cache)
     yield
-    cache.clear()
+    clear_test_cache(cache)
 
 
 @pytest.mark.django_db

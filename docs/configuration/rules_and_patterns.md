@@ -121,7 +121,7 @@ Patterns are scoped by `librenms_os`, which is matched case-insensitively. The L
 
 Console servers expose their serial lines as LibreNMS **state sensors**, not interface-table rows. A Serial Sensor Type entry makes one vendor's `sensor_type` recognized by the Cables tab's serial console-port sync and names the matching local ConsoleServerPorts (`{N}` = the sensor's port number).
 
-Ships pre-seeded with Avocent ACS (`acsSerialPortTable` → `ttyS{N}`) and Cisco IOS async lines (`ciscoAsyncLine` → `Line {N}`). Matching is exact, including case; deleting a row stops recognizing that vendor (there is no hidden fallback). See [Cable Sync](../device_sync/cable_sync.md) for the full serial-ports flow.
+Ships pre-seeded with Avocent ACS (`acsSerialPortTable` → `ttyS{N}`) and Cisco IOS async lines (`OLD-CISCO-TS-MIB::ltsLineTable` → `Line {N}`). Matching is exact, including case; deleting a row stops recognizing that vendor (there is no hidden fallback). See [Cable Sync](../device_sync/cable_sync.md) for the full serial-ports flow.
 
 **Fields:**
 - `sensor_type` — the LibreNMS sensor_type, matched exactly (case-sensitive), case-insensitively unique

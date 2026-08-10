@@ -375,9 +375,11 @@
                             <div class="card-body">
                                 <p class="text-muted mb-3">
                                     Every cable the cable sync creates is stamped with a provenance tag, color and
-                                    description so the plugin can recognize its own cables later (the tag drives the
-                                    overwrite protection). Changes apply to cables created from now on; existing
-                                    cables keep the stamp they were created with.
+                                    description. The tag records plugin provenance and identifies adopted
+                                    connections. Every destructive replacement still requires confirmation.
+                                    Renaming or recoloring the tag updates the same managed Tag, so existing tagged
+                                    cables show the new tag. Cable color and description changes apply to cables
+                                    created from then on.
                                 </p>
 
                                 {# Render ONLY the cable-sync fields — NetBoxModelForm also adds tags/ #}

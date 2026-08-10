@@ -38,6 +38,11 @@ class TestParsePortNumber:
 
         assert parse_port_number(None) is None
 
+    def test_oversized_numeric_suffix_returns_none(self):
+        from netbox_librenms_plugin.serial_utils import parse_port_number
+
+        assert parse_port_number("vendorStatus." + ("9" * 5000)) is None
+
 
 class TestStripStatusSuffix:
     def test_strips_status(self):
@@ -241,6 +246,34 @@ class TestMapSensorsToSerialLinks:
         links = map_sensors_to_serial_links(sensors, sensor_types={"acsSerialPortTable": "serial{N}"})
         assert links[0]["local_port"] == "serial3"
 
+    def test_conflicting_sensors_for_one_local_port_are_all_dropped(self):
+        from netbox_librenms_plugin.serial_utils import map_sensors_to_serial_links
+
+        sensors = [
+            {
+                "sensor_id": 201,
+                "sensor_type": "vendorPortState",
+                "sensor_index": "vendorPortState.1",
+                "sensor_descr": "router-a Status",
+            },
+            {
+                "sensor_id": 301,
+                "sensor_type": "vendorPortLabel",
+                "sensor_index": "vendorPortLabel.1",
+                "sensor_descr": "router-b Status",
+            },
+        ]
+
+        links = map_sensors_to_serial_links(
+            sensors,
+            sensor_types={
+                "vendorPortState": "ttyS{N}",
+                "vendorPortLabel": "ttyS{N}",
+            },
+        )
+
+        assert links == []
+
     def test_empty_input(self):
         from netbox_librenms_plugin.serial_utils import map_sensors_to_serial_links
 
@@ -276,6 +309,36 @@ class TestMapSensorsMalformedRows:
         links = map_sensors_to_serial_links([bad, self._valid(port=8, sid=7008)])
         assert [r["sensor_id"] for r in links] == [7008]
 
+    @pytest.mark.parametrize("sensor_id", ["';alert(1);//", 0, -1, True, [], {}])
+    def test_invalid_sensor_id_is_skipped(self, sensor_id):
+        from netbox_librenms_plugin.serial_utils import map_sensors_to_serial_links
+
+        sensor = self._valid(sid=sensor_id)
+
+        assert map_sensors_to_serial_links([sensor]) == []
+
+    @pytest.mark.django_db
+    def test_sync_action_uses_native_button_value_without_inline_javascript(self):
+        from django.test import RequestFactory
+        from django_tables2 import RequestConfig
+
+        from netbox_librenms_plugin.serial_utils import map_sensors_to_serial_links
+        from netbox_librenms_plugin.tables.cables import LibreNMSCableTable
+        from netbox_librenms_plugin.tests.conftest import make_device
+
+        device = make_device("serial-action-button")
+        rows = map_sensors_to_serial_links([self._valid(sid=7008)], device_id=device.pk)
+        rows[0]["can_create_cable"] = True
+        table = LibreNMSCableTable(rows, device=device)
+        request = RequestFactory().get("/")
+        RequestConfig(request).configure(table)
+
+        html = table.as_html(request)
+
+        assert "onclick=" not in html
+        assert 'name="select"' in html
+        assert 'value="serial:7008"' in html
+
     def test_non_string_sensor_descr_does_not_crash(self):
         from netbox_librenms_plugin.serial_utils import map_sensors_to_serial_links
 
@@ -305,7 +368,7 @@ class TestConfigurableSensorTypes:
     ``SerialSensorTypePattern`` rows map each LibreNMS ``sensor_type`` to the local
     ConsoleServerPort name pattern for that vendor, so Avocent lines become ``ttyS{N}`` and Cisco
     IOS async lines become ``Line {N}``. Both ship seeded by migration; a new vendor is one row.
-    Cisco ``ciscoAsyncLine`` sensors (once shaped like Avocent: sensor_class=state, group
+    Cisco ``OLD-CISCO-TS-MIB::ltsLineTable`` sensors (once shaped like Avocent: sensor_class=state, group
     "Serial Ports", ``"<peer> Status"`` descr) flow through the identical mapper — only the type
     and naming differ.
     """
@@ -315,7 +378,7 @@ class TestConfigurableSensorTypes:
         return {
             "sensor_id": sid,
             "device_id": 52,
-            "sensor_type": "ciscoAsyncLine",
+            "sensor_type": "OLD-CISCO-TS-MIB::ltsLineTable",
             "sensor_index": f"tsLineActive.{port}",
             "sensor_descr": descr,
             "sensor_current": 0,
@@ -334,7 +397,7 @@ class TestConfigurableSensorTypes:
         }
 
     def test_cisco_async_line_uses_its_configured_port_name_pattern(self):
-        """A ciscoAsyncLine maps to a serial row named by the Cisco pattern (Line {N}), not ttyS."""
+        """An IOS-XE async-line sensor maps to the configured Cisco port name."""
         from netbox_librenms_plugin.serial_utils import map_sensors_to_serial_links
 
         links = map_sensors_to_serial_links([self._cisco_line(port=2)])
@@ -394,7 +457,7 @@ class TestConfigurableSensorTypes:
 
         patterns = get_serial_sensor_type_patterns()
         assert patterns["acsSerialPortTable"] == "ttyS{N}"
-        assert patterns["ciscoAsyncLine"] == "Line {N}"
+        assert patterns["OLD-CISCO-TS-MIB::ltsLineTable"] == "Line {N}"
 
     def test_get_patterns_reads_added_rows(self):
         """A new vendor is one row: its type is recognized and named by its own pattern."""
@@ -440,7 +503,7 @@ class TestSerialSensorTypePatternModel:
 
         by_type = {p.sensor_type: p.port_name_pattern for p in SerialSensorTypePattern.objects.all()}
         assert by_type["acsSerialPortTable"] == "ttyS{N}"
-        assert by_type["ciscoAsyncLine"] == "Line {N}"
+        assert by_type["OLD-CISCO-TS-MIB::ltsLineTable"] == "Line {N}"
 
     def test_blank_sensor_type_rejected(self):
         from django.core.exceptions import ValidationError
@@ -493,6 +556,69 @@ class TestSerialSensorTypePatternModel:
         duplicate = SerialSensorTypePattern(sensor_type="\tacsSerialPortTable\t", port_name_pattern="tty{N}")
         with pytest.raises(IntegrityError), transaction.atomic():
             SerialSensorTypePattern.objects.bulk_create([duplicate])
+
+    def test_clean_bypassing_rows_are_normalized_or_rejected_on_read(self):
+        from netbox_librenms_plugin.models import SerialSensorTypePattern
+        from netbox_librenms_plugin.serial_utils import get_serial_sensor_type_patterns
+
+        SerialSensorTypePattern.objects.bulk_create(
+            [
+                SerialSensorTypePattern(
+                    sensor_type=" bulkSerialState ",
+                    port_name_pattern=" console{N} ",
+                ),
+                SerialSensorTypePattern(
+                    sensor_type="brokenSerialState",
+                    port_name_pattern="console",
+                ),
+            ]
+        )
+
+        patterns = get_serial_sensor_type_patterns()
+
+        assert patterns["bulkSerialState"] == "console{N}"
+        assert "brokenSerialState" not in patterns
+
+    def test_api_requires_plugin_permission_and_supports_crud(self, client):
+        """The serial rule is available through the permission-gated rule API."""
+        from django.contrib.auth import get_user_model
+        from django.urls import reverse
+
+        from netbox_librenms_plugin.models import SerialSensorTypePattern
+        from netbox_librenms_plugin.tests.conftest import make_superuser
+
+        url = reverse("plugins-api:netbox_librenms_plugin-api:serialsensortypepattern-list")
+        user = get_user_model().objects.create_user(username="serial-pattern-api-denied", password="x")
+        client.force_login(user)
+        assert client.get(url).status_code == 403
+
+        client.force_login(make_superuser())
+        response = client.post(
+            url,
+            {
+                "sensor_type": "exampleSerialState",
+                "port_name_pattern": "Line {N}",
+                "description": "Created through API",
+            },
+            content_type="application/json",
+        )
+
+        assert response.status_code == 201, response.json()
+        detail_url = reverse(
+            "plugins-api:netbox_librenms_plugin-api:serialsensortypepattern-detail",
+            args=[response.json()["id"]],
+        )
+        response = client.patch(
+            detail_url,
+            {"description": "Updated through API"},
+            content_type="application/json",
+        )
+        assert response.status_code == 200
+        assert response.json()["description"] == "Updated through API"
+
+        response = client.delete(detail_url)
+        assert response.status_code == 204
+        assert not SerialSensorTypePattern.objects.filter(sensor_type="exampleSerialState").exists()
 
 
 @pytest.mark.django_db  # the default sensor-type map is read from SerialSensorTypePattern rows

@@ -1881,6 +1881,10 @@ function initializeVCMemberSelect() {
             cableSelects.forEach(select => {
                 if (select.tomselect && !select.dataset.cableSelectInitialized) {
                     select.dataset.cableSelectInitialized = 'true';
+                    if (typeof select._lastVerifiedMember === 'undefined') {
+                        const selectedOption = select.querySelector('option[selected]');
+                        select._lastVerifiedMember = selectedOption ? selectedOption.value : select.value;
+                    }
                     select.tomselect.on('change', function (value) {
                         handleCableChange(select, value);
                     });
@@ -2680,18 +2684,62 @@ function handleInterfaceChange(select, value) {
  * @param {string} value - Selected device ID
  */
 function handleCableChange(select, value) {
+    const row = document.querySelector(`tr[data-interface="${select.dataset.rowId}"]`);
+    const verifyContext = row?.closest('[data-cable-verify-url]');
+    const verifyUrl = verifyContext?.dataset.cableVerifyUrl;
     const csrfToken = getCsrfToken();
-    if (!csrfToken) return;  // missing token → abort rather than throw on `.value`
+    if (!csrfToken || !row || !verifyUrl) return;
 
-    fetch('/plugins/librenms_plugin/verify-cable/', {
+    if (select._cableVerifyController) {
+        select._cableVerifyController.abort();
+    }
+    const controller = new AbortController();
+    select._cableVerifyController = controller;
+
+    const selection = row.querySelector('td[data-col="selection"] input[name="select"]');
+    if (selection && !selection.dataset.verifyLocked) {
+        selection.dataset.verifyLocked = '1';
+        selection.dataset.wasDisabled = selection.disabled ? '1' : '0';
+        selection.disabled = true;
+    }
+    row.querySelectorAll('td[data-col="actions"] button:not([disabled])').forEach((button) => {
+        button.disabled = true;
+        button.dataset.verifyLocked = '1';
+    });
+
+    const restoreControls = () => {
+        if (selection?.dataset.verifyLocked) {
+            selection.disabled = selection.dataset.wasDisabled === '1';
+            delete selection.dataset.verifyLocked;
+            delete selection.dataset.wasDisabled;
+        }
+        row.querySelectorAll('td[data-col="actions"] button[data-verify-locked]').forEach((button) => {
+            button.disabled = false;
+            delete button.dataset.verifyLocked;
+        });
+        updateBulkActionButton();
+    };
+    const rollbackToLastVerified = () => {
+        if (select._lastVerifiedMember == null) return;
+        if (select.tomselect && typeof select.tomselect.setValue === 'function') {
+            select.tomselect.setValue(select._lastVerifiedMember, true);
+        } else {
+            select.value = select._lastVerifiedMember;
+        }
+        restoreControls();
+    };
+
+    fetch(verifyUrl, {
         method: 'POST',
+        signal: controller.signal,
         headers: {
             'Content-Type': 'application/json',
             'X-CSRFToken': csrfToken
         },
         body: JSON.stringify({
             device_id: value,
-            local_port_id: select.dataset.interface,
+            origin_device_id: verifyContext?.dataset.cableOriginDeviceId || null,
+            row_id: select.dataset.interface,
             server_key: document.querySelector('input[name="server_key"]')?.value || null
         })
     })
@@ -2702,19 +2750,51 @@ function handleCableChange(select, value) {
             return response.json();
         })
         .then(data => {
-            const row = document.querySelector(`tr[data-interface="${select.dataset.rowId}"]`);
-
             if (data.status === 'success' && row) {
                 const formattedRow = data.formatted_row;
                 row.querySelector('td[data-col="local_port"]').innerHTML = formattedRow.local_port;
                 row.querySelector('td[data-col="remote_port"]').innerHTML = formattedRow.remote_port;
                 row.querySelector('td[data-col="remote_device"]').innerHTML = formattedRow.remote_device;
                 row.querySelector('td[data-col="cable_status"]').innerHTML = formattedRow.cable_status;
-                row.querySelector('td[data-col="actions"]').innerHTML = formattedRow.actions;
+                const actionsCell = row.querySelector('td[data-col="actions"]');
+                actionsCell.innerHTML = formattedRow.actions;
+                if (selection) {
+                    delete selection.dataset.verifyLocked;
+                    delete selection.dataset.wasDisabled;
+                    selection.disabled = !formattedRow.can_create_cable;
+                    if (selection.disabled) selection.checked = false;
+                    const expectedValues = {
+                        expected_local_id: formattedRow.expected_local_id,
+                        expected_local_device_id: formattedRow.expected_local_device_id,
+                        expected_remote_id: formattedRow.expected_remote_id,
+                        expected_remote_device_id: formattedRow.expected_remote_device_id
+                    };
+                    Object.entries(expectedValues).forEach(([prefix, expectedValue]) => {
+                        const expectedName = `${prefix}_${select.dataset.interface}`;
+                        let expectedInput = row.querySelector(`input[name="${expectedName}"]`);
+                        if (!expectedInput) {
+                            expectedInput = document.createElement('input');
+                            expectedInput.type = 'hidden';
+                            expectedInput.name = expectedName;
+                            selection.closest('td').appendChild(expectedInput);
+                        }
+                        expectedInput.value = expectedValue || '';
+                    });
+                    updateBulkActionButton();
+                }
+                if (typeof htmx !== 'undefined') {
+                    htmx.process(actionsCell);
+                }
+                select._lastVerifiedMember = value;
+                restoreControls();
+            } else {
+                rollbackToLastVerified();
             }
         })
         .catch(error => {
+            if (error.name === 'AbortError') return;
             console.error('Error verifying cable:', error.message);
+            rollbackToLastVerified();
         });
 }
 

@@ -13,7 +13,7 @@
            by the Cables tab's serial console-port sync and names the matching local
            ConsoleServerPorts — <code>{N}</code> is replaced by the sensor's port number.</p>
         <p>Ships with Avocent ACS (<code>acsSerialPortTable</code> → <code>ttyS{N}</code>) and Cisco IOS
-           async lines (<code>ciscoAsyncLine</code> → <code>Line {N}</code>). Add a row to surface a new
+           async lines (<code>OLD-CISCO-TS-MIB::ltsLineTable</code> → <code>Line {N}</code>). Add a row to surface a new
            vendor; delete a row to stop recognizing one — matching is exact, including case.</p>
     </div>
     {{ block.super }}

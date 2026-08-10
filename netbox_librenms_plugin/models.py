@@ -121,13 +121,13 @@ class LibreNMSSettings(models.Model):
         help_text="Remember each user's ifName or ifDescr choice separately for each device platform",
     )
 
-    # Cable-sync provenance knobs. DB/UI-managed (Settings page) rather than PLUGINS_CONFIG:
-    # they are cosmetic operator preferences, not bootstrap/connection settings, and this way
-    # changing them needs no NetBox restart — same split as the SerialSensorTypePattern rows.
+    # Cable-sync provenance settings. DB/UI-managed (Settings page) rather than PLUGINS_CONFIG,
+    # so changing them needs no NetBox restart. This uses the same split as the
+    # SerialSensorTypePattern rows.
     cable_sync_tag = models.CharField(
         max_length=100,
         default="librenms",
-        help_text="Provenance tag stamped on cables the cable sync creates (the overwrite-protection ownership marker)",
+        help_text="Provenance tag added to cables that cable sync creates or adopts",
     )
 
     cable_sync_tag_color = ColorField(
@@ -1444,7 +1444,7 @@ class SerialSensorTypePattern(FullCleanOnSaveMixin, NetBoxModel):
     Console servers expose their serial lines as state sensors (not ifTable rows); a row here
     makes a vendor's ``sensor_type`` recognized by the Cables tab's serial mapper and names the
     matching local ports (``{N}`` = the sensor's port number). Ships seeded with Avocent ACS
-    (``acsSerialPortTable`` -> ``ttyS{N}``) and Cisco IOS async lines (``ciscoAsyncLine`` ->
+    (``acsSerialPortTable`` -> ``ttyS{N}``) and Cisco IOS async lines (``OLD-CISCO-TS-MIB::ltsLineTable`` ->
     ``Line {N}``). Deleting a row disables that vendor — there is no code-level fallback map.
     """
 
@@ -1452,7 +1452,7 @@ class SerialSensorTypePattern(FullCleanOnSaveMixin, NetBoxModel):
         max_length=100,
         help_text=(
             "LibreNMS sensor_type identifying a vendor's serial-port state sensors "
-            "(e.g. 'acsSerialPortTable', 'ciscoAsyncLine'). Matching is exact, including case."
+            "(e.g. 'acsSerialPortTable', 'OLD-CISCO-TS-MIB::ltsLineTable'). Matching is exact, including case."
         ),
     )
     port_name_pattern = models.CharField(

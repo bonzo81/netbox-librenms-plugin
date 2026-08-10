@@ -1,33 +1,42 @@
 import logging
 import re
+from collections import defaultdict
 from urllib.parse import quote_plus
+from uuid import uuid4
 
-from dcim.models import ConsolePort, ConsoleServerPort, Device, Interface
+from dcim.constants import VIRTUAL_IFACE_TYPES
+from dcim.models import Cable, ConsolePort, ConsoleServerPort, Device, Interface
 from django.contrib import messages
 from django.core.cache import cache
-from django.core.exceptions import MultipleObjectsReturned
 from django.db.models import Q
 from django.http import HttpResponse, JsonResponse
-from django.middleware.csrf import get_token
-from django.shortcuts import get_object_or_404, render
+from django.shortcuts import render
 from django.urls import reverse
 from django.utils import timezone
 from django.utils.html import escape
 from django.views import View
 
-from netbox_librenms_plugin.tables.cables import SERIAL_BADGE_HTML
 from netbox_librenms_plugin.utils import (
+    apply_cable_manual_picks,
+    assign_cable_row_ids,
     cache_remaining_ttl,
+    cable_manual_pick_cache_key,
+    cable_snapshot_token,
     build_librenms_id_qs,
     cable_far_terminations,
     cable_has_librenms_tag,
+    cable_is_point_to_point,
     cable_path_reaches,
     coerce_librenms_id,
     get_interface_name_field,
+    get_librenms_cable_tag,
+    get_librenms_device_id,
+    get_migrated_to_marker,
     get_librenms_oob,
     get_librenms_sync_device,
     get_virtual_chassis_member,
     oob_badge_html,
+    resolve_interface_on_device,
 )
 from netbox_librenms_plugin.sync_cache import SyncCacheConsistency, SyncTab, request_actor_id
 from netbox_librenms_plugin.views.mixins import (
@@ -166,35 +175,6 @@ def _extract_cached_links(cached, cache_key=None):
     return links
 
 
-def _resolve_local_interface(device, server_key, local_port_id, name_candidates):
-    """
-    Resolve a link row's local Interface on *device*: stable librenms_id first, then name.
-
-    The id-beats-name precedence and the dual ifName/ifDescr candidate fallback (issue #88)
-    are the drift-prone core shared by ``enrich_local_port`` and ``SingleCableVerifyView``'s
-    re-resolution — one implementation so a fix in one path can't miss the other again (the
-    issue #88 fallback and the OOB skip were each patched in both copies separately before
-    this was extracted). VC-member selection and the OOB skip stay at the call sites: the two
-    paths deliberately differ there (the initial render leaves a VC row unresolved when the
-    member lookup fails; verify falls back to the selected device).
-
-    Args:
-        device: The NetBox device (or VC member) whose interfaces are searched.
-        server_key (str): LibreNMS server key scoping the librenms_id match.
-        local_port_id: The LibreNMS port_id; falsy skips the id match.
-        name_candidates (list): Interface names for the fallback; empty skips the name match.
-
-    Returns:
-        Interface | None: The resolved interface, or None when neither match hits.
-    """
-    interface = None
-    if local_port_id:
-        interface = device.interfaces.filter(_librenms_id_q(server_key, local_port_id)).first()
-    if not interface and name_candidates:
-        interface = device.interfaces.filter(name__in=name_candidates).first()
-    return interface
-
-
 # The raw (un-enriched) link fields a cached/replayed link is stripped down to before
 # re-enrichment — derived fields (netbox_*_id, *_url, cable_status, …) are dropped so stale
 # IDs/URLs can't cause DoesNotExist after the underlying NetBox objects are deleted. Defined
@@ -204,6 +184,9 @@ _RAW_LINK_KEYS = frozenset(
         "local_port",
         "local_port_alt",
         "local_port_id",
+        "row_id",
+        "link_id",
+        "protocol",
         "remote_port",
         "remote_device",
         "remote_port_id",
@@ -220,23 +203,372 @@ _RAW_LINK_KEYS = frozenset(
         # serial row with no device_id, and the Cables-tab render reads record["device_id"]
         # (tables/cables.py) — a KeyError that 500s the whole tab on any cached replay.
         "device_id",
-        # A manually picked remote endpoint (CableRemotePickerView) is user input, not a derived
-        # field — it must survive the strip so re-enrichment keeps honoring the pick until the
-        # sync runs (after which the real cable drives the row state).
-        "manual_remote_id",
     }
 )
 
 
-class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjectPermissionMixin, CacheMixin, View):
-    """Base view for synchronizing cable information from LibreNMS."""
+class BaseCableTableView(
+    NetBoxObjectPermissionMixin,
+    LibreNMSPermissionMixin,
+    LibreNMSAPIMixin,
+    CacheMixin,
+    View,
+):
+    """
+    Base view for synchronizing cable information from LibreNMS.
+    """
 
     model = None  # To be defined in subclasses
     partial_template_name = "netbox_librenms_plugin/_cable_sync_content.html"
+    required_object_permissions = {"GET": [("view", Device)], "POST": [("view", Device)]}
 
     def get_object(self, pk):
         """Retrieve the object (Device or VirtualMachine)."""
         return self.restrict_object_or_404(self.model, pk=pk)
+
+    def _viewable_queryset(self, model):
+        """Return a read-scoped queryset during a real authenticated request."""
+        user = getattr(getattr(self, "request", None), "user", None)
+        if getattr(user, "is_authenticated", False) is True:
+            return model.objects.restrict(user, "view")
+        return model.objects.all()
+
+    def _changeable_queryset(self, model):
+        """Return a change-scoped queryset during a real authenticated request."""
+        user = getattr(getattr(self, "request", None), "user", None)
+        if getattr(user, "is_authenticated", False) is True:
+            return model.objects.restrict(user, "change")
+        return model.objects.all()
+
+    def _object_is_viewable(self, obj):
+        """Return whether the request user may view one current NetBox object."""
+        return self._viewable_queryset(type(obj)).filter(pk=obj.pk).exists()
+
+    def _viewable_sync_device(self, obj, server_key):
+        """Return the chassis sync owner only when the request may view it."""
+        sync_device = get_librenms_sync_device(obj, server_key=server_key)
+        if sync_device is None or not self._object_is_viewable(sync_device):
+            return None
+        return sync_device
+
+    def _apply_termination_change_scope(self, links, preloaded_changeable_ids=None):
+        """Disable cable writes unless both resolved terminations are changeable."""
+        required_ids = defaultdict(set)
+        row_requirements = []
+        for link in links:
+            requirements = []
+            if link.get("can_create_cable"):
+                if link.get("_source") == "serial":
+                    requirements = [
+                        (ConsoleServerPort, coerce_librenms_id(link.get("netbox_local_interface_id"))),
+                        (ConsolePort, coerce_librenms_id(link.get("netbox_remote_interface_id"))),
+                    ]
+                else:
+                    requirements = [
+                        (Interface, coerce_librenms_id(link.get("netbox_local_interface_id"))),
+                        (Interface, coerce_librenms_id(link.get("netbox_remote_interface_id"))),
+                    ]
+                for model, object_id in requirements:
+                    if object_id is not None:
+                        required_ids[model].add(object_id)
+            row_requirements.append((link, requirements))
+
+        changeable_ids = {model: set(object_ids) for model, object_ids in (preloaded_changeable_ids or {}).items()}
+        for model, object_ids in required_ids.items():
+            if model not in changeable_ids:
+                changeable_ids[model] = set(
+                    self._changeable_queryset(model).filter(pk__in=object_ids).values_list("pk", flat=True)
+                )
+        for link, requirements in row_requirements:
+            if requirements and any(
+                object_id is None or object_id not in changeable_ids.get(model, set())
+                for model, object_id in requirements
+            ):
+                link["can_create_cable"] = False
+
+    def _cable_has_provenance(self, cable):
+        """Check the request's provenance tag without repeating settings/tag queries per row."""
+        if not hasattr(self, "_cable_provenance_tag"):
+            self._cable_provenance_tag = get_librenms_cable_tag(create=False)
+        return cable_has_librenms_tag(cable, self._cable_provenance_tag)
+
+    def _build_trace_visibility(self, paths):
+        """Resolve every object permission used by a page of cable traces in bounded queries."""
+        object_ids = defaultdict(set)
+        for path in paths:
+            for near, segment_cables, far in path or []:
+                for termination in (*list(near or []), *list(far or [])):
+                    object_ids[type(termination)].add(termination.pk)
+                    device = getattr(termination, "device", None)
+                    if device is not None:
+                        object_ids[type(device)].add(device.pk)
+                cables = segment_cables if isinstance(segment_cables, (list, tuple)) else [segment_cables]
+                for cable in cables:
+                    if cable is not None:
+                        object_ids[type(cable)].add(cable.pk)
+        return {
+            model: set(self._viewable_queryset(model).filter(pk__in=ids).values_list("pk", flat=True))
+            for model, ids in object_ids.items()
+        }
+
+    def _trace_is_viewable(self, path, visible_ids=None):
+        """Return whether every cable, termination, and owning device in a trace is viewable."""
+
+        def is_viewable(obj):
+            if visible_ids is None:
+                return self._object_is_viewable(obj)
+            return obj.pk in visible_ids.get(type(obj), set())
+
+        for near, segment_cables, far in path or []:
+            for termination in (*list(near or []), *list(far or [])):
+                if not is_viewable(termination):
+                    return False
+                device = getattr(termination, "device", None)
+                if device is not None and not is_viewable(device):
+                    return False
+            cables = segment_cables if isinstance(segment_cables, (list, tuple)) else [segment_cables]
+            if any(cable is not None and not is_viewable(cable) for cable in cables):
+                return False
+        return True
+
+    @staticmethod
+    def _first_catalog_match(matches, visible_ids):
+        """Return one visible catalog match, while hidden or duplicate evidence blocks fallback."""
+        if len(matches) != 1:
+            return None, bool(matches)
+        match = matches[0]
+        return (match if match.pk in visible_ids else None), True
+
+    def _build_normal_link_context(self, links, obj, server_key):
+        """Load normal LLDP/CDP resolution and permission candidates once per snapshot."""
+        normal_links = [link for link in links if link.get("_source") != "serial"]
+        if not normal_links:
+            return None
+
+        remote_names = {name for link in normal_links if isinstance((name := link.get("remote_device")), str) and name}
+        remote_names.update(name.split(".")[0] for name in tuple(remote_names))
+        remote_ids = {
+            remote_id
+            for link in normal_links
+            if (remote_id := coerce_librenms_id(link.get("remote_device_id"))) is not None
+        }
+        device_pks = set(Device.objects.filter(name__in=remote_names).values_list("pk", flat=True))
+        sorted_remote_ids = sorted(remote_ids)
+        for offset in range(0, len(sorted_remote_ids), 32):
+            id_q = Q(pk__isnull=True) & Q(pk__isnull=False)
+            for remote_id in sorted_remote_ids[offset : offset + 32]:
+                id_q |= _librenms_id_q(server_key, remote_id, include_oob=False)
+            device_pks.update(Device.objects.filter(id_q).values_list("pk", flat=True))
+        catalog_devices = list(Device.objects.filter(pk__in=device_pks).select_related("virtual_chassis"))
+        visible_device_ids = set(
+            self._viewable_queryset(Device)
+            .filter(pk__in=[device.pk for device in catalog_devices])
+            .values_list("pk", flat=True)
+        )
+        devices_by_name = defaultdict(list)
+        devices_by_librenms_id = defaultdict(list)
+        for device in catalog_devices:
+            devices_by_name[device.name].append(device)
+            device_librenms_id = get_librenms_device_id(device, server_key, auto_save=False)
+            if device_librenms_id is not None:
+                devices_by_librenms_id[device_librenms_id].append(device)
+
+        remote_device_by_link = {}
+        for link in normal_links:
+            remote_device = None
+            blocked = False
+            remote_id = coerce_librenms_id(link.get("remote_device_id"))
+            if remote_id is not None:
+                remote_device, blocked = self._first_catalog_match(
+                    devices_by_librenms_id.get(remote_id, []), visible_device_ids
+                )
+            hostname = link.get("remote_device")
+            if not blocked and isinstance(hostname, str) and hostname:
+                remote_device, blocked = self._first_catalog_match(
+                    devices_by_name.get(hostname, []), visible_device_ids
+                )
+                if not blocked:
+                    remote_device, _blocked = self._first_catalog_match(
+                        devices_by_name.get(hostname.split(".")[0], []), visible_device_ids
+                    )
+            remote_device_by_link[id(link)] = remote_device
+
+        remote_chassis_ids = {
+            device.virtual_chassis_id
+            for device in remote_device_by_link.values()
+            if device is not None and device.virtual_chassis_id is not None
+        }
+        remote_members_by_chassis = defaultdict(dict)
+        if remote_chassis_ids:
+            for member in Device.objects.filter(virtual_chassis_id__in=remote_chassis_ids):
+                if member.vc_position is not None:
+                    remote_members_by_chassis[member.virtual_chassis_id][member.vc_position] = member
+        remote_owner_by_link = {}
+        for link in normal_links:
+            remote_device = remote_device_by_link.get(id(link))
+            if remote_device is None:
+                remote_owner = None
+            elif remote_device.virtual_chassis_id is None:
+                remote_owner = remote_device
+            else:
+                remote_owner = get_virtual_chassis_member(
+                    remote_device,
+                    link.get("remote_port"),
+                    members_by_position=remote_members_by_chassis[remote_device.virtual_chassis_id],
+                    return_device_on_failure=False,
+                )
+            remote_owner_by_link[id(link)] = remote_owner
+
+        if getattr(obj, "virtual_chassis_id", None):
+            chassis_members = list(obj.virtual_chassis.members.all())
+            members_by_position = {
+                member.vc_position: member for member in chassis_members if member.vc_position is not None
+            }
+        else:
+            chassis_members = [obj]
+            members_by_position = {}
+        local_owner_by_link = {}
+        for link in normal_links:
+            local_owner_by_link[id(link)] = get_virtual_chassis_member(
+                obj,
+                link.get("local_port"),
+                members_by_position=members_by_position,
+            )
+
+        manual_ids = {
+            manual_id
+            for link in normal_links
+            if (manual_id := coerce_librenms_id(link.get("manual_remote_id"))) is not None
+        }
+        owner_ids = {device.pk for device in chassis_members}
+        owner_ids.update(device.pk for device in remote_owner_by_link.values() if device is not None)
+        candidate_specs = defaultdict(lambda: {"names": set(), "ids": set()})
+        for link in normal_links:
+            local_owner = local_owner_by_link.get(id(link))
+            if local_owner is not None:
+                candidate_specs[local_owner.pk]["names"].update(
+                    name
+                    for name in (link.get("local_port"), link.get("local_port_alt"))
+                    if isinstance(name, str) and name
+                )
+                if (local_id := coerce_librenms_id(link.get("local_port_id"))) is not None:
+                    candidate_specs[local_owner.pk]["ids"].add(local_id)
+            remote_owner = remote_owner_by_link.get(id(link))
+            if remote_owner is not None:
+                remote_name = link.get("remote_port")
+                if isinstance(remote_name, str) and remote_name:
+                    candidate_specs[remote_owner.pk]["names"].add(remote_name)
+                if (remote_id := coerce_librenms_id(link.get("remote_port_id"))) is not None:
+                    candidate_specs[remote_owner.pk]["ids"].add(remote_id)
+
+        candidate_pks = set(manual_ids)
+        named_candidate_items = [
+            (owner_id, evidence["names"]) for owner_id, evidence in sorted(candidate_specs.items()) if evidence["names"]
+        ]
+        for offset in range(0, len(named_candidate_items), 64):
+            candidate_q = Q(pk__isnull=True) & Q(pk__isnull=False)
+            for owner_id, names in named_candidate_items[offset : offset + 64]:
+                candidate_q |= Q(device_id=owner_id, name__in=names)
+            candidate_pks.update(Interface.objects.filter(candidate_q).values_list("pk", flat=True))
+        id_candidate_items = [
+            (owner_id, port_id)
+            for owner_id, evidence in sorted(candidate_specs.items())
+            for port_id in sorted(evidence["ids"])
+        ]
+        for offset in range(0, len(id_candidate_items), 32):
+            candidate_q = Q(pk__isnull=True) & Q(pk__isnull=False)
+            for owner_id, port_id in id_candidate_items[offset : offset + 32]:
+                candidate_q |= Q(device_id=owner_id) & _librenms_id_q(server_key, port_id)
+            candidate_pks.update(Interface.objects.filter(candidate_q).values_list("pk", flat=True))
+        catalog_interfaces = list(
+            Interface.objects.filter(pk__in=candidate_pks)
+            .select_related("device", "cable")
+            .prefetch_related("cable__tags", "cable__terminations__termination")
+        )
+        owner_ids.update(interface.device_id for interface in catalog_interfaces if interface.pk in manual_ids)
+        interface_ids_by_device = defaultdict(list)
+        interfaces_by_name = defaultdict(list)
+        interfaces_by_pk = {}
+        for interface in catalog_interfaces:
+            interfaces_by_pk[interface.pk] = interface
+            interfaces_by_name[(interface.device_id, interface.name)].append(interface)
+            interface_librenms_id = get_librenms_device_id(interface, server_key, auto_save=False)
+            if interface_librenms_id is not None:
+                interface_ids_by_device[(interface.device_id, interface_librenms_id)].append(interface)
+        visible_interface_ids = set(
+            self._viewable_queryset(Interface).filter(pk__in=interfaces_by_pk).values_list("pk", flat=True)
+        )
+        visible_owner_ids = set(self._viewable_queryset(Device).filter(pk__in=owner_ids).values_list("pk", flat=True))
+        cable_ids = {interface.cable_id for interface in catalog_interfaces if interface.cable_id is not None}
+        visible_cable_ids = set(self._viewable_queryset(Cable).filter(pk__in=cable_ids).values_list("pk", flat=True))
+        context = {
+            "local_owner_by_link": local_owner_by_link,
+            "remote_device_by_link": remote_device_by_link,
+            "remote_owner_by_link": remote_owner_by_link,
+            "interfaces_by_pk": interfaces_by_pk,
+            "interfaces_by_name": interfaces_by_name,
+            "interface_ids_by_device": interface_ids_by_device,
+            "visible_interface_ids": visible_interface_ids,
+            "visible_owner_ids": visible_owner_ids,
+            "visible_cable_ids": visible_cable_ids,
+        }
+        trace_paths = {}
+        for link in normal_links:
+            local_interface = self._resolve_context_interface(
+                context,
+                local_owner_by_link.get(id(link)),
+                link.get("local_port_id"),
+                [link.get("local_port"), link.get("local_port_alt")],
+            )
+            manual_id = coerce_librenms_id(link.get("manual_remote_id"))
+            if manual_id is not None:
+                remote_interface = interfaces_by_pk.get(manual_id)
+            else:
+                remote_interface = self._resolve_context_interface(
+                    context,
+                    remote_owner_by_link.get(id(link)),
+                    link.get("remote_port_id"),
+                    [link.get("remote_port")],
+                )
+            if (
+                local_interface is not None
+                and remote_interface is not None
+                and local_interface.cable_id is not None
+                and remote_interface.cable_id is not None
+                and local_interface.cable_id != remote_interface.cable_id
+                and local_interface.cable_id in visible_cable_ids
+                and remote_interface.cable_id in visible_cable_ids
+            ):
+                if local_interface.pk not in trace_paths:
+                    trace_paths[local_interface.pk] = local_interface.trace()
+        context["trace_paths"] = trace_paths
+        context["trace_visibility"] = self._build_trace_visibility(trace_paths.values())
+        return context
+
+    @staticmethod
+    def _resolve_context_interface(context, device, port_id, name_candidates):
+        """Resolve one prefetched Interface with the existing stable-ID-first precedence."""
+        if context is None or device is None or device.pk not in context["visible_owner_ids"]:
+            return None
+        normalized_id = coerce_librenms_id(port_id)
+        if normalized_id is not None:
+            matches = context["interface_ids_by_device"].get((device.pk, normalized_id), [])
+            if len(matches) == 1:
+                interface = matches[0]
+                return interface if interface.pk in context["visible_interface_ids"] else None
+            if matches:
+                return None
+        candidate_names = {name for name in name_candidates if isinstance(name, str) and name}
+        matches = {
+            interface.pk: interface
+            for (device_id, name), named_interfaces in context["interfaces_by_name"].items()
+            if device_id == device.pk and name in candidate_names
+            for interface in named_interfaces
+        }
+        if len(matches) != 1:
+            return None
+        interface = next(iter(matches.values()))
+        return interface if interface.pk in context["visible_interface_ids"] else None
 
     def get_ip_address(self, obj):
         """Get the primary IP address for the object."""
@@ -342,6 +674,8 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObject
                     "local_port": local_port_name,
                     "local_port_alt": alt_map.get(key),
                     "local_port_id": port_id,
+                    "link_id": link.get("id"),
+                    "protocol": link.get("protocol"),
                     "remote_port": link.get("remote_port"),
                     "remote_device": link.get("remote_hostname"),
                     "remote_port_id": link.get("remote_port_id"),
@@ -444,6 +778,7 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObject
         # Same for a serial-sensor fetch failure: flag it so post() can warn rather than
         # silently dropping serial rows under a success banner (parity with OOB).
         self._serial_links_fetch_failed = False
+        self._serial_source_skipped = False
         # Distinguish a real LibreNMS fetch failure (auth/network/server) from a device
         # that simply has no links, so the caller can surface the actual error instead of
         # always saying "No links found". Reset per-call to avoid leaking a prior error.
@@ -454,7 +789,9 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObject
         # member's cables and cache them under another member's key (mismatched verify/sync).
         # Reuse the device the caller (_prepare_context) already resolved to avoid a second
         # get_librenms_sync_device() VC-members query per request; falls back to resolving here.
-        lookup_device = sync_device or get_librenms_sync_device(obj, server_key=server_key) or obj
+        lookup_device = sync_device or self._viewable_sync_device(obj, server_key)
+        if lookup_device is None:
+            return None
         # coerce_librenms_id fails closed on a bool/zero/negative/garbage value (a poisoned
         # id-cache can return True/0 verbatim — get_librenms_id only coerces the custom-field
         # and discovery paths), so a falsy non-None id resolves to None here instead of being
@@ -512,22 +849,21 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObject
             links_data, lookup_device, server_key, interface_name_field, alt_name_field
         )
 
-        # Append serial console-server port rows if the device has any CSPs. Gate on lookup_device
-        # (the resolved sync device), not obj: on a VC-member page the viewed obj may lack CSPs
-        # while the sync device owns them — the sensor fetch above is already scoped to that device.
-        if (
-            self.librenms_id is not None
-            and hasattr(lookup_device, "consoleserverports")
-            and lookup_device.consoleserverports.exists()
-        ):
+        # Append serial rows only when this request can view at least one ConsoleServerPort on the
+        # sync device. The sensor endpoint is instance-wide, so a plain Device grant must not
+        # authorize that expensive inventory request. Store the complete raw sensor response when
+        # the request is allowed to fetch it; request-local enrichment filters individual CSP rows.
+        viewable_serial_port_names = (
+            set(self._viewable_queryset(ConsoleServerPort).filter(device=lookup_device).values_list("name", flat=True))
+            if isinstance(lookup_device, Device)
+            else set()
+        )
+        if isinstance(lookup_device, Device) and not viewable_serial_port_names:
+            self._serial_source_skipped = ConsoleServerPort.objects.filter(device=lookup_device).exists()
+        if self.librenms_id is not None and viewable_serial_port_names:
             from netbox_librenms_plugin.serial_utils import map_sensors_to_serial_links
 
-            # Refresh always re-fetches the serial sensor table (use_cache=False): host LLDP/OOB
-            # are fetched fresh here too, so a relabeled Avocent port shouldn't stay stale behind
-            # the per-server sensor cache until its TTL elapses.
-            serial_success, serial_sensors = self.librenms_api.get_serial_port_sensors(
-                self.librenms_id, use_cache=False
-            )
+            serial_success, serial_sensors = self.librenms_api.get_serial_port_sensors(self.librenms_id)
             if not serial_success:
                 # Don't silently drop serial rows on a fetch failure — flag it so post() can warn
                 # the user (this method has no request to message on). Mirrors the OOB branch.
@@ -564,29 +900,44 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObject
         host_mapping_absent_but_oob_scoped = (
             self.librenms_id is None and lookup_error is None and oob_linked and not self._oob_links_fetch_failed
         )
-        if not links_data and self._links_fetch_error and not host_mapping_absent_but_oob_scoped:
+        if (
+            not links_data
+            and self._links_fetch_error
+            and not host_mapping_absent_but_oob_scoped
+            and not self._serial_source_skipped
+        ):
             return None
         return links_data
 
-    def get_device_by_id_or_name(self, remote_device_id, hostname, server_key=None):
-        """Try to find device in NetBox first by librenms_id custom field, then by name."""
+    def get_device_by_id_or_name(self, remote_device_id, hostname, server_key=None, queryset=None):
+        """Try to find device in NetBox first by librenms_id custom field, then by name"""
         if server_key is None:
             server_key = self._render_server_key()
+        queryset = queryset if queryset is not None else Device.objects.all()
+
+        def resolve_catalog_match(catalog, ambiguous_message):
+            match_ids = list(catalog.order_by("pk").values_list("pk", flat=True)[:2])
+            if len(match_ids) > 1:
+                return None, False, ambiguous_message, True
+            if not match_ids:
+                return None, False, None, False
+            device = queryset.filter(pk=match_ids[0]).first()
+            if device is None:
+                # A stronger catalog match exists but is outside the requester's scope. Do not
+                # fall through to a weaker name match and bind a different visible device.
+                return None, False, None, True
+            return device, True, None, True
+
         # First try matching by LibreNMS ID. The remote device_id is the remote device's OWN
         # identity, so exclude the OOB-controller path: matching it would also select a different
         # device that references this id as its controller, tripping MultipleObjectsReturned.
         if remote_device_id is not None:
-            try:
-                device = Device.objects.get(_librenms_id_q(server_key, remote_device_id, include_oob=False))
-                return device, True, None
-            except Device.DoesNotExist:
-                pass
-            except MultipleObjectsReturned:
-                return (
-                    None,
-                    False,
-                    f"Multiple devices found with the same LibreNMS ID: {remote_device_id}.",
-                )
+            result = resolve_catalog_match(
+                Device.objects.filter(_librenms_id_q(server_key, remote_device_id, include_oob=False)),
+                f"Multiple devices found with the same LibreNMS ID: {remote_device_id}.",
+            )
+            if result[3]:
+                return result[:3]
 
         if not isinstance(hostname, str) or not hostname.strip():
             return None, False, None
@@ -598,31 +949,25 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObject
         # hostname as the device advertises it, which is commonly all lower case, while NetBox
         # holds the operator's capitalisation. Match case insensitively or the remote end only
         # ever resolves through librenms_id.
-        try:
-            device = Device.objects.get(name__iexact=hostname)
-            return device, True, None
-        except Device.DoesNotExist:
-            # Try without domain name
-            simple_hostname = hostname.split(".")[0]
-            try:
-                device = Device.objects.get(name__iexact=simple_hostname)
-                return device, True, None
-            except Device.DoesNotExist:
-                return None, False, None
-            except MultipleObjectsReturned:
-                return (
-                    None,
-                    False,
-                    f"Multiple devices found with the same name: {hostname}.",
-                )
-        except MultipleObjectsReturned:
-            return (
-                None,
-                False,
-                f"Multiple devices found with the same name: {hostname}.",
-            )
+        if not isinstance(hostname, str) or not hostname:
+            return None, False, None
+        ambiguous_name = f"Multiple devices found with the same name: {hostname}."
+        exact_result = resolve_catalog_match(Device.objects.filter(name__iexact=hostname), ambiguous_name)
+        if exact_result[3]:
+            return exact_result[:3]
+        simple_hostname = hostname.split(".")[0]
+        simple_result = resolve_catalog_match(Device.objects.filter(name__iexact=simple_hostname), ambiguous_name)
+        return simple_result[:3]
 
-    def enrich_local_port(self, link, obj, server_key=None, sync_device=None):
+    def enrich_local_port(
+        self,
+        link,
+        obj,
+        server_key=None,
+        sync_device=None,
+        serial_ports_by_name=None,
+        normal_context=None,
+    ):
         """
         Add the local-port URL if the interface/CSP exists in NetBox.
 
@@ -647,11 +992,18 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObject
                 if server_key is None:
                     server_key = self.librenms_api.server_key
                 if sync_device is None:
-                    sync_device = get_librenms_sync_device(obj, server_key=server_key) or obj
-                csp = sync_device.consoleserverports.filter(name=local_port).first()
+                    sync_device = self._viewable_sync_device(obj, server_key)
+                if sync_device is None:
+                    return None
+                csp = (
+                    serial_ports_by_name.get(local_port)
+                    if serial_ports_by_name is not None
+                    else self._viewable_queryset(ConsoleServerPort).filter(device=sync_device, name=local_port).first()
+                )
                 if csp:
                     link["local_port_url"] = reverse("dcim:consoleserverport", args=[csp.pk])
                     link["netbox_local_interface_id"] = csp.pk
+                    link["netbox_local_device_id"] = csp.device_id
                 return csp
 
             interface = None
@@ -668,20 +1020,36 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObject
             # still wins when present; this only widens the fragile name fallback.
             name_candidates = [n for n in (local_port, link.get("local_port_alt")) if n]
 
-            if hasattr(obj, "virtual_chassis") and obj.virtual_chassis:
+            if normal_context is not None:
+                chassis_member = normal_context["local_owner_by_link"].get(id(link))
+                interface = self._resolve_context_interface(
+                    normal_context,
+                    chassis_member,
+                    local_port_id,
+                    name_candidates,
+                )
+            elif hasattr(obj, "virtual_chassis") and obj.virtual_chassis:
                 chassis_member = get_virtual_chassis_member(obj, local_port)
 
                 if chassis_member:
-                    interface = _resolve_local_interface(chassis_member, server_key, local_port_id, name_candidates)
+                    interface = resolve_interface_on_device(
+                        chassis_member,
+                        server_key,
+                        local_port_id,
+                        name_candidates,
+                    )
             else:
-                interface = _resolve_local_interface(obj, server_key, local_port_id, name_candidates)
+                interface = resolve_interface_on_device(obj, server_key, local_port_id, name_candidates)
 
             if interface:
+                if normal_context is None and not self._object_is_viewable(interface):
+                    return None
                 link["local_port_url"] = reverse("dcim:interface", args=[interface.pk])
                 link["netbox_local_interface_id"] = interface.pk
+                link["netbox_local_device_id"] = interface.device_id
 
-    def enrich_remote_port(self, link, device, server_key=None):
-        """Add remote port URL if device and interface exist in NetBox."""
+    def enrich_remote_port(self, link, device, server_key=None, normal_context=None):
+        """Add remote port URL if device and interface exist in NetBox"""
         remote_port = link.get("remote_port")
         if isinstance(remote_port, str) and remote_port:
             netbox_remote_interface = None
@@ -693,24 +1061,39 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObject
             # in one path can't miss the other again (the drift risk _resolve_local_interface was
             # extracted to close). VC-member selection stays here because the remote side leaves the
             # interface unresolved when the member lookup fails.
-            if hasattr(device, "virtual_chassis") and device.virtual_chassis:
+            if normal_context is not None:
+                netbox_remote_interface = self._resolve_context_interface(
+                    normal_context,
+                    normal_context["remote_owner_by_link"].get(id(link)),
+                    librenms_remote_port_id,
+                    [remote_port],
+                )
+            elif hasattr(device, "virtual_chassis") and device.virtual_chassis:
                 chassis_member = get_virtual_chassis_member(
                     device,
                     remote_port,
                     return_device_on_failure=False,
                 )
                 if chassis_member:
-                    netbox_remote_interface = _resolve_local_interface(
+                    netbox_remote_interface = resolve_interface_on_device(
                         chassis_member, server_key, librenms_remote_port_id, [remote_port]
                     )
             else:
-                netbox_remote_interface = _resolve_local_interface(
+                netbox_remote_interface = resolve_interface_on_device(
                     device, server_key, librenms_remote_port_id, [remote_port]
                 )
 
             if netbox_remote_interface:
+                if normal_context is None and (
+                    not self._object_is_viewable(netbox_remote_interface)
+                    or not self._viewable_queryset(Device).filter(pk=netbox_remote_interface.device_id).exists()
+                ):
+                    return link
                 link["remote_port_url"] = reverse("dcim:interface", args=[netbox_remote_interface.pk])
                 link["netbox_remote_interface_id"] = netbox_remote_interface.pk
+                link["netbox_remote_device_id"] = netbox_remote_interface.device_id
+                link["remote_device_display"] = netbox_remote_interface.device.name
+                link["remote_device_url"] = reverse("dcim:device", args=[netbox_remote_interface.device_id])
                 link["remote_port_name"] = netbox_remote_interface.name
 
         # Return the link even when remote_port is empty (or unresolved): callers assign the
@@ -719,7 +1102,7 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObject
         # Cables tab for LLDP/CDP neighbors that advertise a remote device but no remote port.
         return link
 
-    def check_cable_status(self, link):
+    def check_cable_status(self, link, normal_context=None):
         """
         Check cable status against the LibreNMS-desired connection and set the sync affordance.
 
@@ -734,8 +1117,7 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObject
           the LibreNMS target through patch panels: a remodel is a better model of the same
           link, so no re-sync is offered.
         - ``"Cable Mismatch"`` / True — cabled somewhere that does NOT reach the target; a
-          re-sync is offered and the classify gate decides (silent overwrite only for a
-          plugin-owned cable, force-confirm modal otherwise).
+          re-sync is offered and the exact current cable must be confirmed before replacement.
         """
         local_interface_id = link.get("netbox_local_interface_id")
         remote_interface_id = link.get("netbox_remote_interface_id")
@@ -749,10 +1131,57 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObject
         actionable = link.get("_source") != "oob"
 
         if local_interface_id and remote_interface_id:
-            local_interface = Interface.objects.get(pk=local_interface_id)
-            remote_interface = Interface.objects.get(pk=remote_interface_id)
+            if normal_context is not None:
+                local_interface = normal_context["interfaces_by_pk"].get(local_interface_id)
+                remote_interface = normal_context["interfaces_by_pk"].get(remote_interface_id)
+                visible_interface_ids = normal_context["visible_interface_ids"]
+                if (
+                    local_interface is None
+                    or remote_interface is None
+                    or local_interface.pk not in visible_interface_ids
+                    or remote_interface.pk not in visible_interface_ids
+                ):
+                    link["cable_status"] = "Interface Not Available"
+                    return link
+            else:
+                try:
+                    local_interface = self._viewable_queryset(Interface).get(pk=local_interface_id)
+                    remote_interface = self._viewable_queryset(Interface).get(pk=remote_interface_id)
+                except Interface.DoesNotExist:
+                    link["cable_status"] = "Interface Not Available"
+                    return link
             local_cable = local_interface.cable
             remote_cable = remote_interface.cable
+            if normal_context is not None:
+                cable_state_hidden = any(
+                    cable is not None and cable.pk not in normal_context["visible_cable_ids"]
+                    for cable in {local_cable, remote_cable}
+                )
+            else:
+                cable_state_hidden = any(
+                    cable is not None and not self._object_is_viewable(cable) for cable in {local_cable, remote_cable}
+                )
+            if cable_state_hidden:
+                link["cable_status"] = "Cable State Not Available"
+                return link
+
+            unsupported_cable = next(
+                (
+                    cable
+                    for cable in (local_cable, remote_cable)
+                    if cable is not None and not cable_is_point_to_point(cable)
+                ),
+                None,
+            )
+            if unsupported_cable is not None:
+                link.update(
+                    {
+                        "cable_status": "Multi-termination Cable Not Supported",
+                        "cable_url": reverse("dcim:cable", args=[unsupported_cable.pk]),
+                        "_multi_termination_unsupported": True,
+                    }
+                )
+                return link
 
             if local_cable is None and remote_cable is None:
                 link["cable_status"] = "No Cable"
@@ -766,23 +1195,39 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObject
                         "cable_url": reverse("dcim:cable", args=[local_cable.pk]),
                     }
                 )
-                link["can_create_cable"] = actionable and not cable_has_librenms_tag(local_cable)
-            elif (
-                local_cable is not None
-                and remote_cable is not None
-                and cable_path_reaches(local_interface, remote_termination=remote_interface)
-            ):
-                # A remodeled multi-segment path (through patch panels) that still reaches the
-                # LibreNMS target: the link is correct, just modeled in more detail.
-                link.update(
-                    {
-                        "cable_status": "Connected via Patch Path",
-                        "cable_url": reverse("dcim:cable", args=[local_cable.pk]),
-                    }
+                link["can_create_cable"] = actionable and not self._cable_has_provenance(local_cable)
+            elif local_cable is not None and remote_cable is not None:
+                path = (
+                    normal_context["trace_paths"].get(local_interface.pk)
+                    if normal_context is not None
+                    else local_interface.trace()
                 )
+                if not self._trace_is_viewable(
+                    path,
+                    (normal_context or {}).get("trace_visibility"),
+                ):
+                    link["cable_status"] = "Cable State Not Available"
+                    return link
+                if cable_path_reaches(local_interface, remote_termination=remote_interface, path=path):
+                    # A remodeled multi-segment path (through patch panels) that still reaches
+                    # the LibreNMS target: the link is correct, just modeled in more detail.
+                    link.update(
+                        {
+                            "cable_status": "Connected via Patch Path",
+                            "cable_url": reverse("dcim:cable", args=[local_cable.pk]),
+                        }
+                    )
+                else:
+                    link.update(
+                        {
+                            "cable_status": "Cable Mismatch",
+                            "cable_url": reverse("dcim:cable", args=[local_cable.pk]),
+                        }
+                    )
+                    link["can_create_cable"] = actionable
             else:
                 # Cabled somewhere that does not reach the LibreNMS target: offer a re-sync,
-                # gated by classify_cable_action (silent only for plugin-owned cables).
+                # gated by classify_cable_action and explicit confirmation of the current cable.
                 occupying_cable = local_cable or remote_cable
                 link.update(
                     {
@@ -802,7 +1247,7 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObject
 
         return link
 
-    def check_serial_cable_status(self, link, csp=None):
+    def check_serial_cable_status(self, link, csp=None, remote_context=None):
         """Check cable status for a serial ConsoleServerPort row.
 
         ``csp`` may be the ConsoleServerPort already loaded by ``enrich_local_port`` for this
@@ -815,22 +1260,35 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObject
             return link
         if csp is None or csp.pk != csp_id:
             try:
-                csp = ConsoleServerPort.objects.get(pk=csp_id)
+                csp = self._viewable_queryset(ConsoleServerPort).get(pk=csp_id)
             except ConsoleServerPort.DoesNotExist:
                 link["cable_status"] = "Console Server Port Not Found in NetBox"
                 return link
         if csp.cable:
+            visible_cable_ids = (remote_context or {}).get("visible_cable_ids")
+            cable_is_visible = (
+                csp.cable_id in visible_cable_ids
+                if visible_cable_ids is not None
+                else self._object_is_viewable(csp.cable)
+            )
+            if not cable_is_visible:
+                link["cable_status"] = "Cable State Not Available"
+                link["_serial_cable_hidden"] = True
+                return link
             link.update(
                 {
                     "cable_status": "Cable Found",
                     "cable_url": reverse("dcim:cable", args=[csp.cable.pk]),
                 }
             )
+            if not cable_is_point_to_point(csp.cable):
+                link["cable_status"] = "Multi-termination Cable Not Supported"
+                link["_multi_termination_unsupported"] = True
         else:
             link["cable_status"] = "No Cable"
         return link
 
-    def enrich_serial_remote(self, link, claimed_cp_ids=None, csp=None):
+    def enrich_serial_remote(self, link, claimed_cp_ids=None, csp=None, remote_context=None):
         """
         Resolve the remote ConsolePort for a serial row using the Avocent label.
 
@@ -847,9 +1305,9 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObject
         - CSP cabled somewhere that does not reach the label device: if the cable carries the
           librenms tag it is TRUSTED over the label (the label is only a hint; a tagged cable
           was placed deliberately, possibly via a manual pick — flipping it to a mismatch
-          would offer a silent re-point of a correct cable). Otherwise ``"Cable Mismatch"`` —
-          pick a free ConsolePort as the re-point target; the sync's classify gate protects
-          any cable the plugin does not solely own.
+          would offer a re-point of a correct cable). Otherwise ``"Cable Mismatch"``: pick a free
+          ConsolePort as the re-point target. The sync requires exact cable confirmation before
+          replacement.
 
         A manually picked remote (``manual_remote_id``, set by CableRemotePickerView) wins over
         the label hint entirely — the label mismatching is exactly why the user picked by hand.
@@ -877,37 +1335,97 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObject
             return
         if csp is None or csp.pk != csp_id:
             try:
-                csp = ConsoleServerPort.objects.get(pk=csp_id)
+                csp = self._viewable_queryset(ConsoleServerPort).get(pk=csp_id)
             except ConsoleServerPort.DoesNotExist:
                 return
+        if link.get("_serial_cable_hidden") or link.get("_multi_termination_unsupported"):
+            return
 
-        # A manual pick resolves at port level and skips label matching (see docstring). A
-        # vanished picked port (deleted since) falls back to the label path below.
-        if manual_pk := link.get("manual_remote_id"):
-            manual_cp = ConsolePort.objects.filter(pk=manual_pk).select_related("device").first()
+        # A manual pick resolves at port level and skips label matching (see docstring). If the
+        # picked port is no longer available, fail closed. Falling back to the label would replace
+        # the user's explicit target with a different endpoint during sync.
+        if "manual_remote_id" in link:
+            manual_pk = coerce_librenms_id(link.get("manual_remote_id"))
+            manual_cp = (remote_context or {}).get("manual_ports", {}).get(manual_pk)
+            if remote_context is None:
+                manual_cp = (
+                    self._viewable_queryset(ConsolePort)
+                    .filter(pk=manual_pk, device__in=self._viewable_queryset(Device))
+                    .select_related("device")
+                    .first()
+                )
             if manual_cp is not None:
-                # Reserve the pick in the shared dedup set: a sibling auto-matched row in this
-                # pass must not be offered the same free port — batch-syncing both would let the
-                # auto row silently overwrite the just-created manually picked cable (its own
-                # link carries no manual_remote_id, so the force gate would not fire for it).
-                if claimed_cp_ids is not None:
+                # Reserve the pick in the shared dedup set so a sibling auto-matched row cannot
+                # target the manually picked endpoint in the same batch.
+                manual_is_actionable = remote_context is None or (
+                    csp.pk in remote_context["changeable_console_server_port_ids"]
+                    and manual_cp.pk in remote_context["changeable_console_port_ids"]
+                )
+                if claimed_cp_ids is not None and manual_is_actionable:
                     claimed_cp_ids.add(manual_cp.pk)
-                self._apply_serial_remote_target(link, csp, manual_cp, manual=True)
+                self._apply_serial_remote_target(
+                    link,
+                    csp,
+                    manual_cp,
+                    manual=True,
+                    remote_context=remote_context,
+                )
+                if not manual_is_actionable:
+                    link["can_create_cable"] = False
                 return
+            link.update(
+                {
+                    "manual_remote": True,
+                    "cable_status": "Selected remote port is no longer available",
+                    "can_create_cable": False,
+                }
+            )
+            return
+
+        # The default label on an unconfigured sensor identifies only the local appliance
+        # port. It is not evidence for a remote NetBox Device with the same name. Keep the
+        # manual picker available, but do not auto-select or write a remote endpoint.
+        if link.get("is_configured") is False:
+            if csp.cable is not None:
+                self._display_serial_cable_far_end(
+                    link,
+                    csp,
+                    path=(remote_context or {}).get("trace_paths", {}).get(csp.pk),
+                    visible_ids=(remote_context or {}).get("trace_visibility"),
+                )
+            return
 
         label = link.get("remote_device")
         if not label:
             # Cabled but no hint at all: still show where the cable really goes.
             if csp.cable is not None:
-                self._display_serial_cable_far_end(link, csp)
+                self._display_serial_cable_far_end(
+                    link,
+                    csp,
+                    path=(remote_context or {}).get("trace_paths", {}).get(csp.pk),
+                    visible_ids=(remote_context or {}).get("trace_visibility"),
+                )
             return
 
-        device, found, _ = self.get_device_by_id_or_name(None, label)
+        if remote_context is not None:
+            device = remote_context["devices_by_label"].get(label)
+            found = device is not None
+        else:
+            device, found, _ = self.get_device_by_id_or_name(
+                None,
+                label,
+                queryset=self._viewable_queryset(Device),
+            )
         if not found:
             # A dead label must not leave a cabled row's remote columns empty — the cable
             # knows its far end; show (and link) reality. Display only, no sync target.
             if csp.cable is not None:
-                self._display_serial_cable_far_end(link, csp)
+                self._display_serial_cable_far_end(
+                    link,
+                    csp,
+                    path=(remote_context or {}).get("trace_paths", {}).get(csp.pk),
+                    visible_ids=(remote_context or {}).get("trace_visibility"),
+                )
             return
 
         link["remote_device_url"] = reverse("dcim:device", args=[device.pk])
@@ -915,7 +1433,12 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObject
 
         # A cabled row resolves against its cable state; only a mismatch falls through to the
         # free-port pick below (the re-sync re-points at the label device).
-        if csp.cable is not None and self._resolve_cabled_serial_row(link, csp, device):
+        if csp.cable is not None and self._resolve_cabled_serial_row(
+            link,
+            csp,
+            device,
+            remote_context=remote_context,
+        ):
             return
 
         if claimed_cp_ids is None:
@@ -923,25 +1446,47 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObject
         # Order explicitly so the picked port is deterministic (the label is only a hint and
         # the user confirms before sync) and stable regardless of the model's default ordering;
         # exclude ports already claimed by a sibling serial row this response.
-        uncabled_cp = (
-            device.consoleports.filter(cable__isnull=True).exclude(pk__in=claimed_cp_ids).order_by("name").first()
-        )
+        if remote_context is not None:
+            local_is_actionable = csp.pk in remote_context["changeable_console_server_port_ids"]
+            uncabled_cp = next(
+                (
+                    port
+                    for port in remote_context["ports_by_device"].get(device.pk, ())
+                    if port.cable_id is None
+                    and port.pk not in claimed_cp_ids
+                    and (not local_is_actionable or port.pk in remote_context["changeable_console_port_ids"])
+                ),
+                None,
+            )
+        else:
+            uncabled_cp = (
+                self._viewable_queryset(ConsolePort)
+                .filter(device=device, cable__isnull=True)
+                .exclude(pk__in=claimed_cp_ids)
+                .order_by("name")
+                .first()
+            )
         if uncabled_cp:
-            claimed_cp_ids.add(uncabled_cp.pk)
+            can_create = remote_context is None or (
+                csp.pk in remote_context["changeable_console_server_port_ids"]
+                and uncabled_cp.pk in remote_context["changeable_console_port_ids"]
+            )
+            if can_create:
+                claimed_cp_ids.add(uncabled_cp.pk)
             link["netbox_remote_interface_id"] = uncabled_cp.pk
             link["remote_port_name"] = uncabled_cp.name
             link["remote_port_url"] = reverse("dcim:consoleport", args=[uncabled_cp.pk])
-            link["can_create_cable"] = True
+            link["can_create_cable"] = can_create
         else:
             link["cable_status"] = "Console Port Not Found in NetBox"
 
-    def _resolve_cabled_serial_row(self, link, csp, device) -> bool:
+    def _resolve_cabled_serial_row(self, link, csp, device, remote_context=None) -> bool:
         """
         Resolve a cabled serial row against the label-matched *device*.
 
         Adopted match (cable lands on a ConsolePort of the label device), remodeled path
         (traced path reaches the device through patch panels), and trusted tag (a plugin-tagged
-        cable is deliberate — a wrong-name label must not offer a silent re-point) all fully
+        cable is deliberate, so a wrong-name label must not offer a re-point) all fully
         resolve the row. A mismatch does not: the caller falls through to the free-port pick
         that re-points at the label device.
 
@@ -953,11 +1498,18 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObject
         Returns:
             bool: True when the row is fully resolved; False to fall through (mismatch).
         """
+        visible_console_port_ids = (remote_context or {}).get("visible_console_port_ids")
         far_cp = next(
             (
                 termination
                 for termination in cable_far_terminations(csp.cable, csp)
-                if isinstance(termination, ConsolePort) and termination.device_id == device.pk
+                if isinstance(termination, ConsolePort)
+                and termination.device_id == device.pk
+                and (
+                    termination.pk in visible_console_port_ids
+                    if visible_console_port_ids is not None
+                    else self._object_is_viewable(termination)
+                )
             ),
             None,
         )
@@ -965,28 +1517,52 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObject
             link["netbox_remote_interface_id"] = far_cp.pk
             link["remote_port_name"] = far_cp.name
             link["remote_port_url"] = reverse("dcim:consoleport", args=[far_cp.pk])
-            link["can_create_cable"] = not cable_has_librenms_tag(csp.cable)
+            link["can_create_cable"] = not self._cable_has_provenance(csp.cable)
             return True
         # Trace once and reuse it for both the reach check and the far-end display — trace()
         # walks the full cable path in the DB, so the reach+display branches would otherwise
         # pay for it twice per cabled row.
-        path = csp.trace()
-        if cable_path_reaches(csp, remote_device=device, path=path):
+        if remote_context is not None and csp.pk in remote_context["trace_paths"]:
+            path = remote_context["trace_paths"][csp.pk]
+        else:
+            path = csp.trace()
+        trace_visibility = (remote_context or {}).get("trace_visibility")
+        if not self._trace_is_viewable(path, trace_visibility):
+            link["cable_status"] = "Cable State Not Available"
+            link["can_create_cable"] = False
+            link["_serial_cable_hidden"] = True
+            return True
+        if cable_path_reaches(
+            csp,
+            remote_device=device,
+            path=path,
+            remote_termination_type=ConsolePort,
+        ):
             # Show the END of the traced path (the real console), not the panel port the
             # first segment lands on.
             link["cable_status"] = "Connected via Patch Path"
-            self._display_serial_cable_far_end(link, csp, path=path)
+            self._display_serial_cable_far_end(
+                link,
+                csp,
+                path=path,
+                visible_ids=trace_visibility,
+            )
             return True
-        if cable_has_librenms_tag(csp.cable):
+        if self._cable_has_provenance(csp.cable):
             # Trust rule: a plugin-tagged cable was placed deliberately; the wrong-name label
-            # must not flip it to a mismatch offering a silent re-point. Display where it
+            # must not flip it to a mismatch offering a re-point. Display where it
             # really goes (overriding the label-device link the caller set).
-            self._display_serial_cable_far_end(link, csp, path=path)
+            self._display_serial_cable_far_end(
+                link,
+                csp,
+                path=path,
+                visible_ids=trace_visibility,
+            )
             return True
         link["cable_status"] = "Cable Mismatch"
         return False
 
-    def _display_serial_cable_far_end(self, link, csp, path=None):
+    def _display_serial_cable_far_end(self, link, csp, path=None, visible_ids=None):
         """
         Fill *link*'s remote display fields from where the CSP's cable path actually ends.
 
@@ -1003,23 +1579,39 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObject
         """
         if path is None:
             path = csp.trace()
+        if path and not self._trace_is_viewable(path, visible_ids):
+            link["cable_status"] = "Cable State Not Available"
+            link["can_create_cable"] = False
+            link["_serial_cable_hidden"] = True
+            return
         far = (path[-1][2] if path else None) or cable_far_terminations(csp.cable, csp)
         termination = far[0] if far else None
-        if termination is None:
+        termination_is_viewable = termination is not None and (
+            termination.pk in visible_ids.get(type(termination), set())
+            if visible_ids is not None
+            else self._object_is_viewable(termination)
+        )
+        if not termination_is_viewable:
             return
         device = getattr(termination, "device", None)
-        if device is not None:
-            # DISPLAY-ONLY key: never overwrite the raw ``remote_device`` label — it survives
-            # the cache strip, so a leaked far-end name would resolve as a "label" on the next
-            # cached re-render and flip the row's status (fresh vs cached renders disagreeing).
-            link["remote_device_display"] = device.name
-            link["remote_device_url"] = reverse("dcim:device", args=[device.pk])
-            link["netbox_remote_device_id"] = device.pk
+        device_is_viewable = device is not None and (
+            device.pk in visible_ids.get(type(device), set())
+            if visible_ids is not None
+            else self._object_is_viewable(device)
+        )
+        if not device_is_viewable:
+            return
+        # DISPLAY-ONLY key: never overwrite the raw ``remote_device`` label — it survives
+        # the cache strip, so a leaked far-end name would resolve as a "label" on the next
+        # cached re-render and flip the row's status (fresh vs cached renders disagreeing).
+        link["remote_device_display"] = device.name
+        link["remote_device_url"] = reverse("dcim:device", args=[device.pk])
+        link["netbox_remote_device_id"] = device.pk
         link["remote_port_name"] = getattr(termination, "name", str(termination))
         if hasattr(termination, "get_absolute_url"):
             link["remote_port_url"] = termination.get_absolute_url()
 
-    def _apply_serial_remote_target(self, link, csp, target_cp, manual=False):
+    def _apply_serial_remote_target(self, link, csp, target_cp, manual=False, remote_context=None):
         """
         Resolve *link*'s remote to *target_cp* and derive status/affordance from the cable state.
 
@@ -1048,16 +1640,55 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObject
             link["manual_remote"] = True
 
         cable = csp.cable
-        if cable is None:
+        target_cable = target_cp.cable
+        visible_cable_ids = (remote_context or {}).get("visible_cable_ids")
+        cable_state_hidden = any(
+            current is not None
+            and (
+                current.pk not in visible_cable_ids
+                if visible_cable_ids is not None
+                else not self._object_is_viewable(current)
+            )
+            for current in (cable, target_cable)
+        )
+        if cable_state_hidden:
+            link["cable_status"] = "Cable State Not Available"
+            link["can_create_cable"] = False
+            return
+        unsupported_cable = next(
+            (
+                current
+                for current in (cable, target_cable)
+                if current is not None and not cable_is_point_to_point(current)
+            ),
+            None,
+        )
+        if unsupported_cable is not None:
+            link["cable_status"] = "Multi-termination Cable Not Supported"
+            link["cable_url"] = reverse("dcim:cable", args=[unsupported_cable.pk])
+            link["can_create_cable"] = False
+            link["_multi_termination_unsupported"] = True
+            link.pop("picker_url", None)
+            return
+        if cable is None and target_cable is None:
             link["can_create_cable"] = True  # status is already "No Cable"
             return
-        if any(termination == target_cp for termination in cable_far_terminations(cable, csp)):
+        if cable is not None and any(termination == target_cp for termination in cable_far_terminations(cable, csp)):
             # The desired connection already exists — offer adopt while untagged.
-            link["can_create_cable"] = not cable_has_librenms_tag(cable)
+            link["can_create_cable"] = not self._cable_has_provenance(cable)
             return
-        if cable_path_reaches(csp, remote_termination=target_cp):
-            link["cable_status"] = "Connected via Patch Path"
-            return
+        if cable is not None:
+            if remote_context is not None and csp.pk in remote_context["trace_paths"]:
+                path = remote_context["trace_paths"][csp.pk]
+            else:
+                path = csp.trace()
+            if not self._trace_is_viewable(path, (remote_context or {}).get("trace_visibility")):
+                link["cable_status"] = "Cable State Not Available"
+                link["can_create_cable"] = False
+                return
+            if cable_path_reaches(csp, remote_termination=target_cp, path=path):
+                link["cable_status"] = "Connected via Patch Path"
+                return
         link["cable_status"] = "Cable Mismatch"
         link["can_create_cable"] = True
 
@@ -1077,19 +1708,147 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObject
             obj: The page device (URL scope for the picker endpoint).
             server_key: The active LibreNMS server key, carried in the picker URL.
         """
-        if link.get("_source") == "oob" or not link.get("netbox_local_interface_id"):
+        if (
+            not self.has_write_permission()
+            or link.get("_source") == "oob"
+            or link.get("_multi_termination_unsupported")
+            or not link.get("netbox_local_interface_id")
+        ):
             return
         url = reverse("plugins:netbox_librenms_plugin:cable_remote_picker", args=[obj.pk])
-        query = f"port_id={quote_plus(str(link.get('local_port_id', '')))}"
+        query = f"row_id={quote_plus(str(link.get('row_id', '')))}"
         if server_key:
             query += f"&server_key={quote_plus(server_key)}"
         link["picker_url"] = f"{url}?{query}"
 
-    def process_remote_device(self, link, remote_hostname, remote_device_id, server_key=None):
-        """Process remote device data and add remote device URL if device exists in NetBox."""
-        device, found, error_message = self.get_device_by_id_or_name(
-            remote_device_id, remote_hostname, server_key=server_key
+    def _remote_picker_action_html(self, link, obj, server_key):
+        """Render the picker action shared by table-verify response paths."""
+        self._set_remote_picker_affordance(link, obj, server_key)
+        if not (picker_url := link.get("picker_url")):
+            return ""
+        return f"""
+            <button type="button" class="btn btn-sm btn-outline-secondary" title="Pick remote end"
+                    aria-label="Pick remote end"
+                    hx-get="{escape(picker_url)}" hx-target="#htmx-modal-content" hx-swap="innerHTML">
+                <i class="mdi mdi-connection"></i>
+            </button>
+        """
+
+    def _build_serial_remote_context(self, links, serial_ports):
+        """Bulk-load serial label targets and free ports for one table render."""
+        labels = {link.get("remote_device") for link in links if link.get("_source") == "serial"}
+        labels.discard(None)
+        labels.discard("")
+        candidate_names = labels | {label.split(".")[0] for label in labels}
+        catalog_devices = list(Device.objects.filter(name__in=candidate_names).order_by("pk"))
+        visible_device_ids = set(
+            self._viewable_queryset(Device)
+            .filter(pk__in=[device.pk for device in catalog_devices])
+            .values_list("pk", flat=True)
         )
+        devices_by_name = defaultdict(list)
+        for device in catalog_devices:
+            devices_by_name[device.name].append(device)
+
+        devices_by_label = {}
+        for label in labels:
+            exact = devices_by_name[label]
+            simple = devices_by_name[label.split(".")[0]]
+            matches = exact if exact else simple
+            devices_by_label[label] = matches[0] if len(matches) == 1 and matches[0].pk in visible_device_ids else None
+
+        manual_ids = {
+            normalized
+            for link in links
+            if link.get("_source") == "serial"
+            if (normalized := coerce_librenms_id(link.get("manual_remote_id"))) is not None
+        }
+        target_device_ids = {device.pk for device in devices_by_label.values() if device is not None}
+        console_ports = list(
+            self._viewable_queryset(ConsolePort)
+            .filter(Q(device_id__in=target_device_ids) | Q(pk__in=manual_ids))
+            .filter(device__in=self._viewable_queryset(Device))
+            .select_related("device", "cable")
+            .prefetch_related("cable__tags", "cable__terminations__termination")
+            .order_by("device_id", "name", "pk")
+        )
+        ports_by_device = defaultdict(list)
+        manual_ports = {}
+        for port in console_ports:
+            ports_by_device[port.device_id].append(port)
+            if port.pk in manual_ids:
+                manual_ports[port.pk] = port
+
+        cable_ids = {port.cable_id for port in [*serial_ports, *console_ports] if port.cable_id is not None}
+        visible_cable_ids = set(self._viewable_queryset(Cable).filter(pk__in=cable_ids).values_list("pk", flat=True))
+        changeable_console_port_ids = set(
+            self._changeable_queryset(ConsolePort)
+            .filter(pk__in=[port.pk for port in console_ports])
+            .values_list("pk", flat=True)
+        )
+        changeable_console_server_port_ids = set(
+            self._changeable_queryset(ConsoleServerPort)
+            .filter(pk__in=[port.pk for port in serial_ports])
+            .values_list("pk", flat=True)
+        )
+        links_by_local_port = defaultdict(list)
+        for link in links:
+            if link.get("_source") == "serial":
+                links_by_local_port[link.get("local_port")].append(link)
+        trace_paths = {}
+        for port in serial_ports:
+            if port.cable_id is None or port.cable_id not in visible_cable_ids:
+                continue
+            direct_far = cable_far_terminations(port.cable, port)
+            needs_path = False
+            for link in links_by_local_port.get(port.name, ()):
+                manual_id = coerce_librenms_id(link.get("manual_remote_id"))
+                if manual_id is not None:
+                    manual_port = manual_ports.get(manual_id)
+                    needs_path = manual_port is not None and manual_port not in direct_far
+                else:
+                    label_device = devices_by_label.get(link.get("remote_device"))
+                    needs_path = (
+                        link.get("is_configured") is False
+                        or label_device is None
+                        or not any(
+                            isinstance(far, ConsolePort) and far.device_id == label_device.pk for far in direct_far
+                        )
+                    )
+                if needs_path:
+                    break
+            if not needs_path:
+                continue
+            trace_paths[port.pk] = (
+                [([port], [port.cable], direct_far)]
+                if any(isinstance(far, ConsolePort) for far in direct_far)
+                else port.trace()
+            )
+        return {
+            "devices_by_label": devices_by_label,
+            "ports_by_device": ports_by_device,
+            "manual_ports": manual_ports,
+            "visible_console_port_ids": {port.pk for port in console_ports},
+            "visible_cable_ids": visible_cable_ids,
+            "changeable_console_port_ids": changeable_console_port_ids,
+            "changeable_console_server_port_ids": changeable_console_server_port_ids,
+            "trace_paths": trace_paths,
+            "trace_visibility": self._build_trace_visibility(trace_paths.values()),
+        }
+
+    def process_remote_device(self, link, remote_hostname, remote_device_id, server_key=None, normal_context=None):
+        """Process remote device data and add remote device URL if device exists in NetBox"""
+        if normal_context is not None:
+            device = normal_context["remote_device_by_link"].get(id(link))
+            found = device is not None
+            error_message = None
+        else:
+            device, found, error_message = self.get_device_by_id_or_name(
+                remote_device_id,
+                remote_hostname,
+                server_key=server_key,
+                queryset=self._viewable_queryset(Device),
+            )
         if found:
             link.update(
                 {
@@ -1097,7 +1856,12 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObject
                     "netbox_remote_device_id": device.pk,
                 }
             )
-            return self.enrich_remote_port(link, device, server_key=server_key)
+            return self.enrich_remote_port(
+                link,
+                device,
+                server_key=server_key,
+                normal_context=normal_context,
+            )
 
         link.update(
             {
@@ -1107,6 +1871,47 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObject
             }
         )
         return link
+
+    def _apply_manual_interface_target(self, link, normal_context=None):
+        """Resolve one request-scoped manual Interface pick into the shared row shape."""
+        if "manual_remote_id" not in link:
+            return False
+        manual_pk = coerce_librenms_id(link.get("manual_remote_id"))
+        if normal_context is not None:
+            manual_iface = normal_context["interfaces_by_pk"].get(manual_pk)
+            if manual_iface is not None and (
+                manual_iface.pk not in normal_context["visible_interface_ids"]
+                or manual_iface.device_id not in normal_context["visible_owner_ids"]
+            ):
+                manual_iface = None
+        else:
+            manual_iface = (
+                self._viewable_queryset(Interface)
+                .filter(pk=manual_pk, device__in=self._viewable_queryset(Device))
+                .select_related("device")
+                .first()
+            )
+        if manual_iface is None:
+            link.update(
+                {
+                    "manual_remote": True,
+                    "cable_status": "Selected remote port is no longer available",
+                    "can_create_cable": False,
+                }
+            )
+            return True
+        link.update(
+            {
+                "netbox_remote_device_id": manual_iface.device_id,
+                "remote_device_display": manual_iface.device.name,
+                "remote_device_url": reverse("dcim:device", args=[manual_iface.device_id]),
+                "netbox_remote_interface_id": manual_iface.pk,
+                "remote_port_name": manual_iface.name,
+                "remote_port_url": reverse("dcim:interface", args=[manual_iface.pk]),
+                "manual_remote": True,
+            }
+        )
+        return True
 
     def enrich_links_data(self, links_data, obj, server_key=None, sync_device=None):
         """Enrich links data with local and remote port URLs and cable status."""
@@ -1118,12 +1923,51 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObject
         # per serial row. Reuse the device the caller (_prepare_context) already resolved to
         # avoid a second get_librenms_sync_device() VC-members query per request; falls back to
         # resolving here when called without one.
-        serial_sync_device = sync_device or get_librenms_sync_device(obj, server_key=server_key) or obj
+        serial_sync_device = sync_device or self._viewable_sync_device(obj, server_key)
+        serial_links_present = any(link.get("_source") == "serial" for link in links_data)
+        serial_ports = (
+            list(
+                self._viewable_queryset(ConsoleServerPort)
+                .filter(device=serial_sync_device)
+                .select_related("cable")
+                .prefetch_related("cable__tags", "cable__terminations__termination")
+            )
+            if serial_links_present and serial_sync_device is not None
+            else []
+        )
+        serial_ports_by_name = {port.name: port for port in serial_ports}
+        serial_remote_context = (
+            self._build_serial_remote_context(links_data, serial_ports) if serial_links_present else None
+        )
+        normal_context = self._build_normal_link_context(links_data, obj, server_key)
         # ConsolePorts already auto-picked by an earlier serial row this response, so two rows
         # resolving to the same remote device don't collide on one port (see enrich_serial_remote).
-        claimed_remote_cp_ids = set()
+        # Reserve later manual picks before row-order auto matching, but only when that row still
+        # has a current, viewable local CSP. A stale pick for a deleted/hidden CSP must not consume
+        # a valid row's only free remote port.
+        manual_ports = (serial_remote_context or {}).get("manual_ports", {})
+        changeable_console_port_ids = (serial_remote_context or {}).get("changeable_console_port_ids", set())
+        changeable_console_server_port_ids = (serial_remote_context or {}).get(
+            "changeable_console_server_port_ids", set()
+        )
+        claimed_remote_cp_ids = {
+            manual_id
+            for link in links_data
+            if link.get("_source") == "serial"
+            and (local_csp := serial_ports_by_name.get(link.get("local_port"))) is not None
+            and local_csp.pk in changeable_console_server_port_ids
+            if (manual_id := coerce_librenms_id(link.get("manual_remote_id"))) in manual_ports
+            and manual_id in changeable_console_port_ids
+        }
         for link in links_data:
-            csp = self.enrich_local_port(link, obj, server_key=server_key, sync_device=serial_sync_device)
+            csp = self.enrich_local_port(
+                link,
+                obj,
+                server_key=server_key,
+                sync_device=serial_sync_device,
+                serial_ports_by_name=serial_ports_by_name,
+                normal_context=normal_context,
+            )
 
             # Serial rows: check CSP cable status, then try to resolve remote ConsolePort.
             if link.get("_source") == "serial":
@@ -1131,11 +1975,16 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObject
                 # map_sensors_to_serial_links; don't overwrite it with the viewed obj.id —
                 # on a VC-member page that would default the per-row member dropdown (and the
                 # sync target) to the wrong member. Reuse the CSP enrich_local_port just loaded.
-                self.check_serial_cable_status(link, csp=csp)
+                self.check_serial_cable_status(link, csp=csp, remote_context=serial_remote_context)
                 # If CSP is found, resolve the remote against the label — for cabled rows too,
                 # so the row can offer adopt (matched untagged) or re-sync (mismatch) actions.
                 if link.get("netbox_local_interface_id"):
-                    self.enrich_serial_remote(link, claimed_cp_ids=claimed_remote_cp_ids, csp=csp)
+                    self.enrich_serial_remote(
+                        link,
+                        claimed_cp_ids=claimed_remote_cp_ids,
+                        csp=csp,
+                        remote_context=serial_remote_context,
+                    )
                 self._set_remote_picker_affordance(link, obj, server_key)
                 continue
 
@@ -1145,30 +1994,36 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObject
             # names mismatching is why the user picked by hand). check_cable_status then derives
             # the matched / patch-path / mismatch state at termination level as usual. A vanished
             # picked port falls back to the name-matching path below.
-            manual_pk = link.get("manual_remote_id")
-            manual_iface = (
-                Interface.objects.filter(pk=manual_pk).select_related("device").first() if manual_pk else None
-            )
-            if manual_iface is not None:
-                link.update(
-                    {
-                        "netbox_remote_device_id": manual_iface.device_id,
-                        "remote_device_url": reverse("dcim:device", args=[manual_iface.device_id]),
-                        "netbox_remote_interface_id": manual_iface.pk,
-                        "remote_port_name": manual_iface.name,
-                        "remote_port_url": reverse("dcim:interface", args=[manual_iface.pk]),
-                        "manual_remote": True,
-                    }
-                )
-                link = self.check_cable_status(link)
+            if self._apply_manual_interface_target(link, normal_context=normal_context):
+                link = self.check_cable_status(link, normal_context=normal_context)
             elif remote_hostname := link.get("remote_device"):
                 link = self.process_remote_device(
-                    link, remote_hostname, link.get("remote_device_id"), server_key=server_key
+                    link,
+                    remote_hostname,
+                    link.get("remote_device_id"),
+                    server_key=server_key,
+                    normal_context=normal_context,
                 )
                 if link.get("netbox_remote_device_id"):
-                    link = self.check_cable_status(link)
+                    link = self.check_cable_status(link, normal_context=normal_context)
             self._set_remote_picker_affordance(link, obj, server_key)
 
+        user = getattr(getattr(self, "request", None), "user", None)
+        if getattr(user, "is_authenticated", False) and not getattr(user, "is_superuser", False):
+            links_data[:] = [
+                link
+                for link in links_data
+                if link.get("_source") != "serial" or link.get("local_port") in serial_ports_by_name
+            ]
+        self._apply_termination_change_scope(
+            links_data,
+            preloaded_changeable_ids={
+                ConsolePort: changeable_console_port_ids,
+                ConsoleServerPort: changeable_console_server_port_ids,
+            }
+            if serial_remote_context is not None
+            else None,
+        )
         return links_data
 
     def get_table(self, data, obj):
@@ -1182,7 +2037,12 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObject
         # Scoped to the POST-resolved server when provided; else the degrading resolver.
         server_key = server_key or self._render_server_key()
         # For VC devices, cache under the sync device's key so SingleCableVerifyView reads the same entry.
-        cache_device = get_librenms_sync_device(obj, server_key=server_key) or obj
+        cache_device = self._viewable_sync_device(obj, server_key)
+        if cache_device is None:
+            return None
+        cache_key = self.get_cache_key(cache_device, "links", server_key)
+        incomplete_sources = []
+        cached_before_refresh = cache.get(cache_key) if fetch_fresh else None
 
         if fetch_fresh:
             # Always fetch new data when requested
@@ -1193,75 +2053,105 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObject
             # surfaces that OOB warning only on the success path — `if not links_data`
             # would discard it and mislabel it "No links found".
             if links_data is None:
+                cache.delete(cache_key)
                 return None
+            if getattr(self, "_librenms_id_unresolved", False):
+                cache.delete(cache_key)
+                return {
+                    "table": None,
+                    "object": obj,
+                    "cache_expiry": None,
+                    "server_key": server_key,
+                    "refresh_incomplete": True,
+                }
+            snapshot_token = uuid4().hex
+            if getattr(self, "_links_fetch_error", None) and getattr(self, "librenms_id", None) is not None:
+                incomplete_sources.append("host")
+            if getattr(self, "_oob_links_fetch_failed", False):
+                incomplete_sources.append("OOB")
+            if getattr(self, "_serial_links_fetch_failed", False):
+                incomplete_sources.append("serial")
+            if getattr(self, "_serial_source_skipped", False):
+                prior_links = _extract_cached_links(cached_before_refresh) if cached_before_refresh else None
+                links_data.extend(link for link in prior_links or [] if link.get("_source") == "serial")
+                incomplete_sources.append("serial")
         else:
             # Try to use cached data
-            links_cache_key = self.get_cache_key(cache_device, "links", server_key)
-            cached_links_data = cache.get(links_cache_key)
+            cached_links_data = cache.get(cache_key)
             if cached_links_data:
                 # Fail closed on a malformed/corrupt cache entry (non-dict, non-list "links", or a
                 # non-dict link row) instead of crashing the cached render below on .items().
-                links_data = _extract_cached_links(cached_links_data, links_cache_key)
+                links_data = _extract_cached_links(cached_links_data, cache_key)
                 if links_data is None:
                     return None
+                snapshot_token = cable_snapshot_token(cached_links_data)
+                cached_incomplete = cached_links_data.get("incomplete_sources", [])
+                if isinstance(cached_incomplete, list):
+                    incomplete_sources = [source for source in cached_incomplete if isinstance(source, str)]
             else:
                 return None
 
-        if not fetch_fresh:
-            # Strip derived fields so re-enrichment starts from raw link data;
-            # without this, stale IDs/URLs persist when NetBox objects are
-            # deleted and cause DoesNotExist in check_cable_status().
-            links_data = [{k: v for k, v in link.items() if k in _RAW_LINK_KEYS} for link in links_data]
-
-        cache_key = self.get_cache_key(cache_device, "links", server_key)
-        # Don't persist or enrich a PARTIAL fresh snapshot: a host fetch failure on a device that
-        # has a host id, any OOB fetch failure, or a serial-sensor fetch failure drops one side's
-        # cable rows. An OOB-only mapping (no host id) legitimately records _links_fetch_error for
-        # the absent host, so keep caching that successful OOB refresh (mirrors the
-        # host_mapping_absent_but_oob_scoped guard above).
-        partial_fetch_failed = fetch_fresh and (
-            bool(getattr(self, "_oob_links_fetch_failed", False))
-            or bool(getattr(self, "_librenms_id_unresolved", False))
-            # Like the host-links branch below, only an OOB-mapped device (host id present) can have
-            # a serial-fetch failure that makes the snapshot partial. An OOB-only device skips the
-            # serial fetch entirely (see get_links_data), so a transient serial error there must not
-            # drop its valid OOB rows from the cache.
-            or bool(getattr(self, "_librenms_id_unresolved", False))
-            or (
-                bool(getattr(self, "_serial_links_fetch_failed", False))
-                and getattr(self, "librenms_id", None) is not None
-            )
-            or (bool(getattr(self, "_links_fetch_error", None)) and getattr(self, "librenms_id", None) is not None)
+        # The shared snapshot stores only permission-independent LibreNMS source fields. NetBox
+        # IDs, URLs, cable state, and user picks are derived below for this request only.
+        raw_links = assign_cable_row_ids(
+            [{k: v for k, v in link.items() if k in _RAW_LINK_KEYS} for link in links_data]
         )
-        if partial_fetch_failed:
-            # Drop any prior full snapshot so verify and sync actions cannot use data that this
-            # incomplete refresh superseded.
+        if raw_links is None:
             cache.delete(cache_key)
-            return {
-                "table": None,
-                "object": obj,
-                "cache_expiry": None,
-                "server_key": server_key,
-                "refresh_incomplete": True,
-            }
-
-        # Enrich data in both cases to ensure current NetBox state. Pass the already-resolved
-        # cache_device so enrich_links_data reuses it instead of re-running get_librenms_sync_device
-        # (a second VC-members query + per-member cf scan) on every cable refresh.
-        links_data = self.enrich_links_data(links_data, obj, server_key=server_key, sync_device=cache_device)
-
-        # Cache after enrichment so verify/sync views read current NetBox state
+            return None
         if fetch_fresh:
             cache.set(
                 cache_key,
-                {"links": links_data},
+                {
+                    "links": raw_links,
+                    "snapshot_token": snapshot_token,
+                    "incomplete_sources": incomplete_sources,
+                },
                 timeout=self.librenms_api.cache_timeout,
             )
-        elif not getattr(self, "cache_only", False):
-            # Write enriched data back, preserving original TTL
-            remaining_ttl = cache_remaining_ttl(cache, cache_key)
-            if remaining_ttl and remaining_ttl > 0:
-                cache.set(cache_key, {"links": links_data}, timeout=remaining_ttl)
+
+        user_id = getattr(getattr(request, "user", None), "pk", None)
+        if user_id is not None:
+            raw_links, _has_manual_picks = apply_cable_manual_picks(
+                cache,
+                cache_key,
+                {"links": raw_links, "snapshot_token": snapshot_token},
+                user_id,
+                raw_links,
+            )
+
+        # Enrich a request-local copy against current permission-scoped NetBox state.
+        links_data = self.enrich_links_data(
+            raw_links,
+            obj,
+            server_key=server_key,
+            sync_device=cache_device,
+        )
+        if isinstance(obj, Device):
+            local_owner_ids = {
+                owner_id
+                for link in links_data
+                if (owner_id := coerce_librenms_id(link.get("netbox_local_device_id"))) is not None
+            }
+            owner_devices = {device.pk: device for device in (obj, cache_device)}
+            owner_devices.update(
+                {
+                    device.pk: device
+                    for device in self._viewable_queryset(Device).filter(pk__in=local_owner_ids - owner_devices.keys())
+                }
+            )
+            read_only_owner_ids = {
+                device_id for device_id, device in owner_devices.items() if get_migrated_to_marker(device, server_key)
+            }
+            page_is_read_only = obj.pk in read_only_owner_ids or cache_device.pk in read_only_owner_ids
+            for link in links_data:
+                if (
+                    not page_is_read_only
+                    and coerce_librenms_id(link.get("netbox_local_device_id")) not in read_only_owner_ids
+                ):
+                    continue
+                link["can_create_cable"] = False
+                link.pop("picker_url", None)
 
         # Calculate cache expiry
         cache_ttl = cache_remaining_ttl(cache, cache_key)
@@ -1285,6 +2175,7 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObject
             "object": obj,
             "cache_expiry": cache_expiry,
             "server_key": server_key,
+            "incomplete_sources": incomplete_sources,
         }
 
     def get_context_data(self, request, obj):
@@ -1306,6 +2197,8 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObject
 
     def post(self, request, pk):
         """Handle POST request for cable sync view."""
+        if error := self.require_object_permissions("POST"):
+            return error
         obj = self.get_object(pk)
         # Rebind the API to the POSTed server so live link/port fetches hit the same
         # Active server whose source snapshot supplies this multi-server tab. The strict helper,
@@ -1421,100 +2314,7 @@ class SingleCableVerifyView(BaseCableTableView):
     # device id and read back that device's rendered cable/topology rows.
     required_object_permissions = {"POST": [("view", Device)]}
 
-    def _format_serial_verify_row(self, request, selected_device, link_data, local_port_id, server_key):
-        """
-        Build the verify-cable formatted_row for a serial ConsoleServerPort row.
-
-        Mirrors the serial path of enrich_links_data (resolve CSP -> cable status ->
-        remote ConsolePort) and renders the same Serial badge + Sync form as the initial
-        table render, with LibreNMS-sourced labels HTML-escaped.
-
-        Args:
-            request: The current HTTP request (for the CSRF token in the sync form).
-            selected_device: The NetBox device the row is verified against.
-            link_data (dict): The serial link row to enrich and render (mutated).
-            local_port_id: The local ConsoleServerPort id for the sync form.
-            server_key: The active LibreNMS server key.
-
-        Returns:
-            dict: The formatted row (local_port, remote_port, remote_device,
-                cable_status, actions) as escaped HTML fragments.
-        """
-        csp = self.enrich_local_port(link_data, selected_device, server_key=server_key)
-        self.check_serial_cable_status(link_data, csp=csp)
-        # Mirror enrich_links_data: resolve the remote for cabled rows too (adopt / mismatch).
-        if link_data.get("netbox_local_interface_id"):
-            self.enrich_serial_remote(link_data, csp=csp)
-
-        # Shared constant so the verify-row badge can't drift from the table render.
-        serial_badge = SERIAL_BADGE_HTML
-        # `or ""` (not a .get default): a present-but-None value would reach escape(), and
-        # escape(None) renders the literal "None" — the table renderers normalize the same way.
-        safe_local = escape(link_data.get("local_port") or "")
-        if link_data.get("local_port_url"):
-            local_html = f'<a href="{link_data["local_port_url"]}">{safe_local}</a>{serial_badge}'
-        else:
-            local_html = f"{safe_local}{serial_badge}"
-
-        safe_remote_device = escape(link_data.get("remote_device_display") or link_data.get("remote_device") or "")
-        if link_data.get("remote_device_url"):
-            remote_device_html = f'<a href="{link_data["remote_device_url"]}">{safe_remote_device}</a>'
-        elif link_data.get("_source") == "serial" and not link_data.get("is_configured"):
-            # Match the table render (LibreNMSCableTable.render_remote_device): dim an
-            # unconfigured serial label (the Avocent port was never customised) instead of
-            # showing it the same as a configured one.
-            remote_device_html = f'<span class="text-muted fst-italic">{safe_remote_device}</span>'
-        else:
-            remote_device_html = safe_remote_device
-
-        safe_remote_port = escape(link_data.get("remote_port_name", "") or "")
-        if link_data.get("remote_port_url"):
-            remote_port_html = f'<a href="{link_data["remote_port_url"]}">{safe_remote_port}</a>'
-        else:
-            remote_port_html = safe_remote_port
-
-        safe_status = escape(link_data.get("cable_status", "Missing Ports"))
-        if link_data.get("cable_url"):
-            status_html = f'<a href="{link_data["cable_url"]}">{safe_status}</a>'
-        else:
-            status_html = safe_status
-
-        actions = ""
-        if link_data.get("can_create_cable"):
-            csrf_token = get_token(request)
-            server_key_input = (
-                f'<input type="hidden" name="server_key" value="{escape(str(server_key))}">' if server_key else ""
-            )
-            actions = f"""
-                <form method="post" action="{reverse("plugins:netbox_librenms_plugin:sync_device_cables", args=[selected_device.id])}">
-                    <input type="hidden" name="csrfmiddlewaretoken" value="{csrf_token}">
-                    <input type="hidden" name="select" value="{escape(str(local_port_id))}">
-                    {server_key_input}
-                    <button type="submit" class="btn btn-sm btn-primary">Sync Cable</button>
-                </form>
-            """
-
-        # Mirror the table render's pick-remote affordance so it doesn't vanish from the
-        # actions cell after a verify re-render.
-        self._set_remote_picker_affordance(link_data, selected_device, server_key)
-        if picker_url := link_data.get("picker_url"):
-            actions += f"""
-                <button type="button" class="btn btn-sm btn-outline-secondary" title="Pick remote end"
-                        aria-label="Pick remote end"
-                        hx-get="{escape(picker_url)}" hx-target="#htmx-modal-content" hx-swap="innerHTML">
-                    <i class="mdi mdi-connection"></i>
-                </button>
-            """
-
-        return {
-            "local_port": local_html,
-            "remote_port": remote_port_html,
-            "remote_device": remote_device_html,
-            "cable_status": status_html,
-            "actions": actions,
-        }
-
-    def post(self, request):  # noqa: C901
+    def post(self, request):
         data, err = parse_request_json(request)
         if err:
             return err
@@ -1523,7 +2323,7 @@ class SingleCableVerifyView(BaseCableTableView):
         if error := self.require_object_permissions_json("POST"):
             return error
         selected_device_id = data.get("device_id")
-        local_port_id = data.get("local_port_id")
+        row_id = data.get("row_id")
         # Read server_key from POST so we use the exact server the user was viewing, but only honour
         # it when it names a configured server: the raw value scopes the links cache and the
         # _librenms_id_q() JSONField lookups below, so a forged/unconfigured key must not address
@@ -1551,22 +2351,51 @@ class SingleCableVerifyView(BaseCableTableView):
             "remote_device": "",
             "cable_status": "Missing Ports",
             "actions": "",
+            "can_create_cable": False,
+            "expected_local_id": None,
+            "expected_local_device_id": None,
+            "expected_remote_id": None,
+            "expected_remote_device_id": None,
         }
 
         if selected_device_id:
             # Object-scope the lookup: the gate only checked model-level view_device, so an
             # out-of-scope pk must 404 rather than expose that device's cached cable row.
             selected_device = self.restrict_object_or_404(Device, pk=selected_device_id)
-
+            origin_device = selected_device
+            raw_origin_device_id = data.get("origin_device_id")
+            if raw_origin_device_id is not None:
+                origin_device_id = coerce_librenms_id(raw_origin_device_id)
+                if origin_device_id is None:
+                    return JsonResponse(
+                        {"status": "error", "message": "A valid origin device ID is required."},
+                        status=400,
+                    )
+                origin_device = self.restrict_object_or_404(Device, pk=origin_device_id)
+                same_device = origin_device.pk == selected_device.pk
+                same_chassis = (
+                    origin_device.virtual_chassis_id is not None
+                    and origin_device.virtual_chassis_id == selected_device.virtual_chassis_id
+                )
+                if not same_device and not same_chassis:
+                    return JsonResponse(
+                        {"status": "error", "message": "The cable page and selected device do not match."},
+                        status=400,
+                    )
             # Use the same sync-device resolution as the GET path so the cache
             # key matches what _prepare_context wrote. When the VC has no
             # resolvable sync device, return an empty row rather than crashing.
             if selected_device.virtual_chassis:
-                primary_device = get_librenms_sync_device(selected_device, server_key=server_key)
+                primary_device = self._viewable_sync_device(selected_device, server_key)
                 if primary_device is None:
                     return JsonResponse({"status": "success", "formatted_row": formatted_row})
             else:
                 primary_device = selected_device
+
+            read_only_origin = any(
+                get_migrated_to_marker(device, server_key)
+                for device in {origin_device, primary_device, selected_device}
+            )
 
             links_cache_key = self.get_cache_key(primary_device, "links", server_key)
             cached_links = cache.get(links_cache_key)
@@ -1575,26 +2404,35 @@ class SingleCableVerifyView(BaseCableTableView):
             # "links", or a non-dict link row) is purged and treated as no cache, so the verify path
             # returns the empty formatted_row instead of crashing on .get()/.items().
             valid_links = _extract_cached_links(cached_links, links_cache_key) if cached_links else None
+            valid_links = assign_cable_row_ids(valid_links) if valid_links is not None else None
+            if valid_links and request.user.pk is not None:
+                valid_links, _has_manual_picks = apply_cable_manual_picks(
+                    cache,
+                    links_cache_key,
+                    cached_links,
+                    request.user.pk,
+                    valid_links,
+                )
             if valid_links:
                 link_data = next(
-                    (link for link in valid_links if str(link.get("local_port_id", "")) == str(local_port_id)),
+                    (link for link in valid_links if link.get("row_id") == row_id),
                     None,
                 )
                 if link_data:
+                    manual_remote_id = link_data.get("manual_remote_id")
                     # Strip derived fields from cached data to avoid stale
                     # IDs/URLs when NetBox objects are deleted after caching.
                     link_data = {k: v for k, v in link_data.items() if k in _RAW_LINK_KEYS}
+                    if manual_remote_id is not None:
+                        link_data["manual_remote_id"] = manual_remote_id
 
-                    # Serial rows map ConsoleServerPort -> ConsolePort, not Interface -> Interface.
-                    # The VC-member dropdown fires verify-cable for EVERY row (serial included), so
-                    # route serial rows through the serial enrichment pipeline here; otherwise they
-                    # fall into the Interface-lookup path below and get mislabeled "Missing
-                    # Interface" with no Sync action.
+                    # Serial rows have a fixed ConsoleServerPort owner. Their owner selector is
+                    # disabled, so they never need the member-change verify path.
                     if link_data.get("_source") == "serial":
-                        formatted_row = self._format_serial_verify_row(
-                            request, selected_device, link_data, local_port_id, server_key
+                        return JsonResponse(
+                            {"status": "error", "message": "Serial cable rows have a fixed device owner."},
+                            status=400,
                         )
-                        return JsonResponse({"status": "success", "formatted_row": formatted_row})
 
                     # The verify response returns formatted_row HTML directly (it does not pass
                     # through LibreNMSCableTable.render_local_port), so re-apply the OOB badge
@@ -1605,7 +2443,7 @@ class SingleCableVerifyView(BaseCableTableView):
 
                     # Re-enrich remote side from current NetBox state
                     remote_hostname = link_data.get("remote_device", "")
-                    if remote_hostname:
+                    if not self._apply_manual_interface_target(link_data) and remote_hostname:
                         link_data = self.process_remote_device(
                             link_data, remote_hostname, link_data.get("remote_device_id"), server_key=server_key
                         )
@@ -1616,7 +2454,9 @@ class SingleCableVerifyView(BaseCableTableView):
                     local_port = link_data.get("local_port") or ""
                     formatted_row["local_port"] = local_port
 
-                    # Resolve the local interface (handle VC members)
+                    # Resolve the local interface on the member selected by the user. The caller
+                    # already proved that this Device is visible. Do not infer a different member
+                    # from the port name after the dropdown selection.
                     interface = None
                     lookup_device = selected_device
                     # Merged OOB-controller rows are context-only: their local port lives on the
@@ -1625,31 +2465,50 @@ class SingleCableVerifyView(BaseCableTableView):
                     # render. Left unresolved, the row takes the labelled, badge-carrying
                     # unresolved branch below instead of linking the wrong interface.
                     if link_data.get("_source") != "oob":
-                        if (
-                            local_port
-                            and hasattr(selected_device, "virtual_chassis")
-                            and selected_device.virtual_chassis
-                        ):
-                            chassis_member = get_virtual_chassis_member(selected_device, local_port)
-                            if chassis_member:
-                                lookup_device = chassis_member
                         # Shared id→dual-name resolution core (issue #88 fallback included), so
                         # this path can't drift from enrich_local_port's again.
                         name_candidates = [n for n in (local_port, link_data.get("local_port_alt")) if n]
-                        interface = _resolve_local_interface(lookup_device, server_key, local_port_id, name_candidates)
+                        interface = resolve_interface_on_device(
+                            lookup_device,
+                            server_key,
+                            link_data.get("local_port_id"),
+                            name_candidates,
+                        )
+                        if interface is not None and not self._object_is_viewable(interface):
+                            interface = None
 
                     if interface:
                         link_data["netbox_local_interface_id"] = interface.pk
+                        link_data["netbox_local_device_id"] = interface.device_id
 
                         # Check cable status if remote side was resolved
                         if link_data.get("netbox_remote_device_id"):
                             link_data = self.check_cable_status(link_data)
 
+                        self._apply_termination_change_scope([link_data])
+                        if read_only_origin:
+                            link_data["can_create_cable"] = False
+                        formatted_row["can_create_cable"] = bool(link_data.get("can_create_cable"))
+                        formatted_row["expected_local_id"] = coerce_librenms_id(
+                            link_data.get("netbox_local_interface_id")
+                        )
+                        formatted_row["expected_local_device_id"] = coerce_librenms_id(
+                            link_data.get("netbox_local_device_id")
+                        )
+                        formatted_row["expected_remote_id"] = coerce_librenms_id(
+                            link_data.get("netbox_remote_interface_id")
+                        )
+                        formatted_row["expected_remote_device_id"] = coerce_librenms_id(
+                            link_data.get("netbox_remote_device_id")
+                        )
+
                         # Escape LibreNMS-sourced labels to prevent XSS
                         safe_local_port = escape(local_port)
                         remote_port_name = link_data.get("remote_port_name") or link_data.get("remote_port") or ""
                         safe_remote_port = escape(remote_port_name)
-                        remote_device_name = link_data.get("remote_device", "")
+                        remote_device_name = link_data.get("remote_device_display") or link_data.get(
+                            "remote_device", ""
+                        )
                         safe_remote_device = escape(remote_device_name)
                         safe_cable_status = escape(link_data.get("cable_status", "Missing Ports"))
 
@@ -1673,19 +2532,13 @@ class SingleCableVerifyView(BaseCableTableView):
                             )
 
                         if link_data.get("can_create_cable"):
-                            csrf_token = get_token(request)
-                            server_key_input = (
-                                f'<input type="hidden" name="server_key" value="{escape(str(server_key))}">'
-                                if server_key
-                                else ""
-                            )
                             formatted_row["actions"] = f"""
-                                <form method="post" action="{reverse("plugins:netbox_librenms_plugin:sync_device_cables", args=[selected_device.id])}">
-                                    <input type="hidden" name="csrfmiddlewaretoken" value="{csrf_token}">
-                                    <input type="hidden" name="select" value="{escape(str(local_port_id))}">
-                                    {server_key_input}
-                                    <button type="submit" class="btn btn-sm btn-primary">Sync Cable</button>
-                                </form>
+                                <button type="submit"
+                                        class="btn btn-sm btn-primary"
+                                        name="sync_one"
+                                        value="{escape(str(row_id))}">
+                                    Sync Cable
+                                </button>
                             """
                     else:
                         formatted_row["local_port"] = f"{escape(local_port)}{oob_badge}"
@@ -1698,7 +2551,9 @@ class SingleCableVerifyView(BaseCableTableView):
                             else safe_remote_port
                         )
                         # Keep remote device name visible, add URL if available
-                        remote_device_name = link_data.get("remote_device", "")
+                        remote_device_name = link_data.get("remote_device_display") or link_data.get(
+                            "remote_device", ""
+                        )
                         safe_remote_device = escape(remote_device_name)
                         formatted_row["remote_device"] = (
                             f'<a href="{link_data["remote_device_url"]}">{safe_remote_device}</a>'
@@ -1717,10 +2572,17 @@ class SingleCableVerifyView(BaseCableTableView):
 
                         formatted_row["actions"] = ""
 
+                    if not read_only_origin:
+                        formatted_row["actions"] += self._remote_picker_action_html(
+                            link_data,
+                            selected_device,
+                            server_key,
+                        )
+
         return JsonResponse({"status": "success", "formatted_row": formatted_row})
 
 
-class CableRemotePickerView(NetBoxObjectPermissionMixin, BaseCableTableView):
+class CableRemotePickerView(BaseCableTableView):
     """
     Modal picker for a cable row's remote endpoint.
 
@@ -1730,13 +2592,11 @@ class CableRemotePickerView(NetBoxObjectPermissionMixin, BaseCableTableView):
     - ``GET`` serves the picker modal, plus its HTMX fragments: ``action=search`` (device
       search results) and ``action=ports`` (the chosen device's port list — ConsolePorts for
       serial rows, Interfaces otherwise).
-    - ``POST`` stores the pick on the CACHED row as ``manual_remote_id`` (a raw,
-      strip-surviving key honored by ``enrich_links_data``) plus the resolved ids that make the
-      row immediately sync-ready, then re-renders the cable partial and closes the modal.
+    - ``POST`` stores the pick in a user- and row-scoped cache entry outside the shared LibreNMS
+      snapshot. It then re-renders the cable partial and closes the modal.
 
-    The pick only needs to live until the sync runs — after that the real cable drives the row
-    state — so cache-lifetime persistence is deliberate: a full "Refresh Cables" rebuilds the
-    snapshot from LibreNMS and drops unsynced picks.
+    The pick only needs to live until the sync runs. Its key includes the snapshot generation, so
+    a full "Refresh Cables" invalidates unsynced picks without sharing them across users.
     """
 
     # Both methods enumerate devices and their ports, so both gate on dcim.view_device (mirroring
@@ -1745,20 +2605,67 @@ class CableRemotePickerView(NetBoxObjectPermissionMixin, BaseCableTableView):
     # view_device grant clears.
     required_object_permissions = {"GET": [("view", Device)], "POST": [("view", Device)]}
 
+    def _viewable_ports(self, request, model):
+        """Return the permission-filtered port queryset, or None without model access."""
+        permission = f"{model._meta.app_label}.view_{model._meta.model_name}"
+        if not request.user.has_perm(permission):
+            return None
+        queryset = self.restricted_queryset(model, "view")
+        if model is Interface:
+            queryset = queryset.exclude(type__in=VIRTUAL_IFACE_TYPES)
+        return queryset
+
     def _cache_state(self, obj, server_key):
         """Return ``(cache_key, cached_payload)`` for *obj*'s links snapshot (sync-device scoped)."""
-        cache_obj = get_librenms_sync_device(obj, server_key=server_key) or obj
+        cache_obj = self._viewable_sync_device(obj, server_key)
+        if cache_obj is None:
+            return self.get_cache_key(obj, "links", server_key), None
         cache_key = self.get_cache_key(cache_obj, "links", server_key)
         return cache_key, cache.get(cache_key)
 
-    def _find_row(self, cached, port_id):
-        """Return the cached links row matching *port_id*, or None."""
-        if not cached:
+    @staticmethod
+    def _snapshot_rows(cached, cache_key=None):
+        """Return normalized rows, or None when the snapshot is absent or malformed."""
+        links = _extract_cached_links(cached, cache_key)
+        return assign_cable_row_ids(links) if links is not None else None
+
+    def _find_row(self, cached, row_id, cache_key=None):
+        """Return the cached links row matching *row_id*, or None."""
+        rows = self._snapshot_rows(cached, cache_key)
+        if rows is None:
             return None
         return next(
-            (row for row in cached.get("links", []) if str(row.get("local_port_id")) == str(port_id)),
+            (row for row in rows if row.get("row_id") == row_id),
             None,
         )
+
+    def _row_is_viewable(self, request, row, obj, server_key):
+        """Return whether the picker requester may view a cached row's local endpoint."""
+        source = row.get("_source")
+        if source == "oob":
+            return False
+        local_name = row.get("local_port")
+        if not isinstance(local_name, str) or not local_name:
+            return False
+        if source != "serial":
+            owner = get_virtual_chassis_member(obj, local_name)
+            if owner is None or not self.restricted_queryset(Device).filter(pk=owner.pk).exists():
+                return False
+            interface = resolve_interface_on_device(
+                owner,
+                server_key,
+                row.get("local_port_id"),
+                [local_name, row.get("local_port_alt")],
+            )
+            return bool(interface is not None and self.restricted_queryset(Interface).filter(pk=interface.pk).exists())
+
+        owner_id = coerce_librenms_id(row.get("device_id"))
+        if owner_id is None:
+            return False
+        if not self.restricted_queryset(Device).filter(pk=owner_id).exists():
+            return False
+        viewable_ports = self._viewable_ports(request, ConsoleServerPort)
+        return bool(viewable_ports is not None and viewable_ports.filter(device_id=owner_id, name=local_name).exists())
 
     def _refetch_snapshot(self, request, obj, server_key):
         """
@@ -1795,59 +2702,87 @@ class CableRemotePickerView(NetBoxObjectPermissionMixin, BaseCableTableView):
         if denied := self.require_object_permissions("GET"):
             return denied
         obj = self.restrict_object_or_404(Device, pk=pk)
-        server_key = request.GET.get("server_key") or self.librenms_api.server_key
-        port_id = request.GET.get("port_id", "")
+        server_key = self.rebind_api_for_server(request.GET.get("server_key"))
+        if server_key is None:
+            return HttpResponse("Selected LibreNMS server is no longer configured.", status=400)
+        row_id = request.GET.get("row_id", "")
         action = request.GET.get("action")
-        _cache_key, cached = self._cache_state(obj, server_key)
-        row = self._find_row(cached, port_id)
+        base_url = reverse("plugins:netbox_librenms_plugin:cable_remote_picker", args=[obj.pk])
+        if action:
+            source = request.GET.get("source") or ""
+            base_query = f"row_id={quote_plus(str(row_id))}&server_key={quote_plus(server_key)}"
+            if source:
+                base_query += f"&source={quote_plus(source)}"
+            if action == "search":
+                q = (request.GET.get("q") or "").strip()
+                devices = (
+                    self.restricted_queryset(Device)
+                    .filter(name__icontains=q)
+                    .select_related("site")
+                    .order_by("name")[:20]
+                    if q
+                    else []
+                )
+                return render(
+                    request,
+                    "netbox_librenms_plugin/htmx/_remote_picker_device_results.html",
+                    {"devices": devices, "q": q, "ports_url": f"{base_url}?{base_query}&action=ports"},
+                )
+            if action == "ports":
+                try:
+                    target_pk = int(request.GET.get("device_id", ""))
+                except (TypeError, ValueError):
+                    return HttpResponse("Select a device.", status=400)
+                target = self.restrict_object_or_404(Device, pk=target_pk)
+                serial = source == "serial"
+                port_model = ConsolePort if serial else Interface
+                viewable_ports = self._viewable_ports(request, port_model)
+                if viewable_ports is None:
+                    return HttpResponse("You do not have permission to view these ports.", status=403)
+                ports = viewable_ports.filter(device=target)
+                cabled_ports = ports.none()
+                if request.user.has_perm("dcim.view_cable"):
+                    visible_cables = self.restricted_queryset(Cable, "view")
+                    cabled_ports = ports.filter(cable__in=visible_cables).order_by("name")
+                return render(
+                    request,
+                    "netbox_librenms_plugin/htmx/_remote_picker_ports.html",
+                    {
+                        "device": target,
+                        "free_ports": ports.filter(cable__isnull=True).order_by("name"),
+                        "cabled_ports": cabled_ports,
+                        "port_noun": "console ports" if serial else "interfaces",
+                    },
+                )
+            return HttpResponse("Unknown picker action.", status=400)
+
+        cache_key, cached = self._cache_state(obj, server_key)
+        rows = self._snapshot_rows(cached, cache_key)
+        row = next((candidate for candidate in rows or [] if candidate.get("row_id") == row_id), None)
         # Only the modal render needs the row (fragments carry `source` in their URLs): on a
-        # miss, rebuild the snapshot instead of dead-ending on a cache-expired warning.
-        if row is None and not action:
+        # missing/malformed snapshot, rebuild it instead of dead-ending on an expired-cache
+        # warning. A valid snapshot with an unknown row ID is authoritative and must not let a
+        # forged ID trigger fresh LibreNMS requests.
+        if rows is None:
             # Reuse the key the refetch actually cached under (it falls back to the active client
             # key on a stale/forged query-string key) for the rendered URLs and the modal's hidden
             # server_key input, so a stale key doesn't round-trip on POST and force a second fetch.
-            _cache_key, cached, server_key = self._refetch_snapshot(request, obj, server_key)
-            row = self._find_row(cached, port_id)
+            cache_key, cached, server_key = self._refetch_snapshot(request, obj, server_key)
+            row = self._find_row(cached, row_id, cache_key)
 
-        base_url = reverse("plugins:netbox_librenms_plugin:cable_remote_picker", args=[obj.pk])
+        if row is None or not self._row_is_viewable(request, row, obj, server_key):
+            return HttpResponse("Cable row not found.", status=404)
+
         # Carry the row's _source in the fragment URLs so port-type selection does not depend on
         # the cache: with the snapshot expired mid-pick, a serial picker would otherwise silently
         # fall back to listing Interfaces instead of ConsolePorts. Row wins when the cache is
         # alive; the URL param is the fallback.
         source = (row.get("_source") if row else request.GET.get("source")) or ""
-        base_query = f"port_id={quote_plus(str(port_id))}" + (
+        base_query = f"row_id={quote_plus(str(row_id))}" + (
             f"&server_key={quote_plus(server_key)}" if server_key else ""
         )
         if source:
             base_query += f"&source={quote_plus(source)}"
-
-        if action == "search":
-            q = (request.GET.get("q") or "").strip()
-            devices = self.restricted_queryset(Device).filter(name__icontains=q).order_by("name")[:20] if q else []
-            return render(
-                request,
-                "netbox_librenms_plugin/htmx/_remote_picker_device_results.html",
-                {"devices": devices, "q": q, "ports_url": f"{base_url}?{base_query}&action=ports"},
-            )
-
-        if action == "ports":
-            try:
-                target_pk = int(request.GET.get("device_id", ""))
-            except (TypeError, ValueError):
-                return HttpResponse("Select a device.", status=400)
-            target = self.restrict_object_or_404(Device, pk=target_pk)
-            serial = source == "serial"
-            ports = target.consoleports.all() if serial else target.interfaces.all()
-            return render(
-                request,
-                "netbox_librenms_plugin/htmx/_remote_picker_ports.html",
-                {
-                    "device": target,
-                    "free_ports": ports.filter(cable__isnull=True).order_by("name"),
-                    "cabled_ports": ports.filter(cable__isnull=False).order_by("name"),
-                    "port_noun": "console ports" if serial else "interfaces",
-                },
-            )
 
         # Initial modal: prefill the device results with the label match when there is one, so
         # the common "right device, wrong port name" case is one click away from the port list.
@@ -1879,18 +2814,21 @@ class CableRemotePickerView(NetBoxObjectPermissionMixin, BaseCableTableView):
         if denied is not None:
             return denied
         obj = self.restrict_object_or_404(Device, pk=pk)
-        server_key = request.POST.get("server_key") or self.librenms_api.server_key
-        port_id = request.POST.get("port_id", "")
+        server_key = self.rebind_api_for_server(request.POST.get("server_key"))
+        if server_key is None:
+            return HttpResponse("Selected LibreNMS server is no longer configured.", status=400)
+        row_id = request.POST.get("row_id", "")
         cache_key, cached = self._cache_state(obj, server_key)
-        row = self._find_row(cached, port_id)
-        if row is None:
+        rows = self._snapshot_rows(cached, cache_key)
+        row = next((candidate for candidate in rows or [] if candidate.get("row_id") == row_id), None)
+        if rows is None:
             # Snapshot expired between render and pick: rebuild it fresh (what "Refresh
-            # Cables" does) and retry before giving up — the port_id is sensor-stable, so
+            # Cables" does) and retry before giving up. The row identity is snapshot-stable, so
             # the row reappears unless LibreNMS itself dropped it.
             cache_key, cached, server_key = self._refetch_snapshot(request, obj, server_key)
-            row = self._find_row(cached, port_id)
-        if row is None:
-            return HttpResponse("Cache has expired. Please refresh the cable data and pick again.", status=400)
+            row = self._find_row(cached, row_id, cache_key)
+        if row is None or not self._row_is_viewable(request, row, obj, server_key):
+            return HttpResponse("Cable row not found.", status=404)
 
         serial = row.get("_source") == "serial"
         port_model = ConsolePort if serial else Interface
@@ -1900,29 +2838,32 @@ class CableRemotePickerView(NetBoxObjectPermissionMixin, BaseCableTableView):
             return HttpResponse("Select a remote port.", status=400)
         # Scope the pick to a device the user may see — the same rule the ports fragment lists by,
         # so a forged remote_interface_id can't bind a termination on an out-of-scope device.
+        viewable_ports = self._viewable_ports(request, port_model)
         port = (
-            port_model.objects.filter(pk=remote_pk, device__in=self.restricted_queryset(Device))
+            viewable_ports.filter(pk=remote_pk, device__in=self.restricted_queryset(Device))
             .select_related("device")
             .first()
+            if viewable_ports is not None
+            else None
         )
         if port is None:
             noun = "console port" if serial else "interface"
             return HttpResponse(f"Selected {noun} does not exist (or is the wrong kind of port).", status=400)
 
-        # Store the pick: manual_remote_id survives the render strip and steers enrichment; the
-        # resolved ids make the row sync-ready immediately (the sync path reads the cached row
-        # as-is, without a re-enrich).
-        row["manual_remote_id"] = port.pk
-        row["netbox_remote_interface_id"] = port.pk
-        row["netbox_remote_device_id"] = port.device_id
-        row["remote_port_name"] = port.name
-        row["manual_remote"] = True
-        row["can_create_cable"] = True
-        # Preserve the snapshot's remaining TTL — NetBox's cache is always Redis, so ttl() is
-        # available in production; the fallback only serves the LocMemCache TEST backend (no
-        # ttl()), where the exact timeout is irrelevant.
+        # Keep unsaved UI state outside the shared LibreNMS snapshot. The key includes the
+        # snapshot generation, user, and row, so users cannot see or overwrite each other's picks.
         remaining_ttl = cache_remaining_ttl(cache, cache_key)
-        cache.set(cache_key, cached, timeout=remaining_ttl if remaining_ttl and remaining_ttl > 0 else 300)
+        pick_key = cable_manual_pick_cache_key(
+            cache_key,
+            cable_snapshot_token(cached),
+            request.user.pk,
+            row["row_id"],
+        )
+        cache.set(
+            pick_key,
+            {"manual_remote_id": port.pk},
+            timeout=remaining_ttl if remaining_ttl and remaining_ttl > 0 else 300,
+        )
 
         # Re-render the cable partial (rows re-enrich against the updated cache) and close the
         # modal via the partial's close_modal OOB block. Mirrors SyncCablesView._sync_response.
@@ -1930,10 +2871,9 @@ class CableRemotePickerView(NetBoxObjectPermissionMixin, BaseCableTableView):
 
         view = DeviceCableTableView()
         view.setup(request, pk=obj.pk)
-        # Same rebind-failure degrade as _refetch_snapshot: never scope the closing re-render
-        # under an unconfigured key, or the just-stored pick renders (and the table caches) in a
-        # namespace no other view reads.
-        resolved_key = view.rebind_api_for_server_or_default(server_key)
+        # The row was resolved from this exact snapshot scope. A stale key reaches
+        # _refetch_snapshot above, which replaces it with the resolved active key.
+        resolved_key = server_key
         context = view._prepare_context(request, obj, fetch_fresh=False, server_key=resolved_key)
         if context is None:
             context = {"table": None, "object": obj, "cache_expiry": None, "server_key": resolved_key}

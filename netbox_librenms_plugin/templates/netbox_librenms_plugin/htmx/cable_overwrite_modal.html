@@ -1,12 +1,11 @@
 {% load helpers %}
 {% comment %}
 Force-confirm modal for the LibreNMS cable sync. Rendered as the #htmx-modal-content shell and
-injected via an out-of-band swap from _cable_sync_content.html when a sync would overwrite a cable
-the plugin does not solely own (a foreign tag, librenms + another tag, or no tag). It shows the FULL
-end-to-end NetBox trace (through patch panels to the end device) of every cable that would be
-deleted, and blocks the force submit behind an unchecked confirmation checkbox.
+injected via an out-of-band swap from _cable_sync_content.html when a sync would overwrite a cable.
+It shows the visible part of the NetBox trace for every cable that would be deleted. It blocks the
+force submit behind an unchecked confirmation checkbox.
 
-Context: conflicts (list of {interface, port_id, trace}), server_key, device_pk.
+Context: conflicts (list of {interface, row_id, trace}), server_key, device_pk.
 {% endcomment %}
 <div class="modal-header bg-danger text-white">
     <h5 class="modal-title" id="htmx-modal-label">
@@ -21,11 +20,17 @@ Context: conflicts (list of {interface, port_id, trace}), server_key, device_pk.
       hx-disabled-elt="find button[type=submit]">
     {% csrf_token %}
     {% if server_key %}<input type="hidden" name="server_key" value="{{ server_key }}">{% endif %}
+    {% if origin_device_id %}<input type="hidden" name="origin_device_id" value="{{ origin_device_id }}">{% endif %}
     {# Re-submit with force ON, only for the conflicting ports the user is being asked to confirm. #}
     <input type="hidden" name="force" value="on">
-    {% for conflict in conflicts %}<input type="hidden" name="select" value="{{ conflict.port_id }}">
+    {% for conflict in conflicts %}<input type="hidden" name="select" value="{{ conflict.row_id }}">
+    <input type="hidden" name="expected_local_id_{{ conflict.row_id }}" value="{{ conflict.expected_local_id }}">
+    <input type="hidden" name="expected_local_device_id_{{ conflict.row_id }}" value="{{ conflict.expected_local_device_id }}">
+    <input type="hidden" name="expected_remote_id_{{ conflict.row_id }}" value="{{ conflict.expected_remote_id }}">
+    <input type="hidden" name="expected_remote_device_id_{{ conflict.row_id }}" value="{{ conflict.expected_remote_device_id }}">
+    <input type="hidden" name="expected_cable_intent_{{ conflict.row_id }}" value="{{ conflict.expected_cable_intent }}">
     {# Re-target the exact sync device the user confirmed (VC member overrides must survive). #}
-    {% if conflict.device_id %}<input type="hidden" name="device_selection_{{ conflict.port_id }}" value="{{ conflict.device_id }}">{% endif %}{% endfor %}
+    {% if conflict.device_id %}<input type="hidden" name="device_selection_{{ conflict.row_id }}" value="{{ conflict.device_id }}">{% endif %}{% endfor %}
 
     <div class="modal-body">
         {# NetBox's .alert is display:flex, so wrap all text in ONE child div (else each inline #}
@@ -36,9 +41,8 @@ Context: conflicts (list of {interface, port_id, trace}), server_key, device_pk.
             <i class="mdi mdi-alert me-2 mt-1"></i>
             <div>
                 <strong>{{ conflicts|length }} selected port{{ conflicts|length|pluralize }}</strong>
-                already terminate{{ conflicts|length|pluralize:"s," }} an existing cable — one this
-                plugin does not solely own (a different tag, an extra tag, or no tag at all), or one
-                being re-pointed by a manually picked remote. Forcing the sync will
+                already terminate{{ conflicts|length|pluralize:"s," }} an existing cable. Forcing
+                the sync will
                 <strong>delete only the highlighted segment{{ conflicts|length|pluralize }}</strong>
                 directly attached to the endpoints — patch-panel trunks and the rest of the
                 path{{ conflicts|length|pluralize }} shown below stay in place — and connect the

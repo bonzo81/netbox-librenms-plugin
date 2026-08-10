@@ -21,7 +21,7 @@ Two vendors ship pre-seeded:
 | Sensor type | Port name pattern | Vendor |
 |---|---|---|
 | `acsSerialPortTable` | `ttyS{N}` | Avocent ACS |
-| `ciscoAsyncLine` | `Line {N}` | Cisco IOS async lines |
+| `OLD-CISCO-TS-MIB::ltsLineTable` | `Line {N}` | Cisco IOS async lines |
 
 To surface another vendor's serial lines, add a row with its `sensor_type` (matching is exact, including case) and the naming pattern you use for the device's ConsoleServerPorts — no code change or restart needed. Deleting a row stops that vendor's sensors from being recognized; there is no hidden fallback that resurrects the defaults. Entries support bulk YAML import/export and per-object change logging like the other rules.
 
@@ -31,11 +31,11 @@ Every cable the sync creates is stamped so the plugin can recognize its own cabl
 
 | Setting | Default | Purpose |
 |---|---|---|
-| Provenance tag | `librenms` | Tag added to every created cable (auto-created on first use). This is the ownership marker used by overwrite protection. |
+| Provenance tag | `librenms` | Tag added to every created or adopted cable (auto-created on first use). It records provenance and lets sync recognize an already adopted connection. |
 | Tag / cable color | `009688` | Color of the auto-created tag and of the cables themselves. |
 | Cable description | `Synced from LibreNMS` | Cable description; the acting server key is appended, e.g. `Synced from LibreNMS (production)`. |
 
-These are managed in the UI on the plugin **Settings → Cable Sync** tab (no `PLUGINS_CONFIG` entry, no NetBox restart to change them). Changes apply to cables created from then on — existing cables keep the stamp they were created with, and renaming the tag means future cables get the new tag while previously stamped cables keep the old one. The cable's **tenant** follows the remote device's tenant; the cable **type** is left blank (LibreNMS doesn't report the physical cable, and NetBox has no serial/rollover type). Serial console sensor types are likewise DB-managed — rows under the Rules & Patterns tables.
+These are managed in the UI on the plugin **Settings → Cable Sync** tab (no `PLUGINS_CONFIG` entry, no NetBox restart to change them). Renaming or recoloring the provenance tag updates the same managed Tag, so existing tagged cables show the new tag name and color. The cable color and description apply when a cable is created; existing Cable fields do not change. The cable's **tenant** follows the remote device's tenant; the cable **type** is left blank (LibreNMS doesn't report the physical cable, and NetBox has no serial/rollover type). Serial console sensor types are likewise DB-managed through rows under the Rules & Patterns tables.
 
 ## Re-syncing already-cabled ports
 
@@ -57,22 +57,23 @@ Remote matching is name-based — the serial label or the LLDP port name — and
 1. **Search for the remote device** by name (the label-matched device is pre-filled when there is one).
 2. **Pick the port** — console ports for serial rows, interfaces otherwise; free ports are listed first, already-cabled ones are marked (and remain overwrite-protected at sync time).
 
-The pick is stored on the cached row (marked with a small hand icon in the Remote Port column) and makes it immediately syncable — the sync creates the cable to *your* pick, with the usual provenance stamp. Picks live as long as the cached snapshot: a full **Refresh Cables** rebuilds the rows from LibreNMS and drops unsynced picks, so sync soon after picking.
+The pick is stored in a user-scoped cache entry (marked with a small hand icon in the Remote Port column) and makes the row immediately syncable. The shared LibreNMS snapshot does not contain the pick. A full **Refresh Cables** creates a new snapshot and drops unsynced picks, so sync soon after picking.
 
 ### Changing an existing cable
 
-The picker is also available on rows that are **already cabled** (including tagged "Cable Found" and "Connected via Patch Path" rows) — picking a different remote re-points the connection. A manual re-point that would remove an existing cable **always** stops at the warning modal first, showing the full path that would be deleted — even when the cable is plugin-owned. (The silent overwrite of plugin-owned cables applies only to LibreNMS-driven re-points, where the refresh data itself moved.)
+The picker is also available on rows that are **already cabled** (including tagged "Cable Found" and "Connected via Patch Path" rows). Picking a different remote re-points the connection. A re-point that would remove an existing cable **always** stops at the warning modal first, including LibreNMS-driven changes and cables with the provenance tag.
 
 ## Overwrite protection
 
-Re-running the sync never silently destroys a cable the plugin does not solely own. A cable counts as **plugin-owned** only when its tags are *exactly* the configured provenance tag (default `librenms`) and nothing else — a foreign tag, an extra tag, or no tags at all mean someone else has a stake in it.
+Re-running the sync never silently destroys a cable. The configured provenance tag (default `librenms`) identifies cables that the plugin created or adopted, even when other tags are also present. Provenance does not bypass overwrite confirmation.
 
 | Situation on sync | Action |
 |---|---|
 | Neither endpoint cabled | Create a fresh cable. |
 | The desired cable already exists and carries the tag | Nothing to do. |
 | The desired cable already exists but is untagged | The configured provenance tag is added (non-destructive, no confirmation needed). |
-| A *different* cable occupies an endpoint and every such cable is plugin-owned | Replaced silently. |
-| A *different* cable occupies an endpoint and any such cable is **not** plugin-owned | **Force confirmation required.** |
+| A *different* cable occupies either endpoint | **Force confirmation required.** |
 
 When force confirmation is required, the sync leaves the database untouched and pops a warning modal showing, for each conflicting port, the **full cable path for context** — with the segment that would actually be deleted highlighted. Only the cable segment(s) directly attached to the endpoints are ever removed: **patch-panel trunks (e.g. rear-to-rear inter-rack cables) and every other mid-path segment stay in place** — they carry other circuits and are treated as permanent infrastructure. Submitting is blocked until you explicitly tick the force checkbox; forcing deletes the highlighted segment(s) and connects the port with a single LibreNMS-managed cable.
+
+Cable sync does not change multi-termination or breakout cables. These cables can carry unrelated lanes, so the table marks them as unsupported and does not offer a sync action.

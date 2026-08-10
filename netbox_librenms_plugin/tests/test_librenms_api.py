@@ -57,7 +57,7 @@ class TestLibreNMSAPIInit:
 
         from netbox_librenms_plugin.librenms_api import LibreNMSAPI
 
-        api = LibreNMSAPI()
+        api = LibreNMSAPI(server_key="default")
 
         assert api.librenms_url == "https://legacy.example.com"
 
@@ -165,28 +165,32 @@ class TestLibreNMSAPIInit:
         assert api.server_key == "primary"
         assert api.librenms_url == "https://primary.example.com"
 
+    @pytest.mark.django_db
     def test_init_stale_auto_selected_server_falls_back(self, mock_librenms_config):
         """Issue #110: a stale LibreNMSSettings.selected_server (no longer configured) must fall back to the first server rather than hard-fail — it was auto-resolved, not explicitly requested, so the KeyError guard must not fire."""
         mock_config = mock_librenms_config["mock_config"]
         mock_config.return_value = {
             "primary": {"librenms_url": "https://primary.example.com", "api_token": "t"},
         }
-        mock_settings = mock_librenms_config["mock_settings"]
-        mock_settings.objects.first.return_value.selected_server = "gone-server"
+        from netbox_librenms_plugin.models import LibreNMSSettings
+
+        LibreNMSSettings.objects.update_or_create(pk=1, defaults={"selected_server": "gone-server"})
 
         from netbox_librenms_plugin.librenms_api import LibreNMSAPI
 
         api = LibreNMSAPI()  # server_key=None -> auto-resolved from (stale) settings
         assert api.server_key == "primary"
 
+    @pytest.mark.django_db
     def test_init_blank_server_key_treated_as_non_explicit_falls_back(self, mock_librenms_config):
         """A blank/whitespace server_key is 'no key': a stale selected_server must still fall back, not hard-fail. Treating '' as explicit would mark the auto-resolved key explicit and defeat the issue #110 fallback (KeyError)."""
         mock_config = mock_librenms_config["mock_config"]
         mock_config.return_value = {
             "primary": {"librenms_url": "https://primary.example.com", "api_token": "t"},
         }
-        mock_settings = mock_librenms_config["mock_settings"]
-        mock_settings.objects.first.return_value.selected_server = "gone-server"
+        from netbox_librenms_plugin.models import LibreNMSSettings
+
+        LibreNMSSettings.objects.update_or_create(pk=1, defaults={"selected_server": "gone-server"})
 
         from netbox_librenms_plugin.librenms_api import LibreNMSAPI
 
@@ -3219,15 +3223,6 @@ class TestResolvePortRelationships:
 class TestGetSerialPortSensors:
     """Cover response-shape branches in get_serial_port_sensors()."""
 
-    @pytest.fixture(autouse=True)
-    def _clear_serial_sensor_cache(self):
-        """The instance-wide sensor fetch is cached per server_key; clear between tests so a prior test's cached payload can't bleed into the next one's mocked response."""
-        from django.core.cache import cache
-
-        cache.clear()
-        yield
-        cache.clear()
-
     def _make_sensor(self, device_id, sensor_type="acsSerialPortTable", port_num=7):
         return {
             "sensor_id": 1000 + port_num,
@@ -3239,22 +3234,19 @@ class TestGetSerialPortSensors:
             "group": "Serial Ports",
         }
 
-    def _cache_key(self, api):
-        from netbox_librenms_plugin.librenms_api import _serial_sensor_cache_key
-        from netbox_librenms_plugin.serial_utils import get_serial_sensor_type_patterns
+    def test_empty_recognition_table_skips_the_instance_sensor_request(self, mock_librenms_api):
+        import unittest.mock as mock
 
-        return _serial_sensor_cache_key(api.server_key, get_serial_sensor_type_patterns())
+        from netbox_librenms_plugin.models import SerialSensorTypePattern
 
-    def test_cache_key_fingerprints_the_equivalent_map(self):
-        """Map order is irrelevant, but a pattern edit changes the cache identity."""
-        from netbox_librenms_plugin.librenms_api import _serial_sensor_cache_key
+        SerialSensorTypePattern.objects.all().delete()
 
-        first = _serial_sensor_cache_key("default", {"type-a": "tty{N}", "type-b": "line{N}"})
-        reordered = _serial_sensor_cache_key("default", {"type-b": "line{N}", "type-a": "tty{N}"})
-        modified = _serial_sensor_cache_key("default", {"type-a": "console{N}", "type-b": "line{N}"})
+        with mock.patch("netbox_librenms_plugin.librenms_api.requests.get") as external_get:
+            success, data = mock_librenms_api.get_serial_port_sensors(device_id=12)
 
-        assert first == reordered
-        assert first != modified
+        assert success is True
+        assert data == []
+        external_get.assert_not_called()
 
     def test_success_filters_by_device_and_type(self, mock_librenms_api, mock_response_factory):
         import unittest.mock as mock
@@ -3274,14 +3266,8 @@ class TestGetSerialPortSensors:
         assert all(s["device_id"] == 12 for s in data)
         assert all(s["sensor_type"] == "acsSerialPortTable" for s in data)
 
-    def test_explicit_sensor_types_map_bypasses_db_and_shared_cache(self, mock_librenms_api, mock_response_factory):
-        """A caller-supplied map filters without the DB rows and must not seed the shared cache.
-
-        This is the data-shapes replay injection point: a recording is replayed with the map
-        that was CAPTURED alongside it, on a host whose SerialSensorTypePattern table may be
-        empty or different — and the custom-map result must not poison the per-server cache
-        that live readers share.
-        """
+    def test_explicit_sensor_types_map_bypasses_db(self, mock_librenms_api, mock_response_factory):
+        """A caller-supplied recognition map filters without the live database rows."""
         import unittest.mock as mock
 
         from netbox_librenms_plugin.models import SerialSensorTypePattern
@@ -3297,9 +3283,7 @@ class TestGetSerialPortSensors:
             assert success is True
             assert len(data) == 1
 
-            # The DB-map path sees no rows -> filters everything out. This both pins the
-            # override as the thing that filtered above AND proves the override call did not
-            # write the shared per-server cache (a poisoned cache would return the row here).
+            # The DB-map path sees no rows, so it filters everything out.
             success2, data2 = mock_librenms_api.get_serial_port_sensors(device_id=12)
             assert success2 is True
             assert data2 == []
@@ -3311,7 +3295,7 @@ class TestGetSerialPortSensors:
         cisco = {
             "sensor_id": 2002,
             "device_id": 12,
-            "sensor_type": "ciscoAsyncLine",
+            "sensor_type": "OLD-CISCO-TS-MIB::ltsLineTable",
             "sensor_index": "tsLineActive.2",
             "sensor_descr": "peer Status",
             "sensor_current": 0,
@@ -3327,7 +3311,10 @@ class TestGetSerialPortSensors:
             success, data = mock_librenms_api.get_serial_port_sensors(device_id=12)
 
         assert success is True
-        assert {s["sensor_type"] for s in data} == {"acsSerialPortTable", "ciscoAsyncLine"}
+        assert {s["sensor_type"] for s in data} == {
+            "acsSerialPortTable",
+            "OLD-CISCO-TS-MIB::ltsLineTable",
+        }
 
     def test_non_dict_sensor_item_fails_closed(self, mock_librenms_api, mock_response_factory):
         """A non-dict item in the sensor list is a malformed response, not a filterable row.
@@ -3364,6 +3351,19 @@ class TestGetSerialPortSensors:
         assert success is False
         assert "invalid sensor_type" in msg.lower()
 
+    def test_non_numeric_sensor_id_fails_closed(self, mock_librenms_api, mock_response_factory):
+        import unittest.mock as mock
+
+        bad = self._make_sensor(12, port_num=8)
+        bad["sensor_id"] = "';alert(1);//"
+        mock_resp = mock_response_factory(status_code=200, json_data={"status": "ok", "sensors": [bad]})
+
+        with mock.patch("netbox_librenms_plugin.librenms_api.requests.get", return_value=mock_resp):
+            success, msg = mock_librenms_api.get_serial_port_sensors(device_id=12)
+
+        assert success is False
+        assert "invalid sensor_id" in msg.lower()
+
     def test_empty_sensor_list_returns_empty(self, mock_librenms_api, mock_response_factory):
         import unittest.mock as mock
 
@@ -3373,6 +3373,41 @@ class TestGetSerialPortSensors:
 
         assert success is True
         assert data == []
+
+    def test_librenms_empty_inventory_404_returns_empty(self, mock_librenms_api, mock_response_factory):
+        """LibreNMS reports a valid empty sensor inventory as a specific 404 message."""
+        import unittest.mock as mock
+
+        import requests as req
+
+        response = mock_response_factory(
+            status_code=404,
+            json_data={"status": "error", "message": "Sensors do not exist"},
+        )
+        response.raise_for_status.side_effect = req.exceptions.HTTPError(response=response)
+        with mock.patch("netbox_librenms_plugin.librenms_api.requests.get", return_value=response):
+            success, data = mock_librenms_api.get_serial_port_sensors(device_id=12)
+
+        assert success is True
+        assert data == []
+
+    def test_deleted_serial_sensors_are_excluded(self, mock_librenms_api, mock_response_factory):
+        """A discovery-deleted line must not become a live cable-sync row."""
+        import unittest.mock as mock
+
+        active = self._make_sensor(12, port_num=7)
+        active["sensor_deleted"] = "0"
+        deleted = self._make_sensor(12, port_num=8)
+        deleted["sensor_deleted"] = 1
+        response = mock_response_factory(
+            status_code=200,
+            json_data={"status": "ok", "sensors": [active, deleted]},
+        )
+        with mock.patch("netbox_librenms_plugin.librenms_api.requests.get", return_value=response):
+            success, data = mock_librenms_api.get_serial_port_sensors(device_id=12)
+
+        assert success is True
+        assert [sensor["sensor_id"] for sensor in data] == [active["sensor_id"]]
 
     def test_missing_sensors_key_returns_failure(self, mock_librenms_api, mock_response_factory):
         """status=ok but neither 'sensors' nor 'resources' present is a malformed response, not a successful zero-sensor result."""
@@ -3431,22 +3466,8 @@ class TestGetSerialPortSensors:
         assert success is False
         assert "refused" in msg or "error" in msg.lower()
 
-    def test_second_device_lookup_reuses_cached_instance_fetch(self, mock_librenms_api, mock_response_factory):
-        """The /resources/sensors route is instance-wide (LibreNMS exposes no per-device filter), so two device lookups within the cache TTL must reuse a single HTTP fetch rather than re-pulling the whole sensor table per device, while each still gets only its own rows."""
-        import unittest.mock as mock
-
-        sensors = [self._make_sensor(12, port_num=7), self._make_sensor(99, port_num=3)]
-        mock_resp = mock_response_factory(status_code=200, json_data={"status": "ok", "sensors": sensors})
-        with mock.patch("netbox_librenms_plugin.librenms_api.requests.get", return_value=mock_resp) as mock_get:
-            ok1, data1 = mock_librenms_api.get_serial_port_sensors(device_id=12)
-            ok2, data2 = mock_librenms_api.get_serial_port_sensors(device_id=99)
-
-        assert mock_get.call_count == 1  # instance-wide table fetched once, not per device
-        assert ok1 is True and [s["device_id"] for s in data1] == [12]
-        assert ok2 is True and [s["device_id"] for s in data2] == [99]
-
-    def test_recognized_type_change_invalidates_shared_cache(self, mock_librenms_api, mock_response_factory):
-        """Adding a recognized sensor type must not reuse a subset that discarded it."""
+    def test_recognized_type_change_applies_on_the_next_fetch(self, mock_librenms_api, mock_response_factory):
+        """Adding a recognized sensor type applies on the next fresh fetch."""
         import unittest.mock as mock
 
         from netbox_librenms_plugin.models import SerialSensorTypePattern
@@ -3464,8 +3485,8 @@ class TestGetSerialPortSensors:
         assert second_success is True and [sensor["sensor_type"] for sensor in second_data] == [sensor_type]
         assert mock_get.call_count == 2
 
-    def test_failed_fetch_is_not_cached(self, mock_librenms_api, mock_response_factory):
-        """A failed fetch must not populate the cache: a subsequent call has to retry the HTTP request (otherwise a transient error would poison serial sync until the TTL elapsed)."""
+    def test_failed_fetch_is_retried(self, mock_librenms_api, mock_response_factory):
+        """A transient failure does not prevent the next request from fetching again."""
         import unittest.mock as mock
 
         good = [self._make_sensor(12, port_num=7)]
@@ -3478,51 +3499,8 @@ class TestGetSerialPortSensors:
             ok2, data2 = mock_librenms_api.get_serial_port_sensors(device_id=12)
 
         assert ok1 is False and "boom" in msg1
-        assert mock_get.call_count == 2  # error wasn't cached, so the second call re-fetched
+        assert mock_get.call_count == 2
         assert ok2 is True and [s["device_id"] for s in data2] == [12]
-
-    def test_malformed_cached_payload_is_dropped_and_refetched(self, mock_librenms_api, mock_response_factory):
-        """A malformed cached payload (a list whose items aren't dicts — a corrupt backend or foreign writer) must be treated as a cache miss: the device filter calls .get() on every item, so using it directly would raise AttributeError and break every serial refresh until the TTL expired. It must be dropped and re-fetched instead."""
-        import unittest.mock as mock
-
-        from django.core.cache import cache
-
-        cache_key = self._cache_key(mock_librenms_api)
-        cache.set(cache_key, ["not-a-dict", 123])  # passes `is not None` + isinstance(list); items aren't dicts
-
-        good = [self._make_sensor(12, port_num=7)]
-        ok_resp = mock_response_factory(status_code=200, json_data={"status": "ok", "sensors": good})
-        with mock.patch("netbox_librenms_plugin.librenms_api.requests.get", return_value=ok_resp) as mock_get:
-            success, data = mock_librenms_api.get_serial_port_sensors(device_id=12)
-
-        # Didn't crash on the malformed cache; re-fetched and returned the device's rows.
-        assert success is True
-        assert [s["device_id"] for s in data] == [12]
-        assert mock_get.call_count == 1  # the malformed cache value forced a single re-fetch
-        # The bad value was dropped and replaced with the validated fresh payload.
-        assert cache.get(cache_key) == good
-
-    def test_refresh_bypasses_cache_with_use_cache_false(self, mock_librenms_api, mock_response_factory):
-        """A user Refresh (use_cache=False) re-fetches the sensor table even when a stale value is cached — otherwise a relabeled Avocent port stays stale until the TTL elapses (host LLDP/OOB are re-fetched on Refresh too)."""
-        import unittest.mock as mock
-
-        from django.core.cache import cache
-
-        cache_key = self._cache_key(mock_librenms_api)
-        stale = [self._make_sensor(12, port_num=7)]
-        stale[0]["sensor_descr"] = "STALE"
-        cache.set(cache_key, stale)
-
-        fresh = [self._make_sensor(12, port_num=7)]
-        fresh[0]["sensor_descr"] = "FRESH"
-        ok_resp = mock_response_factory(status_code=200, json_data={"status": "ok", "sensors": fresh})
-        with mock.patch("netbox_librenms_plugin.librenms_api.requests.get", return_value=ok_resp) as mock_get:
-            success, data = mock_librenms_api.get_serial_port_sensors(device_id=12, use_cache=False)
-
-        assert success is True
-        assert mock_get.call_count == 1  # bypassed the cache and re-fetched
-        assert data[0]["sensor_descr"] == "FRESH"
-        assert cache.get(cache_key) == fresh  # cache refreshed with the fresh payload
 
     def test_json_decode_error_reported_as_invalid_json(self, mock_librenms_api, mock_response_factory):
         """A non-JSON 200 body must surface 'Invalid JSON', not be mislabeled 'Error connecting' — requests JSONDecodeError subclasses both ValueError and RequestException, so the ValueError handler must precede the RequestException one (mirrors get_port_stack)."""

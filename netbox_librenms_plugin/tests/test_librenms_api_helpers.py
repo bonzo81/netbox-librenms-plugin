@@ -7,11 +7,8 @@ import pytest
 
 @pytest.fixture
 def mock_librenms_config():
-    """Mock the LibreNMS configuration boundaries for tests that request this fixture."""
-    with (
-        patch("netbox_librenms_plugin.librenms_api.get_plugin_config") as mock_config,
-        patch("netbox_librenms_plugin.librenms_api._get_selected_server_key", return_value=None) as mock_settings,
-    ):
+    """Provide the configured LibreNMS boundary only to tests that request it."""
+    with patch("netbox_librenms_plugin.librenms_api.get_plugin_config") as mock_config:
         # Default config
         mock_config.return_value = {
             "default": {
@@ -22,4 +19,4 @@ def mock_librenms_config():
             }
         }
 
-        yield {"mock_config": mock_config, "mock_settings": mock_settings}
+        yield {"mock_config": mock_config}

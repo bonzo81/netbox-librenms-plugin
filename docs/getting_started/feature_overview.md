@@ -88,7 +88,7 @@
 * Create Cable connection in NetBox from LibreNMS links data
 * Sync console-server serial ports (Avocent ACS, Cisco async lines — [configurable](../device_sync/cable_sync.md#configuring-recognized-sensor-types)) from LibreNMS sensors to ConsoleServerPort ↔ ConsolePort cables
 * Created cables are stamped with a configurable provenance tag, color, and description
-* Overwrite protection: cables not solely owned by the plugin are never replaced without explicit force confirmation (with a full path trace of what would be deleted)
+* Overwrite protection: every cable replacement requires explicit confirmation, with a full path trace of what would be deleted
 * Best results when the [custom field](../configuration/custom_field.md) `librenms_id` is populated on interfaces
 
 ## IP Address Sync {#ip-address-sync}

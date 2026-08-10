@@ -693,7 +693,10 @@ class DeviceCableTableView(BaseCableTableView):
     def get_table(self, data, obj):
         """Return the appropriate cable table, selecting VC variant if needed."""
         if hasattr(obj, "virtual_chassis") and obj.virtual_chassis:
-            return VCCableTable(data, device=obj)
+            allowed_vc_member_ids = set(
+                self._viewable_queryset(Device).filter(virtual_chassis=obj.virtual_chassis).values_list("pk", flat=True)
+            )
+            return VCCableTable(data, device=obj, allowed_vc_member_ids=allowed_vc_member_ids)
         return LibreNMSCableTable(data, device=obj)
 
 

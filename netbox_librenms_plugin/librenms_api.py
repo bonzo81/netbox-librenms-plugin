@@ -1,4 +1,3 @@
-import hashlib
 import logging
 import math
 import urllib.parse
@@ -72,12 +71,6 @@ def configured_cache_timeout(server_key):
     return max(1, int(timeout))
 
 
-def _serial_sensor_cache_key(server_key, sensor_types):
-    """Return the cache key for one server and sensor-type map."""
-    map_fingerprint = hashlib.sha256(repr(tuple(sorted(sensor_types.items()))).encode()).hexdigest()
-    return f"librenms_serial_sensors_{server_key}_{map_fingerprint}"
-
-
 def build_librenms_api(server_key):
     """
     Build a :class:`LibreNMSAPI` for a server key, tolerating bad keys.
@@ -109,22 +102,6 @@ class LibreNMSUnreachable(Exception):
     with 200 and an empty list, so a failed fetch never means "no devices matched". The
     message carries the reason the API reported, so a caller can show it verbatim.
     """
-
-
-def _get_selected_server_key():
-    """
-    Return the settings row's selected server key, or None when no row exists.
-
-    A module-level seam on purpose: tests that construct ``LibreNMSAPI`` without a
-    database patch THIS function instead of the ``LibreNMSSettings`` model class —
-    patching the model attribute in ``netbox_librenms_plugin.models`` poisons every
-    module that first imports it while the patch is active (the API-test helper
-    fixture is registered session-wide via ``pytest_plugins``).
-    """
-    from netbox_librenms_plugin.models import LibreNMSSettings
-
-    settings = LibreNMSSettings.objects.first()
-    return settings.selected_server if settings else None
 
 
 class LibreNMSAPI:
@@ -176,7 +153,11 @@ class LibreNMSAPI:
         # If no server_key is provided, try to get the selected server from settings
         if not server_key:
             try:
-                server_key = _get_selected_server_key()
+                from netbox_librenms_plugin.models import LibreNMSSettings
+
+                settings = LibreNMSSettings.objects.first()
+                if settings:
+                    server_key = settings.selected_server
             except (ImportError, AttributeError):
                 pass
 
@@ -1816,9 +1797,7 @@ class LibreNMSAPI:
         except (requests.exceptions.RequestException, ValueError) as e:
             return False, f"Error connecting to LibreNMS: {str(e)}"
 
-    def get_serial_port_sensors(
-        self, device_id: int, use_cache: bool = True, sensor_types: dict | None = None
-    ) -> tuple[bool, list | str]:
+    def get_serial_port_sensors(self, device_id: int, sensor_types: dict | None = None) -> tuple[bool, list | str]:
         """
         Return serial-port sensor records for a single device from LibreNMS.
 
@@ -1834,68 +1813,32 @@ class LibreNMSAPI:
           the physical port number. Recovering it would require an N+1 fan-out
           (``/health/state/{sensor_id}`` per sensor — 49 calls for a 48-port Avocent).
 
-        So the instance-wide table is the cheapest correct source. To keep a
-        multi-device cable refresh from re-pulling that whole table once per device,
-        the serial-typed subset (tiny — only Avocent serial sensors survive the
-        ``sensor_type`` filter) is cached per server for ``cache_timeout`` seconds.
-        Each call then filters the cached subset down to ``device_id``.
+        So the instance-wide table is the cheapest correct source. Each user-initiated cable
+        refresh fetches current sensor data, then filters it down to ``device_id``. Cached cable
+        page renders use the stored cable snapshot and do not call this method.
 
         Route: /api/v0/resources/sensors
 
         Args:
             device_id: LibreNMS device ID.
-            use_cache: False forces a fresh instance-wide pull (user-initiated Refresh).
             sensor_types: Optional explicit recognition map overriding the
                 ``SerialSensorTypePattern`` table — the data-shapes replay injection point (a
                 recording is replayed with the map captured alongside it, on a host whose table
-                may be empty or different). An explicit map bypasses the shared per-server cache
-                in BOTH directions: cached entries were filtered with the live map, and writing
-                custom-map results back would poison later live readers.
+                may be empty or different).
 
         Returns:
             tuple: (success: bool, data: list of sensor dicts or error string)
         """
-        if sensor_types is not None:
-            success, all_serial_sensors = self._fetch_serial_port_sensors(sensor_types=sensor_types)
-            if not success:
-                return False, all_serial_sensors
-            return True, [s for s in all_serial_sensors if str(s.get("device_id")) == str(device_id)]
+        if sensor_types is None:
+            from netbox_librenms_plugin.serial_utils import get_serial_sensor_type_patterns
 
-        from netbox_librenms_plugin.serial_utils import get_serial_sensor_type_patterns
-
-        serial_types = get_serial_sensor_type_patterns()
-        cache_key = _serial_sensor_cache_key(self.server_key, serial_types)
-        all_serial_sensors = None
-        # use_cache=False forces a fresh pull (a user-initiated Cables "Refresh" wants current
-        # data — host LLDP/OOB are re-fetched too). The per-server cache only exists to stop a
-        # multi-device pass re-pulling the whole instance-wide table; it must not make Refresh
-        # serve a stale serial label until the TTL elapses.
-        if use_cache:
-            cached = cache.get(cache_key)
-            # Validate the cached shape before trusting it: the device filter below calls .get()
-            # on every item, so a malformed cache value (not a list of dicts — e.g. a corrupt
-            # backend or foreign writer) would raise AttributeError and break every serial
-            # refresh until the TTL expires. _fetch_serial_port_sensors() already guarantees a
-            # list-of-dicts, so only the cache path needs this guard; a bad value is dropped and
-            # re-fetched as a cache miss.
-            if isinstance(cached, list) and all(isinstance(s, dict) for s in cached):
-                all_serial_sensors = cached
-            elif cached is not None:
-                logger.warning(
-                    "Ignoring malformed cached serial sensor payload for server %s: %r",
-                    self.server_key,
-                    cached,
-                )
-                cache.delete(cache_key)
-
-        if all_serial_sensors is None:
-            success, all_serial_sensors = self._fetch_serial_port_sensors(sensor_types=serial_types)
-            if not success:
-                # all_serial_sensors is the error string here; never cache a failure so a
-                # transient error doesn't poison serial sync until the TTL elapses.
-                return False, all_serial_sensors
-            # Refresh the cache even on a forced fetch so a later cached reader sees current data.
-            cache.set(cache_key, all_serial_sensors, timeout=self.cache_timeout)
+            sensor_types = get_serial_sensor_type_patterns()
+        serial_types = sensor_types
+        if not serial_types:
+            return True, []
+        success, all_serial_sensors = self._fetch_serial_port_sensors(sensor_types=serial_types)
+        if not success:
+            return False, all_serial_sensors
 
         device_sensors = [s for s in all_serial_sensors if str(s.get("device_id")) == str(device_id)]
         return True, device_sensors
@@ -1905,7 +1848,7 @@ class LibreNMSAPI:
         Fetch the instance-wide sensor table and return only serial-port sensors.
 
         Returns the serial-typed subset across ALL devices (the public
-        :meth:`get_serial_port_sensors` filters that by device and handles caching).
+        :meth:`get_serial_port_sensors` filters that by device).
 
         Args:
             sensor_types: Optional explicit recognition map; defaults to the
@@ -1957,7 +1900,23 @@ class LibreNMSAPI:
                 if any(not isinstance(s.get("sensor_type"), str) for s in all_sensors):
                     logger.warning("Unexpected sensors response for %s: invalid sensor_type", self.server_key)
                     return False, result.get("message") or "Unexpected response format: invalid sensor_type"
-                serial_sensors = [s for s in all_sensors if s.get("sensor_type") in serial_types]
+                normalized_sensors = []
+                for sensor in all_sensors:
+                    deleted = sensor.get("sensor_deleted", 0)
+                    if isinstance(deleted, bool) or deleted not in (0, 1, "0", "1"):
+                        logger.warning(
+                            "Unexpected sensors response for %s: invalid sensor_deleted",
+                            self.server_key,
+                        )
+                        return False, result.get("message") or "Unexpected response format: invalid sensor_deleted"
+                    if str(deleted) == "1":
+                        continue
+                    sensor_id = self._normalize_librenms_id(sensor.get("sensor_id"))
+                    if sensor_id is None:
+                        logger.warning("Unexpected sensors response for %s: invalid sensor_id", self.server_key)
+                        return False, result.get("message") or "Unexpected response format: invalid sensor_id"
+                    normalized_sensors.append({**sensor, "sensor_id": sensor_id})
+                serial_sensors = [s for s in normalized_sensors if s.get("sensor_type") in serial_types]
                 return True, serial_sensors
             if isinstance(result, dict):
                 return False, result.get("message") or "Unexpected response format"
@@ -1965,6 +1924,13 @@ class LibreNMSAPI:
 
         except requests.exceptions.HTTPError as e:
             if e.response.status_code == 404:
+                try:
+                    payload = e.response.json()
+                except (TypeError, ValueError):
+                    payload = None
+                message = payload.get("message") if isinstance(payload, dict) else None
+                if isinstance(message, str) and "sensors do not exist" in message.lower():
+                    return True, []
                 return False, "Sensors resource endpoint not found"
             return False, f"HTTP error: {str(e)}"
         except ValueError as e:

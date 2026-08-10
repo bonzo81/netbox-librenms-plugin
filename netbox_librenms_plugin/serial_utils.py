@@ -23,7 +23,12 @@ Row shape emitted (all keys match the cables-view link dict):
 Sorting: rows are returned ordered by sensor_index_int (port number).
 """
 
+import logging
 import re
+
+from netbox_librenms_plugin.utils import coerce_librenms_id
+
+logger = logging.getLogger(__name__)
 
 # Default local ConsoleServerPort name pattern (``{N}`` -> port number) for a serial sensor type
 # with no explicit pattern configured (a caller passing ``sensor_types`` as a bare set).
@@ -47,7 +52,22 @@ def get_serial_sensor_type_patterns() -> dict:
     """
     from netbox_librenms_plugin.models import SerialSensorTypePattern
 
-    return {row.sensor_type: row.port_name_pattern for row in SerialSensorTypePattern.objects.all()}
+    patterns = {}
+    for sensor_type, port_name_pattern in SerialSensorTypePattern.objects.values_list(
+        "sensor_type",
+        "port_name_pattern",
+    ):
+        normalized_type = (sensor_type or "").strip()
+        normalized_pattern = (port_name_pattern or "").strip()
+        if not normalized_type or "{N}" not in normalized_pattern:
+            logger.warning(
+                "Skipping invalid serial sensor pattern %r -> %r",
+                sensor_type,
+                port_name_pattern,
+            )
+            continue
+        patterns[normalized_type] = normalized_pattern
+    return patterns
 
 
 def parse_port_number(sensor_index: str | None) -> int | None:
@@ -70,7 +90,12 @@ def parse_port_number(sensor_index: str | None) -> int | None:
         int | None: The trailing integer, or None when there is no trailing number.
     """
     m = _INDEX_SUFFIX_RE.search(str(sensor_index or ""))
-    return int(m.group(1)) if m else None
+    if m is None:
+        return None
+    try:
+        return int(m.group(1))
+    except ValueError:
+        return None
 
 
 def strip_status_suffix(descr: str) -> str:
@@ -155,7 +180,7 @@ def map_sensors_to_serial_links(
         if sensor_type not in recognized_types:
             continue
 
-        sensor_id = sensor.get("sensor_id")
+        sensor_id = coerce_librenms_id(sensor.get("sensor_id"))
         if sensor_id is None:
             continue
 
@@ -186,5 +211,10 @@ def map_sensors_to_serial_links(
             }
         )
 
+    local_port_counts = {}
+    for link in links:
+        local_port = link["local_port"]
+        local_port_counts[local_port] = local_port_counts.get(local_port, 0) + 1
+    links = [link for link in links if local_port_counts[link["local_port"]] == 1]
     links.sort(key=lambda r: r["sensor_index_int"])
     return links

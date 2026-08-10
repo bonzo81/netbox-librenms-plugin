@@ -11,7 +11,7 @@ Covers:
   - LibreNMSCableTable.render_remote_device() dims unconfigured serial ports
 """
 
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 
@@ -24,237 +24,30 @@ from netbox_librenms_plugin.tests.conftest import cable_together, make_serial_de
 # ---------------------------------------------------------------------------
 
 
-def _mock_obj(pk=1, has_csps=True):
-    obj = MagicMock()
-    obj._meta = MagicMock()
-    obj._meta.model_name = "device"
-    obj.pk = pk
-    obj.id = pk
-    obj.name = "acs-console-01"
-    obj.primary_ip = None
-    obj.virtual_chassis = None
-    csp_qs = MagicMock()
-    csp_qs.exists.return_value = has_csps
-    obj.consoleserverports = csp_qs
-    return obj
+def _make_request(path="/plugins/librenms/device/1/cables/"):
+    """Build an authenticated Django request for direct ORM integration checks."""
+    from uuid import uuid4
 
+    from django.contrib.auth import get_user_model
+    from django.test import RequestFactory
 
-def _mock_request(path="/plugins/librenms/device/1/cables/"):
-    req = MagicMock()
-    req.path = path
-    req.GET = {}
-    req.POST = {}
-    req.headers = {}
-    return req
-
-
-def _make_request_json(body_dict):
-    """Mock POST request carrying a JSON body (SingleCableVerifyView reads request.body)."""
-    import json
-
-    req = MagicMock()
-    req.method = "POST"
-    req.body = json.dumps(body_dict).encode()
-    req.META = {"HTTP_X_REQUESTED_WITH": "XMLHttpRequest"}
-    return req
+    request = RequestFactory().get(path)
+    request.user = get_user_model().objects.create_superuser(
+        username=f"serial-view-{uuid4().hex}",
+        password="pw",
+    )
+    return request
 
 
 def _make_view():
     from netbox_librenms_plugin.views.base.cables_view import BaseCableTableView
+    from netbox_librenms_plugin.librenms_api import LibreNMSAPI
 
     view = object.__new__(BaseCableTableView)
-    view.request = _mock_request()
+    view.request = _make_request()
     view.librenms_id = 12
-    view._librenms_api = MagicMock()
-    view._librenms_api.server_key = "default"
+    view._librenms_api = LibreNMSAPI(server_key="default")
     return view
-
-
-def _serial_sensor(port_num: int, label: str | None = None) -> dict:
-    """Build a minimal sensor record matching ACS fixture shape."""
-    if label is None:
-        label = f"ttyS{port_num}"
-    return {
-        "sensor_id": 1000 + port_num,
-        "device_id": 12,
-        "sensor_type": "acsSerialPortTable",
-        "sensor_index": f"acsSerialPortTableStatus.{port_num}",
-        "sensor_descr": f"{label} Status",
-        "sensor_current": 2,
-        "group": "Serial Ports",
-    }
-
-
-# ---------------------------------------------------------------------------
-# get_links_data with serial appending
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.django_db
-class TestGetLinksDataSerial:
-    """get_links_data() appends serial rows when the (sync) device has ConsoleServerPorts.
-
-    Drives the serial-append path against REAL Device + ConsoleServerPort rows (make_serial_device)
-    so the CSP gate (``consoleserverports.exists()``) and the ``lookup_device.id`` fed into
-    map_sensors_to_serial_links run against the real ORM. Only the LibreNMS API (get_device_links /
-    get_serial_port_sensors / get_librenms_id) stays mocked — a true external HTTP boundary — so a
-    renamed field or a regressed CSP gate fails these tests instead of a MagicMock hiding it.
-    """
-
-    def _obj_with_csps(self, name="serial-obj", csp_names=("ttyS3", "ttyS7")):
-        obj, _csps, _ = make_serial_device(name, csp_names=csp_names)
-        return obj
-
-    def _obj_no_csps(self, name="serial-obj-nocsp"):
-        from netbox_librenms_plugin.tests.conftest import make_device
-
-        return make_device(name)
-
-    def _base_setup(self, view, sensors=None):
-        """Configure the mocked LibreNMS API with a minimal successful LLDP response and sensors."""
-        view._librenms_api.get_device_links.return_value = (True, {"links": []})
-        view._librenms_api.get_librenms_id.return_value = 12
-        view._librenms_api.get_serial_port_sensors.return_value = (True, sensors if sensors is not None else [])
-
-    def test_serial_rows_appended_when_device_has_csps(self):
-        """Sensors are mapped and appended to links_data for a real console-server device."""
-        view = _make_view()
-        sensors = [_serial_sensor(3, "router-a"), _serial_sensor(7, "switch-b")]
-        self._base_setup(view, sensors=sensors)
-        obj = self._obj_with_csps("serial-append", csp_names=("ttyS3", "ttyS7"))
-
-        with (
-            patch("netbox_librenms_plugin.views.base.cables_view.get_librenms_oob", return_value=None),
-            patch("netbox_librenms_plugin.views.base.cables_view.get_librenms_sync_device", return_value=None),
-            patch.object(view, "get_ports_data", return_value={"ports": []}),
-        ):
-            result = view.get_links_data(obj)
-
-        assert result is not None
-        serial_rows = [r for r in result if r.get("_source") == "serial"]
-        assert len(serial_rows) == 2
-        port_names = {r["local_port"] for r in serial_rows}
-        assert port_names == {"ttyS3", "ttyS7"}
-
-    def test_serial_gate_uses_sync_device_csps_on_vc(self):
-        """On a VC-member page the viewed obj may lack ConsoleServerPorts while the resolved sync device owns them."""
-        view = _make_view()
-        sensors = [_serial_sensor(3, "router-a")]
-        self._base_setup(view, sensors=sensors)
-        obj = self._obj_no_csps("serial-vc-member")  # viewed VC member: NO CSPs
-        sync_device = self._obj_with_csps("serial-vc-sync", csp_names=("ttyS3",))  # sync device: HAS CSPs
-
-        with (
-            patch("netbox_librenms_plugin.views.base.cables_view.get_librenms_oob", return_value=None),
-            patch(
-                "netbox_librenms_plugin.views.base.cables_view.get_librenms_sync_device",
-                return_value=sync_device,
-            ),
-            patch.object(view, "get_ports_data", return_value={"ports": []}),
-        ):
-            result = view.get_links_data(obj)
-
-        serial_rows = [r for r in result if r.get("_source") == "serial"]
-        assert len(serial_rows) == 1  # gate passed via the sync device's real CSPs
-        view._librenms_api.get_serial_port_sensors.assert_called_once()
-
-    def test_no_serial_rows_when_no_csps(self):
-        """Serial fetch is skipped entirely when the device has no ConsoleServerPorts."""
-        view = _make_view()
-        self._base_setup(view)
-        obj = self._obj_no_csps("serial-none")
-
-        with (
-            patch("netbox_librenms_plugin.views.base.cables_view.get_librenms_oob", return_value=None),
-            patch("netbox_librenms_plugin.views.base.cables_view.get_librenms_sync_device", return_value=None),
-            patch.object(view, "get_ports_data", return_value={"ports": []}),
-        ):
-            result = view.get_links_data(obj)
-
-        view._librenms_api.get_serial_port_sensors.assert_not_called()
-        # LLDP succeeded with zero links and there are no serial rows: a *successful* empty
-        # refresh returns [] (flows through to the empty table), not None ("No links found").
-        assert result == []
-
-    def test_serial_fetch_failure_does_not_append(self):
-        """When sensor fetch fails, no serial rows are added (graceful degradation), and the failure is flagged so post() can warn the user instead of silently dropping the rows under a success banner (parity with the OOB-fetch-failure warning)."""
-        view = _make_view()
-        view._librenms_api.get_device_links.return_value = (True, {"links": []})
-        view._librenms_api.get_librenms_id.return_value = 12
-        view._librenms_api.get_serial_port_sensors.return_value = (False, "timeout")
-        obj = self._obj_with_csps("serial-fail")
-
-        with (
-            patch("netbox_librenms_plugin.views.base.cables_view.get_librenms_oob", return_value=None),
-            patch("netbox_librenms_plugin.views.base.cables_view.get_librenms_sync_device", return_value=None),
-            patch.object(view, "get_ports_data", return_value={"ports": []}),
-        ):
-            result = view.get_links_data(obj)
-
-        # LLDP succeeded (empty) and the serial fetch failed without adding rows: a successful
-        # refresh with zero rows returns [] (no host error recorded), not None.
-        assert result == []
-        assert view._serial_links_fetch_failed is True
-
-    def test_serial_fetch_success_does_not_flag_failure(self):
-        """A successful serial fetch must leave the failure flag False so no spurious warning."""
-        view = _make_view()
-        sensors = [_serial_sensor(3, "router-a")]
-        self._base_setup(view, sensors=sensors)
-        obj = self._obj_with_csps("serial-ok")
-
-        with (
-            patch("netbox_librenms_plugin.views.base.cables_view.get_librenms_oob", return_value=None),
-            patch("netbox_librenms_plugin.views.base.cables_view.get_librenms_sync_device", return_value=None),
-            patch.object(view, "get_ports_data", return_value={"ports": []}),
-        ):
-            view.get_links_data(obj)
-
-        assert view._serial_links_fetch_failed is False
-
-    def test_serial_fetch_success_with_non_list_payload_is_skipped(self):
-        """A malformed non-list payload on the success path is skipped by the call-site isinstance(list) guard (a non-iterable would otherwise crash the mapper), not flagged as a failure."""
-        view = _make_view()
-        obj = self._obj_with_csps("serial-badpayload")
-
-        for bad in (42, "garbage", {"sensor_id": 1}):  # truthy but not a list
-            view._librenms_api.get_device_links.return_value = (True, {"links": []})
-            view._librenms_api.get_librenms_id.return_value = 12
-            view._librenms_api.get_serial_port_sensors.return_value = (True, bad)
-            with (
-                patch("netbox_librenms_plugin.views.base.cables_view.get_librenms_oob", return_value=None),
-                patch("netbox_librenms_plugin.views.base.cables_view.get_librenms_sync_device", return_value=None),
-                patch.object(view, "get_ports_data", return_value={"ports": []}),
-            ):
-                result = view.get_links_data(obj)  # must not raise
-
-            serial_rows = [r for r in (result or []) if r.get("_source") == "serial"]
-            assert serial_rows == []  # malformed payload skipped, no rows mapped
-            assert view._serial_links_fetch_failed is False  # success, just an unusable payload
-
-    def test_serial_row_shape(self):
-        """Each appended row has the expected keys."""
-        view = _make_view()
-        sensors = [_serial_sensor(5, "prod-router-01")]
-        self._base_setup(view, sensors=sensors)
-        obj = self._obj_with_csps("serial-shape", csp_names=("ttyS5",))
-
-        with (
-            patch("netbox_librenms_plugin.views.base.cables_view.get_librenms_oob", return_value=None),
-            patch("netbox_librenms_plugin.views.base.cables_view.get_librenms_sync_device", return_value=None),
-            patch.object(view, "get_ports_data", return_value={"ports": []}),
-        ):
-            result = view.get_links_data(obj)
-
-        row = result[0]
-        assert row["_source"] == "serial"
-        assert row["local_port"] == "ttyS5"
-        assert row["remote_device"] == "prod-router-01"
-        assert row["remote_port"] is None
-        assert row["remote_device_id"] is None
-        assert row["is_configured"] is True
-        assert row["sensor_id"] == 1005
-        assert row["sensor_index_int"] == 5
 
 
 # ---------------------------------------------------------------------------
@@ -306,17 +99,19 @@ class TestEnrichLocalPortSerial:
 
     def test_csp_resolved_on_sync_device_not_viewed_obj(self):
         """On a VC-member page the CSP lives on the resolved sync device; enrich_local_port must resolve it there, not on the viewed obj (which would drop the row to 'Console Server Port Not Found')."""
+        from netbox_librenms_plugin.tests.conftest import make_virtual_chassis
+        from netbox_librenms_plugin.utils import set_librenms_device_id
+
         view = _make_view()
         # The viewed member has NO CSP; the sync device (priority member) owns it.
         viewed, _, _ = make_serial_device("ser-enrich-viewed")
         sync_device, (csp,), _ = make_serial_device("ser-enrich-sync", csp_names=["ttyS5"])
+        make_virtual_chassis("ser-enrich-vc", viewed, sync_device)
+        set_librenms_device_id(sync_device, view.librenms_id, "default")
+        sync_device.save()
 
         link = {"local_port": "ttyS5", "local_port_id": "serial:1005", "_source": "serial"}
-        with patch(
-            "netbox_librenms_plugin.views.base.cables_view.get_librenms_sync_device",
-            return_value=sync_device,
-        ):
-            view.enrich_local_port(link, viewed)
+        view.enrich_local_port(link, viewed)
 
         # Resolved against the sync device, not the viewed obj.
         assert link["netbox_local_interface_id"] == csp.pk
@@ -373,62 +168,6 @@ class TestCheckSerialCableStatus:
         view.check_serial_cable_status(link)
 
         assert link["cable_status"] == "Console Server Port Not Found in NetBox"
-
-
-# ---------------------------------------------------------------------------
-# enrich_links_data routing
-# ---------------------------------------------------------------------------
-
-
-class TestEnrichLinksDataSerial:
-    """enrich_links_data routes serial rows to check_serial_cable_status."""
-
-    def test_serial_row_calls_check_serial_cable_status(self):
-        view = _make_view()
-        serial_link = {
-            "local_port": "ttyS7",
-            "local_port_id": "serial:1007",
-            "_source": "serial",
-            "remote_device": "switch-a",
-            "device_id": None,
-        }
-
-        obj = _mock_obj()
-
-        with (
-            patch.object(view, "enrich_local_port"),
-            patch.object(view, "check_serial_cable_status") as mock_check_serial,
-            patch.object(view, "process_remote_device") as mock_process_remote,
-        ):
-            view.enrich_links_data([serial_link], obj)
-
-        mock_check_serial.assert_called_once()
-        assert mock_check_serial.call_args.args[0] is serial_link  # csp= reuse arg may also be passed
-        mock_process_remote.assert_not_called()
-
-    def test_non_serial_row_goes_through_normal_path(self):
-        view = _make_view()
-        normal_link = {
-            "local_port": "GigabitEthernet0/1",
-            "local_port_id": 101,
-            "_source": "main",
-            "remote_device": "switch-b",
-            "remote_device_id": 5,
-            "device_id": None,
-        }
-
-        obj = _mock_obj()
-
-        with (
-            patch.object(view, "enrich_local_port"),
-            patch.object(view, "check_serial_cable_status") as mock_check_serial,
-            patch.object(view, "process_remote_device", return_value=normal_link) as mock_process_remote,
-            patch.object(view, "check_cable_status"),
-        ):
-            view.enrich_links_data([normal_link], obj)
-
-        mock_check_serial.assert_not_called()
-        mock_process_remote.assert_called_once()
 
 
 # ---------------------------------------------------------------------------
@@ -602,6 +341,7 @@ class TestCableTableSerialRendering:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.django_db
 class TestEnrichSerialRemote:
     """enrich_serial_remote resolves remote device + ConsolePort."""
 
@@ -621,8 +361,7 @@ class TestEnrichSerialRemote:
             "cable_status": "No Cable",
         }
 
-        with patch.object(view, "get_device_by_id_or_name", return_value=(device, True, None)):
-            view.enrich_serial_remote(link)
+        view.enrich_serial_remote(link)
 
         assert link["netbox_remote_interface_id"] == cp.pk
         assert link["remote_port_name"] == "con0"
@@ -638,8 +377,7 @@ class TestEnrichSerialRemote:
             "cable_status": "No Cable",
         }
 
-        with patch.object(view, "get_device_by_id_or_name", return_value=(None, False, None)):
-            view.enrich_serial_remote(link)
+        view.enrich_serial_remote(link)
 
         assert "netbox_remote_device_id" not in link
         assert "can_create_cable" not in link
@@ -649,10 +387,8 @@ class TestEnrichSerialRemote:
         view = _make_view()
         link = {"remote_device": None, "cable_status": "No Cable"}
 
-        with patch.object(view, "get_device_by_id_or_name") as mock_lookup:
-            view.enrich_serial_remote(link)
-
-        mock_lookup.assert_not_called()
+        view.enrich_serial_remote(link)
+        assert link == {"remote_device": None, "cable_status": "No Cable"}
 
     @pytest.mark.django_db
     def test_all_cps_cabled_sets_not_found_status(self):
@@ -669,8 +405,7 @@ class TestEnrichSerialRemote:
             "cable_status": "No Cable",
         }
 
-        with patch.object(view, "get_device_by_id_or_name", return_value=(device, True, None)):
-            view.enrich_serial_remote(link)
+        view.enrich_serial_remote(link)
 
         assert link["cable_status"] == "Console Port Not Found in NetBox"
         assert "can_create_cable" not in link
@@ -691,8 +426,7 @@ class TestEnrichSerialRemote:
             "cable_status": "No Cable",
         }
 
-        with patch.object(view, "get_device_by_id_or_name", return_value=(router, True, None)):
-            view.enrich_serial_remote(link)
+        view.enrich_serial_remote(link)
 
         assert link["remote_port_name"] == "con-a"  # lowest name, deterministic
         assert link["can_create_cable"] is True
@@ -705,8 +439,7 @@ class TestEnrichSerialRemote:
         remote, _, (cp,) = make_serial_device("router-nocable", cp_names=["con0"])
         link = {"local_port": "ttyS7", "_source": "serial", "remote_device": remote.name, "device_id": local.id}
 
-        with patch.object(view, "get_device_by_id_or_name", return_value=(remote, True, None)):
-            view.enrich_links_data([link], local)
+        view.enrich_links_data([link], local)
 
         assert link["netbox_remote_interface_id"] == cp.pk  # enrich_serial_remote ran
         assert link["can_create_cable"] is True
@@ -720,10 +453,7 @@ class TestEnrichSerialRemote:
         cable_together(csp, peer_cp)  # the CSP now has a cable
         link = {"local_port": "ttyS3", "_source": "serial", "remote_device": "irrelevant", "device_id": local.id}
 
-        with patch.object(view, "get_device_by_id_or_name", return_value=(None, False, None)) as mock_lookup:
-            view.enrich_links_data([link], local)
-
-        mock_lookup.assert_called_once()  # cabled rows now go through enrich_serial_remote
+        view.enrich_links_data([link], local)
         # Label didn't resolve: cabled but no LibreNMS target to compare against — no action.
         assert link["cable_status"] == "Cable Found"
         assert "netbox_remote_interface_id" not in link
@@ -731,276 +461,48 @@ class TestEnrichSerialRemote:
 
 
 # ---------------------------------------------------------------------------
-# SyncCablesView serial handling
+# Serial rows have one fixed ConsoleServerPort owner
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.django_db
-class TestHandleSerialCableCreation:
-    """SyncCablesView.handle_serial_cable_creation creates CSP <-> CP cables."""
+def test_verify_rejects_serial_row_with_fixed_owner():
+    """The public verify endpoint must reject a forged request for a fixed-owner serial row."""
+    from django.contrib.auth import get_user_model
+    from django.core.cache import cache
+    from django.test import Client
+    from django.urls import reverse
 
-    def _make_sync_view(self):
-        from netbox_librenms_plugin.views.sync.cables import SyncCablesView
+    from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+    from netbox_librenms_plugin.views.base.cables_view import SingleCableVerifyView
 
-        view = object.__new__(SyncCablesView)
-        view.request = _mock_request()
-        view._librenms_api = MagicMock()
-        view._librenms_api.server_key = "default"
-        return view
+    device, (csp,), _ = make_serial_device("serial-fixed-owner", csp_names=["ttyS7"])
+    row = {
+        "row_id": "serial:1007",
+        "local_port": csp.name,
+        "local_port_id": "serial:1007",
+        "_source": "serial",
+        "device_id": device.pk,
+        "sensor_id": 1007,
+    }
+    server_key = next(iter(LibreNMSAPI.get_available_servers()))
+    cache_key = object.__new__(SingleCableVerifyView).get_cache_key(device, "links", server_key)
+    cache.set(cache_key, {"links": [row]}, timeout=300)
 
-    def test_creates_cable_when_both_sides_found(self):
-        """When a real CSP and CP both exist and are uncabled, create_cable is invoked and the result is valid."""
-        view = self._make_sync_view()
-        _, (csp,), _ = make_serial_device("ser-hsc-csp", csp_names=["ttyS7"])
-        _, _, (cp,) = make_serial_device("ser-hsc-cp", cp_names=["con0"])
+    user = get_user_model().objects.create_superuser(
+        "serial-fixed-owner-admin",
+        "serial-fixed-owner@example.com",
+        "pw",
+    )
+    client = Client()
+    client.force_login(user)
+    response = client.post(
+        reverse("plugins:netbox_librenms_plugin:verify_cable"),
+        data={"device_id": device.pk, "row_id": row["row_id"], "server_key": server_key},
+        content_type="application/json",
+    )
 
-        link_data = {
-            "_source": "serial",
-            "local_port": "ttyS7",
-            "netbox_local_interface_id": csp.pk,
-            "netbox_remote_interface_id": cp.pk,
-        }
-        interface = {"device_id": 1, "local_port_id": "serial:1007"}
-
-        with patch.object(view, "create_cable", return_value=True) as mock_create:
-            result = view.handle_serial_cable_creation(link_data, interface)
-
-        assert result["status"] == "valid"
-        assert result["interface"] == "ttyS7"
-        mock_create.assert_called_once()
-        passed_csp, passed_cp, passed_req = mock_create.call_args[0]
-        assert passed_csp.pk == csp.pk
-        assert passed_cp.pk == cp.pk
-        assert passed_req is view.request
-
-    def test_missing_csp_id_returns_missing_remote(self):
-        """When netbox_local_interface_id is absent, returns missing_remote."""
-        view = self._make_sync_view()
-
-        link_data = {
-            "_source": "serial",
-            "local_port": "ttyS7",
-            "netbox_remote_interface_id": 77,
-        }
-        interface = {"device_id": 1, "local_port_id": "serial:1007"}
-
-        result = view.handle_serial_cable_creation(link_data, interface)
-        assert result["status"] == "missing_remote"
-
-    def test_missing_cp_id_returns_missing_remote(self):
-        """When netbox_remote_interface_id is absent, returns missing_remote."""
-        view = self._make_sync_view()
-
-        link_data = {
-            "_source": "serial",
-            "local_port": "ttyS7",
-            "netbox_local_interface_id": 99,
-        }
-        interface = {"device_id": 1, "local_port_id": "serial:1007"}
-
-        result = view.handle_serial_cable_creation(link_data, interface)
-        assert result["status"] == "missing_remote"
-
-    def test_existing_untagged_cable_on_csp_returns_conflict(self):
-        """Re-pointing the CSP over an untagged (non-managed) cable defers with a 'conflict', DB untouched."""
-        from dcim.models import Cable
-
-        view = self._make_sync_view()
-        _, (csp,), _ = make_serial_device("ser-hsc-dup-csp", csp_names=["ttyS7"])
-        _, _, (peer_cp,) = make_serial_device("ser-hsc-dup-peer", cp_names=["conX"])
-        old = cable_together(csp, peer_cp)  # csp is now cabled (untagged → not ours)
-        _, _, (cp,) = make_serial_device("ser-hsc-dup-target", cp_names=["con0"])
-
-        link_data = {
-            "_source": "serial",
-            "local_port": "ttyS7",
-            "local_port_id": "serial:1007",
-            "netbox_local_interface_id": csp.pk,
-            "netbox_remote_interface_id": cp.pk,
-        }
-        interface = {"device_id": 1, "local_port_id": "serial:1007"}
-
-        result = view.handle_serial_cable_creation(link_data, interface)
-
-        assert result["status"] == "conflict"
-        assert result["port_id"] == "serial:1007"
-        assert result["trace"]  # the doomed cable's end-to-end path, for the modal
-        assert Cable.objects.filter(pk=old.pk).exists()  # untouched without force
-
-    def test_csp_does_not_exist_returns_missing_remote(self):
-        """A netbox_local_interface_id with no ConsoleServerPort returns missing_remote."""
-        view = self._make_sync_view()
-        _, _, (cp,) = make_serial_device("ser-hsc-nocsp", cp_names=["con0"])
-
-        link_data = {
-            "_source": "serial",
-            "local_port": "ttyS7",
-            "netbox_local_interface_id": 9999999,  # no such CSP
-            "netbox_remote_interface_id": cp.pk,
-        }
-        interface = {"device_id": 1, "local_port_id": "serial:1007"}
-
-        result = view.handle_serial_cable_creation(link_data, interface)
-
-        assert result["status"] == "missing_remote"
-
-    def test_handle_cable_creation_routes_serial_to_serial_handler(self):
-        """handle_cable_creation dispatches serial _source to handle_serial_cable_creation."""
-        view = self._make_sync_view()
-
-        link_data = {"_source": "serial", "local_port": "ttyS7"}
-        interface = {"device_id": 1, "local_port_id": "serial:1007"}
-
-        with patch.object(
-            view, "handle_serial_cable_creation", return_value={"status": "valid", "interface": "ttyS7"}
-        ) as mock_serial:
-            result = view.handle_cable_creation(link_data, interface)
-
-        mock_serial.assert_called_once_with(link_data, interface, force=False)
-        assert result["status"] == "valid"
-
-    def test_handle_cable_creation_non_serial_does_not_route_to_serial(self):
-        """handle_cable_creation does NOT call handle_serial_cable_creation for main rows."""
-        from dcim.models import Interface
-
-        view = self._make_sync_view()
-
-        link_data = {
-            "_source": "main",
-            "local_port": "Gi0/1",
-            "netbox_local_interface_id": 1,
-            "netbox_remote_interface_id": 2,
-            "netbox_remote_device_id": 3,
-        }
-        interface = {"device_id": 1, "local_port_id": 101}
-
-        iface = MagicMock(spec=Interface)
-        iface.device_id = 1
-        iface.cable = None
-
-        with (
-            patch.object(view, "handle_serial_cable_creation") as mock_serial,
-            patch("netbox_librenms_plugin.views.sync.cables.Interface") as MockInterface,
-            patch.object(view, "create_cable", return_value=True),
-        ):
-            MockInterface.objects.get.return_value = iface
-            MockInterface.DoesNotExist = Interface.DoesNotExist
-            view.handle_cable_creation(link_data, interface)
-
-        mock_serial.assert_not_called()
-
-
-# ---------------------------------------------------------------------------
-# SingleCableVerifyView must handle serial rows (VC inline verify)
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.django_db
-class TestSingleCableVerifySerial:
-    """A serial row reaching SingleCableVerifyView (the VC-member dropdown fires verify-cable for EVERY row, serial included) must resolve through the serial pipeline — not fall into the Interface lookup path, which would mislabel the row 'Missing Interface' with no Sync action."""
-
-    def _verify_view(self, server_key="default"):
-        from netbox_librenms_plugin.views.base.cables_view import SingleCableVerifyView
-
-        view = object.__new__(SingleCableVerifyView)
-        view._librenms_api = MagicMock()
-        view._librenms_api.server_key = server_key
-        view.request = MagicMock()
-        return view
-
-    def test_serial_row_resolves_csp_and_remote_consoleport(self):
-        from django.core.cache import cache
-
-        acs, csps, _ = make_serial_device("acs-verify", csp_names=["ttyS7"])
-        router, _, cps = make_serial_device("router-z", cp_names=["console"])
-        csp = csps[0]
-
-        link = {
-            "local_port": "ttyS7",
-            "local_port_id": f"serial:{csp.pk}-sensor",
-            "_source": "serial",
-            "remote_device": "router-z",
-            "remote_port": None,
-            "remote_device_id": None,
-            "device_id": acs.id,
-            "is_configured": True,
-            "sensor_id": 1007,
-            "sensor_index_int": 7,
-        }
-
-        view = self._verify_view()
-        cache_key = view.get_cache_key(acs, "links", "default")
-        cache.set(cache_key, {"links": [link]}, timeout=300)
-
-        request = _make_request_json(
-            {"device_id": acs.id, "local_port_id": link["local_port_id"], "server_key": "default"}
-        )
-        resp = view.post(request)
-        import json as _json
-
-        payload = _json.loads(resp.content)
-        row = payload["formatted_row"]
-
-        # Local port resolves to the ConsoleServerPort, carrying the Serial badge.
-        assert "ttyS7" in row["local_port"]
-        assert "Serial" in row["local_port"]
-        assert (
-            f"/dcim/console-server-ports/{csp.pk}/" in row["local_port"]
-            or "consoleserverport" in row["local_port"].lower()
-        )
-        # Remote resolves to router-z's uncabled ConsolePort, and a Sync action is offered.
-        assert "router-z" in row["remote_device"]
-        assert "console" in row["remote_port"]
-        assert "No Cable" in row["cable_status"]
-        assert "Sync Cable" in row["actions"]
-
-    def _verify_cabled_row(self, name, *, tag_cable):
-        """Verify a serial row whose CSP is already cabled to its label device; optionally librenms-tagged."""
-        import json as _json
-
-        from django.core.cache import cache
-
-        acs, csps, _ = make_serial_device(f"acs-{name}", csp_names=["ttyS9"])
-        router, _, cps = make_serial_device(f"router-{name}", cp_names=["console"])
-        csp = csps[0]
-        cable = cable_together(csp, cps[0])  # already cabled to the label-matched device
-        if tag_cable:
-            from netbox_librenms_plugin.utils import get_librenms_cable_tag
-
-            cable.tags.add(get_librenms_cable_tag())
-
-        link = {
-            "local_port": "ttyS9",
-            "local_port_id": f"serial:{csp.pk}-sensor",
-            "_source": "serial",
-            "remote_device": f"router-{name}",
-            "remote_port": None,
-            "remote_device_id": None,
-            "device_id": acs.id,
-            "is_configured": True,
-            "sensor_id": 1009,
-            "sensor_index_int": 9,
-        }
-
-        view = self._verify_view()
-        cache.set(view.get_cache_key(acs, "links", "default"), {"links": [link]}, timeout=300)
-
-        request = _make_request_json(
-            {"device_id": acs.id, "local_port_id": link["local_port_id"], "server_key": "default"}
-        )
-        return _json.loads(view.post(request).content)["formatted_row"]
-
-    def test_serial_row_with_matched_untagged_cable_offers_adopt(self):
-        """A CSP cabled directly to its label device with an UNTAGGED cable offers Sync — adopting (tagging) the cable, never recreating it."""
-        row = self._verify_cabled_row("verify2", tag_cable=False)
-        assert "Cable Found" in row["cable_status"]
-        assert "Sync Cable" in row["actions"]
-
-    def test_serial_row_with_matched_tagged_cable_offers_no_sync(self):
-        """A CSP cabled directly to its label device with the librenms tag already applied has nothing to do — no Sync action."""
-        row = self._verify_cabled_row("verify3", tag_cable=True)
-        assert "Cable Found" in row["cable_status"]
-        assert "Sync Cable" not in row["actions"]
+    assert response.status_code == 400
 
 
 # ---------------------------------------------------------------------------
@@ -1022,183 +524,465 @@ class TestSerialDeviceIdPreserved:
         viewed, _, _ = make_serial_device("ser-viewed-nonserial")
         view = _make_view()
         link = {"local_port": "Gi0/0"}  # non-serial
-        with patch.object(view, "enrich_local_port"):
-            view.enrich_links_data([link], viewed)
+        view.enrich_links_data([link], viewed)
         assert link["device_id"] == viewed.id  # non-serial rows are scoped to the viewed device
+
+    def test_vc_serial_row_pins_selection_to_the_console_server_port_owner(self):
+        from django.test import RequestFactory
+
+        from netbox_librenms_plugin.tables.cables import VCCableTable
+        from netbox_librenms_plugin.tests.conftest import make_virtual_chassis
+
+        viewed, _, _ = make_serial_device("serial-vc-viewed")
+        owner, (csp,), _ = make_serial_device("serial-vc-owner", csp_names=["ttyS1"])
+        make_virtual_chassis("serial-vc", viewed, owner)
+        row = {
+            "_source": "serial",
+            "device_id": owner.pk,
+            "local_port": csp.name,
+            "local_port_id": "serial:501",
+        }
+        table = VCCableTable([row], device=viewed)
+        request = RequestFactory().get("/")
+
+        html = table.as_html(request)
+
+        assert f'<option value="{owner.pk}" selected>' in html
+        assert 'name="device_selection_serial:501"' in html
+        assert f'value="{owner.pk}"' in html
+        assert "disabled" in html
+
+
+@pytest.mark.django_db
+class TestSerialLocalPortQueryBound:
+    def test_enrichment_query_count_does_not_grow_with_configured_rows(self):
+        from django.db import connection
+        from django.test.utils import CaptureQueriesContext
+
+        names = [f"ttyS{index}" for index in range(1, 49)]
+        device, _ports, _unused = make_serial_device("serial-query-bound", csp_names=names)
+        remote, _, _remote_ports = make_serial_device(
+            "serial-query-bound-remote",
+            cp_names=[f"console-{index:02d}" for index in range(1, 49)],
+        )
+        links = [
+            {
+                "_source": "serial",
+                "device_id": device.pk,
+                "local_port": name,
+                "local_port_id": f"serial:{index}",
+                "remote_device": remote.name,
+                "is_configured": True,
+            }
+            for index, name in enumerate(names, start=1)
+        ]
+        view = _make_view()
+
+        with CaptureQueriesContext(connection) as captured:
+            view.enrich_links_data(links, device, server_key="default", sync_device=device)
+
+        selects = [
+            query["sql"] for query in captured.captured_queries if query["sql"].lstrip().upper().startswith("SELECT")
+        ]
+        assert len(selects) <= 6
+
+    @pytest.mark.parametrize("with_provenance", [False, True])
+    def test_cabled_enrichment_query_count_does_not_grow_per_port(self, with_provenance):
+        """Direct cabled rows must reuse cable, tag, termination, and permission state."""
+        import re
+        from collections import Counter
+
+        from django.contrib.auth import get_user_model
+        from django.db import connection
+        from django.test import RequestFactory
+        from django.test.utils import CaptureQueriesContext
+
+        from netbox_librenms_plugin.utils import get_librenms_cable_tag
+        from netbox_librenms_plugin.views.object_sync.devices import DeviceCableTableView
+
+        names = [f"ttyS{index}" for index in range(1, 49)]
+        device, ports, _unused = make_serial_device("serial-cabled-query-bound", csp_names=names)
+        remote, _, remote_ports = make_serial_device(
+            "serial-cabled-query-bound-remote",
+            cp_names=[f"console-{index:02d}" for index in range(1, 49)],
+        )
+        provenance_tag = get_librenms_cable_tag() if with_provenance else None
+        for local_port, remote_port in zip(ports, remote_ports, strict=True):
+            cable = cable_together(local_port, remote_port)
+            if provenance_tag is not None:
+                cable.tags.add(provenance_tag)
+        links = [
+            {
+                "_source": "serial",
+                "device_id": device.pk,
+                "local_port": name,
+                "local_port_id": f"serial:{index}",
+                "remote_device": remote.name,
+                "is_configured": True,
+            }
+            for index, name in enumerate(names, start=1)
+        ]
+        view = DeviceCableTableView()
+        request = RequestFactory().get("/")
+        request.user = get_user_model().objects.create_superuser(
+            "serial-cabled-query-user",
+            password="pw",
+        )
+        view.request = request
+
+        with CaptureQueriesContext(connection) as captured:
+            view.enrich_links_data(links, device, server_key="default", sync_device=device)
+
+        selects = [
+            query["sql"] for query in captured.captured_queries if query["sql"].lstrip().upper().startswith("SELECT")
+        ]
+        tables = Counter(match.group(1) for sql in selects if (match := re.search(r'FROM "([^"]+)"', sql)))
+        assert len(selects) <= (12 if with_provenance else 14), tables
+
+
+@pytest.mark.django_db
+class TestNormalCableLinkQueryBound:
+    """Ordinary LLDP enrichment must not run permission and lookup queries per row."""
+
+    def test_uncabled_link_enrichment_has_a_constant_query_bound(self):
+        from collections import Counter
+        import re
+
+        from django.contrib.auth import get_user_model
+        from django.db import connection
+        from django.test import RequestFactory
+        from django.test.utils import CaptureQueriesContext
+
+        from netbox_librenms_plugin.tests.conftest import make_device, make_interface
+        from netbox_librenms_plugin.views.object_sync.devices import DeviceCableTableView
+
+        local = make_device("normal-query-local")
+        remote = make_device("normal-query-remote")
+        links = []
+        for index in range(48):
+            local_name = f"Ethernet{index + 1}"
+            remote_name = f"Ethernet{index + 101}"
+            make_interface(local, local_name)
+            make_interface(remote, remote_name)
+            links.append(
+                {
+                    "_source": "main",
+                    "local_port": local_name,
+                    "local_port_id": 1000 + index,
+                    "remote_device": remote.name,
+                    "remote_port": remote_name,
+                    "remote_port_id": 2000 + index,
+                }
+            )
+
+        request = RequestFactory().get("/")
+        request.user = get_user_model().objects.create_superuser("normal-query-user", "", "pw")
+        view = DeviceCableTableView()
+        view.request = request
+
+        with CaptureQueriesContext(connection) as captured:
+            view.enrich_links_data(links, local, server_key="default", sync_device=local)
+
+        selects = [
+            query["sql"] for query in captured.captured_queries if query["sql"].lstrip().upper().startswith("SELECT")
+        ]
+        tables = Counter(match.group(1) for sql in selects if (match := re.search(r'FROM "([^"]+)"', sql)))
+        assert all(link.get("can_create_cable") is True for link in links)
+        assert len(selects) <= 20, tables
+
+    def test_cabled_link_enrichment_reuses_prefetched_termination_state(self):
+        """Point-to-point checks must not query CableTermination once per cable end."""
+        from collections import Counter
+        import re
+
+        from django.contrib.auth import get_user_model
+        from django.db import connection
+        from django.test import RequestFactory
+        from django.test.utils import CaptureQueriesContext
+
+        from netbox_librenms_plugin.tests.conftest import cable_together, make_device, make_interface
+        from netbox_librenms_plugin.views.object_sync.devices import DeviceCableTableView
+
+        local = make_device("normal-cabled-query-local")
+        remote = make_device("normal-cabled-query-remote")
+        links = []
+        for index in range(48):
+            local_interface = make_interface(local, f"Ethernet{index + 1}")
+            remote_interface = make_interface(remote, f"Ethernet{index + 101}")
+            cable_together(local_interface, remote_interface)
+            links.append(
+                {
+                    "_source": "main",
+                    "local_port": local_interface.name,
+                    "remote_device": remote.name,
+                    "remote_port": remote_interface.name,
+                }
+            )
+
+        request = RequestFactory().get("/")
+        request.user = get_user_model().objects.create_superuser("normal-cabled-query-user", "", "pw")
+        view = DeviceCableTableView()
+        view.request = request
+
+        with CaptureQueriesContext(connection) as captured:
+            view.enrich_links_data(links, local, server_key="default", sync_device=local)
+
+        selects = [
+            query["sql"] for query in captured.captured_queries if query["sql"].lstrip().upper().startswith("SELECT")
+        ]
+        tables = Counter(match.group(1) for sql in selects if (match := re.search(r'FROM "([^"]+)"', sql)))
+        assert all(link.get("cable_status") == "Cable Found" for link in links)
+        assert len(selects) <= 24, tables
+
+    def test_patch_path_visibility_checks_are_batched_for_the_page(self):
+        """Trace permission checks must not issue one EXISTS query per path object."""
+        from django.contrib.auth import get_user_model
+        from django.db import connection
+        from django.test import RequestFactory
+        from django.test.utils import CaptureQueriesContext
+
+        from netbox_librenms_plugin.tests.conftest import make_device, make_interface, make_patch_panel
+        from netbox_librenms_plugin.views.object_sync.devices import DeviceCableTableView
+
+        local = make_device("normal-trace-query-local")
+        remote = make_device("normal-trace-query-remote")
+        links = []
+        for index in range(12):
+            local_interface = make_interface(local, f"Ethernet{index + 1}")
+            remote_interface = make_interface(remote, f"Ethernet{index + 101}")
+            _panel, front, rear = make_patch_panel(f"normal-trace-query-panel-{index + 1}")
+            cable_together(local_interface, front)
+            cable_together(rear, remote_interface)
+            links.append(
+                {
+                    "_source": "main",
+                    "local_port": local_interface.name,
+                    "remote_device": remote.name,
+                    "remote_port": remote_interface.name,
+                }
+            )
+
+        request = RequestFactory().get("/")
+        request.user = get_user_model().objects.create_superuser("normal-trace-query-user", "", "pw")
+        view = DeviceCableTableView()
+        view.request = request
+
+        with CaptureQueriesContext(connection) as captured:
+            view.enrich_links_data(links, local, server_key="default", sync_device=local)
+
+        permission_exists = [
+            query["sql"]
+            for query in captured.captured_queries
+            if query["sql"].lstrip().upper().startswith('SELECT 1 AS "A" FROM "DCIM_')
+        ]
+        assert all(link["cable_status"] == "Connected via Patch Path" for link in links)
+        assert len(permission_exists) <= 6
+
+    def test_duplicate_neighbor_rows_trace_each_local_interface_once(self):
+        """Multiple neighbor rows for one local port must reuse its real cable trace."""
+        from django.contrib.auth import get_user_model
+        from django.db import connection
+        from django.test import RequestFactory
+        from django.test.utils import CaptureQueriesContext
+
+        from netbox_librenms_plugin.tests.conftest import cable_together, make_device, make_interface
+        from netbox_librenms_plugin.views.object_sync.devices import DeviceCableTableView
+
+        local_device = make_device("normal-duplicate-trace-local")
+        local_interface = make_interface(local_device, "Ethernet1")
+        local_peer = make_interface(make_device("normal-duplicate-trace-peer"), "Ethernet1")
+        cable_together(local_interface, local_peer)
+        remote_device = make_device("normal-duplicate-trace-remote")
+        links = []
+        for index in range(24):
+            remote_interface = make_interface(remote_device, f"Ethernet{index + 1}")
+            remote_peer = make_interface(make_device(f"normal-duplicate-remote-peer-{index + 1}"), "Ethernet1")
+            cable_together(remote_interface, remote_peer)
+            links.append(
+                {
+                    "link_id": index + 1,
+                    "_source": "main",
+                    "local_port": local_interface.name,
+                    "remote_device": remote_device.name,
+                    "remote_port": remote_interface.name,
+                }
+            )
+
+        request = RequestFactory().get("/")
+        request.user = get_user_model().objects.create_superuser("normal-duplicate-trace-user", "", "pw")
+
+        def query_count(selected_links):
+            view = DeviceCableTableView()
+            view.request = request
+            with CaptureQueriesContext(connection) as captured:
+                view.enrich_links_data(selected_links, local_device, server_key="default", sync_device=local_device)
+            return len(captured)
+
+        one_link_queries = query_count([links[0].copy()])
+        all_link_queries = query_count([link.copy() for link in links])
+
+        assert all_link_queries <= one_link_queries + 3
+
+    def test_multi_termination_status_links_the_offending_remote_cable(self, client):
+        """A normal local cable must not hide the remote breakout cable behind the wrong URL."""
+        from dcim.models import Cable
+        from django.contrib.auth import get_user_model
+        from django.core.cache import cache
+        from django.urls import reverse
+
+        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+        from netbox_librenms_plugin.tests.conftest import make_device, make_interface
+        from netbox_librenms_plugin.views.sync.cables import SyncCablesView
+
+        local = make_device("normal-multi-url-local")
+        local_interface = make_interface(local, "Ethernet1")
+        local_other = make_interface(make_device("normal-multi-url-local-peer"), "Ethernet8")
+        cable_together(local_interface, local_other)
+        remote = make_device("normal-multi-url-remote")
+        remote_interface = make_interface(remote, "Ethernet9")
+        remote_extra = make_interface(remote, "Ethernet10")
+        remote_other = make_interface(make_device("normal-multi-url-remote-peer"), "Ethernet11")
+        breakout = Cable(
+            a_terminations=[remote_interface, remote_extra],
+            b_terminations=[remote_other],
+            status="connected",
+        )
+        breakout.save()
+        row = {
+            "_source": "main",
+            "local_port": local_interface.name,
+            "local_port_id": 10,
+            "remote_device": remote.name,
+            "remote_port": remote_interface.name,
+            "remote_port_id": 20,
+        }
+        server_key = next(iter(LibreNMSAPI.get_available_servers()))
+        cache.set(
+            object.__new__(SyncCablesView).get_cache_key(local, "links", server_key),
+            {"links": [row]},
+            timeout=300,
+        )
+        user = get_user_model().objects.create_superuser("normal-multi-url-user", "", "pw")
+        client.force_login(user)
+
+        response = client.get(
+            reverse("plugins:netbox_librenms_plugin:device_librenms_sync", args=[local.pk]),
+            {"tab": "cables", "server_key": server_key},
+        )
+
+        assert response.status_code == 200
+        record = next(iter(response.context["cable_sync"]["table"].rows)).record
+        assert record["cable_status"] == "Multi-termination Cable Not Supported"
+        assert str(breakout.pk) in record["cable_url"]
+
+    def test_large_stable_id_sets_use_bounded_query_parameters(self):
+        """One large owner must not expand all accepted JSON ID shapes into one statement."""
+        from django.contrib.auth import get_user_model
+        from django.db import connection
+        from django.test import RequestFactory
+
+        from netbox_librenms_plugin.tests.conftest import make_device
+        from netbox_librenms_plugin.views.object_sync.devices import DeviceCableTableView
+
+        local = make_device("normal-parameter-bound-local")
+        links = [
+            {
+                "_source": "main",
+                "local_port": f"Ethernet{port_id}",
+                "local_port_id": port_id,
+                "remote_device_id": 10_000 + port_id,
+                "remote_port_id": 20_000 + port_id,
+            }
+            for port_id in range(1, 321)
+        ]
+        request = RequestFactory().get("/")
+        request.user = get_user_model().objects.create_superuser("normal-parameter-bound-user", "", "pw")
+        view = DeviceCableTableView()
+        view.request = request
+        parameter_counts = []
+
+        def capture_parameters(execute, sql, params, many, context):
+            parameter_counts.append(len(params or ()))
+            return execute(sql, params, many, context)
+
+        with connection.execute_wrapper(capture_parameters):
+            view.enrich_links_data(links, local, server_key="default", sync_device=local)
+
+        assert max(parameter_counts) < 2_000
+
+    def test_candidate_loading_is_scoped_to_each_remote_device(self):
+        """Common interface names must not load every name from every remote device."""
+        from django.contrib.auth import get_user_model
+        from django.db.models.signals import post_init
+        from django.test import RequestFactory
+
+        from dcim.models import Interface
+
+        from netbox_librenms_plugin.tests.conftest import make_device, make_interface
+        from netbox_librenms_plugin.views.object_sync.devices import DeviceCableTableView
+
+        local = make_device("normal-materialization-local")
+        links = []
+        for index in range(16):
+            local_name = f"Local{index + 1}"
+            make_interface(local, local_name)
+            remote = make_device(f"normal-materialization-remote-{index + 1}")
+            for remote_index in range(16):
+                make_interface(remote, f"Ethernet{remote_index + 1}")
+            links.append(
+                {
+                    "_source": "main",
+                    "local_port": local_name,
+                    "remote_device": remote.name,
+                    "remote_port": "Ethernet1",
+                }
+            )
+
+        request = RequestFactory().get("/")
+        request.user = get_user_model().objects.create_superuser("normal-materialization-user", "", "pw")
+        view = DeviceCableTableView()
+        view.request = request
+        initialized = 0
+
+        def count_interface_instances(sender, **kwargs):
+            nonlocal initialized
+            initialized += 1
+
+        post_init.connect(count_interface_instances, sender=Interface, weak=False)
+        try:
+            view.enrich_links_data(links, local, server_key="default", sync_device=local)
+        finally:
+            post_init.disconnect(count_interface_instances, sender=Interface)
+
+        assert all(link.get("can_create_cable") is True for link in links)
+        assert initialized <= 40
 
 
 @pytest.mark.django_db
 class TestSerialFetchSkippedWithoutHostId:
-    """An OOB-only / unmapped device (no host librenms_id) must not call get_serial_port_sensors(None) — it can only return empty and, on a transient error, would wrongly mark the snapshot partial and suppress the valid OOB rows (#4/#6)."""
+    """An unmapped device must not call LibreNMS with a missing host ID."""
 
     def test_serial_fetch_skipped_when_no_host_librenms_id(self):
+        import requests
+
         obj, _csps, _ = make_serial_device("oob-only-serial", csp_names=["ttyS1"])
         view = _make_view()
-        view._librenms_api.get_librenms_id.return_value = None  # OOB-only / unmapped host
-        view._librenms_api.get_device_links.return_value = (False, "no host mapping")
-        # Must not be reached: a None device id can only filter to nothing and waste a fetch.
-        view._librenms_api.get_serial_port_sensors.side_effect = AssertionError("must not fetch with no host id")
-        view.get_links_data(obj)
-        view._librenms_api.get_serial_port_sensors.assert_not_called()
+        requested_urls = []
+
+        def not_found(url, *args, **kwargs):
+            requested_urls.append(url)
+            response = requests.models.Response()
+            response.status_code = 404
+            response.url = url
+            return response
+
+        with patch("netbox_librenms_plugin.librenms_api.requests.get", side_effect=not_found):
+            result = view.get_links_data(obj)
+
+        assert result is None
+        assert requested_urls
+        assert all("/devices/None/links" not in url for url in requested_urls)
         assert view._serial_links_fetch_failed is False
-
-
-# ---------------------------------------------------------------------------
-# #5: cross-row ConsolePort dedup  ·  G-B2: verify-row dimming parity
-# ---------------------------------------------------------------------------
-@pytest.mark.django_db
-class TestSerialRemoteCollisionDedup:
-    """Two serial rows resolving to the same remote device must target distinct uncabled ConsolePorts — otherwise the 2nd sync hits the duplicate guard and a free port stays uncabled (#5)."""
-
-    def test_enrich_serial_remote_excludes_claimed_ports(self):
-        view = _make_view()
-        remote, _, (cp_a, cp_b) = make_serial_device("router-collide", cp_names=["con-a", "con-b"])
-        _local, (csp1, csp2), _ = make_serial_device("acs-collide-local", csp_names=["ttyS1", "ttyS2"])
-        link1 = {
-            "_source": "serial",
-            "remote_device": remote.name,
-            "netbox_local_interface_id": csp1.pk,
-            "cable_status": "No Cable",
-        }
-        link2 = {
-            "_source": "serial",
-            "remote_device": remote.name,
-            "netbox_local_interface_id": csp2.pk,
-            "cable_status": "No Cable",
-        }
-        claimed = set()
-        with patch.object(view, "get_device_by_id_or_name", return_value=(remote, True, None)):
-            view.enrich_serial_remote(link1, claimed_cp_ids=claimed)
-            view.enrich_serial_remote(link2, claimed_cp_ids=claimed)
-        assert link1["netbox_remote_interface_id"] != link2["netbox_remote_interface_id"]
-        assert {link1["netbox_remote_interface_id"], link2["netbox_remote_interface_id"]} == {cp_a.pk, cp_b.pk}
-
-    def test_manual_pick_reserves_port_against_auto_match(self):
-        """A manual pick claims its ConsolePort in the shared dedup set: a sibling auto-matched row in the same enrich pass must pick a DIFFERENT free port (else a batch sync silently overwrites the manually picked cable)."""
-        view = _make_view()
-        local, (csp1, csp2), _ = make_serial_device("acs-manual-claim", csp_names=["ttyS1", "ttyS2"])
-        remote, _, (cp_a, cp_b) = make_serial_device("router-manual-claim", cp_names=["con-a", "con-b"])
-
-        manual_row = {
-            "_source": "serial",
-            "local_port": "ttyS1",
-            "remote_device": "no-label-match",
-            "device_id": local.id,
-            "manual_remote_id": cp_a.pk,  # the user's explicit pick: con-a
-        }
-        auto_row = {
-            "_source": "serial",
-            "local_port": "ttyS2",
-            "remote_device": remote.name,  # label-matches the same device
-            "device_id": local.id,
-        }
-        view.enrich_links_data([manual_row, auto_row], local)
-
-        assert manual_row["netbox_remote_interface_id"] == cp_a.pk
-        assert auto_row["netbox_remote_interface_id"] == cp_b.pk  # NOT the manually claimed con-a
-
-    def test_enrich_links_data_dedups_remote_cp_across_serial_rows(self):
-        view = _make_view()
-        local, (csp1, csp2), _ = make_serial_device("acs-collide", csp_names=["ttyS1", "ttyS2"])
-        remote, _, (cp_a, cp_b) = make_serial_device("router-collide2", cp_names=["con-a", "con-b"])
-        links = [
-            {"local_port": "ttyS1", "_source": "serial", "remote_device": remote.name, "device_id": local.id},
-            {"local_port": "ttyS2", "_source": "serial", "remote_device": remote.name, "device_id": local.id},
-        ]
-        with patch.object(view, "get_device_by_id_or_name", return_value=(remote, True, None)):
-            view.enrich_links_data(links, local)
-        ids = {link.get("netbox_remote_interface_id") for link in links}
-        assert ids == {cp_a.pk, cp_b.pk}  # distinct CPs, no collision
-
-
-@pytest.mark.django_db
-class TestSerialVerifyRowDimming:
-    """The inline verify-row render dims an unconfigured serial remote label, matching the table render (G-B2)."""
-
-    def test_unconfigured_serial_remote_is_dimmed(self):
-        from netbox_librenms_plugin.views.base.cables_view import SingleCableVerifyView
-
-        view = object.__new__(SingleCableVerifyView)
-        view.request = _mock_request()
-        view._librenms_api = MagicMock()
-        view._librenms_api.server_key = "default"
-        dev, (csp,), _ = make_serial_device("acs-verify-dim", csp_names=["ttyS1"])
-        link = {
-            "_source": "serial",
-            "local_port": "ttyS1",
-            "remote_device": "raw-avocent-label",
-            "is_configured": False,
-        }
-        # Remote label doesn't resolve to a NetBox device (real lookup) -> unconfigured, no URL.
-        row = view._format_serial_verify_row(view.request, dev, link, local_port_id="serial:1001", server_key="default")
-        assert "text-muted fst-italic" in row["remote_device"]  # dimmed, matching LibreNMSCableTable
-
-    def test_none_values_render_empty_not_literal_none(self):
-        """Present-but-None local_port/remote_device render '' — escape(None) is the string 'None'.
-
-        The table renderers (render_local_port/render_remote_port/render_remote_device) all
-        normalize `value or ""` with dedicated tests; this verify-row sibling must match.
-        """
-        from netbox_librenms_plugin.views.base.cables_view import SingleCableVerifyView
-
-        view = object.__new__(SingleCableVerifyView)
-        view.request = _mock_request()
-        view._librenms_api = MagicMock()
-        view._librenms_api.server_key = "default"
-        dev, (csp,), _ = make_serial_device("acs-verify-none", csp_names=["ttyS1"])
-        link = {
-            "_source": "serial",
-            "local_port": None,
-            "remote_device": None,
-            "remote_device_display": None,
-            "is_configured": False,
-        }
-        row = view._format_serial_verify_row(view.request, dev, link, local_port_id="serial:1001", server_key="default")
-        assert "None" not in row["local_port"]
-        assert "None" not in row["remote_device"]
-
-    def test_verify_row_picker_button_carries_accessible_name(self):
-        """The verify-row's icon-only picker button has an aria-label, mirroring the table render.
-
-        test_picker_button_carries_accessible_name pins the table version; this parallel
-        rendering path was built to mirror it and must carry the same accessible name.
-        """
-        from netbox_librenms_plugin.views.base.cables_view import SingleCableVerifyView
-
-        view = object.__new__(SingleCableVerifyView)
-        view.request = _mock_request()
-        view._librenms_api = MagicMock()
-        view._librenms_api.server_key = "default"
-        dev, (csp,), _ = make_serial_device("acs-verify-a11y", csp_names=["ttyS1"])
-        # Resolved local end (real CSP name match) → _set_remote_picker_affordance attaches a
-        # real picker_url and the actions cell renders the pick-remote button.
-        link = {
-            "_source": "serial",
-            "local_port": "ttyS1",
-            "local_port_id": "serial:1001",
-            "remote_device": "somewhere",
-            "is_configured": False,
-        }
-        row = view._format_serial_verify_row(view.request, dev, link, local_port_id="serial:1001", server_key="default")
-        assert 'title="Pick remote end"' in row["actions"]
-        assert 'aria-label="Pick remote end"' in row["actions"]
-
-
-class TestEnrichLinksDataReusesSyncDevice:
-    """enrich_links_data must reuse the sync_device _prepare_context already resolved."""
-
-    def test_passed_sync_device_avoids_resolve_query(self):
-        from unittest.mock import patch
-
-        view = _make_view()
-        sentinel_device = MagicMock()
-        with patch("netbox_librenms_plugin.views.base.cables_view.get_librenms_sync_device") as mock_resolve:
-            result = view.enrich_links_data([], MagicMock(), server_key="default", sync_device=sentinel_device)
-
-        # The caller threaded in the already-resolved device, so enrich_links_data must NOT
-        # re-run get_librenms_sync_device (a second VC-members query + per-member cf scan).
-        mock_resolve.assert_not_called()
-        assert result == []
 
 
 # ---------------------------------------------------------------------------
@@ -1257,22 +1041,13 @@ class TestSerialSyncSurvivesHostLinks404:
 
         return _get
 
-    def _librenms_config_patches(self):
-        # Only the true external boundaries are stubbed: the plugin server config and the
-        # LibreNMS HTTP transport. LibreNMSSettings stays REAL — the empty table already
-        # yields None for the api's server lookup, and the cable-sync provenance reads
-        # (get_cable_sync_settings) must see the real model, not a MagicMock whose
-        # fabricated color would fail Cable validation.
-        cfg = patch("netbox_librenms_plugin.librenms_api.get_plugin_config")
-        get = patch("netbox_librenms_plugin.librenms_api.requests.get", side_effect=self._routed_get())
-        return cfg, get
-
-    def test_serial_rows_cached_and_syncable_when_host_links_404(self):
+    def test_serial_rows_cached_and_syncable_when_host_links_404(self, client):
         from django.core.cache import cache
-        from dcim.models import Cable, Device
+        from dcim.models import Cable
+        from django.urls import reverse
 
         from netbox_librenms_plugin.librenms_api import LibreNMSAPI
-        from netbox_librenms_plugin.views.object_sync.devices import DeviceCableTableView
+        from netbox_librenms_plugin.tests.conftest import make_superuser
         from netbox_librenms_plugin.views.sync.cables import SyncCablesView
 
         acs, csps, _ = make_serial_device("acs-ts26", csp_names=["ttyS7"])
@@ -1282,58 +1057,244 @@ class TestSerialSyncSurvivesHostLinks404:
         csp = csps[0]
         console_port = cps[0]
 
-        cfg, get = self._librenms_config_patches()
-        with cfg as mock_config, get:
-            mock_config.return_value = {
-                "default": {
-                    "librenms_url": "https://librenms.example.com",
-                    "api_token": "test-token",
-                    "cache_timeout": 300,
-                    "verify_ssl": True,
-                }
-            }
-
-            # --- Refresh: real get_links_data hits the real (mocked) 404 on /links ---
-            view = object.__new__(DeviceCableTableView)
-            view.model = Device
-            view.request = _mock_request()
-            view._librenms_api = LibreNMSAPI(server_key="default")
-            # Isolate the cache-write assertion from table rendering (RequestConfig needs a real
-            # request); get_table is orthogonal to the bug under test.
-            with patch.object(view, "get_table"):
-                view._prepare_context(view.request, acs, fetch_fresh=True, server_key="default")
-
-            cache_key = view.get_cache_key(acs, "links", "default")
-            cached = cache.get(cache_key)
-            assert cached is not None, "a host /links 404 must NOT delete the serial cache"
-            serial_rows = [link for link in cached["links"] if link.get("_source") == "serial"]
-            assert len(serial_rows) == 1
-            row = serial_rows[0]
-            assert row["local_port"] == "ttyS7"
-            assert row["netbox_local_interface_id"] == csp.pk
-            assert row["netbox_remote_interface_id"] == console_port.pk
-            assert row["can_create_cable"] is True
-
-            # --- Sync: real SyncCablesView reads that cache and creates the cable ---
-            sync = object.__new__(SyncCablesView)
-            sync.request = view.request
-            sync._librenms_api = LibreNMSAPI(server_key="default")
-            sync._post_server_key = "default"
-
-            cached_links = sync.get_cached_links_data(view.request, acs)
-            assert cached_links, "cache present → validate_prerequisites passes, no 'Cache has expired'"
-            assert sync.validate_prerequisites(cached_links, [{"local_port_id": row["local_port_id"]}]) is True
-
-            result = sync.process_single_interface(
-                {"device_id": acs.id, "local_port_id": row["local_port_id"]}, cached_links
+        client.force_login(make_superuser())
+        server_key = next(iter(LibreNMSAPI.get_available_servers()))
+        with patch("netbox_librenms_plugin.librenms_api.requests.get", side_effect=self._routed_get()):
+            refreshed = client.post(
+                reverse("plugins:netbox_librenms_plugin:device_cable_sync", args=[acs.pk]),
+                {"server_key": server_key},
+                HTTP_HX_REQUEST="true",
             )
-            assert result["status"] == "valid"
+
+        assert refreshed.status_code == 200
+        cache_key = object.__new__(SyncCablesView).get_cache_key(acs, "links", server_key)
+        cached = cache.get(cache_key)
+        assert cached is not None, "a host /links 404 must not delete the serial cache"
+        serial_rows = [link for link in cached["links"] if link.get("_source") == "serial"]
+        assert len(serial_rows) == 1
+        row = serial_rows[0]
+        assert row["local_port"] == "ttyS7"
+        assert "netbox_local_interface_id" not in row
+        assert "netbox_remote_interface_id" not in row
+        assert "can_create_cable" not in row
+
+        rendered = client.get(
+            reverse("plugins:netbox_librenms_plugin:device_librenms_sync", args=[acs.pk]),
+            {"tab": "cables", "server_key": server_key},
+        )
+        records = [table_row.record for table_row in rendered.context["cable_sync"]["table"].rows]
+        enriched = next(record for record in records if record["row_id"] == row["row_id"])
+        assert enriched["netbox_local_interface_id"] == csp.pk
+        assert enriched["netbox_remote_interface_id"] == console_port.pk
+        assert enriched["can_create_cable"] is True
+
+        synced = client.post(
+            reverse("plugins:netbox_librenms_plugin:sync_device_cables", args=[acs.pk]),
+            {
+                "sync_one": row["row_id"],
+                f"expected_local_id_{row['row_id']}": csp.pk,
+                f"expected_local_device_id_{row['row_id']}": acs.pk,
+                f"expected_remote_id_{row['row_id']}": console_port.pk,
+                f"expected_remote_device_id_{row['row_id']}": console_port.device_id,
+                "server_key": server_key,
+            },
+        )
+        assert synced.status_code == 302
 
         # The cable really exists between the ConsoleServerPort and the remote ConsolePort.
         csp.refresh_from_db()
         console_port.refresh_from_db()
         assert csp.cable is not None
         assert console_port.cable_id == csp.cable_id
+        assert Cable.objects.filter(pk=csp.cable_id).exists()
+
+    def test_host_link_remains_syncable_when_sensor_fetch_fails(self, client):
+        """A serial sensor outage must not invalidate a successful host-link snapshot."""
+        import json
+
+        import requests
+        from dcim.models import Cable
+        from django.core.cache import cache
+        from django.urls import reverse
+
+        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+        from netbox_librenms_plugin.tests.conftest import make_device, make_interface, make_superuser
+        from netbox_librenms_plugin.views.sync.cables import SyncCablesView
+
+        local, _csps, _ = make_serial_device("serial-partial-host-local", csp_names=["ttyS1"])
+        local.custom_field_data["librenms_id"] = 13
+        local.save()
+        local_interface = make_interface(local, "Ethernet1")
+        remote = make_device("serial-partial-host-remote")
+        remote_interface = make_interface(remote, "Ethernet9")
+
+        def routed_get(url, *args, **kwargs):
+            response = requests.models.Response()
+            response.url = url
+            if url.endswith("/links"):
+                response.status_code = 200
+                response._content = json.dumps(
+                    {
+                        "status": "ok",
+                        "links": [
+                            {
+                                "id": 901,
+                                "local_port_id": 101,
+                                "remote_hostname": remote.name,
+                                "remote_port": remote_interface.name,
+                                "remote_port_id": 202,
+                                "protocol": "lldp",
+                            }
+                        ],
+                    }
+                ).encode()
+            elif url.endswith("/ports"):
+                response.status_code = 200
+                response._content = json.dumps(
+                    {
+                        "status": "ok",
+                        "ports": [{"port_id": 101, "ifName": local_interface.name, "ifDescr": local_interface.name}],
+                    }
+                ).encode()
+            elif url.endswith("/resources/sensors"):
+                response.status_code = 503
+                response._content = b'{"status":"error","message":"temporarily unavailable"}'
+            elif url.endswith("/devices/13"):
+                response.status_code = 200
+                response._content = json.dumps(
+                    {"status": "ok", "devices": [{"device_id": 13, "hostname": local.name}]}
+                ).encode()
+            else:  # pragma: no cover - unexpected external route
+                response.status_code = 404
+                response._content = b"{}"
+            return response
+
+        client.force_login(make_superuser())
+        server_key = next(iter(LibreNMSAPI.get_available_servers()))
+        with patch("netbox_librenms_plugin.librenms_api.requests.get", side_effect=routed_get):
+            refreshed = client.post(
+                reverse("plugins:netbox_librenms_plugin:device_cable_sync", args=[local.pk]),
+                {"server_key": server_key},
+                HTTP_HX_REQUEST="true",
+            )
+
+        assert refreshed.status_code == 200
+        assert "serial port sensor fetch failed" in refreshed.content.decode()
+        cache_key = object.__new__(SyncCablesView).get_cache_key(local, "links", server_key)
+        cached = cache.get(cache_key)
+        assert cached is not None
+        assert cached["incomplete_sources"] == ["serial"]
+        row_id = cached["links"][0]["row_id"]
+
+        with patch("netbox_librenms_plugin.librenms_api.requests.get", side_effect=routed_get):
+            cached_render = client.get(
+                reverse("plugins:netbox_librenms_plugin:device_librenms_sync", args=[local.pk]),
+                {"tab": "cables", "server_key": server_key},
+            )
+        assert cached_render.status_code == 200
+        assert cached_render.context["cable_sync"]["incomplete_sources"] == ["serial"]
+        assert "These LibreNMS sources failed: serial" in cached_render.content.decode()
+
+        synced = client.post(
+            reverse("plugins:netbox_librenms_plugin:sync_device_cables", args=[local.pk]),
+            {
+                "sync_one": row_id,
+                f"expected_local_id_{row_id}": local_interface.pk,
+                f"expected_local_device_id_{row_id}": local.pk,
+                f"expected_remote_id_{row_id}": remote_interface.pk,
+                f"expected_remote_device_id_{row_id}": remote.pk,
+                "server_key": server_key,
+            },
+            HTTP_HX_REQUEST="true",
+        )
+
+        assert synced.status_code == 200
+        local_interface.refresh_from_db()
+        remote_interface.refresh_from_db()
+        assert local_interface.cable_id == remote_interface.cable_id
+        assert Cable.objects.filter(pk=local_interface.cable_id).exists()
+
+    def test_serial_row_remains_syncable_when_host_fetch_fails(self, client):
+        """A host-link outage must not invalidate a successful serial snapshot."""
+        import json
+
+        import requests
+        from dcim.models import Cable
+        from django.core.cache import cache
+        from django.urls import reverse
+
+        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+        from netbox_librenms_plugin.tests.conftest import make_superuser
+        from netbox_librenms_plugin.views.sync.cables import SyncCablesView
+
+        local, (csp,), _ = make_serial_device("serial-partial-sensor-local", csp_names=["ttyS7"])
+        local.custom_field_data["librenms_id"] = 13
+        local.save()
+        _remote, _, (console_port,) = make_serial_device("serial-partial-sensor-remote", cp_names=["console"])
+
+        def routed_get(url, *args, **kwargs):
+            response = requests.models.Response()
+            response.url = url
+            if url.endswith("/links"):
+                response.status_code = 503
+                response._content = b'{"status":"error","message":"temporarily unavailable"}'
+            elif url.endswith("/ports"):
+                response.status_code = 200
+                response._content = b'{"status":"ok","ports":[]}'
+            elif url.endswith("/resources/sensors"):
+                response.status_code = 200
+                response._content = json.dumps(
+                    {
+                        "status": "ok",
+                        "sensors": [
+                            {
+                                "sensor_id": 1007,
+                                "device_id": 13,
+                                "sensor_type": "acsSerialPortTable",
+                                "sensor_index": "acsSerialPortTableStatus.7",
+                                "sensor_descr": "serial-partial-sensor-remote Status",
+                            }
+                        ],
+                    }
+                ).encode()
+            else:  # pragma: no cover - unexpected external route
+                response.status_code = 404
+                response._content = b"{}"
+            return response
+
+        client.force_login(make_superuser())
+        server_key = next(iter(LibreNMSAPI.get_available_servers()))
+        with patch("netbox_librenms_plugin.librenms_api.requests.get", side_effect=routed_get):
+            refreshed = client.post(
+                reverse("plugins:netbox_librenms_plugin:device_cable_sync", args=[local.pk]),
+                {"server_key": server_key},
+                HTTP_HX_REQUEST="true",
+            )
+
+        assert refreshed.status_code == 200
+        assert "host links fetch failed" in refreshed.content.decode()
+        cache_key = object.__new__(SyncCablesView).get_cache_key(local, "links", server_key)
+        cached = cache.get(cache_key)
+        assert cached is not None
+        assert cached["incomplete_sources"] == ["host"]
+
+        synced = client.post(
+            reverse("plugins:netbox_librenms_plugin:sync_device_cables", args=[local.pk]),
+            {
+                "sync_one": "serial:1007",
+                "expected_local_id_serial:1007": csp.pk,
+                "expected_local_device_id_serial:1007": local.pk,
+                "expected_remote_id_serial:1007": console_port.pk,
+                "expected_remote_device_id_serial:1007": console_port.device_id,
+                "server_key": server_key,
+            },
+            HTTP_HX_REQUEST="true",
+        )
+
+        assert synced.status_code == 200
+        csp.refresh_from_db()
+        console_port.refresh_from_db()
+        assert csp.cable_id == console_port.cable_id
         assert Cable.objects.filter(pk=csp.cable_id).exists()
 
 
@@ -1354,25 +1315,24 @@ class TestCableSyncHtmxPartial:
         from django.test import Client
         from django.urls import reverse
 
+        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
         from netbox_librenms_plugin.views.sync.cables import SyncCablesView
 
         acs, csps, _ = make_serial_device("acs-htmx", csp_names=["ttyS3"])
         _router, _, cps = make_serial_device("router-htmx", cp_names=["console"])
         csp, cp = csps[0], cps[0]
 
-        # Seed the enriched links cache that "Refresh Cables" would have written (serial rows
-        # re-enrich purely against the DB, so the re-render needs no live LibreNMS call).
+        # Seed the raw links cache that "Refresh Cables" writes. The request must derive the
+        # current NetBox terminations and action state from the real ORM objects.
+        server_key = next(iter(LibreNMSAPI.get_available_servers()))
         key_view = object.__new__(SyncCablesView)
-        cache_key = key_view.get_cache_key(acs, "links", "default")
+        cache_key = key_view.get_cache_key(acs, "links", server_key)
         link = {
             "local_port": "ttyS3",
             "local_port_id": f"serial:{csp.pk}-s",
             "_source": "serial",
             "device_id": acs.id,
             "remote_device": "router-htmx",
-            "netbox_local_interface_id": csp.pk,
-            "netbox_remote_interface_id": cp.pk,
-            "can_create_cable": True,
             "is_configured": True,
             "sensor_id": 1,
             "sensor_index_int": 3,
@@ -1385,7 +1345,19 @@ class TestCableSyncHtmxPartial:
 
         url = reverse("plugins:netbox_librenms_plugin:sync_device_cables", args=[acs.pk])
         extra = {"HTTP_HX_REQUEST": "true"} if hx else {}
-        resp = client.post(url, data={"select": link["local_port_id"], "server_key": "default"}, **extra)
+        row_id = link["local_port_id"]
+        resp = client.post(
+            url,
+            data={
+                "select": row_id,
+                f"expected_local_id_{row_id}": csp.pk,
+                f"expected_local_device_id_{row_id}": acs.pk,
+                f"expected_remote_id_{row_id}": cp.pk,
+                f"expected_remote_device_id_{row_id}": cp.device_id,
+                "server_key": server_key,
+            },
+            **extra,
+        )
         return resp, csp
 
     def test_htmx_submit_returns_partial_and_creates_cable(self):
@@ -1403,6 +1375,561 @@ class TestCableSyncHtmxPartial:
         assert resp.status_code == 302  # full-page redirect fallback
         csp.refresh_from_db()
         assert csp.cable_id is not None
+
+    def test_row_sync_button_ignores_other_checked_rows(self):
+        """A singular row action must not submit every checked table row."""
+        from django.contrib.auth import get_user_model
+        from django.core.cache import cache
+        from django.test import Client
+        from django.urls import reverse
+
+        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+        from netbox_librenms_plugin.views.sync.cables import SyncCablesView
+
+        acs, (first_csp, second_csp), _ = make_serial_device(
+            "acs-row-button",
+            csp_names=["ttyS1", "ttyS2"],
+        )
+        _router, _, (first_cp, _second_cp) = make_serial_device(
+            "router-row-button",
+            cp_names=["console1", "console2"],
+        )
+        rows = [
+            {
+                "local_port": csp.name,
+                "local_port_id": f"serial:{index}",
+                "_source": "serial",
+                "device_id": acs.pk,
+                "remote_device": _router.name,
+                "is_configured": True,
+                "sensor_id": index,
+                "sensor_index_int": index,
+            }
+            for index, csp in enumerate((first_csp, second_csp), start=1)
+        ]
+        server_key = next(iter(LibreNMSAPI.get_available_servers()))
+        cache_key = object.__new__(SyncCablesView).get_cache_key(acs, "links", server_key)
+        cache.set(cache_key, {"links": rows}, timeout=300)
+
+        user = get_user_model().objects.create_superuser(
+            "row-button-admin",
+            "row-button@example.com",
+            "pw",
+        )
+        client = Client()
+        client.force_login(user)
+        rendered = client.get(
+            reverse("plugins:netbox_librenms_plugin:device_librenms_sync", args=[acs.pk]),
+            {"tab": "cables", "server_key": server_key},
+        )
+        assert rendered.status_code == 200
+        first_row = rendered.context["cable_sync"]["table"].rows[0]
+        record = first_row.record
+        row_action = str(first_row.get_cell("actions"))
+        assert 'name="sync_one"' in row_action
+        assert f'value="{rows[0]["local_port_id"]}"' in row_action
+
+        response = client.post(
+            reverse("plugins:netbox_librenms_plugin:sync_device_cables", args=[acs.pk]),
+            data={
+                "sync_one": rows[0]["local_port_id"],
+                "select": [rows[0]["local_port_id"], rows[1]["local_port_id"]],
+                f"expected_local_id_{rows[0]['local_port_id']}": record["netbox_local_interface_id"],
+                f"expected_local_device_id_{rows[0]['local_port_id']}": record["netbox_local_device_id"],
+                f"expected_remote_id_{rows[0]['local_port_id']}": record["netbox_remote_interface_id"],
+                f"expected_remote_device_id_{rows[0]['local_port_id']}": record["netbox_remote_device_id"],
+                "server_key": server_key,
+            },
+        )
+
+        assert response.status_code == 302
+        first_csp.refresh_from_db()
+        second_csp.refresh_from_db()
+        assert first_csp.cable_id is not None
+        assert second_csp.cable_id is None
+
+    def test_rendered_local_endpoint_rebind_is_rejected(self):
+        """A raw snapshot must not switch to a replacement local termination on POST."""
+        from dcim.models import ConsoleServerPort
+        from django.contrib.auth import get_user_model
+        from django.core.cache import cache
+        from django.test import Client
+        from django.urls import reverse
+
+        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+        from netbox_librenms_plugin.views.sync.cables import SyncCablesView
+
+        local, (original_csp,), _ = make_serial_device("serial-local-rebind", csp_names=["ttyS1"])
+        remote, _, (cp,) = make_serial_device("serial-local-rebind-remote", cp_names=["console"])
+        server_key = next(iter(LibreNMSAPI.get_available_servers()))
+        original_csp_id = original_csp.pk
+        row_id = f"serial:{original_csp_id}"
+        raw_row = {
+            "_source": "serial",
+            "device_id": local.pk,
+            "local_port": original_csp.name,
+            "local_port_id": row_id,
+            "remote_device": remote.name,
+            "sensor_id": original_csp.pk,
+            "sensor_index_int": 1,
+            "is_configured": True,
+        }
+        cache_key = object.__new__(SyncCablesView).get_cache_key(local, "links", server_key)
+        cache.set(cache_key, {"links": [raw_row]}, timeout=300)
+
+        user = get_user_model().objects.create_superuser("serial-local-rebind-user", "", "pw")
+        client = Client()
+        client.force_login(user)
+        rendered = client.get(
+            reverse("plugins:netbox_librenms_plugin:device_librenms_sync", args=[local.pk]),
+            {"tab": "cables", "server_key": server_key},
+        )
+        assert rendered.status_code == 200
+        rendered_table = rendered.context["cable_sync"]["table"].as_html(rendered.wsgi_request)
+
+        original_csp.delete()
+        replacement_csp = ConsoleServerPort.objects.create(device=local, name="ttyS1")
+        response = client.post(
+            reverse("plugins:netbox_librenms_plugin:sync_device_cables", args=[local.pk]),
+            {
+                "sync_one": row_id,
+                f"expected_local_id_{row_id}": original_csp_id,
+                f"expected_local_device_id_{row_id}": local.pk,
+                f"expected_remote_id_{row_id}": cp.pk,
+                f"expected_remote_device_id_{row_id}": remote.pk,
+                "server_key": server_key,
+            },
+            HTTP_HX_REQUEST="true",
+        )
+
+        assert response.status_code == 200
+        replacement_csp.refresh_from_db()
+        cp.refresh_from_db()
+        assert replacement_csp.cable_id is None
+        assert cp.cable_id is None
+        assert f'name="expected_local_id_{row_id}"' in rendered_table
+        assert f'name="expected_local_device_id_{row_id}"' in rendered_table
+        assert f'name="expected_remote_device_id_{row_id}"' in rendered_table
+        assert f'value="{original_csp_id}"' in rendered_table
+
+
+@pytest.mark.django_db
+class TestSerialCableReadScope:
+    """Serial enrichment must not bypass NetBox object-level view grants."""
+
+    @staticmethod
+    def _grant(user, name, model, actions, constraints=None):
+        from core.models import ObjectType
+        from users.models import ObjectPermission
+
+        permission = ObjectPermission.objects.create(name=name, actions=actions, constraints=constraints)
+        permission.object_types.add(ObjectType.objects.get_for_model(model))
+        permission.users.add(user)
+
+    def _user(self, name, visible_device):
+        from dcim.models import Device
+        from django.contrib.auth import get_user_model
+
+        from netbox_librenms_plugin.models import LibreNMSSettings
+
+        user = get_user_model().objects.create_user(name)
+        self._grant(user, f"{name}-plugin", LibreNMSSettings, ["view", "change"])
+        self._grant(user, f"{name}-device", Device, ["view"], {"pk": visible_device.pk})
+        return user
+
+    @staticmethod
+    def _cache_row(device, csp, remote_device, server_key):
+        from django.core.cache import cache
+
+        from netbox_librenms_plugin.views.sync.cables import SyncCablesView
+
+        row = {
+            "local_port": csp.name,
+            "local_port_id": f"serial:{csp.pk}",
+            "_source": "serial",
+            "device_id": device.pk,
+            "remote_device": remote_device.name,
+            "sensor_id": csp.pk,
+            "sensor_index_int": 1,
+            "is_configured": True,
+        }
+        key = object.__new__(SyncCablesView).get_cache_key(device, "links", server_key)
+        cache.set(key, {"links": [row]}, timeout=300)
+        return row
+
+    def test_refresh_post_cannot_read_an_out_of_scope_device(self, client):
+        from django.urls import reverse
+
+        from netbox_librenms_plugin.tests.conftest import make_device
+
+        hidden, _csps, _ = make_serial_device("serial-read-hidden", csp_names=["ttyS1"])
+        visible = make_device("serial-read-visible")
+        user = self._user("serial-read-hidden-user", visible)
+        client.force_login(user)
+
+        response = client.post(
+            reverse("plugins:netbox_librenms_plugin:device_cable_sync", args=[hidden.pk]),
+            {"server_key": "default"},
+            HTTP_HX_REQUEST="true",
+        )
+
+        assert response.status_code == 404
+
+    def test_viewed_vc_member_does_not_expose_a_hidden_sync_owner(self, client):
+        """A visible sibling must not expose serial components from a hidden sync member."""
+        from dcim.models import ConsoleServerPort
+        from django.urls import reverse
+
+        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+        from netbox_librenms_plugin.tests.conftest import make_virtual_chassis
+
+        hidden, (csp,), _ = make_serial_device("serial-hidden-sync-owner", csp_names=["ttyS1"])
+        visible, _, _ = make_serial_device("serial-visible-vc-member")
+        make_virtual_chassis("serial-read-scope-vc", hidden, visible)
+        server_key = next(iter(LibreNMSAPI.get_available_servers()))
+        hidden.custom_field_data["librenms_id"] = {server_key: 42}
+        hidden.save(update_fields=["custom_field_data"])
+        self._cache_row(hidden, csp, visible, server_key)
+        user = self._user("serial-hidden-sync-owner-user", visible)
+        self._grant(user, "serial-hidden-sync-owner-csp", ConsoleServerPort, ["view"])
+        client.force_login(user)
+
+        response = client.get(
+            reverse("plugins:netbox_librenms_plugin:device_librenms_sync", args=[visible.pk]),
+            {"tab": "cables", "server_key": server_key},
+        )
+
+        assert response.status_code == 200
+        html = response.content.decode()
+        assert csp.name not in html
+        assert reverse("dcim:consoleserverport", args=[csp.pk]) not in html
+
+        with patch("requests.get") as http_get:
+            refreshed = client.post(
+                reverse("plugins:netbox_librenms_plugin:device_cable_sync", args=[visible.pk]),
+                {"server_key": server_key},
+                HTTP_HX_REQUEST="true",
+            )
+
+        assert refreshed.status_code == 200
+        http_get.assert_not_called()
+
+    def test_refresh_keeps_raw_serial_inventory_but_hides_ungranted_ports(self, client):
+        """A constrained CSP grant must filter the response, not the shared raw snapshot."""
+        import json
+
+        import requests
+        from dcim.models import ConsoleServerPort
+        from django.core.cache import cache
+        from django.urls import reverse
+
+        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+        from netbox_librenms_plugin.utils import set_librenms_device_id
+        from netbox_librenms_plugin.views.sync.cables import SyncCablesView
+
+        device, (visible_csp, hidden_csp), _ = make_serial_device(
+            "serial-constrained-refresh",
+            csp_names=["ttyS1", "ttyS2"],
+        )
+        server_key = next(iter(LibreNMSAPI.get_available_servers()))
+        set_librenms_device_id(device, 42, server_key)
+        device.save()
+        user = self._user("serial-constrained-refresh-user", device)
+        self._grant(
+            user,
+            "serial-constrained-refresh-csp",
+            ConsoleServerPort,
+            ["view"],
+            {"pk": visible_csp.pk},
+        )
+        client.force_login(user)
+
+        def external_get(url, *args, **kwargs):
+            response = requests.models.Response()
+            response.url = url
+            if url.endswith("/links"):
+                response.status_code = 404
+                response._content = b'{"status":"error","message":"Device does not have any links"}'
+            elif url.endswith("/ports"):
+                response.status_code = 200
+                response._content = b'{"status":"ok","ports":[]}'
+            elif url.endswith("/resources/sensors"):
+                response.status_code = 200
+                response._content = json.dumps(
+                    {
+                        "status": "ok",
+                        "sensors": [
+                            {
+                                "sensor_id": 101,
+                                "device_id": 42,
+                                "sensor_type": "acsSerialPortTable",
+                                "sensor_index": "acsSerialPortTableStatus.1",
+                                "sensor_descr": "visible-serial-label Status",
+                            },
+                            {
+                                "sensor_id": 102,
+                                "device_id": 42,
+                                "sensor_type": "acsSerialPortTable",
+                                "sensor_index": "acsSerialPortTableStatus.2",
+                                "sensor_descr": "hidden-serial-label Status",
+                            },
+                        ],
+                    }
+                ).encode()
+            else:
+                response.status_code = 200
+                response._content = b'{"status":"ok"}'
+            return response
+
+        with patch("requests.get", side_effect=external_get):
+            response = client.post(
+                reverse("plugins:netbox_librenms_plugin:device_cable_sync", args=[device.pk]),
+                {"server_key": server_key},
+                HTTP_HX_REQUEST="true",
+            )
+
+        assert response.status_code == 200
+        html = response.content.decode()
+        assert visible_csp.name in html
+        assert "visible-serial-label" in html
+        assert hidden_csp.name not in html
+        assert "hidden-serial-label" not in html
+        cache_key = object.__new__(SyncCablesView).get_cache_key(device, "links", server_key)
+        raw_links = cache.get(cache_key)["links"]
+        assert {row["local_port"] for row in raw_links if row.get("_source") == "serial"} == {
+            visible_csp.name,
+            hidden_csp.name,
+        }
+
+    def test_refresh_without_visible_serial_ports_skips_the_sensor_request(self, client):
+        """A Device grant alone must not authorize an instance-wide sensor download."""
+        import requests
+        from django.urls import reverse
+
+        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+        from netbox_librenms_plugin.utils import set_librenms_device_id
+
+        device, _csps, _ = make_serial_device("serial-no-csp-grant", csp_names=["ttyS1"])
+        server_key = next(iter(LibreNMSAPI.get_available_servers()))
+        set_librenms_device_id(device, 43, server_key)
+        device.save()
+        user = self._user("serial-no-csp-grant-user", device)
+        client.force_login(user)
+        requested_urls = []
+
+        def external_get(url, *args, **kwargs):
+            requested_urls.append(url)
+            response = requests.models.Response()
+            response.url = url
+            if url.endswith("/links"):
+                response.status_code = 404
+                response._content = b'{"status":"error","message":"Device does not have any links"}'
+            elif url.endswith("/ports"):
+                response.status_code = 200
+                response._content = b'{"status":"ok","ports":[]}'
+            else:
+                raise AssertionError(f"unexpected LibreNMS request: {url}")
+            return response
+
+        with patch("requests.get", side_effect=external_get):
+            response = client.post(
+                reverse("plugins:netbox_librenms_plugin:device_cable_sync", args=[device.pk]),
+                {"server_key": server_key},
+                HTTP_HX_REQUEST="true",
+            )
+
+        assert response.status_code == 200
+        assert all(not url.endswith("/resources/sensors") for url in requested_urls)
+
+    def test_verify_does_not_link_an_ungranted_local_interface(self, client):
+        import json
+
+        from django.core.cache import cache
+        from django.urls import reverse
+
+        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+        from netbox_librenms_plugin.tests.conftest import make_device, make_interface
+        from netbox_librenms_plugin.views.sync.cables import SyncCablesView
+
+        local = make_device("cable-verify-local-scope")
+        interface = make_interface(local, "Ethernet1")
+        server_key = next(iter(LibreNMSAPI.get_available_servers()))
+        cache_key = object.__new__(SyncCablesView).get_cache_key(local, "links", server_key)
+        cache.set(
+            cache_key,
+            {
+                "links": [
+                    {
+                        "local_port": interface.name,
+                        "local_port_id": 10,
+                        "remote_device": None,
+                        "remote_port": None,
+                        "_source": "main",
+                    }
+                ]
+            },
+            timeout=300,
+        )
+        user = self._user("cable-verify-local-scope-user", local)
+        client.force_login(user)
+
+        response = client.post(
+            reverse("plugins:netbox_librenms_plugin:verify_cable"),
+            data=json.dumps(
+                {
+                    "device_id": local.pk,
+                    "row_id": "10",
+                    "server_key": server_key,
+                }
+            ),
+            content_type="application/json",
+        )
+
+        assert response.status_code == 200
+        rendered = json.dumps(response.json()["formatted_row"])
+        assert interface.name in rendered
+        assert reverse("dcim:interface", args=[interface.pk]) not in rendered
+
+    def test_hidden_librenms_id_match_blocks_a_visible_hostname_fallback(self, client):
+        from dcim.models import Device, Interface
+        from django.contrib.auth import get_user_model
+        from django.core.cache import cache
+        from django.urls import reverse
+
+        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+        from netbox_librenms_plugin.models import LibreNMSSettings
+        from netbox_librenms_plugin.tests.conftest import make_device, make_interface
+        from netbox_librenms_plugin.views.sync.cables import SyncCablesView
+
+        local = make_device("cable-strong-id-local")
+        local_interface = make_interface(local, "Ethernet1")
+        hidden = make_device("cable-strong-id-hidden")
+        visible = make_device("cable-strong-id-advertised")
+        visible_interface = make_interface(visible, "Ethernet9")
+        server_key = next(iter(LibreNMSAPI.get_available_servers()))
+        hidden.custom_field_data["librenms_id"] = {server_key: 42}
+        hidden.save()
+        cache_key = object.__new__(SyncCablesView).get_cache_key(local, "links", server_key)
+        cache.set(
+            cache_key,
+            {
+                "links": [
+                    {
+                        "local_port": local_interface.name,
+                        "local_port_id": 10,
+                        "remote_device": visible.name,
+                        "remote_device_id": 42,
+                        "remote_port": visible_interface.name,
+                        "remote_port_id": 20,
+                        "_source": "main",
+                    }
+                ]
+            },
+            timeout=300,
+        )
+        user = get_user_model().objects.create_user("cable-strong-id-user")
+        self._grant(user, "cable-strong-id-plugin", LibreNMSSettings, ["view"])
+        self._grant(user, "cable-strong-id-devices", Device, ["view"], {"pk__in": [local.pk, visible.pk]})
+        self._grant(
+            user,
+            "cable-strong-id-interfaces",
+            Interface,
+            ["view"],
+            {"pk__in": [local_interface.pk, visible_interface.pk]},
+        )
+        client.force_login(user)
+
+        response = client.get(
+            reverse("plugins:netbox_librenms_plugin:device_librenms_sync", args=[local.pk]),
+            {"tab": "cables", "server_key": server_key},
+        )
+
+        assert response.status_code == 200
+        record = next(iter(response.context["cable_sync"]["table"].rows)).record
+        assert record.get("netbox_remote_device_id") is None
+        assert record.get("netbox_remote_interface_id") is None
+
+    def test_hidden_exact_serial_label_blocks_a_visible_short_name_fallback(self, client):
+        from dcim.models import ConsolePort, ConsoleServerPort, Device
+        from django.contrib.auth import get_user_model
+        from django.urls import reverse
+
+        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+        from netbox_librenms_plugin.models import LibreNMSSettings
+        from netbox_librenms_plugin.tests.conftest import make_device
+
+        local, (csp,), _ = make_serial_device("serial-strong-name-local", csp_names=["ttyS1"])
+        hidden = make_device("serial-strong-name.example")
+        visible, _, (console_port,) = make_serial_device("serial-strong-name", cp_names=["console"])
+        server_key = next(iter(LibreNMSAPI.get_available_servers()))
+        self._cache_row(local, csp, hidden, server_key)
+        user = get_user_model().objects.create_user("serial-strong-name-user")
+        self._grant(user, "serial-strong-name-plugin", LibreNMSSettings, ["view"])
+        self._grant(
+            user,
+            "serial-strong-name-devices",
+            Device,
+            ["view"],
+            {"pk__in": [local.pk, visible.pk]},
+        )
+        self._grant(user, "serial-strong-name-csp", ConsoleServerPort, ["view"], {"pk": csp.pk})
+        self._grant(user, "serial-strong-name-cp", ConsolePort, ["view"], {"pk": console_port.pk})
+        client.force_login(user)
+
+        response = client.get(
+            reverse("plugins:netbox_librenms_plugin:device_librenms_sync", args=[local.pk]),
+            {"tab": "cables", "server_key": server_key},
+        )
+
+        assert response.status_code == 200
+        record = next(iter(response.context["cable_sync"]["table"].rows)).record
+        assert record.get("netbox_remote_device_id") is None
+        assert record.get("netbox_remote_interface_id") is None
+
+    def test_restricted_render_does_not_reduce_shared_snapshot_before_admin_sync(self, client):
+        from dcim.models import Cable
+        from django.contrib.auth import get_user_model
+        from django.urls import reverse
+
+        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+
+        local, (csp,), _ = make_serial_device("serial-cache-scope-local", csp_names=["ttyS1"])
+        remote, _, (cp,) = make_serial_device("serial-cache-scope-remote", cp_names=["console"])
+        server_key = next(iter(LibreNMSAPI.get_available_servers()))
+        row = self._cache_row(local, csp, remote, server_key)
+        restricted = self._user("serial-cache-scope-user", local)
+        client.force_login(restricted)
+
+        rendered = client.get(
+            reverse("plugins:netbox_librenms_plugin:device_librenms_sync", args=[local.pk]),
+            {"tab": "cables", "server_key": server_key},
+        )
+        assert rendered.status_code == 200
+
+        admin = get_user_model().objects.create_superuser(
+            "serial-cache-scope-admin",
+            "serial-cache-scope@example.com",
+            "pw",
+        )
+        client.force_login(admin)
+        synced = client.post(
+            reverse("plugins:netbox_librenms_plugin:sync_device_cables", args=[local.pk]),
+            {
+                "sync_one": row["local_port_id"],
+                f"expected_local_id_{row['local_port_id']}": csp.pk,
+                f"expected_local_device_id_{row['local_port_id']}": local.pk,
+                f"expected_remote_id_{row['local_port_id']}": cp.pk,
+                f"expected_remote_device_id_{row['local_port_id']}": remote.pk,
+                "server_key": server_key,
+            },
+            HTTP_HX_REQUEST="true",
+        )
+
+        assert synced.status_code == 200
+        csp.refresh_from_db()
+        cp.refresh_from_db()
+        assert Cable.objects.filter(pk=csp.cable_id).exists()
+        assert csp.cable_id == cp.cable_id
 
 
 # ---------------------------------------------------------------------------
@@ -1422,7 +1949,7 @@ class TestCableEnrichment:
         from netbox_librenms_plugin.views.sync.cables import SyncCablesView
 
         sync = object.__new__(SyncCablesView)
-        sync.request = _mock_request()
+        sync.request = _make_request()
         sync._post_server_key = server_key
         link = {
             "local_port": csp.name,
@@ -1509,37 +2036,3 @@ class TestCableEnrichment:
         csp.refresh_from_db()
         cable = Cable.objects.get(pk=csp.cable_id)
         assert cable.tenant_id == remote_tenant.pk  # remote side wins, not local
-
-
-@pytest.mark.django_db
-class TestSyncResponseStaleServerKeyFallback:
-    """_sync_response must not namespace the partial under a POSTed key that failed to rebind."""
-
-    def test_unconfigured_post_key_falls_back_to_active_server_key(self):
-        """rebind_api_for_server(stale) returns None; `or server_key` reused the very key that
-        failed, so render_sync_partial (and its migrated-donor context) was namespaced under
-        the bogus key. The delegated cable-table view's own POST handler already falls back to
-        active_server_key for this exact state — mirror it."""
-        from django.http import HttpResponse
-
-        from netbox_librenms_plugin.tests.conftest import make_device
-        from netbox_librenms_plugin.views.object_sync.devices import DeviceCableTableView
-        from netbox_librenms_plugin.views.sync.cables import SyncCablesView
-
-        dev = make_device("sync-resp-stale-key")
-        sync = object.__new__(SyncCablesView)
-        request = _mock_request()
-        request.headers = {"HX-Request": "true"}
-
-        captured = {}
-
-        def fake_render(view_self, req, obj, server_key, ctx):
-            captured["server_key"] = server_key
-            return HttpResponse("ok")
-
-        # "no-such-server" names no configured server, so the REAL rebind returns None.
-        with patch.object(DeviceCableTableView, "render_sync_partial", fake_render):
-            sync._sync_response(request, dev, "no-such-server", "/redirect")
-
-        assert captured["server_key"] != "no-such-server"
-        assert captured["server_key"] == "default"  # active_server_key fallback (no bound client)

@@ -113,3 +113,41 @@ class TestPortStackLagPatternBulkExportContract:
         response = PortStackLagPatternBulkExportYAMLView.as_view()(request)
 
         assert response.status_code == 400
+
+
+@pytest.mark.django_db
+class TestSerialSensorTypePatternBulkExportScope:
+    """Serial sensor mapping exports must keep the user's object constraints."""
+
+    def test_export_omits_a_selected_row_outside_the_view_grant(self):
+        from django.test import Client
+        from django.urls import reverse
+
+        from netbox_librenms_plugin.models import SerialSensorTypePattern
+        from netbox_librenms_plugin.tests.view_test_helpers import make_user_with_perms
+
+        visible = SerialSensorTypePattern.objects.create(
+            sensor_type="visibleSerialState",
+            port_name_pattern="tty{N}",
+        )
+        hidden = SerialSensorTypePattern.objects.create(
+            sensor_type="hiddenSerialState",
+            port_name_pattern="line{N}",
+        )
+        user = make_user_with_perms(
+            "serial-pattern-export-scope",
+            [("view", SerialSensorTypePattern)],
+            constraints={"pk": visible.pk},
+        )
+        client = Client()
+        client.force_login(user)
+
+        response = client.post(
+            reverse("plugins:netbox_librenms_plugin:serialsensortypepattern_bulk_export_yaml"),
+            {"pk": [visible.pk, hidden.pk]},
+        )
+
+        assert response.status_code == 200
+        content = response.content.decode()
+        assert visible.sensor_type in content
+        assert hidden.sensor_type not in content

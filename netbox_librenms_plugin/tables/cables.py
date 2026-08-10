@@ -7,14 +7,13 @@ from netbox.tables.columns import ToggleColumn
 from utilities.paginator import EnhancedPaginator
 
 from netbox_librenms_plugin.utils import (
+    assign_cable_row_ids,
     get_table_paginate_count,
     oob_badge_html,
     render_vc_member_options,
 )
 
-# Static trusted markup for the "Serial" console-port badge, shared by the table render
-# (render_local_port) and the inline verify-row render (cables_view._format_serial_verify_row)
-# so the two can't drift. Leading space is intentional (it follows the port name).
+# Static trusted markup for the "Serial" console-port badge. The leading space is intentional.
 SERIAL_BADGE_HTML = ' <span class="badge bg-teal text-white ms-1" title="Serial console port">Serial</span>'
 
 
@@ -24,10 +23,16 @@ class LibreNMSCableTable(tables.Table):
     """
 
     selection = ToggleColumn(
-        accessor="local_port_id",
+        accessor="row_id",
         orderable=False,
         visible=True,
-        attrs={"td": {"data-col": "selection"}, "input": {"name": "select"}},
+        attrs={
+            "td": {"data-col": "selection"},
+            "input": {
+                "name": "select",
+                "disabled": lambda record: None if record.get("can_create_cable") else "disabled",
+            },
+        },
     )
 
     local_port = tables.Column(verbose_name="Local Port", attrs={"td": {"data-col": "local_port"}})
@@ -40,10 +45,31 @@ class LibreNMSCableTable(tables.Table):
     cable_status = tables.Column(verbose_name="Cable Status", attrs={"td": {"data-col": "cable_status"}})
     actions = tables.TemplateColumn(
         template_code="""
+        {% if record.netbox_local_interface_id %}
+            <input type="hidden"
+                   name="expected_local_id_{{ record.row_id }}"
+                   value="{{ record.netbox_local_interface_id }}">
+        {% endif %}
+        {% if record.netbox_local_device_id %}
+            <input type="hidden"
+                   name="expected_local_device_id_{{ record.row_id }}"
+                   value="{{ record.netbox_local_device_id }}">
+        {% endif %}
+        {% if record.netbox_remote_interface_id %}
+            <input type="hidden"
+                   name="expected_remote_id_{{ record.row_id }}"
+                   value="{{ record.netbox_remote_interface_id }}">
+        {% endif %}
+        {% if record.netbox_remote_device_id %}
+            <input type="hidden"
+                   name="expected_remote_device_id_{{ record.row_id }}"
+                   value="{{ record.netbox_remote_device_id }}">
+        {% endif %}
         {% if record.can_create_cable %}
             <button type="submit"
                     class="btn btn-sm btn-primary"
-                    onclick="document.getElementById('selected_port').value='{{ record.local_port_id }}'">
+                    name="sync_one"
+                    value="{{ record.row_id }}">
                 Sync Cable
             </button>
         {% endif %}
@@ -66,6 +92,11 @@ class LibreNMSCableTable(tables.Table):
 
     def __init__(self, *args, device=None, **kwargs):
         """Initialize table with optional device context."""
+        if args:
+            normalized = assign_cable_row_ids(list(args[0]))
+            args = (normalized or [], *args[1:])
+        elif "data" in kwargs:
+            kwargs["data"] = assign_cable_row_ids(list(kwargs["data"])) or []
         self.device = device
         super().__init__(*args, **kwargs)
         self.tab = "cables"
@@ -142,7 +173,7 @@ class LibreNMSCableTable(tables.Table):
             "actions",
         ]
         row_attrs = {
-            "data-interface": lambda record: record["local_port_id"],
+            "data-interface": lambda record: record["row_id"],
             "data-device": lambda record: record["device_id"],
             "data-name": lambda record: record["local_port"],
         }
@@ -156,11 +187,11 @@ class VCCableTable(LibreNMSCableTable):
 
     device_selection = tables.Column(
         verbose_name="Virtual Chassis Member",
-        accessor="local_port_id",
+        accessor="row_id",
         attrs={"td": {"class": "device-selection-col", "data-col": "device_selection"}},
     )
 
-    def __init__(self, *args, device=None, **kwargs):
+    def __init__(self, *args, device=None, allowed_vc_member_ids=None, **kwargs):
         """Initialize the VC cable table with device context."""
         super().__init__(*args, device=device, **kwargs)
         # Cache the VC member set once so render_device_selection doesn't re-query
@@ -169,7 +200,10 @@ class VCCableTable(LibreNMSCableTable):
         self._vc_members = []
         self._vc_member_by_position = {}
         if getattr(self.device, "virtual_chassis", None):
-            self._vc_members = list(self.device.virtual_chassis.members.all())
+            members = self.device.virtual_chassis.members.all()
+            if allowed_vc_member_ids is not None:
+                members = members.filter(pk__in=allowed_vc_member_ids)
+            self._vc_members = list(members)
             self._vc_member_by_position = {m.vc_position: m for m in self._vc_members}
 
     def _selected_member_id(self, port_name):
@@ -194,12 +228,26 @@ class VCCableTable(LibreNMSCableTable):
 
     def render_device_selection(self, value, record):
         """Render a dropdown to select the virtual chassis member for a port."""
-        selected_member_id = self._selected_member_id(record["local_port"])
-        port_id = record["local_port_id"]
+        serial_owner_id = record.get("device_id") if record.get("_source") == "serial" else None
+        selected_member_id = (
+            serial_owner_id
+            if serial_owner_id and any(str(member.pk) == str(serial_owner_id) for member in self._vc_members)
+            else self._selected_member_id(record["local_port"])
+        )
+        row_id = record["row_id"]
+
+        if serial_owner_id:
+            return format_html(
+                '<select id="device_selection_{0}" class="form-select" data-interface="{0}" data-row-id="{0}" disabled aria-disabled="true">{1}</select>'
+                '<input type="hidden" name="device_selection_{0}" value="{2}">',
+                row_id,
+                render_vc_member_options(self._vc_members, selected_member_id),
+                selected_member_id,
+            )
 
         return format_html(
             '<select name="device_selection_{0}" id="device_selection_{0}" class="form-select" data-interface="{0}" data-row-id="{0}">{1}</select>',
-            port_id,
+            row_id,
             render_vc_member_options(self._vc_members, selected_member_id),
         )
 
@@ -216,10 +264,10 @@ class VCCableTable(LibreNMSCableTable):
             "actions",
         ]
         row_attrs = {
-            "data-interface": lambda record: record["local_port_id"],
+            "data-interface": lambda record: record["row_id"],
             "data-device": lambda record: record["device_id"],
             "data-name": lambda record: record["local_port"],
-            "id": lambda record: record["local_port_id"],
+            "id": lambda record: record["row_id"],
         }
         attrs = {
             "class": "table table-hover object-list",

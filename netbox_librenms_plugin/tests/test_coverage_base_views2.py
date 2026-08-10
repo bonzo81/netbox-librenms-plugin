@@ -66,7 +66,6 @@ def _mock_obj(model_name="device", pk=1, name="test-device"):
     obj.pk = pk
     obj.name = name
     obj.virtual_chassis = None
-    obj.consoleserverports.exists.return_value = False
     return obj
 
 
@@ -932,103 +931,6 @@ class TestCablePostHostFetchWarning:
         # librenms_id is None → a host fetch "failure" is expected, not surfaced as a warning.
         warn_texts = self._run(links_fetch_error="device not found", librenms_id=None)
         assert not any("host links fetch failed" in t for t in warn_texts)
-
-
-class TestCablePartialSnapshotNotCached:
-    """A fresh fetch that partially failed (host or OOB) must NOT be cached — later cached renders/verify would otherwise silently serve the incomplete cable set."""
-
-    def _make_view(self):
-        from netbox_librenms_plugin.views.base.cables_view import BaseCableTableView
-
-        view = object.__new__(BaseCableTableView)
-        view._librenms_api = MagicMock(server_key="default", cache_timeout=300)
-        view.get_cache_key = MagicMock(return_value="links-key")
-        view.get_table = MagicMock(return_value=MagicMock())
-        view.enrich_links_data = MagicMock(side_effect=lambda d, o, server_key=None, sync_device=None: d)
-        return view
-
-    def _links_cache_sets(self, *, oob_failed, links_error, librenms_id, serial_failed=False):
-        view = self._make_view()
-
-        def fake_get_links(obj, server_key=None, sync_device=None):
-            view._oob_links_fetch_failed = oob_failed
-            view._serial_links_fetch_failed = serial_failed
-            view._links_fetch_error = links_error
-            view.librenms_id = librenms_id
-            return [{"local_port": "Gi0/0", "remote_port": "Gi0/1", "_source": "host"}]
-
-        view.get_links_data = MagicMock(side_effect=fake_get_links)
-        with (
-            patch("netbox_librenms_plugin.views.base.cables_view.cache") as mock_cache,
-            patch(
-                "netbox_librenms_plugin.views.base.cables_view.get_librenms_sync_device",
-                return_value=MagicMock(),
-            ),
-        ):
-            mock_cache.ttl.return_value = None
-            view._prepare_context(MagicMock(), MagicMock(virtual_chassis=None), fetch_fresh=True, server_key="default")
-        return [c for c in mock_cache.set.call_args_list if c.args and c.args[0] == "links-key"]
-
-    def test_oob_fetch_failure_not_cached(self):
-        assert self._links_cache_sets(oob_failed=True, links_error=None, librenms_id=42) == []
-
-    def test_host_fetch_failure_with_host_id_not_cached(self):
-        assert self._links_cache_sets(oob_failed=False, links_error="auth failed", librenms_id=42) == []
-
-    def test_serial_fetch_failure_not_cached(self):
-        # A serial-sensor outage drops serial rows; caching the host/OOB-only snapshot as complete
-        # would hide them (and the warning) until the cache expires.
-        assert self._links_cache_sets(oob_failed=False, links_error=None, librenms_id=42, serial_failed=True) == []
-
-    def test_oob_only_mapping_still_cached(self):
-        # librenms_id None + a host "failure" is an OOB-only mapping (absent host) → still cache it.
-        assert len(self._links_cache_sets(oob_failed=False, links_error="no host", librenms_id=None)) == 1
-
-    def test_clean_fresh_fetch_cached(self):
-        assert len(self._links_cache_sets(oob_failed=False, links_error=None, librenms_id=42)) == 1
-
-
-class TestCablePostSerialFetchWarning:
-    """post() must warn when the serial-port sensor fetch failed: serial rows are otherwise silently omitted under a green 'refreshed successfully' banner (parity with the OOB warning), making a transient LibreNMS failure indistinguishable from 'no serial ports'."""
-
-    def _make_view(self):
-        from netbox_librenms_plugin.views.base.cables_view import BaseCableTableView
-
-        view = object.__new__(BaseCableTableView)
-        view.partial_template_name = "x.html"
-        view._librenms_api = MagicMock(server_key="default")
-        view.get_object = MagicMock(return_value=MagicMock(pk=1))
-        view.rebind_api_for_server = MagicMock(return_value="default")
-        return view
-
-    def _run(self, *, serial_failed):
-        view = self._make_view()
-        request = MagicMock()
-        request.POST.get.return_value = "default"
-
-        def _prep(*a, **k):
-            # Host fetch fine; mirror get_links_data flagging only the serial-sensor failure.
-            view._links_fetch_error = None
-            view.librenms_id = 42
-            view._serial_links_fetch_failed = serial_failed
-            return {"object": MagicMock(), "table": MagicMock(), "server_key": "default"}
-
-        view._prepare_context = MagicMock(side_effect=_prep)
-        with (
-            patch("netbox_librenms_plugin.views.base.cables_view.messages") as mock_msgs,
-            patch("netbox_librenms_plugin.views.mixins.render"),
-            patch("netbox_librenms_plugin.utils.build_migrated_context", return_value={}),
-        ):
-            view.post(request, pk=1)
-        return [c.args[1] for c in mock_msgs.warning.call_args_list]
-
-    def test_warns_on_serial_fetch_failure(self):
-        warn_texts = self._run(serial_failed=True)
-        assert any("serial" in t.lower() for t in warn_texts)
-
-    def test_no_serial_warning_when_fetch_succeeds(self):
-        warn_texts = self._run(serial_failed=False)
-        assert not any("serial" in t.lower() for t in warn_texts)
 
 
 # =============================================================================

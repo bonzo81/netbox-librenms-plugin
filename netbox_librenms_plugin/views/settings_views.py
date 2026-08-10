@@ -112,7 +112,7 @@ class LibreNMSSettingsView(LibreNMSPermissionMixin, View):
             # Process cable-sync provenance settings form
             server_form = ServerConfigForm(instance=settings)  # Unbound form for display
             import_form = ImportSettingsForm(instance=settings)  # Unbound form for display
-            cable_sync_form = CableSyncSettingsForm(request.POST, instance=settings)
+            cable_sync_form = CableSyncSettingsForm(request.POST, instance=settings, user=request.user)
 
             if cable_sync_form.is_valid():
                 cable_sync_form.save()
