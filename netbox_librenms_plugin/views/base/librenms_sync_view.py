@@ -37,9 +37,14 @@ class BaseLibreNMSSyncView(
     # None until get() runs (e.g. a direct get_context_data() call), then active_server_key is used.
     _scoped_render_server_key = None
 
+    def get_object(self, pk):
+        """Retrieve the object the user may view (same seam as the base table views)."""
+        # The plugin gate is model-level only, so scope the lookup or any pk is reachable.
+        return self.restrict_object_or_404(self.model, pk=pk)
+
     def get(self, request, pk, context=None):
         """Handle GET request for the LibreNMS sync view."""
-        obj = self.restrict_object_or_404(self.model, pk=pk)
+        obj = self.get_object(pk)
 
         # Scope the page header (device info, VC inventory serials, active-server highlight) to the
         # same ?server_key the embedded tabs rebind to. Without this the orchestrator reads the

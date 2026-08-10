@@ -487,7 +487,7 @@ class TestVCLookupDelegation:
     has its own librenms_id."""
 
     @patch("netbox_librenms_plugin.views.base.librenms_sync_view.render")
-    @patch("netbox_librenms_plugin.views.base.librenms_sync_view.get_object_or_404")
+    @patch("netbox_librenms_plugin.views.base.librenms_sync_view.BaseLibreNMSSyncView.get_object")
     @patch("netbox_librenms_plugin.views.base.librenms_sync_view.get_librenms_sync_device")
     def test_vc_member_with_own_id_delegates_to_sync_device(self, mock_sync_device, mock_get_object, mock_render):
         """
@@ -530,7 +530,7 @@ class TestVCLookupDelegation:
         api.get_librenms_id.assert_called_once_with(member_b)
 
     @patch("netbox_librenms_plugin.views.base.librenms_sync_view.render")
-    @patch("netbox_librenms_plugin.views.base.librenms_sync_view.get_object_or_404")
+    @patch("netbox_librenms_plugin.views.base.librenms_sync_view.BaseLibreNMSSyncView.get_object")
     @patch("netbox_librenms_plugin.views.base.librenms_sync_view.get_librenms_sync_device")
     def test_non_vc_device_skips_sync_device_lookup(self, mock_sync_device, mock_get_object, mock_render):
         """
