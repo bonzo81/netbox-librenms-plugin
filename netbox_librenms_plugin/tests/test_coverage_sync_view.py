@@ -1193,7 +1193,6 @@ class TestFullPageMigratedContextServerScope:
         request.user = make_user_with_perms("stale-key-viewer", [("view", Device)])
         # Calling get() directly skips View.setup(), and get_object() scopes by request.user.
         view.request = request
-        request.user = MagicMock(is_superuser=True)
 
         captured = {}
 

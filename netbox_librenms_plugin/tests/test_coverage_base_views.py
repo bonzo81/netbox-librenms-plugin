@@ -3743,11 +3743,13 @@ class TestSingleCableVerifyViewPermissionGate:
         request.user.has_perm.return_value = False  # unauthorized → real gate returns 403
         view.request = request  # check_object_permissions reads self.request.user
 
-        with patch("netbox_librenms_plugin.views.base.cables_view.BaseCableTableView.get_object") as mock_get_obj:
+        # post() resolves through restrict_object_or_404, not get_object: patching the latter
+        # made this assertion vacuous.
+        with patch.object(view, "restrict_object_or_404") as mock_resolve:
             response = view.post(request)
 
         assert response.status_code == 403
-        mock_get_obj.assert_not_called()  # device never resolved → no arbitrary-ID probing
+        mock_resolve.assert_not_called()  # device never resolved → no arbitrary-ID probing
 
 
 # ---------------------------------------------------------------------------

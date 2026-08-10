@@ -194,7 +194,6 @@ def test_background_collision_gate_uses_job_user_scope(monkeypatch):
         name="Bulk collision scope regression",
         user=user,
         job_id=uuid4(),
-        queue_name="default",
         data={},
     )
     device_count = Device.objects.count()
