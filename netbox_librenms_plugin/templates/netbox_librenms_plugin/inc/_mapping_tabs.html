@@ -1,0 +1,27 @@
+{% comment %}
+Switcher across the five type-mapping object lists. The sidebar has ONE "Mappings"
+entry, so the lists cross-link here, rendered above the native Results/Filters tabs.
+Plain page links (no data-bs-toggle): every tab is the full generic list view of its
+model, keeping filters / bulk ops / import / export intact. `mapping_tab_active` is
+the current page's URL-name prefix; the active pill also carries aria-current="page"
+(Bootstrap's nav-pills guidance) so screen readers announce the current page. Navigation
+tests assert the active link's class, href, and aria-current attributes independently;
+attribute order is not part of that contract.
+{% endcomment %}
+<ul class="nav nav-pills mb-3">
+    <li class="nav-item">
+        <a class="nav-link{% if mapping_tab_active == "interfacetypemapping" %} active{% endif %}" href="{% url 'plugins:netbox_librenms_plugin:interfacetypemapping_list' %}"{% if mapping_tab_active == "interfacetypemapping" %} aria-current="page"{% endif %}>Interface Mappings</a>
+    </li>
+    <li class="nav-item">
+        <a class="nav-link{% if mapping_tab_active == "devicetypemapping" %} active{% endif %}" href="{% url 'plugins:netbox_librenms_plugin:devicetypemapping_list' %}"{% if mapping_tab_active == "devicetypemapping" %} aria-current="page"{% endif %}>Device Type Mappings</a>
+    </li>
+    <li class="nav-item">
+        <a class="nav-link{% if mapping_tab_active == "moduletypemapping" %} active{% endif %}" href="{% url 'plugins:netbox_librenms_plugin:moduletypemapping_list' %}"{% if mapping_tab_active == "moduletypemapping" %} aria-current="page"{% endif %}>Module Type Mappings</a>
+    </li>
+    <li class="nav-item">
+        <a class="nav-link{% if mapping_tab_active == "modulebaymapping" %} active{% endif %}" href="{% url 'plugins:netbox_librenms_plugin:modulebaymapping_list' %}"{% if mapping_tab_active == "modulebaymapping" %} aria-current="page"{% endif %}>Module Bay Mappings</a>
+    </li>
+    <li class="nav-item">
+        <a class="nav-link{% if mapping_tab_active == "platformmapping" %} active{% endif %}" href="{% url 'plugins:netbox_librenms_plugin:platformmapping_list' %}"{% if mapping_tab_active == "platformmapping" %} aria-current="page"{% endif %}>Platform Mappings</a>
+    </li>
+</ul>

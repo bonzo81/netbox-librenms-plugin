@@ -1,0 +1,20 @@
+{% comment %}
+Switcher across the sync rule/pattern object lists (the sidebar has ONE
+"Rules & Patterns" entry). Same contract as _mapping_tabs.html: plain page links
+above the native Results/Filters tabs, with the active pill also carrying
+aria-current="page". Navigation tests assert its class, href, and aria-current
+attributes independently. A branch that introduces a new rule or pattern model adds
+its tab here (and to RULE_LIST_ROUTES in the navigation tests) in the same commit that
+adds the model.
+{% endcomment %}
+<ul class="nav nav-pills mb-3">
+    <li class="nav-item">
+        <a class="nav-link{% if rules_tab_active == "inventoryignorerule" %} active{% endif %}" href="{% url 'plugins:netbox_librenms_plugin:inventoryignorerule_list' %}"{% if rules_tab_active == "inventoryignorerule" %} aria-current="page"{% endif %}>Inventory Ignore Rules</a>
+    </li>
+    <li class="nav-item">
+        <a class="nav-link{% if rules_tab_active == "normalizationrule" %} active{% endif %}" href="{% url 'plugins:netbox_librenms_plugin:normalizationrule_list' %}"{% if rules_tab_active == "normalizationrule" %} aria-current="page"{% endif %}>Normalization Rules</a>
+    </li>
+    <li class="nav-item">
+        <a class="nav-link{% if rules_tab_active == "carrierautoinstallrule" %} active{% endif %}" href="{% url 'plugins:netbox_librenms_plugin:carrierautoinstallrule_list' %}"{% if rules_tab_active == "carrierautoinstallrule" %} aria-current="page"{% endif %}>Carrier Auto-Install Rules</a>
+    </li>
+</ul>

@@ -1,5 +1,10 @@
 {% extends 'generic/object_list.html' %}
 
+{% block tabs %}
+    {% include 'netbox_librenms_plugin/inc/_mapping_tabs.html' with mapping_tab_active="modulebaymapping" %}
+    {{ block.super }}
+{% endblock %}
+
 {% block content %}
     <div class="alert alert-info">
         <h4>Module Bay Mapping</h4>

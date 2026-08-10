@@ -24,14 +24,14 @@ Example:
 
 ![Interface Mappings Page](../img/interface_mappings/interfacemappings_menu.png){ width="250" }
 
-* From the main menu, navigate to the Plugins section
-* Under Netbox Librenms Plugin, Select "Interface Mappings"
+* From the main menu, navigate to the LibreNMS section
+* Select "Mappings" — Interface Mappings is the first tab
 
 #### Creating a New Mapping:
 
 ![Add Mapping button on the Interface Mappings page](../img/interface_mappings/addmapping.png){ width="50" }
 
-* Click the green `+` or `Add` button either from the menu or on the Interface Mappings page
+* Click the green `+` or `Add` button on the Interface Mappings page
 * Enter LibreNMS interface type. _You can copy this from plugin's device interface sync page_
 * Enter Librenms interface speed as Kbps
 * Select the Netbox interface type from the dropdown
