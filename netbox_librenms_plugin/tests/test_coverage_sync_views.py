@@ -406,7 +406,8 @@ class TestSyncCablesViewProcessInterfaceSync:
                 results = view.process_interface_sync(interfaces, [])
         assert "eth1" in results["missing_remote"]
 
-    def test_exception_adds_to_invalid(self):
+    def test_exception_adds_to_failed(self):
+        """An operational failure is not "no link data": it gets its own bucket and message."""
         from netbox_librenms_plugin.views.sync.cables import SyncCablesView
 
         view = _make_view(SyncCablesView)
@@ -414,7 +415,22 @@ class TestSyncCablesViewProcessInterfaceSync:
         with patch("netbox_librenms_plugin.views.sync.cables.transaction", _atomic_txn()):
             with patch.object(view, "process_single_interface", side_effect=Exception("boom")):
                 results = view.process_interface_sync(interfaces, [])
-        assert "55" in results["invalid"]
+        assert "55" in results["failed"]
+        assert results["invalid"] == []
+
+    def test_permission_denied_adds_to_denied(self):
+        """A permission raised below the sync (signal, validator) reads as a denial."""
+        from django.core.exceptions import PermissionDenied
+
+        from netbox_librenms_plugin.views.sync.cables import SyncCablesView
+
+        view = _make_view(SyncCablesView)
+        interfaces = [{"row_id": "56"}]
+        with patch("netbox_librenms_plugin.views.sync.cables.transaction", _atomic_txn()):
+            with patch.object(view, "process_single_interface", side_effect=PermissionDenied("nope")):
+                results = view.process_interface_sync(interfaces, [])
+        assert "56" in results["denied"]
+        assert results["failed"] == []
 
 
 class TestSyncCablesViewDisplaySyncResults:

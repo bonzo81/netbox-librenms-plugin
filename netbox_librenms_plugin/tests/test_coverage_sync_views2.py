@@ -869,7 +869,7 @@ class TestSyncCablesViewProcessInterfaceSyncException:
         ):
             results = view.process_interface_sync([interface], cached_links)
 
-        assert "port1" in results["invalid"]
+        assert "port1" in results["failed"]
 
 
 def _add_device_view(request, *, add_result=(True, "Device added")):

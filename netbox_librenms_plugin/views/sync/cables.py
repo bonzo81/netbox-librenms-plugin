@@ -65,14 +65,18 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libre
         return self._cable_sync_settings
 
     def _get_provenance_tag(self, *, create=False, sync_settings=None):
-        """Return the configured provenance tag loaded once for this sync request."""
+        """
+        Return the configured provenance tag loaded once for this sync request.
+
+        The tag is plugin infrastructure: its name and color come from the plugin settings row,
+        and the plugin bootstraps it on first use the same way it bootstraps the ``librenms_id``
+        custom field. Cable sync therefore does not ask the syncing user for ``extras.add_tag``.
+        """
         sync_settings = sync_settings or self._get_cable_sync_settings()
         if not getattr(self, "_cable_provenance_tag_resolved", False):
             self._cable_provenance_tag = get_librenms_cable_tag(create=False, sync_settings=sync_settings)
             self._cable_provenance_tag_resolved = True
         if create and self._cable_provenance_tag is None:
-            if not self.request.user.has_perm("extras.add_tag"):
-                raise PermissionDenied("You do not have permission to create the cable provenance tag.")
             self._cable_provenance_tag = get_librenms_cable_tag(
                 sync_settings=sync_settings,
             )
@@ -496,7 +500,9 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libre
         if action == "create":
             if self.create_cable(local_term, remote_term, self.request, sync_settings=sync_settings):
                 return {"status": "valid", "interface": display_name}
-            return {"status": "invalid", "interface": display_name}  # pragma: no cover
+            # create_cable already flashed the concrete error; "invalid" would additionally claim
+            # the row had no LibreNMS link data.
+            return {"status": "failed", "interface": display_name}
         if action == "unsupported":
             return {"status": "unsupported", "interface": display_name}
         if action == "needs_force" and force:
@@ -526,18 +532,9 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libre
             # (process_interface_sync) rolls the deletes back rather than orphaning the connection.
             raise RuntimeError(f"cable overwrite failed for {display_name}")  # pragma: no cover
 
-        # needs_force and not force: the response may include cable IDs and topology, so require
-        # view scope for every current cable before rendering the confirmation modal.
-        visible_cable_ids = set(
-            self.restricted_queryset(Cable, "view")
-            .filter(pk__in=[cable.pk for cable in decision["to_remove"]])
-            .values_list("pk", flat=True)
-        )
-        if any(cable.pk not in visible_cable_ids for cable in decision["to_remove"]):
-            return {"status": "denied", "interface": display_name}
-
-        # Carry each doomed cable's visible end-to-end trace so the modal can show the user what a
-        # forced overwrite would destroy without exposing hidden path objects.
+        # needs_force and not force: _apply_cable_action already denied any row whose current
+        # cables are outside view scope, so the modal can carry each doomed cable's end-to-end
+        # trace and show what a forced overwrite would destroy, without hidden path objects.
         return {
             "status": "conflict",
             "interface": display_name,
@@ -571,59 +568,88 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libre
 
         return True
 
+    def _selected_row_link_data(self, interface, cached_links):
+        """
+        Resolve one selection to its cached row with the posted VC-member override applied.
+
+        The pre-flight uniqueness gate and the sync itself must judge the same termination:
+        re-resolving the local end in only one of them lets two rows overridden onto the same
+        VC member pass the gate and then collapse onto one interface.
+
+        Args:
+            interface (dict): One entry from :meth:`get_selected_interfaces`.
+            cached_links (list): The enriched cached rows for this page.
+
+        Returns:
+            tuple: ``(link_data, result)`` — exactly one is not None. *result* carries the
+                status of a row that cannot be synced at all.
+        """
+        row_id = interface.get("row_id", "")
+        matching_rows = [link for link in cached_links if link.get("row_id") == row_id]
+        if len(matching_rows) != 1:
+            return None, {"status": "invalid", "interface": row_id}
+        link_data = matching_rows[0]
+        display_name = link_data.get("local_port") or row_id
+        # OOB-controller rows are merged into the host's cable list only for context
+        # (shared-LOM detection) and must never be synced onto the host: their local_port can
+        # resolve to a host interface (shared name), and creating a cable from OOB-controller
+        # LLDP data would attach it to the wrong device. Mirrors the OOB guards in interface
+        # sync (interfaces.py) and module sync (modules.py).
+        if link_data.get("_source") == "oob":
+            return None, {"status": "skipped", "interface": display_name}
+        # A multi-termination (breakout) cable on either end stops the enrichment before it
+        # resolves the remote IDs, so the expected-endpoint check would report the row as
+        # "stale". Name the real reason instead; classify_cable_action still catches a cable
+        # that became multi-termination after the snapshot.
+        if link_data.get("_multi_termination_unsupported"):
+            return None, {"status": "unsupported", "interface": display_name}
+        # Apply posted device_id (VC member selection) without mutating the cached list.
+        link_data = {
+            **link_data,
+            "device_id": interface.get("device_id", link_data.get("device_id")),
+            "expected_cable_intent": interface.get("expected_cable_intent"),
+        }
+        selected_device_id = coerce_librenms_id(interface.get("device_id"))
+        current_local_device_id = coerce_librenms_id(link_data.get("netbox_local_device_id"))
+        if selected_device_id is not None and selected_device_id != current_local_device_id:
+            if not self._selected_device_is_in_page_context(selected_device_id):
+                return None, {"status": "rejected_selection", "interface": display_name}
+            selected_device = self.restricted_queryset(Device, "view").filter(pk=selected_device_id).first()
+            if selected_device is None:
+                return None, {"status": "rejected_selection", "interface": display_name}
+            selected_local = resolve_interface_on_device(
+                selected_device,
+                getattr(self, "_post_server_key", None) or self.librenms_api.server_key,
+                link_data.get("local_port_id"),
+                [link_data.get("local_port"), link_data.get("local_port_alt")],
+            )
+            if (
+                selected_local is None
+                or not self.restricted_queryset(Interface, "change").filter(pk=selected_local.pk).exists()
+            ):
+                return None, {"status": "stale", "interface": display_name}
+            link_data["netbox_local_interface_id"] = selected_local.pk
+            link_data["netbox_local_device_id"] = selected_local.device_id
+        return link_data, None
+
     def process_single_interface(self, interface, cached_links, force=False):
         """Process cable creation for a single interface from cached link data."""
-        row_id = interface.get("row_id", "")
-        try:
-            link_data = next(link for link in cached_links if link.get("row_id") == row_id)
-            # OOB-controller rows are merged into the host's cable list only for context
-            # (shared-LOM detection) and must never be synced onto the host: their local_port can
-            # resolve to a host interface (shared name), and creating a cable from OOB-controller
-            # LLDP data would attach it to the wrong device. Mirrors the OOB guards in interface
-            # sync (interfaces.py) and module sync (modules.py).
-            if link_data.get("_source") == "oob":
-                return {"status": "skipped", "interface": link_data.get("local_port") or row_id}
-            # Apply posted device_id (VC member selection) without mutating the cached list.
-            link_data = {
-                **link_data,
-                "device_id": interface.get("device_id", link_data.get("device_id")),
-                "expected_cable_intent": interface.get("expected_cable_intent"),
-            }
-            selected_device_id = coerce_librenms_id(interface.get("device_id"))
-            current_local_device_id = coerce_librenms_id(link_data.get("netbox_local_device_id"))
-            if selected_device_id is not None and selected_device_id != current_local_device_id:
-                if not self._selected_device_is_in_page_context(selected_device_id):
-                    return {"status": "rejected_selection", "interface": link_data.get("local_port") or row_id}
-                selected_device = self.restricted_queryset(Device, "view").filter(pk=selected_device_id).first()
-                if selected_device is None:
-                    return {"status": "rejected_selection", "interface": link_data.get("local_port") or row_id}
-                selected_local = resolve_interface_on_device(
-                    selected_device,
-                    getattr(self, "_post_server_key", None) or self.librenms_api.server_key,
-                    link_data.get("local_port_id"),
-                    [link_data.get("local_port"), link_data.get("local_port_alt")],
-                )
-                if (
-                    selected_local is None
-                    or not self.restricted_queryset(Interface, "change").filter(pk=selected_local.pk).exists()
-                ):
-                    return {"status": "stale", "interface": link_data.get("local_port") or row_id}
-                link_data["netbox_local_interface_id"] = selected_local.pk
-                link_data["netbox_local_device_id"] = selected_local.device_id
-            current_local_id = coerce_librenms_id(link_data.get("netbox_local_interface_id"))
-            current_local_device_id = coerce_librenms_id(link_data.get("netbox_local_device_id"))
-            current_remote_id = coerce_librenms_id(link_data.get("netbox_remote_interface_id"))
-            current_remote_device_id = coerce_librenms_id(link_data.get("netbox_remote_device_id"))
-            if (
-                interface.get("expected_local_id") != current_local_id
-                or interface.get("expected_local_device_id") != current_local_device_id
-                or interface.get("expected_remote_id") != current_remote_id
-                or interface.get("expected_remote_device_id") != current_remote_device_id
-            ):
-                return {"status": "stale", "interface": link_data.get("local_port") or row_id}
-            return self.handle_cable_creation(link_data, interface, force=force)
-        except StopIteration:
-            return {"status": "invalid", "interface": row_id}
+        link_data, result = self._selected_row_link_data(interface, cached_links)
+        if result is not None:
+            return result
+        display_name = link_data.get("local_port") or interface.get("row_id", "")
+        current_local_id = coerce_librenms_id(link_data.get("netbox_local_interface_id"))
+        current_local_device_id = coerce_librenms_id(link_data.get("netbox_local_device_id"))
+        current_remote_id = coerce_librenms_id(link_data.get("netbox_remote_interface_id"))
+        current_remote_device_id = coerce_librenms_id(link_data.get("netbox_remote_device_id"))
+        if (
+            interface.get("expected_local_id") != current_local_id
+            or interface.get("expected_local_device_id") != current_local_device_id
+            or interface.get("expected_remote_id") != current_remote_id
+            or interface.get("expected_remote_device_id") != current_remote_device_id
+        ):
+            return {"status": "stale", "interface": display_name}
+        return self.handle_cable_creation(link_data, interface, force=force)
 
     def verify_cable_creation_requirements(self, link_data):
         """Return True if all required NetBox IDs are present in link data."""
@@ -722,22 +748,13 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libre
             return {"status": "missing_remote", "interface": display_name}
         return {"local": local_interface, "remote": remote_interface, "interface": display_name}
 
-    def handle_serial_cable_creation(self, link_data, interface, force=False):
-        """Create a ConsoleServerPort ↔ ConsolePort cable for a serial row."""
-        return self.handle_cable_creation(link_data, interface, force=force)
-
     def validate_selected_endpoint_uniqueness(self, selected_interfaces, cached_links):
         """Reject a batch when two selected rows resolve to one NetBox termination."""
         endpoints = set()
         for interface in selected_interfaces:
-            row_id = interface.get("row_id", "")
-            matching_rows = [link for link in cached_links if link.get("row_id") == row_id]
-            if len(matching_rows) != 1 or matching_rows[0].get("_source") == "oob":
+            link_data, result = self._selected_row_link_data(interface, cached_links)
+            if result is not None:
                 continue
-            link_data = {
-                **matching_rows[0],
-                "device_id": interface.get("device_id", matching_rows[0].get("device_id")),
-            }
             resolved = self._resolve_cable_terminations(link_data, interface)
             if "status" in resolved:
                 continue
@@ -775,6 +792,7 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libre
         results = {
             "valid": [],
             "invalid": [],
+            "failed": [],
             "duplicate": [],
             "missing_remote": [],
             "rejected_selection": [],
@@ -799,9 +817,14 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libre
                     # (device_selection_<row_id>) would silently revert to the page device.
                     result["device_id"] = interface.get("device_id")
                     self._pending_conflicts.append(result)
+            except PermissionDenied:
+                # A permission raised anywhere below (signals, custom validators) is a denial, not
+                # missing link data.
+                logger.warning("Denied cable sync for row %s", interface.get("row_id", ""))
+                results["denied"].append(interface.get("row_id", ""))
             except Exception:
                 logger.exception("Failed to sync cable row %s", interface.get("row_id", ""))
-                results["invalid"].append(interface.get("row_id", ""))
+                results["failed"].append(interface.get("row_id", ""))
 
         return results
 
@@ -952,6 +975,11 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libre
             messages.error(
                 request,
                 f"No LibreNMS link data found for interfaces: {', '.join(results['invalid'])}",
+            )
+        if results.get("failed"):
+            messages.error(
+                request,
+                f"Failed to sync cables for interfaces: {', '.join(results['failed'])}",
             )
         if results.get("rejected_selection"):
             messages.error(

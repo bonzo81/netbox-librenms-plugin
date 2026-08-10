@@ -6,7 +6,7 @@ Covers, against REAL Cable / Tag / ConsoleServerPort / ConsolePort / FrontPort /
     whether a sync may touch an existing cable.
   - render_cable_trace(): the full end-to-end path (through patch panels) of a cable that would be
     overwritten, for display in the force-confirm modal.
-  - handle_serial_cable_creation(): the view-level behavior for a conflict and an exact confirmed
+  - handle_cable_creation(): the view-level behavior for a conflict and an exact confirmed
     overwrite.
 
 Every destructive replacement requires confirmation of the exact current cable topology. A
@@ -299,7 +299,7 @@ class TestRenderCableTrace:
 # ---------------------------------------------------------------------------
 @pytest.mark.django_db
 class TestSerialCableOverwriteBehaviour:
-    """handle_serial_cable_creation honours the overwrite gate and the force flag end-to-end."""
+    """handle_cable_creation honours the overwrite gate and the force flag end-to-end."""
 
     def _setup(self, name):
         acs, csps, _ = make_serial_device(f"acs-{name}", csp_names=["ttyS1"])
@@ -315,7 +315,7 @@ class TestSerialCableOverwriteBehaviour:
         old.tags.add(get_librenms_cable_tag())
 
         sync = _sync_view()
-        result = sync.handle_serial_cable_creation(_serial_link(csp, cp_b), {"device_id": acs.id})
+        result = sync.handle_cable_creation(_serial_link(csp, cp_b), {"device_id": acs.id})
 
         assert result["status"] == "conflict"
         assert Cable.objects.filter(pk=old.pk).exists()
@@ -332,7 +332,7 @@ class TestSerialCableOverwriteBehaviour:
         settings.cable_sync_description = "x" * 200
         settings.save()
 
-        result = _sync_view("secondary").handle_serial_cable_creation(
+        result = _sync_view("secondary").handle_cable_creation(
             _serial_link(csp, cp_a),
             {"device_id": acs.id},
         )
@@ -348,7 +348,7 @@ class TestSerialCableOverwriteBehaviour:
         acs, csp, cp_a, _cp_b = self._setup("long-server-key")
         server_key = "placeholder-server-" * 20
 
-        result = _sync_view(server_key).handle_serial_cable_creation(
+        result = _sync_view(server_key).handle_cable_creation(
             _serial_link(csp, cp_a),
             {"device_id": acs.id},
         )
@@ -372,7 +372,7 @@ class TestSerialCableOverwriteBehaviour:
 
         with CaptureQueriesContext(connection) as captured:
             results = [
-                sync.handle_serial_cable_creation(_serial_link(csp, cp), {"device_id": acs.id}) for acs, csp, cp in rows
+                sync.handle_cable_creation(_serial_link(csp, cp), {"device_id": acs.id}) for acs, csp, cp in rows
             ]
 
         assert [result["status"] for result in results] == ["valid", "valid", "valid"]
@@ -411,9 +411,9 @@ class TestSerialCableOverwriteBehaviour:
             return execute(sql, params, many, context)
 
         with connection.execute_wrapper(fail_tag_insert):
-            result = sync.handle_serial_cable_creation(_serial_link(csp, cp_a), {"device_id": acs.id})
+            result = sync.handle_cable_creation(_serial_link(csp, cp_a), {"device_id": acs.id})
 
-        assert result["status"] == "invalid"
+        assert result["status"] == "failed"  # an operational failure, not missing link data
         assert Cable.objects.count() == 0  # the cable and its failed tag stamp roll back together
 
     def test_conflict_on_foreign_cable_without_force_leaves_db_untouched(self):
@@ -424,7 +424,7 @@ class TestSerialCableOverwriteBehaviour:
         old.tags.add(_make_tag("dcim-modeled"))
 
         sync = _sync_view()
-        result = sync.handle_serial_cable_creation(_serial_link(csp, cp_b), {"device_id": acs.id})
+        result = sync.handle_cable_creation(_serial_link(csp, cp_b), {"device_id": acs.id})
 
         assert result["status"] == "conflict"
         assert Cable.objects.filter(pk=old.pk).exists()  # foreign cable survives
@@ -443,7 +443,7 @@ class TestSerialCableOverwriteBehaviour:
         sync = _sync_view()
         link = _serial_link(csp, cp_b)
         link["expected_cable_intent"] = _confirmed_intent(csp, cp_b, old)
-        result = sync.handle_serial_cable_creation(link, {"device_id": acs.id}, force=True)
+        result = sync.handle_cable_creation(link, {"device_id": acs.id}, force=True)
 
         assert result["status"] == "overwritten"
         assert not Cable.objects.filter(pk=old.pk).exists()
@@ -469,7 +469,7 @@ class TestSerialCableOverwriteBehaviour:
         link = _serial_link(csps[0], target_port)
         link["expected_cable_intent"] = _confirmed_intent(csps[0], target_port, old)
 
-        result = _sync_view().handle_serial_cable_creation(link, {"device_id": acs.pk}, force=True)
+        result = _sync_view().handle_cable_creation(link, {"device_id": acs.pk}, force=True)
 
         assert result["status"] == "unsupported"
         assert Cable.objects.filter(pk=old.pk).exists()
@@ -482,7 +482,7 @@ class TestSerialCableOverwriteBehaviour:
         cable = cable_together(csp, cp_a)  # untagged, already the desired connection
 
         sync = _sync_view()
-        result = sync.handle_serial_cable_creation(_serial_link(csp, cp_a), {"device_id": acs.id})
+        result = sync.handle_cable_creation(_serial_link(csp, cp_a), {"device_id": acs.id})
 
         assert result["status"] == "tagged"
         cable.refresh_from_db()
@@ -890,7 +890,7 @@ class TestOverwritePreservesMidPathSegments:
 
         link = _serial_link(csp, target_cp)
         link["expected_cable_intent"] = _confirmed_intent(csp, target_cp, c1)
-        result = _sync_view().handle_serial_cable_creation(link, {"device_id": acs.id}, force=True)
+        result = _sync_view().handle_cable_creation(link, {"device_id": acs.id}, force=True)
 
         assert result["status"] == "overwritten"
         assert not Cable.objects.filter(pk=c1.pk).exists()  # endpoint segment gone
@@ -903,7 +903,7 @@ class TestOverwritePreservesMidPathSegments:
         acs, csp, c1, c2 = self._panel_path("midname")
         _t, _, (target_cp,) = make_serial_device("midname-target", cp_names=["console"])
 
-        result = _sync_view().handle_serial_cable_creation(_serial_link(csp, target_cp), {"device_id": acs.id})
+        result = _sync_view().handle_cable_creation(_serial_link(csp, target_cp), {"device_id": acs.id})
 
         assert result["status"] == "conflict"
         assert result["removed_cables"] == [f"#{c1.pk}"]  # only the endpoint segment, never c2
@@ -961,15 +961,22 @@ class TestOverwriteRequiresDeletePermission:
     """The sync view's blanket gate covers add/change Cable, but the overwrite paths DELETE
     existing cables — that must additionally require dcim.delete_cable, checked precisely on
     the destructive branch so create-only syncs keep working for add/change users.
+
+    Acting on an EXISTING cable also needs view scope for it: the cable table reports current
+    cable state through view-scoped queries, so a row whose cable the user cannot see must not
+    be adopted, replaced or described. Each test below narrows one grant and leaves the rest
+    open, so the denial it asserts can only come from the gate it names.
     """
 
-    def _sync_view_with_real_user(self, *actions, constraints=None, device_ids=None):
+    def _sync_view_with_real_user(self, *actions, constraints=None, constrained_actions=None, device_ids=None):
         """Build a sync view whose request user holds a REAL NetBox ObjectPermission for Cable
         with the given actions — NetBox's ObjectPermissionBackend ignores Django's
         user_permissions m2m, so has_perm() only honors ObjectPermission assignments.
 
-        *constraints* makes the grant a CONSTRAINED one: ``has_perm`` (asked without an instance)
-        still passes, while ``restrict()`` narrows to the matching cables.
+        *constraints* makes a grant a CONSTRAINED one: ``has_perm`` (asked without an instance)
+        still passes, while ``restrict()`` narrows to the matching cables. It applies only to
+        *constrained_actions* (default: every action), so a test can narrow the one gate it is
+        about and leave the others wide open.
         """
         from core.models import ObjectType
         from dcim.models import Cable
@@ -982,9 +989,15 @@ class TestOverwriteRequiresDeletePermission:
         from dcim.models import ConsolePort, ConsoleServerPort
 
         user = get_user_model().objects.create_user(f"perm-user-{'-'.join(actions) or 'none'}{suffix}")
-        if actions:
+        scoped = tuple(constrained_actions if constrained_actions is not None else (actions if constraints else ()))
+        unscoped = tuple(action for action in actions if action not in scoped)
+        for label, grant_actions, grant_constraints in (("open", unscoped, None), ("scoped", scoped, constraints)):
+            if not grant_actions:
+                continue
             op = ObjectPermission.objects.create(
-                name=f"cable-{'-'.join(actions)}{suffix}", actions=list(actions), constraints=constraints
+                name=f"cable-{label}-{'-'.join(grant_actions)}{suffix}",
+                actions=list(grant_actions),
+                constraints=grant_constraints,
             )
             op.object_types.add(ObjectType.objects.get_for_model(Cable))
             op.users.add(user)
@@ -1025,10 +1038,10 @@ class TestOverwriteRequiresDeletePermission:
         old = cable_together(csp, cp_a)
         old.tags.add(get_librenms_cable_tag())
 
-        sync = self._sync_view_with_real_user("add", "change")  # no delete
+        sync = self._sync_view_with_real_user("view", "add", "change")  # no delete
         link = _serial_link(csp, cp_b)
         link["expected_cable_intent"] = _confirmed_intent(csp, cp_b, old)
-        result = sync.handle_serial_cable_creation(link, {"device_id": acs.id}, force=True)
+        result = sync.handle_cable_creation(link, {"device_id": acs.id}, force=True)
 
         assert result["status"] == "denied"
         assert Cable.objects.filter(pk=old.pk).exists()  # nothing deleted
@@ -1042,9 +1055,16 @@ class TestOverwriteRequiresDeletePermission:
         _other_acs, (other_csp,), _ = make_serial_device("permtag-other", csp_names=["ttyS2"])
         _other_remote, _, (other_cp,) = make_serial_device("permtag-other-r", cp_names=["console"])
         in_scope = cable_together(other_csp, other_cp)
-        sync = self._sync_view_with_real_user("add", "change", constraints={"pk": in_scope.pk})
+        # View scope covers every cable, so only the narrowed CHANGE grant can deny this.
+        sync = self._sync_view_with_real_user(
+            "view",
+            "add",
+            "change",
+            constraints={"pk": in_scope.pk},
+            constrained_actions=("change",),
+        )
 
-        result = sync.handle_serial_cable_creation(_serial_link(csp, cp), {"device_id": acs.pk})
+        result = sync.handle_cable_creation(_serial_link(csp, cp), {"device_id": acs.pk})
 
         assert result["status"] == "denied"
         assert not cable.tags.exists()
@@ -1053,9 +1073,20 @@ class TestOverwriteRequiresDeletePermission:
         acs, (csp,), _ = make_serial_device("permtag-hidden", csp_names=["ttyS1"])
         _remote, _, (cp,) = make_serial_device("permtag-hidden-r", cp_names=["console"])
         cable = cable_together(csp, cp)
-        sync = self._sync_view_with_real_user("add", "change", constraints={"pk": cable.pk})
+        _other_acs, (other_csp,), _ = make_serial_device("permtag-hidden-other", csp_names=["ttyS2"])
+        _other_remote, _, (other_cp,) = make_serial_device("permtag-hidden-other-r", cp_names=["console"])
+        visible = cable_together(other_csp, other_cp)
+        # Change scope covers the cable; only the narrowed VIEW grant can deny this. Cable sync
+        # never acts on a cable the user cannot see, however writable it is.
+        sync = self._sync_view_with_real_user(
+            "view",
+            "add",
+            "change",
+            constraints={"pk": visible.pk},
+            constrained_actions=("view",),
+        )
 
-        result = sync.handle_serial_cable_creation(_serial_link(csp, cp), {"device_id": acs.pk})
+        result = sync.handle_cable_creation(_serial_link(csp, cp), {"device_id": acs.pk})
 
         assert result["status"] == "denied"
         assert not cable.tags.exists()
@@ -1070,7 +1101,7 @@ class TestOverwriteRequiresDeletePermission:
         cable_together(csp, current_cp)
         sync = self._sync_view_with_real_user("add", "change")
 
-        result = sync.handle_serial_cable_creation(_serial_link(csp, target_cp), {"device_id": acs.pk})
+        result = sync.handle_cable_creation(_serial_link(csp, target_cp), {"device_id": acs.pk})
 
         assert result["status"] == "denied"
         assert "trace" not in result
@@ -1092,7 +1123,7 @@ class TestOverwriteRequiresDeletePermission:
             device_ids=[acs.pk, target_cp.device_id],
         )
 
-        result = sync.handle_serial_cable_creation(_serial_link(csp, target_cp), {"device_id": acs.pk})
+        result = sync.handle_cable_creation(_serial_link(csp, target_cp), {"device_id": acs.pk})
 
         rendered_trace = str(result["trace"])
         assert result["status"] == "conflict"
@@ -1111,10 +1142,10 @@ class TestOverwriteRequiresDeletePermission:
         old = cable_together(csp, cp_a)
         old.tags.add(get_librenms_cable_tag())
 
-        sync = self._sync_view_with_real_user("add", "change", "delete")
+        sync = self._sync_view_with_real_user("view", "add", "change", "delete")
         link = _serial_link(csp, cp_b)
         link["expected_cable_intent"] = _confirmed_intent(csp, cp_b, old)
-        result = sync.handle_serial_cable_creation(link, {"device_id": acs.id}, force=True)
+        result = sync.handle_cable_creation(link, {"device_id": acs.id}, force=True)
 
         assert result["status"] == "overwritten"
         assert not Cable.objects.filter(pk=old.pk).exists()
@@ -1136,10 +1167,18 @@ class TestOverwriteRequiresDeletePermission:
         _o, _, (other_cp,) = make_serial_device("permdel3-other-r", cp_names=["console-C"])
         in_scope = cable_together(other_csp, other_cp)
 
-        sync = self._sync_view_with_real_user("add", "change", "delete", constraints={"pk": in_scope.pk})
+        # View/add/change cover every cable, so only the narrowed DELETE grant can deny this.
+        sync = self._sync_view_with_real_user(
+            "view",
+            "add",
+            "change",
+            "delete",
+            constraints={"pk": in_scope.pk},
+            constrained_actions=("delete",),
+        )
         link = _serial_link(csp, cp_b)
         link["expected_cable_intent"] = _confirmed_intent(csp, cp_b, old)
-        result = sync.handle_serial_cable_creation(link, {"device_id": acs.id}, force=True)
+        result = sync.handle_cable_creation(link, {"device_id": acs.id}, force=True)
 
         assert result["status"] == "denied"
         assert Cable.objects.filter(pk=old.pk).exists()  # the out-of-scope cable survives

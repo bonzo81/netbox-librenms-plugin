@@ -1775,6 +1775,7 @@ class TestRemotePickerEndpoint:
     def test_vc_sync_uses_the_local_endpoint_returned_by_member_verify(self):
         """A verified VC member change must create the cable on that exact member."""
         import json
+        import re
 
         from django.core.cache import cache
         from django.urls import reverse
@@ -1836,7 +1837,7 @@ class TestRemotePickerEndpoint:
         assert formatted["expected_remote_device_id"] == remote_device.pk
         assert "<form" not in formatted["actions"]
         assert 'name="select"' not in formatted["actions"]
-        assert 'name="sync_one" value="10"' in formatted["actions"]
+        assert 'name="sync_one" value="10"' in re.sub(r"\s+", " ", formatted["actions"])
 
         synced = client.post(
             reverse("plugins:netbox_librenms_plugin:sync_device_cables", args=[first.pk]),
@@ -1882,14 +1883,18 @@ class TestRemotePickerEndpoint:
             HTTP_HX_REQUEST="true",
         )
         request_factory = RequestFactory()
-        picker_request = request_factory.post("/")
-        picker_request.user = get_user_model().objects.get(pk=picker.session["_auth_user_id"])
-        other_request = request_factory.post("/")
-        other_request.user = get_user_model().objects.get(pk=other_user.session["_auth_user_id"])
-        sync_view = object.__new__(SyncCablesView)
-        sync_view._post_server_key = "default"
-        picker_links = sync_view.get_cached_links_data(picker_request, acs)
-        other_links = sync_view.get_cached_links_data(other_request, acs)
+
+        def links_for(client):
+            """Read the cached rows the way the sync POST does, as that client's user."""
+            request = request_factory.post("/")
+            request.user = get_user_model().objects.get(pk=client.session["_auth_user_id"])
+            sync_view = object.__new__(SyncCablesView)
+            sync_view.request = request
+            sync_view._post_server_key = "default"
+            return sync_view.get_cached_links_data(request, acs)
+
+        picker_links = links_for(picker)
+        other_links = links_for(other_user)
 
         assert picked.status_code == 200
         assert "private-console" in picked.content.decode()
@@ -1960,7 +1965,8 @@ class TestRemotePickerEndpoint:
             cached["links"],
         )
         assert applied is True
-        assert overlaid[0]["netbox_remote_interface_id"] == cp.pk
+        # The overlay only carries the pick; enrichment resolves it to the NetBox termination.
+        assert overlaid[0]["manual_remote_id"] == cp.pk
 
         sync_url = reverse("plugins:netbox_librenms_plugin:sync_device_cables", args=[acs.pk])
         post_data = _rendered_sync_data(client, acs, link["local_port_id"])
@@ -2081,14 +2087,98 @@ class TestRemotePickerEndpoint:
         assert Cable.objects.count() == 0
         assert "same cable endpoint" in response.content.decode()
 
+    def test_batch_rejects_two_rows_overridden_onto_one_vc_member_interface(self):
+        """The uniqueness gate must resolve the local end exactly as the sync does.
+
+        A member override re-resolves the local port by LibreNMS port id and by both name
+        candidates. Two rows whose alternate name is the same port on the chosen member collapse
+        onto one interface, so the batch must be refused whole — not applied row by row.
+        """
+        from dcim.models import Cable
+        from django.core.cache import cache
+        from django.urls import reverse
+
+        from netbox_librenms_plugin.utils import set_librenms_device_id
+        from netbox_librenms_plugin.views.sync.cables import SyncCablesView
+
+        client = self._client("vc-collapse")
+        page = make_device("cable-vc-collapse-page")
+        member = make_device("cable-vc-collapse-member")
+        make_virtual_chassis("cable-vc-collapse", page, member)
+        make_interface(page, "Ethernet1")
+        make_interface(page, "Gi1/0/1")
+        # The member carries only ONE of the two names, so both rows land on it.
+        member_local = make_interface(member, "Ethernet1")
+        remote_device = make_device("cable-vc-collapse-remote")
+        first_remote = make_interface(remote_device, "R1")
+        second_remote = make_interface(remote_device, "R2")
+        set_librenms_device_id(page, 700, "default")
+        page.save()
+        rows = [
+            {
+                "_source": "main",
+                "local_port": "Ethernet1",
+                "local_port_id": 11,
+                "remote_device": remote_device.name,
+                "remote_port": first_remote.name,
+            },
+            {
+                "_source": "main",
+                "local_port": "Gi1/0/1",
+                "local_port_alt": "Ethernet1",
+                "local_port_id": 12,
+                "remote_device": remote_device.name,
+                "remote_port": second_remote.name,
+            },
+        ]
+        cache.set(
+            object.__new__(SyncCablesView).get_cache_key(page, "links", "default"),
+            {"links": rows, "snapshot_token": "vc-collapse"},
+            timeout=300,
+        )
+
+        post_data = {
+            "server_key": "default",
+            "origin_device_id": page.pk,
+            "select": ["11", "12"],
+        }
+        # What the member-verify repaint would post back: both rows now name the member's port.
+        for row_id, remote in (("11", first_remote), ("12", second_remote)):
+            post_data.update(
+                {
+                    f"device_selection_{row_id}": member.pk,
+                    f"expected_local_id_{row_id}": member_local.pk,
+                    f"expected_local_device_id_{row_id}": member.pk,
+                    f"expected_remote_id_{row_id}": remote.pk,
+                    f"expected_remote_device_id_{row_id}": remote_device.pk,
+                }
+            )
+
+        response = client.post(
+            reverse("plugins:netbox_librenms_plugin:sync_device_cables", args=[page.pk]),
+            data=post_data,
+            HTTP_HX_REQUEST="true",
+        )
+
+        assert response.status_code == 200
+        assert "same cable endpoint" in response.content.decode()
+        assert Cable.objects.count() == 0
+
     @pytest.mark.parametrize("malformed", [[None], "not-a-dict"])
-    def test_picker_search_fails_closed_on_malformed_cached_rows(self, malformed):
+    def test_picker_search_survives_a_malformed_cached_snapshot(self, malformed):
+        """The search fragment never reads the snapshot, so a corrupt one cannot break it.
+
+        Purging the corrupt entry is the job of the readers that consume it (see the modal
+        render and the verify path); see also
+        ``test_search_fragment_does_not_read_the_cable_snapshot``.
+        """
         from django.core.cache import cache
         from django.urls import reverse
 
         from netbox_librenms_plugin.views.sync.cables import SyncCablesView
 
         device, (csp,), _ = make_serial_device("picker-malformed-cache", csp_names=["ttyS1"])
+        target = make_device("picker-malformed-cache-target")
         cache_key = object.__new__(SyncCablesView).get_cache_key(device, "links", "default")
         cached = {"links": malformed} if isinstance(malformed, list) else malformed
         cache.set(cache_key, cached, timeout=300)
@@ -2100,13 +2190,13 @@ class TestRemotePickerEndpoint:
                 "row_id": f"serial:{csp.pk}",
                 "server_key": "default",
                 "action": "search",
-                "q": "none",
+                "q": target.name,
             },
             HTTP_HX_REQUEST="true",
         )
 
         assert response.status_code == 200
-        assert cache.get(cache_key) is None
+        assert target.name in response.content.decode()
 
 
 # ---------------------------------------------------------------------------
@@ -2707,8 +2797,14 @@ class TestRemotePickerObjectScope:
         assert records[auto_row["local_port_id"]]["can_create_cable"] is True
         assert records[manual_row["local_port_id"]]["can_create_cable"] is False
 
-    def test_first_cable_sync_requires_permission_to_create_the_provenance_tag(self):
-        """Cable permission alone must not authorize creation of a global Tag."""
+    def test_first_cable_sync_bootstraps_the_provenance_tag(self):
+        """Cable permissions alone carry the first sync: the tag is plugin infrastructure.
+
+        Its name and color come from the plugin settings row, so the plugin creates it on first
+        use the same way it creates the ``librenms_id`` custom field. Charging the first syncing
+        user for ``extras.add_tag`` would make cable sync fail for exactly one operator and
+        contradicts the documented permission set (docs/usage_tips/permissions.md).
+        """
         from core.models import ObjectType
         from dcim.models import Cable, ConsolePort, ConsoleServerPort, Device
         from django.apps import apps
@@ -2757,9 +2853,10 @@ class TestRemotePickerObjectScope:
         assert response.status_code == 302
         csp.refresh_from_db()
         cp.refresh_from_db()
-        assert csp.cable_id is None
-        assert cp.cable_id is None
-        assert Tag.objects.filter(name="librenms").exists() is False
+        assert csp.cable_id is not None
+        assert csp.cable_id == cp.cable_id
+        tag = Tag.objects.get(name="librenms")
+        assert list(Cable.objects.get(pk=csp.cable_id).tags.all()) == [tag]
 
     def test_verify_uses_the_selected_member_and_hides_an_unauthorized_action(self):
         """The VC repaint and writer must use the same permission-scoped termination."""

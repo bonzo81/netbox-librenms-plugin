@@ -2795,11 +2795,12 @@ class CableRemotePickerView(BaseCableTableView):
                 )
             return HttpResponse("Unknown picker action.", status=400)
 
+        # Only the modal render needs the row: the fragments above carry `source` in their URLs
+        # and run per keystroke, so they never read the snapshot.
         cache_key, cached = self._cache_state(obj, server_key)
         rows = self._snapshot_rows(cached, cache_key)
         row = next((candidate for candidate in rows or [] if candidate.get("row_id") == row_id), None)
-        # Only the modal render needs the row (fragments carry `source` in their URLs): on a
-        # missing/malformed snapshot, rebuild it instead of dead-ending on an expired-cache
+        # On a missing/malformed snapshot, rebuild it instead of dead-ending on an expired-cache
         # warning. A valid snapshot with an unknown row ID is authoritative and must not let a
         # forged ID trigger fresh LibreNMS requests.
         if rows is None:

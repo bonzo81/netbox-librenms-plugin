@@ -574,7 +574,7 @@ class TestDeleteNetBoxInterfacesPost:
 
 class TestCablesExceptionPath:
     def test_exception_hits_147_to_149(self):
-        """Lines 147-149: logger.exception + invalid.append when _passthrough_atomic used."""
+        """logger.exception + failed.append when _passthrough_atomic is used."""
         from netbox_librenms_plugin.views.sync.cables import SyncCablesView
 
         v = object.__new__(SyncCablesView)
@@ -590,7 +590,7 @@ class TestCablesExceptionPath:
             mt.atomic = _pa
             results = v.process_interface_sync([{"row_id": "eth_x"}], [])
 
-        assert "eth_x" in results["invalid"]
+        assert "eth_x" in results["failed"]
 
 
 # ===========================================================================
