@@ -2644,8 +2644,9 @@ class TestGatedViewsRefuseOutOfScopeObjects:
         view = SyncCablesView()
         view.setup(self._request(user, {"server_key": "default"}))
 
-        result = view.handle_serial_cable_creation(
+        result = view.handle_cable_creation(
             {
+                "_source": "serial",
                 "local_port": "ttyS1",
                 "netbox_local_interface_id": csp.pk,
                 "netbox_remote_interface_id": cp.pk,

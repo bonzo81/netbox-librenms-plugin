@@ -79,6 +79,7 @@ class TestLibreNMSAPIInit:
         api = LibreNMSAPI(server_key="ghost")
         assert api.server_key == "default"
 
+    @pytest.mark.django_db  # an unset key falls back to the stored selected_server, which is a DB read
     def test_init_non_string_server_key_falls_back_cleanly(self, mock_librenms_config):
         """An unhashable non-string server_key (e.g. a list) is treated as unset, not raised on at the dict membership check."""
         from netbox_librenms_plugin.librenms_api import LibreNMSAPI

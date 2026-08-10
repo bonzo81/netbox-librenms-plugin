@@ -532,6 +532,7 @@ class TestSerialDeviceIdPreserved:
 
         from netbox_librenms_plugin.tables.cables import VCCableTable
         from netbox_librenms_plugin.tests.conftest import make_virtual_chassis
+        from netbox_librenms_plugin.utils import assign_cable_row_ids
 
         viewed, _, _ = make_serial_device("serial-vc-viewed")
         owner, (csp,), _ = make_serial_device("serial-vc-owner", csp_names=["ttyS1"])
@@ -542,7 +543,7 @@ class TestSerialDeviceIdPreserved:
             "local_port": csp.name,
             "local_port_id": "serial:501",
         }
-        table = VCCableTable([row], device=viewed)
+        table = VCCableTable(assign_cable_row_ids([row]), device=viewed)
         request = RequestFactory().get("/")
 
         html = table.as_html(request)
@@ -2020,7 +2021,7 @@ class TestCableEnrichment:
     tag (so the plugin can later recognise/own its own cables for the planned DCIM remodel),
     a configured color + description carrying the server key, and the REMOTE device's tenant.
     Driven end-to-end against real ConsoleServerPort / ConsolePort / Tenant rows through
-    ``handle_serial_cable_creation`` → ``create_cable`` (the write point shared with the
+    ``handle_cable_creation`` → ``create_cable`` (the write point shared with the
     non-serial Interface↔Interface path).
     """
 
@@ -2036,7 +2037,7 @@ class TestCableEnrichment:
             "netbox_local_interface_id": csp.pk,
             "netbox_remote_interface_id": cp.pk,
         }
-        return sync.handle_serial_cable_creation(link, {"device_id": csp.device_id})
+        return sync.handle_cable_creation(link, {"device_id": csp.device_id})
 
     def test_created_cable_carries_tag_color_description_and_remote_tenant(self):
         from dcim.models import Cable

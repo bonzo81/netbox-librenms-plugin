@@ -74,19 +74,24 @@ class TestSingleCableVerifyView:
     @pytest.mark.django_db
     @patch("netbox_librenms_plugin.views.base.cables_view.get_librenms_sync_device")
     @patch("netbox_librenms_plugin.views.base.cables_view.cache")
-    def test_vc_no_resolvable_sync_device_returns_empty_row(self, mock_cache, mock_sync):
-        """VC where get_librenms_sync_device returns None -> empty row, no crash."""
+    def test_vc_no_resolvable_sync_device_falls_back_to_the_page_device(self, mock_cache, mock_sync):
+        """VC where get_librenms_sync_device returns None: read the page device's own snapshot.
+
+        The page device was resolved through a restricted queryset, so falling back to it keeps
+        the cables tab populated instead of blanking a chassis whose sync member is unresolvable.
+        """
         device = _real_vc_device("cbl-nosync")
         mock_sync.return_value = None
+        mock_cache.get.return_value = None
         view, request = _real_verify_view(
-            SingleCableVerifyView, {"device_id": device.pk, "local_port_id": "42"}, _verify_superuser("cbl-nosync")
+            SingleCableVerifyView, {"device_id": device.pk, "row_id": "42"}, _verify_superuser("cbl-nosync")
         )
         response = view.post(request)
 
         data = json.loads(response.content)
         assert data["status"] == "success"
         assert data["formatted_row"]["cable_status"] == "Missing Ports"
-        mock_cache.get.assert_not_called()
+        mock_cache.get.assert_called_once_with(view.get_cache_key(device, "links", "default"))
 
     @pytest.mark.django_db
     @patch("netbox_librenms_plugin.views.base.cables_view.get_librenms_sync_device")

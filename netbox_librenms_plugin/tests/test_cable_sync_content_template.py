@@ -120,6 +120,7 @@ class TestCableSyncContentTemplateMigratedMode:
 
         from netbox_librenms_plugin.tables.cables import LibreNMSCableTable
         from netbox_librenms_plugin.tests.conftest import make_device
+        from netbox_librenms_plugin.utils import assign_cable_row_ids
 
         device = make_device("cable-picker-a11y-dev")
         row = {
@@ -128,7 +129,7 @@ class TestCableSyncContentTemplateMigratedMode:
             "device_id": device.id,
             "picker_url": "/plugins/librenms_plugin/picker/1/",
         }
-        table = LibreNMSCableTable([row], device=device)
+        table = LibreNMSCableTable(assign_cable_row_ids([row]), device=device)
         request = RequestFactory().get("/")
         RequestConfig(request).configure(table)
 
