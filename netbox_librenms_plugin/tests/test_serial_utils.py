@@ -124,6 +124,7 @@ class TestMapSensorsToSerialLinks:
         from netbox_librenms_plugin.serial_utils import map_sensors_to_serial_links
         from netbox_librenms_plugin.tables.cables import LibreNMSCableTable
         from netbox_librenms_plugin.tests.conftest import make_device
+        from netbox_librenms_plugin.utils import assign_cable_row_ids
 
         dev = make_device("serial-tbl-dev")
         rows = map_sensors_to_serial_links(
@@ -140,7 +141,8 @@ class TestMapSensorsToSerialLinks:
             ],
             device_id=dev.id,
         )
-        table = LibreNMSCableTable(rows, device=dev)
+        # The cable view assigns row identities before rendering; the table trusts them.
+        table = LibreNMSCableTable(assign_cable_row_ids(rows), device=dev)
         request = RequestFactory().get("/")
         RequestConfig(request).configure(table)
         html = table.as_html(request)  # evaluates row_attrs (record["device_id"]) per row
@@ -325,11 +327,12 @@ class TestMapSensorsMalformedRows:
         from netbox_librenms_plugin.serial_utils import map_sensors_to_serial_links
         from netbox_librenms_plugin.tables.cables import LibreNMSCableTable
         from netbox_librenms_plugin.tests.conftest import make_device
+        from netbox_librenms_plugin.utils import assign_cable_row_ids
 
         device = make_device("serial-action-button")
         rows = map_sensors_to_serial_links([self._valid(sid=7008)], device_id=device.pk)
         rows[0]["can_create_cable"] = True
-        table = LibreNMSCableTable(rows, device=device)
+        table = LibreNMSCableTable(assign_cable_row_ids(rows), device=device)
         request = RequestFactory().get("/")
         RequestConfig(request).configure(table)
 

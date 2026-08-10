@@ -114,6 +114,7 @@ class TestVCCableTableMemberQueryCount:
 
         from dcim.models import VirtualChassis
         from netbox_librenms_plugin.tables.cables import VCCableTable
+        from netbox_librenms_plugin.utils import assign_cable_row_ids
 
         m1 = _make_device("vc-cable-m1", "c1")
         vc = VirtualChassis.objects.create(name="vc-cables")
@@ -130,11 +131,13 @@ class TestVCCableTableMemberQueryCount:
             for i in range(1, 6)  # 5 rows
         ]
         # Build the table OUTSIDE the capture so the one-time member fetch isn't counted.
+        # The view assigns row identities before the table renders; do the same here.
+        rows = assign_cable_row_ids(rows)
         table = VCCableTable(rows, device=m1)
 
         with CaptureQueriesContext(connection) as ctx:
             for row in rows:
-                table.render_device_selection(row["local_port_id"], row)
+                table.render_device_selection(row["row_id"], row)
 
         member_queries = [q for q in ctx.captured_queries if "dcim_device" in q["sql"].lower()]
         # Every row renders from the cached member set → no per-row member queries.

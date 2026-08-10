@@ -7,7 +7,6 @@ from netbox.tables.columns import ToggleColumn
 from utilities.paginator import EnhancedPaginator
 
 from netbox_librenms_plugin.utils import (
-    assign_cable_row_ids,
     get_table_paginate_count,
     oob_badge_html,
     render_vc_member_options,
@@ -91,12 +90,18 @@ class LibreNMSCableTable(tables.Table):
     )
 
     def __init__(self, *args, device=None, **kwargs):
-        """Initialize table with optional device context."""
-        if args:
-            normalized = assign_cable_row_ids(list(args[0]))
-            args = (normalized or [], *args[1:])
-        elif "data" in kwargs:
-            kwargs["data"] = assign_cable_row_ids(list(kwargs["data"])) or []
+        """
+        Initialize table with optional device context.
+
+        Rows arrive with the ``row_id`` the cable view assigned to the snapshot. Re-deriving it
+        here would compute uniqueness over a list the view may already have filtered, so a row
+        could be rendered under one identity and submitted under another.
+
+        Args:
+            *args: Positional table arguments (the row data).
+            device: The page device, used for the virtual-chassis member selector.
+            **kwargs: Keyword table arguments.
+        """
         self.device = device
         super().__init__(*args, **kwargs)
         self.tab = "cables"

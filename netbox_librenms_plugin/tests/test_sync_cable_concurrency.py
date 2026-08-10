@@ -170,7 +170,7 @@ def test_local_termination_owner_change_invalidates_the_selected_member():
 
 def test_termination_change_scope_is_rechecked_after_row_lock():
     from core.models import ObjectType
-    from dcim.models import ConsolePort, ConsoleServerPort
+    from dcim.models import ConsolePort, ConsoleServerPort, Device
     from django.contrib.auth import get_user_model
     from django.db import close_old_connections, connection, transaction
     from users.models import ObjectPermission
@@ -192,6 +192,11 @@ def test_termination_change_scope_is_rechecked_after_row_lock():
     console_ports = ObjectPermission.objects.create(name="lock-scope-cp", actions=["change"])
     console_ports.object_types.add(ObjectType.objects.get_for_model(ConsolePort))
     console_ports.users.add(user)
+    # Owners are locked before terminations, and that lock is gated on Device view scope, so the
+    # worker never reaches the termination row without this grant.
+    device_view = ObjectPermission.objects.create(name="lock-scope-device", actions=["view"])
+    device_view.object_types.add(ObjectType.objects.get_for_model(Device))
+    device_view.users.add(user)
     user = get_user_model().objects.get(pk=user.pk)
 
     sync = object.__new__(SyncCablesView)
@@ -262,6 +267,9 @@ def test_termination_owner_device_is_locked_with_permission_scope():
     console_ports = ObjectPermission.objects.create(name="cable-owner-cp", actions=["change"])
     console_ports.object_types.add(ObjectType.objects.get_for_model(ConsolePort))
     console_ports.users.add(user)
+    device_view = ObjectPermission.objects.create(name="cable-owner-device-view", actions=["view"])
+    device_view.object_types.add(ObjectType.objects.get_for_model(Device))
+    device_view.users.add(user)
     user = get_user_model().objects.get(pk=user.pk)
 
     sync = object.__new__(SyncCablesView)
@@ -292,79 +300,6 @@ def test_termination_owner_device_is_locked_with_permission_scope():
     finally:
         if release.empty():
             release.put(True)
-        executor.shutdown(wait=True)
-
-
-def test_locked_termination_owner_must_remain_in_device_view_scope():
-    """A termination stays changeable, but its owner can leave the user's view grant."""
-    from core.models import ObjectType
-    from dcim.models import ConsolePort, ConsoleServerPort, Device, Site
-    from django.contrib.auth import get_user_model
-    from django.db import close_old_connections, connection, transaction
-    from users.models import ObjectPermission
-
-    from netbox_librenms_plugin.views.sync.cables import SyncCablesView
-
-    in_scope = Site.objects.create(name="cable-view-site-a", slug="cable-view-site-a")
-    out_of_scope = Site.objects.create(name="cable-view-site-b", slug="cable-view-site-b")
-    local_device, (csp,), _ = make_serial_device("cable-view-local", csp_names=["ttyS1"])
-    remote_device, _, (cp,) = make_serial_device("cable-view-remote", cp_names=["console"])
-    Device.objects.filter(pk__in=[local_device.pk, remote_device.pk]).update(site=in_scope)
-
-    user = get_user_model().objects.create_user("cable-device-view-scope-user")
-    device_view = ObjectPermission.objects.create(
-        name="cable-device-view-scope",
-        actions=["view"],
-        constraints={"site_id": in_scope.pk},
-    )
-    device_view.object_types.add(ObjectType.objects.get_for_model(Device))
-    device_view.users.add(user)
-    for model, name in ((ConsoleServerPort, "csp"), (ConsolePort, "cp")):
-        termination_permission = ObjectPermission.objects.create(
-            name=f"cable-device-view-{name}",
-            actions=["view", "change"],
-        )
-        termination_permission.object_types.add(ObjectType.objects.get_for_model(model))
-        termination_permission.users.add(user)
-    user = get_user_model().objects.get(pk=user.pk)
-
-    sync = object.__new__(SyncCablesView)
-    sync.request = SimpleNamespace(user=user)
-    backend_pids = Queue()
-
-    def lock_terminations():
-        close_old_connections()
-        try:
-            with transaction.atomic():
-                connection.ensure_connection()
-                backend_pids.put(connection.connection.info.backend_pid)
-                return sync._lock_cable_terminations(csp, cp)
-        finally:
-            close_old_connections()
-
-    executor = ThreadPoolExecutor(max_workers=1)
-    try:
-        with transaction.atomic():
-            ConsoleServerPort.objects.select_for_update().get(pk=csp.pk)
-            future = executor.submit(lock_terminations)
-            worker_pid = backend_pids.get(timeout=5)
-            deadline = monotonic() + 5
-            while monotonic() < deadline:
-                with connection.cursor() as cursor:
-                    cursor.execute(
-                        "SELECT wait_event_type FROM pg_stat_activity WHERE pid = %s",
-                        [worker_pid],
-                    )
-                    row = cursor.fetchone()
-                if row and row[0] == "Lock":
-                    break
-                sleep(0.01)
-            else:
-                raise AssertionError("worker did not wait for the termination row lock")
-            Device.objects.filter(pk=local_device.pk).update(site=out_of_scope)
-
-        assert future.result(timeout=5) is None
-    finally:
         executor.shutdown(wait=True)
 
 

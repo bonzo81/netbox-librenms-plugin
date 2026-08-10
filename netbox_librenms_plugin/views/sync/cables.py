@@ -298,15 +298,17 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libre
             grouped.setdefault(type(termination), set()).add(termination.pk)
 
         # Check the submitted candidates before taking locks so a forged request cannot lock
-        # rows that are outside its current object scope. The same checks run again after the
-        # rows are locked, where they protect mutable constraint-based grants.
+        # rows that are outside its current object scope. The same check runs again after the
+        # rows are locked, where it protects mutable constraint-based grants. Cabling a
+        # termination is a write, so change scope is what governs it: the POST gate does not ask
+        # for view on the termination models either, and demanding it here would lock out a
+        # change-only grant.
         for model, requested_ids in grouped.items():
-            for action in ("view", "change"):
-                permitted_ids = set(
-                    self.restricted_queryset(model, action).filter(pk__in=requested_ids).values_list("pk", flat=True)
-                )
-                if permitted_ids != requested_ids:
-                    return None
+            permitted_ids = set(
+                self.restricted_queryset(model, "change").filter(pk__in=requested_ids).values_list("pk", flat=True)
+            )
+            if permitted_ids != requested_ids:
+                return None
 
         # Every cable writer locks Device owners before Interface/CSP/CP rows. Parent-child
         # relationship sync uses the same order, so the two features cannot form a Device ↔
@@ -402,12 +404,11 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libre
             return None
 
         for model, requested_ids in grouped.items():
-            for action in ("view", "change"):
-                permitted_after_lock = set(
-                    self.restricted_queryset(model, action).filter(pk__in=requested_ids).values_list("pk", flat=True)
-                )
-                if permitted_after_lock != requested_ids:
-                    return None
+            permitted_after_lock = set(
+                self.restricted_queryset(model, "change").filter(pk__in=requested_ids).values_list("pk", flat=True)
+            )
+            if permitted_after_lock != requested_ids:
+                return None
 
         return (
             locked_local,

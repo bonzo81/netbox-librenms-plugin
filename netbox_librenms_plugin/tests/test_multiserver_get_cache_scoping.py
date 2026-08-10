@@ -13,11 +13,10 @@ client without contacting a server.
 from unittest.mock import MagicMock, patch
 
 import pytest
-from django.contrib.auth import get_user_model
 from django.core.cache import cache as real_cache
 from django.test import RequestFactory
 
-from netbox_librenms_plugin.tests.conftest import make_device, make_interface, make_ip
+from netbox_librenms_plugin.tests.conftest import make_device, make_interface, make_ip, make_superuser
 
 # A real cache backend that does NOT expose .ttl() (Django's default LocMemCache, like
 # Memcached/DB backends — only django-redis exposes ttl()). Used to prove the cable tab's
@@ -26,8 +25,14 @@ _NO_TTL_CACHE = {"default": {"BACKEND": "django.core.cache.backends.locmem.LocMe
 
 
 def _get_request(server_key):
+    """Return an authorized GET render request for *server_key*.
+
+    These tests are about cache scoping. The tabs resolve every object through the request's view
+    scope, so an unprivileged user renders an empty table for permission reasons and would hide
+    the scoping regression under a passing assertion.
+    """
     request = RequestFactory().get("/", {"server_key": server_key})
-    request.user = get_user_model().objects.first() or get_user_model().objects.create_user(username="ms-tester")
+    request.user = make_superuser()
     return request
 
 
