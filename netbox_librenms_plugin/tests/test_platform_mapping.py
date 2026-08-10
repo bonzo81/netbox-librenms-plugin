@@ -7,6 +7,8 @@ TDD: these tests are written before implementation.
 
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 
 def _set_fk_cache(instance, field_name, value):
     """Set a FK field value directly via Django's _state.fields_cache, bypassing descriptor validation."""
@@ -315,194 +317,120 @@ class TestToYamlOnAllMappingModels:
 # =============================================================================
 
 
+@pytest.mark.django_db
 class TestFindMatchingPlatformWithMapping:
     """find_matching_platform checks PlatformMapping before direct name match."""
 
+    @staticmethod
+    def _platform(name, slug=None):
+        from dcim.models import Platform
+        from django.utils.text import slugify
+
+        return Platform.objects.create(name=name, slug=slug or slugify(name) or name.lower())
+
+    @staticmethod
+    def _duplicate_mappings(librenms_os, platform):
+        """Insert case-variant mappings for one OS string.
+
+        ``PlatformMapping.clean()`` lowercases ``librenms_os`` and the column is unique, so
+        ordinary saves cannot produce this. bulk_create bypasses full_clean, standing in for
+        rows that predate the normalisation — the only way the ambiguity guard is reachable.
+        """
+        from netbox_librenms_plugin.models import PlatformMapping
+
+        PlatformMapping.objects.bulk_create(
+            [
+                PlatformMapping(librenms_os=librenms_os.lower(), netbox_platform=platform),
+                PlatformMapping(librenms_os=librenms_os.upper(), netbox_platform=platform),
+            ]
+        )
+
     def test_platform_mapping_used_as_fallback_when_no_name_match(self):
         """When no Platform name matches, PlatformMapping is used as fallback."""
+        from netbox_librenms_plugin.models import PlatformMapping
         from netbox_librenms_plugin.utils import find_matching_platform
 
-        mock_mapped_platform = MagicMock(name="mapped_platform")
-        mock_mapping = MagicMock()
-        mock_mapping.netbox_platform = mock_mapped_platform
+        mapped = self._platform("Cisco IOS")
+        PlatformMapping.objects.create(librenms_os="ios", netbox_platform=mapped)
 
-        mock_pm_class = MagicMock()
-        mock_pm_class.objects.get.return_value = mock_mapping
-        mock_pm_class.DoesNotExist = type("DoesNotExist", (Exception,), {})
-
-        mock_platform_model = MagicMock()
-        mock_platform_model.DoesNotExist = type("DoesNotExist", (Exception,), {})
-        mock_platform_model.objects.get.side_effect = mock_platform_model.DoesNotExist
-
-        with (
-            patch("netbox_librenms_plugin.models.PlatformMapping", mock_pm_class),
-            patch("dcim.models.Platform", mock_platform_model),
-        ):
-            result = find_matching_platform("ios")
+        result = find_matching_platform("ios")
 
         assert result["found"] is True
-        assert result["platform"] is mock_mapped_platform
+        assert result["platform"] == mapped
         assert result["match_type"] == "mapping"
 
     def test_falls_back_to_name_match_when_no_platform_mapping(self):
         """When no PlatformMapping exists, falls back to exact Platform name match."""
         from netbox_librenms_plugin.utils import find_matching_platform
 
-        mock_platform = MagicMock()
+        platform = self._platform("ios")
 
-        mock_pm_class = MagicMock()
-        mock_pm_class.DoesNotExist = type("DoesNotExist", (Exception,), {})
-        mock_pm_class.objects.get.side_effect = mock_pm_class.DoesNotExist
-
-        mock_platform_model = MagicMock()
-        mock_platform_model.objects.get.return_value = mock_platform
-
-        with (
-            patch("netbox_librenms_plugin.models.PlatformMapping", mock_pm_class),
-            patch("dcim.models.Platform", mock_platform_model),
-        ):
-            result = find_matching_platform("ios")
+        result = find_matching_platform("ios")
 
         assert result["found"] is True
-        assert result["platform"] is mock_platform
+        assert result["platform"] == platform
         assert result["match_type"] == "exact"
 
     def test_returns_not_found_when_neither_mapping_nor_platform(self):
         """Returns found=False when neither PlatformMapping nor Platform name match exists."""
         from netbox_librenms_plugin.utils import find_matching_platform
 
-        DoesNotExist = type("DoesNotExist", (Exception,), {})
-
-        mock_pm_class = MagicMock()
-        mock_pm_class.DoesNotExist = DoesNotExist
-        mock_pm_class.objects.get.side_effect = DoesNotExist
-
-        mock_platform_model = MagicMock()
-        mock_platform_model.DoesNotExist = DoesNotExist
-        mock_platform_model.objects.get.side_effect = DoesNotExist
-
-        with (
-            patch("netbox_librenms_plugin.models.PlatformMapping", mock_pm_class),
-            patch("dcim.models.Platform", mock_platform_model),
-        ):
-            result = find_matching_platform("unknown_os")
+        result = find_matching_platform("unknown_os")
 
         assert result["found"] is False
         assert result["platform"] is None
 
     def test_multiple_platform_mappings_returns_ambiguous(self):
-        """When exact name fails and PlatformMapping.MultipleObjectsReturned, returns ambiguous."""
+        """Case-variant mapping rows for one OS resolve to nothing rather than an arbitrary pick."""
         from netbox_librenms_plugin.utils import find_matching_platform
 
-        DoesNotExist = type("DoesNotExist", (Exception,), {})
-        MultipleObjectsReturned = type("MultipleObjectsReturned", (Exception,), {})
+        self._duplicate_mappings("ios", self._platform("Cisco IOS"))
 
-        mock_pm_class = MagicMock()
-        mock_pm_class.DoesNotExist = DoesNotExist
-        mock_pm_class.MultipleObjectsReturned = MultipleObjectsReturned
-        mock_pm_class.objects.get.side_effect = MultipleObjectsReturned
-
-        mock_platform_model = MagicMock()
-        mock_platform_model.DoesNotExist = DoesNotExist
-        mock_platform_model.objects.get.side_effect = DoesNotExist
-
-        with (
-            patch("netbox_librenms_plugin.models.PlatformMapping", mock_pm_class),
-            patch("dcim.models.Platform", mock_platform_model),
-        ):
-            result = find_matching_platform("ios")
+        result = find_matching_platform("ios")
 
         assert result == {"found": False, "platform": None, "match_type": "ambiguous", "ambiguity_source": "mapping"}
 
     def test_exact_platform_wins_over_existing_mapping(self):
         """When a single Platform exists for the OS string, the exact match wins even if a PlatformMapping also exists."""
+        from netbox_librenms_plugin.models import PlatformMapping
         from netbox_librenms_plugin.utils import find_matching_platform
 
-        DoesNotExist = type("DoesNotExist", (Exception,), {})
-        MultipleObjectsReturned = type("MultipleObjectsReturned", (Exception,), {})
+        exact = self._platform("ios")
+        other = self._platform("Cisco IOS XE")
+        PlatformMapping.objects.create(librenms_os="ios", netbox_platform=other)
 
-        # Both an exact Platform and a PlatformMapping exist for "ios" — they would
-        # resolve to *different* Platform objects. Exact match must win; the mapping
-        # branch must never be consulted.
-        exact_platform = MagicMock(name="exact_platform")
-        mapping_platform = MagicMock(name="mapping_platform")
-        mapping = MagicMock(netbox_platform=mapping_platform)
-
-        mock_pm_class = MagicMock()
-        mock_pm_class.DoesNotExist = DoesNotExist
-        mock_pm_class.MultipleObjectsReturned = MultipleObjectsReturned
-        mock_pm_class.objects.get.return_value = mapping
-
-        mock_platform_model = MagicMock()
-        mock_platform_model.DoesNotExist = DoesNotExist
-        mock_platform_model.MultipleObjectsReturned = MultipleObjectsReturned
-        mock_platform_model.objects.get.return_value = exact_platform
-
-        with (
-            patch("netbox_librenms_plugin.models.PlatformMapping", mock_pm_class),
-            patch("dcim.models.Platform", mock_platform_model),
-        ):
-            result = find_matching_platform("ios")
+        result = find_matching_platform("ios")
 
         assert result["found"] is True
-        assert result["platform"] is exact_platform
+        assert result["platform"] == exact
         assert result["match_type"] == "exact"
-        # Mapping must not be consulted when exact resolves cleanly.
-        mock_pm_class.objects.get.assert_not_called()
 
     def test_ambiguous_platform_falls_through_to_mapping_resolution(self):
-        """When Platform.MultipleObjectsReturned fires, PlatformMapping is consulted; if it resolves, mapping wins (not 'ambiguous')."""
+        """Two Platforms share the name case-insensitively; an explicit mapping breaks the tie."""
+        from netbox_librenms_plugin.models import PlatformMapping
         from netbox_librenms_plugin.utils import find_matching_platform
 
-        DoesNotExist = type("DoesNotExist", (Exception,), {})
-        MultipleObjectsReturned = type("MultipleObjectsReturned", (Exception,), {})
+        # Platform.name is unique case-SENSITIVELY, so these two coexist and name__iexact
+        # matches both — the state the mapping fallback exists to resolve.
+        self._platform("ios")
+        self._platform("IOS", slug="ios-upper")  # slug is unique; only the NAME collides
+        mapped = self._platform("Cisco IOS")
+        PlatformMapping.objects.create(librenms_os="ios", netbox_platform=mapped)
 
-        mapping_platform = MagicMock(name="mapping_platform")
-        mapping = MagicMock(netbox_platform=mapping_platform)
-
-        mock_pm_class = MagicMock()
-        mock_pm_class.DoesNotExist = DoesNotExist
-        mock_pm_class.MultipleObjectsReturned = MultipleObjectsReturned
-        mock_pm_class.objects.get.return_value = mapping
-
-        mock_platform_model = MagicMock()
-        mock_platform_model.DoesNotExist = DoesNotExist
-        mock_platform_model.MultipleObjectsReturned = MultipleObjectsReturned
-        # Exact lookup is ambiguous — but mapping resolves cleanly, so mapping wins.
-        mock_platform_model.objects.get.side_effect = MultipleObjectsReturned
-
-        with (
-            patch("netbox_librenms_plugin.models.PlatformMapping", mock_pm_class),
-            patch("dcim.models.Platform", mock_platform_model),
-        ):
-            result = find_matching_platform("ios")
+        result = find_matching_platform("ios")
 
         assert result["found"] is True
-        assert result["platform"] is mapping_platform
+        assert result["platform"] == mapped
         assert result["match_type"] == "mapping"
 
     def test_ambiguous_platform_with_no_mapping_returns_platform_ambiguous(self):
-        """When Platform.MultipleObjectsReturned fires and PlatformMapping has no entry, ambiguity_source='platform'."""
+        """Two same-name Platforms and no mapping to disambiguate → ambiguity_source='platform'."""
         from netbox_librenms_plugin.utils import find_matching_platform
 
-        DoesNotExist = type("DoesNotExist", (Exception,), {})
-        MultipleObjectsReturned = type("MultipleObjectsReturned", (Exception,), {})
+        self._platform("ios")
+        self._platform("IOS", slug="ios-upper")  # slug is unique; only the NAME collides
 
-        mock_pm_class = MagicMock()
-        mock_pm_class.DoesNotExist = DoesNotExist
-        mock_pm_class.MultipleObjectsReturned = MultipleObjectsReturned
-        mock_pm_class.objects.get.side_effect = DoesNotExist
-
-        mock_platform_model = MagicMock()
-        mock_platform_model.DoesNotExist = DoesNotExist
-        mock_platform_model.MultipleObjectsReturned = MultipleObjectsReturned
-        mock_platform_model.objects.get.side_effect = MultipleObjectsReturned
-
-        with (
-            patch("netbox_librenms_plugin.models.PlatformMapping", mock_pm_class),
-            patch("dcim.models.Platform", mock_platform_model),
-        ):
-            result = find_matching_platform("ios")
+        result = find_matching_platform("ios")
 
         assert result == {"found": False, "platform": None, "match_type": "ambiguous", "ambiguity_source": "platform"}
 

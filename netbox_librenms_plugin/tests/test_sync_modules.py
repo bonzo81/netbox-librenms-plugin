@@ -13,6 +13,9 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 
+from netbox_librenms_plugin.tests.view_test_helpers import get as _get, post as _post
+
+
 @contextmanager
 def _patch_build_row_deps(view, match_bay_return=None):
     """Patch all utility imports used by _build_row to isolate bay/type matching tests."""
@@ -748,6 +751,7 @@ class TestMatchModuleBayExactFallback:
             "netbox_librenms_plugin.utils.apply_normalization_rules", side_effect=lambda name, scope, **kw: name
         ):
             with patch("netbox_librenms_plugin.models.ModuleBayMapping") as mock_mbm:
+                mock_mbm.objects.restrict.return_value = mock_mbm.objects
                 mock_mbm.objects.filter.return_value.first.return_value = None
 
                 # Also patch _lookup_regex_bay_mapping to return None
@@ -776,6 +780,7 @@ class TestMatchModuleBayExactFallback:
             "netbox_librenms_plugin.utils.apply_normalization_rules", side_effect=lambda name, scope, **kw: name
         ):
             with patch("netbox_librenms_plugin.models.ModuleBayMapping") as mock_mbm:
+                mock_mbm.objects.restrict.return_value = mock_mbm.objects
                 mock_mbm.objects.filter.return_value.first.return_value = None
                 with patch.object(BaseModuleTableView, "_lookup_regex_bay_mapping", return_value=None):
                     with patch.object(BaseModuleTableView, "_match_bay_by_position", return_value=None):
@@ -801,6 +806,7 @@ class TestMatchModuleBayExactFallback:
             "netbox_librenms_plugin.utils.apply_normalization_rules", side_effect=lambda name, scope, **kw: name
         ):
             with patch("netbox_librenms_plugin.models.ModuleBayMapping") as mock_mbm:
+                mock_mbm.objects.restrict.return_value = mock_mbm.objects
                 mock_mbm.objects.filter.return_value.first.return_value = None
                 with patch.object(BaseModuleTableView, "_lookup_regex_bay_mapping", return_value=None):
                     with patch.object(BaseModuleTableView, "_match_bay_by_position", return_value=None):
@@ -843,6 +849,7 @@ class TestInstallSingleStatus:
         module_types = {"WS-X4748": mt}
 
         ModuleBay = MagicMock()
+        ModuleBay.objects.restrict.return_value = ModuleBay.objects
         ModuleBay.objects.filter.return_value.select_related.return_value = [bay]
         # Support select_for_update chain used in _install_single
         locked_bay = _bay("Slot 1")
@@ -1047,6 +1054,7 @@ class TestInstallSingleStatus:
 
         bay.name = "SFP 1"
         bay.module_id = None
+        ModuleBay.objects.restrict.return_value = ModuleBay.objects
         ModuleBay.objects.filter.return_value.select_related.return_value = [bay]
 
         locked_bay = _bay("SFP 1")
@@ -1100,6 +1108,7 @@ class TestInstallSingleStatus:
         )
 
         # No bays under parent module scope.
+        ModuleBay.objects.restrict.return_value = ModuleBay.objects
         ModuleBay.objects.filter.return_value.select_related.return_value = []
         ModuleBay.objects.filter.return_value.first.return_value = None
 
@@ -1259,6 +1268,7 @@ class TestAdoptExistingTemplateInterfaces:
             patch("netbox_librenms_plugin.views.sync.modules.transaction") as mock_tx,
         ):
             mock_tx.atomic = noop_atomic
+            mock_interface_model.objects.restrict.return_value = mock_interface_model.objects
             mock_interface_model.objects.filter.return_value = [iface_a, iface_b]
             result = _adopt_existing_template_interfaces(device, module)
 
@@ -1304,6 +1314,7 @@ class TestAdoptExistingTemplateInterfaces:
             patch("netbox_librenms_plugin.views.sync.modules.transaction") as mock_tx,
         ):
             mock_tx.atomic = tracking_atomic
+            mock_interface_model.objects.restrict.return_value = mock_interface_model.objects
             mock_interface_model.objects.filter.return_value = [iface_a, iface_b]
 
             try:
@@ -1344,6 +1355,7 @@ class TestAdoptExistingTemplateInterfaces:
             patch("netbox_librenms_plugin.views.sync.modules.transaction") as mock_tx,
         ):
             mock_tx.atomic = noop_atomic
+            mock_interface_model.objects.restrict.return_value = mock_interface_model.objects
             mock_interface_model.objects.filter.return_value = [iface]
             result = _adopt_existing_template_interfaces(device, module)
 
@@ -1378,6 +1390,7 @@ class TestAdoptExistingTemplateInterfaces:
             patch("netbox_librenms_plugin.views.sync.modules.get_librenms_device_id", return_value=None),
             patch("netbox_librenms_plugin.views.sync.modules.set_librenms_device_id") as mock_set,
         ):
+            mock_interface_model.objects.restrict.return_value = mock_interface_model.objects
             mock_interface_model.objects.filter.side_effect = [by_name_qs, module_qs]
             result = _bind_interface_librenms_id(
                 device,
@@ -1415,6 +1428,7 @@ class TestAdoptExistingTemplateInterfaces:
             patch("netbox_librenms_plugin.views.sync.modules.get_librenms_device_id", return_value=None),
             patch("netbox_librenms_plugin.views.sync.modules.set_librenms_device_id") as mock_set,
         ):
+            mock_interface_model.objects.restrict.return_value = mock_interface_model.objects
             mock_interface_model.objects.filter.side_effect = [by_name_qs, module_qs]
             result = _bind_interface_librenms_id(
                 device,
@@ -1499,6 +1513,7 @@ class TestAdoptExistingTemplateInterfaces:
             patch("netbox_librenms_plugin.views.sync.modules.get_librenms_device_id", return_value=None),
             patch("netbox_librenms_plugin.views.sync.modules.set_librenms_device_id") as mock_set,
         ):
+            mock_interface_model.objects.restrict.return_value = mock_interface_model.objects
             mock_interface_model.objects.filter.return_value = by_name_qs
             result = _bind_interface_librenms_id(
                 device,
@@ -1545,6 +1560,7 @@ class TestAdoptExistingTemplateInterfaces:
             patch("netbox_librenms_plugin.views.sync.modules.get_librenms_device_id", return_value=None),
             patch("netbox_librenms_plugin.views.sync.modules.set_librenms_device_id") as mock_set,
         ):
+            mock_interface_model.objects.restrict.return_value = mock_interface_model.objects
             mock_interface_model.objects.filter.side_effect = [by_name_qs, module_qs]
             result = _bind_interface_librenms_id(
                 device,
@@ -1587,6 +1603,7 @@ class TestAdoptExistingTemplateInterfaces:
             patch("dcim.models.Interface") as mock_interface_model,
             patch("netbox_librenms_plugin.views.sync.modules.find_by_librenms_id", return_value=None),
         ):
+            mock_interface_model.objects.restrict.return_value = mock_interface_model.objects
             mock_interface_model.objects.filter.side_effect = [by_name_qs, module_qs]
             result = _bind_interface_librenms_id(
                 device,
@@ -1740,12 +1757,12 @@ class TestSingleInstallInterfaceBinding:
             yield
 
         mock_qs = MagicMock()
-        mock_qs.get.return_value = module_bay
+        mock_qs.filter.return_value.first.return_value = module_bay
 
         with (
             patch.object(view, "require_all_permissions", return_value=None),
             patch(
-                "netbox_librenms_plugin.views.sync.modules.get_object_or_404",
+                "netbox_librenms_plugin.views.mixins.NetBoxObjectPermissionMixin.restrict_object_or_404",
                 side_effect=[device, module_bay, module_type],
             ),
             patch("netbox_librenms_plugin.views.sync.modules.reverse", return_value="/sync/"),
@@ -1764,6 +1781,8 @@ class TestSingleInstallInterfaceBinding:
         ):
             mock_tx.atomic = noop_atomic
             mock_module_cls.return_value = new_module
+            # The locked re-fetch goes through restrict(user, ...), so hand back the same manager.
+            mock_objects.restrict.return_value = mock_objects
             mock_objects.select_for_update.return_value = mock_qs
             # Mismatched cache context triggers posted fallback path.
             mock_cache.get.return_value = {
@@ -1776,6 +1795,7 @@ class TestSingleInstallInterfaceBinding:
                     }
                 ],
             }
+            view.request = request
             view.post(request, pk=24)
 
         assert any(
@@ -1822,12 +1842,12 @@ class TestSingleInstallInterfaceBinding:
             yield
 
         mock_qs = MagicMock()
-        mock_qs.get.return_value = module_bay
+        mock_qs.filter.return_value.first.return_value = module_bay
 
         with (
             patch.object(view, "require_all_permissions", return_value=None),
             patch(
-                "netbox_librenms_plugin.views.sync.modules.get_object_or_404",
+                "netbox_librenms_plugin.views.mixins.NetBoxObjectPermissionMixin.restrict_object_or_404",
                 side_effect=[device, module_bay, module_type],
             ),
             patch("netbox_librenms_plugin.views.sync.modules.reverse", return_value="/sync/"),
@@ -1845,6 +1865,8 @@ class TestSingleInstallInterfaceBinding:
         ):
             mock_tx.atomic = noop_atomic
             mock_module_cls.return_value = new_module
+            # The locked re-fetch goes through restrict(user, ...), so hand back the same manager.
+            mock_objects.restrict.return_value = mock_objects
             mock_objects.select_for_update.return_value = mock_qs
             mock_cache.get.return_value = {
                 "inventory": [
@@ -1855,6 +1877,7 @@ class TestSingleInstallInterfaceBinding:
                     }
                 ]
             }
+            view.request = request
             view.post(request, pk=24)
 
         mock_bind.assert_called_once()
@@ -1908,12 +1931,12 @@ class TestSingleInstallInterfaceBinding:
             yield
 
         mock_qs = MagicMock()
-        mock_qs.get.return_value = module_bay
+        mock_qs.filter.return_value.first.return_value = module_bay
 
         with (
             patch.object(view, "require_all_permissions", return_value=None),
             patch(
-                "netbox_librenms_plugin.views.sync.modules.get_object_or_404",
+                "netbox_librenms_plugin.views.mixins.NetBoxObjectPermissionMixin.restrict_object_or_404",
                 side_effect=[device, module_bay, module_type],
             ),
             patch("netbox_librenms_plugin.views.sync.modules.reverse", return_value="/sync/"),
@@ -1931,6 +1954,8 @@ class TestSingleInstallInterfaceBinding:
         ):
             mock_tx.atomic = noop_atomic
             mock_module_cls.return_value = new_module
+            # The locked re-fetch goes through restrict(user, ...), so hand back the same manager.
+            mock_objects.restrict.return_value = mock_objects
             mock_objects.select_for_update.return_value = mock_qs
             mock_cache.get.return_value = {
                 "inventory": [
@@ -1941,6 +1966,7 @@ class TestSingleInstallInterfaceBinding:
                     }
                 ]
             }
+            view.request = request
             view.post(request, pk=24)
 
         # The bind must run and be scoped to the active server the blank key fell back to.
@@ -1968,11 +1994,15 @@ class TestSingleInstallInterfaceBinding:
 
         with (
             patch.object(view, "require_all_permissions", return_value=None),
-            patch("netbox_librenms_plugin.views.sync.modules.get_object_or_404", return_value=device),
+            patch(
+                "netbox_librenms_plugin.views.mixins.NetBoxObjectPermissionMixin.restrict_object_or_404",
+                return_value=device,
+            ),
             patch("netbox_librenms_plugin.views.sync.modules.reverse", return_value="/sync/"),
             patch("netbox_librenms_plugin.views.sync.modules.messages") as mock_messages,
             patch("netbox_librenms_plugin.views.sync.modules.redirect") as mock_redirect,
         ):
+            view.request = request
             view.post(request, pk=24)
 
         mock_messages.error.assert_called_once()
@@ -2004,7 +2034,7 @@ class TestSingleInstallInterfaceBinding:
         with (
             patch.object(view, "require_all_permissions", return_value=None),
             patch(
-                "netbox_librenms_plugin.views.sync.modules.get_object_or_404",
+                "netbox_librenms_plugin.views.mixins.NetBoxObjectPermissionMixin.restrict_object_or_404",
                 side_effect=[device, module],
             ),
             patch("netbox_librenms_plugin.views.sync.modules.reverse", return_value="/sync/"),
@@ -2024,6 +2054,7 @@ class TestSingleInstallInterfaceBinding:
                 "inventory": [{"entPhysicalIndex": 77, "_librenms_port_id": 42, "_librenms_ifname": "Te1/1/1"}],
                 "librenms_id": 999,
             }
+            view.request = request
             response = view.post(request, pk=24)
 
         mock_bind.assert_called_once()
@@ -2051,7 +2082,7 @@ class TestSingleInstallInterfaceBinding:
         with (
             patch.object(view, "require_all_permissions", return_value=None),
             patch(
-                "netbox_librenms_plugin.views.sync.modules.get_object_or_404",
+                "netbox_librenms_plugin.views.mixins.NetBoxObjectPermissionMixin.restrict_object_or_404",
                 side_effect=[device, module],
             ),
             patch("netbox_librenms_plugin.views.sync.modules.reverse", return_value="/sync/"),
@@ -2073,6 +2104,7 @@ class TestSingleInstallInterfaceBinding:
                 "inventory": [{"entPhysicalIndex": 78, "_librenms_port_id": 43, "_librenms_ifname": "Te1/1/2"}],
                 "librenms_id": 999,
             }
+            view.request = request
             response = view.post(request, pk=24)
 
         mock_messages.success.assert_called_once()
@@ -2105,7 +2137,7 @@ class TestSingleInstallInterfaceBinding:
         with (
             patch.object(view, "require_all_permissions", return_value=None),
             patch(
-                "netbox_librenms_plugin.views.sync.modules.get_object_or_404",
+                "netbox_librenms_plugin.views.mixins.NetBoxObjectPermissionMixin.restrict_object_or_404",
                 side_effect=[device, module],
             ),
             patch("netbox_librenms_plugin.views.sync.modules.reverse", return_value="/sync/"),
@@ -2127,6 +2159,7 @@ class TestSingleInstallInterfaceBinding:
                 "inventory": [{"entPhysicalIndex": 77, "entPhysicalName": "Slot 1"}],
                 "librenms_id": 999,
             }
+            view.request = request
             response = view.post(request, pk=24)
 
         mock_bind.assert_called_once()
@@ -2157,7 +2190,7 @@ class TestSingleInstallInterfaceBinding:
         with (
             patch.object(view, "require_all_permissions", return_value=None),
             patch(
-                "netbox_librenms_plugin.views.sync.modules.get_object_or_404",
+                "netbox_librenms_plugin.views.mixins.NetBoxObjectPermissionMixin.restrict_object_or_404",
                 side_effect=[device, module],
             ),
             patch("netbox_librenms_plugin.views.sync.modules.reverse", return_value="/sync/"),
@@ -2182,6 +2215,7 @@ class TestSingleInstallInterfaceBinding:
                 "inventory": [{"entPhysicalIndex": 77, "_librenms_port_id": 42, "_librenms_ifname": "Te1/1/1"}],
                 "librenms_id": 999,
             }
+            view.request = request
             response = view.post(request, pk=24)
 
         mock_bind.assert_called_once()
@@ -2219,7 +2253,7 @@ class TestSingleInstallInterfaceBinding:
         with (
             patch.object(view, "require_all_permissions", return_value=None),
             patch(
-                "netbox_librenms_plugin.views.sync.modules.get_object_or_404",
+                "netbox_librenms_plugin.views.mixins.NetBoxObjectPermissionMixin.restrict_object_or_404",
                 side_effect=[device, module],
             ),
             patch("netbox_librenms_plugin.views.sync.modules.reverse", return_value="/sync/"),
@@ -2236,6 +2270,7 @@ class TestSingleInstallInterfaceBinding:
             patch("netbox_librenms_plugin.views.sync.modules._modules_redirect_response", return_value="redirected"),
         ):
             mock_cache.get.return_value = {"inventory": [], "librenms_id": 999}
+            view.request = request
             response = view.post(request, pk=24)
 
         mock_bind.assert_not_called()  # no server context → bind never attempted
@@ -2267,7 +2302,7 @@ class TestSingleInstallInterfaceBinding:
         with (
             patch.object(view, "require_all_permissions", return_value=None),
             patch(
-                "netbox_librenms_plugin.views.sync.modules.get_object_or_404",
+                "netbox_librenms_plugin.views.mixins.NetBoxObjectPermissionMixin.restrict_object_or_404",
                 side_effect=[device, module],
             ),
             patch("netbox_librenms_plugin.views.sync.modules.reverse", return_value="/sync/"),
@@ -2289,6 +2324,7 @@ class TestSingleInstallInterfaceBinding:
                 "inventory": [{"entPhysicalIndex": 77, "_librenms_port_id": 587, "_librenms_ifname": "2/x1/1/c2"}],
                 "librenms_id": 999,
             }
+            view.request = request
             response = view.post(request, pk=24)
 
         # Bind no-op'd on the already-bound interface, but adoption still ran...
@@ -2321,7 +2357,7 @@ class TestSingleInstallInterfaceBinding:
         with (
             patch.object(view, "require_all_permissions", return_value=None),
             patch(
-                "netbox_librenms_plugin.views.sync.modules.get_object_or_404",
+                "netbox_librenms_plugin.views.mixins.NetBoxObjectPermissionMixin.restrict_object_or_404",
                 side_effect=[device, module],
             ),
             patch("netbox_librenms_plugin.views.sync.modules.reverse", return_value="/sync/"),
@@ -2342,121 +2378,78 @@ class TestSingleInstallInterfaceBinding:
                 "inventory": [{"entPhysicalIndex": 77, "_librenms_port_id": 587, "_librenms_ifname": "2/x1/1/c2"}],
                 "librenms_id": 999,
             }
+            view.request = request
             view.post(request, pk=24)
 
         mock_adopt.assert_not_called()
         mock_messages.warning.assert_called_once()
 
+    @pytest.mark.django_db
     def test_replace_module_view_binds_interface_after_replace(self):
+        from dcim.models import Module
+        from django.core.cache import cache
+
+        from netbox_librenms_plugin.tests.conftest import (
+            make_device,
+            make_interface,
+            make_module_bay,
+            make_module_type,
+        )
+        from netbox_librenms_plugin.tests.view_test_helpers import make_request, make_view, message_texts
+        from netbox_librenms_plugin.utils import get_librenms_device_id
         from netbox_librenms_plugin.views.sync.modules import ReplaceModuleView
 
-        view = object.__new__(ReplaceModuleView)
-        view.required_object_permissions = {}
-        view._librenms_api = MagicMock(server_key="production")
-        device = _make_device()
-
-        target_bay = MagicMock()
-        target_bay.name = "SFP 1"
-
-        installed_module = MagicMock()
-        installed_module.pk = 321
-        installed_module.module_type.model = "OLD-SFP"
-        installed_module.module_bay = target_bay
-
-        matched_type = MagicMock()
-        matched_type.model = "NEW-SFP"
-
-        new_module = MagicMock()
-        new_module.pk = 654
-
-        request = _make_request(
-            "POST",
-            data={
-                "module_id": "321",
+        device = make_device("replace-bind-device")
+        old_type = make_module_type("OLD-SFP-BIND")
+        new_type = make_module_type("NEW-SFP-BIND")
+        target_bay = make_module_bay(device, "SFP 1")
+        installed_module = Module.objects.create(
+            device=device,
+            module_bay=target_bay,
+            module_type=old_type,
+            serial="SN-OLD-BIND",
+        )
+        interface = make_interface(device, "Te1/1/1")
+        request = make_request(
+            "post",
+            {
+                "module_id": str(installed_module.pk),
                 "ent_index": "77",
-                "server_key": "production",
+                "server_key": "default",
             },
         )
-
-        @contextmanager
-        def noop_atomic():
-            yield
-
-        installed_filter_qs = MagicMock()
-        installed_filter_qs.select_related.return_value.first.return_value = installed_module
-
-        conflict_filter_qs = MagicMock()
-        conflict_filter_qs.exclude.return_value.select_related.return_value = []
-
-        with (
-            patch.object(view, "require_all_permissions", return_value=None),
-            patch(
-                "netbox_librenms_plugin.views.sync.modules.get_object_or_404",
-                side_effect=[device, installed_module],
-            ),
-            patch("netbox_librenms_plugin.views.sync.modules.reverse", return_value="/sync/"),
-            patch("netbox_librenms_plugin.views.sync.modules.transaction") as mock_tx,
-            patch("netbox_librenms_plugin.views.sync.modules.messages") as mock_messages,
-            patch("netbox_librenms_plugin.views.sync.modules._modules_redirect_response", return_value="redirected"),
-            patch.object(view, "get_cache_key", return_value="inv-key"),
-            patch("netbox_librenms_plugin.views.sync.modules.cache") as mock_cache,
-            patch(
-                "netbox_librenms_plugin.views.sync.modules.get_module_types_indexed",
-                return_value={"NEW-SFP": matched_type},
-            ),
-            patch("netbox_librenms_plugin.utils.resolve_module_type", return_value=matched_type),
-            patch(
-                "netbox_librenms_plugin.views.sync.modules._count_adoptable_interfaces", return_value=2
-            ) as mock_count,
-            patch(
-                "netbox_librenms_plugin.views.sync.modules._normalize_module_interface_names_for_vc_member",
-                return_value={"renamed": 1, "adopted": 0, "removed": 0, "skipped": 0},
-            ) as mock_normalize,
-            patch(
-                "netbox_librenms_plugin.views.sync.modules._bind_interface_librenms_id",
-                return_value={"status": "bound", "interface": "Te1/1/1", "port_id": 42},
-            ) as mock_bind,
-            patch("dcim.models.Module") as mock_module_cls,
-        ):
-            mock_tx.atomic = noop_atomic
-            mock_cache.get.return_value = {
+        view = make_view(ReplaceModuleView, request, librenms_api=MagicMock(server_key="default"))
+        cache_key = view.get_cache_key(device, "inventory", server_key="default")
+        cache.set(
+            cache_key,
+            {
                 "inventory": [
                     {
                         "entPhysicalIndex": 77,
-                        "entPhysicalModelName": "NEW-SFP",
-                        "entPhysicalSerialNum": "SN-42",
+                        "entPhysicalModelName": new_type.model,
+                        "entPhysicalSerialNum": "SN-NEW-BIND",
                         "_librenms_port_id": 42,
-                        "_librenms_ifname": "Te1/1/1",
+                        "_librenms_ifname": interface.name,
                     }
-                ]
-            }
-            mock_module_cls.return_value = new_module
-            mock_module_cls.objects.select_related.return_value = MagicMock()
-            mock_module_cls.objects.select_for_update.return_value.filter.side_effect = [
-                installed_filter_qs,
-                conflict_filter_qs,
-            ]
-
-            response = view.post(request, pk=24)
-
-        mock_count.assert_called_once_with(device, new_module)
-        assert new_module._adopt_components is True
-        mock_normalize.assert_called_once_with(device, new_module)
-        mock_bind.assert_called_once()
-        bind_call = mock_bind.call_args
-        assert bind_call.args[0] is device
-        assert bind_call.args[1]["_librenms_port_id"] == 42
-        assert bind_call.args[2] == 654
-        assert bind_call.args[3] == "production"
-        mock_messages.success.assert_called_once()
-        warning_messages = [call.args[1] for call in mock_messages.warning.call_args_list]
-        assert (
-            "Module sync authority applied: adopted 2 existing standalone interface(s) into the module."
-            in warning_messages
+                ],
+                "librenms_id": 1,
+            },
         )
-        assert "VC member interface normalization applied: renamed 1." in warning_messages
-        mock_messages.info.assert_called()
-        assert response == "redirected"
+        try:
+            response = _post(view, request, pk=device.pk)
+        finally:
+            cache.delete(cache_key)
+
+        assert response.status_code == 302
+        assert not Module.objects.filter(pk=installed_module.pk).exists()
+        replacement = Module.objects.get(device=device, module_bay=target_bay)
+        assert replacement.module_type == new_type
+        assert replacement.serial == "SN-NEW-BIND"
+        interface.refresh_from_db()
+        assert interface.module_id == replacement.pk
+        assert get_librenms_device_id(interface, "default") == 42
+        assert any("Replaced OLD-SFP-BIND with NEW-SFP-BIND" in text for text in message_texts(request, "success"))
+        assert any("Bound Te1/1/1 to LibreNMS port_id 42" in text for text in message_texts(request, "info"))
 
 
 class TestVCMemberInterfaceNormalization:
@@ -2509,6 +2502,7 @@ class TestVCMemberInterfaceNormalization:
         conflict_qs.exclude.return_value.first.return_value = None
 
         with patch("dcim.models.Interface") as mock_interface:
+            mock_interface.objects.restrict.return_value = mock_interface.objects
             mock_interface.objects.filter.side_effect = [module_qs, conflict_qs]
             result = _normalize_module_interface_names_for_vc_member(device, module)
 
@@ -2539,6 +2533,7 @@ class TestVCMemberInterfaceNormalization:
         conflict_qs.exclude.return_value.first.return_value = existing_iface
 
         with patch("dcim.models.Interface") as mock_interface:
+            mock_interface.objects.restrict.return_value = mock_interface.objects
             mock_interface.objects.filter.side_effect = [module_qs, conflict_qs]
             result = _normalize_module_interface_names_for_vc_member(device, module)
 
@@ -2564,6 +2559,7 @@ class TestVCMemberInterfaceNormalization:
         module_qs.order_by.return_value = [iface]
 
         with patch("dcim.models.Interface") as mock_interface:
+            mock_interface.objects.restrict.return_value = mock_interface.objects
             mock_interface.objects.filter.side_effect = [module_qs]
             result = _normalize_module_interface_names_for_vc_member(device, module)
 
@@ -2792,6 +2788,42 @@ class TestAncestorWalkGenericContainerModel:
         assert 1 in indices
         assert 2 not in indices, "Child module under real parent must remain a descendant"
 
+    def test_numeric_models_are_classified_without_crashing(self):
+        """Numeric child and ancestor models still participate in top-level classification."""
+        parent = {
+            "entPhysicalIndex": 1,
+            "entPhysicalClass": "module",
+            "entPhysicalModelName": 123456,
+            "entPhysicalContainedIn": 0,
+        }
+        child = {
+            "entPhysicalIndex": 2,
+            "entPhysicalClass": "module",
+            "entPhysicalModelName": 654321,
+            "entPhysicalContainedIn": 1,
+        }
+
+        top = self._run_top_items([parent, child])
+
+        assert top == [parent]
+
+    def test_unknown_model_remains_visible_for_no_type_diagnosis(self):
+        """Unknown is a real ancestor model, so its child stays nested below it."""
+        parent = {
+            "entPhysicalIndex": 1,
+            "entPhysicalClass": "module",
+            "entPhysicalModelName": "Unknown",
+            "entPhysicalContainedIn": 0,
+        }
+        child = {
+            "entPhysicalIndex": 2,
+            "entPhysicalClass": "module",
+            "entPhysicalModelName": "CHILD-MODULE",
+            "entPhysicalContainedIn": 1,
+        }
+
+        assert self._run_top_items([parent, child]) == [parent]
+
 
 # ---------------------------------------------------------------------------
 # Regression: parent_row_idx (table index) must not alias entPhysicalIndex
@@ -2872,6 +2904,7 @@ class TestParentRowIdxVsEntityIndex:
         with patch("netbox_librenms_plugin.models.ModuleBayMapping") as mock_mapping:
             mock_mapping.objects.all.return_value = []
             with patch("netbox_librenms_plugin.models.InventoryIgnoreRule") as mock_ignore:
+                mock_ignore.objects.restrict.return_value = mock_ignore.objects
                 mock_ignore.objects.filter.return_value.order_by.return_value = []
                 with patch("netbox_librenms_plugin.utils.preload_normalization_rules", return_value={}):
                     with patch.object(view, "_get_module_bays", return_value=({}, {})):
@@ -2946,12 +2979,12 @@ class TestInstallViewsDoNotDeleteCache:
             yield
 
         mock_qs = MagicMock()
-        mock_qs.get.return_value = module_bay
+        mock_qs.filter.return_value.first.return_value = module_bay
 
         with (
             patch.object(view, "require_all_permissions", return_value=None),
             patch(
-                "netbox_librenms_plugin.views.sync.modules.get_object_or_404",
+                "netbox_librenms_plugin.views.mixins.NetBoxObjectPermissionMixin.restrict_object_or_404",
                 side_effect=[device, module_bay, module_type],
             ),
             patch("netbox_librenms_plugin.views.sync.modules.reverse", return_value="/sync/"),
@@ -2964,7 +2997,10 @@ class TestInstallViewsDoNotDeleteCache:
         ):
             mock_tx.atomic = noop_atomic
             mock_module_cls.return_value = new_module
+            # The locked re-fetch goes through restrict(user, ...), so hand back the same manager.
+            mock_objects.restrict.return_value = mock_objects
             mock_objects.select_for_update.return_value = mock_qs
+            view.request = request
             view.post(request, pk=24)
 
         mock_messages.success.assert_called_once()
@@ -2995,7 +3031,10 @@ class TestInstallViewsDoNotDeleteCache:
 
         with (
             patch.object(view, "require_all_permissions", return_value=None),
-            patch("netbox_librenms_plugin.views.sync.modules.get_object_or_404", return_value=device),
+            patch(
+                "netbox_librenms_plugin.views.mixins.NetBoxObjectPermissionMixin.restrict_object_or_404",
+                return_value=device,
+            ),
             patch("netbox_librenms_plugin.views.sync.modules.reverse", return_value="/sync/"),
             patch("netbox_librenms_plugin.views.sync.modules.cache") as mock_cache,
             patch.object(view, "get_cache_key", return_value="test-key"),
@@ -3011,6 +3050,7 @@ class TestInstallViewsDoNotDeleteCache:
         ):
             mock_cache.get.return_value = {"inventory": cached_inventory, "librenms_id": "test"}
             mock_tx.atomic = lambda *a, **kw: MagicMock(__enter__=MagicMock(), __exit__=MagicMock(return_value=False))
+            view.request = request
             view.post(request, pk=24)
 
         mock_messages.success.assert_called_once()
@@ -3045,7 +3085,10 @@ class TestInstallViewsDoNotDeleteCache:
 
         with (
             patch.object(view, "require_all_permissions", return_value=None),
-            patch("netbox_librenms_plugin.views.sync.modules.get_object_or_404", return_value=device),
+            patch(
+                "netbox_librenms_plugin.views.mixins.NetBoxObjectPermissionMixin.restrict_object_or_404",
+                return_value=device,
+            ),
             patch("netbox_librenms_plugin.views.sync.modules.reverse", return_value="/sync/"),
             patch("netbox_librenms_plugin.views.sync.modules.cache") as mock_cache,
             patch.object(view, "get_cache_key", return_value="test-key"),
@@ -3060,6 +3103,7 @@ class TestInstallViewsDoNotDeleteCache:
         ):
             mock_cache.get.return_value = {"inventory": cached_inventory, "librenms_id": "test"}
             mock_tx.atomic = lambda *a, **kw: MagicMock(__enter__=MagicMock(), __exit__=MagicMock(return_value=False))
+            view.request = request
             view.post(request, pk=24)
 
         mock_messages.success.assert_called_once()
@@ -3078,7 +3122,10 @@ class TestInstallViewsDoNotDeleteCache:
 
         with (
             patch.object(view, "require_all_permissions", return_value=None),
-            patch("netbox_librenms_plugin.views.sync.modules.get_object_or_404", return_value=device),
+            patch(
+                "netbox_librenms_plugin.views.mixins.NetBoxObjectPermissionMixin.restrict_object_or_404",
+                return_value=device,
+            ),
             patch("netbox_librenms_plugin.views.sync.modules.reverse", return_value="/sync/"),
             patch("netbox_librenms_plugin.views.sync.modules.cache") as mock_cache,
             patch.object(view, "get_cache_key", return_value="test-key"),
@@ -3088,6 +3135,7 @@ class TestInstallViewsDoNotDeleteCache:
             patch.object(InstallBranchView, "_collect_branch") as mock_collect,
         ):
             mock_cache.get.return_value = {"inventory": [{"entPhysicalIndex": 100}], "librenms_id": 555}
+            view.request = request
             view.post(request, pk=24)
 
         mock_collect.assert_not_called()
@@ -3110,7 +3158,10 @@ class TestInstallViewsDoNotDeleteCache:
 
         with (
             patch.object(view, "require_all_permissions", return_value=None),
-            patch("netbox_librenms_plugin.views.sync.modules.get_object_or_404", return_value=device),
+            patch(
+                "netbox_librenms_plugin.views.mixins.NetBoxObjectPermissionMixin.restrict_object_or_404",
+                return_value=device,
+            ),
             patch("netbox_librenms_plugin.views.sync.modules.reverse", return_value="/sync/"),
             patch("netbox_librenms_plugin.views.sync.modules.cache") as mock_cache,
             patch.object(view, "get_cache_key", return_value="test-key"),
@@ -3120,6 +3171,7 @@ class TestInstallViewsDoNotDeleteCache:
             patch("netbox_librenms_plugin.views.sync.modules.InstallBranchView._install_single") as mock_install,
         ):
             mock_cache.get.return_value = {"inventory": [{"entPhysicalIndex": 100}], "librenms_id": 555}
+            view.request = request
             view.post(request, pk=24)
 
         mock_install.assert_not_called()
@@ -3148,7 +3200,10 @@ class TestInstallViewsDoNotDeleteCache:
 
         with (
             patch.object(view, "require_all_permissions", return_value=None),
-            patch("netbox_librenms_plugin.views.sync.modules.get_object_or_404", return_value=device),
+            patch(
+                "netbox_librenms_plugin.views.mixins.NetBoxObjectPermissionMixin.restrict_object_or_404",
+                return_value=device,
+            ),
             patch("netbox_librenms_plugin.views.sync.modules.reverse", return_value="/sync/"),
             patch("netbox_librenms_plugin.views.sync.modules.cache") as mock_cache,
             patch.object(view, "get_cache_key", return_value="test-key"),
@@ -3165,6 +3220,7 @@ class TestInstallViewsDoNotDeleteCache:
         ):
             mock_cache.get.return_value = {"inventory": cached_inventory, "librenms_id": "test"}
             mock_tx.atomic = lambda: MagicMock(__enter__=MagicMock(), __exit__=MagicMock(return_value=False))
+            view.request = request
             view.post(request, pk=24)
 
         mock_bind.assert_not_called()
@@ -3197,7 +3253,10 @@ class TestInstallViewsDoNotDeleteCache:
 
         with (
             patch.object(view, "require_all_permissions", return_value=None),
-            patch("netbox_librenms_plugin.views.sync.modules.get_object_or_404", return_value=device),
+            patch(
+                "netbox_librenms_plugin.views.mixins.NetBoxObjectPermissionMixin.restrict_object_or_404",
+                return_value=device,
+            ),
             patch("netbox_librenms_plugin.views.sync.modules.reverse", return_value="/sync/"),
             patch("netbox_librenms_plugin.views.sync.modules.cache") as mock_cache,
             patch.object(view, "get_cache_key", return_value="test-key"),
@@ -3213,6 +3272,7 @@ class TestInstallViewsDoNotDeleteCache:
         ):
             mock_cache.get.return_value = {"inventory": cached_inventory, "librenms_id": "test"}
             mock_tx.atomic = lambda: MagicMock(__enter__=MagicMock(), __exit__=MagicMock(return_value=False))
+            view.request = request
             view.post(request, pk=24)
 
         mock_bind.assert_not_called()
@@ -3246,7 +3306,10 @@ class TestInstallViewsDoNotDeleteCache:
 
         with (
             patch.object(view, "require_all_permissions", return_value=None),
-            patch("netbox_librenms_plugin.views.sync.modules.get_object_or_404", return_value=device),
+            patch(
+                "netbox_librenms_plugin.views.mixins.NetBoxObjectPermissionMixin.restrict_object_or_404",
+                return_value=device,
+            ),
             patch("netbox_librenms_plugin.views.sync.modules.reverse", return_value="/sync/"),
             patch("netbox_librenms_plugin.views.sync.modules.cache") as mock_cache,
             patch.object(view, "get_cache_key", return_value="test-key"),
@@ -3266,6 +3329,7 @@ class TestInstallViewsDoNotDeleteCache:
         ):
             mock_cache.get.return_value = {"inventory": cached_inventory, "librenms_id": "test"}
             mock_tx.atomic = lambda: MagicMock(__enter__=MagicMock(), __exit__=MagicMock(return_value=False))
+            view.request = request
             view.post(request, pk=24)
 
         mock_bind.assert_called_once()
@@ -3304,7 +3368,10 @@ class TestInstallViewsDoNotDeleteCache:
 
         with (
             patch.object(view, "require_all_permissions", return_value=None),
-            patch("netbox_librenms_plugin.views.sync.modules.get_object_or_404", return_value=device),
+            patch(
+                "netbox_librenms_plugin.views.mixins.NetBoxObjectPermissionMixin.restrict_object_or_404",
+                return_value=device,
+            ),
             patch("netbox_librenms_plugin.views.sync.modules.reverse", return_value="/sync/"),
             patch("netbox_librenms_plugin.views.sync.modules.cache") as mock_cache,
             patch.object(view, "get_cache_key", return_value="test-key"),
@@ -3323,6 +3390,7 @@ class TestInstallViewsDoNotDeleteCache:
         ):
             mock_cache.get.return_value = {"inventory": cached_inventory, "librenms_id": "test"}
             mock_tx.atomic = lambda: MagicMock(__enter__=MagicMock(), __exit__=MagicMock(return_value=False))
+            view.request = request
             view.post(request, pk=24)
 
         mock_bind.assert_called_once()
@@ -4138,11 +4206,15 @@ class TestPKValidationErrorPaths:
 
         with (
             patch.object(view, "require_all_permissions", return_value=None),
-            patch("netbox_librenms_plugin.views.sync.modules.get_object_or_404", return_value=device),
+            patch(
+                "netbox_librenms_plugin.views.mixins.NetBoxObjectPermissionMixin.restrict_object_or_404",
+                return_value=device,
+            ),
             patch("netbox_librenms_plugin.views.sync.modules.reverse", return_value="/sync/"),
             patch("netbox_librenms_plugin.views.sync.modules.messages") as mock_msg,
             patch("netbox_librenms_plugin.views.sync.modules.redirect") as mock_redirect,
         ):
+            view.request = request
             view.post(request, pk=24)
 
         mock_msg.error.assert_called_once()
@@ -4168,11 +4240,15 @@ class TestPKValidationErrorPaths:
 
         with (
             patch.object(view, "require_all_permissions", return_value=None),
-            patch("netbox_librenms_plugin.views.sync.modules.get_object_or_404", return_value=device),
+            patch(
+                "netbox_librenms_plugin.views.mixins.NetBoxObjectPermissionMixin.restrict_object_or_404",
+                return_value=device,
+            ),
             patch("netbox_librenms_plugin.views.sync.modules.reverse", return_value="/sync/"),
             patch("netbox_librenms_plugin.views.sync.modules.messages") as mock_msg,
             patch("netbox_librenms_plugin.views.sync.modules.redirect") as mock_redirect,
         ):
+            view.request = request
             view.post(request, pk=24)
 
         mock_msg.error.assert_called_once()
@@ -4197,11 +4273,15 @@ class TestPKValidationErrorPaths:
 
         with (
             patch.object(view, "require_all_permissions", return_value=None),
-            patch("netbox_librenms_plugin.views.sync.modules.get_object_or_404", return_value=device),
+            patch(
+                "netbox_librenms_plugin.views.mixins.NetBoxObjectPermissionMixin.restrict_object_or_404",
+                return_value=device,
+            ),
             patch("netbox_librenms_plugin.views.sync.modules.reverse", return_value="/sync/"),
             patch("netbox_librenms_plugin.views.sync.modules.messages") as mock_msg,
             patch("netbox_librenms_plugin.views.sync.modules.redirect") as mock_redirect,
         ):
+            view.request = request
             view.post(request, pk=24)
 
         mock_msg.error.assert_called_once()
@@ -4230,7 +4310,10 @@ class TestPKValidationErrorPaths:
 
         with (
             patch.object(view, "require_all_permissions", return_value=None),
-            patch("netbox_librenms_plugin.views.sync.modules.get_object_or_404", return_value=device),
+            patch(
+                "netbox_librenms_plugin.views.mixins.NetBoxObjectPermissionMixin.restrict_object_or_404",
+                return_value=device,
+            ),
             patch("netbox_librenms_plugin.views.sync.modules.reverse", return_value="/sync/"),
             patch.object(view, "get_cache_key", return_value="ck"),
             patch("netbox_librenms_plugin.views.sync.modules.cache") as mock_cache,
@@ -4238,6 +4321,7 @@ class TestPKValidationErrorPaths:
             patch("netbox_librenms_plugin.views.sync.modules.redirect") as mock_redirect,
         ):
             mock_cache.get.return_value = {"inventory": cached, "librenms_id": "test"}
+            view.request = request
             view.post(request, pk=24)
 
         mock_msg.error.assert_called_once()
@@ -4291,12 +4375,12 @@ class TestInstallModuleViewBehavior:
             yield
 
         mock_qs = MagicMock()
-        mock_qs.get.return_value = module_bay  # locked re-fetch returns same occupied bay
+        mock_qs.filter.return_value.first.return_value = module_bay  # locked re-fetch returns same occupied bay
 
         with (
             patch.object(view, "require_all_permissions", return_value=None),
             patch(
-                "netbox_librenms_plugin.views.sync.modules.get_object_or_404",
+                "netbox_librenms_plugin.views.mixins.NetBoxObjectPermissionMixin.restrict_object_or_404",
                 side_effect=[device, module_bay, module_type],
             ),
             patch("netbox_librenms_plugin.views.sync.modules.reverse", return_value="/sync/"),
@@ -4306,11 +4390,58 @@ class TestInstallModuleViewBehavior:
             patch.object(ModuleBay, "objects") as mock_objects,
         ):
             mock_tx.atomic = noop_atomic
+            # The module is read through restrict(user, "change"), so hand back the same manager.
+            mock_objects.restrict.return_value = mock_objects
             mock_objects.select_for_update.return_value = mock_qs
+            view.request = request
             view.post(request, pk=24)
 
         mock_msg.warning.assert_called_once()
         assert "already has a module" in mock_msg.warning.call_args[0][1]
+        mock_redirect.assert_called_once()
+
+    def test_bay_deleted_before_lock_reports_error(self):
+        """A bay removed after the first lookup must not cause an uncaught exception."""
+        from contextlib import contextmanager
+
+        from dcim.models import ModuleBay
+
+        view = self._view()
+        device = _make_device()
+        module_bay = MagicMock()
+        module_type = MagicMock()
+        request = _make_request(
+            "POST",
+            data={"module_bay_id": "10", "module_type_id": "5", "serial": "SN1"},
+        )
+
+        @contextmanager
+        def noop_atomic():
+            yield
+
+        mock_qs = MagicMock()
+        mock_qs.filter.return_value.first.return_value = None
+
+        with (
+            patch.object(view, "require_all_permissions", return_value=None),
+            patch(
+                "netbox_librenms_plugin.views.mixins.NetBoxObjectPermissionMixin.restrict_object_or_404",
+                side_effect=[device, module_bay, module_type],
+            ),
+            patch("netbox_librenms_plugin.views.sync.modules.reverse", return_value="/sync/"),
+            patch("netbox_librenms_plugin.views.sync.modules.transaction") as mock_tx,
+            patch("netbox_librenms_plugin.views.sync.modules.messages") as mock_msg,
+            patch("netbox_librenms_plugin.views.sync.modules.redirect") as mock_redirect,
+            patch.object(ModuleBay, "objects") as mock_objects,
+        ):
+            mock_tx.atomic = noop_atomic
+            mock_objects.restrict.return_value = mock_objects
+            mock_objects.select_for_update.return_value = mock_qs
+            view.request = request
+            view.post(request, pk=24)
+
+        mock_msg.error.assert_called_once_with(request, "Module bay no longer exists.")
+        mock_qs.filter.assert_called_once_with(pk=10, device=device)
         mock_redirect.assert_called_once()
 
     def test_successful_install(self):
@@ -4346,12 +4477,12 @@ class TestInstallModuleViewBehavior:
             yield
 
         mock_qs = MagicMock()
-        mock_qs.get.return_value = module_bay  # locked re-fetch returns same bay
+        mock_qs.filter.return_value.first.return_value = module_bay  # locked re-fetch returns same bay
 
         with (
             patch.object(view, "require_all_permissions", return_value=None),
             patch(
-                "netbox_librenms_plugin.views.sync.modules.get_object_or_404",
+                "netbox_librenms_plugin.views.mixins.NetBoxObjectPermissionMixin.restrict_object_or_404",
                 side_effect=[device, module_bay, module_type],
             ),
             patch("netbox_librenms_plugin.views.sync.modules.reverse", return_value="/sync/"),
@@ -4363,7 +4494,10 @@ class TestInstallModuleViewBehavior:
         ):
             mock_tx.atomic = noop_atomic
             mock_module_cls.return_value = new_module
+            # The locked re-fetch goes through restrict(user, ...), so hand back the same manager.
+            mock_objects.restrict.return_value = mock_objects
             mock_objects.select_for_update.return_value = mock_qs
+            view.request = request
             view.post(request, pk=24)
 
         new_module.full_clean.assert_called_once()
@@ -4423,7 +4557,7 @@ class TestUpdateModuleSerialViewBehavior:
         with (
             patch.object(view, "require_all_permissions", return_value=None),
             patch(
-                "netbox_librenms_plugin.views.sync.modules.get_object_or_404",
+                "netbox_librenms_plugin.views.mixins.NetBoxObjectPermissionMixin.restrict_object_or_404",
                 return_value=device,
             ),
             patch("netbox_librenms_plugin.views.sync.modules.reverse", return_value="/sync/"),
@@ -4433,7 +4567,10 @@ class TestUpdateModuleSerialViewBehavior:
             patch.object(Module, "objects") as mock_objects,
         ):
             mock_tx.atomic = noop_atomic
+            # The module is read through restrict(user, "change"), so hand back the same manager.
+            mock_objects.restrict.return_value = mock_objects
             mock_objects.select_for_update.return_value = mock_qs
+            view.request = request
             view.post(request, pk=24)
 
         assert module.serial == "NEW-SN"
@@ -4633,13 +4770,17 @@ class TestAddBayTemplateViewPostValidation:
         view = self._make_view()
         req = self._make_request({"target_kind": "bogus", "target_pk": "1", "name": "Slot 1"})
         with (
-            patch("netbox_librenms_plugin.views.sync.modules.get_object_or_404", return_value=MagicMock()),
+            patch(
+                "netbox_librenms_plugin.views.mixins.NetBoxObjectPermissionMixin.restrict_object_or_404",
+                return_value=MagicMock(),
+            ),
             patch("netbox_librenms_plugin.views.sync.modules.reverse", return_value="/sync/"),
             patch("netbox_librenms_plugin.views.sync.modules.messages") as mock_messages,
             patch(
                 "netbox_librenms_plugin.views.sync.modules._modules_redirect_response", return_value="REDIR"
             ) as mock_redir,
         ):
+            view.request = req
             result = view.post(req, pk=1)
         assert result == "REDIR"
         assert mock_messages.error.called
@@ -4650,11 +4791,15 @@ class TestAddBayTemplateViewPostValidation:
         view = self._make_view()
         req = self._make_request({"target_kind": "device_type", "target_pk": "", "name": "Slot 1"})
         with (
-            patch("netbox_librenms_plugin.views.sync.modules.get_object_or_404", return_value=MagicMock()),
+            patch(
+                "netbox_librenms_plugin.views.mixins.NetBoxObjectPermissionMixin.restrict_object_or_404",
+                return_value=MagicMock(),
+            ),
             patch("netbox_librenms_plugin.views.sync.modules.reverse", return_value="/sync/"),
             patch("netbox_librenms_plugin.views.sync.modules.messages") as mock_messages,
             patch("netbox_librenms_plugin.views.sync.modules._modules_redirect_response", return_value="REDIR"),
         ):
+            view.request = req
             view.post(req, pk=1)
         assert "target_pk" in mock_messages.error.call_args[0][1]
 
@@ -4662,11 +4807,15 @@ class TestAddBayTemplateViewPostValidation:
         view = self._make_view()
         req = self._make_request({"target_kind": "module_type", "target_pk": "5", "name": "  "})
         with (
-            patch("netbox_librenms_plugin.views.sync.modules.get_object_or_404", return_value=MagicMock()),
+            patch(
+                "netbox_librenms_plugin.views.mixins.NetBoxObjectPermissionMixin.restrict_object_or_404",
+                return_value=MagicMock(),
+            ),
             patch("netbox_librenms_plugin.views.sync.modules.reverse", return_value="/sync/"),
             patch("netbox_librenms_plugin.views.sync.modules.messages") as mock_messages,
             patch("netbox_librenms_plugin.views.sync.modules._modules_redirect_response", return_value="REDIR"),
         ):
+            view.request = req
             view.post(req, pk=1)
         assert "name is required" in mock_messages.error.call_args[0][1]
 
@@ -4685,7 +4834,10 @@ class TestAddBayTemplateViewGetValidation:
         view = self._make_view()
         req = MagicMock()
         req.GET = {"target_kind": "nope", "target_pk": "1"}
-        with patch("netbox_librenms_plugin.views.sync.modules.get_object_or_404", return_value=MagicMock()):
+        with patch(
+            "netbox_librenms_plugin.views.mixins.NetBoxObjectPermissionMixin.restrict_object_or_404",
+            return_value=MagicMock(),
+        ):
             response = view.get(req, pk=1)
         assert response.status_code == 400
 
@@ -4693,7 +4845,10 @@ class TestAddBayTemplateViewGetValidation:
         view = self._make_view()
         req = MagicMock()
         req.GET = {"target_kind": "device_type", "target_pk": "abc"}
-        with patch("netbox_librenms_plugin.views.sync.modules.get_object_or_404", return_value=MagicMock()):
+        with patch(
+            "netbox_librenms_plugin.views.mixins.NetBoxObjectPermissionMixin.restrict_object_or_404",
+            return_value=MagicMock(),
+        ):
             response = view.get(req, pk=1)
         assert response.status_code == 400
 
@@ -4708,7 +4863,10 @@ class TestAddBayTemplateViewGetValidation:
             "suggested_label": "Fan Controller",
         }
         with (
-            patch("netbox_librenms_plugin.views.sync.modules.get_object_or_404", return_value=MagicMock()),
+            patch(
+                "netbox_librenms_plugin.views.mixins.NetBoxObjectPermissionMixin.restrict_object_or_404",
+                return_value=MagicMock(),
+            ),
             patch("netbox_librenms_plugin.views.sync.modules.render", return_value="RENDERED") as mock_render,
         ):
             response = view.get(req, pk=42)
@@ -4758,10 +4916,14 @@ class TestAddBayTemplateViewMappingCheckbox:
         }
         req.user.has_perm.return_value = True
         with (
-            patch("netbox_librenms_plugin.views.sync.modules.get_object_or_404", return_value=device),
+            patch(
+                "netbox_librenms_plugin.views.mixins.NetBoxObjectPermissionMixin.restrict_object_or_404",
+                return_value=device,
+            ),
             patch("netbox_librenms_plugin.views.sync.modules.render", return_value="R") as mock_render,
             patch("netbox_librenms_plugin.models.ModuleBayMapping") as mock_mapping_cls,
         ):
+            mock_mapping_cls.objects.restrict.return_value = mock_mapping_cls.objects
             mock_mapping_cls.objects.filter.return_value.filter.return_value.exists.return_value = False
             view.get(req, pk=42)
         ctx = mock_render.call_args[0][2]
@@ -4783,10 +4945,14 @@ class TestAddBayTemplateViewMappingCheckbox:
         }
         req.user.has_perm.return_value = True
         with (
-            patch("netbox_librenms_plugin.views.sync.modules.get_object_or_404", return_value=device),
+            patch(
+                "netbox_librenms_plugin.views.mixins.NetBoxObjectPermissionMixin.restrict_object_or_404",
+                return_value=device,
+            ),
             patch("netbox_librenms_plugin.views.sync.modules.render", return_value="R") as mock_render,
             patch("netbox_librenms_plugin.models.ModuleBayMapping") as mock_mapping_cls,
         ):
+            mock_mapping_cls.objects.restrict.return_value = mock_mapping_cls.objects
             mock_mapping_cls.objects.filter.return_value.filter.return_value.exists.return_value = True
             view.get(req, pk=42)
         ctx = mock_render.call_args[0][2]
@@ -4804,10 +4970,14 @@ class TestAddBayTemplateViewMappingCheckbox:
         }
         req.user.has_perm.return_value = False  # lacks add_modulebaymapping
         with (
-            patch("netbox_librenms_plugin.views.sync.modules.get_object_or_404", return_value=device),
+            patch(
+                "netbox_librenms_plugin.views.mixins.NetBoxObjectPermissionMixin.restrict_object_or_404",
+                return_value=device,
+            ),
             patch("netbox_librenms_plugin.views.sync.modules.render", return_value="R") as mock_render,
             patch("netbox_librenms_plugin.models.ModuleBayMapping") as mock_mapping_cls,
         ):
+            mock_mapping_cls.objects.restrict.return_value = mock_mapping_cls.objects
             mock_mapping_cls.objects.filter.return_value.filter.return_value.exists.return_value = False
             view.get(req, pk=42)
         ctx = mock_render.call_args[0][2]
@@ -4830,7 +5000,10 @@ class TestAddBayTemplateViewMappingCheckbox:
         req.user.has_perm.return_value = True
         target = MagicMock()
         with (
-            patch("netbox_librenms_plugin.views.sync.modules.get_object_or_404", side_effect=[device, target]),
+            patch(
+                "netbox_librenms_plugin.views.mixins.NetBoxObjectPermissionMixin.restrict_object_or_404",
+                side_effect=[device, target],
+            ),
             patch("netbox_librenms_plugin.views.sync.modules.reverse", return_value="/sync/"),
             patch("netbox_librenms_plugin.views.sync.modules.transaction") as mock_tx,
             patch("netbox_librenms_plugin.views.sync.modules.messages") as mock_msg,
@@ -4842,9 +5015,11 @@ class TestAddBayTemplateViewMappingCheckbox:
             mock_tx.atomic.return_value.__exit__ = MagicMock(return_value=False)
             mock_bt_cls.return_value = MagicMock()
             # No existing mapping
+            mock_mapping_cls.objects.restrict.return_value = mock_mapping_cls.objects
             mock_mapping_cls.objects.filter.return_value.filter.return_value.exists.return_value = False
             mapping_instance = MagicMock()
             mock_mapping_cls.return_value = mapping_instance
+            view.request = req
             view.post(req, pk=1)
         # ModuleBayMapping was constructed with the right field values
         call_kwargs = mock_mapping_cls.call_args.kwargs
@@ -4872,7 +5047,10 @@ class TestAddBayTemplateViewMappingCheckbox:
         }
         req.user.has_perm.return_value = True
         with (
-            patch("netbox_librenms_plugin.views.sync.modules.get_object_or_404", side_effect=[device, MagicMock()]),
+            patch(
+                "netbox_librenms_plugin.views.mixins.NetBoxObjectPermissionMixin.restrict_object_or_404",
+                side_effect=[device, MagicMock()],
+            ),
             patch("netbox_librenms_plugin.views.sync.modules.reverse", return_value="/sync/"),
             patch("netbox_librenms_plugin.views.sync.modules.transaction") as mock_tx,
             patch("netbox_librenms_plugin.views.sync.modules.messages"),
@@ -4883,6 +5061,7 @@ class TestAddBayTemplateViewMappingCheckbox:
             mock_tx.atomic.return_value.__enter__ = lambda s: s
             mock_tx.atomic.return_value.__exit__ = MagicMock(return_value=False)
             mock_bt_cls.return_value = MagicMock()
+            view.request = req
             view.post(req, pk=1)
         # Mapping must not be instantiated when names match
         mock_mapping_cls.assert_not_called()
@@ -4901,7 +5080,10 @@ class TestAddBayTemplateViewMappingCheckbox:
         }
         req.user.has_perm.return_value = True
         with (
-            patch("netbox_librenms_plugin.views.sync.modules.get_object_or_404", side_effect=[device, MagicMock()]),
+            patch(
+                "netbox_librenms_plugin.views.mixins.NetBoxObjectPermissionMixin.restrict_object_or_404",
+                side_effect=[device, MagicMock()],
+            ),
             patch("netbox_librenms_plugin.views.sync.modules.reverse", return_value="/sync/"),
             patch("netbox_librenms_plugin.views.sync.modules.transaction") as mock_tx,
             patch("netbox_librenms_plugin.views.sync.modules.messages"),
@@ -4912,6 +5094,7 @@ class TestAddBayTemplateViewMappingCheckbox:
             mock_tx.atomic.return_value.__enter__ = lambda s: s
             mock_tx.atomic.return_value.__exit__ = MagicMock(return_value=False)
             mock_bt_cls.return_value = MagicMock()
+            view.request = req
             view.post(req, pk=1)
         mock_mapping_cls.assert_not_called()
 
@@ -4934,7 +5117,9 @@ class TestAddBayTemplateViewInstantiation:
             patch("dcim.models.Module") as mock_module_cls,
             patch("dcim.models.ModuleBay") as mock_bay_cls,
         ):
+            mock_device_cls.objects.restrict.return_value = mock_device_cls.objects
             mock_device_cls.objects.filter.return_value = [dev_a, dev_b]
+            mock_bay_cls.objects.restrict.return_value = mock_bay_cls.objects
             mock_bay_cls.objects.filter.return_value.exists.return_value = False
             count = AddBayTemplateView._instantiate_template_on_existing(bay_template, "device_type", device_type)
         assert count == 2
@@ -4957,8 +5142,10 @@ class TestAddBayTemplateViewInstantiation:
             patch("dcim.models.Module"),
             patch("dcim.models.ModuleBay") as mock_bay_cls,
         ):
+            mock_device_cls.objects.restrict.return_value = mock_device_cls.objects
             mock_device_cls.objects.filter.return_value = [MagicMock()]
             # Bay already exists on the device
+            mock_bay_cls.objects.restrict.return_value = mock_bay_cls.objects
             mock_bay_cls.objects.filter.return_value.exists.return_value = True
             count = AddBayTemplateView._instantiate_template_on_existing(bay_template, "device_type", device_type)
         assert count == 0
@@ -4976,7 +5163,9 @@ class TestAddBayTemplateViewInstantiation:
             patch("dcim.models.Module") as mock_module_cls,
             patch("dcim.models.ModuleBay") as mock_bay_cls,
         ):
+            mock_module_cls.objects.restrict.return_value = mock_module_cls.objects
             mock_module_cls.objects.filter.return_value.select_related.return_value = [module_a]
+            mock_bay_cls.objects.restrict.return_value = mock_bay_cls.objects
             mock_bay_cls.objects.filter.return_value.exists.return_value = False
             count = AddBayTemplateView._instantiate_template_on_existing(bay_template, "module_type", module_type)
         assert count == 1
@@ -5125,10 +5314,14 @@ class TestAddBayTemplateViewRegexMapping:
         }
         req.user.has_perm.return_value = True
         with (
-            patch("netbox_librenms_plugin.views.sync.modules.get_object_or_404", return_value=device),
+            patch(
+                "netbox_librenms_plugin.views.mixins.NetBoxObjectPermissionMixin.restrict_object_or_404",
+                return_value=device,
+            ),
             patch("netbox_librenms_plugin.views.sync.modules.render", return_value="R") as mock_render,
             patch("netbox_librenms_plugin.models.ModuleBayMapping") as mock_mapping_cls,
         ):
+            mock_mapping_cls.objects.restrict.return_value = mock_mapping_cls.objects
             mock_mapping_cls.objects.filter.return_value.filter.return_value.exists.return_value = False
             mock_mapping_cls.objects.filter.return_value.filter.return_value.only.return_value = []
             view.get(req, pk=42)
@@ -5150,10 +5343,14 @@ class TestAddBayTemplateViewRegexMapping:
         }
         req.user.has_perm.return_value = True
         with (
-            patch("netbox_librenms_plugin.views.sync.modules.get_object_or_404", return_value=device),
+            patch(
+                "netbox_librenms_plugin.views.mixins.NetBoxObjectPermissionMixin.restrict_object_or_404",
+                return_value=device,
+            ),
             patch("netbox_librenms_plugin.views.sync.modules.render", return_value="R") as mock_render,
             patch("netbox_librenms_plugin.models.ModuleBayMapping") as mock_mapping_cls,
         ):
+            mock_mapping_cls.objects.restrict.return_value = mock_mapping_cls.objects
             mock_mapping_cls.objects.filter.return_value.filter.return_value.exists.return_value = False
             mock_mapping_cls.objects.filter.return_value.filter.return_value.only.return_value = []
             view.get(req, pk=42)
@@ -5176,11 +5373,15 @@ class TestAddBayTemplateViewRegexMapping:
         }
         req.user.has_perm.return_value = True
         with (
-            patch("netbox_librenms_plugin.views.sync.modules.get_object_or_404", return_value=device),
+            patch(
+                "netbox_librenms_plugin.views.mixins.NetBoxObjectPermissionMixin.restrict_object_or_404",
+                return_value=device,
+            ),
             patch("netbox_librenms_plugin.views.sync.modules.render", return_value="R") as mock_render,
             patch("netbox_librenms_plugin.models.ModuleBayMapping") as mock_mapping_cls,
         ):
             # No exact mapping, but a covering regex row exists.
+            mock_mapping_cls.objects.restrict.return_value = mock_mapping_cls.objects
             mock_mapping_cls.objects.filter.return_value.filter.return_value.exists.return_value = False
             mock_mapping_cls.objects.filter.return_value.filter.return_value.only.return_value = [existing]
             view.get(req, pk=42)
@@ -5212,7 +5413,10 @@ class TestAddBayTemplateViewRegexMapping:
             }
         )
         with (
-            patch("netbox_librenms_plugin.views.sync.modules.get_object_or_404", side_effect=[device, target]),
+            patch(
+                "netbox_librenms_plugin.views.mixins.NetBoxObjectPermissionMixin.restrict_object_or_404",
+                side_effect=[device, target],
+            ),
             patch("netbox_librenms_plugin.views.sync.modules.reverse", return_value="/sync/"),
             patch("netbox_librenms_plugin.views.sync.modules.transaction") as mock_tx,
             patch("netbox_librenms_plugin.views.sync.modules.messages"),
@@ -5224,9 +5428,11 @@ class TestAddBayTemplateViewRegexMapping:
             mock_tx.atomic.return_value.__exit__ = MagicMock(return_value=False)
             mock_bt_cls.return_value = MagicMock()
             # No existing exact or regex coverage.
+            mock_mapping_cls.objects.restrict.return_value = mock_mapping_cls.objects
             mock_mapping_cls.objects.filter.return_value.filter.return_value.exists.return_value = False
             mock_mapping_cls.objects.filter.return_value.filter.return_value.only.return_value = []
             mock_mapping_cls.return_value = MagicMock()
+            view.request = req
             view.post(req, pk=1)
         kwargs = mock_mapping_cls.call_args.kwargs
         assert kwargs["is_regex"] is True
@@ -5248,7 +5454,10 @@ class TestAddBayTemplateViewRegexMapping:
             }
         )
         with (
-            patch("netbox_librenms_plugin.views.sync.modules.get_object_or_404", side_effect=[device, target]),
+            patch(
+                "netbox_librenms_plugin.views.mixins.NetBoxObjectPermissionMixin.restrict_object_or_404",
+                side_effect=[device, target],
+            ),
             patch("netbox_librenms_plugin.views.sync.modules.reverse", return_value="/sync/"),
             patch("netbox_librenms_plugin.views.sync.modules.transaction") as mock_tx,
             patch("netbox_librenms_plugin.views.sync.modules.messages"),
@@ -5259,9 +5468,11 @@ class TestAddBayTemplateViewRegexMapping:
             mock_tx.atomic.return_value.__enter__ = lambda s: s
             mock_tx.atomic.return_value.__exit__ = MagicMock(return_value=False)
             mock_bt_cls.return_value = MagicMock()
+            mock_mapping_cls.objects.restrict.return_value = mock_mapping_cls.objects
             mock_mapping_cls.objects.filter.return_value.filter.return_value.exists.return_value = False
             mock_mapping_cls.objects.filter.return_value.filter.return_value.only.return_value = []
             mock_mapping_cls.return_value = MagicMock()
+            view.request = req
             view.post(req, pk=1)
         kwargs = mock_mapping_cls.call_args.kwargs
         assert kwargs["is_regex"] is False
@@ -5282,7 +5493,10 @@ class TestAddBayTemplateViewRegexMapping:
             }
         )
         with (
-            patch("netbox_librenms_plugin.views.sync.modules.get_object_or_404", side_effect=[device, target]),
+            patch(
+                "netbox_librenms_plugin.views.mixins.NetBoxObjectPermissionMixin.restrict_object_or_404",
+                side_effect=[device, target],
+            ),
             patch("netbox_librenms_plugin.views.sync.modules.reverse", return_value="/sync/"),
             patch("netbox_librenms_plugin.views.sync.modules.transaction") as mock_tx,
             patch("netbox_librenms_plugin.views.sync.modules.messages"),
@@ -5293,9 +5507,11 @@ class TestAddBayTemplateViewRegexMapping:
             mock_tx.atomic.return_value.__enter__ = lambda s: s
             mock_tx.atomic.return_value.__exit__ = MagicMock(return_value=False)
             mock_bt_cls.return_value = MagicMock()
+            mock_mapping_cls.objects.restrict.return_value = mock_mapping_cls.objects
             mock_mapping_cls.objects.filter.return_value.filter.return_value.exists.return_value = False
             mock_mapping_cls.objects.filter.return_value.filter.return_value.only.return_value = []
             mock_mapping_cls.return_value = MagicMock()
+            view.request = req
             view.post(req, pk=1)
         kwargs = mock_mapping_cls.call_args.kwargs
         assert kwargs["is_regex"] is False
@@ -5316,7 +5532,10 @@ class TestAddBayTemplateViewRegexMapping:
         existing = MagicMock()
         existing.librenms_name = r"^Sfm (\d+)$"
         with (
-            patch("netbox_librenms_plugin.views.sync.modules.get_object_or_404", side_effect=[device, target]),
+            patch(
+                "netbox_librenms_plugin.views.mixins.NetBoxObjectPermissionMixin.restrict_object_or_404",
+                side_effect=[device, target],
+            ),
             patch("netbox_librenms_plugin.views.sync.modules.reverse", return_value="/sync/"),
             patch("netbox_librenms_plugin.views.sync.modules.transaction") as mock_tx,
             patch("netbox_librenms_plugin.views.sync.modules.messages"),
@@ -5327,8 +5546,10 @@ class TestAddBayTemplateViewRegexMapping:
             mock_tx.atomic.return_value.__enter__ = lambda s: s
             mock_tx.atomic.return_value.__exit__ = MagicMock(return_value=False)
             mock_bt_cls.return_value = MagicMock()
+            mock_mapping_cls.objects.restrict.return_value = mock_mapping_cls.objects
             mock_mapping_cls.objects.filter.return_value.filter.return_value.exists.return_value = False
             mock_mapping_cls.objects.filter.return_value.filter.return_value.only.return_value = [existing]
+            view.request = req
             view.post(req, pk=1)
         # Coverage already exists → no new ModuleBayMapping instantiated.
         mock_mapping_cls.assert_not_called()
@@ -5474,7 +5695,7 @@ class TestVCNormalizationReportView:
         with (
             patch.object(view, "require_object_permissions", return_value=None),
             patch(
-                "netbox_librenms_plugin.views.sync.modules.get_object_or_404",
+                "netbox_librenms_plugin.views.mixins.NetBoxObjectPermissionMixin.restrict_object_or_404",
                 return_value=device,
             ),
         ):
@@ -5495,7 +5716,7 @@ class TestVCNormalizationReportView:
         request = _make_request("GET", data={"module_id": str(module.pk)})
 
         with patch.object(view, "require_object_permissions", return_value=None):
-            response = view.get(request, pk=device.pk)
+            response = _get(view, request, pk=device.pk)
 
         assert response.status_code == 400
         assert b"nothing to report" in response.content.lower()
@@ -5520,7 +5741,7 @@ class TestVCNormalizationReportView:
                 return_value="rendered",
             ) as mock_render,
         ):
-            response = view.get(request, pk=device.pk)
+            response = _get(view, request, pk=device.pk)
 
         assert response == "rendered"
         ctx = mock_render.call_args[0][2]
@@ -5542,7 +5763,7 @@ class TestVCNormalizationReportView:
         with (
             patch.object(view, "require_object_permissions", return_value=None),
             patch(
-                "netbox_librenms_plugin.views.sync.modules.get_object_or_404",
+                "netbox_librenms_plugin.views.mixins.NetBoxObjectPermissionMixin.restrict_object_or_404",
                 side_effect=[device, module],
             ),
             patch(
@@ -5557,7 +5778,7 @@ class TestVCNormalizationReportView:
                 return_value=None,
             ),
         ):
-            response = view.get(request, pk=24)
+            response = _get(view, request, pk=24)
 
         mock_warn.assert_called_once_with(request)
         assert response.status_code == 400
@@ -5574,7 +5795,7 @@ class TestVCNormalizationReportView:
         with (
             patch.object(view, "require_object_permissions", return_value=None),
             patch(
-                "netbox_librenms_plugin.views.sync.modules.get_object_or_404",
+                "netbox_librenms_plugin.views.mixins.NetBoxObjectPermissionMixin.restrict_object_or_404",
                 return_value=device,
             ),
         ):
@@ -5895,7 +6116,10 @@ class TestReplaceModuleRedirectServerKey:
 
         with (
             patch.object(type(view), "librenms_api", new_callable=lambda: property(lambda s: mock_api)),
-            patch("netbox_librenms_plugin.views.sync.modules.get_object_or_404", return_value=MagicMock(pk=1)),
+            patch(
+                "netbox_librenms_plugin.views.mixins.NetBoxObjectPermissionMixin.restrict_object_or_404",
+                return_value=MagicMock(pk=1),
+            ),
             patch(
                 "netbox_librenms_plugin.views.sync.modules._resolve_target_device_with_validation",
                 return_value=(MagicMock(), False),
@@ -5903,6 +6127,7 @@ class TestReplaceModuleRedirectServerKey:
             patch("netbox_librenms_plugin.views.sync.modules.reverse", return_value="/sync/url/"),
             patch("netbox_librenms_plugin.views.sync.modules.messages"),
         ):
+            view.request = request
             return view.post(request, pk=1)
 
     def test_missing_module_id_redirect_preserves_fallback_server_key(self):
@@ -5937,7 +6162,10 @@ class TestUpdateModuleInterfaceRedirectServerKey:
 
         with (
             patch.object(view, "require_all_permissions", return_value=None),
-            patch("netbox_librenms_plugin.views.sync.modules.get_object_or_404", return_value=device),
+            patch(
+                "netbox_librenms_plugin.views.mixins.NetBoxObjectPermissionMixin.restrict_object_or_404",
+                return_value=device,
+            ),
             patch(
                 "netbox_librenms_plugin.views.sync.modules._resolve_target_device_with_validation",
                 return_value=(device, False),
@@ -5949,6 +6177,7 @@ class TestUpdateModuleInterfaceRedirectServerKey:
             patch("netbox_librenms_plugin.views.sync.modules.reverse", return_value="/sync/url/"),
             patch("netbox_librenms_plugin.views.sync.modules.messages"),
         ):
+            view.request = request
             response = view.post(request, pk=device.pk)
 
         assert "server_key=prod" in response["HX-Redirect"]
@@ -5965,7 +6194,7 @@ class TestUpdateModuleInterfaceRedirectServerKey:
         with (
             patch.object(view, "require_all_permissions", return_value=None),
             patch(
-                "netbox_librenms_plugin.views.sync.modules.get_object_or_404",
+                "netbox_librenms_plugin.views.mixins.NetBoxObjectPermissionMixin.restrict_object_or_404",
                 side_effect=[device, module],
             ),
             patch(
@@ -5983,6 +6212,7 @@ class TestUpdateModuleInterfaceRedirectServerKey:
             patch("netbox_librenms_plugin.views.sync.modules.reverse", return_value="/sync/url/"),
             patch("netbox_librenms_plugin.views.sync.modules.messages"),
         ):
+            view.request = request
             response = view.post(request, pk=device.pk)
 
         assert "server_key=prod" in response["HX-Redirect"]

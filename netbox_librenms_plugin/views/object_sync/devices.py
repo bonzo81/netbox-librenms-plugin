@@ -3,10 +3,9 @@ import copy
 from dcim.models import Device
 from django.core.cache import cache
 from django.http import JsonResponse
-from django.shortcuts import get_object_or_404
 from django.urls import reverse
 from django.views import View
-from ipam.models import VLAN
+from ipam.models import VLAN, VLANGroup
 from utilities.views import ViewTab, register_model_view
 
 from netbox_librenms_plugin.constants import PERM_VIEW_PLUGIN
@@ -375,11 +374,9 @@ class SingleVlanGroupVerifyView(LibreNMSPermissionMixin, NetBoxObjectPermissionM
 
     # Read-only verify endpoint that surfaces a device's interface VLAN assignments —
     # require object-view permission on the underlying Device (mirrors the other verify views).
-    required_object_permissions = {"POST": [("view", Device)]}
+    required_object_permissions = {"POST": [("view", Device), ("view", VLANGroup), ("view", VLAN)]}
 
     def post(self, request):
-        from ipam.models import VLANGroup
-
         data, err = parse_request_json(request)
         if err:
             return err
@@ -407,15 +404,16 @@ class SingleVlanGroupVerifyView(LibreNMSPermissionMixin, NetBoxObjectPermissionM
             return JsonResponse({"status": "error", "message": "Invalid VID"}, status=400)
 
         # Build lookup for the selected group
+        visible_vlans = self.restricted_queryset(VLAN)
         if vlan_group_id:
-            vlan_group = get_object_or_404(VLANGroup, pk=vlan_group_id)
+            vlan_group = self.restrict_object_or_404(VLANGroup, pk=vlan_group_id)
             # Get VLANs in selected group + global VLANs
-            group_vids = set(VLAN.objects.filter(group=vlan_group).values_list("vid", flat=True))
-            global_vids = set(VLAN.objects.filter(group__isnull=True).values_list("vid", flat=True))
+            group_vids = set(visible_vlans.filter(group=vlan_group).values_list("vid", flat=True))
+            global_vids = set(visible_vlans.filter(group__isnull=True).values_list("vid", flat=True))
             available_vids = group_vids | global_vids
         else:
             # No group selected - use global VLANs only
-            available_vids = set(VLAN.objects.filter(group__isnull=True).values_list("vid", flat=True))
+            available_vids = set(visible_vlans.filter(group__isnull=True).values_list("vid", flat=True))
 
         # Compute whether VID is missing from selected group
         is_missing = vid not in available_vids
@@ -514,11 +512,9 @@ class VerifyVlanSyncGroupView(LibreNMSPermissionMixin, NetBoxObjectPermissionMix
     # Read-only verify endpoint that surfaces NetBox VLAN existence + names — require
     # object-view permission on VLAN (there is no device in scope here, unlike the other
     # verify views), so an unauthorized caller can't enumerate VLANs/groups.
-    required_object_permissions = {"POST": [("view", VLAN)]}
+    required_object_permissions = {"POST": [("view", VLAN), ("view", VLANGroup)]}
 
     def post(self, request):
-        from ipam.models import VLANGroup
-
         data, err = parse_request_json(request)
         if err:
             return err
@@ -538,12 +534,13 @@ class VerifyVlanSyncGroupView(LibreNMSPermissionMixin, NetBoxObjectPermissionMix
             return JsonResponse({"status": "error", "message": "Invalid VID"}, status=400)
 
         # Check if VLAN exists in the selected group (or globally)
+        visible_vlans = self.restricted_queryset(VLAN)
         if vlan_group_id:
-            vlan_group = get_object_or_404(VLANGroup, pk=vlan_group_id)
-            netbox_vlan = VLAN.objects.filter(vid=vid, group=vlan_group).first()
+            vlan_group = self.restrict_object_or_404(VLANGroup, pk=vlan_group_id)
+            netbox_vlan = visible_vlans.filter(vid=vid, group=vlan_group).first()
         else:
             # No group = global VLANs
-            netbox_vlan = VLAN.objects.filter(vid=vid, group__isnull=True).first()
+            netbox_vlan = visible_vlans.filter(vid=vid, group__isnull=True).first()
 
         exists_in_netbox = bool(netbox_vlan)
         name_matches = netbox_vlan.name == librenms_name if netbox_vlan else False

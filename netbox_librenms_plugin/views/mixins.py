@@ -344,7 +344,7 @@ class NetBoxObjectPermissionMixin:
         """
         return model.objects.restrict(self.request.user, action)
 
-    def restrict_object_or_404(self, model, action="view", **kwargs):
+    def restrict_object_or_404(self, model, action="view", select_related=(), **kwargs):
         """
         Resolve one object through :meth:`restricted_queryset` (fail-closed lookup).
 
@@ -354,12 +354,17 @@ class NetBoxObjectPermissionMixin:
         Args:
             model: A NetBox model whose manager is a ``RestrictedQuerySet``.
             action: The permission action to scope by (default ``"view"``).
+            select_related: Relations to join in the same query, for a caller that reads them right
+                after (the plain ``Model.objects.select_related(...)`` form would skip the scoping).
             **kwargs: Lookup kwargs forwarded to ``get_object_or_404`` (e.g. ``pk=...``).
 
         Returns:
             The resolved object the user is permitted to access.
         """
-        return get_object_or_404(self.restricted_queryset(model, action), **kwargs)
+        queryset = self.restricted_queryset(model, action)
+        if select_related:
+            queryset = queryset.select_related(*select_related)
+        return get_object_or_404(queryset, **kwargs)
 
     def require_all_permissions(self, method="POST"):
         """

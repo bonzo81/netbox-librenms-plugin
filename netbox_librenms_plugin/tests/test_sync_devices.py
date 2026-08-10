@@ -3,6 +3,9 @@
 from unittest.mock import MagicMock, patch
 
 
+from netbox_librenms_plugin.tests.view_test_helpers import post as _post
+
+
 def _make_view(cls_name, module_path="netbox_librenms_plugin.views.sync.devices"):
     import importlib
 
@@ -140,10 +143,13 @@ class TestUpdateDeviceLocationView:
         device.site.name = "London"
         device.get_absolute_url.return_value = "/dcim/devices/1/"
 
-        with patch("netbox_librenms_plugin.views.sync.devices.get_object_or_404", return_value=device):
+        with patch(
+            "netbox_librenms_plugin.views.mixins.NetBoxObjectPermissionMixin.restrict_object_or_404",
+            return_value=device,
+        ):
             with patch("netbox_librenms_plugin.views.sync.devices._device_sync_redirect"):
                 with patch("netbox_librenms_plugin.views.sync.devices.messages") as mock_msg:
-                    view.post(view.request, pk=1)
+                    _post(view, view.request, pk=1)
 
         view._librenms_api.update_device_field.assert_called_once_with(
             42,
@@ -165,10 +171,13 @@ class TestUpdateDeviceLocationView:
         device.site = None
         device.pk = 1
 
-        with patch("netbox_librenms_plugin.views.sync.devices.get_object_or_404", return_value=device):
+        with patch(
+            "netbox_librenms_plugin.views.mixins.NetBoxObjectPermissionMixin.restrict_object_or_404",
+            return_value=device,
+        ):
             with patch("netbox_librenms_plugin.views.sync.devices._device_sync_redirect"):
                 with patch("netbox_librenms_plugin.views.sync.devices.messages") as mock_msg:
-                    view.post(view.request, pk=1)
+                    _post(view, view.request, pk=1)
 
         view._librenms_api.update_device_field.assert_not_called()
         mock_msg.warning.assert_called_once()
@@ -177,18 +186,21 @@ class TestUpdateDeviceLocationView:
 class TestAddDeviceObjectResolution:
     """Regression tests for AddDeviceToLibreNMSView.get_object()."""
 
-    def test_get_object_uses_get_object_or_404_for_virtualmachine(self):
+    def test_get_object_resolves_a_virtualmachine_through_the_restricted_queryset(self):
         from netbox_librenms_plugin.views.sync.devices import AddDeviceToLibreNMSView
         from virtualization.models import VirtualMachine
 
         view = object.__new__(AddDeviceToLibreNMSView)
         vm_obj = MagicMock()
 
-        with patch("netbox_librenms_plugin.views.sync.devices.get_object_or_404", return_value=vm_obj) as mock_get_obj:
+        with patch(
+            "netbox_librenms_plugin.views.mixins.NetBoxObjectPermissionMixin.restrict_object_or_404",
+            return_value=vm_obj,
+        ) as mock_get_obj:
             result = view.get_object(123, object_type="virtualmachine")
 
         assert result is vm_obj
-        mock_get_obj.assert_called_once_with(VirtualMachine, pk=123)
+        mock_get_obj.assert_called_once_with(VirtualMachine, "change", pk=123)
 
 
 class TestUpdateDeviceNameViewWiring:
@@ -270,6 +282,7 @@ class TestRemoveServerMappingViewWiring:
 
         # Use a mock model class so the select_for_update().get() call doesn't hit the DB
         mock_model = MagicMock()
+        mock_model.objects.restrict.return_value = mock_model.objects
         mock_model.objects.select_for_update.return_value.get.return_value = mock_vm
 
         request = MagicMock()
@@ -286,9 +299,11 @@ class TestRemoveServerMappingViewWiring:
                 PLUGINS_CONFIG={"netbox_librenms_plugin": {}},
             ),
         ):
+            view.request = request
             view.post(request, pk=10)
 
         # required_object_permissions must be scoped to VirtualMachine, not Device
         assert ("change", VirtualMachine) in permissions_at_check.get("POST", [])
+        mock_model.objects.restrict.assert_called_once_with(request.user, "change")
         # Response must redirect to the VM-specific sync URL
         mock_redirect.assert_called_with("plugins:netbox_librenms_plugin:vm_librenms_sync", pk=10)

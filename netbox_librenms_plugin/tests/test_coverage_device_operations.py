@@ -322,6 +322,32 @@ class TestValidateDeviceStateMachine:
         assert "role" not in joined
         assert "cluster" not in joined
 
+    def test_ambiguous_primary_ip_is_terminal_no_new_import_blockers(self):
+        """A duplicate primary-IP match (resolve_device_by_host_ip ambiguous) is terminal too — validation must NOT fall through into the new-import site/role/device-type checks and pile unrelated blockers onto the row (mirrors the ambiguous_librenms_id handling)."""
+        from unittest.mock import patch
+
+        device = self._base_device()
+        device["ip"] = "10.1.2.3"  # drives the primary-IP resolution path
+        result = self._run_validate(
+            device,
+            patches_overrides=[
+                patch(
+                    "netbox_librenms_plugin.import_utils.device_operations.resolve_device_by_host_ip",
+                    return_value=(None, True, set()),  # ip_ambiguous
+                ),
+            ],
+        )
+        assert result["existing_match_type"] == "ambiguous_hostname_or_serial"
+        assert result["can_import"] is False
+        assert result["is_ready"] is False
+        # The duplicate-IP ambiguity is the only blocker — no new-import blockers appended.
+        joined = " ".join(result["issues"]).lower()
+        assert "site" not in joined
+        assert "device type" not in joined
+        assert "role" not in joined
+        assert "cluster" not in joined
+        assert any("serial or management IP" in i for i in result["issues"])
+
     def test_flag_ambiguous_is_a_durable_blocker(self):
         """The ambiguity must land in issues (not only warnings) so the readiness step's `can_import = len(issues) == 0` recompute cannot silently re-enable the import."""
         from netbox_librenms_plugin.import_utils.device_operations import _flag_ambiguous_librenms_id
@@ -548,6 +574,23 @@ class TestFetchDeviceWithCache:
         result = fetch_device_with_cache(1, api, libre_devices_cache=cache_dict)
         assert result is device
         mock_cache.get.assert_not_called()
+
+    @patch("netbox_librenms_plugin.import_utils.device_operations.cache")
+    def test_mis_keyed_cache_dict_row_is_not_returned(self, mock_cache):
+        """A pre-fetched cache row whose device_id contradicts the requested id (mis-keyed/stale) is NOT served as this device — resolution falls through to the Django cache / API."""
+        from netbox_librenms_plugin.import_utils.device_operations import fetch_device_with_cache
+
+        api = MagicMock()
+        api.server_key = "default"
+        # The dict maps id 1 -> device 99's row (mis-keyed); the Django cache holds the REAL id-1 row.
+        real_row = {"device_id": 1, "hostname": "real-1"}
+        mock_cache.get.return_value = real_row
+
+        result = fetch_device_with_cache(1, api, libre_devices_cache={1: {"device_id": 99}})
+
+        # The mis-keyed dict row is rejected → the Django cache's real row is returned instead.
+        assert result is real_row
+        mock_cache.get.assert_called_once()
 
     @patch("netbox_librenms_plugin.import_utils.device_operations.cache")
     def test_from_django_cache(self, mock_cache):
@@ -1583,10 +1626,8 @@ class TestValidateDeviceForImportEdgeCases:
         assert validation.get("existing_match_type") == "ambiguous_hostname_or_serial"
         assert any("serial or management IP" in i for i in validation.get("issues", []))
 
-        # Resolve the duplicate: dev_b no longer carries the shared host address. Refresh first so
-        # `address` is an IPNetwork, not the str it was constructed with — NetBox 4.4's pre_delete
-        # `clear_primary_ip` reads `instance.family`, which dereferences `.version` unguarded there.
-        ip_b.refresh_from_db()
+        # Resolve the duplicate: dev_b no longer carries the shared host address. The shared
+        # builder must return a DB-coerced address so NetBox's pre-delete receiver can inspect it.
         ip_b.delete()
 
         _refresh_existing_device(validation, libre_device=libre_device, server_key="default")
@@ -3496,7 +3537,12 @@ class TestValidateDedupsSerialDuplicateQuery:
         serial_dup_queries = [
             q["sql"]
             for q in ctx.captured_queries
-            if '."serial" =' in q["sql"].lower() and "limit 2" in q["sql"].lower() and "not" not in q["sql"].lower()
+            if '."serial" =' in (sql := q["sql"].lower())
+            and "limit 2" in sql
+            # Cross-side lookups exclude a peer ID; the duplicate lookup's WHERE clause does not.
+            and '."id"' not in sql.partition(" where ")[2].partition(" order by ")[0]
         ]
         assert len(serial_dup_queries) == 1
-        assert all("trim(" not in sql.lower() for sql in serial_dup_queries)
+        # A TRIM-wrapped comparison would not match the exact-serial filter above, so check
+        # every captured query rather than only the already-filtered exact-match subset.
+        assert all("trim(" not in query["sql"].lower() for query in ctx.captured_queries)

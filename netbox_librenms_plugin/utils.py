@@ -659,7 +659,10 @@ def get_table_paginate_count(request: HttpRequest, table_prefix: str) -> int:
     if f"{table_prefix}per_page" in request.GET:
         try:
             per_page = int(request.GET.get(f"{table_prefix}per_page"))
-            return min(per_page, config.MAX_PAGE_SIZE)
+            max_page_size = config.MAX_PAGE_SIZE
+            # MAX_PAGE_SIZE 0/None disables the NetBox ceiling; don't clamp to it (min() with 0
+            # would zero the page size, and with None it TypeErrors).
+            return min(per_page, max_page_size) if max_page_size else per_page
         except ValueError:
             pass
 
@@ -1309,6 +1312,77 @@ def resolve_server_mapping_display_id(entry) -> tuple[int | None, bool]:
                 return oob_id, True
         return None, False
     return coerce_librenms_id(entry), False
+
+
+def coerce_positive_int(value) -> int | None:
+    """
+    Coerce a value to a strictly-positive ``int``, or ``None`` when invalid.
+
+    A named alias for :func:`coerce_librenms_id` at the NetBox-pk coercion sites —
+    bulk-import collision detection and module-inventory port identity — so the call
+    reads as pk handling while the strictly-positive-int rule genuinely lives in ONE
+    place and can't drift. The two apply the identical rule: only an ``int`` (excluding
+    ``bool``, an ``int`` subclass, so ``int(True)`` can't silently become ``1``) or an
+    integer-parseable ``str``, kept only when ``> 0``; non-integer types such as ``float``
+    are rejected outright (``int(1.9)`` would truncate to a valid-looking ``1`` and resolve
+    a malformed id to the wrong object).
+
+    Args:
+        value: The raw value to coerce (a NetBox pk or similar identifier).
+
+    Returns:
+        int | None: The positive integer, or None if it can't be coerced.
+    """
+    return coerce_librenms_id(value)
+
+
+def cached_row_matches(cached_row, device_id) -> bool:
+    """
+    Decide whether a cached LibreNMS device row may be served for *device_id*.
+
+    A non-dictionary row or a row whose own ``device_id`` contradicts the requested id
+    must not be served as this device. A dictionary without a readable ``device_id`` stays
+    trusted, and ``None`` never matches. An uncoercible requested id never matches either.
+    Shared by the single-import and bulk-import cache reads so the acceptance rule cannot drift.
+
+    Args:
+        cached_row: The cached payload for *device_id* (usually a dict, possibly None).
+        device_id: The LibreNMS device id the caller asked for.
+
+    Returns:
+        bool: True when the cached row may be used for *device_id*.
+    """
+    if not isinstance(cached_row, dict):
+        return False
+    requested_id = coerce_librenms_id(device_id)
+    if requested_id is None:
+        return False
+    cached_row_id = cached_row.get("device_id")
+    return cached_row_id is None or coerce_librenms_id(cached_row_id) == requested_id
+
+
+def row_identity_matches(row, device_id) -> bool:
+    """
+    Decide whether a LibreNMS device payload verifiably describes *device_id*.
+
+    Stricter than :func:`cached_row_matches`: a real LibreNMS device read always returns
+    a dict carrying its own ``device_id``, so anything else — a non-dict payload, a
+    missing or contradicting id, an un-coercible requested id — fails closed. Shared by
+    the bulk-import collision pre-check and the single-row live-fetch fallback so a
+    payload that flunks this check is neither imported nor written into the shared cache.
+
+    Args:
+        row: The fetched (or cached) payload to identity-check.
+        device_id: The LibreNMS device id the caller asked for.
+
+    Returns:
+        bool: True when the payload's own device_id equals the requested id.
+    """
+    requested_id = coerce_librenms_id(device_id)
+    if requested_id is None:
+        return False
+    row_id = coerce_librenms_id(row.get("device_id")) if isinstance(row, dict) else None
+    return row_id == requested_id
 
 
 def get_librenms_device_id(obj, server_key: str = "default", *, auto_save: bool = True):
@@ -2322,6 +2396,8 @@ def mark_librenms_migrated(donor, winner_pk: int, server_key: str = "default", a
     # ids so a malformed marker can never target the wrong device.
     if isinstance(winner_pk, bool) or not isinstance(winner_pk, int) or winner_pk <= 0:
         raise ValueError(f"winner_pk must be a positive integer, got {winner_pk!r}")
+    # Keep the writer's key normalization paired with get_migrated_to_marker()'s.
+    server_key = server_key or "default"
 
     cf_value = donor.custom_field_data.get("librenms_id")
     if cf_value is None:
@@ -2426,6 +2502,9 @@ def get_migrated_to_marker(device, server_key: str = "default") -> dict | None:
     """
     if device is None:
         return None
+    # Blank/None server_key means the default server everywhere else in this plugin; normalize
+    # here so every marker reader agrees, whatever key hygiene its call site has.
+    server_key = server_key or "default"
     cf_value = device.cf.get("librenms_id") if hasattr(device, "cf") else None
     if not isinstance(cf_value, dict):
         return None

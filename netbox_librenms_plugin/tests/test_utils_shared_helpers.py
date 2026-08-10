@@ -10,7 +10,70 @@ Both are pure functions, so these exercise the real implementations directly wit
 
 import pytest
 
-from netbox_librenms_plugin.utils import is_valid_ports_payload, resolve_server_mapping_display_id
+from netbox_librenms_plugin.utils import (
+    cached_row_matches,
+    is_valid_ports_payload,
+    resolve_server_mapping_display_id,
+    row_identity_matches,
+)
+
+
+class TestCachedRowMatches:
+    """The single- and bulk-import cache reads share this acceptance rule (can't drift)."""
+
+    def test_matching_id_is_served(self):
+        assert cached_row_matches({"device_id": 12, "hostname": "a"}, 12) is True
+
+    def test_string_and_int_ids_normalize_equal(self):
+        assert cached_row_matches({"device_id": "12"}, 12) is True
+
+    def test_contradicting_id_is_rejected(self):
+        # A mis-keyed/stale entry (another device's row under this key) must not be served.
+        assert cached_row_matches({"device_id": 99}, 12) is False
+
+    def test_row_without_device_id_stays_trusted(self):
+        assert cached_row_matches({"hostname": "a"}, 12) is True
+
+    def test_none_row_never_matches(self):
+        assert cached_row_matches(None, 12) is False
+
+    def test_non_dict_row_is_rejected(self):
+        assert cached_row_matches(["not-a-dict"], 12) is False
+
+    def test_two_invalid_ids_do_not_match(self):
+        # Both ids un-coercible must not compare equal as None == None; fail closed.
+        assert cached_row_matches({"device_id": "abc"}, "xyz") is False
+
+    def test_invalid_requested_id_rejects_even_a_trusted_row(self):
+        # An un-coercible requested id can't be identity-checked at all, so nothing matches it.
+        assert cached_row_matches({"hostname": "a"}, "xyz") is False
+
+
+class TestRowIdentityMatches:
+    """The strict identity rule for the collision pre-check and the single-row fetch fallback."""
+
+    def test_matching_dict_row(self):
+        assert row_identity_matches({"device_id": 5, "hostname": "a"}, 5) is True
+
+    def test_string_and_int_ids_normalize_equal(self):
+        assert row_identity_matches({"device_id": "5"}, 5) is True
+
+    def test_contradicting_id_fails(self):
+        assert row_identity_matches({"device_id": 6}, 5) is False
+
+    def test_row_without_device_id_fails(self):
+        # Unlike cached_row_matches, a fetched row MUST carry its own id — fail closed.
+        assert row_identity_matches({"hostname": "a"}, 5) is False
+
+    def test_non_dict_payload_fails(self):
+        assert row_identity_matches(["not-a-dict"], 5) is False
+
+    def test_none_payload_fails(self):
+        assert row_identity_matches(None, 5) is False
+
+    def test_two_invalid_ids_do_not_match(self):
+        # None == None must not read as a verified identity.
+        assert row_identity_matches({"device_id": "abc"}, "abc") is False
 
 
 class TestIsValidPortsPayload:

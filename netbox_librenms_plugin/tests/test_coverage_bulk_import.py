@@ -237,6 +237,86 @@ class TestBulkImportDevicesShared:
         mock_api.get_device_info.assert_not_called()
         assert len(result["success"]) == 1
 
+    def test_mis_keyed_cache_row_is_refetched_not_trusted(self):
+        """A cached row whose own device_id contradicts the requested id (mis-keyed/stale) is NOT imported as this device — a live fetch runs instead.
+
+        The multi-row collision pre-check verifies this, but its callers skip it for single-row
+        imports, so the import path must re-check at the point of use.
+        """
+        # Requested id 1, but the cached payload describes device 99 (a mis-keyed/stale entry).
+        libre_cache = {1: {"device_id": 99, "hostname": "someone-else"}}
+
+        with (
+            patch("netbox_librenms_plugin.import_utils.bulk_import.require_permissions"),
+            patch("netbox_librenms_plugin.import_utils.bulk_import.LibreNMSAPI") as mock_api_cls,
+            patch(
+                "netbox_librenms_plugin.import_utils.bulk_import.validate_device_for_import",
+                return_value=_make_validation(),
+            ),
+            patch(
+                "netbox_librenms_plugin.import_utils.bulk_import.import_single_device",
+                return_value=_make_import_result(),
+            ),
+        ):
+            mock_api = MagicMock()
+            mock_api.server_key = "default"
+            mock_api.get_device_info.return_value = (True, {"device_id": 1, "hostname": "real-device-1"})
+            mock_api_cls.return_value = mock_api
+
+            from netbox_librenms_plugin.import_utils.bulk_import import bulk_import_devices_shared
+
+            bulk_import_devices_shared(
+                device_ids=[1],
+                user=MagicMock(),
+                libre_devices_cache=libre_cache,
+            )
+
+        # The mis-keyed cache row is rejected → a live fetch for the REAL id 1 runs instead of
+        # importing device 99's data under the id-1 selection.
+        mock_api.get_device_info.assert_called_once_with(1, use_cache=False)
+
+    @pytest.mark.parametrize(
+        "bad_payload",
+        [
+            {"device_id": 77, "hostname": "wrong-device"},  # another device's row
+            {},  # empty mapping — no identity to verify
+            ["not-a-dict"],  # non-dict payload
+        ],
+    )
+    def test_mismatched_fallback_fetch_is_failed_and_not_cached(self, bad_payload):
+        """A live-fetch payload not carrying the requested device_id is failed, not used or cached."""
+        # Same fail-closed identity rule as the multi-row collision pre-check (which single-row
+        # imports skip). The rejected mis-keyed cached row forces the live-fetch fallback.
+        stale_row = {"device_id": 99, "hostname": "someone-else"}
+        libre_cache = {1: dict(stale_row)}
+
+        with (
+            patch("netbox_librenms_plugin.import_utils.bulk_import.require_permissions"),
+            patch("netbox_librenms_plugin.import_utils.bulk_import.LibreNMSAPI") as mock_api_cls,
+            patch("netbox_librenms_plugin.import_utils.bulk_import.validate_device_for_import") as mock_validate,
+            patch("netbox_librenms_plugin.import_utils.bulk_import.import_single_device") as mock_import,
+        ):
+            mock_api = MagicMock()
+            mock_api.server_key = "default"
+            mock_api.get_device_info.return_value = (True, bad_payload)
+            mock_api_cls.return_value = mock_api
+
+            from netbox_librenms_plugin.import_utils.bulk_import import bulk_import_devices_shared
+
+            result = bulk_import_devices_shared(
+                device_ids=[1],
+                user=MagicMock(),
+                libre_devices_cache=libre_cache,
+            )
+
+        # The row fails closed instead of importing another device's data under id 1...
+        assert [row["device_id"] for row in result["failed"]] == [1]
+        assert result["success"] == []
+        mock_validate.assert_not_called()
+        mock_import.assert_not_called()
+        # ...and the bad payload must not overwrite the shared cache entry either.
+        assert libre_cache[1] == stale_row
+
     # ------------------------------------------------------------------
     # Line 183 – job.logger.info("Imported device X of Y")
     # ------------------------------------------------------------------
@@ -1053,6 +1133,93 @@ class TestRefreshExistingDevice:
         _refresh_librenms_linkage(validation, dev, {"hostname": "h"}, "default")
 
         assert validation["existing_match_type"] is None
+
+    def test_serial_cached_row_promoted_to_librenms_id_when_now_linked(self):
+        """A row cached as a serial conflict that has since gained the matching host librenms_id must promote to a librenms_id match, not keep the stale serial badge."""
+        from netbox_librenms_plugin.import_utils.bulk_import import _refresh_librenms_linkage
+
+        dev = make_device("ref-serial-now-linked", librenms_cf={"default": {"id": 42}})
+        validation = self._device_validation(existing_device=dev, existing_match_type="serial")
+
+        _refresh_librenms_linkage(validation, dev, {"device_id": 42, "hostname": "h"}, "default")
+
+        assert validation["existing_match_type"] == "librenms_id"
+
+    def test_serial_cached_row_untouched_when_no_current_link_matches(self):
+        """A serial-matched row whose device has no matching librenms link stays 'serial' — only prior id/OOB matches are cleared."""
+        from netbox_librenms_plugin.import_utils.bulk_import import _refresh_librenms_linkage
+
+        dev = make_device("ref-serial-no-link")  # no librenms_id CF
+        validation = self._device_validation(existing_device=dev, existing_match_type="serial")
+
+        _refresh_librenms_linkage(validation, dev, {"device_id": 42, "hostname": "h"}, "default")
+
+        assert validation["existing_match_type"] == "serial"
+
+    def test_serial_oob_candidate_promoted_to_host_clears_stale_action(self):
+        """A serial->librenms_id promotion drops the now-stale serial_action/oob_candidate."""
+        # Otherwise device_status.py renders a purple "Add as OOB controller" badge
+        # (is_oob_candidate = serial_action == "oob_candidate", match-type-independent) on a
+        # row that is actually host-linked.
+        from netbox_librenms_plugin.import_utils.bulk_import import _refresh_existing_device
+
+        dev = make_device("ref-serial-oob-now-linked", librenms_cf={"default": {"id": 6001}})
+        validation = self._device_validation(
+            existing_device=dev,
+            existing_match_type="serial",
+            serial_action="oob_candidate",
+            oob_candidate={"device": dev, "type": "idrac"},
+            device_role={"found": True, "role": dev.role},
+        )
+
+        _refresh_existing_device(validation, libre_device={"device_id": 6001, "hostname": "h"}, server_key="default")
+
+        assert validation["existing_match_type"] == "librenms_id"
+        assert validation.get("serial_action") is None
+        assert validation.get("oob_candidate") is None
+
+    def test_serial_merge_promoted_to_oob_clears_merge_candidates(self):
+        """A serial->librenms_oob promotion drops the now-stale serial_action/merge_candidates."""
+        # Otherwise device_validation_details.html (which checks serial_action ==
+        # "merge_netbox_devices" BEFORE the existing_match_type chain) renders a destructive
+        # "Merge two NetBox devices" form on a row that is already correctly OOB-linked.
+        from netbox_librenms_plugin.import_utils.bulk_import import _refresh_existing_device
+
+        dev = make_device("ref-serial-merge-now-linked", librenms_cf={"default": {"oob": {"id": 6002}}})
+        validation = self._device_validation(
+            existing_device=dev,
+            existing_match_type="serial",
+            serial_action="merge_netbox_devices",
+            merge_candidates={
+                "host_named": {"pk": 1, "name": "other"},
+                "oob_named": {"pk": dev.pk, "name": dev.name},
+            },
+            device_role={"found": True, "role": dev.role},
+        )
+
+        _refresh_existing_device(validation, libre_device={"device_id": 6002, "hostname": "h"}, server_key="default")
+
+        assert validation["existing_match_type"] == "librenms_oob"
+        assert validation.get("serial_action") is None
+        assert validation.get("merge_candidates") is None
+
+    def test_already_linked_row_promotion_preserves_derived_fields(self):
+        """A re-confirmed librenms_id row keeps its link-derived fields (no over-clear)."""
+        from netbox_librenms_plugin.import_utils.bulk_import import _refresh_existing_device
+
+        dev = make_device("ref-already-linked", librenms_cf={"default": {"id": 6003}})
+        validation = self._device_validation(
+            existing_device=dev,
+            existing_match_type="librenms_id",
+            serial_action="update_serial",  # a legitimate link-context action
+            device_role={"found": True, "role": dev.role},
+        )
+
+        _refresh_existing_device(validation, libre_device={"device_id": 6003, "hostname": "h"}, server_key="default")
+
+        assert validation["existing_match_type"] == "librenms_id"
+        # prior match was already a link type → no spurious clear of the link-context action.
+        assert validation.get("serial_action") == "update_serial"
 
     # ------------------------------------------------------------------
     # Deleted match → readiness recompute
@@ -2765,21 +2932,18 @@ class TestRefreshLibreNMSLinkage:
         validation = {"existing_match_type": match_type}
         device = MagicMock()
         libre_device = {"device_id": scanned_id}
-        oob = {"id": oob_id} if oob_id is not None else None
-        with (
-            patch.object(
-                bulk_import,
-                "_describe_existing_librenms_link",
-                return_value={"host_id": host_id, "oob_id": oob_id, "oob_type": None},
-            ) as mock_describe,
-            patch.object(bulk_import, "get_librenms_oob", return_value=oob) as mock_oob,
-        ):
+        with patch.object(
+            bulk_import,
+            "_describe_existing_librenms_link",
+            return_value={"host_id": host_id, "oob_id": oob_id, "oob_type": None},
+        ) as mock_describe:
             bulk_import._refresh_librenms_linkage(validation, device, libre_device, "default")
-        # Both linkage reads must be scoped to the active server_key — a regression that
-        # dropped server_key would re-classify against the wrong server's mapping.
+        # _refresh_librenms_linkage ALWAYS reads the linkage (via _describe_existing_librenms_link)
+        # up front, before it branches on match_type — so every case, including a non-librenms
+        # match type, must issue that read scoped to the active server_key. A regression that
+        # dropped server_key (or short-circuited before the read) would re-classify against the
+        # wrong server's mapping, so assert the call unconditionally.
         mock_describe.assert_called_once_with(device, "default")
-        if mock_oob.called:
-            mock_oob.assert_called_with(device, server_key="default")
         return validation
 
     def test_host_id_match_classifies_librenms_id(self):
@@ -2796,7 +2960,7 @@ class TestRefreshLibreNMSLinkage:
         assert v["existing_match_type"] is None
 
     def test_non_librenms_match_type_untouched(self):
-        """Serial/hostname/primary_ip matches are left alone."""
+        """Serial/hostname/primary_ip matches are left alone (the linkage read still runs first)."""
         v = self._call(match_type="serial", scanned_id=42, host_id=None, oob_id=None)
         assert v["existing_match_type"] == "serial"
 
@@ -2859,3 +3023,312 @@ class TestRefreshExistingDeviceVMMatch:
         assert validation["cluster"]["found"] is False
         assert validation["cluster"]["cluster"] is None
         assert validation["cluster"]["available_clusters"] == ["keep-me"]
+
+
+@pytest.mark.django_db
+class TestDetectCollisionsForDeviceIds:
+    """Real-DB coverage for ``detect_collisions_for_device_ids`` (the import-path gate helper)."""
+
+    @staticmethod
+    def _api():
+        from types import SimpleNamespace
+
+        # server_key only — get_device_info is never reached because the cache is pre-populated.
+        return SimpleNamespace(server_key="default")
+
+    def test_two_rows_resolving_to_one_device_collide(self):
+        """Two LibreNMS rows whose real validation resolves to one NetBox device → a collision."""
+        from netbox_librenms_plugin.import_utils.bulk_import import detect_collisions_for_device_ids
+
+        nb = make_device("collide-batch-host")
+        cache = {
+            8001: {"device_id": 8001, "sysName": "collide-batch-host", "hostname": "collide-batch-host"},
+            8002: {"device_id": 8002, "sysName": "collide-batch-host", "hostname": "collide-batch-host"},
+        }
+        collisions, unresolved = detect_collisions_for_device_ids(
+            [8001, 8002], self._api(), libre_devices_cache=cache, sync_options={"use_sysname": True}
+        )
+        assert unresolved == []
+        assert len(collisions) == 1
+        assert collisions[0]["nb_device_pk"] == nb.pk
+        assert collisions[0]["nb_model_name"] == "device"
+        assert {r["device_id"] for r in collisions[0]["librenms_rows"]} == {8001, 8002}
+
+    def test_empty_cached_row_is_unresolved_not_a_clean_scan(self):
+        """A negatively-cached empty payload can't be collision-checked → unresolved, never importable."""
+        from netbox_librenms_plugin.import_utils.bulk_import import detect_collisions_for_device_ids
+
+        # A prior failed lookup left an empty dict in the shared cache. Without the fix this reaches
+        # validation as a brand-new device and the gate reports a clean scan for an unverified id.
+        collisions, unresolved = detect_collisions_for_device_ids(
+            [8010], self._api(), libre_devices_cache={8010: {}}, sync_options={"use_sysname": True}
+        )
+        assert collisions == []
+        assert unresolved == [8010]
+
+    def test_mismatched_cached_device_id_is_unresolved(self):
+        """A cached row whose device_id doesn't match the requested id is unresolved, not scanned."""
+        from netbox_librenms_plugin.import_utils.bulk_import import detect_collisions_for_device_ids
+
+        # Stale/mis-keyed cache entry: id 8011 requested but the payload describes device 9999.
+        cache = {8011: {"device_id": 9999, "sysName": "wrong-row", "hostname": "wrong-row"}}
+        collisions, unresolved = detect_collisions_for_device_ids(
+            [8011], self._api(), libre_devices_cache=cache, sync_options={"use_sysname": True}
+        )
+        assert collisions == []
+        assert unresolved == [8011]
+
+    def test_get_device_info_exception_is_unresolved_not_crash(self, caplog):
+        """A raised fetch failure must be logged and fail closed to unresolved, not crash the gate."""
+        from types import SimpleNamespace
+
+        from netbox_librenms_plugin.import_utils.bulk_import import detect_collisions_for_device_ids
+
+        def _boom(device_id, **_kwargs):
+            raise RuntimeError("cache backend unavailable")
+
+        # Id not in the cache → the gate must fetch it; get_device_info raises instead of returning
+        # (False, None). The row can't be collision-checked, so it's recorded unresolved (the caller
+        # fails closed on it) rather than propagating and aborting the whole batch.
+        api = SimpleNamespace(server_key="default", get_device_info=_boom)
+        collisions, unresolved = detect_collisions_for_device_ids([8099], api, libre_devices_cache={})
+        assert collisions == []
+        assert unresolved == [8099]
+        assert "Collision pre-check couldn't fetch device 8099" in caplog.text
+        assert "cache backend unavailable" in caplog.text
+
+    def test_two_rows_resolving_to_one_vm_collide(self):
+        """Two LibreNMS rows whose real validation resolves to one existing VirtualMachine → a collision keyed to the VM model, proving the pre-check gate covers the VM half of a batch (validation flips import_as_vm on the existing-VM match)."""
+        from netbox_librenms_plugin.import_utils.bulk_import import detect_collisions_for_device_ids
+        from netbox_librenms_plugin.tests.conftest import make_vm
+
+        vm = make_vm("collide-batch-vm")
+        cache = {
+            8005: {"device_id": 8005, "sysName": "collide-batch-vm", "hostname": "collide-batch-vm"},
+            8006: {"device_id": 8006, "sysName": "collide-batch-vm", "hostname": "collide-batch-vm"},
+        }
+        collisions, unresolved = detect_collisions_for_device_ids(
+            [8005, 8006],
+            self._api(),
+            libre_devices_cache=cache,
+            sync_options={"use_sysname": True},
+            # Mirror the real callers: VM-selected ids are passed so each row validates in
+            # its actual import mode (the hostname→existing-VM match works either way, but
+            # the wiring under test is the per-row mode the view/job now supply).
+            vm_device_ids={8005, 8006},
+        )
+        assert unresolved == []
+        assert len(collisions) == 1
+        assert collisions[0]["nb_device_pk"] == vm.pk
+        assert collisions[0]["nb_model_name"] == "virtualmachine"
+        assert {r["device_id"] for r in collisions[0]["librenms_rows"]} == {8005, 8006}
+
+    def test_vm_row_serial_match_does_not_fabricate_a_collision(self):
+        """A VM-selected row must be validated in VM mode: Device-only serial matching (which bulk_import_vms intentionally skips) would otherwise resolve the VM row onto a Device another row targets and block a perfectly valid batch."""
+        from netbox_librenms_plugin.import_utils.bulk_import import detect_collisions_for_device_ids
+
+        nb = make_device("phantom-host", serial="ZZSER-PHANTOM")
+        cache = {
+            # Device row: hostname-matches the existing device — legitimate single-row target.
+            8401: {"device_id": 8401, "sysName": "phantom-host", "hostname": "phantom-host", "serial": ""},
+            # VM row: hostname matches nothing, but its serial equals the device's. Device-mode
+            # validation would serial-match it onto nb; the real VM import never would.
+            8402: {
+                "device_id": 8402,
+                "sysName": "vm-unrelated",
+                "hostname": "vm-unrelated",
+                "serial": "ZZSER-PHANTOM",
+            },
+        }
+        collisions, unresolved = detect_collisions_for_device_ids(
+            [8401, 8402],
+            self._api(),
+            libre_devices_cache=cache,
+            sync_options={"use_sysname": True},
+            vm_device_ids={8402},
+        )
+        assert unresolved == []
+        assert collisions == [], f"VM-mode row must not serial-match onto Device pk={nb.pk}"
+
+    def test_distinct_devices_do_not_collide(self):
+        """Rows resolving to different NetBox devices → no collision."""
+        from netbox_librenms_plugin.import_utils.bulk_import import detect_collisions_for_device_ids
+
+        make_device("clean-a-host")
+        make_device("clean-b-host")
+        cache = {
+            8003: {"device_id": 8003, "sysName": "clean-a-host", "hostname": "clean-a-host"},
+            8004: {"device_id": 8004, "sysName": "clean-b-host", "hostname": "clean-b-host"},
+        }
+        collisions, unresolved = detect_collisions_for_device_ids(
+            [8003, 8004], self._api(), libre_devices_cache=cache, sync_options={"use_sysname": True}
+        )
+        assert collisions == []
+        assert unresolved == []
+
+    def test_unfetchable_id_is_reported_unresolved(self):
+        """An id not in the cache whose get_device_info fails is returned as unresolved (not silently skipped), so the caller can fail closed instead of importing it unchecked."""
+        from types import SimpleNamespace
+
+        from netbox_librenms_plugin.import_utils.bulk_import import detect_collisions_for_device_ids
+
+        make_device("resolvable-host")
+        cache = {9001: {"device_id": 9001, "sysName": "resolvable-host", "hostname": "resolvable-host"}}
+        # 9002 isn't cached and its info fetch fails → it can't be collision-checked.
+        api = SimpleNamespace(server_key="default", get_device_info=lambda _did, **_kwargs: (False, None))
+        collisions, unresolved = detect_collisions_for_device_ids(
+            [9001, 9002], api, libre_devices_cache=cache, sync_options={"use_sysname": True}
+        )
+        assert unresolved == [9002]
+        assert collisions == []  # only one resolvable row → no collision
+
+    def test_validation_error_id_is_reported_unresolved(self):
+        """A row whose validator returns a partial-result issue is reported unresolved, not collision-checked on the partial result."""
+        from netbox_librenms_plugin.import_utils import bulk_import as bulk_import_module
+        from netbox_librenms_plugin.import_utils.bulk_import import detect_collisions_for_device_ids
+        from netbox_librenms_plugin.import_utils.device_operations import VALIDATION_ERROR_ISSUE_PREFIX
+
+        make_device("validatable-host")
+        cache = {
+            9101: {"device_id": 9101, "sysName": "validatable-host", "hostname": "validatable-host"},
+            9102: {"device_id": 9102, "sysName": "unvalidatable-host", "hostname": "unvalidatable-host"},
+        }
+
+        # Stub the consumer's validator so 9102 returns the except-branch shape directly, instead
+        # of relying on _determine_device_name crashing on a non-string sysName — which would
+        # silently stop exercising the fail-closed path if name coercion is ever hardened. Build the
+        # issue from the SHARED prefix constant so producer and consumer can't drift apart unnoticed
+        # (a rename of the marker moves both this input and the guard together). 9101 delegates to
+        # the REAL validator so the clean-row collision logic this test asserts on stays genuine.
+        real_validate = bulk_import_module.validate_device_for_import
+
+        def fake_validate(libre_device, *args, **kwargs):
+            if libre_device.get("device_id") == 9102:
+                return {
+                    "issues": [f"{VALIDATION_ERROR_ISSUE_PREFIX} simulated validator exception"],
+                    "resolved_name": None,
+                }
+            return real_validate(libre_device, *args, **kwargs)
+
+        with patch.object(bulk_import_module, "validate_device_for_import", side_effect=fake_validate):
+            collisions, unresolved = detect_collisions_for_device_ids(
+                [9101, 9102],
+                self._api(),
+                libre_devices_cache=cache,
+                sync_options={"use_sysname": True, "strip_domain": True},
+            )
+        assert unresolved == [9102]
+        assert collisions == []  # only one validatable row → no collision
+
+    def test_cancelled_job_stops_scan_before_any_fetch(self):
+        """A job already cancelled when the scan starts issues ZERO LibreNMS calls; every id is returned unresolved so the caller's existing gate fails the batch closed instead of importing it unchecked."""
+        from types import SimpleNamespace
+
+        from netbox_librenms_plugin.import_utils import bulk_import as bulk_import_module
+        from netbox_librenms_plugin.import_utils.bulk_import import detect_collisions_for_device_ids
+
+        calls = []
+
+        def _get_device_info(did, **_kwargs):
+            calls.append(did)
+            return True, {"device_id": did, "sysName": f"host-{did}", "hostname": f"host-{did}"}
+
+        api = SimpleNamespace(server_key="default", get_device_info=_get_device_info)
+        # _is_job_cancelled reads RQ/Redis job state — the one true external boundary here.
+        with patch.object(bulk_import_module, "_is_job_cancelled", return_value=True):
+            collisions, unresolved = detect_collisions_for_device_ids(
+                [8201, 8202, 8203],
+                api,
+                libre_devices_cache={},
+                sync_options={"use_sysname": True},
+                job=SimpleNamespace(logger=None),
+            )
+        assert calls == [], "cancelled scan must not keep calling LibreNMS"
+        assert unresolved == [8201, 8202, 8203]
+        assert collisions == []
+
+    def test_mid_scan_cancellation_marks_remainder_unresolved(self):
+        """Cancellation arriving mid-scan stops at the next poll (every 5th id); already-scanned ids stay checked and every unscanned id is returned unresolved, so a partial scan can never pass for a clean full one."""
+        from types import SimpleNamespace
+
+        from netbox_librenms_plugin.import_utils import bulk_import as bulk_import_module
+        from netbox_librenms_plugin.import_utils.bulk_import import detect_collisions_for_device_ids
+
+        ids = [8301, 8302, 8303, 8304, 8305, 8306, 8307]
+        calls = []
+
+        def _get_device_info(did, **_kwargs):
+            calls.append(did)
+            return True, {"device_id": did, "sysName": f"host-{did}", "hostname": f"host-{did}"}
+
+        api = SimpleNamespace(server_key="default", get_device_info=_get_device_info)
+        # Not cancelled at the idx==1 poll, cancelled by the idx==5 poll → ids 5..7 unscanned.
+        with patch.object(bulk_import_module, "_is_job_cancelled", side_effect=[False, True]):
+            collisions, unresolved = detect_collisions_for_device_ids(
+                ids,
+                api,
+                libre_devices_cache={},
+                sync_options={"use_sysname": True},
+                job=SimpleNamespace(logger=None),
+            )
+        assert calls == [8301, 8302, 8303, 8304], "scan must stop at the cancellation poll"
+        assert unresolved == [8305, 8306, 8307]
+        assert collisions == []
+
+    def test_fetched_row_is_written_back_into_shared_cache(self):
+        """A cache-miss fetch is persisted into the caller's cache dict so the downstream import reuses it instead of re-fetching the same LibreNMS device."""
+        from types import SimpleNamespace
+
+        from netbox_librenms_plugin.import_utils.bulk_import import detect_collisions_for_device_ids
+
+        make_device("writeback-a-host")
+        make_device("writeback-b-host")
+        calls = []
+
+        def _get_device_info(did, **kwargs):
+            calls.append((did, kwargs))
+            name = {8101: "writeback-a-host", 8102: "writeback-b-host"}[did]
+            return True, {"device_id": did, "sysName": name, "hostname": name}
+
+        api = SimpleNamespace(server_key="default", get_device_info=_get_device_info)
+        shared_cache = {}  # empty → both ids miss, must be fetched AND written back
+
+        detect_collisions_for_device_ids(
+            [8101, 8102], api, libre_devices_cache=shared_cache, sync_options={"use_sysname": True}
+        )
+        # Each id fetched once and persisted into the SAME dict object the caller passed.
+        assert calls == [(8101, {"use_cache": False}), (8102, {"use_cache": False})]
+        assert shared_cache[8101]["hostname"] == "writeback-a-host"
+        assert shared_cache[8102]["hostname"] == "writeback-b-host"
+
+        # A downstream consumer reusing that warmed cache adds ZERO further LibreNMS calls.
+        calls.clear()
+        detect_collisions_for_device_ids(
+            [8101, 8102], api, libre_devices_cache=shared_cache, sync_options={"use_sysname": True}
+        )
+        assert calls == [], "second pass must hit the warmed cache, not re-fetch"
+
+    def test_fresh_fetch_mismatched_device_id_is_not_written_back(self):
+        """A freshly fetched payload whose device_id doesn't match the requested id is unresolved and never written back into the shared cache (fresh-fetch analog of the cached-mismatch guard)."""
+        from types import SimpleNamespace
+
+        from netbox_librenms_plugin.import_utils.bulk_import import detect_collisions_for_device_ids
+
+        # 8020 isn't cached; the fetch SUCCEEDS but returns a payload describing device 9999
+        # (a mis-keyed / stale LibreNMS response). It must fail closed WITHOUT persisting.
+        shared_cache = {}
+        api = SimpleNamespace(
+            server_key="default",
+            get_device_info=lambda _did, **_kwargs: (
+                True,
+                {"device_id": 9999, "sysName": "wrong-row", "hostname": "wrong-row"},
+            ),
+        )
+        collisions, unresolved = detect_collisions_for_device_ids(
+            [8020], api, libre_devices_cache=shared_cache, sync_options={"use_sysname": True}
+        )
+        assert unresolved == [8020]
+        assert collisions == []
+        # The mismatched payload must NOT leak into the shared cache the caller passed in.
+        assert 8020 not in shared_cache, "mismatched fresh fetch poisoned the shared cache"
+        assert shared_cache == {}, "no mis-keyed payload may survive the collision gate"

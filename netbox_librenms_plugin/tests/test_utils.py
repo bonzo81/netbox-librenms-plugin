@@ -782,6 +782,20 @@ class TestPaginationHelpers:
 
         assert result == 50
 
+    @pytest.mark.parametrize("disabled_max", [0, None])
+    @patch("netbox_librenms_plugin.utils.get_config")
+    @patch("netbox_librenms_plugin.utils.netbox_get_paginate_count")
+    def test_get_table_paginate_count_no_clamp_when_max_disabled(self, mock_netbox_paginate, mock_config, disabled_max):
+        """MAX_PAGE_SIZE 0/None disables the NetBox ceiling; per_page must pass through unclamped."""
+        # min(per_page, 0) would silently return 0 rows per page; min(per_page, None) TypeErrors.
+        from netbox_librenms_plugin.utils import get_table_paginate_count
+
+        mock_config.return_value.MAX_PAGE_SIZE = disabled_max
+        mock_request = MagicMock()
+        mock_request.GET = {"table1_per_page": "500"}
+
+        assert get_table_paginate_count(mock_request, "table1_") == 500
+
     @patch("netbox_librenms_plugin.utils.get_config")
     @patch("netbox_librenms_plugin.utils.netbox_get_paginate_count")
     def test_get_table_paginate_count_default(self, mock_netbox_paginate, mock_config):
@@ -1513,6 +1527,7 @@ class TestNormalizeDeviceSerialsMigration:
         with connection.cursor() as cursor:
             cursor.execute("SELECT to_regclass(%s)::oid", ["nblp_dcim_device_serial_idx"])
             original_oid = cursor.fetchone()[0]
+        assert original_oid is not None, "0012 must have created nblp_dcim_device_serial_idx"
 
         with connection.schema_editor(atomic=False) as schema_editor:
             module.ensure_device_serial_index(apps, schema_editor)
@@ -1719,3 +1734,33 @@ class TestGetVirtualChassisMemberNoneName:
         dev.refresh_from_db()
 
         assert get_virtual_chassis_member(dev, None) is dev
+
+
+class TestCoercePositiveInt:
+    """coerce_positive_int accepts only positive int / int-string and rejects non-integer types (no float truncation)."""
+
+    @pytest.mark.parametrize(
+        "value,expected",
+        [
+            (5, 5),
+            ("7", 7),
+            (1, 1),
+            (0, None),
+            (-3, None),
+            ("0", None),
+            ("-3", None),
+            (None, None),
+            (True, None),  # bool is an int subclass — must not become 1
+            (False, None),
+            (1.9, None),  # float must NOT int()-truncate to 1
+            (1.0, None),  # even a whole float is rejected (non-integer type)
+            ("1.9", None),  # non-integer string
+            ("abc", None),
+            ([], None),
+            ({}, None),
+        ],
+    )
+    def test_coercion(self, value, expected):
+        from netbox_librenms_plugin.utils import coerce_positive_int
+
+        assert coerce_positive_int(value) == expected

@@ -7,19 +7,28 @@ import pytest
 
 @pytest.fixture(autouse=True)
 def _clear_device_info_cache():
-    """Clear get_device_info()'s short-lived cache between tests.
+    """Flush the plugin's caches between tests.
 
-    get_device_info() caches successful lookups in the shared cache. Without this,
-    a cached success from one test leaks into another that reuses the same
-    (server_key, device_id) but mocks a different response — e.g. the failure-path
-    tests keyed on device_id=123 that run after test_get_device_info_success.
+    NetBox uses Redis, which (unlike the test DB) is NOT rolled back between tests, while
+    primary keys ARE reused after each rollback. Every plugin cache key is built from a model
+    name and a pk (``CacheMixin.get_cache_key`` → ``librenms_links_device_7_default``), so a
+    value cached by one test is read by the next test that draws the same pk, with entirely
+    different data behind it. ``librenms_*`` covers the per-object render caches (ports, links,
+    vlans, ip_addresses, inventory, last-fetched stamps, VLAN group overrides), ``get_device_info()``'s
+    short-lived lookup cache and the cached import search results. ``import_device_data_*`` sits
+    outside that prefix: the bulk-import collision gate reads it via ``cache.get_many``
+    (actions.py) BEFORE falling back to the stubbed ``get_device_info``, so a leaked entry for a
+    selected id silently bypasses the stub and defeats the collision check.
     """
     from django.core.cache import cache
 
-    try:
-        cache.delete_pattern("librenms_device_info_*")
-    except (AttributeError, NotImplementedError):
-        cache.clear()
+    for pattern in ("librenms_*", "import_device_data_*"):
+        try:
+            cache.delete_pattern(pattern)
+        except (AttributeError, NotImplementedError):
+            # No django-redis delete_pattern (e.g. LocMemCache): a single clear() covers all.
+            cache.clear()
+            break
     yield
 
 
@@ -56,6 +65,21 @@ def make_device(name, *, serial="", librenms_cf=None):
         dev.custom_field_data["librenms_id"] = librenms_cf
         dev.save()
     return dev
+
+
+def make_virtual_chassis_members(tag, count=2):
+    """Create a VirtualChassis with members at consecutive positions."""
+    from dcim.models import VirtualChassis
+
+    virtual_chassis = VirtualChassis.objects.create(name=f"vc-{tag}")
+    members = []
+    for position in range(1, count + 1):
+        member = make_device(f"{tag}-m{position}")
+        member.virtual_chassis = virtual_chassis
+        member.vc_position = position
+        member.save()
+        members.append(member)
+    return virtual_chassis, members
 
 
 def make_cluster(name):
@@ -190,7 +214,11 @@ def install_module(device, bay_name, model, *, serial="", child_bays=(), manufac
 def ip_on(device, address, ifname, *, iface_type="1000base-t"):
     """Create an Interface on *device* and assign a real IPAddress to it."""
     iface = make_interface(device, ifname, iface_type=iface_type)
-    return make_ip(address, assigned_object=iface)
+    ip = make_ip(address, assigned_object=iface)
+    # NetBox 4.4's IP pre-delete receiver reads address.version. Coerce the string passed to
+    # objects.create() through the model field before returning so every caller can delete safely.
+    ip.refresh_from_db()
+    return ip
 
 
 def delete_keeping_pk(obj):

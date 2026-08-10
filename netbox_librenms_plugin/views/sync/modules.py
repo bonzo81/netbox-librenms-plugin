@@ -9,12 +9,13 @@ from django.core.cache import cache
 from django.core.exceptions import ValidationError
 from django.db import IntegrityError, models, transaction
 from django.http import HttpResponse
-from django.shortcuts import get_object_or_404, redirect, render
+from django.shortcuts import redirect, render
 from django.urls import reverse
 from django.views import View
 
 from netbox_librenms_plugin.utils import (
     AmbiguousLibreNMSIdError,
+    coerce_positive_int as _coerce_positive_int,
     find_by_librenms_id,
     get_librenms_device_id,
     get_librenms_sync_device,
@@ -158,20 +159,17 @@ class _SerialConflictAmbiguous(Exception):
         self.serial = serial
 
 
+class _SerialConflictUnavailable(Exception):
+    """Abort replacement when a serial conflict is outside the caller's delete scope."""
+
+    def __init__(self, serial):
+        super().__init__(serial)
+        self.serial = serial
+
+
 def _get_sync_device_for_inventory(device, server_key):
     """Return the VC sync device used for module inventory cache keys."""
     return get_librenms_sync_device(device, server_key=server_key) or device
-
-
-def _coerce_positive_int(value):
-    """Return ``value`` as a positive int, or ``None`` when invalid."""
-    if value is None or isinstance(value, bool):
-        return None
-    try:
-        int_value = int(value)
-    except (TypeError, ValueError):
-        return None
-    return int_value if int_value > 0 else None
 
 
 def _get_item_port_identity(item):
@@ -564,12 +562,20 @@ class InstallModuleView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
         from dcim.models import Device, Interface, Module, ModuleBay, ModuleType
 
         self.required_object_permissions = {
-            "POST": [("add", Module), ("add", Interface), ("change", Interface), ("delete", Interface)]
+            "POST": [
+                ("view", Device),
+                ("view", ModuleBay),
+                ("view", ModuleType),
+                ("add", Module),
+                ("add", Interface),
+                ("change", Interface),
+                ("delete", Interface),
+            ]
         }
         if error := self.require_all_permissions("POST"):
             return error
 
-        page_device = get_object_or_404(Device, pk=pk)
+        page_device = self.restrict_object_or_404(Device, pk=pk)
         target_device, invalid_selected_device = _resolve_target_device_with_validation(
             page_device, request.POST.get("selected_device_id")
         )
@@ -594,13 +600,23 @@ class InstallModuleView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
             messages.error(request, "Missing or invalid module bay/module type ID.")
             return _modules_redirect_response(request, sync_url, server_key)
 
-        get_object_or_404(ModuleBay, pk=module_bay_id, device=target_device)  # verify bay belongs to selected device
-        module_type = get_object_or_404(ModuleType, pk=module_type_id)
+        self.restrict_object_or_404(
+            ModuleBay, pk=module_bay_id, device=target_device
+        )  # verify bay belongs to selected device
+        module_type = self.restrict_object_or_404(ModuleType, pk=module_type_id)
 
         try:
             with transaction.atomic():
                 # Re-fetch bay under lock to prevent TOCTOU race with concurrent installs.
-                locked_bay = ModuleBay.objects.select_for_update().get(pk=module_bay_id)
+                locked_bay = (
+                    self.restricted_queryset(ModuleBay)
+                    .select_for_update(of=("self",))
+                    .filter(pk=module_bay_id, device=target_device)
+                    .first()
+                )
+                if not locked_bay:
+                    messages.error(request, "Module bay no longer exists.")
+                    return _modules_redirect_response(request, sync_url, server_key)
                 if hasattr(locked_bay, "installed_module") and locked_bay.installed_module:
                     messages.warning(request, f"Module bay '{locked_bay.name}' already has a module installed.")
                     return _modules_redirect_response(request, sync_url, server_key)
@@ -673,6 +689,7 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
 
         self.required_object_permissions = {
             "POST": [
+                ("view", Device),
                 ("add", Module),
                 ("add", Interface),
                 ("change", Interface),
@@ -682,7 +699,7 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
         if error := self.require_all_permissions("POST"):
             return error
 
-        page_device = get_object_or_404(Device, pk=pk)
+        page_device = self.restrict_object_or_404(Device, pk=pk)
         target_device, invalid_selected_device = _resolve_target_device_with_validation(
             page_device, request.POST.get("selected_device_id")
         )
@@ -1230,6 +1247,7 @@ class InstallSelectedView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
 
         self.required_object_permissions = {
             "POST": [
+                ("view", Device),
                 ("add", Module),
                 ("add", Interface),
                 ("change", Interface),
@@ -1239,7 +1257,7 @@ class InstallSelectedView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
         if error := self.require_all_permissions("POST"):
             return error
 
-        page_device = get_object_or_404(Device, pk=pk)
+        page_device = self.restrict_object_or_404(Device, pk=pk)
         server_key = self.resolve_posted_server_key(request.POST)
         sync_url = reverse("plugins:netbox_librenms_plugin:device_librenms_sync", kwargs={"pk": pk})
 
@@ -1366,11 +1384,11 @@ class UpdateModuleSerialView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixi
     def post(self, request, pk):
         from dcim.models import Device, Module
 
-        self.required_object_permissions = {"POST": [("change", Module)]}
+        self.required_object_permissions = {"POST": [("view", Device), ("change", Module)]}
         if error := self.require_all_permissions("POST"):
             return error
 
-        page_device = get_object_or_404(Device, pk=pk)
+        page_device = self.restrict_object_or_404(Device, pk=pk)
         target_device, invalid_selected_device = _resolve_target_device_with_validation(
             page_device, request.POST.get("selected_device_id")
         )
@@ -1390,7 +1408,8 @@ class UpdateModuleSerialView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixi
         try:
             with transaction.atomic():
                 module = (
-                    Module.objects.select_for_update()
+                    self.restricted_queryset(Module, "change")
+                    .select_for_update(of=("self",))
                     .select_related("module_type", "module_bay")
                     .filter(pk=module_id, device=target_device)
                     .first()
@@ -1419,11 +1438,11 @@ class UpdateModuleInterfaceView(
     def post(self, request, pk):
         from dcim.models import Device, Interface, Module
 
-        self.required_object_permissions = {"POST": [("change", Interface)]}
+        self.required_object_permissions = {"POST": [("view", Device), ("view", Module), ("change", Interface)]}
         if error := self.require_all_permissions("POST"):
             return error
 
-        page_device = get_object_or_404(Device, pk=pk)
+        page_device = self.restrict_object_or_404(Device, pk=pk)
         target_device, invalid_selected_device = _resolve_target_device_with_validation(
             page_device, request.POST.get("selected_device_id")
         )
@@ -1444,7 +1463,7 @@ class UpdateModuleInterfaceView(
             messages.error(request, "Missing or invalid module ID.")
             return _modules_redirect_response(request, sync_url, server_key)
 
-        module = get_object_or_404(Module, pk=module_id, device=target_device)
+        module = self.restrict_object_or_404(Module, "view", pk=module_id, device=target_device)
 
         bind_result = None
         # A primary interface is bindable only with both a cache-resolved item AND a server
@@ -1554,7 +1573,7 @@ class ModuleMismatchPreviewView(
         if error := self.require_object_permissions("GET"):
             return error
 
-        page_device = get_object_or_404(Device, pk=pk)
+        page_device = self.restrict_object_or_404(Device, pk=pk)
         target_device, invalid_selected_device = _resolve_target_device_with_validation(
             page_device, request.GET.get("selected_device_id")
         )
@@ -1568,8 +1587,9 @@ class ModuleMismatchPreviewView(
         except (TypeError, ValueError):
             return HttpResponse("Missing or invalid module_id/ent_index.", status=400)
 
-        installed_module = get_object_or_404(
-            Module.objects.select_related("module_type", "module_bay", "device"),
+        installed_module = self.restrict_object_or_404(
+            Module,
+            select_related=("module_type", "module_bay", "device"),
             pk=module_id,
             device=target_device,
         )
@@ -1617,15 +1637,18 @@ class ModuleMismatchPreviewView(
         # Check whether the LibreNMS serial already exists at a different location
         serial_conflict = None
         serial_conflict_ambiguous = False
+        serial_conflict_hidden = False
         if librenms_serial:
-            conflict_qs = (
-                Module.objects.filter(serial=librenms_serial)
-                .exclude(pk=installed_module.pk)
-                .select_related("module_type", "module_bay", "device")
-            )
+            conflict_qs = Module.objects.filter(serial=librenms_serial).exclude(pk=installed_module.pk)
             conflict_count = conflict_qs.count()
             if conflict_count == 1:
-                serial_conflict = conflict_qs.first()
+                serial_conflict = (
+                    self.restricted_queryset(Module)
+                    .filter(pk__in=conflict_qs)
+                    .select_related("module_type", "module_bay", "device")
+                    .first()
+                )
+                serial_conflict_hidden = serial_conflict is None
             elif conflict_count > 1:
                 serial_conflict_ambiguous = True
 
@@ -1645,6 +1668,7 @@ class ModuleMismatchPreviewView(
                 "serial_mismatch": serial_mismatch,
                 "serial_conflict": serial_conflict,
                 "serial_conflict_ambiguous": serial_conflict_ambiguous,
+                "serial_conflict_hidden": serial_conflict_hidden,
                 "ent_index": ent_index_int,
                 "server_key": server_key or "",
                 "selected_device_id": target_device.pk,
@@ -1667,7 +1691,7 @@ class VCNormalizationReportView(LibreNMSPermissionMixin, NetBoxObjectPermissionM
         if error := self.require_object_permissions("GET"):
             return error
 
-        page_device = get_object_or_404(Device, pk=pk)
+        page_device = self.restrict_object_or_404(Device, pk=pk)
         target_device, invalid_selected_device = _resolve_target_device_with_validation(
             page_device, request.GET.get("selected_device_id")
         )
@@ -1679,8 +1703,9 @@ class VCNormalizationReportView(LibreNMSPermissionMixin, NetBoxObjectPermissionM
         except (TypeError, ValueError):
             return HttpResponse("Missing or invalid module_id.", status=400)
 
-        module = get_object_or_404(
-            Module.objects.select_related("module_type", "module_type__manufacturer", "module_bay", "device"),
+        module = self.restrict_object_or_404(
+            Module,
+            select_related=("module_type", "module_type__manufacturer", "module_bay", "device"),
             pk=module_id,
             device=target_device,
         )
@@ -1715,6 +1740,7 @@ class ReplaceModuleView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjectP
 
         self.required_object_permissions = {
             "POST": [
+                ("view", Device),
                 ("add", Module),
                 ("change", Module),
                 ("delete", Module),
@@ -1726,7 +1752,7 @@ class ReplaceModuleView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjectP
         if error := self.require_all_permissions("POST"):
             return error
 
-        page_device = get_object_or_404(Device, pk=pk)
+        page_device = self.restrict_object_or_404(Device, pk=pk)
         target_device, invalid_selected_device = _resolve_target_device_with_validation(
             page_device, request.POST.get("selected_device_id")
         )
@@ -1742,10 +1768,13 @@ class ReplaceModuleView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjectP
             messages.error(request, "Missing or invalid module_id/ent_index.")
             return _modules_redirect_response(request, sync_url, server_key)
 
-        installed_module = get_object_or_404(
-            Module.objects.select_related("module_type", "module_bay"),
+        installed_module = self.restrict_object_or_404(
+            Module,
+            "change",
+            select_related=("module_type", "module_bay"),
             pk=module_id,
             device=target_device,
+            pk__in=self.restricted_queryset(Module, "delete").values("pk"),
         )
 
         sync_device = _get_sync_device_for_inventory(target_device, server_key)
@@ -1786,8 +1815,13 @@ class ReplaceModuleView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjectP
             with transaction.atomic():
                 # Re-fetch with row lock to prevent concurrent modifications
                 installed_module = (
-                    Module.objects.select_for_update()
-                    .filter(pk=module_id, device=target_device)
+                    self.restricted_queryset(Module, "change")
+                    .select_for_update(of=("self",))
+                    .filter(
+                        pk=module_id,
+                        device=target_device,
+                        pk__in=self.restricted_queryset(Module, "delete").values("pk"),
+                    )
                     .select_related("module_type", "module_bay")
                     .first()
                 )
@@ -1809,17 +1843,21 @@ class ReplaceModuleView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjectP
                 conflict_module = None
                 if serial:
                     conflict_qs = (
-                        Module.objects.select_for_update()
+                        self.restricted_queryset(Module, "delete")
+                        .select_for_update(of=("self",))
                         .filter(serial=serial)
                         .exclude(pk=installed_module.pk)
                         .select_related("module_type", "module_bay", "device")
                     )
                     locked_conflicts = list(conflict_qs)
-                    if len(locked_conflicts) > 1:
+                    conflict_count = Module.objects.filter(serial=serial).exclude(pk=installed_module.pk).count()
+                    if conflict_count > 1:
                         # Roll back and surface a clear error — we don't want to
                         # guess which of N conflicts to remove.
                         raise _SerialConflictAmbiguous(serial)
-                    if len(locked_conflicts) == 1:
+                    if conflict_count != len(locked_conflicts):
+                        raise _SerialConflictUnavailable(serial)
+                    if conflict_count == 1:
                         conflict_module = locked_conflicts[0]
 
                 # Remove the serial-conflicting module from its current location.
@@ -1893,6 +1931,12 @@ class ReplaceModuleView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjectP
                 f"Serial '{exc.serial}' is assigned to multiple modules; cannot determine which to remove. "
                 "Please resolve the conflict manually.",
             )
+        except _SerialConflictUnavailable as exc:
+            messages.error(
+                request,
+                f"Serial '{exc.serial}' is assigned to a module you cannot remove. "
+                "Ask an administrator to resolve the conflict.",
+            )
         except (ValidationError, IntegrityError) as e:
             error_msg = str(e)
             if "dcim_interface_unique_device_name" in error_msg:
@@ -1919,11 +1963,18 @@ class MoveModuleView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, View)
     def post(self, request, pk):
         from dcim.models import Device, Module, ModuleBay
 
-        self.required_object_permissions = {"POST": [("change", Module), ("delete", Module)]}
+        self.required_object_permissions = {
+            "POST": [
+                ("view", Device),
+                ("view", ModuleBay),
+                ("change", Module),
+                ("delete", Module),
+            ]
+        }
         if error := self.require_all_permissions("POST"):
             return error
 
-        page_device = get_object_or_404(Device, pk=pk)
+        page_device = self.restrict_object_or_404(Device, pk=pk)
         target_device, invalid_selected_device = _resolve_target_device_with_validation(
             page_device, request.POST.get("selected_device_id")
         )
@@ -1945,17 +1996,29 @@ class MoveModuleView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, View)
         except (TypeError, ValueError):
             module_id = None
 
-        get_object_or_404(ModuleBay, pk=target_bay_id, device=target_device)
+        self.restrict_object_or_404(ModuleBay, pk=target_bay_id, device=target_device)
 
         try:
             occupant_removed_msg = None
             with transaction.atomic():
                 # Lock target bay to prevent concurrent modifications
-                target_bay = ModuleBay.objects.select_for_update().get(pk=target_bay_id, device=target_device)
+                target_bay = (
+                    self.restricted_queryset(ModuleBay)
+                    .select_for_update(of=("self",))
+                    .filter(pk=target_bay_id, device=target_device)
+                    .first()
+                )
+                if not target_bay:
+                    messages.error(request, "Module bay no longer exists.")
+                    return _modules_redirect_response(request, sync_url)
 
-                # Re-fetch with row lock to prevent concurrent modifications
+                # Re-fetch with row lock to prevent concurrent modifications. Scoped like the
+                # primary lookup: this module's device and bay are reassigned below, and its pk
+                # comes straight from the POST, so an unscoped read would move a module the
+                # user's grant does not cover.
                 conflict_module = (
-                    Module.objects.select_for_update()
+                    self.restricted_queryset(Module, "change")
+                    .select_for_update(of=("self",))
                     .filter(pk=conflict_module_id)
                     .select_related("module_type", "module_bay", "device")
                     .first()
@@ -1964,10 +2027,13 @@ class MoveModuleView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, View)
                     messages.error(request, "Module no longer exists.")
                     return _modules_redirect_response(request, sync_url)
 
-                # Remove whatever is currently in the target bay (if provided and different)
+                # Remove whatever is currently in the target bay (if provided and different).
+                # Scoped by "delete": the device and bay filters prove where the row sits, not that
+                # the grant covers it, and the gate asked has_perm without an instance.
                 if module_id:
                     occupant = (
-                        Module.objects.select_for_update()
+                        self.restricted_queryset(Module, "delete")
+                        .select_for_update(of=("self",))
                         .filter(pk=module_id, device=target_device, module_bay=target_bay)
                         .first()
                     )
@@ -2012,9 +2078,9 @@ class AddBayTemplateView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, V
         from dcim.models import DeviceType, ModuleType
 
         if target_kind == "device_type":
-            return get_object_or_404(DeviceType, pk=target_pk)
+            return self.restrict_object_or_404(DeviceType, pk=target_pk)
         if target_kind == "module_type":
-            return get_object_or_404(ModuleType, pk=target_pk)
+            return self.restrict_object_or_404(ModuleType, pk=target_pk)
         return None
 
     @staticmethod
@@ -2199,22 +2265,31 @@ class AddBayTemplateView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, V
         return qs.exists()
 
     def get(self, request, pk):
-        from dcim.models import Device, ModuleBay, ModuleBayTemplate
+        from dcim.models import Device, DeviceType, ModuleBay, ModuleBayTemplate, ModuleType
+
+        target_kind = request.GET.get("target_kind", "")
+        if target_kind not in self.TARGET_KINDS:
+            return HttpResponse("Invalid target_kind.", status=400)
+        target_model = DeviceType if target_kind == "device_type" else ModuleType
 
         # Read-only modal render — only require plugin view permission and
         # NetBox add-permission on ModuleBayTemplate so users without it never
         # see a form they cannot submit. POST also instantiates live ModuleBay
         # rows via _instantiate_template_on_existing(), so require add_modulebay
         # here too to keep the GET/POST permission contract aligned.
-        self.required_object_permissions = {"GET": [("add", ModuleBayTemplate), ("add", ModuleBay)]}
+        self.required_object_permissions = {
+            "GET": [
+                ("view", Device),
+                ("view", target_model),
+                ("add", ModuleBayTemplate),
+                ("add", ModuleBay),
+            ]
+        }
         if error := self.require_all_permissions("GET"):
             return error
 
-        device = get_object_or_404(Device, pk=pk)
+        device = self.restrict_object_or_404(Device, pk=pk)
 
-        target_kind = request.GET.get("target_kind", "")
-        if target_kind not in self.TARGET_KINDS:
-            return HttpResponse("Invalid target_kind.", status=400)
         try:
             target_pk = int(request.GET.get("target_pk", ""))
         except (TypeError, ValueError):
@@ -2261,24 +2336,34 @@ class AddBayTemplateView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, V
         return render(request, "netbox_librenms_plugin/htmx/add_bay_template_modal.html", context)
 
     def post(self, request, pk):
-        from dcim.models import Device, ModuleBay, ModuleBayTemplate
+        from dcim.models import Device, DeviceType, ModuleBay, ModuleBayTemplate, ModuleType
 
         from netbox_librenms_plugin.models import ModuleBayMapping
-
-        # POST creates the template AND instantiates live ModuleBay rows on
-        # existing devices/modules via _instantiate_template_on_existing(), so
-        # gate on add_modulebay in addition to add_modulebaytemplate.
-        self.required_object_permissions = {"POST": [("add", ModuleBayTemplate), ("add", ModuleBay)]}
-        if error := self.require_all_permissions("POST"):
-            return error
-
-        device = get_object_or_404(Device, pk=pk)
-        sync_url = reverse("plugins:netbox_librenms_plugin:device_librenms_sync", kwargs={"pk": pk})
 
         target_kind = request.POST.get("target_kind", "")
         if target_kind not in self.TARGET_KINDS:
             messages.error(request, "Invalid target_kind for bay template.")
+            sync_url = reverse("plugins:netbox_librenms_plugin:device_librenms_sync", kwargs={"pk": pk})
             return _modules_redirect_response(request, sync_url)
+        target_model = DeviceType if target_kind == "device_type" else ModuleType
+
+        # POST creates the template AND instantiates live ModuleBay rows on
+        # existing devices/modules via _instantiate_template_on_existing(), so
+        # gate on add_modulebay in addition to add_modulebaytemplate.
+        self.required_object_permissions = {
+            "POST": [
+                ("view", Device),
+                ("view", target_model),
+                ("add", ModuleBayTemplate),
+                ("add", ModuleBay),
+            ]
+        }
+        if error := self.require_all_permissions("POST"):
+            return error
+
+        device = self.restrict_object_or_404(Device, pk=pk)
+        sync_url = reverse("plugins:netbox_librenms_plugin:device_librenms_sync", kwargs={"pk": pk})
+
         try:
             target_pk = int(request.POST.get("target_pk", ""))
         except (TypeError, ValueError):

@@ -5,6 +5,9 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 
+from netbox_librenms_plugin.tests.view_test_helpers import post as _post
+
+
 def _make_real_device(tag):
     """Create and return a real NetBox Device (with its required FKs) for DB-backed tests."""
     from dcim.models import Device, DeviceRole, DeviceType, Manufacturer, Site
@@ -327,7 +330,7 @@ class TestSingleInterfaceVerifyView:
         assert response.status_code == 400
 
     def test_checks_permission_before_resolving_device(self):
-        """The object-view gate must run BEFORE get_object_or_404 so an unauthorized caller can't probe arbitrary device IDs (existence via 404). Exercises the REAL require_object_permissions_json (only request.user.has_perm is mocked) — mocking the gate itself would mask a missing NetBoxObjectPermissionMixin base (AttributeError/500 in production)."""
+        """The object-view gate must run BEFORE restrict_object_or_404 so an unauthorized caller can't probe arbitrary device IDs (existence via 404). Exercises the REAL require_object_permissions_json (only request.user.has_perm is mocked) — mocking the gate itself would mask a missing NetBoxObjectPermissionMixin base (AttributeError/500 in production)."""
         import json
         from netbox_librenms_plugin.views.object_sync.devices import SingleInterfaceVerifyView
 
@@ -492,7 +495,7 @@ class TestSingleModuleVerifyView:
         return view
 
     def test_checks_permission_before_resolving_device(self):
-        """The object-view gate must run BEFORE get_object_or_404 so an unauthorized caller can't probe arbitrary device IDs (existence via 404). Exercises the real require_object_permissions_json (only request.user.has_perm is mocked)."""
+        """The object-view gate must run BEFORE restrict_object_or_404 so an unauthorized caller can't probe arbitrary device IDs (existence via 404). Exercises the real require_object_permissions_json (only request.user.has_perm is mocked)."""
         import json
         from netbox_librenms_plugin.views.object_sync.devices import SingleModuleVerifyView
 
@@ -716,11 +719,104 @@ class TestSingleVlanGroupVerifyView:
         request.user.has_perm.return_value = False  # unauthorized → real gate returns 403
         view.request = request
 
-        with patch("netbox_librenms_plugin.views.object_sync.devices.get_object_or_404") as mock_get_obj:
+        with patch.object(view, "restrict_object_or_404") as mock_get_obj:
             response = view.post(request)
 
         assert response.status_code == 403
         mock_get_obj.assert_not_called()  # device never resolved → no arbitrary-ID probing
+
+    def test_declares_vlan_group_read_permission(self):
+        from ipam.models import VLANGroup
+
+        from netbox_librenms_plugin.views.object_sync.devices import SingleVlanGroupVerifyView
+
+        assert ("view", VLANGroup) in SingleVlanGroupVerifyView.required_object_permissions["POST"]
+
+    @pytest.mark.django_db
+    def test_denies_a_user_without_vlan_read_permission(self):
+        """The verify endpoint must gate its VLAN membership reads."""
+        from dcim.models import Device
+        from ipam.models import VLAN, VLANGroup
+
+        from netbox_librenms_plugin.views.object_sync.devices import SingleVlanGroupVerifyView
+
+        device = _make_real_device("vg-no-vlan-perm")
+        user = _user_with_perms(
+            "vg-no-vlan-perm",
+            [("view", Device), ("view", VLANGroup)],
+        )
+        request = _real_verify_request(
+            {"device_id": device.pk, "vid": "100", "server_key": "default"},
+            "vg-no-vlan-request",
+        )
+        request.user = user
+        view = SingleVlanGroupVerifyView()
+        view.setup(request)
+
+        assert user.has_perm("dcim.view_device") is True
+        assert user.has_perm("ipam.view_vlangroup") is True
+        assert user.has_perm("ipam.view_vlan") is False
+        assert ("view", VLAN) in view.required_object_permissions["POST"]
+        assert view.check_object_permissions("POST")[0] is False
+
+        response = view.post(request)
+
+        assert response.status_code == 403
+
+    @pytest.mark.django_db
+    def test_a_hidden_vlan_is_not_reported_as_available(self):
+        """A constrained VLAN grant must not disclose another VLAN through its VID."""
+        import json
+
+        from dcim.models import Device
+        from ipam.models import VLAN, VLANGroup
+
+        from netbox_librenms_plugin.tests.view_test_helpers import grant
+        from netbox_librenms_plugin.views.object_sync.devices import SingleVlanGroupVerifyView
+
+        device = _make_real_device("vg-hidden")
+        group = VLANGroup.objects.create(name="Grp-vg-hidden", slug="grp-vg-hidden")
+        visible = VLAN.objects.create(vid=10, name="visible", group=group)
+        hidden = VLAN.objects.create(vid=20, name="hidden", group=group)
+        user = _user_with_perms(
+            "vg-hidden",
+            [("view", Device), ("view", VLANGroup)],
+        )
+        user = grant(user, "view", VLAN, constraints={"pk": visible.pk})
+        request = _real_verify_request(
+            {
+                "device_id": device.pk,
+                "vid": str(hidden.vid),
+                "vlan_group_id": group.pk,
+                "vlan_type": "U",
+            },
+            "vg-hidden-request",
+        )
+        request.user = user
+        view = SingleVlanGroupVerifyView()
+        view.setup(request)
+
+        response = view.post(request)
+
+        assert response.status_code == 200
+        assert json.loads(response.content)["is_missing"] is True
+
+        visible_request = _real_verify_request(
+            {
+                "device_id": device.pk,
+                "vid": str(visible.vid),
+                "vlan_group_id": group.pk,
+                "vlan_type": "U",
+            },
+            "vg-visible-request",
+        )
+        visible_request.user = user
+        visible_view = SingleVlanGroupVerifyView()
+        visible_view.setup(visible_request)
+
+        visible_response = visible_view.post(visible_request)
+
+        assert json.loads(visible_response.content)["is_missing"] is False
 
     def test_returns_400_when_no_device_id(self):
         """Returns 400 when no device_id provided."""
@@ -791,7 +887,7 @@ class TestSingleVlanGroupVerifyView:
         ).encode()
         request.user = _make_verify_superuser("vg-with")
         view.request = request
-        response = view.post(request)
+        response = _post(view, request)
 
         assert isinstance(response, JsonResponse)
         assert response.status_code == 200
@@ -875,6 +971,13 @@ class TestVerifyVlanSyncGroupView:
         view.require_object_permissions_json = MagicMock(return_value=None)
         return view
 
+    def test_declares_vlan_group_read_permission(self):
+        from ipam.models import VLANGroup
+
+        from netbox_librenms_plugin.views.object_sync.devices import VerifyVlanSyncGroupView
+
+        assert ("view", VLANGroup) in VerifyVlanSyncGroupView.required_object_permissions["POST"]
+
     def test_checks_permission_before_resolving_group(self):
         """The object-view gate (on VLAN — no device here) must run BEFORE get_object_or_404 so an unauthorized caller can't enumerate VLANs/groups (existence via 404). Exercises the real require_object_permissions_json (only request.user.has_perm is mocked)."""
         import json
@@ -890,7 +993,9 @@ class TestVerifyVlanSyncGroupView:
         request.user.has_perm.return_value = False  # unauthorized → real gate returns 403
         view.request = request
 
-        with patch("netbox_librenms_plugin.views.object_sync.devices.get_object_or_404") as mock_get_obj:
+        with patch(
+            "netbox_librenms_plugin.views.mixins.NetBoxObjectPermissionMixin.restrict_object_or_404"
+        ) as mock_get_obj:
             response = view.post(request)
 
         assert response.status_code == 403
@@ -936,9 +1041,8 @@ class TestVerifyVlanSyncGroupView:
         VLAN.objects.create(vid=10, name="vlan10", group=group)
 
         view = self._make_view()
-        request = MagicMock()
-        request.body = json.dumps({"vid": "10", "vlan_group_id": group.pk, "name": "vlan10"}).encode()
-        response = view.post(request)
+        request = _real_verify_request({"vid": "10", "vlan_group_id": group.pk, "name": "vlan10"}, "sync-group-with")
+        response = _post(view, request)
 
         assert isinstance(response, JsonResponse)
         data = json.loads(response.content)
@@ -956,9 +1060,8 @@ class TestVerifyVlanSyncGroupView:
         from django.http import JsonResponse
 
         view = self._make_view()
-        request = MagicMock()
-        request.body = json.dumps({"vid": "20", "name": "vlan20"}).encode()
-        response = view.post(request)
+        request = _real_verify_request({"vid": "20", "name": "vlan20"}, "sync-group-without")
+        response = _post(view, request)
 
         assert isinstance(response, JsonResponse)
         data = json.loads(response.content)
@@ -966,6 +1069,48 @@ class TestVerifyVlanSyncGroupView:
         assert data["status"] == "success"
         assert data["exists_in_netbox"] is False
         assert data["css_class"]  # a real CSS class was computed
+
+    @pytest.mark.django_db
+    def test_a_hidden_vlan_is_not_returned_from_the_group_lookup(self):
+        """The standalone VLAN verifier must apply the constrained VLAN grant too."""
+        import json
+
+        from ipam.models import VLAN, VLANGroup
+
+        from netbox_librenms_plugin.tests.view_test_helpers import grant
+        from netbox_librenms_plugin.views.object_sync.devices import VerifyVlanSyncGroupView
+
+        group = VLANGroup.objects.create(name="Grp-sync-hidden", slug="grp-sync-hidden")
+        visible = VLAN.objects.create(vid=10, name="visible", group=group)
+        hidden = VLAN.objects.create(vid=20, name="hidden", group=group)
+        user = _user_with_perms("sync-hidden", [("view", VLANGroup)])
+        user = grant(user, "view", VLAN, constraints={"pk": visible.pk})
+        request = _real_verify_request(
+            {"vid": str(hidden.vid), "vlan_group_id": group.pk, "name": hidden.name},
+            "sync-hidden-request",
+        )
+        request.user = user
+        view = VerifyVlanSyncGroupView()
+        view.setup(request)
+
+        response = view.post(request)
+
+        data = json.loads(response.content)
+        assert response.status_code == 200
+        assert data["exists_in_netbox"] is False
+        assert data["name_matches"] is False
+
+        visible_request = _real_verify_request(
+            {"vid": str(visible.vid), "vlan_group_id": group.pk, "name": visible.name},
+            "sync-visible-request",
+        )
+        visible_request.user = user
+        visible_view = VerifyVlanSyncGroupView()
+        visible_view.setup(visible_request)
+
+        visible_response = visible_view.post(visible_request)
+
+        assert json.loads(visible_response.content)["exists_in_netbox"] is True
 
 
 class TestSaveVlanGroupOverridesView:
@@ -1350,12 +1495,24 @@ class TestIpCachedSnapshotMgmtIpBackfill:
         # Pre-upgrade snapshot: NO "mgmt_ip" key.
         real_cache.set(key, {"ip_addresses": [], "ports_by_id": {"7": {}}}, timeout=300)
         try:
-            view._prepare_context(request, device, "ifName", fetch_fresh=False, server_key="default")
-            # The missing key triggered a one-time live resolve of the management IP...
-            api.get_device_info.assert_called_once_with(7)
-            # ...and the resolved VALUE was backfilled into the re-cached snapshot, so
-            # subsequent cached renders read it without another live call.
-            assert real_cache.get(key)["mgmt_ip"] == "10.0.0.9"
+            # This test exercises the django-redis-style positive-TTL path explicitly. Other
+            # backends intentionally skip the backfill because Django's core cache API has no TTL
+            # introspection.
+            with patch(
+                "netbox_librenms_plugin.views.base.ip_addresses_view.cache_remaining_ttl",
+                return_value=300,
+            ):
+                view._prepare_context(request, device, "ifName", fetch_fresh=False, server_key="default")
+                # The missing key triggered a one-time live resolve of the management IP...
+                api.get_device_info.assert_called_once_with(7)
+                # ...and the resolved VALUE was backfilled into the re-cached snapshot...
+                assert real_cache.get(key)["mgmt_ip"] == "10.0.0.9"
+                # ...so the next cached render reads it WITHOUT a second LibreNMS round-trip. Proving
+                # the backfill is consumed is the point of storing it; asserting only the stored value
+                # would still pass if every render re-resolved.
+                api.get_device_info.reset_mock()
+                view._prepare_context(request, device, "ifName", fetch_fresh=False, server_key="default")
+                api.get_device_info.assert_not_called()
         finally:
             real_cache.delete(key)
 

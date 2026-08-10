@@ -186,7 +186,12 @@ class ImportDevicesJob(JobRunner):
 
         from netbox_librenms_plugin.import_utils import (
             bulk_import_devices_shared,
+            classify_bulk_precheck,
+            detect_collisions_for_device_ids,
+            require_permissions,
+            required_import_permissions,
         )
+        from netbox_librenms_plugin.import_utils.bulk_import import _is_job_cancelled
         from netbox_librenms_plugin.librenms_api import LibreNMSAPI
 
         total_count = len(device_ids) + len(vm_imports)
@@ -194,6 +199,16 @@ class ImportDevicesJob(JobRunner):
         self.logger.info(f"Device imports: {len(device_ids)}, VM imports: {len(vm_imports)}")
         if server_key:
             self.logger.info(f"Using LibreNMS server: {server_key}")
+
+        # Authorize BEFORE the collision pre-check: the scan below queries LibreNMS and
+        # surfaces collision details (NetBox pks) in the job output, while the
+        # require_permissions calls inside bulk_import_devices_shared / bulk_import_vms
+        # only run after it. The job executes outside any view's permission gate, so a
+        # submitter whose import rights were revoked after enqueueing must be rejected
+        # here, with the same standalone helper and perm sets the import paths enforce.
+        required_permissions = required_import_permissions(device_ids, vm_imports)
+        if required_permissions:
+            require_permissions(self.job.user, required_permissions, "import devices and VMs")
 
         # Initialize API client
         api = LibreNMSAPI(server_key=server_key)
@@ -205,27 +220,112 @@ class ImportDevicesJob(JobRunner):
             "skipped": [],
             "virtual_chassis_created": 0,
         }
-        if device_ids:
-            self.logger.info(f"Importing {len(device_ids)} devices...")
-            device_result = bulk_import_devices_shared(
-                device_ids=device_ids,
-                server_key=api.server_key,
-                sync_options=sync_options,
-                manual_mappings_per_device=manual_mappings_per_device,
-                libre_devices_cache=libre_devices_cache,
-                job=self,  # Pass job context for logging and cancellation
-                user=self.job.user,  # Pass user for permission checks
+        # Set to the block reason when the device collision/unresolved gate fires, so the VM
+        # section below skips too — the synchronous view returns before importing ANY of the
+        # submitted batch, and the async path must not partially import the same batch's VMs.
+        batch_blocked_msg = None
+        # Collision-check the WHOLE submitted batch — device imports AND VM imports — exactly like
+        # the synchronous view, which passes its full parsed id set (devices + VMs) to the same
+        # gate. device_ids here excludes VM rows (split out upstream), so checking it alone would
+        # let a VM-only batch, or a collision involving a VM row, slip through to bulk_import_vms().
+        collision_check_ids = list(dict.fromkeys([*device_ids, *vm_imports]))
+        # The shared block/skip decision (classify_bulk_precheck); None until the pre-check runs and
+        # consulted by the VM section below so devices and VMs apply the SAME skip set.
+        precheck_outcome = None
+        skipped_id_set = set()
+        if collision_check_ids:
+            # Defense-in-depth: block a batch where two LibreNMS rows resolve to the same NetBox
+            # device, mirroring the confirm-preview/sync-view gate so the async path can't import a
+            # colliding batch either. A single row can never collide, so skip the extra pass.
+            collisions, unresolved = (
+                detect_collisions_for_device_ids(
+                    collision_check_ids,
+                    api,
+                    libre_devices_cache=libre_devices_cache,
+                    sync_options=sync_options,
+                    # Job context so a cancellation stops the scan itself — without it, a large
+                    # cache-miss batch keeps issuing LibreNMS calls until the whole pre-check
+                    # finishes and only the import loops below would honor the cancel.
+                    job=self,
+                    # Each row validates in its actual import mode: a VM row checked in Device
+                    # mode would run the serial/IP matching bulk_import_vms skips and could
+                    # fabricate a collision that blocks a valid batch.
+                    vm_device_ids=vm_imports,
+                )
+                if len(collision_check_ids) >= 2
+                else ([], [])
             )
+            if unresolved and _is_job_cancelled(self):
+                # A cancelled pre-check returns its unscanned remainder as unresolved. Cancellation
+                # is a hard stop (the user asked to stop), so fail the whole batch closed rather than
+                # skip-and-import the scanned portion — and report it as the cancellation it is.
+                ids = ", ".join(str(d) for d in unresolved)
+                msg = (
+                    f"Import cancelled during the collision pre-check; {len(unresolved)} "
+                    f"row(s) (id(s): {ids}) were not checked and nothing was imported."
+                )
+                self.logger.error(msg)
+                device_result["failed"] = [{"device_id": device_id, "error": msg} for device_id in device_ids]
+                batch_blocked_msg = msg
+            else:
+                # Shared decision, identical to the sync view: genuine collisions block the whole
+                # batch; rows that couldn't be collision-checked are SKIPPED (not a whole-batch
+                # block) so a transient miss on one row doesn't drop the entire import.
+                precheck_outcome = classify_bulk_precheck(collisions, unresolved, device_ids, vm_imports)
+                skipped_id_set = set(precheck_outcome.skipped_ids)
+                if precheck_outcome.blocked:
+                    self.logger.error(precheck_outcome.block_message)
+                    device_result["failed"] = [
+                        {"device_id": device_id, "error": precheck_outcome.block_message} for device_id in device_ids
+                    ]
+                    batch_blocked_msg = precheck_outcome.block_message
+                else:
+                    if precheck_outcome.importable_device_ids:
+                        # Clean device rows — import them. (A VM-only batch has none; its VMs are
+                        # handled in the vm_imports block below.)
+                        self.logger.info(f"Importing {len(precheck_outcome.importable_device_ids)} devices...")
+                        device_result = bulk_import_devices_shared(
+                            device_ids=precheck_outcome.importable_device_ids,
+                            server_key=api.server_key,
+                            sync_options=sync_options,
+                            manual_mappings_per_device=manual_mappings_per_device,
+                            libre_devices_cache=libre_devices_cache,
+                            job=self,  # Pass job context for logging and cancellation
+                            user=self.job.user,  # Pass user for permission checks
+                        )
+                    skipped_device_ids = [d for d in device_ids if d in skipped_id_set]
+                    if skipped_device_ids:
+                        self.logger.warning(precheck_outcome.skip_message)
+                        device_result.setdefault("failed", []).extend(
+                            {"device_id": device_id, "error": precheck_outcome.skip_message}
+                            for device_id in skipped_device_ids
+                        )
 
         # Import VMs
         vm_result = {"success": [], "failed": [], "skipped": []}
         if vm_imports:
-            self.logger.info(f"Importing {len(vm_imports)} VMs...")
-            from netbox_librenms_plugin.import_utils import bulk_import_vms
+            if batch_blocked_msg:
+                # A genuine collision (or a cancellation) blocked this submission — fail the same
+                # batch's VMs closed with the block reason rather than partially importing them.
+                self.logger.error(f"Skipping {len(vm_imports)} VM import(s); batch blocked: {batch_blocked_msg}")
+                vm_result["failed"] = [{"device_id": device_id, "error": batch_blocked_msg} for device_id in vm_imports]
+            else:
+                # Apply the same skip set to VMs: import the collision-checked VM rows, skip the
+                # unresolved ones (surfaced as failures with the shared message).
+                importable_vm_imports = precheck_outcome.importable_vm_imports if precheck_outcome else vm_imports
+                skipped_vm_ids = [d for d in vm_imports if d in skipped_id_set] if precheck_outcome else []
+                if importable_vm_imports:
+                    self.logger.info(f"Importing {len(importable_vm_imports)} VMs...")
+                    from netbox_librenms_plugin.import_utils import bulk_import_vms
 
-            vm_result = bulk_import_vms(
-                vm_imports, api, sync_options, libre_devices_cache, job=self, user=self.job.user
-            )
+                    vm_result = bulk_import_vms(
+                        importable_vm_imports, api, sync_options, libre_devices_cache, job=self, user=self.job.user
+                    )
+                if skipped_vm_ids:
+                    self.logger.warning(precheck_outcome.skip_message)
+                    vm_result.setdefault("failed", []).extend(
+                        {"device_id": device_id, "error": precheck_outcome.skip_message} for device_id in skipped_vm_ids
+                    )
 
         # Combine results — partition device_result successes by model type since
         # bulk_import_devices_shared() may return VirtualMachine objects when import_as_vm=True.

@@ -10,6 +10,8 @@ All tests use mocking and direct attribute manipulation instead of HTTP requests
 
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 
 class TestShouldUseBackgroundJob:
     """Test background job decision logic."""
@@ -370,6 +372,10 @@ class TestFilterDevicesJob:
 class TestImportDevicesJob:
     """Test ImportDevicesJob background job."""
 
+    # Two LibreNMS ids (>=2) trigger the job's collision pre-check, which runs the real
+    # validate_device_for_import against the DB (as the production rqworker does). The
+    # fabricated hostnames match no existing NetBox object, so the batch resolves cleanly.
+    @pytest.mark.django_db
     @patch("netbox_librenms_plugin.import_utils.bulk_import_vms")
     @patch("netbox_librenms_plugin.import_utils.bulk_import_devices_shared")
     @patch("netbox_librenms_plugin.librenms_api.LibreNMSAPI")
@@ -377,7 +383,17 @@ class TestImportDevicesJob:
         """Import devices without VMs."""
         from netbox_librenms_plugin.jobs import ImportDevicesJob
 
-        mock_api_class.return_value = MagicMock()
+        # Pin server_key to a real string: the collision pre-check uses api.server_key as a
+        # cache/Q discriminator, so a bare MagicMock() would let server-scoped logic pass on a
+        # non-string sentinel and miss the multi-server regression this path protects.
+        mock_api_class.return_value = MagicMock(server_key="default")
+        # The collision pre-check fetches each device; return distinct devices so the batch
+        # resolves cleanly with no collision (collision/unresolved handling has its own tests).
+        # A "not found" here would now fail the batch closed (unresolved id), not skip silently.
+        mock_api_class.return_value.get_device_info.side_effect = lambda did, **_kwargs: (
+            True,
+            {"device_id": did, "hostname": f"job-import-dev-{did}", "sysName": f"job-import-dev-{did}"},
+        )
 
         # Mock successful device imports
         mock_device_1 = MagicMock()
@@ -415,6 +431,9 @@ class TestImportDevicesJob:
         assert job.job.data["success_count"] == 2
         assert job.job.data["failed_count"] == 0
 
+    # Two VM ids (>=2) now trigger the job's collision pre-check too — it runs over the WHOLE
+    # batch (devices + VMs), so configure the api the same way the device-batch tests do.
+    @pytest.mark.django_db
     @patch("netbox_librenms_plugin.import_utils.bulk_import_vms")
     @patch("netbox_librenms_plugin.import_utils.bulk_import_devices_shared")
     @patch("netbox_librenms_plugin.librenms_api.LibreNMSAPI")
@@ -422,7 +441,13 @@ class TestImportDevicesJob:
         """Import VMs without devices."""
         from netbox_librenms_plugin.jobs import ImportDevicesJob
 
-        mock_api_class.return_value = MagicMock()
+        mock_api_class.return_value = MagicMock(server_key="default")
+        # The batch-wide collision pre-check now fetches each VM id; return distinct devices so the
+        # VM-only batch resolves cleanly (no collision) and the VM import still proceeds.
+        mock_api_class.return_value.get_device_info.side_effect = lambda did, **_kwargs: (
+            True,
+            {"device_id": did, "hostname": f"job-vm-{did}", "sysName": f"job-vm-{did}"},
+        )
 
         # Mock successful VM imports
         mock_vm_1 = MagicMock()
@@ -460,12 +485,77 @@ class TestImportDevicesJob:
     @patch("netbox_librenms_plugin.import_utils.bulk_import_vms")
     @patch("netbox_librenms_plugin.import_utils.bulk_import_devices_shared")
     @patch("netbox_librenms_plugin.librenms_api.LibreNMSAPI")
+    def test_run_vm_only_batch_is_collision_gated(self, mock_api_class, mock_bulk_devices, mock_bulk_vms):
+        """A VM-only batch skips unverifiable rows through the shared collision pre-check."""
+        from netbox_librenms_plugin.jobs import ImportDevicesJob
+
+        mock_api_class.return_value = MagicMock(server_key="default")
+        # get_device_info fails for the VM ids → they can't be collision-checked → the batch-wide
+        # pre-check must skip those rows and the VM import (before the fix it only saw device_ids,
+        # so a VM-only batch bypassed it entirely and bulk_import_vms ran unchecked).
+        mock_api_class.return_value.get_device_info.side_effect = lambda did, **_kwargs: (False, None)
+
+        job = create_mock_job_runner(ImportDevicesJob, job_pk=801)
+
+        job.run(
+            device_ids=[],
+            vm_imports={10: {"cluster_id": 1}, 11: {"cluster_id": 1}},
+            server_key="default",
+        )
+
+        # The VM import must NOT run because every submitted row was skipped.
+        mock_bulk_vms.assert_not_called()
+        mock_bulk_devices.assert_not_called()
+        errors = job.job.data["errors"]
+        assert {error["device_id"] for error in errors} == {10, 11}
+        assert all("Skipped" in error["error"] and "verify collisions" in error["error"] for error in errors)
+        assert job.job.data["failed_count"] == 2
+        assert job.job.data["success_count"] == 0
+
+    @patch("netbox_librenms_plugin.import_utils.bulk_import_vms")
+    @patch("netbox_librenms_plugin.import_utils.bulk_import_devices_shared")
+    @patch("netbox_librenms_plugin.librenms_api.LibreNMSAPI")
+    def test_run_cancelled_during_precheck_blocks_batch_with_cancel_message(
+        self, mock_api_class, mock_bulk_devices, mock_bulk_vms
+    ):
+        """A job cancelled during the collision pre-check stops scanning immediately, imports nothing, and reports the block as a cancellation — not as the fetch-failure message the genuine unresolved path uses."""
+        from netbox_librenms_plugin.import_utils import bulk_import as bulk_import_module
+        from netbox_librenms_plugin.jobs import ImportDevicesJob
+
+        mock_api_class.return_value = MagicMock(server_key="default")
+        job = create_mock_job_runner(ImportDevicesJob, job_pk=802)
+
+        # _is_job_cancelled reads RQ/Redis job state — patch that one external boundary; the
+        # pre-check loop and the jobs.py message branch both read it through this module attr.
+        with patch.object(bulk_import_module, "_is_job_cancelled", return_value=True):
+            job.run(device_ids=[1, 2], vm_imports={10: {"cluster_id": 1}}, server_key="default")
+
+        mock_bulk_devices.assert_not_called()
+        mock_bulk_vms.assert_not_called()
+        # Cancelled at the first poll → the scan issued ZERO LibreNMS calls.
+        mock_api_class.return_value.get_device_info.assert_not_called()
+        errors = job.job.data["errors"]
+        assert errors, "blocked rows must surface as errors"
+        assert all("cancelled during the collision pre-check" in e["error"] for e in errors)
+        assert job.job.data["failed_count"] == 3  # 2 device rows + 1 VM row fail closed
+        assert job.job.data["success_count"] == 0
+
+    # device + VM = 2 ids → the batch-wide collision pre-check runs over both; configure the api.
+    @pytest.mark.django_db
+    @patch("netbox_librenms_plugin.import_utils.bulk_import_vms")
+    @patch("netbox_librenms_plugin.import_utils.bulk_import_devices_shared")
+    @patch("netbox_librenms_plugin.librenms_api.LibreNMSAPI")
     def test_run_mixed_device_and_vm_import(self, mock_api_class, mock_bulk_devices, mock_bulk_vms):
         """Import both devices and VMs."""
         from netbox_librenms_plugin.jobs import ImportDevicesJob
 
         mock_api = MagicMock()
         mock_api.server_key = "non-default"
+        # Distinct devices so the mixed batch resolves cleanly and both imports proceed.
+        mock_api.get_device_info.side_effect = lambda did, **_kwargs: (
+            True,
+            {"device_id": did, "hostname": f"job-mix-{did}", "sysName": f"job-mix-{did}"},
+        )
         mock_api_class.return_value = mock_api
 
         # Mock device imports
@@ -553,6 +643,8 @@ class TestImportDevicesJob:
         call_kwargs = mock_bulk_devices.call_args.kwargs
         assert call_kwargs["sync_options"] == sync_options
 
+    # >=2 ids → the collision pre-check runs real validation against the DB (see note above).
+    @pytest.mark.django_db
     @patch("netbox_librenms_plugin.import_utils.bulk_import_vms")
     @patch("netbox_librenms_plugin.import_utils.bulk_import_devices_shared")
     @patch("netbox_librenms_plugin.librenms_api.LibreNMSAPI")
@@ -560,7 +652,15 @@ class TestImportDevicesJob:
         """Manual mappings passed correctly."""
         from netbox_librenms_plugin.jobs import ImportDevicesJob
 
-        mock_api_class.return_value = MagicMock()
+        # Pin server_key to a real string so the collision pre-check's server-scoped cache/Q
+        # logic runs on a real discriminator, not a MagicMock sentinel.
+        mock_api_class.return_value = MagicMock(server_key="default")
+        # Collision pre-check fetches each device; return distinct devices so the batch resolves
+        # cleanly (a "not found" would now fail the batch closed as an unresolved id).
+        mock_api_class.return_value.get_device_info.side_effect = lambda did, **_kwargs: (
+            True,
+            {"device_id": did, "hostname": f"job-mm-dev-{did}", "sysName": f"job-mm-dev-{did}"},
+        )
 
         mock_bulk_devices.return_value = {
             "success": [],
@@ -636,6 +736,9 @@ class TestImportDevicesJob:
 
         assert 42 in job.job.data["imported_libre_device_ids"]
 
+    # device + VM = 2 ids → the batch-wide collision pre-check runs over both; configure the api so
+    # the batch resolves cleanly and the mocked device/VM error payloads are actually exercised.
+    @pytest.mark.django_db
     @patch("netbox_librenms_plugin.import_utils.bulk_import_vms")
     @patch("netbox_librenms_plugin.import_utils.bulk_import_devices_shared")
     @patch("netbox_librenms_plugin.librenms_api.LibreNMSAPI")
@@ -643,7 +746,11 @@ class TestImportDevicesJob:
         """Device and VM errors are combined in job.data."""
         from netbox_librenms_plugin.jobs import ImportDevicesJob
 
-        mock_api_class.return_value = MagicMock()
+        mock_api_class.return_value = MagicMock(server_key="default")
+        mock_api_class.return_value.get_device_info.side_effect = lambda did, **_kwargs: (
+            True,
+            {"device_id": did, "hostname": f"job-agg-{did}", "sysName": f"job-agg-{did}"},
+        )
 
         # Mock mixed results
         mock_bulk_devices.return_value = {
@@ -670,6 +777,7 @@ class TestImportDevicesJob:
         assert job.job.data["failed_count"] == 2
         assert job.job.data["success_count"] == 0
 
+    @pytest.mark.django_db
     @patch("netbox_librenms_plugin.import_utils.bulk_import_vms")
     @patch("netbox_librenms_plugin.import_utils.bulk_import_devices_shared")
     @patch("netbox_librenms_plugin.librenms_api.LibreNMSAPI")
@@ -677,7 +785,17 @@ class TestImportDevicesJob:
         """All imports fail gracefully."""
         from netbox_librenms_plugin.jobs import ImportDevicesJob
 
-        mock_api_class.return_value = MagicMock()
+        # Pin server_key to a real string so the collision pre-check runs server-scoped cache/Q
+        # logic on a real discriminator rather than a MagicMock sentinel.
+        mock_api_class.return_value = MagicMock(server_key="default")
+        # Collision pre-check fetches each device; return distinct devices so the batch resolves
+        # cleanly (no collision/unresolved) and the import actually reaches
+        # bulk_import_devices_shared. A "not found" here would fail the batch closed in the
+        # unresolved branch, so the mocked all-failure payload below would never be exercised.
+        mock_api_class.return_value.get_device_info.side_effect = lambda did, **_kwargs: (
+            True,
+            {"device_id": did, "hostname": f"job-fail-dev-{did}", "sysName": f"job-fail-dev-{did}"},
+        )
 
         mock_bulk_devices.return_value = {
             "success": [],
@@ -693,11 +811,143 @@ class TestImportDevicesJob:
 
         job.run(device_ids=[1, 2], vm_imports={})
 
-        # Should complete without exception
+        # The import path is actually exercised, and the bulk-import failures (not an
+        # unresolved/collision block message) are the stored errors.
+        mock_bulk_devices.assert_called_once()
+        assert job.job.data["errors"] == [
+            {"device_id": 1, "error": "Error 1"},
+            {"device_id": 2, "error": "Error 2"},
+        ]
         assert job.job.data["success_count"] == 0
         assert job.job.data["failed_count"] == 2
         assert job.job.data["completed"] is True
         job.job.save.assert_called()
+
+    @pytest.mark.django_db
+    @patch("netbox_librenms_plugin.import_utils.bulk_import_vms")
+    @patch("netbox_librenms_plugin.import_utils.bulk_import_devices_shared")
+    @patch("netbox_librenms_plugin.librenms_api.LibreNMSAPI")
+    def test_unresolved_row_is_skipped_not_batch_blocked(self, mock_api_class, mock_bulk_devices, mock_bulk_vms):
+        """An unresolved id is SKIPPED (not imported) while the rest of the batch — devices AND VMs — imports. A transient fetch miss on one row must not drop the whole submission (the old whole-batch block)."""
+        from netbox_librenms_plugin.jobs import ImportDevicesJob
+
+        mock_api = MagicMock()
+        mock_api.server_key = "default"
+
+        # Real collision gate against the DB: ids 1 and 10 resolve + validate cleanly (match no
+        # existing NetBox device); id 2 is a get_device_info miss → unresolved → skipped, not a block.
+        def _get_device_info(did, **_kwargs):
+            if did == 2:
+                return (False, None)
+            return (True, {"device_id": did, "hostname": f"job-skip-dev-{did}", "sysName": f"job-skip-dev-{did}"})
+
+        mock_api.get_device_info.side_effect = _get_device_info
+        mock_api_class.return_value = mock_api
+        mock_bulk_devices.return_value = {"success": [], "failed": [], "skipped": [], "virtual_chassis_created": 0}
+        mock_bulk_vms.return_value = {"success": [], "failed": [], "skipped": []}
+
+        job = create_mock_job_runner(ImportDevicesJob, job_pk=810)
+        job.run(device_ids=[1, 2], vm_imports={10: {"cluster_id": 1}}, server_key="default")
+
+        # The fetchable rows import; only the unresolved id 2 is dropped. The importer is called
+        # with just the importable device id, and the VM section still runs.
+        mock_bulk_devices.assert_called_once()
+        assert mock_bulk_devices.call_args.kwargs["device_ids"] == [1]
+        mock_bulk_vms.assert_called_once()
+        assert mock_bulk_vms.call_args.args[0] == {10: {"cluster_id": 1}}
+
+        errors = job.job.data["errors"]
+        # Only the unresolved row is reported (as a skip) — not the whole batch.
+        assert {e["device_id"] for e in errors} == {2}
+        assert all("Skipped" in e["error"] and "verify collisions" in e["error"] for e in errors)
+        # Object-neutral wording: "row(s)", never "device(s)".
+        assert all("device(s)" not in e["error"] for e in errors)
+        assert any("row(s)" in e["error"] for e in errors)
+        assert job.job.data["failed_count"] == 1
+        assert job.job.data["success_count"] == 0
+        assert job.job.data["completed"] is True
+
+    @pytest.mark.django_db
+    @patch("netbox_librenms_plugin.import_utils.bulk_import_vms")
+    @patch("netbox_librenms_plugin.import_utils.bulk_import_devices_shared")
+    @patch("netbox_librenms_plugin.librenms_api.LibreNMSAPI")
+    def test_vm_row_is_collision_checked_in_vm_mode_not_device_mode(
+        self, mock_api_class, mock_bulk_devices, mock_bulk_vms
+    ):
+        """End-to-end through the job's REAL collision gate: a VM row whose serial happens to equal an existing Device's serial must not be Device-serial-matched onto it — that would fabricate a collision with the device row legitimately targeting that Device and block a valid batch that the real VM import (which skips serial matching) would import fine."""
+        from netbox_librenms_plugin.jobs import ImportDevicesJob
+        from netbox_librenms_plugin.tests.conftest import make_device
+
+        make_device("job-phantom-host", serial="ZZSER-JOB-PHANTOM")
+
+        mock_api = MagicMock()
+        mock_api.server_key = "default"
+
+        def _get_device_info(did, **_kwargs):
+            if did == 1:  # device import row → hostname-matches the existing device (fine alone)
+                return (
+                    True,
+                    {"device_id": 1, "hostname": "job-phantom-host", "sysName": "job-phantom-host", "serial": ""},
+                )
+            # VM import row → hostname matches nothing; serial equals the Device's.
+            return (
+                True,
+                {
+                    "device_id": did,
+                    "hostname": "job-vm-unique",
+                    "sysName": "job-vm-unique",
+                    "serial": "ZZSER-JOB-PHANTOM",
+                },
+            )
+
+        mock_api.get_device_info.side_effect = _get_device_info
+        mock_api_class.return_value = mock_api
+        mock_bulk_devices.return_value = {"success": [], "failed": [], "skipped": [], "virtual_chassis_created": 0}
+        mock_bulk_vms.return_value = {"success": [], "failed": [], "skipped": []}
+
+        job = create_mock_job_runner(ImportDevicesJob, job_pk=811)
+        job.run(device_ids=[1], vm_imports={10: {"cluster_id": 1}}, server_key="default")
+
+        # No fabricated collision → the clean batch imports BOTH halves.
+        mock_bulk_devices.assert_called_once()
+        mock_bulk_vms.assert_called_once()
+        assert job.job.data["errors"] == []
+        assert job.job.data["failed_count"] == 0
+
+    @patch("netbox_librenms_plugin.import_utils.detect_collisions_for_device_ids")
+    @patch("netbox_librenms_plugin.import_utils.bulk_import_vms")
+    @patch("netbox_librenms_plugin.import_utils.bulk_import_devices_shared")
+    @patch("netbox_librenms_plugin.librenms_api.LibreNMSAPI")
+    def test_collision_block_skips_vm_import(self, mock_api_class, mock_bulk_devices, mock_bulk_vms, mock_detect):
+        """A same-NetBox-device collision blocks the batch and skips the VM section too.
+
+        Collision DETECTION has its own real-DB tests; here the detector is stubbed to isolate
+        the job's collisions-branch block flow (the symmetric counterpart of the unresolved one).
+        """
+        from netbox_librenms_plugin.jobs import ImportDevicesJob
+
+        mock_api = MagicMock()
+        mock_api.server_key = "default"
+        mock_api_class.return_value = mock_api
+        mock_detect.return_value = ([{"nb_device_pk": 5}], [])  # one collision group, no unresolved
+        mock_bulk_devices.return_value = {"success": [], "failed": [], "skipped": [], "virtual_chassis_created": 0}
+        mock_bulk_vms.return_value = {"success": [], "failed": [], "skipped": []}
+
+        job = create_mock_job_runner(ImportDevicesJob, job_pk=812)
+        job.run(device_ids=[1, 2], vm_imports={10: {"cluster_id": 1}}, server_key="default")
+
+        mock_bulk_devices.assert_not_called()
+        mock_bulk_vms.assert_not_called()
+        errors = job.job.data["errors"]
+        assert {e["device_id"] for e in errors} == {1, 2, 10}
+        # Shared block wording (classify_bulk_precheck), identical to the sync view.
+        assert all("Bulk import blocked" in e["error"] for e in errors)
+        # The gate spans device + VM ids (vm_imports here), so the block message must be
+        # object-neutral — a VM collision must not be mislabelled a "NetBox device" collision.
+        assert all("NetBox object collision" in e["error"] for e in errors)
+        assert not any("NetBox device collision" in e["error"] for e in errors)
+        assert job.job.data["failed_count"] == 3
+        assert job.job.data["success_count"] == 0
 
     def test_job_meta_name(self):
         """Job has correct Meta.name."""
@@ -730,6 +980,135 @@ class TestImportDevicesJob:
         mock_bulk_devices.assert_called_once()
         call_kwargs = mock_bulk_devices.call_args[1]
         assert call_kwargs.get("server_key") == "resolved-default"
+
+    @staticmethod
+    def _real_user(username, *vm_or_device_perms):
+        """Create a real NetBox user, granting perms the NetBox way (ObjectPermission).
+
+        NetBox's only enforcement backend is ObjectPermissionBackend, so Django's
+        ``user_permissions`` would not make ``has_perm`` pass — the gate must be
+        exercised through real ObjectPermission rows, not a mocked ``has_perm``.
+        """
+        from core.models import ObjectType
+        from django.contrib.auth import get_user_model
+        from users.models import ObjectPermission
+
+        user = get_user_model().objects.create_user(username=username)
+        for app_label, model, action in vm_or_device_perms:
+            perm = ObjectPermission.objects.create(name=f"{username}-{app_label}.{action}_{model}", actions=[action])
+            perm.object_types.add(ObjectType.objects.get_by_natural_key(app_label, model))
+            perm.users.add(user)
+        # Refetch: the permission backend caches per instance on first has_perm call.
+        return get_user_model().objects.get(pk=user.pk)
+
+    @pytest.mark.django_db
+    @patch("netbox_librenms_plugin.import_utils.bulk_import_vms")
+    @patch("netbox_librenms_plugin.import_utils.bulk_import_devices_shared")
+    @patch("netbox_librenms_plugin.librenms_api.LibreNMSAPI")
+    def test_run_unauthorized_user_is_blocked_before_any_librenms_call(
+        self, mock_api_class, mock_bulk_devices, mock_bulk_vms
+    ):
+        """A submitter without import permissions is rejected BEFORE the collision pre-check — no API client, no LibreNMS queries, no collision details computed (the per-path checks inside the import helpers only run after the scan)."""
+        from django.core.exceptions import PermissionDenied
+
+        from netbox_librenms_plugin.jobs import ImportDevicesJob
+
+        # Even if the gate were bypassed, keep the pre-check viable so the failure mode
+        # on unfixed code is "scan ran + import mocks reached", not an unpacking error.
+        mock_api_class.return_value = MagicMock(server_key="default")
+        mock_api_class.return_value.get_device_info.side_effect = lambda did, **_kwargs: (
+            True,
+            {"device_id": did, "hostname": f"authgate-{did}", "sysName": f"authgate-{did}"},
+        )
+
+        job = create_mock_job_runner(ImportDevicesJob, job_pk=803)
+        job.job.user = self._real_user("import-noperms")
+
+        with pytest.raises(PermissionDenied):
+            job.run(device_ids=[1, 2], vm_imports={}, server_key="default")
+
+        mock_api_class.assert_not_called()
+        mock_api_class.return_value.get_device_info.assert_not_called()
+        mock_bulk_devices.assert_not_called()
+        mock_bulk_vms.assert_not_called()
+
+    @pytest.mark.django_db
+    @patch("netbox_librenms_plugin.import_utils.bulk_import_vms")
+    @patch("netbox_librenms_plugin.import_utils.bulk_import_devices_shared")
+    @patch("netbox_librenms_plugin.librenms_api.LibreNMSAPI")
+    def test_run_device_batch_rejected_with_only_the_vm_permission(
+        self, mock_api_class, mock_bulk_devices, mock_bulk_vms
+    ):
+        """A device batch needs add/change Device permissions; the VM permission alone must not open the pre-check."""
+        from django.core.exceptions import PermissionDenied
+
+        from netbox_librenms_plugin.jobs import ImportDevicesJob
+
+        mock_api_class.return_value = MagicMock(server_key="default")
+
+        job = create_mock_job_runner(ImportDevicesJob, job_pk=804)
+        job.job.user = self._real_user("import-vm-perm-only", ("virtualization", "virtualmachine", "add"))
+
+        with pytest.raises(PermissionDenied):
+            job.run(device_ids=[1, 2], vm_imports={}, server_key="default")
+
+        mock_api_class.assert_not_called()
+        mock_bulk_devices.assert_not_called()
+
+    @pytest.mark.django_db
+    @patch("netbox_librenms_plugin.import_utils.bulk_import_vms")
+    @patch("netbox_librenms_plugin.import_utils.bulk_import_devices_shared")
+    @patch("netbox_librenms_plugin.librenms_api.LibreNMSAPI")
+    def test_run_device_batch_passes_without_vm_permission(self, mock_api_class, mock_bulk_devices, mock_bulk_vms):
+        """A device-only batch reaches the importer with add/change Device permissions."""
+        from netbox_librenms_plugin.jobs import ImportDevicesJob
+
+        mock_api_class.return_value = MagicMock(server_key="default")
+        mock_bulk_devices.return_value = {
+            "success": [],
+            "failed": [],
+            "skipped": [],
+            "virtual_chassis_created": 0,
+        }
+
+        job = create_mock_job_runner(ImportDevicesJob, job_pk=806)
+        job.job.user = self._real_user(
+            "import-device-without-vm",
+            ("dcim", "device", "add"),
+            ("dcim", "device", "change"),
+        )
+
+        job.run(device_ids=[1], vm_imports={}, server_key="default")
+
+        mock_api_class.assert_called_once()
+        mock_bulk_devices.assert_called_once()
+        mock_bulk_vms.assert_not_called()
+
+    @pytest.mark.django_db
+    @patch("netbox_librenms_plugin.import_utils.bulk_import_vms")
+    @patch("netbox_librenms_plugin.import_utils.bulk_import_devices_shared")
+    @patch("netbox_librenms_plugin.librenms_api.LibreNMSAPI")
+    def test_run_vm_only_batch_passes_with_only_the_vm_permission(
+        self, mock_api_class, mock_bulk_devices, mock_bulk_vms
+    ):
+        """The gate scopes to the batch: a VM-only submission requires only virtualization.add_virtualmachine, so that single grant reaches the pre-check and the VM import."""
+        from netbox_librenms_plugin.jobs import ImportDevicesJob
+
+        mock_api_class.return_value = MagicMock(server_key="default")
+        mock_api_class.return_value.get_device_info.side_effect = lambda did, **_kwargs: (
+            True,
+            {"device_id": did, "hostname": f"vmgate-{did}", "sysName": f"vmgate-{did}"},
+        )
+        mock_bulk_vms.return_value = {"success": [], "failed": [], "skipped": []}
+
+        job = create_mock_job_runner(ImportDevicesJob, job_pk=805)
+        job.job.user = self._real_user("import-vm-only", ("virtualization", "virtualmachine", "add"))
+
+        job.run(device_ids=[], vm_imports={10: {"cluster_id": 1}, 11: {"cluster_id": 1}}, server_key="default")
+
+        # The gate let the batch through: the pre-check scanned it and the VM import ran.
+        mock_bulk_vms.assert_called_once()
+        mock_bulk_devices.assert_not_called()
 
 
 class TestLoadJobResults:

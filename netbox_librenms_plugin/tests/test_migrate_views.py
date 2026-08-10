@@ -75,6 +75,47 @@ class TestGetMigratedToMarker:
 
         assert get_migrated_to_marker(None, "default") is None
 
+    def test_blank_or_none_server_key_reads_the_default_marker(self):
+        # A blank/None key means the default server everywhere else in the plugin; a reader
+        # passing a raw unnormalized key must not miss the default-server marker (and flip a
+        # migrated donor's UI back to ordinary sync mode).
+        from netbox_librenms_plugin.utils import get_migrated_to_marker
+
+        marker_data = {"device_id": 42, "server_key": "default", "at": "2025-01-01T00:00:00Z"}
+        donor = _make_migrate_device("mig-blank-key", {"default": {"_migrated_to": marker_data}})
+        assert get_migrated_to_marker(donor, "") == marker_data
+        assert get_migrated_to_marker(donor, None) == marker_data
+
+    def test_build_migrated_context_with_blank_key_carries_the_marker(self):
+        from netbox_librenms_plugin.utils import build_migrated_context
+
+        winner = _make_migrate_device("mig-blank-ctx-winner")
+        donor = _make_migrate_device(
+            "mig-blank-ctx-donor",
+            {
+                "default": {
+                    "_migrated_to": {"device_id": winner.pk, "server_key": "default", "at": "2025-01-01T00:00:00Z"}
+                }
+            },
+        )
+        ctx = build_migrated_context(donor, "")
+        assert ctx["migrated_to_marker"] is not None
+        assert bool(ctx["migrated_to_winner"])
+
+    def test_mark_librenms_migrated_normalizes_blank_key_to_default(self):
+        # Writer/reader pairing: stamping with a blank key must land under "default" so the
+        # normalized readers find it (marker server_key stamped as "default" too).
+        from netbox_librenms_plugin.utils import get_migrated_to_marker, mark_librenms_migrated
+
+        winner = _make_migrate_device("mig-blank-write-winner")
+        donor = _make_migrate_device("mig-blank-write-donor", {"default": {"id": 7}})
+        mark_librenms_migrated(donor, winner.pk, "")
+        donor.save()
+        marker = get_migrated_to_marker(donor, "default")
+        assert marker is not None
+        assert marker["server_key"] == "default"
+        assert marker["device_id"] == winner.pk
+
     def test_returns_none_when_device_id_is_bool(self):
         # bool is a subclass of int; a marker with device_id=True must not be
         # treated as a valid pk (would otherwise map to device #1).
@@ -293,6 +334,7 @@ def _hx_request(post=None):
     req.htmx = True  # pin branch intent: implementations may check `if request.htmx`
     req.META = {"HTTP_REFERER": "/back"}
     req.user = MagicMock(is_superuser=True)
+    req._messages = MagicMock()  # parity with _nonhtmx_request: HTMX rejection paths call messages.error()
     return req
 
 
@@ -326,6 +368,7 @@ class TestMoveInterfaceToWinnerView:
         interface = make_interface(donor, "Eth0")
         req = _hx_request({"server_key": "default"})
 
+        view.request = req
         resp = view.post(req, pk=interface.pk)
 
         assert resp.status_code == 200
@@ -350,6 +393,7 @@ class TestMoveInterfaceToWinnerView:
         donor.save()
         req = _hx_request({"server_key": "default"})
 
+        view.request = req
         resp = view.post(req, pk=iface.pk)
 
         assert resp.status_code == 200
@@ -377,6 +421,7 @@ class TestMoveInterfaceToWinnerView:
         interface = make_interface(donor, "Eth0")
         req = _hx_request({"server_key": "default"})
 
+        view.request = req
         resp = view.post(req, pk=interface.pk)
 
         assert resp.status_code == 200
@@ -397,6 +442,7 @@ class TestMoveInterfaceToWinnerView:
         interface = make_interface(donor, "Eth0")
         req = _hx_request({"server_key": "default"})
 
+        view.request = req
         resp = view.post(req, pk=interface.pk)
 
         assert resp.status_code == 200
@@ -416,6 +462,7 @@ class TestMoveInterfaceToWinnerView:
         make_interface(winner, "Eth0")  # collision on the winner side
         req = _hx_request({"server_key": "default"})
 
+        view.request = req
         resp = view.post(req, pk=interface.pk)
 
         assert resp.status_code == 200
@@ -435,6 +482,7 @@ class TestMoveInterfaceToWinnerView:
         interface = make_interface(donor, "Eth0")
         req = _hx_request({"server_key": "default"})
 
+        view.request = req
         resp = view.post(req, pk=interface.pk)
 
         assert resp.status_code == 200
@@ -458,6 +506,7 @@ class TestMoveInterfaceToWinnerView:
             "netbox_librenms_plugin.views.mixins.LibreNMSAPI",
             side_effect=ValueError("LibreNMS URL or API token is not configured for server 'default'."),
         ) as api_ctor:
+            view.request = req
             resp = view.post(req, pk=interface.pk)
 
         api_ctor.assert_not_called()  # the fix never builds the (broken) client
@@ -478,6 +527,7 @@ class TestMoveInterfaceToWinnerView:
         member.save()
         req = _hx_request({"server_key": "default"})
 
+        view.request = req
         resp = view.post(req, pk=member.pk)
 
         # full_clean() failed for real → row not saved, error surfaced via the OOB toast.
@@ -501,6 +551,7 @@ class TestMoveInterfaceToWinnerView:
         member.save()
         req = _hx_request({"server_key": "default"})
 
+        view.request = req
         resp = view.post(req, pk=lag.pk)
 
         assert resp.status_code == 200
@@ -527,6 +578,7 @@ class TestMoveInterfaceToWinnerView:
         bridged.save()
         req = _hx_request({"server_key": "default"})
 
+        view.request = req
         resp = view.post(req, pk=parent.pk)
 
         assert resp.status_code == 200
@@ -550,6 +602,7 @@ class TestMoveInterfaceToWinnerView:
         make_interface(winner, "Eth0")  # collides with the member, not the master
         req = _hx_request({"server_key": "default"})
 
+        view.request = req
         resp = view.post(req, pk=lag.pk)
 
         assert resp.status_code == 200
@@ -576,6 +629,7 @@ class TestMoveInterfaceToWinnerView:
         cable_together(iface, peer_iface)
         req = _hx_request({"server_key": "default"})
 
+        view.request = req
         resp = view.post(req, pk=iface.pk)
 
         assert resp.status_code == 200
@@ -609,6 +663,7 @@ class TestMoveInterfaceToWinnerView:
             return real_save(self, *args, **kwargs)
 
         with patch.object(Interface, "save", boom):
+            view.request = req
             resp = view.post(req, pk=interface.pk)
 
         # Caught and surfaced as the collision 409 OOB toast (HTTP 200, HX-Reswap:none, no HX-Refresh).
@@ -645,6 +700,7 @@ class TestMoveInterfaceToWinnerView:
             return result
 
         with patch.object(Interface, "full_clean", racing_full_clean):
+            view.request = req
             resp = view.post(req, pk=interface.pk)
 
         assert state["raced"]
@@ -686,6 +742,7 @@ class TestMoveInterfaceToWinnerView:
             return result
 
         with patch.object(migrate_mod, "_resolve_winner_for_donor", side_effect=repoint_then_resolve):
+            view.request = req
             resp = view.post(req, pk=interface.pk)
 
         # Aborted with the concurrency conflict toast; the interface is moved to neither winner.
@@ -706,6 +763,7 @@ class TestMoveInterfaceToWinnerView:
         view.request = _hx_request()
         view.require_all_permissions = MagicMock(return_value=HttpResponse(status=403))
         req = _hx_request()
+        view.request = req
         resp = view.post(req, pk=5)
         assert resp.status_code == 403
 
@@ -747,6 +805,7 @@ class TestTransferDeviceIPView:
         # so a bare request (no device needed) is sufficient.
         view = self._setup_view()
         req = _hx_request()
+        view.request = req
         resp = view.post(req, pk=10, ip_kind="bogus")
         assert resp.status_code == 200
         assert b"django-messages" in resp.content
@@ -768,6 +827,7 @@ class TestTransferDeviceIPView:
         winner.save()
         req = _hx_request({"server_key": "default"})
 
+        view.request = req
         resp = view.post(req, pk=donor.pk, ip_kind="primary4")
 
         assert resp.status_code == 200
@@ -791,6 +851,7 @@ class TestTransferDeviceIPView:
         donor.save()
         req = _hx_request({"server_key": "default"})
 
+        view.request = req
         resp = view.post(req, pk=donor.pk, ip_kind="oob")
 
         assert resp.headers.get("HX-Refresh") == "true"
@@ -798,6 +859,54 @@ class TestTransferDeviceIPView:
         winner.refresh_from_db()
         assert winner.oob_ip_id == oob_ip.pk  # winner claimed it
         assert donor.oob_ip_id is None  # donor released it
+
+    def test_transfer_survives_interface_move_onto_winner_between_read_and_lock(self):
+        """A concurrent interface move ONTO the winner, landing between the GFK read and the interface lock, must not spuriously 409 the transfer: the freshly locked (winner-owned) row is assigned back onto donor_ip before set_device_ip_fk re-checks ownership."""
+        from dcim.models import Interface
+
+        view = self._setup_view()
+        donor = make_device("tx-race-donor")
+        winner = make_device("tx-race-winner")
+        self._mark(donor, winner)
+        # The address starts on a DONOR interface, so the view's assigned_object read caches
+        # a device_id=donor snapshot on the locked IP row.
+        oob_ip = ip_on(donor, "10.0.0.7/24", "mgmt0")
+        donor.oob_ip = oob_ip
+        donor.save()
+        iface_pk = oob_ip.assigned_object_id
+
+        # Simulate the concurrent move: the owning-interface SELECT ... FOR UPDATE fires AFTER
+        # the GFK read cached device_id=donor. Move the interface onto the winner right then,
+        # so the locked row is winner-owned while the cached GFK snapshot is stale.
+        real_sfu = Interface.objects.select_for_update
+        state = {"moved": False}
+
+        def moving_sfu(*args, **kwargs):
+            queryset = real_sfu(*args, **kwargs)
+            real_filter = queryset.filter
+
+            def moving_filter(*f_args, **f_kwargs):
+                if not state["moved"] and f_kwargs.get("pk") == iface_pk:
+                    state["moved"] = True
+                    Interface.objects.filter(pk=iface_pk).update(device=winner)
+                return real_filter(*f_args, **f_kwargs)
+
+            queryset.filter = moving_filter
+            return queryset
+
+        req = _hx_request({"server_key": "default"})
+        view.request = req
+        with patch.object(Interface.objects, "select_for_update", moving_sfu):
+            resp = view.post(req, pk=donor.pk, ip_kind="oob")
+
+        # The interface is winner-owned at lock time, so the transfer MUST complete — not be
+        # rejected against the stale cached device_id and rolled back.
+        assert resp.headers.get("HX-Refresh") == "true"
+        donor.refresh_from_db()
+        winner.refresh_from_db()
+        assert winner.oob_ip_id == oob_ip.pk
+        assert donor.oob_ip_id is None
+        assert state["moved"], "the injected interface move did not run"
 
     def test_rejects_when_address_still_attached_to_donor(self):
         """The transfer only flips the FK (save skips full_clean), so it must refuse to point the winner at an address still assigned to a DONOR interface — otherwise the winner would own an oob_ip that isn't on one of its interfaces."""
@@ -811,6 +920,7 @@ class TestTransferDeviceIPView:
         donor.save()
         req = _hx_request({"server_key": "default"})
 
+        view.request = req
         resp = view.post(req, pk=donor.pk, ip_kind="oob")
 
         assert b"django-messages" in resp.content
@@ -834,6 +944,7 @@ class TestTransferDeviceIPView:
         donor.save()
         req = _hx_request({"server_key": "default"})
 
+        view.request = req
         resp = view.post(req, pk=donor.pk, ip_kind="primary4")
 
         # Graceful HTMX error toast, not an uncaught 500.
@@ -864,6 +975,7 @@ class TestTransferDeviceIPView:
         donor.save()  # save() skips full_clean(), so the cross-type dangling FK persists
         req = _hx_request({"server_key": "default"})
 
+        view.request = req
         resp = view.post(req, pk=donor.pk, ip_kind="oob")
 
         # Reject path flows through _fail(): HX-Reswap:none and never the success HX-Refresh header.
@@ -905,6 +1017,7 @@ class TestMoveIPAddressToWinnerView:
         ip = make_ip("10.0.0.1/24")  # unassigned
         req = _hx_request({"server_key": "default"})
 
+        view.request = req
         resp = view.post(req, pk=ip.pk)
 
         assert resp.status_code == 200
@@ -925,6 +1038,7 @@ class TestMoveIPAddressToWinnerView:
         ip = make_ip("10.0.0.1/24", assigned_object=donor_iface)
         req = _hx_request({"server_key": "default"})
 
+        view.request = req
         resp = view.post(req, pk=ip.pk)
 
         assert resp.status_code == 200
@@ -947,6 +1061,7 @@ class TestMoveIPAddressToWinnerView:
         ip = make_ip("10.0.0.1/24", assigned_object=donor_iface)
 
         req = _hx_request({"server_key": "default"})
+        view.request = req
         resp = view.post(req, pk=ip.pk)
 
         assert resp.status_code == 200
@@ -1274,6 +1389,7 @@ class TestNonHtmxFallbackRedirect:
                 return_value={"siteB": "Site B"},
             ),
         ):
+            view.request = req
             resp = view.post(req, pk=5)
 
         # Degraded non-HTMX path: a real redirect carrying tab + server context,
@@ -1336,6 +1452,7 @@ class TestVlanStaleServerMigratedContext:
             patch("netbox_librenms_plugin.utils.build_migrated_context", return_value={}) as mock_mig,
             patch("netbox_librenms_plugin.views.mixins.render", return_value="rendered"),
         ):
+            view.request = request
             result = view.post(request, pk=1)
 
         mock_mig.assert_called_once_with(obj, "test-server")  # session key, not "ghost-server"
@@ -1401,6 +1518,7 @@ class TestMigratedContextServerKeyFallback:
             patch("netbox_librenms_plugin.views.base.ip_addresses_view.messages"),
             patch("netbox_librenms_plugin.views.base.interfaces_view.messages"),
         ):
+            view.request = request
             result = view.post(request, pk=donor.pk)
 
         assert result == "rendered"
@@ -1469,6 +1587,7 @@ class TestMigratedContextServerKeyFallback:
                 side_effect=AssertionError("lazy librenms_api touched on the rebind-fail path"),
             ),
         ):
+            view.request = request
             view.post(request, pk=1)
 
         bmc.assert_called_once()
@@ -1500,6 +1619,7 @@ class TestMigratedContextServerKeyFallback:
                 side_effect=AssertionError("lazy librenms_api touched on the rebind-fail path"),
             ),
         ):
+            view.request = request
             view.post(request, pk=1)
 
         bmc.assert_called_once()
@@ -1531,6 +1651,7 @@ class TestMigratedContextServerKeyFallback:
                 side_effect=AssertionError("lazy librenms_api touched on the rebind-fail path"),
             ),
         ):
+            view.request = request
             view.post(request, pk=1)
 
         bmc.assert_called_once()
@@ -1561,6 +1682,7 @@ class TestMigratedContextServerKeyFallback:
                 side_effect=AssertionError("lazy librenms_api touched on the rebind-fail path"),
             ),
         ):
+            view.request = request
             view.post(request, pk=1)
 
         bmc.assert_called_once()
@@ -1592,6 +1714,7 @@ class TestMigratedContextServerKeyFallback:
                 side_effect=AssertionError("lazy librenms_api touched on the rebind-fail path"),
             ),
         ):
+            view.request = request
             view.post(request, pk=1)
 
         bmc.assert_called_once()
@@ -1616,6 +1739,7 @@ class TestMigratedContextServerKeyFallback:
             patch("netbox_librenms_plugin.views.mixins.render") as mock_render,
             patch("netbox_librenms_plugin.utils.build_migrated_context", return_value={}),
         ):
+            view.request = request
             view.post(request, pk=1)
 
         ip_sync = mock_render.call_args.args[2]["ip_sync"]
@@ -1642,6 +1766,7 @@ class TestMigratedContextServerKeyFallback:
             patch("netbox_librenms_plugin.views.mixins.render") as mock_render,
             patch("netbox_librenms_plugin.utils.build_migrated_context", return_value={}),
         ):
+            view.request = request
             view.post(request, pk=1)
 
         ip_sync = mock_render.call_args.args[2]["ip_sync"]
@@ -1677,6 +1802,18 @@ class TestMovableIpsForMigration:
         assert result[0]["id"] == ip.pk
         assert result[0]["address"] == "10.10.0.5/24"
         assert result[0]["interface_name"] == "eth0"
+
+    def test_none_server_key_uses_the_default_marker_scope(self):
+        """A degraded render with no bound key still finds a marker stored in default scope."""
+        from netbox_librenms_plugin.utils import mark_librenms_migrated
+
+        winner = make_device("mv-winner-none-key")
+        donor = make_device("mv-donor-none-key")
+        ip_on(donor, "10.10.0.8/24", "eth0")
+        mark_librenms_migrated(donor, winner.pk, "default")
+        donor.save()
+
+        assert len(self._movable(donor, None)) == 1
 
     def test_excludes_unassigned_ip(self):
         from netbox_librenms_plugin.tests.conftest import make_ip

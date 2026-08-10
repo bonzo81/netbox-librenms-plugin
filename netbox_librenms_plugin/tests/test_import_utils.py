@@ -5,7 +5,7 @@ Phase 2 tests covering cache key generation, device name determination,
 device retrieval, and device validation functions.
 """
 
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, call, patch
 
 import pytest
 
@@ -2282,7 +2282,8 @@ class TestDeviceConflictActionView:
             patch("netbox_librenms_plugin.views.imports.actions.transaction") as mock_tx,
         ):
             mock_tx.atomic.return_value = MagicMock()
-            mock_device_cls.objects.restrict.return_value.get.return_value = existing_device
+            mock_device_cls.objects.restrict.return_value = mock_device_cls.objects
+            mock_device_cls.objects.get.return_value = existing_device
             mock_device_cls.objects.select_for_update.return_value.get.return_value = existing_device
             mock_device_cls.objects.filter.return_value.exclude.return_value.first.return_value = None
             mock_device_cls.objects.filter.return_value.first.return_value = None
@@ -2297,6 +2298,10 @@ class TestDeviceConflictActionView:
         assert existing_device.custom_field_data["librenms_id"] == {"default": 10}
         assert existing_device.name == "switch-01.example.com"
         existing_device.save.assert_called_once()
+        assert mock_device_cls.objects.restrict.call_args_list == [
+            call(request.user, "change"),
+            call(request.user, "change"),
+        ]
 
     @patch("netbox_librenms_plugin.views.imports.actions.cache")
     @patch("netbox_librenms_plugin.views.imports.actions.get_import_device_cache_key")
@@ -2329,7 +2334,8 @@ class TestDeviceConflictActionView:
             patch("netbox_librenms_plugin.views.imports.actions.transaction") as mock_tx,
         ):
             mock_tx.atomic.return_value = MagicMock()
-            mock_device_cls.objects.restrict.return_value.get.return_value = existing_device
+            mock_device_cls.objects.restrict.return_value = mock_device_cls.objects
+            mock_device_cls.objects.get.return_value = existing_device
             mock_device_cls.objects.select_for_update.return_value.get.return_value = existing_device
             mock_device_cls.objects.filter.return_value.first.return_value = None
             mock_device_cls.objects.filter.return_value.exclude.return_value.first.return_value = None
@@ -2373,7 +2379,8 @@ class TestDeviceConflictActionView:
             patch("netbox_librenms_plugin.views.imports.actions.transaction") as mock_tx,
         ):
             mock_tx.atomic.return_value = MagicMock()
-            mock_device_cls.objects.restrict.return_value.get.return_value = existing_device
+            mock_device_cls.objects.restrict.return_value = mock_device_cls.objects
+            mock_device_cls.objects.get.return_value = existing_device
             mock_device_cls.objects.select_for_update.return_value.get.return_value = existing_device
             mock_device_cls.objects.filter.return_value.exclude.return_value.first.return_value = None
             mock_device_cls.objects.filter.return_value.first.return_value = None
@@ -2424,7 +2431,8 @@ class TestDeviceConflictActionView:
             patch("netbox_librenms_plugin.views.imports.actions.transaction") as mock_tx,
         ):
             mock_tx.atomic.return_value = MagicMock()
-            mock_device_cls.objects.restrict.return_value.get.return_value = existing_device
+            mock_device_cls.objects.restrict.return_value = mock_device_cls.objects
+            mock_device_cls.objects.get.return_value = existing_device
             mock_device_cls.objects.select_for_update.return_value.get.return_value = existing_device
             mock_device_cls.objects.filter.return_value.exclude.return_value.first.return_value = None
             mock_device_cls.objects.filter.return_value.first.return_value = None
@@ -2464,7 +2472,8 @@ class TestDeviceConflictActionView:
             patch("netbox_librenms_plugin.views.imports.actions.transaction") as mock_tx,
         ):
             mock_tx.atomic.return_value = MagicMock()
-            mock_device_cls.objects.restrict.return_value.get.return_value = existing_device
+            mock_device_cls.objects.restrict.return_value = mock_device_cls.objects
+            mock_device_cls.objects.get.return_value = existing_device
             mock_device_cls.objects.select_for_update.return_value.get.return_value = existing_device
             mock_device_cls.objects.filter.return_value.exclude.return_value.first.return_value = None
             mock_device_cls.objects.filter.return_value.first.return_value = None
@@ -2508,7 +2517,8 @@ class TestDeviceConflictActionView:
             patch("netbox_librenms_plugin.views.imports.actions.transaction") as mock_tx,
         ):
             mock_tx.atomic.return_value = MagicMock()
-            mock_device_cls.objects.restrict.return_value.get.return_value = existing_device
+            mock_device_cls.objects.restrict.return_value = mock_device_cls.objects
+            mock_device_cls.objects.get.return_value = existing_device
             mock_device_cls.objects.select_for_update.return_value.get.return_value = existing_device
             mock_device_cls.objects.filter.return_value.exclude.return_value.first.return_value = None
             mock_device_cls.objects.filter.return_value.exclude.return_value.exists.return_value = False
@@ -2549,7 +2559,8 @@ class TestDeviceConflictActionView:
             patch.object(DeviceConflictActionView, "require_object_permissions", return_value=None),
             patch("dcim.models.Device") as mock_device_cls,
         ):
-            mock_device_cls.objects.restrict.return_value.get.return_value = existing_device
+            mock_device_cls.objects.restrict.return_value = mock_device_cls.objects
+            mock_device_cls.objects.get.return_value = existing_device
             mock_device_cls.objects.select_for_update.return_value.get.return_value = existing_device
             mock_device_cls.objects.filter.return_value.exclude.return_value.first.return_value = None
             # Include existing_device so the validated-conflict-target guard passes;
@@ -2590,7 +2601,8 @@ class TestDeviceConflictActionView:
             patch.object(DeviceConflictActionView, "render_device_row") as mock_render,
             patch("dcim.models.Device") as mock_device_cls,
         ):
-            mock_device_cls.objects.restrict.return_value.get.return_value = existing_device
+            mock_device_cls.objects.restrict.return_value = mock_device_cls.objects
+            mock_device_cls.objects.get.return_value = existing_device
             mock_device_cls.objects.select_for_update.return_value.get.return_value = existing_device
             mock_device_cls.objects.filter.return_value.exclude.return_value.first.return_value = None
             mock_validate.return_value = (libre_device, validation, selections)
@@ -2624,7 +2636,8 @@ class TestDeviceConflictActionView:
             patch.object(DeviceConflictActionView, "get_validated_device_with_selections") as mock_validate,
             patch("dcim.models.Device") as mock_device_cls,
         ):
-            mock_device_cls.objects.restrict.return_value.get.return_value = existing_device
+            mock_device_cls.objects.restrict.return_value = mock_device_cls.objects
+            mock_device_cls.objects.get.return_value = existing_device
             mock_device_cls.objects.select_for_update.return_value.get.return_value = existing_device
             mock_device_cls.objects.filter.return_value.exclude.return_value.first.return_value = None
             mock_validate.return_value = (libre_device, validation, selections)
@@ -2667,7 +2680,8 @@ class TestDeviceConflictActionView:
             patch("netbox_librenms_plugin.views.imports.actions.transaction") as mock_tx,
         ):
             mock_tx.atomic.return_value = MagicMock()
-            mock_device_cls.objects.restrict.return_value.get.return_value = existing_device
+            mock_device_cls.objects.restrict.return_value = mock_device_cls.objects
+            mock_device_cls.objects.get.return_value = existing_device
             mock_device_cls.objects.select_for_update.return_value.get.return_value = existing_device
             mock_device_cls.objects.filter.return_value.exclude.return_value.first.return_value = None
             mock_device_cls.objects.filter.return_value.first.return_value = None
@@ -2722,7 +2736,8 @@ class TestDeviceConflictActionView:
             patch("netbox_librenms_plugin.views.imports.actions.transaction") as mock_tx,
         ):
             mock_tx.atomic.return_value = MagicMock()
-            mock_device_cls.objects.restrict.return_value.get.return_value = existing_device
+            mock_device_cls.objects.restrict.return_value = mock_device_cls.objects
+            mock_device_cls.objects.get.return_value = existing_device
             mock_device_cls.objects.select_for_update.return_value.get.return_value = existing_device
             mock_device_cls.objects.filter.return_value.exclude.return_value.first.return_value = None
             mock_device_cls.objects.filter.return_value.first.return_value = None
@@ -2777,7 +2792,8 @@ class TestDeviceConflictActionView:
             patch.object(DeviceConflictActionView, "render_device_row") as mock_render,
             patch("dcim.models.Device") as mock_device_cls,
         ):
-            mock_device_cls.objects.restrict.return_value.get.return_value = existing_device
+            mock_device_cls.objects.restrict.return_value = mock_device_cls.objects
+            mock_device_cls.objects.get.return_value = existing_device
             mock_device_cls.objects.select_for_update.return_value.get.return_value = existing_device
             mock_device_cls.objects.filter.return_value.exclude.return_value.first.return_value = None
             mock_validate.return_value = (libre_device, validation, selections)
@@ -2812,7 +2828,8 @@ class TestDeviceConflictActionView:
             patch("netbox_librenms_plugin.views.imports.actions.transaction") as mock_tx,
         ):
             mock_tx.atomic.return_value = MagicMock()
-            mock_device_cls.objects.restrict.return_value.get.return_value = existing_device
+            mock_device_cls.objects.restrict.return_value = mock_device_cls.objects
+            mock_device_cls.objects.get.return_value = existing_device
             mock_device_cls.objects.select_for_update.return_value.get.return_value = existing_device
             mock_device_cls.objects.filter.return_value.exclude.return_value.first.return_value = None
             mock_device_cls.objects.filter.return_value.first.return_value = None
@@ -2852,7 +2869,8 @@ class TestDeviceConflictActionView:
             # it from netbox_librenms_plugin.utils, so that is the correct seam to mock.
             patch("netbox_librenms_plugin.utils.find_matching_platform") as mock_find_platform,
         ):
-            mock_device_cls.objects.restrict.return_value.get.return_value = existing_device
+            mock_device_cls.objects.restrict.return_value = mock_device_cls.objects
+            mock_device_cls.objects.get.return_value = existing_device
             mock_device_cls.objects.select_for_update.return_value.get.return_value = existing_device
             mock_device_cls.objects.filter.return_value.exclude.return_value.first.return_value = None
             mock_find_platform.return_value = {"found": True, "platform": mock_platform, "match_type": "exact"}
@@ -2888,7 +2906,8 @@ class TestDeviceConflictActionView:
             patch("dcim.models.Device") as mock_device_cls,
             patch("netbox_librenms_plugin.utils.match_librenms_hardware_to_device_type") as mock_hw_match,
         ):
-            mock_device_cls.objects.restrict.return_value.get.return_value = existing_device
+            mock_device_cls.objects.restrict.return_value = mock_device_cls.objects
+            mock_device_cls.objects.get.return_value = existing_device
             mock_device_cls.objects.select_for_update.return_value.get.return_value = existing_device
             mock_device_cls.objects.filter.return_value.exclude.return_value.first.return_value = None
             mock_hw_match.return_value = {"matched": True, "device_type": new_device_type}
@@ -4522,7 +4541,12 @@ class TestBulkImportCancellation:
         ):
             mock_api = MagicMock()
             mock_api.server_key = "default"
-            mock_api.get_device_info.return_value = (True, {"device_id": 1, "hostname": "sw"})
+            # Echo the requested id like the real API — the import loop's identity check
+            # (row_identity_matches) rejects a payload describing another device.
+            mock_api.get_device_info.side_effect = lambda did, **_kwargs: (
+                True,
+                {"device_id": did, "hostname": "sw"},
+            )
             mock_api_cls.return_value = mock_api
             mock_import.return_value = {"success": True, "device": MagicMock(), "is_vm": False}
 

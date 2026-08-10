@@ -1,7 +1,7 @@
 from dcim.models import Device
 from django.contrib import messages
 from django.http import HttpResponse
-from django.shortcuts import get_object_or_404, redirect
+from django.shortcuts import redirect
 from django.utils.html import escape
 from django.views import View
 from virtualization.models import VirtualMachine
@@ -45,18 +45,15 @@ class AddDeviceToLibreNMSView(
         a client error, not a missing-resource error).
         """
         if object_type == "virtualmachine":
-            return get_object_or_404(VirtualMachine, pk=object_id)
+            return self.restrict_object_or_404(VirtualMachine, "change", pk=object_id)
         if object_type == "device":
-            return get_object_or_404(Device, pk=object_id)
+            return self.restrict_object_or_404(Device, "change", pk=object_id)
         return None
 
     def post(self, request, object_id):
         """Add a device to LibreNMS using the submitted SNMP form."""
-        # Resolve the target object first so we can apply object-level perms
-        # against the correct model (Device vs VirtualMachine).
         object_type = request.POST.get("object_type")
-        self.object = self.get_object(object_id, object_type=object_type)
-        if self.object is None:
+        if object_type not in ("device", "virtualmachine"):
             # Match the convention used in views/sync/device_fields.py — return
             # 400 (Bad Request) with an escaped echo of the offending value
             # rather than raising 404, which would mislead clients into
@@ -66,14 +63,14 @@ class AddDeviceToLibreNMSView(
                 status=400,
             )
 
-        # Plugin write perm + NetBox change perm on the resolved model. The
-        # mapping is set per-request because object_type can be either
-        # device or virtualmachine; static class-level declaration cannot
-        # express that branch.
+        # Gate before the change-scoped lookup so a missing grant produces the
+        # named permission error instead of a bare 404.
         target_model = VirtualMachine if object_type == "virtualmachine" else Device
         self.required_object_permissions = {"POST": [("change", target_model)]}
         if error := self.require_all_permissions("POST"):
             return error
+
+        self.object = self.get_object(object_id, object_type=object_type)
 
         form_class = self.get_form_class()
 
@@ -141,16 +138,21 @@ class AddDeviceToLibreNMSView(
         return redirect(self.object.get_absolute_url())
 
 
-class UpdateDeviceLocationView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
+class UpdateDeviceLocationView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreNMSAPIMixin, View):
     """Update the LibreNMS site/location based on the NetBox site."""
+
+    # The device is only read here (the write lands in LibreNMS), but it is read by raw URL pk —
+    # so gate on the object view permission and resolve through the restricted queryset, or a
+    # constrained grant could push any device's site to LibreNMS.
+    required_object_permissions = {"POST": [("view", Device)]}
 
     def post(self, request, pk):
         """Sync the device location to LibreNMS from the NetBox site."""
-        # Check write permission before updating location in LibreNMS
-        if error := self.require_write_permission():
+        # Check plugin write permission AND the object view permission before touching the device.
+        if error := self.require_all_permissions("POST"):
             return error
 
-        device = get_object_or_404(Device, pk=pk)
+        device = self.restrict_object_or_404(Device, pk=pk)
 
         # Rebind the API client to the POSTed server before resolving the per-server
         # librenms_id and writing the location, so a multi-server user acting on a

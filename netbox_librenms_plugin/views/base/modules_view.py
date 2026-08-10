@@ -57,6 +57,11 @@ _SKIP_TRANSCEIVER_TYPES = {"Port Container", "Port", ""}
 _NON_HARDWARE_CLASSES = {"sensor", "backplane", "stack"}
 
 
+def _normalize_librenms_text(value) -> str:
+    """Coerce a LibreNMS text value to a trimmed string without changing placeholder semantics."""
+    return normalize_serial(value)
+
+
 def _clean_librenms_value(value) -> str:
     """
     Return a LibreNMS model/serial/type value trimmed, with placeholders blanked.
@@ -70,7 +75,7 @@ def _clean_librenms_value(value) -> str:
     Returns:
         The cleaned string, or "" for a missing/placeholder value.
     """
-    text = normalize_serial(value)
+    text = _normalize_librenms_text(value)
     return "" if text.lower() in _PLACEHOLDER_VALUES else text
 
 
@@ -314,9 +319,9 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
 
         # Name/model hint fallback: common "<position>/..." prefixes.
         hints = [
-            (item.get("entPhysicalName") or "").strip(),
-            (item.get("entPhysicalDescr") or "").strip(),
-            (item.get("entPhysicalModelName") or "").strip(),
+            _normalize_librenms_text(item.get("entPhysicalName")),
+            _normalize_librenms_text(item.get("entPhysicalDescr")),
+            _normalize_librenms_text(item.get("entPhysicalModelName")),
         ]
         for hint in hints:
             if not hint:
@@ -771,7 +776,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
             if action == "transparent":
                 continue
             # Skip items with generic model names (not real hardware), regardless of class.
-            model = (item.get("entPhysicalModelName") or "").strip().lower()
+            model = _normalize_librenms_text(item.get("entPhysicalModelName")).lower()
             if model in _GENERIC_CONTAINER_MODELS:
                 continue
             # Walk up ancestor chain; skip if any ancestor is an inventory-class item.
@@ -787,7 +792,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
                     continue
                 anc_class = ancestor.get("entPhysicalClass")
                 if anc_class in INVENTORY_CLASSES:
-                    anc_model = (ancestor.get("entPhysicalModelName") or "").strip().lower()
+                    anc_model = _normalize_librenms_text(ancestor.get("entPhysicalModelName")).lower()
                     if anc_model in _GENERIC_CONTAINER_MODELS:
                         current_idx = ancestor.get("entPhysicalContainedIn", 0)
                         continue
@@ -1750,7 +1755,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
                     device_serial=device_serial,
                 )
                 continue
-            model = (child.get("entPhysicalModelName") or "").strip().lower()
+            model = _normalize_librenms_text(child.get("entPhysicalModelName")).lower()
             if model and model not in _GENERIC_CONTAINER_MODELS:
                 results.append((depth, child))
                 # Continue looking for deeper components (e.g., SFPs inside converters)
@@ -2206,7 +2211,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
         while current_idx and current_idx in index_map and current_idx not in visited:
             visited.add(current_idx)
             ancestor = index_map[current_idx]
-            model = (ancestor.get("entPhysicalModelName") or "").strip().lower()
+            model = _normalize_librenms_text(ancestor.get("entPhysicalModelName")).lower()
             if model and model not in _GENERIC_CONTAINER_MODELS:
                 # Found the parent with a real model; container_idx is the intermediate container
                 break
@@ -2352,7 +2357,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
             resolve_module_type,
         )
 
-        model_name = (item.get("entPhysicalModelName", "") or "").strip()
+        model_name = _normalize_librenms_text(item.get("entPhysicalModelName"))
         serial = _clean_librenms_value(item.get("entPhysicalSerialNum"))
         phys_class = item.get("entPhysicalClass", "")
         name = item.get("entPhysicalName", "") or "-"
@@ -3044,7 +3049,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
         Returns None when the model name is blank — no meaningful mapping can
         be created without at least a model name to key on.
         """
-        model = (item.get("entPhysicalModelName") or "").strip()
+        model = _normalize_librenms_text(item.get("entPhysicalModelName"))
         if not model:
             return None
 
@@ -3083,7 +3088,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
         there's nothing meaningful to pre-fill and the row can't be made
         installable by adding a type either.
         """
-        model = (item.get("entPhysicalModelName") or "").strip()
+        model = _normalize_librenms_text(item.get("entPhysicalModelName"))
         if not model:
             return None
 
@@ -3112,7 +3117,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
         guess.  The message names each conflicting ``manufacturer / model``
         pair so the user can resolve the data issue in NetBox itself.
         """
-        model = (item.get("entPhysicalModelName") or "").strip()
+        model = _normalize_librenms_text(item.get("entPhysicalModelName"))
         if not model:
             return "LibreNMS did not report a model name for this item; cannot match to a NetBox ModuleType."
         if ambiguity_candidates:
@@ -3180,7 +3185,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
         item_serial = _clean_librenms_value(item.get("entPhysicalSerialNum"))
         if not item_serial:
             return None
-        item_model = (item.get("entPhysicalModelName") or "").strip().lower()
+        item_model = _clean_librenms_value(item.get("entPhysicalModelName")).lower()
         if not item_model or item_model in _PLACEHOLDER_VALUES:
             return None
 
@@ -3197,7 +3202,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
                 return None
             if anc_class in INVENTORY_CLASSES and anc_class not in {"container", "powerSupply", "fan"}:
                 anc_serial = _clean_librenms_value(ancestor.get("entPhysicalSerialNum"))
-                anc_model = (ancestor.get("entPhysicalModelName") or "").strip().lower()
+                anc_model = _clean_librenms_value(ancestor.get("entPhysicalModelName")).lower()
                 if anc_serial and anc_serial == item_serial and anc_model and anc_model == item_model:
                     return ancestor
             current_idx = ancestor.get("entPhysicalContainedIn", 0)

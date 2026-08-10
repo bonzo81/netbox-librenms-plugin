@@ -662,36 +662,24 @@ class TestFindMatchingSiteMultipleReturned:
             assert result["site"] is mock_site
 
 
+@pytest.mark.django_db
 class TestFindMatchingPlatformMultipleReturned:
-    """Tests for find_matching_platform MultipleObjectsReturned (lines 358-360)."""
+    """find_matching_platform must fail closed when the Platform name is ambiguous."""
 
     def test_multiple_objects_returned_returns_ambiguous(self):
+        from dcim.models import Platform
+
         from netbox_librenms_plugin.utils import find_matching_platform
 
-        Platform_DoesNotExist = type("DoesNotExist", (Exception,), {})
-        Platform_MultipleObjectsReturned = type("MultipleObjectsReturned", (Exception,), {})
-        PlatformMapping_DoesNotExist = type("DoesNotExist", (Exception,), {})
+        # Platform.name is unique case-SENSITIVELY while the lookup is case-INsensitive, so
+        # these two rows coexist and name__iexact matches both. No PlatformMapping exists to
+        # break the tie, so the ambiguity is surfaced rather than resolved arbitrarily.
+        Platform.objects.create(name="ios", slug="ios")
+        Platform.objects.create(name="IOS", slug="ios-upper")
 
-        with patch("netbox_librenms_plugin.models.PlatformMapping") as MockPlatformMapping:
-            MockPlatformMapping.DoesNotExist = PlatformMapping_DoesNotExist
-            MockPlatformMapping.objects.get.side_effect = PlatformMapping_DoesNotExist("no mapping")
+        result = find_matching_platform("ios")
 
-            with patch("dcim.models.Platform") as MockPlatform:
-                MockPlatform.DoesNotExist = Platform_DoesNotExist
-                MockPlatform.MultipleObjectsReturned = Platform_MultipleObjectsReturned
-                MockPlatform.objects.get.side_effect = Platform_MultipleObjectsReturned("multiple")
-
-                result = find_matching_platform("ios")
-                assert result["found"] is False
-                assert result["platform"] is None
-                assert result["match_type"] == "ambiguous"
-                assert result["ambiguity_source"] == "platform"
-                # Per the fix for the "PlatformMapping never consulted" CodeRabbit
-                # finding: when Platform.MultipleObjectsReturned fires, the function
-                # now defers the ambiguity decision and consults PlatformMapping
-                # first so an explicit override can disambiguate. Only when the
-                # mapping also misses do we surface ambiguous(platform).
-                MockPlatformMapping.objects.get.assert_called_once_with(librenms_os__iexact="ios")
+        assert result == {"found": False, "platform": None, "match_type": "ambiguous", "ambiguity_source": "platform"}
 
 
 class TestGetMissingVlanWarning:

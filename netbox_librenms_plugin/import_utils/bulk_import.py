@@ -2,6 +2,7 @@
 
 import hashlib
 import logging
+from dataclasses import dataclass
 from typing import List
 
 from django.core.cache import cache
@@ -16,14 +17,17 @@ from ..import_validation_helpers import (
 from ..librenms_api import LibreNMSAPI
 from ..utils import (
     AmbiguousLibreNMSIdError,
+    cached_row_matches,
     coerce_librenms_id,
     find_by_librenms_id,
-    get_librenms_oob,
     normalize_serial,
     preload_normalization_rules,
+    row_identity_matches,
 )
 from .cache import get_cache_metadata_key, get_import_device_cache_key, get_validated_device_cache_key
+from .collisions import detect_bulk_collisions
 from .device_operations import (
+    VALIDATION_ERROR_ISSUE_PREFIX,
     _describe_existing_librenms_link,
     import_single_device,
     resolve_device_by_host_ip,
@@ -86,6 +90,228 @@ def _is_job_cancelled(job) -> bool:
         return False
 
 
+def detect_collisions_for_device_ids(
+    device_ids, api, libre_devices_cache=None, sync_options=None, job=None, vm_device_ids=None
+) -> tuple[list[dict], list]:
+    """
+    Detect same-NetBox-device collisions for a batch of LibreNMS device ids.
+
+    Validates each device just enough to read the collision-relevant match fields
+    (``include_vc_detection=False`` — DB-only, no VC API call), then groups rows that
+    target the same NetBox device. Reuses ``libre_devices_cache`` so it adds no LibreNMS
+    API calls when the caller already pre-fetched device data.
+
+    This enforces the bulk-confirm collision block on the import paths that do NOT pass
+    through the confirm modal — the direct ``BulkImportDevicesView`` POST and the
+    background ``ImportDevicesJob`` — so a colliding batch can't be imported by bypassing
+    the preview.
+
+    Args:
+        device_ids: LibreNMS device ids about to be imported.
+        api: A LibreNMS API client (only ``server_key`` and ``get_device_info`` are used;
+            ``get_device_info`` is called only for ids missing from the cache).
+        libre_devices_cache: Optional ``{device_id: libre_device}`` pre-fetched data.
+        sync_options: Optional sync options (``use_sysname`` / ``strip_domain``).
+        job: Optional background-job context. When set, cancellation is polled the same
+            way the import loops poll it (first id, then every 5th); a cancelled job stops
+            the scan instead of finishing a large cache-miss batch's API calls.
+        vm_device_ids: Optional collection of the batch's VM-selected LibreNMS ids. Each row
+            is validated in its ACTUAL import mode: a VM row validated as a Device would run
+            the Device-only serial/IP matching that ``bulk_import_vms`` intentionally skips,
+            and could fabricate a collision (blocking a valid batch) against a Device it
+            will never touch.
+
+    Returns:
+        tuple[list[dict], list]: ``(collisions, unresolved_ids)`` — the collision groups from
+            :func:`detect_bulk_collisions` (empty when the batch is clean), and the device ids
+            that could NOT be validated (``get_device_info`` failed and they weren't in the
+            cache), plus — on a mid-scan cancellation — every id not yet scanned. Those ids
+            were not collision-checked, so the caller must fail closed on them rather than
+            import them unchecked — a transient miss could otherwise slip a colliding row
+            through on a retry.
+    """
+    use_sysname = (sync_options or {}).get("use_sysname", True)
+    strip_domain = (sync_options or {}).get("strip_domain", False)
+    # Reuse the caller's dict object (mutate it in place) rather than `or {}`, which would swap in a
+    # throwaway dict when the caller passes an empty one — the write-back below must be visible to
+    # the caller so the downstream import reuses it.
+    devices_cache = libre_devices_cache if libre_devices_cache is not None else {}
+    vm_id_set = set(vm_device_ids or ())
+    devices = []
+    unresolved_ids = []
+    device_ids = list(device_ids)
+    for idx, device_id in enumerate(device_ids, start=1):
+        # Same cancellation cadence as the import loops below (first id, then every 5th):
+        # a large batch with many cache misses is one LibreNMS call per id, so a cancelled
+        # job must not sit through the whole scan. The unscanned remainder goes to
+        # unresolved_ids — those ids were NOT collision-checked, and the caller's existing
+        # unresolved gate already fails closed on them, so nothing imports unchecked.
+        if job and (idx == 1 or idx % 5 == 0) and _is_job_cancelled(job):
+            if getattr(job, "logger", None):
+                job.logger.warning(f"Collision pre-check stopped by cancellation at id {idx} of {len(device_ids)}")
+            unresolved_ids.extend(device_ids[idx - 1 :])
+            break
+        libre_device = devices_cache.get(device_id)
+        just_fetched = False
+        if libre_device is None:
+            try:
+                # The verified row is written into the shared import cache below, so bypass the
+                # short-lived API snapshot just like the downstream import's own live read.
+                success, libre_device = api.get_device_info(device_id, use_cache=False)
+            except Exception as exc:
+                # get_device_info can raise rather than return (False, None), for example on an
+                # unexpected transport/backend failure. The gate's contract is to fail closed per
+                # row, so treat an exception like a fetch miss instead of crashing the whole batch.
+                if getattr(job, "logger", None):
+                    job.logger.warning(f"Collision pre-check couldn't fetch device {device_id}: {exc}")
+                else:
+                    logger.warning("Collision pre-check couldn't fetch device %s: %s", device_id, exc)
+                unresolved_ids.append(device_id)
+                continue
+            if not success or not isinstance(libre_device, dict):
+                # Couldn't fetch device info → can't collision-check this id. Record it so the
+                # caller blocks it instead of importing it unchecked (fail closed).
+                unresolved_ids.append(device_id)
+                continue
+            just_fetched = True
+        # Fail closed on a bad cached payload too: a negatively-cached lookup (an empty dict or a
+        # row whose device_id doesn't match the requested id — e.g. a stale/mis-keyed cache entry)
+        # would otherwise reach validation as a brand-new device and make the collision gate report
+        # a clean scan for an id it never actually verified.
+        if not row_identity_matches(libre_device, device_id):
+            unresolved_ids.append(device_id)
+            continue
+        if just_fetched:
+            # Persist the freshly fetched row into the shared cache — but only now that its
+            # device_id is verified to match the requested id — so the downstream import
+            # (bulk_import_devices_shared / bulk_import_vms) reuses it instead of re-fetching the
+            # same device from LibreNMS. Deferring the write until past the mismatch check keeps a
+            # mis-keyed payload from poisoning the shared cache for any other consumer that reads it
+            # (e.g. a same-batch retry that hits the cache instead of re-fetching), even though this
+            # id is (correctly) recorded unresolved above.
+            devices_cache[device_id] = libre_device
+        validation = validate_device_for_import(
+            # DB-only collision pre-check: don't hand the validator an API client (it would let
+            # API-backed validation paths run even with the cache supplied + include_vc_detection
+            # False). The collision-relevant match fields are resolved from the DB; api is only
+            # used for VC/chassis enrichment, all of which is guarded on `api` being truthy.
+            libre_device,
+            api=None,
+            # Validate in the row's ACTUAL import mode: VM rows skip the Device-only
+            # serial/IP matching exactly like bulk_import_vms will, so a coincidental
+            # serial can't fabricate a collision against a Device the row never touches.
+            import_as_vm=device_id in vm_id_set,
+            use_sysname=use_sysname,
+            strip_domain=strip_domain,
+            server_key=api.server_key,
+            include_vc_detection=False,
+        )
+        if any(str(issue).startswith(VALIDATION_ERROR_ISSUE_PREFIX) for issue in validation.get("issues", [])):
+            # validate_device_for_import() caught an exception and returned only a partial result
+            # (its except branch appends a VALIDATION_ERROR_ISSUE_PREFIX issue). The collision-relevant
+            # match fields may be missing, so this id was NOT reliably collision-checked. Fail
+            # closed: record it as unresolved rather than collision-check it on incomplete data
+            # (mirrors the get_device_info miss above). The prefix is a shared constant so this
+            # guard can't silently drift from the producer's wording.
+            unresolved_ids.append(device_id)
+            continue
+        devices.append(
+            {
+                "device_id": device_id,
+                "device_name": validation.get("resolved_name") or f"device-{device_id}",
+                "validation": validation,
+            }
+        )
+    return detect_bulk_collisions(devices), unresolved_ids
+
+
+@dataclass
+class BulkPrecheckOutcome:
+    """
+    Shared decision derived from a :func:`detect_collisions_for_device_ids` result.
+
+    Consumed by BOTH non-modal import callers — the synchronous ``BulkImportDevicesView`` and the
+    async ``ImportDevicesJob`` — so their block/skip semantics and user-facing wording can't drift
+    (they previously re-implemented the branching inline, and the copy had already diverged:
+    "Import blocked" vs "Bulk import blocked").
+
+    Semantics:
+        * ``blocked`` (genuine collisions): two LibreNMS rows resolve to the same NetBox object,
+          which can't be auto-resolved — the WHOLE batch is blocked and nothing imports.
+        * ``skipped_ids`` (unresolved rows): a row whose LibreNMS info couldn't be fetched/validated
+          to collision-check it. These are SKIPPED, not a whole-batch block — a transient miss on
+          one row no longer drops the entire import — but they are NOT imported either (importing an
+          un-collision-checked row could bypass the collision guard). The rest import normally.
+
+    Attributes:
+        blocked: True when genuine collisions exist → import nothing.
+        collisions: The collision groups (for the HTMX modal / job log).
+        block_message: Shared collision-block copy (``""`` when not blocked).
+        skipped_ids: Unresolved ids to skip (import the rest).
+        skip_message: Shared copy naming skipped rows in an unblocked batch (``""`` otherwise).
+        importable_device_ids: ``device_ids`` minus ``skipped_ids``.
+        importable_vm_imports: ``vm_imports`` minus ``skipped_ids``.
+    """
+
+    blocked: bool
+    collisions: list
+    block_message: str
+    skipped_ids: list
+    skip_message: str
+    importable_device_ids: list
+    importable_vm_imports: dict
+
+
+def classify_bulk_precheck(collisions, unresolved, device_ids, vm_imports) -> BulkPrecheckOutcome:
+    """
+    Turn a ``(collisions, unresolved)`` pre-check result into the shared import decision.
+
+    See :class:`BulkPrecheckOutcome` for the block-vs-skip semantics. Genuine collisions block the
+    whole batch; unresolved rows are excluded from the importable sets and surfaced via
+    ``skip_message`` while the rest import. Both callers apply this identically.
+
+    Args:
+        collisions: Collision groups from :func:`detect_bulk_collisions`.
+        unresolved: Ids that couldn't be collision-checked (fetch/validation miss).
+        device_ids: The batch's device-import ids.
+        vm_imports: The batch's VM imports mapping (``{device_id: manual_mappings}``).
+
+    Returns:
+        BulkPrecheckOutcome: The shared block/skip decision.
+    """
+    unresolved_set = set(unresolved)
+    importable_device_ids = [d for d in device_ids if d not in unresolved_set]
+    importable_vm_imports = {d: v for d, v in vm_imports.items() if d not in unresolved_set}
+
+    skip_message = ""
+    if unresolved and not collisions:
+        ids = ", ".join(str(d) for d in unresolved)
+        skip_message = (
+            f"Skipped {len(unresolved)} selected row(s) (id(s): {ids}): their LibreNMS device info "
+            f"couldn't be fetched to verify collisions, so they were not imported. The remaining "
+            f"rows were imported; retry those rows individually."
+        )
+
+    block_message = ""
+    if collisions:
+        pks = ", ".join(str(group["nb_device_pk"]) for group in collisions)
+        block_message = (
+            f"Bulk import blocked: {len(collisions)} NetBox object collision(s) in this batch "
+            f"(pk(s): {pks}). Two or more selected LibreNMS devices resolve to the same NetBox "
+            f"object; resolve each individually, or deselect the duplicates."
+        )
+
+    return BulkPrecheckOutcome(
+        blocked=bool(collisions),
+        collisions=collisions,
+        block_message=block_message,
+        skipped_ids=list(unresolved),
+        skip_message=skip_message,
+        importable_device_ids=importable_device_ids,
+        importable_vm_imports=importable_vm_imports,
+    )
+
+
 def bulk_import_devices_shared(
     device_ids: List[int],
     server_key: str = None,
@@ -136,13 +362,10 @@ def bulk_import_devices_shared(
     if user is None and job is not None:
         user = getattr(job.job, "user", None)
 
-    # Check permissions at start of bulk operation — device and VM add perms are
-    # required because any device may be flagged as import_as_vm during validation.
     # change_device is needed for VC master/member updates.
     required_perms = [
         "dcim.add_device",
         "dcim.change_device",
-        "virtualization.add_virtualmachine",
     ]
     require_permissions(user, required_perms, "import devices")
 
@@ -172,15 +395,25 @@ def bulk_import_devices_shared(
             break
 
         try:
-            # Use cached device data if available to avoid redundant API calls
-            if libre_devices_cache and device_id in libre_devices_cache:
-                libre_device = libre_devices_cache[device_id]
+            # Use cached device data if available to avoid redundant API calls — but only when the
+            # cached row's OWN device_id doesn't contradict the requested id (cached_row_matches).
+            # detect_collisions_for_device_ids verifies this too, but its callers skip the pre-check
+            # for single-row imports, so re-check at the point of use; a contradiction falls through
+            # to a live fetch below.
+            cached_row = libre_devices_cache.get(device_id) if libre_devices_cache else None
+            if cached_row_matches(cached_row, device_id):
+                libre_device = cached_row
                 success = True
             else:
                 # Import decisions (DeviceType match, serial-conflict, hostname) must run against
                 # live LibreNMS data: bypass the short device-info read cache so a value the user
                 # just corrected in LibreNMS isn't read back stale within the cache window.
                 success, libre_device = api.get_device_info(device_id, use_cache=False)
+                # Same fail-closed identity rule as the collision pre-check (row_identity_matches):
+                # a payload that isn't a dict carrying the requested device_id must be neither
+                # imported nor written into the shared cache — treat it as a failed retrieval.
+                if success and not row_identity_matches(libre_device, device_id):
+                    success, libre_device = False, None
                 # Backfill the shared cache so the synchronous import's post-import row re-render
                 # (which reads the same dict via fetch_device_with_cache) doesn't issue a second
                 # LibreNMS round-trip per device on a cold cache. The background path passes a
@@ -211,6 +444,20 @@ def bulk_import_devices_shared(
                 include_vc_detection=True,
                 preloaded_device_type_rules=device_type_norm_rules,
             )
+
+            if validation.get("import_as_vm"):
+                has_vm_perm, _ = check_user_permissions(user, ["virtualization.add_virtualmachine"])
+                if not has_vm_perm:
+                    error_msg = (
+                        f"Cannot import device row {device_id} as a VM: "
+                        "missing permission virtualization.add_virtualmachine"
+                    )
+                    failed_list.append({"device_id": device_id, "error": error_msg})
+                    if job and job.logger:
+                        job.logger.error(error_msg)
+                    else:
+                        logger.error(error_msg)
+                    continue
 
             vc_data = validation.get("virtual_chassis", {})
             if vc_data.get("is_stack", False):
@@ -414,29 +661,34 @@ def _refresh_librenms_linkage(validation: dict, device, libre_device: dict, serv
     """
     link = _describe_existing_librenms_link(device, server_key)
     validation["existing_librenms_link"] = link
-    # Only re-classify librenms-id-based matches; leave serial/hostname/primary_ip
-    # match types untouched.
+
+    scanned_id = coerce_librenms_id((libre_device or {}).get("device_id"))
+    # _describe_existing_librenms_link already read the OOB sub-object via get_librenms_oob and
+    # exposes the coerced positive-int id as link["oob_id"]; reuse it instead of re-reading.
+    oob_id = link["oob_id"]
+
+    # Promote to a *current* librenms-id / OOB link first, regardless of the cached match type.
+    # A row cached as a serial/hostname conflict may since have gained the matching host/OOB
+    # librenms_id in NetBox; it should render as the link, not the stale conflict, instead of
+    # waiting for the cache to expire.
+    if scanned_id is not None and oob_id is not None and oob_id == scanned_id:
+        validation["existing_match_type"] = "librenms_oob"
+        return
+    if scanned_id is not None and link["host_id"] is not None and link["host_id"] == scanned_id:
+        validation["existing_match_type"] = "librenms_id"
+        return
+
+    # No current id/OOB link matches the scanned device. Only clear a *prior* librenms-id/OOB
+    # match here — leave serial/hostname/primary_ip match types untouched (evaluated elsewhere).
     if validation.get("existing_match_type") in ("librenms_id", "librenms_oob"):
-        scanned_id = coerce_librenms_id((libre_device or {}).get("device_id"))
         if scanned_id is None:
-            # The current scan didn't return a usable device_id (libre_device omitted or
-            # malformed). A missing scanned id is NOT proof the link disappeared — only drop
-            # the cached match when the DB linkage itself is gone; otherwise leave the prior
-            # match type until there's a real id to compare against.
+            # A missing scanned id (libre_device omitted/malformed) is NOT proof the link
+            # disappeared — only drop the cached match when the DB linkage itself is gone.
             if link["host_id"] is None and link["oob_id"] is None:
                 validation["existing_match_type"] = None
             return
-        oob = get_librenms_oob(device, server_key=server_key)
-        oob_id = coerce_librenms_id(oob.get("id")) if oob else None
-        if scanned_id is not None and oob_id is not None and oob_id == scanned_id:
-            validation["existing_match_type"] = "librenms_oob"
-        elif scanned_id is not None and link["host_id"] is not None and link["host_id"] == scanned_id:
-            # Host id still matches the scanned device — a genuine host-side link.
-            validation["existing_match_type"] = "librenms_id"
-        else:
-            # Linkage changed since caching: neither the host id nor the OOB id matches
-            # the scanned device anymore, so don't keep a stale librenms_id badge.
-            validation["existing_match_type"] = None
+        # scanned id present but neither the host id nor the OOB id matches it anymore.
+        validation["existing_match_type"] = None
 
 
 def _clear_existing_match_derived_fields(validation: dict) -> None:
@@ -560,6 +812,19 @@ def _refresh_existing_device(validation: dict, libre_device: dict = None, server
                 # is reflected in the badge (DB-only; no LibreNMS API call).
                 prior_match = validation.get("existing_match_type")
                 _refresh_librenms_linkage(validation, refreshed, libre_device, server_key)
+                if prior_match not in ("librenms_id", "librenms_oob") and validation.get("existing_match_type") in (
+                    "librenms_id",
+                    "librenms_oob",
+                ):
+                    # _refresh_librenms_linkage just PROMOTED a row cached under a non-link match
+                    # (serial/hostname/primary_ip) to a current librenms_id/OOB link. The
+                    # serial/merge/oob/promote actions derived for that old match are now stale and
+                    # would render a destructive "Merge two NetBox devices" form (the template
+                    # checks serial_action == "merge_netbox_devices" before the match_type chain)
+                    # or a misleading "Add as OOB" badge (device_status keys that on serial_action,
+                    # independent of match_type) on a row that is actually host/OOB-linked. Drop
+                    # them; a row already cached as a link type keeps its link-derived fields.
+                    _clear_existing_match_derived_fields(validation)
                 if prior_match in ("librenms_id", "librenms_oob") and validation.get("existing_match_type") is None:
                     # The librenms-id/OOB link that made this the cached match is gone
                     # (removed/repointed in NetBox since caching). Treat it like a vanished

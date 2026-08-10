@@ -6,11 +6,11 @@ from django.contrib import messages
 from django.core.cache import cache
 from django.db import transaction
 from django.http import Http404
-from django.shortcuts import get_object_or_404, redirect
+from django.shortcuts import redirect
 from django.urls import reverse
 from django.views import View
 from ipam.models import VRF, IPAddress
-from virtualization.models import VirtualMachine
+from virtualization.models import VirtualMachine, VMInterface
 
 from netbox_librenms_plugin.utils import (
     get_librenms_device_id,
@@ -39,21 +39,56 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
         ],
     }
 
+    def _required_permissions(self, object_type):
+        """
+        Return the POST permissions, narrowed to the owner model this request targets.
+
+        The owner and target interfaces are resolved through restricted querysets, so their view
+        permissions belong in the gate. They cannot be declared statically because one view serves
+        both Devices and VirtualMachines.
+
+        Args:
+            object_type (str): ``"device"`` or ``"virtualmachine"`` from the URL.
+
+        Returns:
+            dict: The ``required_object_permissions`` mapping for this request.
+        """
+        if object_type == "device":
+            owner_model = Device
+            interface_model = Interface
+        elif object_type == "virtualmachine":
+            owner_model = VirtualMachine
+            interface_model = VMInterface
+        else:
+            raise Http404("Invalid object type.")
+
+        perms = [
+            ("view", owner_model),
+            ("view", interface_model),
+            *type(self).required_object_permissions["POST"],
+        ]
+        # A per-row VRF is resolved by client-supplied id through a restricted queryset. Only
+        # demand its view permission when one is actually posted, so the common no-VRF sync
+        # is not gated on a permission it never uses.
+        if any(key.startswith("vrf_") and value for key, value in self.request.POST.items()):
+            perms.append(("view", VRF))
+        return {"POST": perms}
+
     def get_selected_ips(self, request):
         """Return selected IP addresses from POST data."""
         return [x for x in request.POST.getlist("select") if x]
 
     def get_vrf_selection(self, request, ip_address):
-        """Return the VRF selected for a given IP address, or None."""
+        """Return the selected VRF, or None only when the row requests no VRF."""
         vrf_id = request.POST.get(f"vrf_{ip_address}")
 
-        if vrf_id:
-            try:
-                return VRF.objects.get(pk=vrf_id)
-            except VRF.DoesNotExist:
-                pass
+        if not vrf_id:
+            return None
 
-        return None
+        try:
+            return self.restricted_queryset(VRF).get(pk=vrf_id)
+        except (VRF.DoesNotExist, TypeError, ValueError):
+            raise ValueError("Selected VRF is no longer available or you do not have permission to view it.") from None
 
     def get_cached_ip_data(self, request, obj):
         """Return cached LibreNMS IP address data for the given object."""
@@ -64,11 +99,11 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
         return cached_data.get("ip_addresses", [])
 
     def get_object(self, object_type, pk):
-        """Return the Device or VirtualMachine instance for the given type and pk."""
+        """Return the Device or VirtualMachine instance for the given type and pk (object-scoped)."""
         if object_type == "device":
-            return get_object_or_404(Device, pk=pk)
+            return self.restrict_object_or_404(Device, pk=pk)
         if object_type == "virtualmachine":
-            return get_object_or_404(VirtualMachine, pk=pk)
+            return self.restrict_object_or_404(VirtualMachine, pk=pk)
         raise Http404("Invalid object type.")
 
     def get_ip_tab_url(self, obj):
@@ -101,7 +136,8 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
 
     def post(self, request, object_type, pk):
         """Sync selected IP addresses from LibreNMS into NetBox."""
-        # Check both plugin write and NetBox object permissions
+        # Check both plugin write and NetBox object permissions (owner read included).
+        self.required_object_permissions = self._required_permissions(object_type)
         if error := self.require_all_permissions("POST"):
             return error
 
@@ -172,15 +208,13 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
         Used to re-resolve the target interface at sync time instead of trusting the cached
         ``interface_url`` (see ``_match_interface``).
 
-        For a Device in a Virtual Chassis, all member interfaces are indexed (not just the viewed
-        member's), mirroring ``_resolve_interface_by_port_id`` in ``views/sync/interfaces``: LibreNMS
-        treats a VC as one logical device, so a VC member IP can legitimately resolve to an interface
-        on another member by stable port id. For the name fallback the viewed object's own interface
-        wins — that's exactly what the rendered IP table binds to (the render indexes only
-        ``obj.interfaces``; see ``ip_addresses_view._prefetch_netbox_data``), so the sync must agree
-        rather than skip what the user sees linked. A name shared only by sibling members (none on the
-        viewed object) stays ambiguous (None) so the address can't silently rebind to an arbitrary
-        member; duplicate port ids are always ambiguous.
+        For a Device in a Virtual Chassis, authorized member interfaces are indexed (not just the
+        viewed member's), mirroring ``_resolve_interface_by_port_id`` in ``views/sync/interfaces``:
+        LibreNMS treats a VC as one logical device, so a VC member IP can legitimately resolve to an
+        interface on another member by stable port id. For the name fallback the viewed object's own
+        interface wins. A name shared only by sibling members (none on the viewed object) stays
+        ambiguous (None) so the address can't silently rebind to an arbitrary member; duplicate port
+        ids are always ambiguous.
 
         Args:
             obj (Device | VirtualMachine): The synced object whose current interfaces to index.
@@ -195,10 +229,10 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
             # Route member expansion through the shared helper (returns [obj] when not in a VC)
             # so this can't drift from the VC member set used by the interface-sync path.
             member_devices = get_virtual_chassis_members(obj)
-            interfaces = list(Interface.objects.filter(device__in=member_devices))
+            interfaces = list(self.restricted_queryset(Interface).filter(device__in=member_devices))
             obj_device_id = obj.pk
         else:
-            interfaces = list(obj.interfaces.all())
+            interfaces = list(self.restricted_queryset(VMInterface).filter(virtual_machine=obj))
             obj_device_id = None
         by_librenms_id = {}
         by_name = {}
@@ -320,6 +354,7 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
             "failed": [],
             "primary_set": [],
             "primary_no_interface": [],
+            "primary_interface_not_eligible": [],
             "skipped_no_interface": [],
             "errors": {},
         }
@@ -346,17 +381,31 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
                         ip_data, interfaces_by_librenms_id, interfaces_by_name, interfaces_by_pk
                     )
 
+                    # This row ends in obj.save() (primary_ip) when it matches the management
+                    # address, so it takes BOTH an ipam_ipaddress and a dcim_device row lock.
+                    is_primary_candidate = bool(mgmt_ip) and self._same_host(ip_data["ip_address"], mgmt_ip)
+
                     if interface is None:
                         # No matching NetBox interface — the row is stale, the interface isn't
                         # synced yet, or _match_interface refused an ambiguous port_id. Writing
                         # here would either drop an existing IP's binding (assigned_object=None)
                         # or create an unassigned/global address, both of which violate the
                         # interface-assigned model. Skip the row instead of corrupting state.
-                        if mgmt_ip and self._same_host(ip_data["ip_address"], mgmt_ip):
+                        if is_primary_candidate:
                             results["primary_no_interface"].append(ip_address)
                         else:
                             results["skipped_no_interface"].append(ip_address)
                         continue
+
+                    if is_primary_candidate:
+                        # Lock obj's row BEFORE the address write, so this path takes the same
+                        # Device -> IPAddress lock order as the migrate move views. The reverse
+                        # order closes a deadlock cycle with a concurrent donor move.
+                        if type(obj).objects.select_for_update().filter(pk=obj.pk).first() is None:
+                            raise type(obj).DoesNotExist(f"{type(obj).__name__} {obj.pk} no longer exists")
+                        # Re-read the primary_ip ids from the locked row. A stale in-memory value
+                        # would make _set_primary_ip skip a set it must perform.
+                        obj.refresh_from_db()
 
                     ip_with_mask = ip_data["ip_with_mask"]
 
@@ -386,7 +435,7 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
                     # Primary-IP auto-match for the management IP. The no-interface case is
                     # handled above (the row was skipped before any write), so here the IP is
                     # guaranteed interface-assigned and can satisfy NetBox's primary constraint.
-                    if mgmt_ip and self._same_host(ip_data["ip_address"], mgmt_ip):
+                    if is_primary_candidate:
                         # _build_interface_maps indexes ALL VC member interfaces, so `interface`
                         # can belong to a sibling member. NetBox's Device.clean() accepts a
                         # primary IP on any same-VC member's non-mgmt-only interface
@@ -405,7 +454,7 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
                                 and not interface.mgmt_only
                             )
                         ):
-                            results["primary_no_interface"].append(ip_address)
+                            results["primary_interface_not_eligible"].append(ip_address)
                         elif self._set_primary_ip(obj, ip_obj):
                             results["primary_set"].append(ip_address)
 
@@ -430,6 +479,13 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
                 "Primary IP not set for "
                 f"{', '.join(results['primary_no_interface'])} — no NetBox interface for this IP. "
                 "Sync interfaces first, then re-run.",
+            )
+        if results.get("primary_interface_not_eligible"):
+            messages.warning(
+                request,
+                "Primary IP not set for "
+                f"{', '.join(results['primary_interface_not_eligible'])} — the matched interface is not eligible "
+                "(it is outside this virtual chassis or is a management-only interface).",
             )
         if results.get("skipped_no_interface"):
             messages.warning(

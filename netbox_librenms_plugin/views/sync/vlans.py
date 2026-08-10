@@ -1,11 +1,13 @@
+import hashlib
 from urllib.parse import quote_plus
 
 from dcim.models import Device
 from django.contrib import messages
 from django.core.cache import cache
-from django.db import transaction
+from django.core.exceptions import ValidationError
+from django.db import IntegrityError, connection, transaction
 from django.http import Http404
-from django.shortcuts import get_object_or_404, redirect
+from django.shortcuts import redirect
 from django.urls import reverse
 from django.views import View
 from ipam.models import VLAN, VLANGroup
@@ -18,6 +20,24 @@ from netbox_librenms_plugin.views.mixins import (
 )
 
 
+def _acquire_global_vlan_locks(vids):
+    """Lock global VLAN VIDs in stable order for the current transaction."""
+    if not connection.in_atomic_block:
+        raise RuntimeError("_acquire_global_vlan_locks() requires an open transaction")
+
+    with connection.cursor() as cursor:
+        for vid in sorted(set(vids)):
+            lock_key = int.from_bytes(
+                hashlib.blake2b(
+                    f"netbox-librenms-plugin:global-vlan:{vid}".encode(),
+                    digest_size=8,
+                ).digest(),
+                byteorder="big",
+                signed=True,
+            )
+            cursor.execute("SELECT pg_advisory_xact_lock(%s)", [lock_key])
+
+
 class SyncVLANsView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreNMSAPIMixin, CacheMixin, View):
     """
     Handle POST requests to create/update VLANs in NetBox from LibreNMS data.
@@ -25,6 +45,10 @@ class SyncVLANsView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreN
 
     required_object_permissions = {
         "POST": [
+            # The owner device is resolved through a restricted queryset (see get_object), so
+            # state that read here: a missing grant is an explicit 403, not a 404 at the lookup.
+            ("view", Device),
+            ("view", VLANGroup),
             ("add", VLAN),
             ("change", VLAN),
         ],
@@ -58,7 +82,7 @@ class SyncVLANsView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreN
     def get_object(self, object_type: str, object_id: int):
         """Get the target object (Device or VM)."""
         if object_type == "device":
-            return get_object_or_404(Device, pk=object_id)
+            return self.restrict_object_or_404(Device, pk=object_id)
         raise Http404("Invalid object type.")
 
     def _redirect(self, object_type: str, object_id: int):
@@ -99,8 +123,27 @@ class SyncVLANsView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreN
         updated_count = 0
         skipped_count = 0
         group_missing_count = 0
+        permission_skipped_count = 0
+        ambiguous_count = 0
+        concurrent_change_count = 0
+        invalid_name_count = 0
+        changeable_vlans = self.restricted_queryset(VLAN, "change")
 
         with transaction.atomic():
+            # A global VLAN has no parent row to lock, and PostgreSQL treats NULL
+            # group values as distinct in the VLAN uniqueness constraint. Lock all
+            # selected global VIDs before lookup so concurrent batches cannot both
+            # observe a missing row. Stable ordering prevents cross-batch deadlocks.
+            global_vids = []
+            for vid_str in selected_vlans:
+                try:
+                    vid = int(vid_str)
+                except ValueError:
+                    continue
+                if vid_str in librenms_vlans and not request.POST.get(f"vlan_group_{vid}", ""):
+                    global_vids.append(vid)
+            _acquire_global_vlan_locks(global_vids)
+
             for vid_str in selected_vlans:
                 try:
                     vid = int(vid_str)
@@ -116,7 +159,7 @@ class SyncVLANsView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreN
                 row_vlan_group = None
                 if group_id_str:
                     try:
-                        row_vlan_group = VLANGroup.objects.get(pk=int(group_id_str))
+                        row_vlan_group = self.restricted_queryset(VLANGroup).get(pk=int(group_id_str))
                     except (ValueError, VLANGroup.DoesNotExist):
                         # A group was explicitly requested but doesn't exist (stale page or
                         # tampered id). Fail closed: do NOT fall back to a global VLAN, which
@@ -133,43 +176,76 @@ class SyncVLANsView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreN
                         continue
 
                 librenms_name = vlan_data.get("vlan_name", f"VLAN {vid}")
+                try:
+                    VLAN._meta.get_field("name").clean(librenms_name, None)
+                except ValidationError:
+                    messages.error(request, f"VLAN {vid}: the LibreNMS name is invalid; skipped.")
+                    invalid_name_count += 1
+                    continue
 
-                if row_vlan_group:
-                    # Grouped VLAN: match by VID (unique constraint within group)
-                    vlan, created = VLAN.objects.get_or_create(
-                        vid=vid,
-                        group=row_vlan_group,
-                        defaults={
-                            "name": librenms_name,
-                            "status": "active",
-                        },
+                lookup = {"vid": vid, "group": row_vlan_group}
+                try:
+                    # Resolve the catalog match before applying the user's change scope. A
+                    # constrained grant must not make duplicate rows look like one safe match.
+                    vlan = VLAN.objects.get(**lookup)
+                    created = False
+                except VLAN.MultipleObjectsReturned:
+                    messages.error(
+                        request,
+                        f"VLAN {vid}: several VLANs match this VID and scope; skipped to avoid renaming the wrong one.",
                     )
-                    if created:
-                        created_count += 1
-                    elif vlan.name != librenms_name:
-                        vlan.name = librenms_name
-                        vlan.save()
-                        updated_count += 1
-                    else:
-                        skipped_count += 1
+                    ambiguous_count += 1
+                    continue
+                except VLAN.DoesNotExist:
+                    try:
+                        # A concurrent creator can win after the initial lookup. Keep the
+                        # IntegrityError inside a savepoint so the outer batch can continue.
+                        with transaction.atomic():
+                            vlan = VLAN.objects.create(
+                                **lookup,
+                                name=librenms_name,
+                                status="active",
+                            )
+                        created = True
+                    except IntegrityError:
+                        try:
+                            vlan = VLAN.objects.get(**lookup)
+                            created = False
+                        except VLAN.MultipleObjectsReturned:
+                            messages.error(
+                                request,
+                                f"VLAN {vid}: several VLANs match this VID and scope; skipped to avoid "
+                                "renaming the wrong one.",
+                            )
+                            ambiguous_count += 1
+                            continue
+                        except VLAN.DoesNotExist:
+                            messages.error(
+                                request,
+                                f"VLAN {vid}: the VLAN could not be resolved after a concurrent change; skipped.",
+                            )
+                            concurrent_change_count += 1
+                            continue
+
+                if not created:
+                    try:
+                        vlan = changeable_vlans.get(pk=vlan.pk)
+                    except VLAN.DoesNotExist:
+                        messages.error(
+                            request,
+                            f"VLAN {vid}: an existing VLAN in this scope is outside your change permission; skipped.",
+                        )
+                        permission_skipped_count += 1
+                        continue
+
+                if created:
+                    created_count += 1
+                elif vlan.name != librenms_name:
+                    vlan.name = librenms_name
+                    vlan.save(update_fields=["name"])
+                    updated_count += 1
                 else:
-                    # Global VLAN: match by VID only (unique constraint with group=NULL)
-                    vlan, created = VLAN.objects.get_or_create(
-                        vid=vid,
-                        group=None,
-                        defaults={
-                            "name": librenms_name,
-                            "status": "active",
-                        },
-                    )
-                    if created:
-                        created_count += 1
-                    elif vlan.name != librenms_name:
-                        vlan.name = librenms_name
-                        vlan.save()
-                        updated_count += 1
-                    else:
-                        skipped_count += 1
+                    skipped_count += 1
 
         # Build summary message. created/updated/unchanged are all successful sync outcomes (an
         # "unchanged" VID exists and already matches — nothing to do). Group-missing skips are NOT:
@@ -183,13 +259,23 @@ class SyncVLANsView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreN
         if skipped_count > 0:
             parts.append(f"{skipped_count} unchanged")
 
+        skip_reasons = []
+        if group_missing_count > 0:
+            skip_reasons.append(f"{group_missing_count} skipped (VLAN group missing)")
+        if permission_skipped_count > 0:
+            skip_reasons.append(f"{permission_skipped_count} skipped (change permission missing)")
+        if ambiguous_count > 0:
+            skip_reasons.append(f"{ambiguous_count} skipped (VLAN match ambiguous)")
+        if concurrent_change_count > 0:
+            skip_reasons.append(f"{concurrent_change_count} skipped (concurrent VLAN change)")
+        if invalid_name_count > 0:
+            skip_reasons.append(f"{invalid_name_count} skipped (invalid VLAN name)")
+
         if parts:
-            if group_missing_count > 0:
-                parts.append(f"{group_missing_count} skipped (VLAN group missing)")
-            messages.success(request, f"VLANs synced: {', '.join(parts)}.")
-        elif group_missing_count > 0:
-            # Nothing actually synced — only group-missing failures. Don't claim success.
-            messages.warning(request, f"No VLANs synced: {group_missing_count} skipped (VLAN group missing).")
+            messages.success(request, f"VLANs synced: {', '.join(parts + skip_reasons)}.")
+        elif skip_reasons:
+            # Nothing actually synced. Do not claim success for rows rejected by a scope check.
+            messages.warning(request, f"No VLANs synced: {', '.join(skip_reasons)}.")
         else:
             messages.warning(request, "No VLANs were created or updated.")
 

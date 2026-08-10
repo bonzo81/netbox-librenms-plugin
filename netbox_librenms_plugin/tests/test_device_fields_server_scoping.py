@@ -23,6 +23,9 @@ from netbox_librenms_plugin.librenms_api import LibreNMSAPI
 from netbox_librenms_plugin.tests.conftest import make_device
 
 
+from netbox_librenms_plugin.tests.view_test_helpers import post as _post
+
+
 @pytest.fixture(autouse=True)
 def mock_librenms_config():
     """Neutralize the suite-wide autouse config mock (registered via ``pytest_plugins``).
@@ -105,7 +108,7 @@ class TestUpdateDeviceNameServerScoping:
             patch("netbox_librenms_plugin.views.sync.device_fields.messages"),
             patch("netbox_librenms_plugin.views.sync.device_fields.redirect_with_server_key"),
         ):
-            view.post(request, pk=viewed.pk)
+            _post(view, request, pk=viewed.pk)
 
         assert recorded["device_pk"] == sib_siteB.pk, (
             "VC sync-device resolution was not scoped to the POSTed server_key "

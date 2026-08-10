@@ -25,10 +25,14 @@ from netbox_librenms_plugin.import_utils import (
     _determine_device_name,
     bulk_import_devices,
     bulk_import_vms,
+    classify_bulk_precheck,
+    detect_bulk_collisions,
+    detect_collisions_for_device_ids,
     fetch_device_with_cache,
     get_import_device_cache_key,
     get_librenms_device_by_id,
     get_virtual_chassis_data,
+    required_import_permissions,
     update_vc_member_suggested_names,
     validate_device_for_import,
 )
@@ -38,6 +42,7 @@ from netbox_librenms_plugin.import_validation_helpers import (
     apply_role_to_validation,
     extract_device_selections,
     fetch_model_by_id,
+    merge_candidate_pks,
 )
 from netbox_librenms_plugin.tables.device_status import DeviceImportTable
 from netbox_librenms_plugin.utils import (
@@ -883,6 +888,19 @@ class BulkImportConfirmView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
             "vc_detection_enabled": vc_detection_enabled,
         }
 
+        collisions = detect_bulk_collisions(devices)
+        if collisions:
+            # Render at 200 (not 4xx): this is an interstitial modal swapped
+            # into #htmx-modal-content, exactly like the confirm step. A non-2xx
+            # status makes HTMX skip the swap and route the body through
+            # htmx:responseError -> showErrorToast(), which would dump the
+            # collision template as raw text in a toast.
+            return render(
+                request,
+                "netbox_librenms_plugin/htmx/bulk_import_collision.html",
+                {"collisions": collisions},
+            )
+
         return render(
             request,
             "netbox_librenms_plugin/htmx/bulk_import_confirm.html",
@@ -1023,6 +1041,25 @@ class BulkImportDevicesView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
         device_ids_to_import = [d for d in parsed_ids if d not in vm_imports]
         vm_ids_to_import = list(vm_imports.keys())
 
+        # Authorize the model add/change perms BEFORE the background dispatch and the collision
+        # pre-check below (mirrors ImportDevicesJob, which authorizes before its scan).
+        # require_write_permission() above only checks the plugin-settings perm, while the job would
+        # raise PermissionDenied only once it ran — leaving the caller with a doomed job and an
+        # "Import job started" message. The pre-check likewise surfaces NetBox collision details
+        # (object names + pks) in its modal. Enforce the same perm sets the import paths do, for
+        # every import, before either path starts.
+        required_import_perms = required_import_permissions(device_ids_to_import, vm_imports)
+        missing_import_perms = [p for p in required_import_perms if not request.user.has_perm(p)]
+        if missing_import_perms:
+            deny_msg = f"You do not have permission to import these rows (missing: {', '.join(missing_import_perms)})."
+            messages.error(request, deny_msg)
+            if is_htmx:
+                # 200 + HX-Redirect, like the other denial paths: HTMX skips the swap on non-2xx.
+                return HttpResponse(
+                    "", headers={"HX-Redirect": reverse("plugins:netbox_librenms_plugin:librenms_import")}
+                )
+            return redirect("plugins:netbox_librenms_plugin:librenms_import")
+
         # Seed the shared device cache from ALREADY-cached entries only, before the
         # background-vs-sync decision. Reading the Django cache directly (not
         # fetch_device_with_cache, which falls through to the LibreNMS HTTP API on a miss)
@@ -1115,6 +1152,48 @@ class BulkImportDevicesView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
                         f"Background job requested but no workers available. Importing {total_import_count} devices synchronously...",
                     )
 
+        # Re-run the same-NetBox-device collision check the confirm modal performs. The confirm
+        # preview is advisory only — a re-submitted stale confirm form or a scripted POST reaches
+        # this view directly — so block a colliding batch here too. This runs on the SYNCHRONOUS
+        # path only: it sits after the background-job dispatch above, so a batch that enqueued a job
+        # doesn't pay this validation cost synchronously (ImportDevicesJob re-runs the same check).
+        # A single selected device can never collide (collisions need two distinct LibreNMS ids on
+        # one NetBox object), so skip the extra validation pass for the common single-row case.
+        precheck_skip_msg = None
+        if len(parsed_ids) >= 2:
+            collisions, unresolved = detect_collisions_for_device_ids(
+                parsed_ids,
+                self.librenms_api,
+                libre_devices_cache=libre_devices_cache,
+                sync_options=sync_options,
+                # Each row validates in its actual import mode: a VM row checked in Device mode
+                # would run the serial/IP matching bulk_import_vms skips and could fabricate a
+                # collision that blocks a valid batch.
+                vm_device_ids=vm_imports,
+            )
+            outcome = classify_bulk_precheck(collisions, unresolved, device_ids_to_import, vm_imports)
+            if outcome.blocked:
+                # Genuine collision (two rows → one NetBox object): block the whole batch, exactly
+                # as the confirm modal does. Same shared wording ImportDevicesJob logs.
+                if is_htmx:
+                    # 200, like the confirm step: HTMX skips the swap on non-2xx.
+                    return render(
+                        request,
+                        "netbox_librenms_plugin/htmx/bulk_import_collision.html",
+                        {"collisions": outcome.collisions, "oob": True},
+                    )
+                messages.error(request, outcome.block_message)
+                return redirect("plugins:netbox_librenms_plugin:librenms_import")
+            if outcome.skipped_ids:
+                # Skip ONLY the rows that couldn't be fetched/validated to collision-check them
+                # (import the rest) rather than blocking the whole batch — a transient fetch miss on
+                # one row no longer drops the entire import. Those rows are not imported (importing
+                # an un-collision-checked row could bypass this guard); the skip is surfaced below.
+                device_ids_to_import = outcome.importable_device_ids
+                vm_imports = outcome.importable_vm_imports
+                vm_ids_to_import = list(vm_imports.keys())
+                precheck_skip_msg = outcome.skip_message
+
         # Synchronous import execution (reuses libre_devices_cache built above).
         # Import devices and VMs separately
         device_result = {
@@ -1202,6 +1281,12 @@ class BulkImportDevicesView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
             if not is_htmx:
                 messages.warning(request, _msg)
             htmx_toasts.append(("text-bg-warning", "mdi-alert", "Warning", _msg))
+        # Rows the collision pre-check couldn't fetch/validate were skipped (not imported) rather
+        # than blocking the whole batch; surface that so the user knows which rows to retry.
+        if precheck_skip_msg:
+            if not is_htmx:
+                messages.warning(request, precheck_skip_msg)
+            htmx_toasts.append(("text-bg-warning", "mdi-alert", "Warning", precheck_skip_msg))
 
         if request.headers.get("HX-Request"):
             # Return updated rows for all imported devices using HTMX OOB swaps
@@ -1695,7 +1780,11 @@ class DeviceConflictActionView(
                 # best-effort guard for different devices; a DB unique constraint
                 # would be needed for full protection.
                 try:
-                    existing_device = Device.objects.select_for_update().get(pk=existing_device.pk)
+                    existing_device = (
+                        self.restricted_queryset(Device, "change")
+                        .select_for_update(of=("self",))
+                        .get(pk=existing_device.pk)
+                    )
                 except Device.DoesNotExist:
                     return _htmx_error_response("Device no longer exists; it may have been deleted concurrently.")
                 try:
@@ -1804,7 +1893,11 @@ class DeviceConflictActionView(
             if incoming_serial and incoming_serial != "-":
                 with transaction.atomic():
                     try:
-                        locked_device = Device.objects.select_for_update().get(pk=existing_device.pk)
+                        locked_device = (
+                            self.restricted_queryset(Device, "change")
+                            .select_for_update(of=("self",))
+                            .get(pk=existing_device.pk)
+                        )
                     except Device.DoesNotExist:
                         return _htmx_error_response("Device no longer exists; it may have been deleted concurrently.")
                     # Re-check for serial ownership conflict under the locks, on the LOCKED row.
@@ -1883,7 +1976,11 @@ class DeviceConflictActionView(
                 )
             with transaction.atomic():
                 try:
-                    locked_device = existing_model.objects.select_for_update().get(pk=existing_device.pk)
+                    locked_device = (
+                        self.restricted_queryset(existing_model, "change")
+                        .select_for_update(of=("self",))
+                        .get(pk=existing_device.pk)
+                    )
                 except existing_model.DoesNotExist:
                     return _htmx_error_response("Object no longer exists; it may have been deleted concurrently.")
                 # Re-check under lock — another request may have already migrated it
@@ -1999,11 +2096,6 @@ class AddDeviceTypeMappingView(
         except (ValueError, TypeError):
             return _htmx_error_response("Invalid device type selection.")
 
-        try:
-            device_type = DeviceType.objects.get(pk=device_type_id)
-        except DeviceType.DoesNotExist:
-            return _htmx_error_response("Selected device type not found.")
-
         # Reject ambiguous state up front: multiple case-variant rows for the same hardware
         # string mean .first() would silently mutate an arbitrary one and leave the duplicate
         # unresolved. Fetch [:2] once and reuse it for both the ambiguity check and the
@@ -2019,11 +2111,16 @@ class AddDeviceTypeMappingView(
         # actually needed: "add" for a new mapping, "change" for an update.
         existing_mapping = upfront_rows[0] if upfront_rows else None
         if existing_mapping:
-            self.required_object_permissions = {"POST": [("change", DeviceTypeMapping)]}
+            self.required_object_permissions = {"POST": [("view", DeviceType), ("change", DeviceTypeMapping)]}
         else:
-            self.required_object_permissions = {"POST": [("add", DeviceTypeMapping)]}
+            self.required_object_permissions = {"POST": [("view", DeviceType), ("add", DeviceTypeMapping)]}
         if error := self.require_object_permissions("POST"):
             return error
+
+        try:
+            device_type = self.restricted_queryset(DeviceType).get(pk=device_type_id)
+        except DeviceType.DoesNotExist:
+            return _htmx_error_response("Selected device type not found.")
 
         try:
             with transaction.atomic():
@@ -2048,13 +2145,15 @@ class AddDeviceTypeMappingView(
                     # if the locked row already maps to the same device type this is a no-op
                     # and the caller needs only the add permission they already passed above.
                     if locked.netbox_device_type_id != device_type_id:
-                        self.required_object_permissions = {"POST": [("change", DeviceTypeMapping)]}
+                        self.required_object_permissions = {
+                            "POST": [("view", DeviceType), ("change", DeviceTypeMapping)]
+                        }
                         if error := self.require_object_permissions("POST"):
                             return error
                 if existing_mapping and not locked:
                     # The mapping was deleted between our upfront read and the lock.
                     # We are about to CREATE a new row, so require add permission.
-                    self.required_object_permissions = {"POST": [("add", DeviceTypeMapping)]}
+                    self.required_object_permissions = {"POST": [("view", DeviceType), ("add", DeviceTypeMapping)]}
                     if error := self.require_object_permissions("POST"):
                         return error
                 if locked:
@@ -2259,6 +2358,10 @@ class CreatePlatformFromImportView(
         perms = [("add", Platform)]
         if target_model is not None:
             perms.append(("change", target_model))
+        # When a manufacturer is posted it is resolved by client-supplied id through a restricted
+        # queryset, so state that read in the gate.
+        if (request.POST.get("manufacturer") or "").strip():
+            perms.append(("view", Manufacturer))
         self.required_object_permissions = {"POST": perms}
 
         if error := self.require_object_permissions("POST"):
@@ -2276,7 +2379,7 @@ class CreatePlatformFromImportView(
         manufacturer = None
         if manufacturer_id:
             try:
-                manufacturer = Manufacturer.objects.get(pk=int(manufacturer_id))
+                manufacturer = self.restricted_queryset(Manufacturer).get(pk=int(manufacturer_id))
             except (Manufacturer.DoesNotExist, ValueError, TypeError):
                 # The user explicitly submitted a manufacturer; a stale/tampered id must be
                 # rejected, not silently dropped to None (which would persist a Platform with
@@ -2399,7 +2502,11 @@ class CreatePlatformFromImportView(
         if target_model is not None and target_pk is not None:
             try:
                 with transaction.atomic():
-                    target = target_model.objects.select_for_update().get(pk=target_pk)
+                    target = (
+                        self.restricted_queryset(target_model, "change")
+                        .select_for_update(of=("self",))
+                        .get(pk=target_pk)
+                    )
                     target.platform = platform
                     target.full_clean()
                     target.save()
@@ -2569,7 +2676,9 @@ class AddAsOOBView(
 
         with transaction.atomic():
             try:
-                sync_device = Device.objects.select_for_update().get(pk=sync_device.pk)
+                sync_device = (
+                    self.restricted_queryset(Device, "change").select_for_update(of=("self",)).get(pk=sync_device.pk)
+                )
             except Device.DoesNotExist:
                 return _htmx_error_response("Device no longer exists; it may have been deleted concurrently.")
 
@@ -2957,7 +3066,14 @@ class AddAsOOBView(
         if iface_id:
             try:
                 # Lock the reused row too (same orphan-on-concurrent-delete reasoning).
-                return Interface.objects.select_for_update().get(pk=int(iface_id), device=device), None
+                # Scoped like every other client-supplied id: the device filter proves where the
+                # interface sits, not that the caller's grant covers it.
+                return (
+                    Interface.objects.restrict(request.user, "view")
+                    .select_for_update(of=("self",))
+                    .get(pk=int(iface_id), device=device),
+                    None,
+                )
             except (Interface.DoesNotExist, ValueError):
                 return None, None
         return None, None
@@ -3341,12 +3457,7 @@ class MergeNetBoxDevicesView(
         if not libre_device:
             return _htmx_error_response("LibreNMS device not found")
 
-        merge_candidates = (validation or {}).get("merge_candidates") or {}
-        candidate_pks = {
-            (merge_candidates.get("host_named") or {}).get("pk"),
-            (merge_candidates.get("oob_named") or {}).get("pk"),
-        }
-        candidate_pks.discard(None)
+        candidate_pks = merge_candidate_pks(validation)
         # Derive the donor from the selected winner. The merge is always between this fixed pair
         # of candidates, so the donor is unambiguously the other candidate and no client-supplied
         # donor state is needed. This also enforces that the winner is one of the two candidates.
@@ -3485,6 +3596,15 @@ class MergeNetBoxDevicesView(
                     if isinstance(oob_assigned, Interface):
                         locked_iface = Interface.objects.select_for_update().filter(pk=oob_assigned.pk).first()
                         if locked_iface is not None and locked_iface.device_id == winner.pk:
+                            # Refresh the cached GenericForeignKey on locked_oob_ip to the freshly
+                            # locked interface: set_device_ip_fk() re-reads locked_oob_ip.assigned_object
+                            # for its ownership check, but the GFK cache still holds the pre-lock
+                            # snapshot (the FK id fields didn't change, so Django won't re-query). A
+                            # concurrent move ONTO the winner landing between the assigned_object read
+                            # above and this lock would otherwise pass the locked-row gate here and then
+                            # be spuriously rejected against the stale device_id — mirrors the
+                            # freshen-after-lock pattern in migrate._reconcile_donor_device_ip_fks.
+                            locked_oob_ip.assigned_object = locked_iface
                             # set_device_ip_fk() re-checks the address is on a winner interface
                             # (verified above under lock) and assigns without saving — the batched
                             # donor-then-winner save below preserves the release-before-claim
@@ -3644,11 +3764,6 @@ class AddPlatformMappingView(
         except (ValueError, TypeError):
             return _htmx_error_response("Invalid platform selection.")
 
-        try:
-            platform = Platform.objects.get(pk=platform_id)
-        except Platform.DoesNotExist:
-            return _htmx_error_response("Selected platform not found.")
-
         # Fetch [:2] once and reuse it for both the ambiguity check and the existing-mapping
         # resolution rather than a separate count() + first() (two queries for the same filter).
         # Mirrors AddDeviceTypeMappingView and the locked read below.
@@ -3659,10 +3774,18 @@ class AddPlatformMappingView(
             )
         existing_mapping = upfront_rows[0] if upfront_rows else None
         self.required_object_permissions = {
-            "POST": [("change", PlatformMapping) if existing_mapping else ("add", PlatformMapping)]
+            "POST": [
+                ("view", Platform),
+                ("change", PlatformMapping) if existing_mapping else ("add", PlatformMapping),
+            ]
         }
         if error := self.require_object_permissions("POST"):
             return error
+
+        try:
+            platform = self.restricted_queryset(Platform).get(pk=platform_id)
+        except Platform.DoesNotExist:
+            return _htmx_error_response("Selected platform not found.")
 
         try:
             with transaction.atomic():
@@ -3683,13 +3806,13 @@ class AddPlatformMappingView(
                     # Concurrent request created the mapping after our upfront read.
                     # Only escalate to change permission if we would actually mutate.
                     if locked.netbox_platform_id != platform_id:
-                        self.required_object_permissions = {"POST": [("change", PlatformMapping)]}
+                        self.required_object_permissions = {"POST": [("view", Platform), ("change", PlatformMapping)]}
                         if error := self.require_object_permissions("POST"):
                             return error
                 if existing_mapping and not locked:
                     # Mapping was deleted between our upfront read and the lock.
                     # We are about to CREATE a new row, so require add permission.
-                    self.required_object_permissions = {"POST": [("add", PlatformMapping)]}
+                    self.required_object_permissions = {"POST": [("view", Platform), ("add", PlatformMapping)]}
                     if error := self.require_object_permissions("POST"):
                         return error
                 if locked:

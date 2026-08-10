@@ -9,7 +9,34 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from netbox_librenms_plugin.tests.conftest import make_device, make_interface
+from netbox_librenms_plugin.tests.conftest import make_device, make_interface, make_vm
+from netbox_librenms_plugin.tests.view_test_helpers import (
+    grant,
+    make_request,
+    make_user_with_perms,
+    make_view,
+    message_texts,
+    missing_pk,
+)
+from netbox_librenms_plugin.tests.view_test_helpers import get as _get
+from netbox_librenms_plugin.tests.view_test_helpers import post as _post
+
+# The views here are built with real requests and real users, so the whole file needs the DB.
+pytestmark = pytest.mark.django_db
+
+_seeded_cache_keys = set()
+
+
+@pytest.fixture(autouse=True)
+def _clear_seeded_cache_keys():
+    """Delete the real-cache snapshots seeded by this module's view helpers."""
+    yield
+
+    from django.core.cache import cache
+
+    for key in _seeded_cache_keys:
+        cache.delete(key)
+    _seeded_cache_keys.clear()
 
 
 # ---------------------------------------------------------------------------
@@ -18,19 +45,13 @@ from netbox_librenms_plugin.tests.conftest import make_device, make_interface
 
 
 def _make_request(post_data=None, get_data=None, user=None):
-    req = MagicMock()
-    _post = post_data or {}
-    post_mock = MagicMock()
-    post_mock.get = lambda k, d=None: _post.get(k, d)
-    post_mock.getlist = lambda k: (
-        _post.get(k) if isinstance(_post.get(k), list) else ([] if k not in _post else [_post[k]])
-    )
-    req.POST = post_mock
-    req.GET = get_data or {}
-    req.user = user or MagicMock()
-    req.META = {}
-    req.htmx = False
-    return req
+    """A real request. POST wins when both are given; a GET-only call builds a GET request."""
+    if post_data is None and get_data:
+        return make_request("get", get_data, user=user)
+    request = make_request("post", post_data or {}, user=user)
+    request.GET = get_data or request.GET
+    request.htmx = False
+    return request
 
 
 def _denied_response():
@@ -52,7 +73,9 @@ class TestSyncCablesViewPermissionDenied:
         view.require_all_permissions = MagicMock(return_value=_denied_response())
         view.request = _make_request()
 
-        with patch("netbox_librenms_plugin.views.sync.cables.get_object_or_404") as mock_get:
+        with patch(
+            "netbox_librenms_plugin.views.mixins.NetBoxObjectPermissionMixin.restrict_object_or_404"
+        ) as mock_get:
             result = view.post(view.request, pk=1)
 
         assert result.status_code == 403
@@ -72,7 +95,10 @@ class TestSyncCablesViewCacheMiss:
         mock_device = MagicMock(pk=1)
 
         with (
-            patch("netbox_librenms_plugin.views.sync.cables.get_object_or_404", return_value=mock_device),
+            patch(
+                "netbox_librenms_plugin.views.mixins.NetBoxObjectPermissionMixin.restrict_object_or_404",
+                return_value=mock_device,
+            ),
             patch("netbox_librenms_plugin.views.sync.cables.cache") as mock_cache,
             patch("netbox_librenms_plugin.views.sync.cables.messages") as mock_msgs,
             patch("netbox_librenms_plugin.views.sync.cables.redirect") as mock_redirect,
@@ -101,7 +127,10 @@ class TestSyncCablesViewNoSelection:
         mock_device = MagicMock(pk=1)
 
         with (
-            patch("netbox_librenms_plugin.views.sync.cables.get_object_or_404", return_value=mock_device),
+            patch(
+                "netbox_librenms_plugin.views.mixins.NetBoxObjectPermissionMixin.restrict_object_or_404",
+                return_value=mock_device,
+            ),
             patch("netbox_librenms_plugin.views.sync.cables.cache") as mock_cache,
             patch("netbox_librenms_plugin.views.sync.cables.messages") as mock_msgs,
             patch("netbox_librenms_plugin.views.sync.cables.redirect"),
@@ -116,7 +145,6 @@ class TestSyncCablesViewNoSelection:
         mock_msgs.error.assert_called_once()
 
 
-@pytest.mark.django_db
 class TestSyncCablesViewSuccessPath:
     def test_valid_cable_created(self):
         """A real Cable is created between two real Interfaces (verified via the interfaces' cable FKs)."""
@@ -143,7 +171,10 @@ class TestSyncCablesViewSuccessPath:
         }
 
         with (
-            patch("netbox_librenms_plugin.views.sync.cables.get_object_or_404", return_value=dev_local),
+            patch(
+                "netbox_librenms_plugin.views.mixins.NetBoxObjectPermissionMixin.restrict_object_or_404",
+                return_value=dev_local,
+            ),
             patch("netbox_librenms_plugin.views.sync.cables.cache") as mock_cache,
             patch("netbox_librenms_plugin.views.sync.cables.messages") as mock_msgs,
             patch("netbox_librenms_plugin.views.sync.cables.redirect"),
@@ -163,8 +194,95 @@ class TestSyncCablesViewSuccessPath:
         assert local.cable_id == remote.cable_id
         assert Cable.objects.filter(pk=local.cable_id).exists()
 
+    def test_unrelated_posted_device_cannot_redirect_the_local_termination(self):
+        """A forged VC selection must reject the row, not cable the cached page interface."""
+        from dcim.models import Cable
 
-@pytest.mark.django_db
+        page_device = make_device("cable-page-device")
+        unrelated_device = make_device("cable-unrelated-device")
+        remote_device = make_device("cable-forged-remote")
+        cached_local = make_interface(page_device, "Gi0/1")
+        make_interface(unrelated_device, "Gi0/1")
+        remote = make_interface(remote_device, "Gi0/2")
+        request = _make_request(
+            post_data={
+                "select": ["port1"],
+                "device_selection_port1": str(unrelated_device.pk),
+            }
+        )
+        view = _cables_view(
+            request,
+            page_device,
+            [
+                {
+                    "local_port_id": "port1",
+                    "local_port": "Gi0/1",
+                    "netbox_local_interface_id": cached_local.pk,
+                    "netbox_remote_interface_id": remote.pk,
+                }
+            ],
+        )
+
+        selected = view.get_selected_interfaces(request, page_device)
+        assert selected == [{"device_id": str(unrelated_device.pk), "local_port_id": "port1"}]
+        view._initial_device = page_device
+        assert view._selected_device_is_in_page_context(unrelated_device.pk) is False
+
+        _post(view, request, pk=page_device.pk)
+
+        cached_local.refresh_from_db()
+        remote.refresh_from_db()
+        assert cached_local.cable_id is None
+        assert remote.cable_id is None
+        assert Cable.objects.count() == 0
+        assert any(
+            "Selected device is not part of this cable-sync page for interfaces: Gi0/1" in text
+            for text in message_texts(request, "error")
+        )
+
+    def test_missing_interface_on_selected_vc_member_does_not_cable_cached_interface(self):
+        """A selected VC member without the port must not cable the page member's cached port."""
+        from dcim.models import Cable, VirtualChassis
+
+        vc = VirtualChassis.objects.create(name="cable-vc-missing-port")
+        page_device = make_device("cable-vc-page")
+        page_device.virtual_chassis = vc
+        page_device.vc_position = 1
+        page_device.save()
+        selected_member = make_device("cable-vc-selected")
+        selected_member.virtual_chassis = vc
+        selected_member.vc_position = 2
+        selected_member.save()
+        remote_device = make_device("cable-vc-remote")
+        cached_local = make_interface(page_device, "Gi0/1")
+        remote = make_interface(remote_device, "Gi0/2")
+        request = _make_request(
+            post_data={
+                "select": ["port1"],
+                "device_selection_port1": str(selected_member.pk),
+            }
+        )
+        view = _cables_view(
+            request,
+            page_device,
+            [
+                {
+                    "local_port_id": "port1",
+                    "local_port": "Gi0/1",
+                    "netbox_local_interface_id": cached_local.pk,
+                    "netbox_remote_interface_id": remote.pk,
+                }
+            ],
+        )
+
+        _post(view, request, pk=page_device.pk)
+
+        cached_local.refresh_from_db()
+        assert cached_local.cable_id is None
+        assert Cable.objects.count() == 0
+        assert any("Gi0/1" in text for text in message_texts(request, "error"))
+
+
 class TestSyncCablesViewSkipsOOBRows:
     def test_oob_sourced_link_is_never_cabled(self):
         """An OOB-controller cable row (_source="oob") merged into the host list must never create a cable on the host interface — it's context-only (shared-LOM detection), mirroring the interface- and module-sync OOB guards."""
@@ -194,7 +312,10 @@ class TestSyncCablesViewSkipsOOBRows:
         }
 
         with (
-            patch("netbox_librenms_plugin.views.sync.cables.get_object_or_404", return_value=dev_local),
+            patch(
+                "netbox_librenms_plugin.views.mixins.NetBoxObjectPermissionMixin.restrict_object_or_404",
+                return_value=dev_local,
+            ),
             patch("netbox_librenms_plugin.views.sync.cables.cache") as mock_cache,
             patch("netbox_librenms_plugin.views.sync.cables.messages") as mock_msgs,
             patch("netbox_librenms_plugin.views.sync.cables.redirect"),
@@ -213,92 +334,129 @@ class TestSyncCablesViewSkipsOOBRows:
         mock_msgs.success.assert_not_called()
 
 
+def _cables_view(request, device, links):
+    """The real SyncCablesView with the LibreNMS link snapshot seeded into the real cache."""
+    from django.core.cache import cache
+
+    from netbox_librenms_plugin.views.sync.cables import SyncCablesView
+
+    view = make_view(SyncCablesView, request)
+    view._post_server_key = "default"
+    key = view.get_cache_key(device, "links", "default")
+    _seeded_cache_keys.add(key)
+    cache.set(key, {"links": links})
+    return view
+
+
 class TestSyncCablesViewDuplicateCable:
     def test_duplicate_cable_shows_warning(self):
-        from netbox_librenms_plugin.views.sync.cables import SyncCablesView
+        from netbox_librenms_plugin.tests.conftest import cable_together
 
-        view = object.__new__(SyncCablesView)
-        view.require_all_permissions = MagicMock(return_value=None)
-        view.request = _make_request(post_data={"select": ["port1"]})
-        view.get_cache_key = MagicMock(return_value="key")
-        view._post_server_key = "default"
+        dev = make_device("cable-dup-local")
+        remote = make_device("cable-dup-remote")
+        local_iface = make_interface(dev, "Gi0/1")
+        remote_iface = make_interface(remote, "Gi0/2")
+        cable_together(local_iface, remote_iface)  # already connected
+        req = _make_request(post_data={"select": ["port1"]})
+        view = _cables_view(
+            req,
+            dev,
+            [
+                {
+                    "local_port_id": "port1",
+                    "local_port": "Gi0/1",
+                    "netbox_local_interface_id": local_iface.pk,
+                    "netbox_remote_interface_id": remote_iface.pk,
+                }
+            ],
+        )
 
-        mock_device = MagicMock(pk=1)
-        mock_device.id = 1  # ensure id matches device_id on iface to skip VC branch
-        link_data = {
-            "local_port_id": "port1",
-            "local_port": "Gi0/1",
-            "netbox_local_interface_id": 10,
-            "netbox_remote_interface_id": 20,
-        }
+        _post(view, req, pk=dev.pk)
 
-        with (
-            patch("netbox_librenms_plugin.views.sync.cables.get_object_or_404", return_value=mock_device),
-            patch("netbox_librenms_plugin.views.sync.cables.cache") as mock_cache,
-            patch("netbox_librenms_plugin.views.sync.cables.messages") as mock_msgs,
-            patch("netbox_librenms_plugin.views.sync.cables.redirect"),
-            patch("netbox_librenms_plugin.views.sync.cables.reverse", return_value="/sync/"),
-            patch("netbox_librenms_plugin.views.sync.cables.Cable") as mock_cable_cls,
-            patch("netbox_librenms_plugin.views.sync.cables.Interface") as mock_iface_cls,
-            patch("netbox_librenms_plugin.views.sync.cables.ContentType") as mock_ct,
-            patch("netbox_librenms_plugin.views.sync.cables.transaction"),
-            patch.object(
-                type(view), "librenms_api", new_callable=lambda: property(lambda s: MagicMock(server_key="default"))
-            ),
-        ):
-            mock_cache.get.return_value = {"links": [link_data]}
-            local_iface = MagicMock(pk=10)
-            local_iface.device_id = 1  # match the device pk to skip VC branch
-            remote_iface = MagicMock(pk=20)
-            mock_iface_cls.objects.get.side_effect = [local_iface, remote_iface]
-            mock_cable_cls.objects.filter.return_value.exists.return_value = True
-            mock_ct.objects.get_for_model.return_value = MagicMock()
-
-            view.post(view.request, pk=1)
-
-        mock_msgs.warning.assert_called_once()
+        assert any("Cable already exists" in t for t in message_texts(req, "warning"))
 
 
 class TestSyncCablesViewMissingRemote:
     def test_interface_does_not_exist_shows_error(self):
+        from dcim.models import Interface
+
+        dev = make_device("cable-missing-local")
+        local_iface = make_interface(dev, "Gi0/1")
+        gone_pk = missing_pk(Interface)
+        req = _make_request(post_data={"select": ["port1"]})
+        view = _cables_view(
+            req,
+            dev,
+            [
+                {
+                    "local_port_id": "port1",
+                    "local_port": "Gi0/1",
+                    "netbox_local_interface_id": local_iface.pk,
+                    "netbox_remote_interface_id": gone_pk,
+                }
+            ],
+        )
+
+        _post(view, req, pk=dev.pk)
+
+        assert any("Remote device or interface not found" in t for t in message_texts(req, "error"))
+
+    def test_a_remote_interface_outside_the_grant_is_reported_missing(self):
+        """The remote id comes from the cached LibreNMS row; a constrained grant must not cable it."""
+        from dcim.models import Cable, Device, Interface
+
+        dev = make_device("cable-scoped-local")
+        remote = make_device("cable-scoped-remote")
+        local_iface = make_interface(dev, "Gi0/1")
+        remote_iface = make_interface(remote, "Gi0/2")
+        user = make_user_with_perms("cable-scoped", [("view", Device), ("add", Cable), ("change", Cable)])
+        user = grant(user, "change", Interface, constraints={"device__name": "cable-scoped-local"})
+        req = _make_request(post_data={"select": ["port1"]}, user=user)
+        view = _cables_view(
+            req,
+            dev,
+            [
+                {
+                    "local_port_id": "port1",
+                    "local_port": "Gi0/1",
+                    "netbox_local_interface_id": local_iface.pk,
+                    "netbox_remote_interface_id": remote_iface.pk,
+                }
+            ],
+        )
+
+        _post(view, req, pk=dev.pk)
+
+        assert any("Remote device or interface not found" in t for t in message_texts(req, "error"))
+        assert not remote_iface.cable_terminations.exists()
+
+    def test_view_only_interface_grant_cannot_create_a_cable(self):
+        """Cable creation changes both terminations, so a view-only grant must not resolve them."""
+        from dcim.models import Cable, Interface
+
         from netbox_librenms_plugin.views.sync.cables import SyncCablesView
 
-        view = object.__new__(SyncCablesView)
-        view.require_all_permissions = MagicMock(return_value=None)
-        view.request = _make_request(post_data={"select": ["port1"]})
-        view.get_cache_key = MagicMock(return_value="key")
+        local_device = make_device("cable-view-only-local")
+        remote_device = make_device("cable-view-only-remote")
+        local_iface = make_interface(local_device, "Gi0/1")
+        remote_iface = make_interface(remote_device, "Gi0/2")
+        user = make_user_with_perms("cable-view-only", [("view", Interface)])
+        request = _make_request(user=user)
+        view = SyncCablesView()
+        view.setup(request)
         view._post_server_key = "default"
 
-        mock_device = MagicMock(pk=1)
-        link_data = {
-            "local_port_id": "port1",
-            "local_port": "Gi0/1",
-            "netbox_local_interface_id": 10,
-            "netbox_remote_interface_id": 20,
-        }
+        result = view.handle_cable_creation(
+            {
+                "local_port": "Gi0/1",
+                "netbox_local_interface_id": local_iface.pk,
+                "netbox_remote_interface_id": remote_iface.pk,
+            },
+            {"local_port_id": "1"},
+        )
 
-        class _DNE(Exception):
-            pass
-
-        with (
-            patch("netbox_librenms_plugin.views.sync.cables.get_object_or_404", return_value=mock_device),
-            patch("netbox_librenms_plugin.views.sync.cables.cache") as mock_cache,
-            patch("netbox_librenms_plugin.views.sync.cables.messages") as mock_msgs,
-            patch("netbox_librenms_plugin.views.sync.cables.redirect"),
-            patch("netbox_librenms_plugin.views.sync.cables.reverse", return_value="/sync/"),
-            patch("netbox_librenms_plugin.views.sync.cables.Interface") as mock_iface_cls,
-            patch("netbox_librenms_plugin.views.sync.cables.transaction"),
-            patch.object(
-                type(view), "librenms_api", new_callable=lambda: property(lambda s: MagicMock(server_key="default"))
-            ),
-        ):
-            mock_cache.get.return_value = {"links": [link_data]}
-            mock_iface_cls.DoesNotExist = _DNE
-            mock_iface_cls.objects.get.side_effect = _DNE()
-
-            view.post(view.request, pk=1)
-
-        mock_msgs.error.assert_called_once()
+        assert result["status"] == "invalid"
+        assert not Cable.objects.filter(terminations__termination_id=local_iface.pk).exists()
 
 
 class TestSyncCablesViewMissingLinkData:
@@ -314,7 +472,10 @@ class TestSyncCablesViewMissingLinkData:
         mock_device = MagicMock(pk=1)
 
         with (
-            patch("netbox_librenms_plugin.views.sync.cables.get_object_or_404", return_value=mock_device),
+            patch(
+                "netbox_librenms_plugin.views.mixins.NetBoxObjectPermissionMixin.restrict_object_or_404",
+                return_value=mock_device,
+            ),
             patch("netbox_librenms_plugin.views.sync.cables.cache") as mock_cache,
             patch("netbox_librenms_plugin.views.sync.cables.messages") as mock_msgs,
             patch("netbox_librenms_plugin.views.sync.cables.redirect"),
@@ -345,7 +506,10 @@ class TestSyncCablesViewInvalidLinkData:
         link_data = {"local_port_id": "port1", "local_port": "Gi0/1", "netbox_remote_interface_id": 20}
 
         with (
-            patch("netbox_librenms_plugin.views.sync.cables.get_object_or_404", return_value=mock_device),
+            patch(
+                "netbox_librenms_plugin.views.mixins.NetBoxObjectPermissionMixin.restrict_object_or_404",
+                return_value=mock_device,
+            ),
             patch("netbox_librenms_plugin.views.sync.cables.cache") as mock_cache,
             patch("netbox_librenms_plugin.views.sync.cables.messages") as mock_msgs,
             patch("netbox_librenms_plugin.views.sync.cables.redirect"),
@@ -478,20 +642,46 @@ class TestSyncCablesViewHelpers:
         assert result == [{"local_port_id": "p"}]
 
     def test_check_existing_cable(self):
+        from netbox_librenms_plugin.tests.conftest import cable_together
+
+        dev = make_device("cable-check")
+        remote = make_device("cable-check-remote")
+        local = make_interface(dev, "Gi0/1")
+        far = make_interface(remote, "Gi0/2")
+        free = make_interface(remote, "Gi0/3")
+        view = make_view(_sync_cables_view_class())
+
+        assert view.check_existing_cable(local, free) is False
+
+        cable_together(local, far)
+
+        assert view.check_existing_cable(local, free) is True
+
+    def test_missing_local_interface_is_invalid_not_missing_remote(self):
+        """A stale local interface ID must not be reported as missing remote data."""
+        from dcim.models import Interface
+
         from netbox_librenms_plugin.views.sync.cables import SyncCablesView
 
-        view = object.__new__(SyncCablesView)
-        local = MagicMock(pk=1)
-        remote = MagicMock(pk=2)
+        remote = make_interface(make_device("cable-stale-local-remote"), "Gi0/2")
+        view = make_view(SyncCablesView)
 
-        with (
-            patch("netbox_librenms_plugin.views.sync.cables.Cable") as mock_cable_cls,
-            patch("netbox_librenms_plugin.views.sync.cables.ContentType") as mock_ct,
-        ):
-            mock_cable_cls.objects.filter.return_value.exists.return_value = True
-            mock_ct.objects.get_for_model.return_value = MagicMock()
-            result = view.check_existing_cable(local, remote)
-        assert result is True
+        result = view.handle_cable_creation(
+            {
+                "local_port": "Gi0/1",
+                "netbox_local_interface_id": missing_pk(Interface),
+                "netbox_remote_interface_id": remote.pk,
+            },
+            {"local_port_id": "port1"},
+        )
+
+        assert result == {"status": "invalid", "interface": "Gi0/1"}
+
+
+def _sync_cables_view_class():
+    from netbox_librenms_plugin.views.sync.cables import SyncCablesView
+
+    return SyncCablesView
 
 
 class TestSyncCablesViewProcessInterfaceSyncException:
@@ -519,268 +709,235 @@ class TestSyncCablesViewProcessInterfaceSyncException:
         assert "port1" in results["invalid"]
 
 
+def _add_device_view(request, *, add_result=(True, "Device added"), poller_choices=()):
+    """The real AddDeviceToLibreNMSView; only the LibreNMS calls are stubbed.
+
+    ``poller_choices`` seeds the poller-group ChoiceField, whose options production fetches
+    from LibreNMS — that fetch is the external boundary, the form validation is not.
+    """
+    from netbox_librenms_plugin.views.sync.devices import AddDeviceToLibreNMSView
+
+    view = make_view(AddDeviceToLibreNMSView, request)
+    view._librenms_api.add_device.return_value = add_result
+    view._poller_choices = list(poller_choices)
+    return view
+
+
+def _poller_groups(choices):
+    return patch("netbox_librenms_plugin.forms._get_librenms_poller_group_choices", return_value=list(choices))
+
+
+def _snmp_post(prefix, **fields):
+    """POST data for the real SNMP form, prefixed the way the template renders it."""
+    data = {"object_type": "device", f"{prefix}-snmp_version": fields.pop("snmp_version", "v2c")}
+    data.update({f"{prefix}-{k}": v for k, v in fields.items()})
+    return data
+
+
 class TestAddDeviceToLibreNMSViewPermission:
     def test_permission_denied_returns_early(self):
-        from netbox_librenms_plugin.views.sync.devices import AddDeviceToLibreNMSView
+        """The plugin write gate refuses before anything reaches LibreNMS."""
+        from dcim.models import Device
 
-        view = object.__new__(AddDeviceToLibreNMSView)
-        view.require_all_permissions = MagicMock(return_value=_denied_response())
-        view.request = _make_request(post_data={"snmp_version": "v2c", "object_type": "device"})
-        # Permission check now runs after object resolution, so the get_object
-        # lookup must be stubbed out to reach it.
-        with patch.object(view, "get_object", return_value=MagicMock()):
-            result = view.post(view.request, object_id=1)
-        assert result.status_code == 403
+        dev = make_device("addsnmp-denied")
+        # Holds change_device (so the scoped resolve succeeds) but not the plugin write perm,
+        # which is the only way to reach require_all_permissions' denial branch here.
+        user = make_user_with_perms("addsnmp-noplugin", [("change", Device)], plugin_write=False)
+        req = _make_request(post_data=_snmp_post("v1v2", hostname="r.example.com", community="public"), user=user)
+        view = _add_device_view(req)
+
+        with _poller_groups([]):
+            _post(view, req, object_id=dev.pk)
+
+        view._librenms_api.add_device.assert_not_called()
+
+    def test_a_user_without_the_change_grant_gets_named_permission_error(self):
+        """The permission gate reports the missing change grant before the scoped lookup."""
+        from dcim.models import Device
+
+        dev = make_device("addsnmp-viewonly")
+        user = make_user_with_perms("addsnmp-viewer", [("view", Device)])
+        req = _make_request(post_data=_snmp_post("v1v2", hostname="r.example.com", community="public"), user=user)
+        view = _add_device_view(req)
+
+        with _poller_groups([]):
+            response = _post(view, req, object_id=dev.pk)
+
+        assert response.status_code == 302
+        assert any("dcim.change_device" in text for text in message_texts(req, "error"))
+        view._librenms_api.add_device.assert_not_called()
+
+    def test_a_device_outside_the_grant_404s(self):
+        """The object_id is client-supplied, so an out-of-scope device must not be added."""
+        from dcim.models import Device
+        from django.http import Http404
+
+        make_device("addsnmp-mine")
+        theirs = make_device("addsnmp-theirs")
+        user = make_user_with_perms("addsnmp-scoped", [("change", Device)], constraints={"name": "addsnmp-mine"})
+        req = _make_request(post_data=_snmp_post("v1v2", hostname="r.example.com", community="public"), user=user)
+        view = _add_device_view(req)
+
+        with _poller_groups([]), pytest.raises(Http404):
+            _post(view, req, object_id=theirs.pk)
+
+        view._librenms_api.add_device.assert_not_called()
+
+    def test_unknown_object_type_returns_400(self):
+        dev = make_device("addsnmp-badtype")
+        req = _make_request(post_data={"object_type": "rack"})
+        view = _add_device_view(req)
+
+        response = _post(view, req, object_id=dev.pk)
+
+        assert response.status_code == 400
 
 
 class TestAddDeviceToLibreNMSViewFormInvalid:
     def test_invalid_form_shows_errors(self):
-        from netbox_librenms_plugin.views.sync.devices import AddDeviceToLibreNMSView
+        """The REAL form rejects the missing hostname/community, and each error is surfaced."""
+        dev = make_device("addsnmp-invalid")
+        req = _make_request(post_data={"v1v2-snmp_version": "v2c", "object_type": "device"})
+        view = _add_device_view(req)
 
-        view = object.__new__(AddDeviceToLibreNMSView)
-        view.require_all_permissions = MagicMock(return_value=None)
+        with _poller_groups([]):
+            _post(view, req, object_id=dev.pk)
 
-        mock_device = MagicMock()
-        mock_device.get_absolute_url.return_value = "/device/1/"
-
-        post_data = {"v1v2-snmp_version": "v2c", "object_type": "device"}
-
-        with (
-            patch("netbox_librenms_plugin.views.sync.devices.Device") as mock_device_cls,
-            patch("netbox_librenms_plugin.views.sync.devices.messages") as mock_msgs,
-            patch("netbox_librenms_plugin.views.sync.devices.redirect"),
-            patch("netbox_librenms_plugin.forms._get_librenms_poller_group_choices", return_value=[]),
-        ):
-            mock_device_cls.objects.get.return_value = mock_device
-            view.request = _make_request(post_data=post_data)
-            view.object = mock_device
-
-            # Provide an invalid form (missing required hostname)
-            view.post(view.request, object_id=1)
-
-        # Should show form errors (hostname and community are required)
-        assert mock_msgs.error.call_count >= 1
+        errors = message_texts(req, "error")
+        assert any(t.startswith("hostname:") for t in errors)
+        assert any(t.startswith("community:") for t in errors)
+        view._librenms_api.add_device.assert_not_called()
 
 
 class TestAddDeviceToLibreNMSViewFormValid:
     def test_valid_v2c_form_calls_api(self):
-        from netbox_librenms_plugin.views.sync.devices import AddDeviceToLibreNMSView
+        dev = make_device("addsnmp-v2c")
+        req = _make_request(post_data=_snmp_post("v1v2", hostname="router.example.com", community="public"))
+        view = _add_device_view(req, add_result=(True, "Device added"))
 
-        view = object.__new__(AddDeviceToLibreNMSView)
-        view.require_all_permissions = MagicMock(return_value=None)
+        with _poller_groups([]):
+            _post(view, req, object_id=dev.pk)
 
-        mock_device = MagicMock()
-        mock_device.get_absolute_url.return_value = "/device/1/"
-        mock_api = MagicMock()
-        mock_api.server_key = "default"
-        mock_api.add_device.return_value = (True, "Device added")
-
-        mock_form = MagicMock()
-        mock_form.is_valid.return_value = True
-        mock_form.cleaned_data = {
-            "hostname": "router.example.com",
-            "snmp_version": "v2c",
-            "community": "public",
-            "force_add": False,
-            "port": None,
-            "transport": None,
-            "port_association_mode": None,
-            "poller_group": None,
-        }
-
-        with (
-            patch("netbox_librenms_plugin.views.sync.devices.Device") as mock_device_cls,
-            patch("netbox_librenms_plugin.views.sync.devices.messages") as mock_msgs,
-            patch("netbox_librenms_plugin.views.sync.devices.redirect"),
-            patch("netbox_librenms_plugin.views.sync.devices.AddToLIbreSNMPV1V2", return_value=mock_form),
-            patch.object(type(view), "librenms_api", new_callable=lambda: property(lambda s: mock_api)),
-        ):
-            mock_device_cls.objects.get.return_value = mock_device
-            post_data = {"v1v2-snmp_version": "v2c", "object_type": "device"}
-            view.request = _make_request(post_data=post_data)
-            view.object = mock_device
-
-            view.post(view.request, object_id=1)
-
-        mock_api.add_device.assert_called_once()
-        mock_msgs.success.assert_called_once()
+        payload = view._librenms_api.add_device.call_args[0][0]
+        assert payload["hostname"] == "router.example.com"
+        assert payload["snmp_version"] == "v2c"
+        assert payload["community"] == "public"
+        assert message_texts(req, "success") == ["Device added"]
 
 
 class TestAddDeviceToLibreNMSViewFormValidExtraFields:
     """Covers lines 74-78: transport and port_association_mode optional fields."""
 
     def test_valid_form_with_transport_and_pam(self):
-        from netbox_librenms_plugin.views.sync.devices import AddDeviceToLibreNMSView
+        dev = make_device("addsnmp-extra")
+        req = _make_request(
+            post_data=_snmp_post(
+                "v1v2",
+                hostname="router.example.com",
+                community="public",
+                port="161",
+                transport="udp6",
+                port_association_mode="ifName",
+            )
+        )
+        view = _add_device_view(req)
 
-        view = object.__new__(AddDeviceToLibreNMSView)
-        view.require_all_permissions = MagicMock(return_value=None)
+        with _poller_groups([]):
+            _post(view, req, object_id=dev.pk)
 
-        mock_device = MagicMock()
-        mock_device.get_absolute_url.return_value = "/device/1/"
-        mock_api = MagicMock()
-        mock_api.server_key = "default"
-        mock_api.add_device.return_value = (True, "Device added")
-
-        mock_form = MagicMock()
-        mock_form.is_valid.return_value = True
-        mock_form.cleaned_data = {
-            "hostname": "router.example.com",
-            "snmp_version": "v2c",
-            "community": "public",
-            "force_add": False,
-            "port": 161,
-            "transport": "udp6",
-            "port_association_mode": 2,
-            "poller_group": None,
-        }
-
-        with (
-            patch("netbox_librenms_plugin.views.sync.devices.Device") as mock_device_cls,
-            patch("netbox_librenms_plugin.views.sync.devices.messages"),
-            patch("netbox_librenms_plugin.views.sync.devices.redirect"),
-            patch("netbox_librenms_plugin.views.sync.devices.AddToLIbreSNMPV1V2", return_value=mock_form),
-            patch.object(type(view), "librenms_api", new_callable=lambda: property(lambda s: mock_api)),
-        ):
-            mock_device_cls.objects.get.return_value = mock_device
-            post_data = {"v1v2-snmp_version": "v2c", "object_type": "device"}
-            view.request = _make_request(post_data=post_data)
-            view.object = mock_device
-
-            view.post(view.request, object_id=1)
-
-        call_kwargs = mock_api.add_device.call_args[0][0]
-        assert call_kwargs.get("transport") == "udp6"
-        assert call_kwargs.get("port_association_mode") == 2
+        payload = view._librenms_api.add_device.call_args[0][0]
+        assert payload["transport"] == "udp6"
+        assert payload["port_association_mode"] == "ifName"
+        assert payload["port"] == 161
 
     def test_invalid_poller_group_ignored(self):
-        """Covers lines 81-82: except (ValueError, TypeError) for non-int poller_group."""
-        from netbox_librenms_plugin.views.sync.devices import AddDeviceToLibreNMSView
+        """Covers lines 81-82: a non-numeric poller group id from LibreNMS is dropped, not fatal."""
+        dev = make_device("addsnmp-badpoller")
+        req = _make_request(
+            post_data=_snmp_post("v1v2", hostname="router.example.com", community="public", poller_group="not-a-number")
+        )
+        view = _add_device_view(req)
 
-        view = object.__new__(AddDeviceToLibreNMSView)
-        view.require_all_permissions = MagicMock(return_value=None)
+        # LibreNMS supplies the option list, so a non-numeric id is a real possibility.
+        with _poller_groups([("not-a-number", "Odd group")]):
+            _post(view, req, object_id=dev.pk)
 
-        mock_device = MagicMock()
-        mock_device.get_absolute_url.return_value = "/device/1/"
-        mock_api = MagicMock()
-        mock_api.server_key = "default"
-        mock_api.add_device.return_value = (True, "Device added")
-
-        mock_form = MagicMock()
-        mock_form.is_valid.return_value = True
-        mock_form.cleaned_data = {
-            "hostname": "router.example.com",
-            "snmp_version": "v2c",
-            "community": "public",
-            "force_add": False,
-            "port": None,
-            "transport": None,
-            "port_association_mode": None,
-            "poller_group": "not-a-number",  # Triggers except path
-        }
-
-        with (
-            patch("netbox_librenms_plugin.views.sync.devices.Device") as mock_device_cls,
-            patch("netbox_librenms_plugin.views.sync.devices.messages"),
-            patch("netbox_librenms_plugin.views.sync.devices.redirect"),
-            patch("netbox_librenms_plugin.views.sync.devices.AddToLIbreSNMPV1V2", return_value=mock_form),
-            patch.object(type(view), "librenms_api", new_callable=lambda: property(lambda s: mock_api)),
-        ):
-            mock_device_cls.objects.get.return_value = mock_device
-            post_data = {"v1v2-snmp_version": "v2c", "object_type": "device"}
-            view.request = _make_request(post_data=post_data)
-            view.object = mock_device
-
-            view.post(view.request, object_id=1)
-
-        call_kwargs = mock_api.add_device.call_args[0][0]
-        assert "poller_group" not in call_kwargs
+        payload = view._librenms_api.add_device.call_args[0][0]
+        assert "poller_group" not in payload
 
 
 class TestAddDeviceToLibreNMSViewV3:
     def test_v3_form_submits_v3_data(self):
-        from netbox_librenms_plugin.views.sync.devices import AddDeviceToLibreNMSView
+        dev = make_device("addsnmp-v3")
+        req = _make_request(
+            post_data=_snmp_post(
+                "v3",
+                snmp_version="v3",
+                hostname="router.example.com",
+                authlevel="authPriv",
+                authname="user",
+                authpass="auth123",
+                authalgo="MD5",
+                cryptopass="priv123",
+                cryptoalgo="DES",
+            )
+        )
+        view = _add_device_view(req, add_result=(False, "Error"))
 
-        view = object.__new__(AddDeviceToLibreNMSView)
-        view.require_all_permissions = MagicMock(return_value=None)
-        view.request = _make_request()
+        with _poller_groups([]):
+            _post(view, req, object_id=dev.pk)
 
-        mock_device = MagicMock()
-        mock_device.get_absolute_url.return_value = "/device/1/"
-        mock_api = MagicMock()
-        mock_api.add_device.return_value = (False, "Error")
-
-        mock_form = MagicMock()
-        mock_form.is_valid.return_value = True
-        mock_form.cleaned_data = {
-            "hostname": "router.example.com",
-            "snmp_version": "v3",
-            "authlevel": "authPriv",
-            "authname": "user",
-            "authpass": "auth123",
-            "authalgo": "MD5",
-            "cryptopass": "priv123",
-            "cryptoalgo": "DES",
-            "force_add": False,
-            "port": None,
-            "transport": None,
-            "port_association_mode": None,
-            "poller_group": None,
-        }
-
-        with (
-            patch("netbox_librenms_plugin.views.sync.devices.Device") as mock_device_cls,
-            patch("netbox_librenms_plugin.views.sync.devices.messages") as mock_msgs,
-            patch("netbox_librenms_plugin.views.sync.devices.redirect"),
-            patch("netbox_librenms_plugin.views.sync.devices.AddToLIbreSNMPV3", return_value=mock_form),
-            patch.object(type(view), "librenms_api", new_callable=lambda: property(lambda s: mock_api)),
-        ):
-            mock_device_cls.objects.get.return_value = mock_device
-            post_data = {"v3-snmp_version": "v3", "object_type": "device"}
-            view.request = _make_request(post_data=post_data)
-            view.object = mock_device
-            view.post(view.request, object_id=1)
-
-        mock_api.add_device.assert_called_once()
-        mock_msgs.error.assert_called_once()
+        payload = view._librenms_api.add_device.call_args[0][0]
+        assert payload["snmp_version"] == "v3"
+        assert payload["authlevel"] == "authPriv"
+        assert payload["cryptoalgo"] == "DES"
+        assert message_texts(req, "error") == ["Error"]
 
 
 class TestAddDeviceToLibreNMSViewUnknownVersion:
     def test_unknown_snmp_version_shows_error(self):
-        from netbox_librenms_plugin.views.sync.devices import AddDeviceToLibreNMSView
+        """A version string that is neither v1/v2c nor v3 is refused before reaching LibreNMS.
 
-        view = object.__new__(AddDeviceToLibreNMSView)
-        view.require_all_permissions = MagicMock(return_value=None)
+        ``snmp_version`` on the v3 form is a plain CharField whose ``initial`` does not constrain a
+        BOUND form, so a posted "v99" survives validation, reaches form_valid as the version, and
+        must hit the guard rather than be sent on.
+        """
+        dev = make_device("addsnmp-badversion")
+        req = _make_request(
+            post_data={
+                "object_type": "device",
+                "v3-snmp_version": "v99",
+                "v3-hostname": "router.example.com",
+                "v3-authlevel": "noAuthNoPriv",
+                "v3-authname": "user",
+            }
+        )
+        view = _add_device_view(req)
 
-        mock_device = MagicMock()
-        mock_device.get_absolute_url.return_value = "/device/1/"
-        mock_api = MagicMock()
+        with _poller_groups([]):
+            _post(view, req, object_id=dev.pk)
 
-        mock_form = MagicMock()
-        mock_form.is_valid.return_value = True
-        mock_form.cleaned_data = {
-            "hostname": "router.example.com",
-            "snmp_version": "v99",  # Unknown version
-            "force_add": False,
-            "port": None,
-            "transport": None,
-            "port_association_mode": None,
-            "poller_group": None,
-        }
+        assert message_texts(req, "error") == ["Unknown SNMP version."]
+        view._librenms_api.add_device.assert_not_called()
 
-        with (
-            patch("netbox_librenms_plugin.views.sync.devices.Device") as mock_device_cls,
-            patch("netbox_librenms_plugin.views.sync.devices.messages") as mock_msgs,
-            patch("netbox_librenms_plugin.views.sync.devices.redirect"),
-            patch("netbox_librenms_plugin.views.sync.devices.AddToLIbreSNMPV3", return_value=mock_form),
-            patch.object(type(view), "librenms_api", new_callable=lambda: property(lambda s: mock_api)),
-        ):
-            mock_device_cls.objects.get.return_value = mock_device
-            post_data = {"object_type": "device"}
-            view.request = _make_request(post_data=post_data)
-            view.object = mock_device
-            view.post(view.request, object_id=1)
+    def test_no_version_field_at_all_is_a_form_error(self):
+        """With no snmp_version posted, the v3 form's required field rejects the submission."""
+        dev = make_device("addsnmp-noversion")
+        req = _make_request(
+            post_data={
+                "object_type": "device",
+                "v3-hostname": "router.example.com",
+                "v3-authlevel": "noAuthNoPriv",
+                "v3-authname": "user",
+            }
+        )
+        view = _add_device_view(req)
 
-        mock_msgs.error.assert_called()
+        with _poller_groups([]):
+            _post(view, req, object_id=dev.pk)
+
+        assert any(t.startswith("snmp_version:") for t in message_texts(req, "error"))
+        view._librenms_api.add_device.assert_not_called()
 
 
 class TestAddDeviceToLibreNMSViewGetFormClass:
@@ -811,7 +968,10 @@ class TestAddDeviceToLibreNMSViewGetFormClass:
         view = object.__new__(AddDeviceToLibreNMSView)
         mock_vm = MagicMock()
 
-        with patch("netbox_librenms_plugin.views.sync.devices.get_object_or_404", return_value=mock_vm):
+        with patch(
+            "netbox_librenms_plugin.views.mixins.NetBoxObjectPermissionMixin.restrict_object_or_404",
+            return_value=mock_vm,
+        ):
             result = view.get_object(5, object_type="virtualmachine")
         assert result is mock_vm
 
@@ -833,7 +993,7 @@ class TestAddDeviceToLibreNMSViewGetFormClass:
         import pytest
 
         with patch(
-            "netbox_librenms_plugin.views.sync.devices.get_object_or_404",
+            "netbox_librenms_plugin.views.mixins.NetBoxObjectPermissionMixin.restrict_object_or_404",
             side_effect=Http404,
         ):
             with pytest.raises(Http404):
@@ -904,12 +1064,15 @@ class TestUpdateDeviceLocationView:
         mock_api.update_device_field.return_value = (True, "ok")
 
         with (
-            patch("netbox_librenms_plugin.views.sync.devices.get_object_or_404", return_value=mock_device),
+            patch(
+                "netbox_librenms_plugin.views.mixins.NetBoxObjectPermissionMixin.restrict_object_or_404",
+                return_value=mock_device,
+            ),
             patch("netbox_librenms_plugin.views.sync.devices.messages") as mock_msgs,
             patch("netbox_librenms_plugin.views.sync.devices._device_sync_redirect"),
         ):
             view.request = _make_request()
-            view.post(view.request, pk=1)
+            _post(view, view.request, pk=1)
 
         mock_api.update_device_field.assert_called_once()
         mock_msgs.success.assert_called_once()
@@ -923,12 +1086,15 @@ class TestUpdateDeviceLocationView:
         mock_api.update_device_field.return_value = (False, "Connection refused")
 
         with (
-            patch("netbox_librenms_plugin.views.sync.devices.get_object_or_404", return_value=mock_device),
+            patch(
+                "netbox_librenms_plugin.views.mixins.NetBoxObjectPermissionMixin.restrict_object_or_404",
+                return_value=mock_device,
+            ),
             patch("netbox_librenms_plugin.views.sync.devices.messages") as mock_msgs,
             patch("netbox_librenms_plugin.views.sync.devices._device_sync_redirect"),
         ):
             view.request = _make_request()
-            view.post(view.request, pk=1)
+            _post(view, view.request, pk=1)
 
         mock_msgs.error.assert_called_once()
 
@@ -939,12 +1105,15 @@ class TestUpdateDeviceLocationView:
         mock_device.site = None
 
         with (
-            patch("netbox_librenms_plugin.views.sync.devices.get_object_or_404", return_value=mock_device),
+            patch(
+                "netbox_librenms_plugin.views.mixins.NetBoxObjectPermissionMixin.restrict_object_or_404",
+                return_value=mock_device,
+            ),
             patch("netbox_librenms_plugin.views.sync.devices.messages") as mock_msgs,
             patch("netbox_librenms_plugin.views.sync.devices._device_sync_redirect"),
         ):
             view.request = _make_request()
-            view.post(view.request, pk=1)
+            _post(view, view.request, pk=1)
 
         mock_msgs.warning.assert_called_once()
 
@@ -977,7 +1146,10 @@ class TestSyncIPAddressesViewUnknownServerKey:
         mock_api = MagicMock(server_key="default")
 
         with (
-            patch("netbox_librenms_plugin.views.sync.ip_addresses.get_object_or_404", return_value=mock_device),
+            patch(
+                "netbox_librenms_plugin.views.mixins.NetBoxObjectPermissionMixin.restrict_object_or_404",
+                return_value=mock_device,
+            ),
             # Drive the REAL failure mode end to end: LibreNMSAPI raises KeyError for an
             # unknown key, and the real build_librenms_api must swallow it into None so
             # the view degrades gracefully. Mocking build_librenms_api=None directly would
@@ -1011,7 +1183,10 @@ class TestSyncIPAddressesViewCacheMiss:
         mock_api = MagicMock(server_key="default")
 
         with (
-            patch("netbox_librenms_plugin.views.sync.ip_addresses.get_object_or_404", return_value=mock_device),
+            patch(
+                "netbox_librenms_plugin.views.mixins.NetBoxObjectPermissionMixin.restrict_object_or_404",
+                return_value=mock_device,
+            ),
             patch("netbox_librenms_plugin.views.sync.ip_addresses.cache") as mock_cache,
             patch("netbox_librenms_plugin.views.sync.ip_addresses.messages") as mock_msgs,
             patch("netbox_librenms_plugin.views.sync.ip_addresses.redirect"),
@@ -1039,7 +1214,10 @@ class TestSyncIPAddressesViewNoSelection:
         mock_api = MagicMock(server_key="default")
 
         with (
-            patch("netbox_librenms_plugin.views.sync.ip_addresses.get_object_or_404", return_value=mock_device),
+            patch(
+                "netbox_librenms_plugin.views.mixins.NetBoxObjectPermissionMixin.restrict_object_or_404",
+                return_value=mock_device,
+            ),
             patch("netbox_librenms_plugin.views.sync.ip_addresses.cache") as mock_cache,
             patch("netbox_librenms_plugin.views.sync.ip_addresses.messages") as mock_msgs,
             patch("netbox_librenms_plugin.views.sync.ip_addresses.redirect"),
@@ -1071,7 +1249,6 @@ class TestSyncIPAddressesGetManagementIp:
         assert view._librenms_api.get_device_info.call_args.kwargs.get("use_cache") is False
 
 
-@pytest.mark.django_db
 class TestSyncIPAddressesViewIPWrites:
     """SyncIPAddressesView create/update/unchanged against real IPAddress rows."""
 
@@ -1160,12 +1337,56 @@ class TestSyncIPAddressesViewIPWrites:
 
 
 class TestSyncIPAddressesViewHelpers:
+    def test_device_sync_declares_interface_view_permission(self):
+        from dcim.models import Interface
+
+        view = make_view(_sync_ip_view_class(), _make_request())
+
+        assert ("view", Interface) in view._required_permissions("device")["POST"]
+
+    def test_vm_sync_declares_interface_view_permission(self):
+        from virtualization.models import VMInterface
+
+        view = make_view(_sync_ip_view_class(), _make_request())
+
+        assert ("view", VMInterface) in view._required_permissions("virtualmachine")["POST"]
+
+    def test_blank_vrf_selection_does_not_require_vrf_permission(self):
+        from ipam.models import VRF
+
+        req = _make_request(post_data={"vrf_10.0.0.1": ""})
+        view = make_view(_sync_ip_view_class(), req)
+
+        assert ("view", VRF) not in view._required_permissions("device")["POST"]
+
+    def test_nonblank_vrf_selection_requires_vrf_permission(self):
+        from ipam.models import VRF
+
+        req = _make_request(post_data={"vrf_10.0.0.1": "1"})
+        view = make_view(_sync_ip_view_class(), req)
+
+        assert ("view", VRF) in view._required_permissions("device")["POST"]
+
+    def test_required_permissions_are_stable_across_repeated_posts(self):
+        """Reusing a view instance must not accumulate duplicate owner or VRF permissions."""
+        req = _make_request(post_data={"vrf_10.0.0.1": "1"})
+        view = make_view(_sync_ip_view_class(), req)
+
+        first = view._required_permissions("device")
+        view.required_object_permissions = first
+        second = view._required_permissions("device")
+
+        assert second == first
+
     def test_get_object_device(self):
         from netbox_librenms_plugin.views.sync.ip_addresses import SyncIPAddressesView
 
         view = object.__new__(SyncIPAddressesView)
         mock_device = MagicMock()
-        with patch("netbox_librenms_plugin.views.sync.ip_addresses.get_object_or_404", return_value=mock_device):
+        with patch(
+            "netbox_librenms_plugin.views.mixins.NetBoxObjectPermissionMixin.restrict_object_or_404",
+            return_value=mock_device,
+        ):
             result = view.get_object("device", 1)
         assert result is mock_device
 
@@ -1174,7 +1395,10 @@ class TestSyncIPAddressesViewHelpers:
 
         view = object.__new__(SyncIPAddressesView)
         mock_vm = MagicMock()
-        with patch("netbox_librenms_plugin.views.sync.ip_addresses.get_object_or_404", return_value=mock_vm):
+        with patch(
+            "netbox_librenms_plugin.views.mixins.NetBoxObjectPermissionMixin.restrict_object_or_404",
+            return_value=mock_vm,
+        ):
             result = view.get_object("virtualmachine", 1)
         assert result is mock_vm
 
@@ -1198,31 +1422,68 @@ class TestSyncIPAddressesViewHelpers:
         assert result is None
 
     def test_get_vrf_selection_returns_vrf(self):
-        from netbox_librenms_plugin.views.sync.ip_addresses import SyncIPAddressesView
+        from ipam.models import VRF
 
-        view = object.__new__(SyncIPAddressesView)
-        mock_vrf = MagicMock()
-        req = _make_request(post_data={"vrf_10.0.0.1": "3"})
+        vrf = VRF.objects.create(name="Blue")
+        req = _make_request(post_data={"vrf_10.0.0.1": str(vrf.pk)})
+        view = make_view(_sync_ip_view_class(), req)
 
-        with patch("netbox_librenms_plugin.views.sync.ip_addresses.VRF") as mock_vrf_cls:
-            mock_vrf_cls.objects.get.return_value = mock_vrf
-            result = view.get_vrf_selection(req, "10.0.0.1")
-        assert result is mock_vrf
+        assert view.get_vrf_selection(req, "10.0.0.1") == vrf
 
-    def test_get_vrf_selection_not_found_returns_none(self):
-        from netbox_librenms_plugin.views.sync.ip_addresses import SyncIPAddressesView
+    def test_get_vrf_selection_fails_when_requested_vrf_is_missing(self):
+        from ipam.models import VRF
 
-        view = object.__new__(SyncIPAddressesView)
-        req = _make_request(post_data={"vrf_10.0.0.1": "99"})
+        absent_pk = missing_pk(VRF)
+        req = _make_request(post_data={"vrf_10.0.0.1": str(absent_pk)})
+        view = make_view(_sync_ip_view_class(), req)
 
-        class _DNE(Exception):
-            pass
+        with pytest.raises(ValueError, match="Selected VRF"):
+            view.get_vrf_selection(req, "10.0.0.1")
 
-        with patch("netbox_librenms_plugin.views.sync.ip_addresses.VRF") as mock_vrf_cls:
-            mock_vrf_cls.DoesNotExist = _DNE
-            mock_vrf_cls.objects.get.side_effect = _DNE()
-            result = view.get_vrf_selection(req, "10.0.0.1")
-        assert result is None
+    def test_get_vrf_selection_fails_when_id_is_invalid(self):
+        req = _make_request(post_data={"vrf_10.0.0.1": "not-an-id"})
+        view = make_view(_sync_ip_view_class(), req)
+
+        with pytest.raises(ValueError, match="Selected VRF"):
+            view.get_vrf_selection(req, "10.0.0.1")
+
+    def test_get_vrf_selection_fails_for_a_vrf_outside_the_grant(self):
+        """A constrained grant must not turn a requested VRF into global scope."""
+        from ipam.models import VRF
+
+        VRF.objects.create(name="Mine")
+        theirs = VRF.objects.create(name="Theirs")
+        user = make_user_with_perms("vrf-scoped", [("view", VRF)], constraints={"name": "Mine"})
+        req = _make_request(post_data={"vrf_10.0.0.1": str(theirs.pk)}, user=user)
+        view = make_view(_sync_ip_view_class(), req)
+
+        with pytest.raises(ValueError, match="Selected VRF"):
+            view.get_vrf_selection(req, "10.0.0.1")
+
+    def test_out_of_scope_vrf_fails_the_row_without_writing_a_global_ip(self):
+        """A restricted requested VRF must not silently create the address without a VRF."""
+        from ipam.models import IPAddress, VRF
+
+        from netbox_librenms_plugin.utils import set_librenms_device_id
+
+        mine = VRF.objects.create(name="VRF Mine")
+        theirs = VRF.objects.create(name="VRF Theirs")
+        user = make_user_with_perms("vrf-row-scoped", [("view", VRF)], constraints={"pk": mine.pk})
+        req = _make_request(post_data={"vrf_10.0.0.2": str(theirs.pk)}, user=user)
+        view = make_view(_sync_ip_view_class(), req)
+        view._post_server_key = "default"
+        device = make_device("vrf-row-device")
+        interface = make_interface(device, "eth0")
+        set_librenms_device_id(interface, 5, "default")
+        interface.save()
+        cached = [{"ip_address": "10.0.0.2", "ip_with_mask": "10.0.0.2/24", "port_id": 5}]
+
+        with patch("netbox_librenms_plugin.views.sync.ip_addresses.resolve_set_primary_ip", return_value=False):
+            results = view.process_ip_sync(req, ["10.0.0.2"], cached, device, "device")
+
+        assert results["failed"] == ["10.0.0.2"]
+        assert "Selected VRF" in results["errors"]["10.0.0.2"]
+        assert not IPAddress.objects.filter(address="10.0.0.2/24").exists()
 
     def test_get_ip_tab_url_device(self):
         from dcim.models import Device
@@ -1291,58 +1552,52 @@ class TestSyncIPAddressesViewHelpers:
         assert "server_key" not in url
 
 
+def _sync_ip_view_class():
+    from netbox_librenms_plugin.views.sync.ip_addresses import SyncIPAddressesView
+
+    return SyncIPAddressesView
+
+
 class TestSyncIPAddressesViewVMInterface:
     def test_vm_interface_resolved(self):
-        from netbox_librenms_plugin.views.sync.ip_addresses import SyncIPAddressesView
+        """A VM IP is bound to the VM's own interface, matched by name."""
+        from django.core.cache import cache
+        from ipam.models import IPAddress
+        from virtualization.models import VMInterface
 
-        view = object.__new__(SyncIPAddressesView)
-        view.require_all_permissions = MagicMock(return_value=None)
+        vm = make_vm("ipsync-vm")
+        vmiface = VMInterface.objects.create(virtual_machine=vm, name="eth0")
+        req = _make_request(post_data={"select": ["10.0.0.5"]})
+        view = make_view(_sync_ip_view_class(), req)
         view.rebind_api_for_server = MagicMock(return_value="default")
-        view.get_cache_key = MagicMock(return_value="k")
+        cache.set(
+            view.get_cache_key(vm, "ip_addresses", "default"),
+            {
+                "ip_addresses": [
+                    {
+                        "ip_address": "10.0.0.5",
+                        "ip_with_mask": "10.0.0.5/24",
+                        "port_id": 9,
+                        "interface_name": "eth0",
+                    }
+                ]
+            },
+        )
 
-        mock_vmiface = MagicMock()
-        mock_vmiface.name = "eth0"
-        mock_vm = MagicMock()
-        mock_vm.pk = 2
-        mock_vm.interfaces.all.return_value = [mock_vmiface]
-        mock_api = MagicMock(server_key="default")
+        with patch("netbox_librenms_plugin.views.sync.ip_addresses.get_librenms_device_id", return_value=9):
+            _post(view, req, object_type="virtualmachine", pk=vm.pk)
 
-        ip_data = {
-            "ip_address": "10.0.0.5",
-            "ip_with_mask": "10.0.0.5/24",
-            "port_id": 9,
-            "interface_name": "eth0",
-        }
-
-        with (
-            patch("netbox_librenms_plugin.views.sync.ip_addresses.get_object_or_404", return_value=mock_vm),
-            patch("netbox_librenms_plugin.views.sync.ip_addresses.cache") as mock_cache,
-            patch("netbox_librenms_plugin.views.sync.ip_addresses.messages"),
-            patch("netbox_librenms_plugin.views.sync.ip_addresses.redirect"),
-            patch("netbox_librenms_plugin.views.sync.ip_addresses.transaction"),
-            patch("netbox_librenms_plugin.views.sync.ip_addresses.reverse", return_value="/sync/"),
-            patch("netbox_librenms_plugin.views.sync.ip_addresses.IPAddress") as mock_ip_cls,
-            patch("netbox_librenms_plugin.views.sync.ip_addresses.get_librenms_device_id", return_value=9),
-            patch.object(type(view), "librenms_api", new_callable=lambda: property(lambda s: mock_api)),
-        ):
-            mock_cache.get.return_value = {"ip_addresses": [ip_data]}
-            mock_ip_cls.objects.filter.return_value.first.return_value = None
-
-            view.request = _make_request(post_data={"select": ["10.0.0.5"]})
-            view.post(view.request, object_type="virtualmachine", pk=2)
-
-        mock_ip_cls.objects.create.assert_called_once()
-        assert mock_ip_cls.objects.create.call_args.kwargs["assigned_object"] is mock_vmiface
+        ip = IPAddress.objects.get(address="10.0.0.5/24")
+        assert ip.assigned_object == vmiface
 
 
-@pytest.mark.django_db
 class TestSyncIPAddressesViewInterfaceResolution:
     """The sync re-resolves the target interface against current NetBox state rather than trusting the cached ``interface_url`` (which goes stale when an interface is synced after the IP rows were cached)."""
 
     def _view(self):
         from netbox_librenms_plugin.views.sync.ip_addresses import SyncIPAddressesView
 
-        return object.__new__(SyncIPAddressesView)
+        return make_view(SyncIPAddressesView)
 
     def test_match_interface_by_port_id(self):
         dev = make_device("ipres-byid")
@@ -1506,6 +1761,42 @@ class TestSyncIPAddressesViewInterfaceResolution:
         assert by_name["Ethernet1"].pk == i1.pk
         assert by_name["Ethernet2"].pk == i2.pk
 
+    def test_ip_sync_skips_vc_interface_outside_the_users_grant(self):
+        """A cached sibling port must not bypass a constrained Interface view grant."""
+        from dcim.models import Device, Interface
+        from ipam.models import IPAddress
+
+        from netbox_librenms_plugin.utils import set_librenms_device_id
+
+        _vc, members = self._make_vc("ipres-vc-scoped", [1, 2])
+        visible = make_interface(members[1], "Ethernet1")
+        hidden = make_interface(members[2], "Ethernet2")
+        set_librenms_device_id(hidden, 202, "default")
+        hidden.save()
+
+        user = make_user_with_perms(
+            "ipres-vc-scoped",
+            [("view", Device), ("add", IPAddress), ("change", IPAddress)],
+        )
+        user = grant(user, "view", Interface, constraints={"pk": visible.pk})
+        request = _make_request(post_data={"select": ["10.0.0.2"]}, user=user)
+        view = make_view(_sync_ip_view_class(), request)
+        view._post_server_key = "default"
+        cached = [
+            {
+                "ip_address": "10.0.0.2",
+                "ip_with_mask": "10.0.0.2/24",
+                "port_id": 202,
+                "interface_name": "Ethernet2",
+            }
+        ]
+
+        with patch("netbox_librenms_plugin.views.sync.ip_addresses.resolve_set_primary_ip", return_value=False):
+            results = view.process_ip_sync(request, ["10.0.0.2"], cached, members[1], "device")
+
+        assert results["skipped_no_interface"] == ["10.0.0.2"]
+        assert not IPAddress.objects.filter(address="10.0.0.2/24").exists()
+
     def test_primary_ip_set_from_sibling_vc_member_interface(self):
         """Because _build_interface_maps indexes every VC member, a synced IP can resolve to a SIBLING member's interface — and NetBox's Device.clean() explicitly ACCEPTS a primary IP on any same-VC member's non-mgmt-only interface (vc_interfaces(if_master=False)), so the sync must set it rather than warn 'sync interfaces first' forever."""
         from ipam.models import IPAddress
@@ -1585,7 +1876,90 @@ class TestSyncIPAddressesViewInterfaceResolution:
         m1.refresh_from_db()
         assert m1.primary_ip4_id is None
         assert results["primary_set"] == []
-        assert results["primary_no_interface"] == ["10.0.0.2"]
+        assert results["primary_interface_not_eligible"] == ["10.0.0.2"]
+
+        view.display_sync_results(request, results)
+        warnings = message_texts(request, "warning")
+        assert any("matched interface is not eligible" in text for text in warnings)
+        assert all("Sync interfaces first" not in text for text in warnings)
+
+    def test_primary_ip_row_locks_the_device_before_writing_the_address(self):
+        """The primary-IP row writes the address and then the device (primary_ip4), while the migrate move views lock Device then IPAddress — so this path must take the device row lock FIRST or the two orders close a deadlock cycle."""
+        from django.db import connection
+        from django.test.utils import CaptureQueriesContext
+
+        from netbox_librenms_plugin.utils import set_librenms_device_id
+
+        dev = make_device("ipres-lockorder")
+        iface = make_interface(dev, "eth0")
+        set_librenms_device_id(iface, 5, "default")
+        iface.save()
+
+        view = self._view()
+        view._post_server_key = "default"
+        view.get_management_ip = MagicMock(return_value="10.0.0.1")
+
+        ip_data = {
+            "ip_address": "10.0.0.1",
+            "ip_with_mask": "10.0.0.1/24",
+            "interface_url": None,
+            "port_id": 5,
+            "interface_name": "eth0",
+        }
+        request = _make_request(post_data={"select": ["10.0.0.1"]})
+        with (
+            patch(
+                "netbox_librenms_plugin.views.sync.ip_addresses.resolve_set_primary_ip",
+                return_value=True,
+            ),
+            CaptureQueriesContext(connection) as ctx,
+        ):
+            results = view.process_ip_sync(request, ["10.0.0.1"], [ip_data], dev, "device")
+
+        assert results["primary_set"] == ["10.0.0.1"]
+        sqls = [q["sql"] for q in ctx.captured_queries]
+        device_locks = [i for i, sql in enumerate(sqls) if 'FROM "dcim_device"' in sql and "FOR UPDATE" in sql]
+        address_writes = [i for i, sql in enumerate(sqls) if 'INSERT INTO "ipam_ipaddress"' in sql]
+        assert device_locks, "the primary-IP row must lock the device row (SELECT ... FOR UPDATE)"
+        assert address_writes, "the address must be written"
+        assert min(device_locks) < min(address_writes), "the device lock must precede the address write"
+
+    def test_primary_ip_row_fails_if_owner_disappears_before_lock(self):
+        """A concurrent owner deletion must not write an orphan address or recreate stale owner data."""
+        from ipam.models import IPAddress
+
+        from netbox_librenms_plugin.utils import set_librenms_device_id
+
+        dev = make_device("ipres-owner-gone")
+        iface = make_interface(dev, "eth0")
+        set_librenms_device_id(iface, 5, "default")
+        iface.save()
+
+        view = self._view()
+        view._post_server_key = "default"
+        view.get_management_ip = MagicMock(return_value="10.0.0.1")
+        ip_data = {
+            "ip_address": "10.0.0.1",
+            "ip_with_mask": "10.0.0.1/24",
+            "interface_url": None,
+            "port_id": 5,
+            "interface_name": "eth0",
+        }
+        request = _make_request(post_data={"select": ["10.0.0.1"]})
+
+        with (
+            patch(
+                "netbox_librenms_plugin.views.sync.ip_addresses.resolve_set_primary_ip",
+                return_value=True,
+            ),
+            patch.object(type(dev).objects, "select_for_update") as select_for_update,
+        ):
+            select_for_update.return_value.filter.return_value.first.return_value = None
+            results = view.process_ip_sync(request, ["10.0.0.1"], [ip_data], dev, "device")
+
+        assert results["failed"] == ["10.0.0.1"]
+        assert "no longer exists" in results["errors"]["10.0.0.1"]
+        assert not IPAddress.objects.filter(address="10.0.0.1/24").exists()
 
     def test_build_interface_maps_vc_shared_name_prefers_viewed_member(self):
         """A name shared across VC members resolves to the VIEWED member's own interface (matching the rendered table), not ambiguous."""
@@ -1652,7 +2026,10 @@ class TestSyncVLANsViewInvalidAction:
         mock_device = MagicMock(pk=1)
 
         with (
-            patch("netbox_librenms_plugin.views.sync.vlans.get_object_or_404", return_value=mock_device),
+            patch(
+                "netbox_librenms_plugin.views.mixins.NetBoxObjectPermissionMixin.restrict_object_or_404",
+                return_value=mock_device,
+            ),
             patch("netbox_librenms_plugin.views.sync.vlans.messages") as mock_msgs,
             patch("netbox_librenms_plugin.views.sync.vlans.redirect"),
             patch("netbox_librenms_plugin.views.sync.vlans.transaction"),
@@ -1678,7 +2055,10 @@ class TestSyncVLANsViewNoSelection:
         mock_device = MagicMock(pk=1)
 
         with (
-            patch("netbox_librenms_plugin.views.sync.vlans.get_object_or_404", return_value=mock_device),
+            patch(
+                "netbox_librenms_plugin.views.mixins.NetBoxObjectPermissionMixin.restrict_object_or_404",
+                return_value=mock_device,
+            ),
             patch("netbox_librenms_plugin.views.sync.vlans.cache") as mock_cache,
             patch("netbox_librenms_plugin.views.sync.vlans.messages") as mock_msgs,
             patch("netbox_librenms_plugin.views.sync.vlans.redirect"),
@@ -1706,7 +2086,10 @@ class TestSyncVLANsViewCacheMiss:
         mock_device = MagicMock(pk=1)
 
         with (
-            patch("netbox_librenms_plugin.views.sync.vlans.get_object_or_404", return_value=mock_device),
+            patch(
+                "netbox_librenms_plugin.views.mixins.NetBoxObjectPermissionMixin.restrict_object_or_404",
+                return_value=mock_device,
+            ),
             patch("netbox_librenms_plugin.views.sync.vlans.cache") as mock_cache,
             patch("netbox_librenms_plugin.views.sync.vlans.messages") as mock_msgs,
             patch("netbox_librenms_plugin.views.sync.vlans.redirect"),
@@ -1721,7 +2104,6 @@ class TestSyncVLANsViewCacheMiss:
         mock_msgs.error.assert_called_once()
 
 
-@pytest.mark.django_db
 class TestSyncVLANsViewCreateVLAN:
     """SyncVLANsView create path against a real VLAN row (only the cached LibreNMS data and the messages/redirect/reverse framework seams are mocked; the real get_or_create + transaction run and the created VLAN is reloaded from the DB)."""
 
@@ -1763,7 +2145,6 @@ class TestSyncVLANsViewCreateVLAN:
         mock_msgs.success.assert_called_once()
 
 
-@pytest.mark.django_db
 class TestSyncVLANsViewUpdateVLAN:
     def test_existing_vlan_name_updated(self):
         from ipam.models import VLAN
@@ -1792,7 +2173,6 @@ class TestSyncVLANsViewUpdateVLAN:
         assert VLAN.objects.get(vid=100, group=None).name == "Management"  # renamed in place
 
 
-@pytest.mark.django_db
 class TestSyncVLANsViewUnchangedVLAN:
     def test_unchanged_vlan_counts_as_skipped(self):
         from ipam.models import VLAN
@@ -1823,260 +2203,248 @@ class TestSyncVLANsViewUnchangedVLAN:
         assert VLAN.objects.filter(vid=100).count() == 1  # no duplicate created
 
 
+def _vlan_view(request, device, cached_vlans):
+    """The real SyncVLANsView with the LibreNMS VLAN snapshot seeded into the real cache."""
+    from django.core.cache import cache
+
+    from netbox_librenms_plugin.views.sync.vlans import SyncVLANsView
+
+    view = make_view(SyncVLANsView, request)
+    view._post_server_key = "default"
+    key = view.get_cache_key(device, "vlans", "default")
+    _seeded_cache_keys.add(key)
+    cache.set(key, cached_vlans)
+    return view
+
+
+def _vlan_group(name):
+    from ipam.models import VLANGroup
+
+    return VLANGroup.objects.create(name=name, slug=name.lower().replace(" ", "-"))
+
+
 class TestSyncVLANsViewWithGroup:
     def test_vlan_created_in_group(self):
-        from netbox_librenms_plugin.views.sync.vlans import SyncVLANsView
+        from ipam.models import VLAN
 
-        view = object.__new__(SyncVLANsView)
-        view.require_all_permissions = MagicMock(return_value=None)
-        view._post_server_key = "default"
-        view.get_cache_key = MagicMock(return_value="k")
-        mock_api = MagicMock(server_key="default")
+        dev = make_device("vlan-grp-create")
+        group = _vlan_group("Prod Group")
+        req = _make_request(post_data={"action": "create_vlans", "select": ["200"], "vlan_group_200": str(group.pk)})
+        view = _vlan_view(req, dev, [{"vlan_vlan": 200, "vlan_name": "Production"}])
 
-        mock_device = MagicMock(pk=1)
-        mock_vlan_group = MagicMock(pk=3)
-        mock_vlan = MagicMock()
+        _post(view, req, object_type="device", object_id=dev.pk)
 
-        librenms_vlans = [{"vlan_vlan": 200, "vlan_name": "Production"}]
-
-        with (
-            patch("netbox_librenms_plugin.views.sync.vlans.get_object_or_404", return_value=mock_device),
-            patch("netbox_librenms_plugin.views.sync.vlans.cache") as mock_cache,
-            patch("netbox_librenms_plugin.views.sync.vlans.messages"),
-            patch("netbox_librenms_plugin.views.sync.vlans.redirect"),
-            patch("netbox_librenms_plugin.views.sync.vlans.transaction"),
-            patch("netbox_librenms_plugin.views.sync.vlans.reverse", return_value="/sync/"),
-            patch("netbox_librenms_plugin.views.sync.vlans.VLAN") as mock_vlan_cls,
-            patch("netbox_librenms_plugin.views.sync.vlans.VLANGroup") as mock_group_cls,
-            patch.object(type(view), "librenms_api", new_callable=lambda: property(lambda s: mock_api)),
-        ):
-            mock_cache.get.return_value = librenms_vlans
-            mock_group_cls.objects.get.return_value = mock_vlan_group
-            mock_vlan_cls.objects.get_or_create.return_value = (mock_vlan, True)
-
-            view.request = _make_request(post_data={"action": "create_vlans", "select": ["200"], "vlan_group_200": "3"})
-            view.post(view.request, object_type="device", object_id=1)
-
-        mock_vlan_cls.objects.get_or_create.assert_called_once_with(
-            vid=200,
-            group=mock_vlan_group,
-            defaults={"name": "Production", "status": "active"},
-        )
+        vlan = VLAN.objects.get(vid=200, group=group)
+        assert vlan.name == "Production"
+        assert vlan.status == "active"
 
     def test_invalid_vlan_group_id_is_rejected(self):
         """A requested-but-missing VLAN group fails closed: no VLAN is created (not even a global one) and an error is surfaced."""
-        from netbox_librenms_plugin.views.sync.vlans import SyncVLANsView
+        from ipam.models import VLAN, VLANGroup
 
-        view = object.__new__(SyncVLANsView)
-        view.require_all_permissions = MagicMock(return_value=None)
-        view._post_server_key = "default"
-        view.get_cache_key = MagicMock(return_value="k")
-        mock_api = MagicMock(server_key="default")
+        dev = make_device("vlan-grp-missing")
+        absent_pk = missing_pk(VLANGroup)
+        req = _make_request(post_data={"action": "create_vlans", "select": ["200"], "vlan_group_200": str(absent_pk)})
+        view = _vlan_view(req, dev, [{"vlan_vlan": 200, "vlan_name": "Production"}])
 
-        mock_device = MagicMock(pk=1)
-        mock_vlan = MagicMock()
-
-        librenms_vlans = [{"vlan_vlan": 200, "vlan_name": "Production"}]
-
-        class _DNE(Exception):
-            pass
-
-        with (
-            patch("netbox_librenms_plugin.views.sync.vlans.get_object_or_404", return_value=mock_device),
-            patch("netbox_librenms_plugin.views.sync.vlans.cache") as mock_cache,
-            patch("netbox_librenms_plugin.views.sync.vlans.messages") as mock_messages,
-            patch("netbox_librenms_plugin.views.sync.vlans.redirect"),
-            patch("netbox_librenms_plugin.views.sync.vlans.transaction"),
-            patch("netbox_librenms_plugin.views.sync.vlans.reverse", return_value="/sync/"),
-            patch("netbox_librenms_plugin.views.sync.vlans.VLAN") as mock_vlan_cls,
-            patch("netbox_librenms_plugin.views.sync.vlans.VLANGroup") as mock_group_cls,
-            patch.object(type(view), "librenms_api", new_callable=lambda: property(lambda s: mock_api)),
-        ):
-            mock_cache.get.return_value = librenms_vlans
-            mock_group_cls.DoesNotExist = _DNE
-            mock_group_cls.objects.get.side_effect = _DNE()
-            mock_vlan_cls.objects.get_or_create.return_value = (mock_vlan, True)
-
-            view.request = _make_request(
-                post_data={"action": "create_vlans", "select": ["200"], "vlan_group_200": "99"}
-            )
-            view.post(view.request, object_type="device", object_id=1)
+        _post(view, req, object_type="device", object_id=dev.pk)
 
         # Fail closed: never create a VLAN in any scope, and surface an error.
-        mock_vlan_cls.objects.get_or_create.assert_not_called()
-        mock_messages.error.assert_called()
+        assert not VLAN.objects.filter(vid=200).exists()
+        assert any("no longer exists" in t for t in message_texts(req, "error"))
+
+    def test_a_vlan_group_outside_the_grant_is_rejected(self):
+        """The group id is posted by the client, so a constrained grant must not widen the scope."""
+        from dcim.models import Device
+        from ipam.models import VLAN, VLANGroup
+
+        dev = make_device("vlan-grp-scoped")
+        mine = _vlan_group("Scoped Mine")
+        theirs = _vlan_group("Scoped Theirs")
+        user = make_user_with_perms(
+            "vlan-scoped",
+            [("view", Device), ("add", VLAN), ("change", VLAN)],
+        )
+        user = grant(user, "view", VLANGroup, constraints={"name": mine.name})
+        req = _make_request(
+            post_data={"action": "create_vlans", "select": ["200"], "vlan_group_200": str(theirs.pk)},
+            user=user,
+        )
+        view = _vlan_view(req, dev, [{"vlan_vlan": 200, "vlan_name": "Production"}])
+
+        _post(view, req, object_type="device", object_id=dev.pk)
+
+        assert not VLAN.objects.filter(vid=200).exists()
+        assert any("no longer exists" in t for t in message_texts(req, "error"))
+
+    def test_existing_vlan_outside_change_grant_is_not_renamed(self):
+        """A matching hidden VLAN must not be changed through the unrestricted manager."""
+        from dcim.models import Device
+        from ipam.models import VLAN, VLANGroup
+
+        dev = make_device("vlan-hidden-existing")
+        visible = VLAN.objects.create(vid=300, name="Visible", status="active")
+        hidden = VLAN.objects.create(vid=301, name="Keep this name", status="active")
+        user = make_user_with_perms(
+            "vlan-hidden-existing",
+            [("view", Device), ("view", VLANGroup), ("add", VLAN)],
+        )
+        user = grant(user, "change", VLAN, constraints={"pk": visible.pk})
+        req = _make_request(
+            post_data={"action": "create_vlans", "select": ["301"]},
+            user=user,
+        )
+        view = _vlan_view(req, dev, [{"vlan_vlan": 301, "vlan_name": "Unauthorized rename"}])
+
+        _post(view, req, object_type="device", object_id=dev.pk)
+
+        hidden.refresh_from_db()
+        assert hidden.name == "Keep this name"
+        assert any("permission" in text.lower() for text in message_texts(req, "error"))
+
+    def test_duplicate_global_vid_is_skipped_without_aborting_the_batch(self):
+        """An ambiguous global VID must not pick one row or roll back later valid rows."""
+        from ipam.models import VLAN
+
+        dev = make_device("vlan-duplicate-global")
+        VLAN.objects.create(vid=300, name="First", status="active")
+        VLAN.objects.create(vid=300, name="Second", status="active")
+        req = _make_request(post_data={"action": "create_vlans", "select": ["300", "301"]})
+        view = _vlan_view(
+            req,
+            dev,
+            [
+                {"vlan_vlan": 300, "vlan_name": "Ambiguous rename"},
+                {"vlan_vlan": 301, "vlan_name": "Unambiguous"},
+            ],
+        )
+
+        _post(view, req, object_type="device", object_id=dev.pk)
+
+        assert set(VLAN.objects.filter(vid=300).values_list("name", flat=True)) == {"First", "Second"}
+        assert VLAN.objects.filter(vid=301, name="Unambiguous").exists()
+        assert any("several VLANs" in text for text in message_texts(req, "error"))
+        assert any("1 skipped (VLAN match ambiguous)" in text for text in message_texts(req, "success"))
+
+    def test_duplicate_global_vid_is_ambiguous_before_change_scope_is_applied(self):
+        """A constrained grant must not make an ambiguous VID look unique."""
+        from dcim.models import Device
+        from ipam.models import VLAN, VLANGroup
+
+        dev = make_device("vlan-duplicate-scoped")
+        permitted = VLAN.objects.create(vid=302, name="Permitted", status="active")
+        hidden = VLAN.objects.create(vid=302, name="Hidden", status="active")
+        user = make_user_with_perms(
+            "vlan-duplicate-scoped",
+            [("view", Device), ("view", VLANGroup), ("add", VLAN)],
+        )
+        user = grant(user, "change", VLAN, constraints={"pk": permitted.pk})
+        req = _make_request(post_data={"action": "create_vlans", "select": ["302"]}, user=user)
+        view = _vlan_view(req, dev, [{"vlan_vlan": 302, "vlan_name": "Ambiguous rename"}])
+
+        _post(view, req, object_type="device", object_id=dev.pk)
+
+        permitted.refresh_from_db()
+        hidden.refresh_from_db()
+        assert permitted.name == "Permitted"
+        assert hidden.name == "Hidden"
+        assert any("several VLANs" in text for text in message_texts(req, "error"))
 
     def test_invalid_vid_string_skipped(self):
-        from netbox_librenms_plugin.views.sync.vlans import SyncVLANsView
+        """A non-numeric selection is skipped, and the rest of the batch still syncs.
 
-        view = object.__new__(SyncVLANsView)
-        view.require_all_permissions = MagicMock(return_value=None)
-        view._post_server_key = "default"
-        view.get_cache_key = MagicMock(return_value="k")
-        mock_api = MagicMock(server_key="default")
+        The batch carries a valid VID after the bad one so a `break` in place of the
+        `continue` would be caught — a single-item batch cannot tell them apart.
+        """
+        from ipam.models import VLAN
 
-        mock_device = MagicMock(pk=1)
-        librenms_vlans = [{"vlan_vlan": 100, "vlan_name": "Mgmt"}]
+        dev = make_device("vlan-badvid")
+        req = _make_request(post_data={"action": "create_vlans", "select": ["not-a-vid", "100"]})
+        view = _vlan_view(req, dev, [{"vlan_vlan": 100, "vlan_name": "Mgmt"}])
 
-        with (
-            patch("netbox_librenms_plugin.views.sync.vlans.get_object_or_404", return_value=mock_device),
-            patch("netbox_librenms_plugin.views.sync.vlans.cache") as mock_cache,
-            patch("netbox_librenms_plugin.views.sync.vlans.messages"),
-            patch("netbox_librenms_plugin.views.sync.vlans.redirect"),
-            patch("netbox_librenms_plugin.views.sync.vlans.transaction"),
-            patch("netbox_librenms_plugin.views.sync.vlans.reverse", return_value="/sync/"),
-            patch("netbox_librenms_plugin.views.sync.vlans.VLAN") as mock_vlan_cls,
-            patch.object(type(view), "librenms_api", new_callable=lambda: property(lambda s: mock_api)),
-        ):
-            mock_cache.get.return_value = librenms_vlans
-            # "not-a-vid" → int() fails → skip
-            view.request = _make_request(post_data={"action": "create_vlans", "select": ["not-a-vid"]})
-            view.post(view.request, object_type="device", object_id=1)
+        _post(view, req, object_type="device", object_id=dev.pk)
 
-        # no VLAN created, shows "no VLANs" warning
-        mock_vlan_cls.objects.get_or_create.assert_not_called()
+        assert VLAN.objects.filter(vid=100, name="Mgmt").exists()
+        assert VLAN.objects.count() == 1
 
     def test_unknown_vid_in_cache_skipped(self):
-        from netbox_librenms_plugin.views.sync.vlans import SyncVLANsView
+        """A VID absent from the cached snapshot is skipped, and the rest of the batch syncs."""
+        from ipam.models import VLAN
 
-        view = object.__new__(SyncVLANsView)
-        view.require_all_permissions = MagicMock(return_value=None)
-        view._post_server_key = "default"
-        view.get_cache_key = MagicMock(return_value="k")
-        mock_api = MagicMock(server_key="default")
+        dev = make_device("vlan-unknownvid")
+        req = _make_request(post_data={"action": "create_vlans", "select": ["999", "100"]})
+        view = _vlan_view(req, dev, [{"vlan_vlan": 100, "vlan_name": "Mgmt"}])
 
-        mock_device = MagicMock(pk=1)
-        librenms_vlans = [{"vlan_vlan": 100, "vlan_name": "Mgmt"}]
+        _post(view, req, object_type="device", object_id=dev.pk)
 
-        with (
-            patch("netbox_librenms_plugin.views.sync.vlans.get_object_or_404", return_value=mock_device),
-            patch("netbox_librenms_plugin.views.sync.vlans.cache") as mock_cache,
-            patch("netbox_librenms_plugin.views.sync.vlans.messages"),
-            patch("netbox_librenms_plugin.views.sync.vlans.redirect"),
-            patch("netbox_librenms_plugin.views.sync.vlans.transaction"),
-            patch("netbox_librenms_plugin.views.sync.vlans.reverse", return_value="/sync/"),
-            patch("netbox_librenms_plugin.views.sync.vlans.VLAN") as mock_vlan_cls,
-            patch.object(type(view), "librenms_api", new_callable=lambda: property(lambda s: mock_api)),
-        ):
-            mock_cache.get.return_value = librenms_vlans
-            # VID 999 not in cached vlans → skipped
-            view.request = _make_request(post_data={"action": "create_vlans", "select": ["999"]})
-            view.post(view.request, object_type="device", object_id=1)
+        assert not VLAN.objects.filter(vid=999).exists()
+        assert VLAN.objects.filter(vid=100, name="Mgmt").exists()
 
-        mock_vlan_cls.objects.get_or_create.assert_not_called()
+    def test_invalid_vlan_name_does_not_abort_the_batch(self):
+        """An invalid LibreNMS name is skipped while the next valid VLAN is created."""
+        from ipam.models import VLAN
 
-    def test_no_vlans_shows_warning(self):
-        from netbox_librenms_plugin.views.sync.vlans import SyncVLANsView
+        dev = make_device("vlan-invalid-name")
+        max_length = VLAN._meta.get_field("name").max_length
+        invalid_name = "x" * (max_length + 1)
+        req = _make_request(post_data={"action": "create_vlans", "select": ["400", "401"]})
+        view = _vlan_view(
+            req,
+            dev,
+            [
+                {"vlan_vlan": 400, "vlan_name": invalid_name},
+                {"vlan_vlan": 401, "vlan_name": "Valid name"},
+            ],
+        )
 
-        view = object.__new__(SyncVLANsView)
-        view.require_all_permissions = MagicMock(return_value=None)
-        view._post_server_key = "default"
-        view.get_cache_key = MagicMock(return_value="k")
-        mock_api = MagicMock(server_key="default")
+        _post(view, req, object_type="device", object_id=dev.pk)
 
-        mock_device = MagicMock(pk=1)
-        librenms_vlans = [{"vlan_vlan": 100, "vlan_name": "Mgmt"}]
-
-        with (
-            patch("netbox_librenms_plugin.views.sync.vlans.get_object_or_404", return_value=mock_device),
-            patch("netbox_librenms_plugin.views.sync.vlans.cache") as mock_cache,
-            patch("netbox_librenms_plugin.views.sync.vlans.messages") as mock_msgs,
-            patch("netbox_librenms_plugin.views.sync.vlans.redirect"),
-            patch("netbox_librenms_plugin.views.sync.vlans.transaction"),
-            patch("netbox_librenms_plugin.views.sync.vlans.reverse", return_value="/sync/"),
-            patch("netbox_librenms_plugin.views.sync.vlans.VLAN"),
-            patch.object(type(view), "librenms_api", new_callable=lambda: property(lambda s: mock_api)),
-        ):
-            mock_cache.get.return_value = librenms_vlans
-            view.request = _make_request(post_data={"action": "create_vlans", "select": ["not-a-vid"]})
-            view.post(view.request, object_type="device", object_id=1)
-
-        mock_msgs.warning.assert_called()
+        assert not VLAN.objects.filter(vid=400).exists()
+        assert VLAN.objects.filter(vid=401, name="Valid name").exists()
+        assert any("name is invalid" in text for text in message_texts(req, "error"))
+        assert any("1 skipped (invalid VLAN name)" in text for text in message_texts(req, "success"))
 
 
 class TestSyncVLANsViewGroupedUpdateSkip:
     """Lines 134-139: grouped VLAN update (elif) and unchanged (else) paths."""
 
     def test_grouped_vlan_name_updated(self):
-        from netbox_librenms_plugin.views.sync.vlans import SyncVLANsView
+        from ipam.models import VLAN
 
-        view = object.__new__(SyncVLANsView)
-        view.require_all_permissions = MagicMock(return_value=None)
-        view._post_server_key = "default"
-        view.get_cache_key = MagicMock(return_value="k")
-        mock_api = MagicMock(server_key="default")
+        dev = make_device("vlan-grp-update")
+        group = _vlan_group("Update Group")
+        vlan = VLAN.objects.create(vid=300, group=group, name="OldGroupedName", status="active")
+        req = _make_request(post_data={"action": "create_vlans", "select": ["300"], "vlan_group_300": str(group.pk)})
+        view = _vlan_view(req, dev, [{"vlan_vlan": 300, "vlan_name": "NewGroupedName"}])
 
-        mock_device = MagicMock(pk=1)
-        mock_vlan_group = MagicMock(pk=3)
-        mock_vlan = MagicMock()
-        mock_vlan.name = "OldGroupedName"  # Different from librenms → update path
+        _post(view, req, object_type="device", object_id=dev.pk)
 
-        librenms_vlans = [{"vlan_vlan": 300, "vlan_name": "NewGroupedName"}]
-
-        with (
-            patch("netbox_librenms_plugin.views.sync.vlans.get_object_or_404", return_value=mock_device),
-            patch("netbox_librenms_plugin.views.sync.vlans.cache") as mock_cache,
-            patch("netbox_librenms_plugin.views.sync.vlans.messages"),
-            patch("netbox_librenms_plugin.views.sync.vlans.redirect"),
-            patch("netbox_librenms_plugin.views.sync.vlans.transaction"),
-            patch("netbox_librenms_plugin.views.sync.vlans.reverse", return_value="/sync/"),
-            patch("netbox_librenms_plugin.views.sync.vlans.VLAN") as mock_vlan_cls,
-            patch("netbox_librenms_plugin.views.sync.vlans.VLANGroup") as mock_group_cls,
-            patch.object(type(view), "librenms_api", new_callable=lambda: property(lambda s: mock_api)),
-        ):
-            mock_cache.get.return_value = librenms_vlans
-            mock_group_cls.objects.get.return_value = mock_vlan_group
-            mock_vlan_cls.objects.get_or_create.return_value = (mock_vlan, False)  # exists
-
-            view.request = _make_request(post_data={"action": "create_vlans", "select": ["300"], "vlan_group_300": "3"})
-            view.post(view.request, object_type="device", object_id=1)
-
-        mock_vlan.save.assert_called_once()
+        assert VLAN.objects.get(pk=vlan.pk).name == "NewGroupedName"
 
     def test_grouped_vlan_unchanged_skipped(self):
-        from netbox_librenms_plugin.views.sync.vlans import SyncVLANsView
+        from ipam.models import VLAN
 
-        view = object.__new__(SyncVLANsView)
-        view.require_all_permissions = MagicMock(return_value=None)
-        view._post_server_key = "default"
-        view.get_cache_key = MagicMock(return_value="k")
-        mock_api = MagicMock(server_key="default")
+        dev = make_device("vlan-grp-same")
+        group = _vlan_group("Same Group")
+        vlan = VLAN.objects.create(vid=300, group=group, name="SameName", status="active")
+        last_updated = VLAN.objects.get(pk=vlan.pk).last_updated
+        req = _make_request(post_data={"action": "create_vlans", "select": ["300"], "vlan_group_300": str(group.pk)})
+        view = _vlan_view(req, dev, [{"vlan_vlan": 300, "vlan_name": "SameName"}])
 
-        mock_device = MagicMock(pk=1)
-        mock_vlan_group = MagicMock(pk=3)
-        mock_vlan = MagicMock()
-        mock_vlan.name = "SameName"  # Same name → skipped_count path
+        _post(view, req, object_type="device", object_id=dev.pk)
 
-        librenms_vlans = [{"vlan_vlan": 300, "vlan_name": "SameName"}]
-
-        with (
-            patch("netbox_librenms_plugin.views.sync.vlans.get_object_or_404", return_value=mock_device),
-            patch("netbox_librenms_plugin.views.sync.vlans.cache") as mock_cache,
-            patch("netbox_librenms_plugin.views.sync.vlans.messages") as mock_msgs,
-            patch("netbox_librenms_plugin.views.sync.vlans.redirect"),
-            patch("netbox_librenms_plugin.views.sync.vlans.transaction"),
-            patch("netbox_librenms_plugin.views.sync.vlans.reverse", return_value="/sync/"),
-            patch("netbox_librenms_plugin.views.sync.vlans.VLAN") as mock_vlan_cls,
-            patch("netbox_librenms_plugin.views.sync.vlans.VLANGroup") as mock_group_cls,
-            patch.object(type(view), "librenms_api", new_callable=lambda: property(lambda s: mock_api)),
-        ):
-            mock_cache.get.return_value = librenms_vlans
-            mock_group_cls.objects.get.return_value = mock_vlan_group
-            mock_vlan_cls.objects.get_or_create.return_value = (mock_vlan, False)
-
-            view.request = _make_request(post_data={"action": "create_vlans", "select": ["300"], "vlan_group_300": "3"})
-            view.post(view.request, object_type="device", object_id=1)
-
-        mock_vlan.save.assert_not_called()
-        mock_msgs.success.assert_called()
-        assert "unchanged" in str(mock_msgs.success.call_args_list)
+        assert VLAN.objects.get(pk=vlan.pk).last_updated == last_updated
+        assert any("unchanged" in t for t in message_texts(req, "success"))
 
     def test_get_object_device(self):
         from netbox_librenms_plugin.views.sync.vlans import SyncVLANsView
 
         view = object.__new__(SyncVLANsView)
         mock_device = MagicMock()
-        with patch("netbox_librenms_plugin.views.sync.vlans.get_object_or_404", return_value=mock_device):
+        with patch(
+            "netbox_librenms_plugin.views.mixins.NetBoxObjectPermissionMixin.restrict_object_or_404",
+            return_value=mock_device,
+        ):
             result = view.get_object("device", 1)
         assert result is mock_device
 
@@ -2114,401 +2482,263 @@ class TestSyncVLANsViewGroupedUpdateSkip:
 # ===========================================================================
 
 
+def _make_site(name, *, latitude=None, longitude=None):
+    """A real Site, optionally with coordinates.
+
+    Re-read from the DB so the coordinate fields come back as the Decimals the view actually
+    formats in production, not the Python floats that were passed in.
+    """
+    from dcim.models import Site
+    from django.utils.text import slugify
+
+    site = Site.objects.create(name=name, slug=slugify(name), latitude=latitude, longitude=longitude)
+    return Site.objects.get(pk=site.pk)
+
+
+def _location_view(request=None, *, locations=None, add_result=None, update_result=None):
+    """The real SyncSiteLocationView with only the LibreNMS location calls stubbed."""
+    from netbox_librenms_plugin.views.sync.locations import SyncSiteLocationView
+
+    view = make_view(SyncSiteLocationView, request)
+    view._librenms_api.get_locations.return_value = (True, locations if locations is not None else [])
+    view._librenms_api.add_location.return_value = add_result or (True, "ok")
+    view._librenms_api.update_location.return_value = update_result or (True, "ok")
+    return view
+
+
 class TestSyncSiteLocationViewPost:
     def test_permission_denied_returns_early(self):
-        from netbox_librenms_plugin.views.sync.locations import SyncSiteLocationView
+        """Without the plugin write permission the LibreNMS API is never called."""
+        site = _make_site("Perm Site", latitude=51.5, longitude=-0.12)
+        user = make_user_with_perms("loc-noplugin", [], plugin_write=False)
+        req = _make_request(post_data={"action": "create", "pk": str(site.pk)}, user=user)
+        view = _location_view(req)
 
-        view = object.__new__(SyncSiteLocationView)
-        view.require_write_permission = MagicMock(return_value=_denied_response())
-        view.request = _make_request(post_data={"action": "create", "pk": "1"})
+        _post(view, req)
 
-        result = view.post(view.request)
-        assert result.status_code == 403
+        view._librenms_api.add_location.assert_not_called()
+
+    def test_site_view_permission_is_required_before_post_processing(self):
+        """Plugin write permission alone must not authorize reading the posted Site."""
+        site = _make_site("No Site Read", latitude=1.0, longitude=1.0)
+        user = make_user_with_perms("loc-no-site-read", [])
+        req = _make_request(post_data={"action": "create", "pk": str(site.pk)}, user=user)
+        view = _location_view(req)
+
+        response = _post(view, req)
+
+        assert response.status_code == 302
+        assert any("dcim.view_site" in text for text in message_texts(req, "error"))
+        view._librenms_api.add_location.assert_not_called()
 
     def test_missing_pk_shows_error(self):
-        from netbox_librenms_plugin.views.sync.locations import SyncSiteLocationView
+        req = _make_request(post_data={"action": "create"})
+        view = _location_view(req)
 
-        view = object.__new__(SyncSiteLocationView)
-        view.require_write_permission = MagicMock(return_value=None)
-        mock_api = MagicMock()
+        _post(view, req)
 
-        with (
-            patch("netbox_librenms_plugin.views.sync.locations.messages") as mock_msgs,
-            patch("netbox_librenms_plugin.views.sync.locations.redirect"),
-            patch.object(type(view), "librenms_api", new_callable=lambda: property(lambda s: mock_api)),
-        ):
-            view.request = _make_request(post_data={"action": "create"})
-            view.post(view.request)
-
-        mock_msgs.error.assert_called_once()
+        assert message_texts(req, "error") == ["No site ID provided."]
 
     def test_site_not_found_shows_error(self):
-        from django.core.exceptions import ObjectDoesNotExist
-        from netbox_librenms_plugin.views.sync.locations import SyncSiteLocationView
+        from dcim.models import Site
 
-        view = object.__new__(SyncSiteLocationView)
-        view.require_write_permission = MagicMock(return_value=None)
-        mock_api = MagicMock()
+        absent_pk = missing_pk(Site)
+        req = _make_request(post_data={"action": "create", "pk": str(absent_pk)})
+        view = _location_view(req)
 
-        with (
-            patch("netbox_librenms_plugin.views.sync.locations.messages") as mock_msgs,
-            patch("netbox_librenms_plugin.views.sync.locations.redirect"),
-            patch("netbox_librenms_plugin.views.sync.locations.Site") as mock_site_cls,
-            patch.object(type(view), "librenms_api", new_callable=lambda: property(lambda s: mock_api)),
-        ):
-            mock_site_cls.objects.get.side_effect = ObjectDoesNotExist()
-            view.request = _make_request(post_data={"action": "create", "pk": "99"})
-            view.post(view.request)
+        _post(view, req)
 
-        mock_msgs.error.assert_called_once()
+        assert message_texts(req, "error") == ["Site not found."]
+
+    def test_site_outside_the_grant_is_reported_as_not_found(self):
+        """The pk is posted by the client, so an out-of-scope site must not reach LibreNMS."""
+        from dcim.models import Site
+
+        _make_site("Loc Mine", latitude=1.0, longitude=1.0)
+        theirs = _make_site("Loc Theirs", latitude=2.0, longitude=2.0)
+        user = make_user_with_perms("loc-scoped", [("view", Site)], constraints={"name": "Loc Mine"})
+        req = _make_request(post_data={"action": "create", "pk": str(theirs.pk)}, user=user)
+        view = _location_view(req)
+
+        _post(view, req)
+
+        assert message_texts(req, "error") == ["Site not found."]
+        view._librenms_api.add_location.assert_not_called()
 
     def test_unknown_action_shows_error(self):
-        from netbox_librenms_plugin.views.sync.locations import SyncSiteLocationView
+        site = _make_site("Action Site")
+        req = _make_request(post_data={"action": "banana", "pk": str(site.pk)})
+        view = _location_view(req)
 
-        view = object.__new__(SyncSiteLocationView)
-        view.require_write_permission = MagicMock(return_value=None)
-        mock_api = MagicMock()
-        mock_site = MagicMock()
+        _post(view, req)
 
-        with (
-            patch("netbox_librenms_plugin.views.sync.locations.messages") as mock_msgs,
-            patch("netbox_librenms_plugin.views.sync.locations.redirect"),
-            patch("netbox_librenms_plugin.views.sync.locations.Site") as mock_site_cls,
-            patch.object(type(view), "librenms_api", new_callable=lambda: property(lambda s: mock_api)),
-        ):
-            mock_site_cls.objects.get.return_value = mock_site
-            view.request = _make_request(post_data={"action": "banana", "pk": "1"})
-            view.post(view.request)
-
-        mock_msgs.error.assert_called_once()
+        assert message_texts(req, "error") == ["Unknown action 'banana'."]
 
 
 class TestSyncSiteLocationViewCreate:
     def test_create_without_coords_shows_warning(self):
-        from netbox_librenms_plugin.views.sync.locations import SyncSiteLocationView
+        site = _make_site("London")
+        req = _make_request(post_data={"action": "create", "pk": str(site.pk)})
+        view = _location_view(req)
 
-        view = object.__new__(SyncSiteLocationView)
-        view.require_write_permission = MagicMock(return_value=None)
-        mock_api = MagicMock()
-        mock_site = MagicMock()
-        mock_site.name = "London"
-        mock_site.latitude = None
-        mock_site.longitude = None
+        _post(view, req)
 
-        with (
-            patch("netbox_librenms_plugin.views.sync.locations.messages") as mock_msgs,
-            patch("netbox_librenms_plugin.views.sync.locations.redirect"),
-            patch("netbox_librenms_plugin.views.sync.locations.Site") as mock_site_cls,
-            patch.object(type(view), "librenms_api", new_callable=lambda: property(lambda s: mock_api)),
-        ):
-            mock_site_cls.objects.get.return_value = mock_site
-            view.request = _make_request(post_data={"action": "create", "pk": "1"})
-            view.post(view.request)
-
-        mock_msgs.warning.assert_called_once()
+        assert any("Latitude and/or longitude is missing" in t for t in message_texts(req, "warning"))
+        view._librenms_api.add_location.assert_not_called()
 
     def test_create_success(self):
-        from netbox_librenms_plugin.views.sync.locations import SyncSiteLocationView
+        site = _make_site("London", latitude=51.5, longitude=-0.12)
+        req = _make_request(post_data={"action": "create", "pk": str(site.pk)})
+        view = _location_view(req, add_result=(True, "ok"))
 
-        view = object.__new__(SyncSiteLocationView)
-        view.require_write_permission = MagicMock(return_value=None)
-        mock_api = MagicMock()
-        mock_api.add_location.return_value = (True, "ok")
-        mock_site = MagicMock()
-        mock_site.name = "London"
-        mock_site.latitude = 51.5
-        mock_site.longitude = -0.12
+        _post(view, req)
 
-        with (
-            patch("netbox_librenms_plugin.views.sync.locations.messages") as mock_msgs,
-            patch("netbox_librenms_plugin.views.sync.locations.redirect"),
-            patch("netbox_librenms_plugin.views.sync.locations.Site") as mock_site_cls,
-            patch.object(type(view), "librenms_api", new_callable=lambda: property(lambda s: mock_api)),
-        ):
-            mock_site_cls.objects.get.return_value = mock_site
-            view.request = _make_request(post_data={"action": "create", "pk": "1"})
-            view.post(view.request)
-
-        mock_msgs.success.assert_called_once()
+        assert message_texts(req, "success") == ["Location 'London' created in LibreNMS successfully."]
+        # The site's real coordinates are what gets sent, stringified.
+        view._librenms_api.add_location.assert_called_once_with(
+            {"lat": "51.500000", "lng": "-0.120000", "location": "London"}
+        )
 
     def test_create_failure(self):
-        from netbox_librenms_plugin.views.sync.locations import SyncSiteLocationView
+        site = _make_site("London", latitude=51.5, longitude=-0.12)
+        req = _make_request(post_data={"action": "create", "pk": str(site.pk)})
+        view = _location_view(req, add_result=(False, "Server error"))
 
-        view = object.__new__(SyncSiteLocationView)
-        view.require_write_permission = MagicMock(return_value=None)
-        mock_api = MagicMock()
-        mock_api.add_location.return_value = (False, "Server error")
-        mock_site = MagicMock()
-        mock_site.name = "London"
-        mock_site.latitude = 51.5
-        mock_site.longitude = -0.12
+        _post(view, req)
 
-        with (
-            patch("netbox_librenms_plugin.views.sync.locations.messages") as mock_msgs,
-            patch("netbox_librenms_plugin.views.sync.locations.redirect"),
-            patch("netbox_librenms_plugin.views.sync.locations.Site") as mock_site_cls,
-            patch.object(type(view), "librenms_api", new_callable=lambda: property(lambda s: mock_api)),
-        ):
-            mock_site_cls.objects.get.return_value = mock_site
-            view.request = _make_request(post_data={"action": "create", "pk": "1"})
-            view.post(view.request)
-
-        mock_msgs.error.assert_called_once()
+        assert any("Server error" in t for t in message_texts(req, "error"))
 
 
 class TestSyncSiteLocationViewUpdate:
     def test_update_without_coords_shows_warning(self):
-        from netbox_librenms_plugin.views.sync.locations import SyncSiteLocationView
+        site = _make_site("Berlin", longitude=13.4)
+        req = _make_request(post_data={"action": "update", "pk": str(site.pk)})
+        view = _location_view(req)
 
-        view = object.__new__(SyncSiteLocationView)
-        view.require_write_permission = MagicMock(return_value=None)
-        mock_api = MagicMock()
-        mock_site = MagicMock()
-        mock_site.name = "Berlin"
-        mock_site.latitude = None
-        mock_site.longitude = 13.4
+        _post(view, req)
 
-        with (
-            patch("netbox_librenms_plugin.views.sync.locations.messages") as mock_msgs,
-            patch("netbox_librenms_plugin.views.sync.locations.redirect"),
-            patch("netbox_librenms_plugin.views.sync.locations.Site") as mock_site_cls,
-            patch.object(type(view), "librenms_api", new_callable=lambda: property(lambda s: mock_api)),
-        ):
-            mock_site_cls.objects.get.return_value = mock_site
-            view.request = _make_request(post_data={"action": "update", "pk": "1"})
-            view.post(view.request)
-
-        mock_msgs.warning.assert_called_once()
+        assert any("Latitude and/or longitude is missing" in t for t in message_texts(req, "warning"))
 
     def test_update_api_failure_fetching_locations(self):
-        from netbox_librenms_plugin.views.sync.locations import SyncSiteLocationView
+        site = _make_site("Berlin", latitude=52.5, longitude=13.4)
+        req = _make_request(post_data={"action": "update", "pk": str(site.pk)})
+        view = _location_view(req)
+        view._librenms_api.get_locations.return_value = (False, "Connection error")
 
-        view = object.__new__(SyncSiteLocationView)
-        view.require_write_permission = MagicMock(return_value=None)
-        mock_api = MagicMock()
-        mock_api.get_locations.return_value = (False, "Connection error")
-        mock_site = MagicMock()
-        mock_site.name = "Berlin"
-        mock_site.latitude = 52.5
-        mock_site.longitude = 13.4
+        _post(view, req)
 
-        with (
-            patch("netbox_librenms_plugin.views.sync.locations.messages") as mock_msgs,
-            patch("netbox_librenms_plugin.views.sync.locations.redirect"),
-            patch("netbox_librenms_plugin.views.sync.locations.Site") as mock_site_cls,
-            patch.object(type(view), "librenms_api", new_callable=lambda: property(lambda s: mock_api)),
-        ):
-            mock_site_cls.objects.get.return_value = mock_site
-            view.request = _make_request(post_data={"action": "update", "pk": "1"})
-            view.post(view.request)
-
-        mock_msgs.error.assert_called_once()
+        assert message_texts(req, "error") == ["Failed to retrieve LibreNMS locations."]
 
     def test_update_no_matching_location(self):
-        from netbox_librenms_plugin.views.sync.locations import SyncSiteLocationView
+        site = _make_site("Berlin", latitude=52.5, longitude=13.4)
+        req = _make_request(post_data={"action": "update", "pk": str(site.pk)})
+        view = _location_view(req, locations=[{"location": "Paris"}])
 
-        view = object.__new__(SyncSiteLocationView)
-        view.require_write_permission = MagicMock(return_value=None)
-        mock_api = MagicMock()
-        mock_api.get_locations.return_value = (True, [{"location": "Paris"}])  # No Berlin
-        mock_site = MagicMock()
-        mock_site.name = "Berlin"
-        mock_site.slug = "berlin"
-        mock_site.latitude = 52.5
-        mock_site.longitude = 13.4
+        _post(view, req)
 
-        with (
-            patch("netbox_librenms_plugin.views.sync.locations.messages") as mock_msgs,
-            patch("netbox_librenms_plugin.views.sync.locations.redirect"),
-            patch("netbox_librenms_plugin.views.sync.locations.Site") as mock_site_cls,
-            patch.object(type(view), "librenms_api", new_callable=lambda: property(lambda s: mock_api)),
-        ):
-            mock_site_cls.objects.get.return_value = mock_site
-            view.request = _make_request(post_data={"action": "update", "pk": "1"})
-            view.post(view.request)
-
-        mock_msgs.error.assert_called_once()
+        assert message_texts(req, "error") == ["Could not find matching location for site 'Berlin'"]
 
     def test_update_success(self):
-        from netbox_librenms_plugin.views.sync.locations import SyncSiteLocationView
+        site = _make_site("Berlin", latitude=52.5, longitude=13.4)
+        req = _make_request(post_data={"action": "update", "pk": str(site.pk)})
+        view = _location_view(req, locations=[{"location": "Berlin"}], update_result=(True, "ok"))
 
-        view = object.__new__(SyncSiteLocationView)
-        view.require_write_permission = MagicMock(return_value=None)
-        mock_api = MagicMock()
-        mock_api.get_locations.return_value = (True, [{"location": "Berlin"}])
-        mock_api.update_location.return_value = (True, "ok")
-        mock_site = MagicMock()
-        mock_site.name = "Berlin"
-        mock_site.slug = "berlin"
-        mock_site.latitude = 52.5
-        mock_site.longitude = 13.4
+        _post(view, req)
 
-        with (
-            patch("netbox_librenms_plugin.views.sync.locations.messages") as mock_msgs,
-            patch("netbox_librenms_plugin.views.sync.locations.redirect"),
-            patch("netbox_librenms_plugin.views.sync.locations.Site") as mock_site_cls,
-            patch.object(type(view), "librenms_api", new_callable=lambda: property(lambda s: mock_api)),
-        ):
-            mock_site_cls.objects.get.return_value = mock_site
-            view.request = _make_request(post_data={"action": "update", "pk": "1"})
-            view.post(view.request)
-
-        mock_msgs.success.assert_called_once()
+        assert message_texts(req, "success") == ["Location 'Berlin' updated in LibreNMS successfully."]
+        # The update payload carries coordinates only — renaming is not this action's job.
+        view._librenms_api.update_location.assert_called_once_with("Berlin", {"lat": "52.500000", "lng": "13.400000"})
 
     def test_update_failure(self):
-        from netbox_librenms_plugin.views.sync.locations import SyncSiteLocationView
+        site = _make_site("Berlin", latitude=52.5, longitude=13.4)
+        req = _make_request(post_data={"action": "update", "pk": str(site.pk)})
+        view = _location_view(req, locations=[{"location": "Berlin"}], update_result=(False, "boom"))
 
-        view = object.__new__(SyncSiteLocationView)
-        view.require_write_permission = MagicMock(return_value=None)
-        mock_api = MagicMock()
-        mock_api.get_locations.return_value = (True, [{"location": "Berlin"}])
-        mock_api.update_location.return_value = (False, "Not found in LibreNMS")
-        mock_site = MagicMock()
-        mock_site.name = "Berlin"
-        mock_site.slug = "berlin"
-        mock_site.latitude = 52.5
-        mock_site.longitude = 13.4
+        _post(view, req)
 
-        with (
-            patch("netbox_librenms_plugin.views.sync.locations.messages") as mock_msgs,
-            patch("netbox_librenms_plugin.views.sync.locations.redirect"),
-            patch("netbox_librenms_plugin.views.sync.locations.Site") as mock_site_cls,
-            patch.object(type(view), "librenms_api", new_callable=lambda: property(lambda s: mock_api)),
-        ):
-            mock_site_cls.objects.get.return_value = mock_site
-            view.request = _make_request(post_data={"action": "update", "pk": "1"})
-            view.post(view.request)
-
-        mock_msgs.error.assert_called_once()
+        assert any("boom" in t for t in message_texts(req, "error"))
 
 
 class TestSyncSiteLocationViewHelpers:
     def test_match_site_by_name(self):
-        from netbox_librenms_plugin.views.sync.locations import SyncSiteLocationView
-
-        view = object.__new__(SyncSiteLocationView)
-        site = MagicMock()
-        site.name = "London"
-        site.slug = "london"
+        site = _make_site("London")
         locations = [{"location": "London"}, {"location": "Berlin"}]
-        result = view.match_site_with_location(site, locations)
+
+        result = _location_view().match_site_with_location(site, locations)
+
         assert result["location"] == "London"
 
     def test_match_site_by_slug(self):
-        from netbox_librenms_plugin.views.sync.locations import SyncSiteLocationView
+        from dcim.models import Site
 
-        view = object.__new__(SyncSiteLocationView)
-        site = MagicMock()
-        site.name = "LondonDC"
-        site.slug = "london"
-        locations = [{"location": "london"}]
-        result = view.match_site_with_location(site, locations)
+        site = Site.objects.create(name="LondonDC", slug="london")
+
+        result = _location_view().match_site_with_location(site, [{"location": "london"}])
+
         assert result is not None
 
     def test_match_site_not_found(self):
-        from netbox_librenms_plugin.views.sync.locations import SyncSiteLocationView
+        site = _make_site("Tokyo")
 
-        view = object.__new__(SyncSiteLocationView)
-        site = MagicMock()
-        site.name = "Tokyo"
-        site.slug = "tokyo"
-        locations = [{"location": "London"}]
-        result = view.match_site_with_location(site, locations)
+        result = _location_view().match_site_with_location(site, [{"location": "London"}])
+
         assert result is None
 
     def test_check_coordinates_match_true(self):
-        from netbox_librenms_plugin.views.sync.locations import SyncSiteLocationView
-
-        view = object.__new__(SyncSiteLocationView)
-        assert view.check_coordinates_match(51.5, -0.12, "51.5", "-0.12") is True
+        assert _location_view().check_coordinates_match(51.5, -0.12, "51.5", "-0.12") is True
 
     def test_check_coordinates_match_false(self):
-        from netbox_librenms_plugin.views.sync.locations import SyncSiteLocationView
-
-        view = object.__new__(SyncSiteLocationView)
-        assert view.check_coordinates_match(51.5, -0.12, "52.0", "-0.12") is False
+        assert _location_view().check_coordinates_match(51.5, -0.12, "52.0", "-0.12") is False
 
     def test_check_coordinates_none_returns_false(self):
-        from netbox_librenms_plugin.views.sync.locations import SyncSiteLocationView
-
-        view = object.__new__(SyncSiteLocationView)
-        assert view.check_coordinates_match(None, -0.12, "51.5", "-0.12") is False
+        assert _location_view().check_coordinates_match(None, -0.12, "51.5", "-0.12") is False
 
     def test_build_location_data_with_name(self):
-        from netbox_librenms_plugin.views.sync.locations import SyncSiteLocationView
+        site = _make_site("London", latitude=51.5, longitude=-0.12)
 
-        view = object.__new__(SyncSiteLocationView)
-        site = MagicMock()
-        site.name = "London"
-        site.latitude = "51.5"
-        site.longitude = "-0.12"
-        data = view.build_location_data(site)
-        assert data["location"] == "London"
-        assert data["lat"] == "51.5"
+        data = _location_view().build_location_data(site)
+
+        assert data == {"location": "London", "lat": "51.500000", "lng": "-0.120000"}
 
     def test_build_location_data_without_name(self):
-        from netbox_librenms_plugin.views.sync.locations import SyncSiteLocationView
+        site = _make_site("London", latitude=51.5, longitude=-0.12)
 
-        view = object.__new__(SyncSiteLocationView)
-        site = MagicMock()
-        site.name = "London"
-        site.latitude = "51.5"
-        site.longitude = "-0.12"
-        data = view.build_location_data(site, include_name=False)
+        data = _location_view().build_location_data(site, include_name=False)
+
         assert "location" not in data
 
     def test_get_site_by_pk_returns_none_on_not_found(self):
-        from django.core.exceptions import ObjectDoesNotExist
-        from netbox_librenms_plugin.views.sync.locations import SyncSiteLocationView
+        from dcim.models import Site
 
-        view = object.__new__(SyncSiteLocationView)
+        absent_pk = missing_pk(Site)
 
-        with patch("netbox_librenms_plugin.views.sync.locations.Site") as mock_site_cls:
-            mock_site_cls.objects.get.side_effect = ObjectDoesNotExist()
-            result = view.get_site_by_pk(99)
-        assert result is None
+        assert _location_view().get_site_by_pk(absent_pk) is None
+
+    def test_get_site_by_pk_returns_none_for_a_site_outside_the_grant(self):
+        from dcim.models import Site
+
+        _make_site("Bypk Mine")
+        theirs = _make_site("Bypk Theirs")
+        user = make_user_with_perms("loc-bypk", [("view", Site)], constraints={"name": "Bypk Mine"})
+
+        view = _location_view(_make_request(user=user))
+
+        assert view.get_site_by_pk(theirs.pk) is None
 
     def test_get_queryset_api_failure_returns_empty(self):
-        from netbox_librenms_plugin.views.sync.locations import SyncSiteLocationView
+        _make_site("Any Site")
+        view = _location_view(_make_request())
+        view._librenms_api.get_locations.return_value = (False, "Error")
 
-        view = object.__new__(SyncSiteLocationView)
-        view.request = _make_request()
-        view.filterset = None
-        mock_api = MagicMock()
-        mock_api.get_locations.return_value = (False, "Error")
-
-        with (
-            patch("netbox_librenms_plugin.views.sync.locations.Site") as mock_site_cls,
-            patch.object(type(view), "librenms_api", new_callable=lambda: property(lambda s: mock_api)),
-        ):
-            mock_site_cls.objects.all.return_value = []
-            result = view.get_queryset()
-        assert result == []
+        assert view.get_queryset() == []
 
     def test_create_sync_data_no_match(self):
-        from netbox_librenms_plugin.views.sync.locations import SyncSiteLocationView
+        site = _make_site("Atlantis")
 
-        view = object.__new__(SyncSiteLocationView)
-        site = MagicMock()
-        site.name = "Atlantis"
-        site.slug = "atlantis"
-        locations = [{"location": "London"}]
-        sync_data = view.create_sync_data(site, locations)
-        assert sync_data.is_synced is False
-        assert sync_data.librenms_location is None
+        result = _location_view().create_sync_data(site, [{"location": "London"}])
 
-    def test_create_sync_data_with_match(self):
-        from netbox_librenms_plugin.views.sync.locations import SyncSiteLocationView
-
-        view = object.__new__(SyncSiteLocationView)
-        site = MagicMock()
-        site.name = "London"
-        site.slug = "london"
-        site.latitude = 51.5
-        site.longitude = -0.12
-        locations = [{"location": "London", "lat": "51.5", "lng": "-0.12"}]
-        sync_data = view.create_sync_data(site, locations)
-        assert sync_data.is_synced is True
+        assert result.librenms_location is None
+        assert result.is_synced is False
 
 
 class TestSyncSiteLocationViewSuperMethods:
@@ -2555,53 +2785,44 @@ class TestSyncSiteLocationViewGetQuerysetFilterset:
     """Lines 44-49: filterset branch in get_queryset."""
 
     def test_get_queryset_with_filterset_and_get_params(self):
-        from netbox_librenms_plugin.views.sync.locations import SyncSiteLocationView
+        """A GET query runs the real filterset over the real Site rows."""
+        _make_site("London")
+        _make_site("Paris")
+        view = _location_view(_make_request(get_data={"q": "London"}), locations=[{"location": "London"}])
 
-        view = object.__new__(SyncSiteLocationView)
-        mock_api = MagicMock(server_key="default")
-        mock_request = MagicMock()
-        mock_request.GET = {"name": "London"}
-        view.request = mock_request
-        view.filterset = MagicMock()
-        view._post_server_key = "default"
-        view.get_cache_key = MagicMock(return_value="k")
-        view.get_librenms_locations = MagicMock(return_value=(True, [{"location": "London"}]))
-        view.create_sync_data = MagicMock(side_effect=lambda s, _locs: s)
+        result = view.get_queryset()
 
-        mock_site = MagicMock()
-        mock_site.name = "London"
-
-        mock_qs = MagicMock()
-        view.filterset.return_value.qs = mock_qs
-
-        with (
-            patch("netbox_librenms_plugin.views.sync.locations.Site") as mock_site_cls,
-            patch.object(type(view), "librenms_api", new_callable=lambda: property(lambda s: mock_api)),
-        ):
-            mock_site_cls.objects.all.return_value = [mock_site]
-            result = view.get_queryset()
-
-        assert result is mock_qs
+        assert [row.netbox_site.name for row in result] == ["London"]
 
     def test_get_queryset_no_get_params_returns_list(self):
-        from netbox_librenms_plugin.views.sync.locations import SyncSiteLocationView
+        """No GET params → the unfiltered sync-data list, one row per Site."""
+        from dcim.models import Site
 
-        view = object.__new__(SyncSiteLocationView)
-        mock_api = MagicMock(server_key="default")
-        mock_request = MagicMock()
-        mock_request.GET = {}  # Empty GET → falls through to return sync_data (line 49)
-        view.request = mock_request
-        view.filterset = None  # Falsy → line 47 skipped
-        view.get_librenms_locations = MagicMock(return_value=(True, [{"location": "London"}]))
-        mock_site = MagicMock()
-        mock_site.name = "London"
-        view.create_sync_data = MagicMock(side_effect=lambda s, _locs: s)
+        _make_site("London")
+        _make_site("Paris")
+        view = _location_view(_make_request(), locations=[{"location": "London"}])
 
-        with (
-            patch("netbox_librenms_plugin.views.sync.locations.Site") as mock_site_cls,
-            patch.object(type(view), "librenms_api", new_callable=lambda: property(lambda s: mock_api)),
-        ):
-            mock_site_cls.objects.all.return_value = [mock_site]
-            result = view.get_queryset()
+        result = view.get_queryset()
 
-        assert result == [mock_site]
+        assert len(result) == Site.objects.count()
+        assert {row.netbox_site.name for row in result} >= {"London", "Paris"}
+
+    def test_get_queryset_lists_only_sites_in_the_users_grant(self):
+        """A read-only constrained grant renders only its sites through the GET gate."""
+        from dcim.models import Site
+
+        mine = _make_site("Location List Mine")
+        _make_site("Location List Theirs")
+        user = make_user_with_perms(
+            "loc-list-scoped",
+            [("view", Site)],
+            constraints={"pk": mine.pk},
+            plugin_write=False,
+        )
+        request = _make_request(user=user)
+        view = _location_view(request, locations=[])
+
+        response = _get(view, request)
+
+        assert response.status_code == 200
+        assert [row.netbox_site.pk for row in response.context_data["table"].data] == [mine.pk]

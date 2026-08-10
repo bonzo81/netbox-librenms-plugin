@@ -3,6 +3,7 @@
 from unittest.mock import MagicMock, patch
 
 import pytest
+from django.contrib.auth.models import AnonymousUser
 from django.test import RequestFactory
 
 from netbox_librenms_plugin.tests.conftest import (
@@ -44,6 +45,19 @@ def _make_request(post=None, get=None, headers=None, user_is_superuser=False):
     req.user.is_superuser = user_is_superuser
     req.headers = headers or {}
     return req
+
+
+def _import_authorized_user():
+    """A stand-in user authorized for device/VM import (``has_perm`` → True).
+
+    The synchronous import view authorizes the model add/change perms before the collision
+    pre-check (mirroring ImportDevicesJob), so a collision-gate test must supply an authorized
+    user — the gate runs downstream of authorization.
+    """
+    user = MagicMock()
+    user.has_perm.return_value = True
+    user.is_superuser = False
+    return user
 
 
 def _make_api():
@@ -667,6 +681,41 @@ class TestBulkImportDevicesViewPost:
         assert b"no workers are available" in response.content
         assert b"ran synchronously" in response.content
         assert b"devices synchronously" not in response.content
+
+    def test_import_denied_without_model_add_perms_before_collision_precheck(self):
+        """A user with the plugin change perm but WITHOUT dcim.add_device is denied BEFORE the sync collision pre-check (which surfaces NetBox object names/pks in its modal) — mirroring the async job's authorize-before-scan ordering."""
+        view = self._make_view()
+        request = _make_request(
+            post={"select": ["1", "2"]},  # >=2 ids: the collision pre-check would otherwise run
+            headers={"HX-Request": "true"},
+            user_is_superuser=False,
+        )
+        # require_write_permission (plugin perm) passes, but the user lacks the model add perms.
+        request.user.has_perm = lambda perm: (
+            perm
+            not in {
+                "dcim.add_device",
+                "dcim.change_device",
+                "virtualization.add_virtualmachine",
+            }
+        )
+        detect_spy = MagicMock(return_value=([], []))
+        with (
+            patch.object(view, "require_write_permission", return_value=None),
+            patch(
+                "netbox_librenms_plugin.views.imports.actions.detect_collisions_for_device_ids",
+                detect_spy,
+            ),
+            patch("netbox_librenms_plugin.views.imports.actions.bulk_import_devices") as mock_import,
+        ):
+            response = view.post(request)
+
+        # Denied before any collision scan or import: the detector and importer never ran, and the
+        # response is the permission redirect (HX-Redirect), not the collision modal or an import.
+        detect_spy.assert_not_called()
+        mock_import.assert_not_called()
+        assert response.status_code == 200
+        assert response.get("HX-Redirect")
 
 
 class TestDeviceImportHelperMixin:
@@ -1754,12 +1803,11 @@ class TestDeviceConflictActionViewVMGuard:
                         with patch.object(
                             view, "get_validated_device_with_selections", return_value=(None, None, None)
                         ):
-                            try:
-                                view.post(request, device_id=1)
-                            except Exception:
-                                pass
+                            response = view.post(request, device_id=1)
 
         MockAPI.assert_called_with(server_key="secondary")
+        assert response.status_code == 200
+        assert response.headers.get("HX-Reswap") == "none"
 
 
 class TestDeviceRoleClusterRackViews:
@@ -3039,7 +3087,10 @@ class TestDeviceConflictSelectForUpdateDoesNotExist:
 
         with patch.object(view, "require_all_permissions", return_value=None):
             with patch("dcim.models.Device") as MockDevice:
-                MockDevice.objects.restrict.return_value.get.return_value = mock_existing
+                # The locked re-read is reached through restrict(user, action), so hand back the
+                # same manager: the stubs below then describe both the primary read and the lock.
+                MockDevice.objects.restrict.return_value = MockDevice.objects
+                MockDevice.objects.get.return_value = mock_existing
                 # select_for_update().get() raises DoesNotExist
                 MockDevice.objects.select_for_update.return_value.get.side_effect = DoesNotExistExc("gone")
                 MockDevice.DoesNotExist = DoesNotExistExc
@@ -3156,8 +3207,10 @@ class TestMigrateLibreNMSIdMorePaths:
                             with patch("dcim.models.Device") as MockDevice2:
                                 # This inner patch shadows the outer one for the in-function
                                 # `from dcim.models import Device`, so it must serve BOTH the
-                                # pre-lock existing_device lookup and the locked re-read.
-                                MockDevice2.objects.restrict.return_value.get.return_value = mock_existing
+                                # pre-lock existing_device lookup and the locked re-read. Both go
+                                # through restrict(user, action), so it returns the same manager.
+                                MockDevice2.objects.restrict.return_value = MockDevice2.objects
+                                MockDevice2.objects.get.return_value = mock_existing
                                 MockDevice2.objects.select_for_update.return_value.get.return_value = locked_device
                                 MockDevice2.DoesNotExist = DoesNotExistExc
                                 with patch("netbox_librenms_plugin.utils.find_by_librenms_id", return_value=None):
@@ -3234,7 +3287,10 @@ class TestDeviceConflictMoreActions:
         stack.enter_context(patch.object(view, "require_all_permissions", return_value=None))
 
         MockDevice = MagicMock()
-        MockDevice.objects.restrict.return_value.get.return_value = mock_existing
+        # restrict() hands back the same manager, so the locked re-read reached through it
+        # resolves to the stubs below.
+        MockDevice.objects.restrict.return_value = MockDevice.objects
+        MockDevice.objects.get.return_value = mock_existing
         MockDevice.objects.select_for_update.return_value.get.return_value = mock_existing
         MockDevice.objects.filter.return_value.exclude.return_value.first.return_value = None
         MockDevice.DoesNotExist = DoesNotExistExc
@@ -3442,7 +3498,10 @@ class TestMoreSaveErrorPaths:
 
         DoesNotExistExc = type("DoesNotExist", (Exception,), {})
         MockDevice = MagicMock()
-        MockDevice.objects.restrict.return_value.get.return_value = mock_existing
+        # restrict() hands back the same manager, so the locked re-read reached through it
+        # resolves to the stubs below.
+        MockDevice.objects.restrict.return_value = MockDevice.objects
+        MockDevice.objects.get.return_value = mock_existing
         MockDevice.objects.select_for_update.return_value.get.return_value = mock_existing
         MockDevice.objects.filter.return_value.exclude.return_value.first.return_value = None
         MockDevice.DoesNotExist = DoesNotExistExc
@@ -3672,7 +3731,10 @@ class TestUpdateAndSerialSaveErrors:
 
         DoesNotExistExc = type("DoesNotExist", (Exception,), {})
         MockDevice = MagicMock()
-        MockDevice.objects.restrict.return_value.get.return_value = mock_existing
+        # restrict() hands back the same manager, so the locked re-read reached through it
+        # resolves to the stubs below.
+        MockDevice.objects.restrict.return_value = MockDevice.objects
+        MockDevice.objects.get.return_value = mock_existing
         MockDevice.objects.select_for_update.return_value.get.return_value = mock_existing
         MockDevice.objects.filter.return_value.exclude.return_value.first.return_value = None
         MockDevice.DoesNotExist = DoesNotExistExc
@@ -3750,7 +3812,10 @@ class TestSyncSerialMorePaths:
 
         DoesNotExistExc = type("DoesNotExist", (Exception,), {})
         MockDevice = MagicMock()
-        MockDevice.objects.restrict.return_value.get.return_value = mock_existing
+        # restrict() hands back the same manager so the locked re-read the tests stub as
+        # objects.select_for_update() resolves through it too.
+        MockDevice.objects.restrict.return_value = MockDevice.objects
+        MockDevice.objects.get.return_value = mock_existing
         MockDevice.DoesNotExist = DoesNotExistExc
         mock_tx = MagicMock()
         mock_tx.atomic.return_value.__enter__ = MagicMock(return_value=None)
@@ -3956,7 +4021,11 @@ class TestMigrateLibreNMSIdTransactionPaths:
         locked_device.name = "router01"
 
         MockDevice = MagicMock()
-        MockDevice.objects.restrict.return_value.get.return_value = mock_existing
+        # The view reaches the manager through restrict(user, action) for both the primary read
+        # and the locked re-read, so restrict() hands back the same manager: the stubs below then
+        # describe both chains, and a test can still override either one.
+        MockDevice.objects.restrict.return_value = MockDevice.objects
+        MockDevice.objects.get.return_value = mock_existing
         MockDevice.objects.select_for_update.return_value.get.return_value = locked_device
         MockDevice.DoesNotExist = DoesNotExistExc
 
@@ -4892,6 +4961,7 @@ class TestAddDeviceTypeMappingNoSecondRoundTrip:
             data={"device_type_id": str(dt.pk)},
         )
         request.user = user
+        view.request = request
 
         # Mock ONLY the LibreNMS HTTP boundary; have it raise if ever called after the cache hit,
         # so a second round-trip would be unmistakable. Also stub the auth gates and VC detection.
@@ -4949,6 +5019,7 @@ class TestAddDeviceTypeMappingNoSecondRoundTrip:
             data={"device_type_id": str(dt.pk)},
         )
         request.user = user
+        view.request = request
 
         spy_cache = MagicMock(wraps=cache)
         with (
@@ -5007,6 +5078,7 @@ class TestAddDeviceTypeMappingNoSecondRoundTrip:
             data={"device_type_id": str(dt.pk)},
         )
         request.user = user
+        view.request = request
 
         with (
             patch("netbox_librenms_plugin.import_utils.device_operations.get_librenms_device_by_id", return_value=None),
@@ -5067,6 +5139,7 @@ class TestAddDeviceTypeMappingNoSecondRoundTrip:
             data={"device_type_id": str(dt_new.pk)},
         )
         request.user = user
+        view.request = request
 
         with (
             patch("netbox_librenms_plugin.import_utils.device_operations.get_librenms_device_by_id", return_value=None),
@@ -5115,6 +5188,7 @@ class TestCreatePlatformAssignmentIndependence:
 
         request = MagicMock()
         request.POST = {"platform_name": "NewPlatPF"}
+        view.request = request  # dispatch() would set this; restricted_queryset reads request.user
 
         validation = {"existing_device": target}
         dvdv = MagicMock()
@@ -5154,6 +5228,7 @@ class TestCreatePlatformAssignmentIndependence:
 
         request = MagicMock()
         request.POST = {"platform_name": "NewPlatPF2"}
+        view.request = request  # dispatch() would set this; restricted_queryset reads request.user
 
         validation = {"existing_device": target}
         # Patched so the UNFIXED success path can still render its OOB modal swap cleanly,
@@ -5297,7 +5372,9 @@ class TestBulkImportRerenderVMClassification:
 
         view = self._make_view()
         User = get_user_model()
-        user = User.objects.create_user(username="u-rerender", password="x")
+        # Superuser so has_perm passes the import view's authorize-before-precheck gate; this test
+        # exercises the VM-classification re-render path, not permission enforcement.
+        user = User.objects.create_user(username="u-rerender", password="x", is_superuser=True)
 
         # device 1 → Device import; devices 2 & 3 → VM imports (a cluster is selected for them).
         request = RequestFactory().post(
@@ -5325,6 +5402,9 @@ class TestBulkImportRerenderVMClassification:
                 "hardware": "",
                 "os": "",
             }
+
+        # detect_collisions falls back to api.get_device_info for cold-cache misses — feed it _fetch.
+        view._librenms_api.get_device_info = lambda did, *a, **k: (True, _fetch(did))
 
         # Mock ONLY genuine boundaries: the import process, the LibreNMS fetch, the template render,
         # and the permission/background-job gates. validate_device_for_import, the cache and the
@@ -5479,6 +5559,329 @@ class TestImportActionRebindGuard:
             response = view.post(request)
 
         assert response.status_code != 500
+
+
+@pytest.mark.django_db
+class TestBulkImportConfirmCollisions:
+    """Tests for Stage 3 collision-blocking behaviour."""
+
+    def _make_view(self):
+        from netbox_librenms_plugin.views.imports.actions import BulkImportConfirmView
+
+        view = object.__new__(BulkImportConfirmView)
+        view._librenms_api = _make_api()
+        return view
+
+    def _run_with_two_devices(self, validation_a, validation_b, *, real_render):
+        """Drive the real BulkImportConfirmView.post over two LibreNMS rows.
+
+        ``validation_a/b`` carry real NetBox Device objects so the real
+        detect_bulk_collisions + _model_name_of run; only validate_device_for_import (an
+        expensive VC-detection call covered by its own tests) is stubbed. When
+        ``real_render`` is True the real template engine renders (returning an HttpResponse);
+        otherwise render() is captured so the chosen template can be asserted without
+        building the full confirm-table context.
+        """
+        view = self._make_view()
+        request = _make_request(post={"select": ["1", "2"]})
+        request.POST.getlist = MagicMock(return_value=["1", "2"])
+        request.GET = MagicMock()
+        request.GET.get = MagicMock(return_value=None)
+        request.user = AnonymousUser()
+
+        libre_devices = {
+            1: {"device_id": 1, "hostname": "alpha"},
+            2: {"device_id": 2, "hostname": "beta"},
+        }
+        validations = {1: validation_a, 2: validation_b}
+
+        def fake_validate(libre_device, **_kwargs):
+            return validations[libre_device["device_id"]]
+
+        with (
+            patch.object(view, "require_write_permission", return_value=None),
+            patch(
+                "netbox_librenms_plugin.views.imports.actions.fetch_device_with_cache",
+                side_effect=lambda did, _api: libre_devices.get(did),
+            ),
+            patch(
+                "netbox_librenms_plugin.views.imports.actions.extract_device_selections",
+                return_value={"cluster_id": None, "role_id": None, "rack_id": None},
+            ),
+            patch(
+                "netbox_librenms_plugin.views.imports.actions.validate_device_for_import",
+                side_effect=fake_validate,
+            ),
+            patch(
+                "netbox_librenms_plugin.views.imports.actions.resolve_naming_preferences",
+                return_value=(True, False),
+            ),
+        ):
+            if real_render:
+                return view.post(request)
+            with patch("netbox_librenms_plugin.views.imports.actions.render") as mock_render:
+                mock_render.side_effect = lambda req, tpl, ctx, status=200: MagicMock(
+                    status_code=status, template_name=tpl, context=ctx
+                )
+                return view.post(request)
+
+    def test_collision_path_renders_collision_template(self):
+        """A host row and an OOB row resolving to one real NetBox device render the collision modal."""
+        from django.urls import reverse
+
+        nb_device = make_device("srv-collide-confirm")
+        validation_a = {
+            "status": "importable",
+            "resolved_name": "alpha",
+            "virtual_chassis": {},
+            "existing_device": nb_device,
+        }
+        validation_b = {
+            "status": "importable",
+            "resolved_name": "beta",
+            "virtual_chassis": {},
+            "oob_candidate": {"device": nb_device, "type": "idrac"},
+        }
+        # Real render: the real collision template + real detect_bulk_collisions + real
+        # _model_name_of(real Device) must produce a dcim:device link for the colliding device.
+        response = self._run_with_two_devices(validation_a, validation_b, real_render=True)
+        assert response.status_code == 200
+        html = response.content.decode()
+        assert "Bulk import blocked" in html
+        assert reverse("dcim:device", kwargs={"pk": nb_device.pk}) in html
+        assert "srv-collide-confirm" in html
+
+    def test_clean_batch_renders_normal_confirm_template(self):
+        """Two rows resolving to distinct real NetBox devices fall through to the confirm template."""
+        validation_a = {
+            "status": "importable",
+            "resolved_name": "alpha",
+            "virtual_chassis": {},
+            "existing_device": make_device("nb-clean-a"),
+        }
+        validation_b = {
+            "status": "importable",
+            "resolved_name": "beta",
+            "virtual_chassis": {},
+            "existing_device": make_device("nb-clean-b"),
+        }
+        # render captured (not the heavy confirm table) — assert no collision block fired and the
+        # confirm template was chosen.
+        response = self._run_with_two_devices(validation_a, validation_b, real_render=False)
+        assert response is not None
+        assert "bulk_import_confirm.html" in response.template_name
+        assert response.status_code == 200
+
+
+@pytest.mark.django_db
+class TestBulkImportDevicesViewCollisionGate:
+    """The direct-import view re-runs the collision check the confirm preview can be bypassed on."""
+
+    def _make_view(self):
+        from netbox_librenms_plugin.views.imports.actions import BulkImportDevicesView
+
+        view = object.__new__(BulkImportDevicesView)
+        view._librenms_api = _make_api()
+        return view
+
+    def test_colliding_batch_blocked_before_import(self):
+        """Two selected LibreNMS rows resolving to one real device → collision modal, importer never called."""
+        from django.urls import reverse
+
+        view = self._make_view()
+        request = _make_request(post={"select": ["1", "2"]}, headers={"HX-Request": "true"})
+        request.POST.getlist = MagicMock(return_value=["1", "2"])
+        request.user = _import_authorized_user()
+
+        nb = make_device("gate-collide-host")
+        libre = {
+            1: {"device_id": 1, "sysName": "gate-collide-host", "hostname": "gate-collide-host"},
+            2: {"device_id": 2, "sysName": "gate-collide-host", "hostname": "gate-collide-host"},
+        }
+        # The collision pre-check reads the seeded libre cache (cold Django cache in the test) and
+        # falls back to api.get_device_info for the misses — stub that seam so the misses resolve.
+        view._librenms_api.get_device_info = lambda did, *a, **k: (True, libre[did]) if did in libre else (False, None)
+        with (
+            patch.object(view, "require_write_permission", return_value=None),
+            patch(
+                "netbox_librenms_plugin.views.imports.actions.resolve_naming_preferences", return_value=(True, False)
+            ),
+            patch(
+                "netbox_librenms_plugin.views.imports.actions.fetch_device_with_cache",
+                side_effect=lambda did, _api: libre.get(did),
+            ),
+            patch("netbox_librenms_plugin.views.imports.actions.bulk_import_devices") as mock_import,
+        ):
+            response = view.post(request)
+
+        # Real validate + real detect via the gate → real collision template, importer never reached.
+        assert response.status_code == 200
+        html = response.content.decode()
+        assert "Bulk import blocked" in html
+        assert reverse("dcim:device", kwargs={"pk": nb.pk}) in html
+        assert 'id="htmx-modal-content"' in html
+        assert 'hx-swap-oob="innerHTML"' in html
+        mock_import.assert_not_called()
+
+    def test_clean_batch_passes_gate_and_imports(self):
+        """Two rows resolving to distinct real devices clear the gate and reach the importer."""
+        view = self._make_view()
+        request = _make_request(post={"select": ["1", "2"]})
+        request.POST.getlist = MagicMock(return_value=["1", "2"])
+        request.user = _import_authorized_user()
+
+        make_device("gate-clean-a")
+        make_device("gate-clean-b")
+        libre = {
+            1: {"device_id": 1, "sysName": "gate-clean-a", "hostname": "gate-clean-a"},
+            2: {"device_id": 2, "sysName": "gate-clean-b", "hostname": "gate-clean-b"},
+        }
+        view._librenms_api.get_device_info = lambda did, *a, **k: (True, libre[did]) if did in libre else (False, None)
+        import_result = {"success": [], "failed": [], "skipped": [], "virtual_chassis_created": 0}
+        with (
+            patch.object(view, "require_write_permission", return_value=None),
+            patch(
+                "netbox_librenms_plugin.views.imports.actions.resolve_naming_preferences", return_value=(True, False)
+            ),
+            patch(
+                "netbox_librenms_plugin.views.imports.actions.fetch_device_with_cache",
+                side_effect=lambda did, _api: libre.get(did),
+            ),
+            patch(
+                "netbox_librenms_plugin.views.imports.actions.bulk_import_devices", return_value=import_result
+            ) as mock_import,
+            patch(
+                "netbox_librenms_plugin.views.imports.actions.bulk_import_vms",
+                return_value={"success": [], "failed": [], "skipped": []},
+            ),
+            patch("netbox_librenms_plugin.views.imports.actions.messages"),
+            patch("netbox_librenms_plugin.views.imports.actions.redirect", return_value=MagicMock(status_code=302)),
+        ):
+            view.post(request)
+
+        # Gate cleared (distinct devices) → the importer ran.
+        mock_import.assert_called_once()
+
+    def test_unfetchable_id_is_skipped_rest_imports(self):
+        """A selected id whose LibreNMS info can't be fetched (not cached + get_device_info fails) is SKIPPED, not a whole-batch block: the fetchable rows still import and the skipped row is surfaced. Restores the per-device resilience the old fail-closed block removed."""
+        view = self._make_view()
+        make_device("gate-unresolved-host")
+        libre = {1: {"device_id": 1, "sysName": "gate-unresolved-host", "hostname": "gate-unresolved-host"}}
+        # id 2 isn't cached and its info fetch fails → it can't be collision-checked → skipped.
+        view._librenms_api.get_device_info = lambda did, *a, **k: (True, libre[did]) if did in libre else (False, None)
+        request = _make_request(post={"select": ["1", "2"]}, headers={"HX-Request": "true"})
+        request.POST.getlist = MagicMock(return_value=["1", "2"])
+        request.user = _import_authorized_user()
+
+        import_result = {"success": [], "failed": [], "skipped": [], "virtual_chassis_created": 0}
+        with (
+            patch.object(view, "require_write_permission", return_value=None),
+            patch(
+                "netbox_librenms_plugin.views.imports.actions.resolve_naming_preferences", return_value=(True, False)
+            ),
+            patch(
+                "netbox_librenms_plugin.views.imports.actions.fetch_device_with_cache",
+                side_effect=lambda did, _api, **_kw: libre.get(did),
+            ),
+            patch(
+                "netbox_librenms_plugin.views.imports.actions.bulk_import_devices", return_value=import_result
+            ) as mock_import,
+        ):
+            response = view.post(request)
+
+        # The fetchable id 1 imports; only the unresolved id 2 is dropped (not a whole-batch block).
+        assert response.status_code == 200
+        mock_import.assert_called_once()
+        assert mock_import.call_args.kwargs["device_ids"] == [1]
+        html = response.content.decode()
+        # The skipped row is surfaced, object-neutral ("row(s)", never "device(s)").
+        assert "Skipped" in html
+        assert "verify collisions" in html
+        assert "selected row(s)" in html
+        assert "selected device(s)" not in html
+
+    def test_background_batch_defers_collision_precheck_to_job(self):
+        """A batch routed to a background job must NOT run the collision pre-check synchronously — it's deferred to ImportDevicesJob (which re-runs it), so the request doesn't pay the validation cost. The job is enqueued and the sync detector is never called."""
+        view = self._make_view()
+        request = _make_request(
+            post={"select": ["1", "2"], "use_background_job": "on"},
+            headers={"HX-Request": "true"},
+            user_is_superuser=True,
+        )
+        request.POST.getlist = MagicMock(return_value=["1", "2"])
+
+        libre = {
+            1: {"device_id": 1, "sysName": "bg-a", "hostname": "bg-a"},
+            2: {"device_id": 2, "sysName": "bg-b", "hostname": "bg-b"},
+        }
+        with (
+            patch.object(view, "require_write_permission", return_value=None),
+            patch(
+                "netbox_librenms_plugin.views.imports.actions.resolve_naming_preferences", return_value=(True, False)
+            ),
+            patch(
+                "netbox_librenms_plugin.views.imports.actions.fetch_device_with_cache",
+                side_effect=lambda did, _api, **_kw: libre.get(did),
+            ),
+            patch("utilities.rqworker.get_workers_for_queue", return_value=1),
+            patch(
+                "netbox_librenms_plugin.jobs.ImportDevicesJob.enqueue",
+                return_value=MagicMock(pk=4242, job_id="job-4242"),
+            ) as mock_enqueue,
+            patch("netbox_librenms_plugin.views.imports.actions.detect_collisions_for_device_ids") as mock_detect,
+            patch("netbox_librenms_plugin.views.imports.actions.messages"),
+        ):
+            response = view.post(request)
+
+        # The job is enqueued and the synchronous collision pre-check is skipped entirely (deferred).
+        mock_enqueue.assert_called_once()
+        mock_detect.assert_not_called()
+        assert response.status_code == 200
+
+    def test_colliding_batch_non_htmx_message_is_object_neutral(self):
+        """The non-HTMX collision block toast says "NetBox object", not "NetBox device".
+
+        The gate covers VM rows too (vm_device_ids=vm_imports), so a VM-only batch must not
+        be mislabelled — mirrors the deliberately neutral wording in ImportDevicesJob.
+        """
+        view = self._make_view()
+        # No HX-Request header → the messages.error + redirect branch.
+        request = _make_request(post={"select": ["1", "2"]})
+        request.POST.getlist = MagicMock(return_value=["1", "2"])
+        request.user = _import_authorized_user()
+
+        make_device("gate-collide-plain")
+        libre = {
+            1: {"device_id": 1, "sysName": "gate-collide-plain", "hostname": "gate-collide-plain"},
+            2: {"device_id": 2, "sysName": "gate-collide-plain", "hostname": "gate-collide-plain"},
+        }
+        view._librenms_api.get_device_info = lambda did, *a, **k: (True, libre[did]) if did in libre else (False, None)
+        with (
+            patch.object(view, "require_write_permission", return_value=None),
+            patch(
+                "netbox_librenms_plugin.views.imports.actions.resolve_naming_preferences", return_value=(True, False)
+            ),
+            patch(
+                "netbox_librenms_plugin.views.imports.actions.fetch_device_with_cache",
+                side_effect=lambda did, _api: libre.get(did),
+            ),
+            patch("netbox_librenms_plugin.views.imports.actions.bulk_import_devices") as mock_import,
+            patch("netbox_librenms_plugin.views.imports.actions.messages") as mock_messages,
+            patch("netbox_librenms_plugin.views.imports.actions.redirect", return_value=MagicMock(status_code=302)),
+        ):
+            view.post(request)
+
+        mock_import.assert_not_called()
+        mock_messages.error.assert_called_once()
+        toast = mock_messages.error.call_args[0][1]
+        assert "NetBox object" in toast
+        assert "NetBox device" not in toast
+        assert "colliding device" not in toast
+
+
+# ---------------------------------------------------------------------------
+# AddAsOOBView / PromoteToHostView — generic "oob" sentinel regression tests
+# ---------------------------------------------------------------------------
 
 
 class TestAddAsOOBViewGenericSentinel:
@@ -5847,7 +6250,10 @@ class TestAddAsOOBViewPost:
             patch("netbox_librenms_plugin.utils.find_by_librenms_id", return_value=None) as mock_find,
         ):
             mock_device.DoesNotExist = Exception
-            mock_device.objects.restrict.return_value.get.return_value = existing_device
+            # The sync-device re-read under lock goes through restrict(user, action) too, so
+            # restrict() hands back the same manager and both stubs below apply.
+            mock_device.objects.restrict.return_value = mock_device.objects
+            mock_device.objects.get.return_value = existing_device
             mock_device.objects.select_for_update.return_value.get.return_value = locked_device
             response = view.post(request, device_id=17)
 
@@ -6519,6 +6925,59 @@ class TestMergeNetBoxDevicesViewOOBTransfer:
         assert entry == {"id": 10}
         assert "_migrated_to" not in entry
 
+    def test_transfer_survives_interface_move_onto_winner_between_read_and_lock(self):
+        """A concurrent interface move ONTO the winner, landing between the assigned_object read and the interface lock, must not spuriously fail the merge: the locked IP's GFK cache is refreshed to the freshly-locked (winner-owned) interface before set_device_ip_fk re-checks ownership."""
+        from dcim.models import Interface
+        from django.http import HttpResponse
+
+        from netbox_librenms_plugin.tests.conftest import ip_on
+
+        view = self._make_view()
+        winner = make_device("merge-winner-race", librenms_cf={"default": {"id": 20}})
+        donor = make_device("merge-donor-race", librenms_cf={"default": {"id": 10}})
+        # The IP starts on a DONOR interface, so the merge's assigned_object read caches device_id=donor.
+        oob_ip = ip_on(donor, "192.0.2.11/32", "mgmt0")
+        donor.oob_ip = oob_ip
+        donor.save()
+        iface_pk = oob_ip.assigned_object_id
+
+        request = _make_request(post={"winner_pk": str(winner.pk), "donor_pk": str(donor.pk)})
+        validation = {"merge_candidates": {"host_named": {"pk": winner.pk}, "oob_named": {"pk": donor.pk}}}
+        view.get_validated_device_with_selections = MagicMock(return_value=({"device_id": 99}, validation, {}))
+        view.render_device_row = MagicMock(return_value=HttpResponse("row"))
+
+        # Simulate the concurrent move: the first Interface SELECT ... FOR UPDATE (the oob_ip's owning
+        # interface lock) fires AFTER the merge cached assigned_object with device_id=donor. Move the
+        # interface onto the winner right then, so the freshly locked row is winner-owned while the
+        # cached GFK is stale — exactly the TOCTOU the freshen-after-lock guards against.
+        real_sfu = Interface.objects.select_for_update
+        state = {"moved": False}
+
+        def moving_sfu(*args, **kwargs):
+            queryset = real_sfu(*args, **kwargs)
+            real_filter = queryset.filter
+
+            def moving_filter(*filter_args, **filter_kwargs):
+                if not state["moved"] and filter_kwargs.get("pk") == iface_pk:
+                    state["moved"] = True
+                    Interface.objects.filter(pk=iface_pk).update(device=winner)
+                return real_filter(*filter_args, **filter_kwargs)
+
+            queryset.filter = moving_filter
+            return queryset
+
+        with patch.object(Interface.objects, "select_for_update", moving_sfu):
+            resp = view.post(request, device_id=99)
+
+        assert resp.status_code == 200
+        winner.refresh_from_db()
+        donor.refresh_from_db()
+        # The interface is now on the winner, so the transfer MUST complete — not be rejected against
+        # the stale cached device_id and roll the merge back.
+        assert winner.oob_ip_id == oob_ip.pk
+        assert donor.oob_ip_id is None
+        assert state["moved"], "the injected interface move never fired — test wiring is stale"
+
 
 def _two_member_vc(name, *, m1_cf=None, m2_cf=None):
     """Create a real 2-member VirtualChassis (positions 1, 2). m1 becomes the sync device when it is the member holding the ``librenms_id``."""
@@ -6891,7 +7350,10 @@ class TestResolveOOBInterface:
         view = self._view()
         dev = make_device("oob-res-existing")
         iface = make_interface(dev, "eth0")
-        req = _make_request(post={"oob_interface_id": str(iface.pk)})
+        # Superuser: the reused interface is now read through a restricted queryset, and this
+        # test is about resolving the selection, not about the grant (see
+        # TestGatedViewsRefuseOutOfScopeObjects for the scoping itself).
+        req = _make_request(post={"oob_interface_id": str(iface.pk)}, user_is_superuser=True)
         with transaction.atomic():
             result_iface, reason = view._resolve_oob_interface(req, dev)
         assert result_iface.pk == iface.pk and reason is None
@@ -7313,8 +7775,13 @@ class TestCreatePlatformFromImportManufacturer:
         view = self._view()
         req = _make_request(post={"platform_name": "New-OS", "manufacturer": "9999"})
 
+        view.request = req  # dispatch() would set this; restricted_queryset reads request.user
+
         mock_manuf = MagicMock()
         mock_manuf.DoesNotExist = type("DoesNotExist", (Exception,), {})
+        # The manufacturer is resolved through restrict(user, "view"), so hand back the same
+        # manager and the not-found stub below still describes that chain.
+        mock_manuf.objects.restrict.return_value = mock_manuf.objects
         mock_manuf.objects.get.side_effect = mock_manuf.DoesNotExist()
         mock_platform = MagicMock()
         mock_platform.objects.filter.return_value.exists.return_value = False
@@ -7354,10 +7821,13 @@ class TestCreatePlatformFromImportManufacturer:
         assert other_mfr.pk != device.device_type.manufacturer_id
 
         view = self._view()
+        # Superuser: the subject is the assignment failure, not the object gate.
         req = _make_request(
             post={"platform_name": "Mismatch-OS", "manufacturer": str(other_mfr.pk)},
             headers={"HX-Request": "true"},
+            user_is_superuser=True,
         )
+        view.request = req
 
         with (
             patch.object(view, "require_write_permission", return_value=None),
@@ -7388,10 +7858,14 @@ class TestCreatePlatformFromImportManufacturer:
         mfr = Manufacturer.objects.get(slug="test-mfr")  # make_device's device_type manufacturer
 
         view = self._view()
+        # Superuser: this test is about the platform assignment, not the object gate, and the
+        # manufacturer is now read through a restricted queryset.
         req = _make_request(
             post={"platform_name": "Match-OS", "manufacturer": str(mfr.pk)},
             headers={"HX-Request": "true"},
+            user_is_superuser=True,
         )
+        view.request = req
 
         with (
             patch.object(view, "require_write_permission", return_value=None),
@@ -7838,6 +8312,18 @@ class TestSerialActionsNormalizeAndLock:
             self._post_action("update", target, "SN-88")
         sqls = [q["sql"] for q in ctx.captured_queries]
         assert any("pg_advisory_xact_lock" in s for s in sqls)
+        assert self._serial_row_locks(sqls) == []
+
+    def test_update_serial_action_serializes_on_the_serial_advisory_lock(self):
+        """The dedicated update_serial action takes the same serial-keyed advisory lock."""
+        from django.db import connection
+        from django.test.utils import CaptureQueriesContext
+
+        target = make_device("ser-act-upd-serial-lock")
+        with CaptureQueriesContext(connection) as ctx:
+            self._post_action("update_serial", target, "SN-89")
+        sqls = [q["sql"] for q in ctx.captured_queries]
+        assert any("pg_advisory_xact_lock" in sql for sql in sqls)
         assert self._serial_row_locks(sqls) == []
 
     def test_conflict_toast_escapes_the_conflicting_device_name(self):
@@ -8307,3 +8793,168 @@ class TestPromoteAndMergeObjectScope:
         assert "id" not in sync_entry
         assert sync_entry["_migrated_to"]["device_id"] == winner.pk
         assert Device.objects.get(pk=winner.pk).custom_field_data["librenms_id"]["default"]["oob"]["id"] == 30
+
+
+@pytest.mark.django_db
+class TestBulkImportPermGateRunsBeforeEnqueue:
+    """The import model-perm gate must run BEFORE the background job is dispatched.
+
+    Otherwise an unauthorized caller both enqueues a job that can only fail and is told
+    "Import job started", while the denial surfaces nowhere.
+    """
+
+    def _make_view(self):
+        from netbox_librenms_plugin.views.imports.actions import BulkImportDevicesView
+
+        view = object.__new__(BulkImportDevicesView)
+        view._librenms_api = _make_api()
+        return view
+
+    @staticmethod
+    def _plugin_writer_without_import_perms(username):
+        """A real active user with plugin write access but no dcim/virtualization add perms."""
+        from core.models import ObjectType
+        from django.apps import apps
+        from django.contrib.auth import get_user_model
+        from users.models import ObjectPermission
+
+        LibreNMSSettings = apps.get_model("netbox_librenms_plugin", "LibreNMSSettings")
+
+        user = get_user_model().objects.create_user(username=username, password="x")
+        write = ObjectPermission.objects.create(name=f"{username}-plugin-write", actions=["change"])
+        write.object_types.set([ObjectType.objects.get_for_model(LibreNMSSettings)])
+        write.users.set([user])
+        return get_user_model().objects.get(pk=user.pk)  # clear the per-request perm cache
+
+    @staticmethod
+    def _plugin_writer_with_device_perms(username):
+        """A real plugin writer with only the Device add/change permissions."""
+        from core.models import ObjectType
+        from dcim.models import Device
+        from django.contrib.auth import get_user_model
+        from users.models import ObjectPermission
+
+        user = TestBulkImportPermGateRunsBeforeEnqueue._plugin_writer_without_import_perms(username)
+        device_write = ObjectPermission.objects.create(
+            name=f"{username}-device-import",
+            actions=["add", "change"],
+        )
+        device_write.object_types.set([ObjectType.objects.get_for_model(Device)])
+        device_write.users.set([user])
+        return get_user_model().objects.get(pk=user.pk)  # clear the per-request perm cache
+
+    @staticmethod
+    def _request_for(user, data):
+        """Build a real POST request with session-backed message storage."""
+        from django.contrib.messages.storage.fallback import FallbackStorage
+        from django.contrib.sessions.middleware import SessionMiddleware
+        from django.test import RequestFactory
+
+        request = RequestFactory().post("/device-import/bulk/", data=data)
+        request.user = user
+        SessionMiddleware(lambda req: None).process_request(request)
+        request.session.save()
+        request._messages = FallbackStorage(request)
+        return request
+
+    def test_plain_device_background_batch_does_not_require_vm_permission(self):
+        """Device add/change grants reach enqueue without add_virtualmachine."""
+        view = self._make_view()
+        user = self._plugin_writer_with_device_perms("bulk-device-only-perms")
+        request = self._request_for(user, {"select": ["1"]})
+        view.request = request
+
+        assert user.has_perm("dcim.add_device")
+        assert user.has_perm("dcim.change_device")
+        assert not user.has_perm("virtualization.add_virtualmachine")
+
+        with (
+            patch.object(type(view), "should_use_background_job_for_import", return_value=True, create=False),
+            patch("utilities.rqworker.get_workers_for_queue", return_value=1),
+            patch(
+                "netbox_librenms_plugin.jobs.ImportDevicesJob.enqueue",
+                return_value=MagicMock(pk=4331, job_id="job-4331"),
+            ) as mock_enqueue,
+        ):
+            response = view.post(request)
+
+        mock_enqueue.assert_called_once()
+        assert mock_enqueue.call_args.kwargs["device_ids"] == [1]
+        assert mock_enqueue.call_args.kwargs["vm_imports"] == {}
+        messages_sent = [str(m) for m in request._messages]
+        assert not any("do not have permission to import" in m for m in messages_sent), messages_sent
+        assert response.status_code in (301, 302)
+
+    def test_explicit_vm_background_batch_still_requires_vm_permission(self):
+        """An explicit VM row is denied before enqueue without add_virtualmachine."""
+        view = self._make_view()
+        user = self._plugin_writer_with_device_perms("bulk-explicit-vm-no-perm")
+        request = self._request_for(user, {"select": ["1"], "cluster_1": "1"})
+        view.request = request
+
+        with (
+            patch.object(type(view), "should_use_background_job_for_import", return_value=True, create=False),
+            patch("utilities.rqworker.get_workers_for_queue", return_value=1),
+            patch("netbox_librenms_plugin.jobs.ImportDevicesJob.enqueue") as mock_enqueue,
+        ):
+            response = view.post(request)
+
+        mock_enqueue.assert_not_called()
+        messages_sent = [str(m) for m in request._messages]
+        assert any("virtualization.add_virtualmachine" in m for m in messages_sent), messages_sent
+        assert response.status_code in (301, 302)
+
+    def test_device_row_flipped_to_vm_fails_without_vm_permission(self):
+        """A validation-time Device→VM flip fails per-row without creating a VM."""
+        from virtualization.models import VirtualMachine
+
+        from netbox_librenms_plugin.import_utils import bulk_import_devices_shared
+
+        user = self._plugin_writer_with_device_perms("bulk-flipped-vm-no-perm")
+        existing_vm = make_vm("bulk-flipped-vm")
+        vm_count = VirtualMachine.objects.count()
+        libre_device = {
+            "device_id": 13,
+            "hostname": existing_vm.name,
+            "sysName": existing_vm.name,
+            "serial": "",
+            "hardware": "",
+            "os": "",
+        }
+        api = MagicMock(server_key="default", cache_timeout=300)
+
+        with patch("netbox_librenms_plugin.import_utils.bulk_import.LibreNMSAPI", return_value=api):
+            result = bulk_import_devices_shared(
+                device_ids=[13],
+                server_key="default",
+                libre_devices_cache={13: libre_device},
+                user=user,
+            )
+
+        assert VirtualMachine.objects.count() == vm_count
+        assert result["success"] == []
+        assert result["skipped"] == []
+        assert len(result["failed"]) == 1
+        assert result["failed"][0]["device_id"] == 13
+        assert "virtualization.add_virtualmachine" in result["failed"][0]["error"]
+
+    def test_unauthorized_background_import_is_denied_without_enqueueing(self):
+        """A plugin-writer without dcim.add_device is denied and no ImportDevicesJob is enqueued."""
+        view = self._make_view()
+        user = self._plugin_writer_without_import_perms("bulk-no-import-perms")
+        request = self._request_for(user, {"select": ["1"]})
+        view.request = request  # Django binds this in dispatch(); the perm gate reads it
+
+        with (
+            # Stub the background decision so this plugin writer reaches the ordering under test.
+            patch.object(type(view), "should_use_background_job_for_import", return_value=True, create=False),
+            patch("utilities.rqworker.get_workers_for_queue", return_value=1),
+            patch("netbox_librenms_plugin.jobs.ImportDevicesJob.enqueue") as mock_enqueue,
+        ):
+            response = view.post(request)
+
+        mock_enqueue.assert_not_called()
+        messages_sent = [str(m) for m in request._messages]
+        assert any("do not have permission to import" in m for m in messages_sent), messages_sent
+        assert not any("Import job started" in m for m in messages_sent), messages_sent
+        assert response.status_code in (301, 302)

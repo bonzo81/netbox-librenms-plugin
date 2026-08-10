@@ -11,32 +11,41 @@ Targets:
 from contextlib import contextmanager
 from unittest.mock import MagicMock, patch
 
+import pytest
+
+from netbox_librenms_plugin.tests.conftest import make_device, make_interface, make_virtual_chassis_members, make_vm
+from netbox_librenms_plugin.tests.view_test_helpers import (
+    grant,
+    make_request,
+    make_user_with_perms,
+    make_view,
+    message_texts,
+    missing_pk,
+)
+from netbox_librenms_plugin.tests.view_test_helpers import post as _post
+
+# Every view here is now built with a real request and a real user, so all of it needs the DB.
+pytestmark = pytest.mark.django_db
+
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
 
-def _make_iv():
+def _make_iv(request=None):
     from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
 
-    v = object.__new__(SyncInterfacesView)
-    v._librenms_api = MagicMock()
-    v._librenms_api.server_key = "default"
+    v = make_view(SyncInterfacesView, request)
     v._post_server_key = "default"
-    v.request = MagicMock()
-    v.request.POST.get = lambda k, *a: None
     v.object = MagicMock()
     return v
 
 
-def _make_dv():
+def _make_dv(request=None):
     from netbox_librenms_plugin.views.sync.interfaces import DeleteNetBoxInterfacesView
 
-    v = object.__new__(DeleteNetBoxInterfacesView)
-    v._librenms_api = MagicMock()
-    v.request = MagicMock()
-    return v
+    return make_view(DeleteNetBoxInterfacesView, request)
 
 
 @contextmanager
@@ -67,7 +76,6 @@ class TestGetRequiredPermissionsForObjectType:
         assert any(a == "add" and m is VMInterface for a, m in perms)
 
     def test_invalid_raises_http404(self):
-        import pytest
         from django.http import Http404
 
         v = _make_iv()
@@ -82,19 +90,29 @@ class TestGetRequiredPermissionsForObjectType:
 
 class TestSyncInterfacesGetObject:
     def test_device_type(self):
-        v = _make_iv()
-        mock_obj = MagicMock()
-        with patch("netbox_librenms_plugin.views.sync.interfaces.get_object_or_404", return_value=mock_obj):
-            assert v.get_object("device", 1) is mock_obj
+        dev = make_device("getobj-device")
+
+        assert _make_iv().get_object("device", dev.pk) == dev
 
     def test_vm_type(self):
-        v = _make_iv()
-        mock_obj = MagicMock()
-        with patch("netbox_librenms_plugin.views.sync.interfaces.get_object_or_404", return_value=mock_obj):
-            assert v.get_object("virtualmachine", 2) is mock_obj
+        vm = make_vm("getobj-vm")
+
+        assert _make_iv().get_object("virtualmachine", vm.pk) == vm
+
+    def test_a_device_outside_the_grant_404s(self):
+        """The pk comes from the URL, so an out-of-scope id must 404 like a missing one."""
+        from dcim.models import Device
+        from django.http import Http404
+
+        make_device("getobj-mine")
+        theirs = make_device("getobj-theirs")
+        user = make_user_with_perms("getobj-scoped", [("view", Device)], constraints={"name": "getobj-mine"})
+        v = _make_iv(make_request(user=user))
+
+        with pytest.raises(Http404):
+            v.get_object("device", theirs.pk)
 
     def test_invalid_raises_http404(self):
-        import pytest
         from django.http import Http404
 
         v = _make_iv()
@@ -182,6 +200,7 @@ class TestSyncInterfacesPost:
         with patch("netbox_librenms_plugin.views.sync.interfaces.get_interface_name_field", return_value="ifName"):
             with patch("netbox_librenms_plugin.views.sync.interfaces.reverse", return_value="/s/"):
                 with patch("netbox_librenms_plugin.views.sync.interfaces.redirect") as mr:
+                    v.request = req
                     v.post(req, "device", 1)
         mr.assert_called_once()
 
@@ -200,6 +219,7 @@ class TestSyncInterfacesPost:
         with patch("netbox_librenms_plugin.views.sync.interfaces.get_interface_name_field", return_value="ifName"):
             with patch("netbox_librenms_plugin.views.sync.interfaces.reverse", return_value="/s/"):
                 with patch("netbox_librenms_plugin.views.sync.interfaces.redirect") as mr:
+                    v.request = req
                     v.post(req, "device", 1)
         mr.assert_called_once()
 
@@ -220,6 +240,7 @@ class TestSyncInterfacesPost:
             with patch("netbox_librenms_plugin.views.sync.interfaces.reverse", return_value="/s/"):
                 with patch("netbox_librenms_plugin.views.sync.interfaces.redirect") as mr:
                     with patch("netbox_librenms_plugin.views.sync.interfaces.messages") as mm:
+                        v.request = req
                         v.post(req, "device", 1)
         v.sync_selected_interfaces.assert_called_once()
         mm.success.assert_called_once()
@@ -242,6 +263,7 @@ class TestSyncInterfacesPost:
             with patch("netbox_librenms_plugin.views.sync.interfaces.reverse", return_value="/s/"):
                 with patch("netbox_librenms_plugin.views.sync.interfaces.redirect"):
                     with patch("netbox_librenms_plugin.views.sync.interfaces.messages"):
+                        v.request = req
                         v.post(req, "virtualmachine", 2)
         v.sync_selected_interfaces.assert_called_once()
 
@@ -271,138 +293,126 @@ class TestSyncSelectedInterfaces:
 
 
 class TestSyncInterface:
-    def _v(self):
-        v = _make_iv()
+    """Which device the LibreNMS row is written to, resolved against real rows.
+
+    ``update_interface_attributes`` and ``_sync_interface_vlans`` stay stubbed: they are the
+    view's own next steps, and these tests are about target selection, not field copying.
+    """
+
+    def _v(self, request=None):
+        v = _make_iv(request)
         v.update_interface_attributes = MagicMock()
         v._sync_interface_vlans = MagicMock()
-        v.get_netbox_interface_type = MagicMock(return_value="1000base-t")
         v._lookup_maps = {}
+        v._skipped_conflicts = []
         return v
 
     def test_device_no_vc_uses_obj(self):
-        from dcim.models import Device
+        from dcim.models import Interface
 
+        dev = make_device("sync-novc")
         v = self._v()
-        obj = MagicMock(spec=Device)
-        obj.id = 1
-        obj.virtual_chassis = None
-        iface = MagicMock()
-        with patch("netbox_librenms_plugin.views.sync.interfaces.Interface") as mc:
-            mc.objects.get_or_create.return_value = (iface, True)
-            v.sync_interface(obj, {"ifName": "eth0"}, [], "ifName")
-        mc.objects.get_or_create.assert_called_once_with(device=obj, name="eth0")
+
+        v.sync_interface(dev, {"ifName": "eth0"}, [], "ifName")
+
+        assert Interface.objects.filter(device=dev, name="eth0").exists()
         v.update_interface_attributes.assert_called_once()
 
     def test_device_vc_target_in_valid_ids(self):
-        from dcim.models import Device
+        """A posted sibling of the same chassis is honoured: the interface lands on the sibling."""
+        from dcim.models import Interface
 
-        v = self._v()
-        obj = MagicMock(spec=Device)
-        obj.id = 1
-        vc = MagicMock()
-        vc.members.values_list.return_value = [1, 2, 3]
-        obj.virtual_chassis = vc
-        target = MagicMock()
-        target.id = 2
-        v.request.POST.get = lambda k, *a: "2" if k == "device_selection_eth0" else None
-        iface = MagicMock()
-        # Patch only Device.objects.get, not Device itself (isinstance must work)
-        with patch("netbox_librenms_plugin.views.sync.interfaces.Device.objects.get", return_value=target):
-            with patch("netbox_librenms_plugin.views.sync.interfaces.Interface") as mc:
-                mc.objects.get_or_create.return_value = (iface, True)
-                v.sync_interface(obj, {"ifName": "eth0"}, [], "ifName")
-        mc.objects.get_or_create.assert_called_once_with(device=target, name="eth0")
+        _vc, (host, sibling) = make_virtual_chassis_members("sync-vc-ok")
+        req = make_request("post", {"device_selection_eth0": str(sibling.pk)})
+        v = self._v(req)
 
-    def test_device_vc_target_not_in_valid_ids_falls_back(self):
-        from dcim.models import Device
+        v.sync_interface(host, {"ifName": "eth0"}, [], "ifName")
 
-        v = self._v()
-        obj = MagicMock(spec=Device)
-        obj.id = 1
-        vc = MagicMock()
-        vc.members.values_list.return_value = [1, 2, 3]
-        obj.virtual_chassis = vc
-        target = MagicMock()
-        target.id = 99
-        v.request.POST.get = lambda k, *a: "99" if k == "device_selection_eth0" else None
-        iface = MagicMock()
-        with patch("netbox_librenms_plugin.views.sync.interfaces.Device.objects.get", return_value=target):
-            with patch("netbox_librenms_plugin.views.sync.interfaces.Interface") as mc:
-                mc.objects.get_or_create.return_value = (iface, True)
-                v.sync_interface(obj, {"ifName": "eth0"}, [], "ifName")
-        mc.objects.get_or_create.assert_called_once_with(device=obj, name="eth0")
+        assert Interface.objects.filter(device=sibling, name="eth0").exists()
+        assert not Interface.objects.filter(device=host, name="eth0").exists()
 
-    def test_device_no_vc_wrong_selection_falls_back(self):
-        from dcim.models import Device
+    def test_device_vc_target_not_in_valid_ids_is_skipped(self):
+        """A device outside the chassis is refused without writing to the page device."""
+        from dcim.models import Interface
 
-        v = self._v()
-        obj = MagicMock(spec=Device)
-        obj.id = 1
-        obj.virtual_chassis = None
-        target = MagicMock()
-        target.id = 99
-        v.request.POST.get = lambda k, *a: "99" if k == "device_selection_eth0" else None
-        iface = MagicMock()
-        with patch("netbox_librenms_plugin.views.sync.interfaces.Device.objects.get", return_value=target):
-            with patch("netbox_librenms_plugin.views.sync.interfaces.Interface") as mc:
-                mc.objects.get_or_create.return_value = (iface, True)
-                v.sync_interface(obj, {"ifName": "eth0"}, [], "ifName")
-        mc.objects.get_or_create.assert_called_once_with(device=obj, name="eth0")
+        _vc, (host, _sibling) = make_virtual_chassis_members("sync-vc-outsider")
+        outsider = make_device("sync-vc-outsider-x")
+        req = make_request("post", {"device_selection_eth0": str(outsider.pk)})
+        v = self._v(req)
 
-    def test_device_selection_does_not_exist_falls_back(self):
-        from dcim.models import Device
+        v.sync_interface(host, {"ifName": "eth0"}, [], "ifName")
 
-        v = self._v()
-        obj = MagicMock(spec=Device)
-        obj.id = 1
-        obj.virtual_chassis = None
-        v.request.POST.get = lambda k, *a: "999" if k == "device_selection_eth0" else None
-        iface = MagicMock()
-        with patch(
-            "netbox_librenms_plugin.views.sync.interfaces.Device.objects.get",
-            side_effect=Device.DoesNotExist,
-        ):
-            with patch("netbox_librenms_plugin.views.sync.interfaces.Interface") as mc:
-                mc.objects.get_or_create.return_value = (iface, True)
-                v.sync_interface(obj, {"ifName": "eth0"}, [], "ifName")
-        mc.objects.get_or_create.assert_called_once_with(device=obj, name="eth0")
+        assert not Interface.objects.filter(device=host, name="eth0").exists()
+        assert not Interface.objects.filter(device=outsider, name="eth0").exists()
+        assert v._skipped_conflicts == ["eth0 (selected target unavailable)"]
+
+    def test_device_no_vc_wrong_selection_is_skipped(self):
+        from dcim.models import Interface
+
+        dev = make_device("sync-novc-self")
+        other = make_device("sync-novc-other")
+        req = make_request("post", {"device_selection_eth0": str(other.pk)})
+        v = self._v(req)
+
+        v.sync_interface(dev, {"ifName": "eth0"}, [], "ifName")
+
+        assert not Interface.objects.filter(device=dev, name="eth0").exists()
+        assert not Interface.objects.filter(device=other, name="eth0").exists()
+        assert v._skipped_conflicts == ["eth0 (selected target unavailable)"]
+
+    def test_device_selection_does_not_exist_is_skipped(self):
+        from dcim.models import Device, Interface
+
+        dev = make_device("sync-gone")
+        absent_pk = missing_pk(Device)
+        req = make_request("post", {"device_selection_eth0": str(absent_pk)})
+        v = self._v(req)
+
+        v.sync_interface(dev, {"ifName": "eth0"}, [], "ifName")
+
+        assert not Interface.objects.filter(device=dev, name="eth0").exists()
+        assert v._skipped_conflicts == ["eth0 (selected target unavailable)"]
+
+    def test_device_selection_outside_the_grant_is_skipped(self):
+        """The posted id is client-supplied, so a constrained grant must not reach the sibling."""
+        from dcim.models import Device, Interface
+
+        _vc, (host, sibling) = make_virtual_chassis_members("sync-vc-scoped")
+        user = make_user_with_perms("sync-scoped", [("view", Device)], constraints={"name": "sync-vc-scoped-m1"})
+        req = make_request("post", {"device_selection_eth0": str(sibling.pk)}, user=user)
+        v = self._v(req)
+
+        v.sync_interface(host, {"ifName": "eth0"}, [], "ifName")
+
+        assert not Interface.objects.filter(device=host, name="eth0").exists()
+        assert not Interface.objects.filter(device=sibling, name="eth0").exists()
+        assert v._skipped_conflicts == ["eth0 (selected target unavailable)"]
 
     def test_vm_uses_vminterface(self):
-        from virtualization.models import VirtualMachine
+        from virtualization.models import VMInterface
 
+        vm = make_vm("sync-vm")
         v = self._v()
-        obj = MagicMock(spec=VirtualMachine)
-        iface = MagicMock()
-        with patch("netbox_librenms_plugin.views.sync.interfaces.VMInterface") as mc:
-            mc.objects.get_or_create.return_value = (iface, True)
-            v.sync_interface(obj, {"ifName": "eth0"}, [], "ifName")
-        mc.objects.get_or_create.assert_called_once_with(virtual_machine=obj, name="eth0")
+
+        v.sync_interface(vm, {"ifName": "eth0"}, [], "ifName")
+
+        assert VMInterface.objects.filter(virtual_machine=vm, name="eth0").exists()
         v.update_interface_attributes.assert_called_once()
 
     def test_vlans_excluded_skips_sync(self):
-        from dcim.models import Device
-
+        dev = make_device("sync-novlan")
         v = self._v()
-        obj = MagicMock(spec=Device)
-        obj.id = 1
-        obj.virtual_chassis = None
-        iface = MagicMock()
-        with patch("netbox_librenms_plugin.views.sync.interfaces.Interface") as mc:
-            mc.objects.get_or_create.return_value = (iface, True)
-            v.sync_interface(obj, {"ifName": "eth0"}, ["vlans"], "ifName")
+
+        v.sync_interface(dev, {"ifName": "eth0"}, ["vlans"], "ifName")
+
         v._sync_interface_vlans.assert_not_called()
 
     def test_vlans_not_excluded_calls_sync(self):
-        from dcim.models import Device
-
+        dev = make_device("sync-vlan")
         v = self._v()
-        obj = MagicMock(spec=Device)
-        obj.id = 1
-        obj.virtual_chassis = None
-        iface = MagicMock()
-        with patch("netbox_librenms_plugin.views.sync.interfaces.Interface") as mc:
-            mc.objects.get_or_create.return_value = (iface, True)
-            v.sync_interface(obj, {"ifName": "eth0"}, [], "ifName")
+
+        v.sync_interface(dev, {"ifName": "eth0"}, [], "ifName")
+
         v._sync_interface_vlans.assert_called_once()
 
 
@@ -412,51 +422,48 @@ class TestSyncInterface:
 
 
 class TestGetNetboxInterfaceType:
+    """Type selection driven by real InterfaceTypeMapping rows and the real speed filters."""
+
+    @staticmethod
+    def _mapping(librenms_type, netbox_type, speed=None):
+        from netbox_librenms_plugin.models import InterfaceTypeMapping
+
+        return InterfaceTypeMapping.objects.create(
+            librenms_type=librenms_type, netbox_type=netbox_type, librenms_speed=speed
+        )
+
     def test_speed_mapping_found(self):
-        v = _make_iv()
-        mm = MagicMock()
-        mm.netbox_type = "1000base-t"
-        with patch("netbox_librenms_plugin.views.sync.interfaces.convert_speed_to_kbps", return_value=1000000):
-            with patch("netbox_librenms_plugin.views.sync.interfaces.InterfaceTypeMapping") as mc:
-                qs = MagicMock()
-                mc.objects.filter.return_value = qs
-                qs.filter.return_value.order_by.return_value.first.return_value = mm
-                result = v.get_netbox_interface_type({"ifType": "ethernetCsmacd", "ifSpeed": 1000000000})
+        """The highest speed row at or below the port's speed wins over the catch-all."""
+        self._mapping("ethernetCsmacd", "virtual")  # NULL-speed catch-all
+        self._mapping("ethernetCsmacd", "100base-tx", speed=100000)
+        self._mapping("ethernetCsmacd", "1000base-t", speed=1000000)
+        self._mapping("ethernetCsmacd", "10gbase-x-sfpp", speed=10000000)  # above the port speed
+
+        result = _make_iv().get_netbox_interface_type({"ifType": "ethernetCsmacd", "ifSpeed": 1000000000})
+
         assert result == "1000base-t"
 
     def test_speed_not_found_falls_back_to_null(self):
-        v = _make_iv()
-        null_m = MagicMock()
-        null_m.netbox_type = "null-type"
-        with patch("netbox_librenms_plugin.views.sync.interfaces.convert_speed_to_kbps", return_value=1000000):
-            with patch("netbox_librenms_plugin.views.sync.interfaces.InterfaceTypeMapping") as mc:
-                qs = MagicMock()
-                mc.objects.filter.return_value = qs
-                qs.filter.return_value.order_by.return_value.first.return_value = None
-                qs.filter.return_value.first.return_value = null_m
-                result = v.get_netbox_interface_type({"ifType": "ethernetCsmacd", "ifSpeed": 1000000000})
-        assert result == "null-type"
+        """No speed row at or below the port's speed → the NULL-speed row for that type."""
+        self._mapping("ethernetCsmacd", "virtual")
+        self._mapping("ethernetCsmacd", "10gbase-x-sfpp", speed=10000000)
+
+        result = _make_iv().get_netbox_interface_type({"ifType": "ethernetCsmacd", "ifSpeed": 1000000})
+
+        assert result == "virtual"
 
     def test_no_speed_uses_null_mapping(self):
-        v = _make_iv()
-        m = MagicMock()
-        m.netbox_type = "virtual"
-        with patch("netbox_librenms_plugin.views.sync.interfaces.convert_speed_to_kbps", return_value=None):
-            with patch("netbox_librenms_plugin.views.sync.interfaces.InterfaceTypeMapping") as mc:
-                qs = MagicMock()
-                mc.objects.filter.return_value = qs
-                qs.filter.return_value.first.return_value = m
-                result = v.get_netbox_interface_type({"ifType": "eth", "ifSpeed": None})
+        self._mapping("softwareLoopback", "virtual")
+
+        result = _make_iv().get_netbox_interface_type({"ifType": "softwareLoopback", "ifSpeed": None})
+
         assert result == "virtual"
 
     def test_no_mapping_returns_other(self):
-        v = _make_iv()
-        with patch("netbox_librenms_plugin.views.sync.interfaces.convert_speed_to_kbps", return_value=None):
-            with patch("netbox_librenms_plugin.views.sync.interfaces.InterfaceTypeMapping") as mc:
-                qs = MagicMock()
-                mc.objects.filter.return_value = qs
-                qs.filter.return_value.first.return_value = None
-                result = v.get_netbox_interface_type({"ifType": "unknown", "ifSpeed": None})
+        self._mapping("ethernetCsmacd", "virtual")  # a mapping exists, but not for this type
+
+        result = _make_iv().get_netbox_interface_type({"ifType": "unknown", "ifSpeed": None})
+
         assert result == "other"
 
 
@@ -520,7 +527,6 @@ class TestDeleteGetRequiredPermissions:
         assert any(a == "delete" and m is VMInterface for a, m in perms)
 
     def test_invalid_raises_http404(self):
-        import pytest
         from django.http import Http404
 
         v = _make_dv()
@@ -534,244 +540,185 @@ class TestDeleteGetRequiredPermissions:
 
 
 class TestDeleteNetBoxInterfacesPost:
-    def test_permission_denied(self):
-        v = _make_dv()
-        err = MagicMock()
-        v.require_all_permissions_json = MagicMock(return_value=err)
-        v.get_required_permissions_for_object_type = MagicMock(return_value=[])
-        req = MagicMock()
-        req.POST.getlist.return_value = ["1"]
-        assert v.post(req, "device", 1) is err
+    """The delete endpoint against real interfaces: every count is a real row disappearing."""
 
-    def test_invalid_object_type_400(self):
-        v = _make_dv()
-        v.require_all_permissions_json = MagicMock(return_value=None)
-        v.get_required_permissions_for_object_type = MagicMock(return_value=[])
-        req = MagicMock()
-        req.POST.getlist.return_value = ["1"]
-        resp = v.post(req, "rack", 1)
-        assert resp.status_code == 400
+    @staticmethod
+    def _payload(response):
+        import json
+
+        return json.loads(response.content)
+
+    def test_permission_denied(self):
+        """Without delete_interface nothing is removed and the JSON gate refuses."""
+        from dcim.models import Device, Interface
+
+        dev = make_device("del-denied")
+        iface = make_interface(dev, "eth0")
+        user = make_user_with_perms("del-viewer", [("view", Device), ("view", Interface)])
+        req = make_request("post", {"interface_ids": [str(iface.pk)]}, user=user)
+
+        response = _post(_make_dv(req), req, object_type="device", object_id=dev.pk)
+
+        assert response.status_code == 403
+        assert Interface.objects.filter(pk=iface.pk).exists()
+
+    def test_invalid_object_type_raises_http404(self):
+        """get_required_permissions_for_object_type rejects the type before any lookup."""
+        from django.http import Http404
+
+        req = make_request("post", {"interface_ids": ["1"]})
+
+        with pytest.raises(Http404):
+            _post(_make_dv(req), req, object_type="rack", object_id=1)
 
     def test_no_ids_400(self):
-        v = _make_dv()
-        v.require_all_permissions_json = MagicMock(return_value=None)
-        v.get_required_permissions_for_object_type = MagicMock(return_value=[])
-        req = MagicMock()
-        req.POST.getlist.return_value = []
-        with patch("netbox_librenms_plugin.views.sync.interfaces.get_object_or_404"):
-            resp = v.post(req, "device", 1)
-        assert resp.status_code == 400
+        dev = make_device("del-noids")
+        req = make_request("post", {})
+
+        response = _post(_make_dv(req), req, object_type="device", object_id=dev.pk)
+
+        assert response.status_code == 400
 
     def test_device_successful_delete(self):
-        import json
+        from dcim.models import Interface
 
-        v = _make_dv()
-        v.require_all_permissions_json = MagicMock(return_value=None)
-        v.get_required_permissions_for_object_type = MagicMock(return_value=[])
-        obj = MagicMock()
-        obj.id = 1
-        obj.virtual_chassis = None
-        iface = MagicMock()
-        iface.name = "eth0"
-        iface.device_id = 1
-        req = MagicMock()
-        req.POST.getlist.side_effect = lambda k: ["10"] if k == "interface_ids" else []
-        with patch("netbox_librenms_plugin.views.sync.interfaces.get_object_or_404", return_value=obj):
-            with patch("netbox_librenms_plugin.views.sync.interfaces.Interface") as mc:
-                mc.objects.get.return_value = iface
-                with patch("netbox_librenms_plugin.views.sync.interfaces.transaction") as mt:
-                    mt.atomic = _pa
-                    resp = v.post(req, "device", 1)
-        data = json.loads(resp.content)
-        assert data["deleted_count"] == 1
-        iface.delete.assert_called_once()
+        dev = make_device("del-ok")
+        iface = make_interface(dev, "eth0")
+        req = make_request("post", {"interface_ids": [str(iface.pk)]})
+
+        response = _post(_make_dv(req), req, object_type="device", object_id=dev.pk)
+
+        assert self._payload(response)["deleted_count"] == 1
+        assert not Interface.objects.filter(pk=iface.pk).exists()
 
     def test_device_wrong_device_id_error(self):
-        import json
+        from dcim.models import Interface
 
-        v = _make_dv()
-        v.require_all_permissions_json = MagicMock(return_value=None)
-        v.get_required_permissions_for_object_type = MagicMock(return_value=[])
-        obj = MagicMock()
-        obj.id = 1
-        obj.virtual_chassis = None
-        iface = MagicMock()
-        iface.name = "eth0"
-        iface.device_id = 99
-        req = MagicMock()
-        req.POST.getlist.side_effect = lambda k: ["10"] if k == "interface_ids" else []
-        with patch("netbox_librenms_plugin.views.sync.interfaces.get_object_or_404", return_value=obj):
-            with patch("netbox_librenms_plugin.views.sync.interfaces.Interface") as mc:
-                mc.objects.get.return_value = iface
-                with patch("netbox_librenms_plugin.views.sync.interfaces.transaction") as mt:
-                    mt.atomic = _pa
-                    resp = v.post(req, "device", 1)
-        data = json.loads(resp.content)
+        dev = make_device("del-owner")
+        other = make_device("del-other")
+        stranger = make_interface(other, "eth0")
+        req = make_request("post", {"interface_ids": [str(stranger.pk)]})
+
+        response = _post(_make_dv(req), req, object_type="device", object_id=dev.pk)
+
+        data = self._payload(response)
         assert data["deleted_count"] == 0
-        assert len(data["errors"]) > 0
+        assert any("does not belong to this device" in e for e in data["errors"])
+        assert Interface.objects.filter(pk=stranger.pk).exists()
+
+    def test_interface_outside_the_grant_is_reported_not_deleted(self):
+        """The interface id is client-supplied, so a constrained delete grant must fail closed."""
+        from dcim.models import Device, Interface
+
+        dev = make_device("del-scoped")
+        keep = make_interface(dev, "eth0")
+        make_interface(dev, "eth1")
+        user = make_user_with_perms("del-scoped-user", [("view", Device)])
+        user = grant(user, "delete", Interface, constraints={"name": "eth1"})
+        req = make_request("post", {"interface_ids": [str(keep.pk)]}, user=user)
+
+        response = _post(_make_dv(req), req, object_type="device", object_id=dev.pk)
+
+        data = self._payload(response)
+        assert data["deleted_count"] == 0
+        assert any(f"Interface with ID {keep.pk} not found" in e for e in data["errors"])
+        assert Interface.objects.filter(pk=keep.pk).exists()
 
     def test_device_vc_interface_not_in_members(self):
-        import json
+        from dcim.models import Interface, VirtualChassis
 
-        v = _make_dv()
-        v.require_all_permissions_json = MagicMock(return_value=None)
-        v.get_required_permissions_for_object_type = MagicMock(return_value=[])
-        obj = MagicMock()
-        obj.id = 1
-        vc = MagicMock()
-        m1 = MagicMock()
-        m1.id = 1
-        m2 = MagicMock()
-        m2.id = 2
-        vc.members.all.return_value = [m1, m2]
-        obj.virtual_chassis = vc
-        iface = MagicMock()
-        iface.name = "eth0"
-        iface.device_id = 99
-        req = MagicMock()
-        req.POST.getlist.side_effect = lambda k: ["10"] if k == "interface_ids" else []
-        with patch("netbox_librenms_plugin.views.sync.interfaces.get_object_or_404", return_value=obj):
-            with patch("netbox_librenms_plugin.views.sync.interfaces.Interface") as mc:
-                mc.objects.get.return_value = iface
-                with patch("netbox_librenms_plugin.views.sync.interfaces.transaction") as mt:
-                    mt.atomic = _pa
-                    resp = v.post(req, "device", 1)
-        data = json.loads(resp.content)
+        vc = VirtualChassis.objects.create(name="vc-del")
+        host = make_device("del-vc-host")
+        host.virtual_chassis = vc
+        host.vc_position = 1
+        host.save()
+        outsider = make_device("del-vc-outsider")
+        stranger = make_interface(outsider, "eth0")
+        req = make_request("post", {"interface_ids": [str(stranger.pk)]})
+
+        response = _post(_make_dv(req), req, object_type="device", object_id=host.pk)
+
+        data = self._payload(response)
         assert data["deleted_count"] == 0
-        assert len(data["errors"]) > 0
+        assert any("virtual chassis" in e for e in data["errors"])
+        assert Interface.objects.filter(pk=stranger.pk).exists()
 
     def test_device_vc_interface_in_members_deleted(self):
-        import json
+        """An interface on a sibling of the same chassis is in scope and is removed."""
+        from dcim.models import Interface, VirtualChassis
 
-        v = _make_dv()
-        v.require_all_permissions_json = MagicMock(return_value=None)
-        v.get_required_permissions_for_object_type = MagicMock(return_value=[])
-        obj = MagicMock()
-        obj.id = 1
-        vc = MagicMock()
-        m1 = MagicMock()
-        m1.id = 1
-        m2 = MagicMock()
-        m2.id = 2
-        vc.members.all.return_value = [m1, m2]
-        obj.virtual_chassis = vc
-        iface = MagicMock()
-        iface.name = "eth0"
-        iface.device_id = 2
-        req = MagicMock()
-        req.POST.getlist.side_effect = lambda k: ["10"] if k == "interface_ids" else []
-        with patch("netbox_librenms_plugin.views.sync.interfaces.get_object_or_404", return_value=obj):
-            with patch("netbox_librenms_plugin.views.sync.interfaces.Interface") as mc:
-                mc.objects.get.return_value = iface
-                with patch("netbox_librenms_plugin.views.sync.interfaces.transaction") as mt:
-                    mt.atomic = _pa
-                    resp = v.post(req, "device", 1)
-        data = json.loads(resp.content)
-        assert data["deleted_count"] == 1
+        vc = VirtualChassis.objects.create(name="vc-del-ok")
+        host = make_device("del-vcok-host")
+        host.virtual_chassis = vc
+        host.vc_position = 1
+        host.save()
+        sibling = make_device("del-vcok-member")
+        sibling.virtual_chassis = vc
+        sibling.vc_position = 2
+        sibling.save()
+        iface = make_interface(sibling, "eth0")
+        req = make_request("post", {"interface_ids": [str(iface.pk)]})
+
+        response = _post(_make_dv(req), req, object_type="device", object_id=host.pk)
+
+        assert self._payload(response)["deleted_count"] == 1
+        assert not Interface.objects.filter(pk=iface.pk).exists()
 
     def test_vm_successful_delete(self):
-        import json
+        from virtualization.models import VMInterface
 
-        v = _make_dv()
-        v.require_all_permissions_json = MagicMock(return_value=None)
-        v.get_required_permissions_for_object_type = MagicMock(return_value=[])
-        obj = MagicMock()
-        obj.id = 5
-        iface = MagicMock()
-        iface.name = "eth0"
-        iface.virtual_machine_id = 5
-        req = MagicMock()
-        req.POST.getlist.side_effect = lambda k: ["20"] if k == "interface_ids" else []
-        with patch("netbox_librenms_plugin.views.sync.interfaces.get_object_or_404", return_value=obj):
-            with patch("netbox_librenms_plugin.views.sync.interfaces.VMInterface") as mc:
-                mc.objects.get.return_value = iface
-                with patch("netbox_librenms_plugin.views.sync.interfaces.transaction") as mt:
-                    mt.atomic = _pa
-                    resp = v.post(req, "virtualmachine", 5)
-        data = json.loads(resp.content)
-        assert data["deleted_count"] == 1
-        iface.delete.assert_called_once()
+        vm = make_vm("del-vm")
+        iface = VMInterface.objects.create(virtual_machine=vm, name="eth0")
+        req = make_request("post", {"interface_ids": [str(iface.pk)]})
+
+        response = _post(_make_dv(req), req, object_type="virtualmachine", object_id=vm.pk)
+
+        assert self._payload(response)["deleted_count"] == 1
+        assert not VMInterface.objects.filter(pk=iface.pk).exists()
 
     def test_vm_wrong_vm_error(self):
-        import json
+        from virtualization.models import VMInterface
 
-        v = _make_dv()
-        v.require_all_permissions_json = MagicMock(return_value=None)
-        v.get_required_permissions_for_object_type = MagicMock(return_value=[])
-        obj = MagicMock()
-        obj.id = 5
-        iface = MagicMock()
-        iface.name = "eth0"
-        iface.virtual_machine_id = 99
-        req = MagicMock()
-        req.POST.getlist.side_effect = lambda k: ["20"] if k == "interface_ids" else []
-        with patch("netbox_librenms_plugin.views.sync.interfaces.get_object_or_404", return_value=obj):
-            with patch("netbox_librenms_plugin.views.sync.interfaces.VMInterface") as mc:
-                mc.objects.get.return_value = iface
-                with patch("netbox_librenms_plugin.views.sync.interfaces.transaction") as mt:
-                    mt.atomic = _pa
-                    resp = v.post(req, "virtualmachine", 5)
-        data = json.loads(resp.content)
+        vm = make_vm("del-vm-owner")
+        other = make_vm("del-vm-other")
+        stranger = VMInterface.objects.create(virtual_machine=other, name="eth0")
+        req = make_request("post", {"interface_ids": [str(stranger.pk)]})
+
+        response = _post(_make_dv(req), req, object_type="virtualmachine", object_id=vm.pk)
+
+        data = self._payload(response)
         assert data["deleted_count"] == 0
-        assert len(data["errors"]) > 0
+        assert any("does not belong to this virtual machine" in e for e in data["errors"])
+        assert VMInterface.objects.filter(pk=stranger.pk).exists()
 
     def test_interface_not_found_adds_error(self):
-        import json
         from dcim.models import Interface
-        from virtualization.models import VMInterface as VMI
 
-        v = _make_dv()
-        v.require_all_permissions_json = MagicMock(return_value=None)
-        v.get_required_permissions_for_object_type = MagicMock(return_value=[])
-        obj = MagicMock()
-        obj.id = 1
-        obj.virtual_chassis = None
-        req = MagicMock()
-        req.POST.getlist.side_effect = lambda k: ["999"] if k == "interface_ids" else []
-        with patch("netbox_librenms_plugin.views.sync.interfaces.get_object_or_404", return_value=obj):
-            with patch("netbox_librenms_plugin.views.sync.interfaces.Interface") as mc:
-                mc.DoesNotExist = Interface.DoesNotExist
-                mc.objects.get.side_effect = Interface.DoesNotExist
-                with patch("netbox_librenms_plugin.views.sync.interfaces.VMInterface") as mvc:
-                    mvc.DoesNotExist = VMI.DoesNotExist
-                    with patch("netbox_librenms_plugin.views.sync.interfaces.transaction") as mt:
-                        mt.atomic = _pa
-                        resp = v.post(req, "device", 1)
-        data = json.loads(resp.content)
-        assert any("999" in e for e in data.get("errors", []))
+        dev = make_device("del-missing")
+        gone_pk = missing_pk(Interface)
+        req = make_request("post", {"interface_ids": [str(gone_pk)]})
+
+        response = _post(_make_dv(req), req, object_type="device", object_id=dev.pk)
+
+        assert any(str(gone_pk) in e for e in self._payload(response)["errors"])
 
     def test_response_with_errors_includes_error_message(self):
-        import json
+        """A mixed batch deletes what it may and reports the rest — in one transaction."""
+        from dcim.models import Interface
 
-        v = _make_dv()
-        v.require_all_permissions_json = MagicMock(return_value=None)
-        v.get_required_permissions_for_object_type = MagicMock(return_value=[])
-        obj = MagicMock()
-        obj.id = 1
-        obj.virtual_chassis = None
-        iface_ok = MagicMock()
-        iface_ok.name = "eth0"
-        iface_ok.device_id = 1
-        iface_bad = MagicMock()
-        iface_bad.name = "eth1"
-        iface_bad.device_id = 99
-        n = [0]
+        dev = make_device("del-mixed")
+        other = make_device("del-mixed-other")
+        mine = make_interface(dev, "eth0")
+        stranger = make_interface(other, "eth1")
+        req = make_request("post", {"interface_ids": [str(mine.pk), str(stranger.pk)]})
 
-        def get_se(**kw):
-            n[0] += 1
-            return iface_ok if n[0] == 1 else iface_bad
+        response = _post(_make_dv(req), req, object_type="device", object_id=dev.pk)
 
-        req = MagicMock()
-        req.POST.getlist.side_effect = lambda k: ["10", "20"] if k == "interface_ids" else []
-        with patch("netbox_librenms_plugin.views.sync.interfaces.get_object_or_404", return_value=obj):
-            with patch("netbox_librenms_plugin.views.sync.interfaces.Interface") as mc:
-                mc.objects.get.side_effect = get_se
-                with patch("netbox_librenms_plugin.views.sync.interfaces.transaction") as mt:
-                    mt.atomic = _pa
-                    resp = v.post(req, "device", 1)
-        data = json.loads(resp.content)
+        data = self._payload(response)
         assert data["deleted_count"] == 1
         assert "error(s)" in data["message"]
+        assert not Interface.objects.filter(pk=mine.pk).exists()
+        assert Interface.objects.filter(pk=stranger.pk).exists()
 
 
 # ===========================================================================
@@ -880,39 +827,39 @@ class TestSyncSiteLocationViewGetContextData:
 
 
 class TestSyncSiteLocationViewGetQuerysetSuccess:
-    def test_returns_sync_data(self):
-        """Lines 44, 49: build sync_data list and return it."""
+    def _view(self, get_params, locations):
+        """The real view over the real Site table, with only the LibreNMS locations call stubbed."""
         from netbox_librenms_plugin.views.sync.locations import SyncSiteLocationView
 
-        v = object.__new__(SyncSiteLocationView)
-        v.request = MagicMock()
-        v.request.GET = {}
-        v.filterset = None
-        sd = MagicMock()
-        with patch("netbox_librenms_plugin.views.sync.locations.Site") as ms:
-            ms.objects.all.return_value = [MagicMock()]
-            with patch.object(v, "get_librenms_locations", return_value=(True, [{"location": "T"}])):
-                with patch.object(v, "create_sync_data", return_value=sd):
-                    result = v.get_queryset()
-        assert result == [sd]
+        v = make_view(SyncSiteLocationView, make_request("get", get_params))
+        v._librenms_api.get_locations.return_value = (True, locations)
+        return v
+
+    def test_returns_sync_data(self):
+        """One SyncData row per real Site, paired with its LibreNMS location."""
+        from dcim.models import Site
+
+        Site.objects.create(name="Loc Site A", slug="loc-site-a")
+        Site.objects.create(name="Loc Site B", slug="loc-site-b")
+        v = self._view({}, [{"location": "Loc Site A"}])
+
+        result = v.get_queryset()
+
+        assert {row.netbox_site.name for row in result} == set(Site.objects.values_list("name", flat=True))
+        matched = next(row for row in result if row.netbox_site.name == "Loc Site A")
+        assert matched.librenms_location == {"location": "Loc Site A"}
 
     def test_filterset_branch(self):
-        """Lines 46-47: filterset branch when request.GET is truthy."""
-        from netbox_librenms_plugin.views.sync.locations import SyncSiteLocationView
+        """A GET query narrows the rows through the real SiteLocationFilterSet."""
+        from dcim.models import Site
 
-        v = object.__new__(SyncSiteLocationView)
-        v.request = MagicMock()
-        v.request.GET = {"name": "x"}
-        mf = MagicMock()
-        filtered = [MagicMock()]
-        mf.return_value.qs = filtered
-        v.filterset = mf
-        with patch("netbox_librenms_plugin.views.sync.locations.Site") as ms:
-            ms.objects.all.return_value = [MagicMock()]
-            with patch.object(v, "get_librenms_locations", return_value=(True, [{"location": "T"}])):
-                with patch.object(v, "create_sync_data", return_value=MagicMock()):
-                    result = v.get_queryset()
-        assert result is filtered
+        Site.objects.create(name="Filter Hit", slug="filter-hit")
+        Site.objects.create(name="Filter Miss", slug="filter-miss")
+        v = self._view({"q": "Hit"}, [{"location": "Filter Hit"}])
+
+        result = v.get_queryset()
+
+        assert [row.netbox_site.name for row in result] == ["Filter Hit"]
 
 
 # ===========================================================================
@@ -921,60 +868,44 @@ class TestSyncSiteLocationViewGetQuerysetSuccess:
 
 
 class TestVlansGroupedUpdateAndSkip:
-    def _v(self):
+    def _setup(self, tag, cached_name, existing_name):
+        """A real grouped VLAN plus a request selecting it; returns (view, request, device, vlan)."""
+        from django.core.cache import cache
+        from ipam.models import VLAN, VLANGroup
+
         from netbox_librenms_plugin.views.sync.vlans import SyncVLANsView
 
-        v = object.__new__(SyncVLANsView)
-        v._librenms_api = MagicMock()
-        v._librenms_api.server_key = "default"
-        v._post_server_key = "default"
-        v.get_cache_key = MagicMock(return_value="k")
-        v._redirect = MagicMock(return_value=MagicMock())
-        req = MagicMock()
-        req.POST.getlist = lambda k: ["100"] if k == "select" else []
-        req.POST.get = lambda key, default="": "3" if key == "vlan_group_100" else default
-        v.request = req
-        return v
+        group = VLANGroup.objects.create(name=f"grp-{tag}", slug=f"grp-{tag}")
+        vlan = VLAN.objects.create(vid=100, group=group, name=existing_name, status="active")
+        dev = make_device(f"vlan-{tag}")
+        req = make_request("post", {"select": ["100"], "vlan_group_100": str(group.pk)})
+        view = make_view(SyncVLANsView, req)
+        view._post_server_key = "default"
+        cache.set(
+            view.get_cache_key(dev, "vlans", "default"),
+            [{"vlan_vlan": 100, "vlan_name": cached_name}],
+        )
+        return view, req, dev, vlan
 
-    def test_grouped_update_path_lines_134_to_137(self):
-        """elif vlan.name != librenms_name: update triggered."""
-        from ipam.models import VLANGroup
+    def test_grouped_vlan_with_different_name_is_renamed(self):
+        """A grouped VLAN whose LibreNMS name differs is renamed and persisted."""
+        from ipam.models import VLAN
 
-        v = self._v()
-        mg = MagicMock()
-        mv = MagicMock()
-        mv.name = "OldName"
-        with patch("netbox_librenms_plugin.views.sync.vlans.cache") as mc:
-            mc.get.return_value = [{"vlan_vlan": 100, "vlan_name": "NewName"}]
-            with patch("netbox_librenms_plugin.views.sync.vlans.VLANGroup") as mvg:
-                mvg.DoesNotExist = VLANGroup.DoesNotExist
-                mvg.objects.get.return_value = mg
-                with patch("netbox_librenms_plugin.views.sync.vlans.VLAN") as mvl:
-                    mvl.objects.get_or_create.return_value = (mv, False)
-                    with patch("netbox_librenms_plugin.views.sync.vlans.transaction"):
-                        with patch("netbox_librenms_plugin.views.sync.vlans.messages") as mm:
-                            v._handle_create_vlans(v.request, MagicMock(), "device", 1)
-        mv.save.assert_called_once()
-        assert mv.name == "NewName"
-        assert "updated" in str(mm.success.call_args)
+        view, req, dev, vlan = self._setup("update", cached_name="NewName", existing_name="OldName")
 
-    def test_grouped_skip_path_lines_138_to_139(self):
-        """else: skipped_count when name unchanged."""
-        from ipam.models import VLANGroup
+        view._handle_create_vlans(req, dev, "device", dev.pk)
 
-        v = self._v()
-        mg = MagicMock()
-        mv = MagicMock()
-        mv.name = "Same"
-        with patch("netbox_librenms_plugin.views.sync.vlans.cache") as mc:
-            mc.get.return_value = [{"vlan_vlan": 100, "vlan_name": "Same"}]
-            with patch("netbox_librenms_plugin.views.sync.vlans.VLANGroup") as mvg:
-                mvg.DoesNotExist = VLANGroup.DoesNotExist
-                mvg.objects.get.return_value = mg
-                with patch("netbox_librenms_plugin.views.sync.vlans.VLAN") as mvl:
-                    mvl.objects.get_or_create.return_value = (mv, False)
-                    with patch("netbox_librenms_plugin.views.sync.vlans.transaction"):
-                        with patch("netbox_librenms_plugin.views.sync.vlans.messages") as mm:
-                            v._handle_create_vlans(v.request, MagicMock(), "device", 1)
-        mv.save.assert_not_called()
-        assert "unchanged" in str(mm.success.call_args)
+        assert VLAN.objects.get(pk=vlan.pk).name == "NewName"
+        assert any("updated" in t for t in message_texts(req, "success"))
+
+    def test_grouped_vlan_with_matching_name_is_unchanged(self):
+        """A grouped VLAN already carrying the LibreNMS name is left untouched."""
+        from ipam.models import VLAN
+
+        view, req, dev, vlan = self._setup("skip", cached_name="Same", existing_name="Same")
+        last_updated = VLAN.objects.get(pk=vlan.pk).last_updated
+
+        view._handle_create_vlans(req, dev, "device", dev.pk)
+
+        assert VLAN.objects.get(pk=vlan.pk).last_updated == last_updated
+        assert any("unchanged" in t for t in message_texts(req, "success"))

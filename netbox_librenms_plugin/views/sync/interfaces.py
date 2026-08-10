@@ -6,7 +6,7 @@ from django.contrib import messages
 from django.core.cache import cache
 from django.db import transaction
 from django.http import Http404, JsonResponse
-from django.shortcuts import get_object_or_404, redirect
+from django.shortcuts import redirect
 from django.urls import reverse
 from django.views import View
 from virtualization.models import VirtualMachine, VMInterface
@@ -39,10 +39,12 @@ class SyncInterfacesView(
 
     def get_required_permissions_for_object_type(self, object_type):
         """Return the required permissions based on object type."""
+        # The owner is resolved through a restricted queryset (get_object), so its view
+        # permission is stated here: a missing grant is an explicit 403, not a 404.
         if object_type == "device":
-            return [("add", Interface), ("change", Interface)]
+            return [("view", Device), ("add", Interface), ("change", Interface)]
         elif object_type == "virtualmachine":
-            return [("add", VMInterface), ("change", VMInterface)]
+            return [("view", VirtualMachine), ("add", VMInterface), ("change", VMInterface)]
         else:
             raise Http404(f"Invalid object type: {object_type}")
 
@@ -114,20 +116,17 @@ class SyncInterfacesView(
             skipped = ", ".join(self._skipped_conflicts)
             messages.warning(
                 request,
-                # Generic reason: the skip list covers both "port already mapped to a different
-                # interface" and ambiguous-port_id cases, so don't claim a single cause.
-                f"{len(self._skipped_conflicts)} interface(s) skipped — their LibreNMS port could not "
-                f"be safely matched to a NetBox interface (already mapped elsewhere, or ambiguous): {skipped}.",
+                f"{len(self._skipped_conflicts)} interface(s) skipped: {skipped}.",
             )
         messages.success(request, "Selected interfaces synced successfully.")
         return redirect(redirect_url)
 
     def get_object(self, object_type, object_id):
-        """Return the Device or VirtualMachine for the given type and ID."""
+        """Return the Device or VirtualMachine for the given type and ID (object-scoped)."""
         if object_type == "device":
-            return get_object_or_404(Device, pk=object_id)
+            return self.restrict_object_or_404(Device, pk=object_id)
         if object_type == "virtualmachine":
-            return get_object_or_404(VirtualMachine, pk=object_id)
+            return self.restrict_object_or_404(VirtualMachine, pk=object_id)
         raise Http404("Invalid object type.")
 
     def get_selected_interfaces(self, request, interface_name_field):
@@ -206,16 +205,21 @@ class SyncInterfacesView(
 
             if selected_device_id:
                 try:
-                    target_device = Device.objects.get(id=selected_device_id)
+                    target_device = self.restricted_queryset(Device).get(id=selected_device_id)
                     # Validate the target is the current device or a VC member
                     if hasattr(obj, "virtual_chassis") and obj.virtual_chassis:
                         valid_ids = set(obj.virtual_chassis.members.values_list("id", flat=True))
                         if target_device.id not in valid_ids:
-                            target_device = obj
+                            self._record_skipped_conflict(interface_name, "selected target unavailable")
+                            return
                     elif target_device.id != obj.id:
-                        target_device = obj
+                        self._record_skipped_conflict(interface_name, "selected target unavailable")
+                        return
                 except (Device.DoesNotExist, ValueError, TypeError):
-                    target_device = obj
+                    # The user explicitly selected a target. If it is stale or outside the
+                    # caller's grant, do not silently sync the row onto the page device.
+                    self._record_skipped_conflict(interface_name, "selected target unavailable")
+                    return
             else:
                 target_device = obj
 
@@ -234,9 +238,7 @@ class SyncInterfacesView(
             )
             # Record for the user-facing summary in post(). Defensive getattr: sync_interface
             # may be exercised directly (without post() initialising the list).
-            skipped = getattr(self, "_skipped_conflicts", None)
-            if skipped is not None:
-                skipped.append(interface_name or "(unnamed)")
+            self._record_skipped_conflict(interface_name, "port already mapped elsewhere or ambiguous")
             return
 
         netbox_type = None
@@ -254,6 +256,12 @@ class SyncInterfacesView(
         # Sync VLANs if not excluded
         if "vlans" not in exclude_columns:
             self._sync_interface_vlans(interface, librenms_interface, interface_name)
+
+    def _record_skipped_conflict(self, interface_name, reason):
+        """Record a row that cannot be synced to its requested target."""
+        skipped = getattr(self, "_skipped_conflicts", None)
+        if skipped is not None:
+            skipped.append(f"{interface_name or '(unnamed)'} ({reason})")
 
     def _resolve_device_interface(self, target_device, interface_name, port_id, server_key):
         """Resolve a device interface using port_id first, then safe name fallback."""
@@ -447,10 +455,12 @@ class DeleteNetBoxInterfacesView(LibreNMSPermissionMixin, NetBoxObjectPermission
 
     def get_required_permissions_for_object_type(self, object_type):
         """Return the required permissions based on object type."""
+        # The owner is resolved through a restricted queryset, so its view permission is stated
+        # here too (mirroring SyncInterfacesView): a missing grant is a 403, not a bare 404.
         if object_type == "device":
-            return [("delete", Interface)]
+            return [("view", Device), ("delete", Interface)]
         elif object_type == "virtualmachine":
-            return [("delete", VMInterface)]
+            return [("view", VirtualMachine), ("delete", VMInterface)]
         else:
             raise Http404(f"Invalid object type: {object_type}")
 
@@ -466,9 +476,9 @@ class DeleteNetBoxInterfacesView(LibreNMSPermissionMixin, NetBoxObjectPermission
             return error
 
         if object_type == "device":
-            obj = get_object_or_404(Device, pk=object_id)
+            obj = self.restrict_object_or_404(Device, pk=object_id)
         elif object_type == "virtualmachine":
-            obj = get_object_or_404(VirtualMachine, pk=object_id)
+            obj = self.restrict_object_or_404(VirtualMachine, pk=object_id)
         else:
             return JsonResponse({"error": "Invalid object type"}, status=400)
 
@@ -487,7 +497,9 @@ class DeleteNetBoxInterfacesView(LibreNMSPermissionMixin, NetBoxObjectPermission
                     interface_name = None
                     try:
                         if object_type == "device":
-                            interface = Interface.objects.get(id=interface_id)
+                            # Scoped by "delete": the ownership checks below prove where the
+                            # interface sits, not that the grant covers it.
+                            interface = self.restricted_queryset(Interface, "delete").get(id=interface_id)
                             interface_name = interface.name
                             if hasattr(obj, "virtual_chassis") and obj.virtual_chassis:
                                 valid_device_ids = [member.id for member in obj.virtual_chassis.members.all()]
@@ -502,7 +514,7 @@ class DeleteNetBoxInterfacesView(LibreNMSPermissionMixin, NetBoxObjectPermission
                                 errors.append(f"Interface {interface.name} does not belong to this device")
                                 continue
                         else:
-                            interface = VMInterface.objects.get(id=interface_id)
+                            interface = self.restricted_queryset(VMInterface, "delete").get(id=interface_id)
                             interface_name = interface.name
                             if interface.virtual_machine_id != obj.id:
                                 errors.append(f"Interface {interface.name} does not belong to this virtual machine")

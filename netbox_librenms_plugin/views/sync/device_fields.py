@@ -7,7 +7,7 @@ from django.db import IntegrityError, transaction
 from django.utils.text import slugify
 
 from django.http import HttpResponse
-from django.shortcuts import get_object_or_404, redirect
+from django.shortcuts import redirect
 from django.urls import reverse
 from django.utils.html import escape
 from django.views import View
@@ -65,7 +65,7 @@ class UpdateDeviceNameView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin,
         if error := self.require_all_permissions("POST"):
             return error
 
-        device = get_object_or_404(Device, pk=pk)
+        device = self.restrict_object_or_404(Device, "change", pk=pk)
 
         # Rebind the API client to the POSTed server before resolving the per-server librenms_id,
         # so a multi-server user acting on a non-default tab isn't routed through the globally
@@ -160,7 +160,7 @@ class UpdateDeviceSerialView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixi
         if error := self.require_all_permissions("POST"):
             return error
 
-        device = get_object_or_404(Device, pk=pk)
+        device = self.restrict_object_or_404(Device, "change", pk=pk)
 
         # Rebind the API client to the POSTed server before resolving the per-server librenms_id,
         # so a multi-server user acting on a non-default tab isn't routed through the globally
@@ -224,7 +224,7 @@ class UpdateDeviceTypeView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin,
         if error := self.require_all_permissions("POST"):
             return error
 
-        device = get_object_or_404(Device, pk=pk)
+        device = self.restrict_object_or_404(Device, "change", pk=pk)
 
         # Rebind the API client to the POSTed server before resolving the per-server librenms_id,
         # so a multi-server user acting on a non-default tab isn't routed through the globally
@@ -302,7 +302,7 @@ class UpdateDevicePlatformView(LibreNMSPermissionMixin, NetBoxObjectPermissionMi
         if error := self.require_all_permissions("POST"):
             return error
 
-        device = get_object_or_404(Device, pk=pk)
+        device = self.restrict_object_or_404(Device, "change", pk=pk)
 
         # Rebind the API client to the POSTed server before resolving the per-server librenms_id,
         # so a multi-server user acting on a non-default tab isn't routed through the globally
@@ -403,6 +403,10 @@ class CreateAndAssignPlatformView(LibreNMSPermissionMixin, NetBoxObjectPermissio
         required = [("change", Device)]
         if existing_platform is None:
             required.append(("add", Platform))
+        # The manufacturer is optional, but when one IS posted it is resolved by client-supplied
+        # id through a restricted queryset — so state that read in the gate.
+        if (request.POST.get("manufacturer") or "").strip():
+            required.append(("view", Manufacturer))
         # Deliberately do NOT gate the upfront POST on "add PlatformMapping": assigning the
         # platform is the primary action and must succeed for a user who can change the device
         # (and create the platform) even when they can't create OS mappings. The optional
@@ -415,7 +419,7 @@ class CreateAndAssignPlatformView(LibreNMSPermissionMixin, NetBoxObjectPermissio
         if error := self.require_all_permissions("POST"):
             return error
 
-        device = get_object_or_404(Device, pk=pk)
+        device = self.restrict_object_or_404(Device, "change", pk=pk)
 
         # Rebind the API client to the POSTed server so the server_key fallback in _sync_redirect
         # below resolves to the active server instead of None (self._librenms_api would otherwise
@@ -424,7 +428,7 @@ class CreateAndAssignPlatformView(LibreNMSPermissionMixin, NetBoxObjectPermissio
         # primary source, so a bad key can't refuse the platform create (which needs no LibreNMS).
         self.rebind_api_for_server(request.POST.get("server_key"))
 
-        manufacturer_id = request.POST.get("manufacturer")
+        manufacturer_id = (request.POST.get("manufacturer") or "").strip()
 
         if not platform_name:
             messages.error(request, "Platform name is required")
@@ -433,9 +437,14 @@ class CreateAndAssignPlatformView(LibreNMSPermissionMixin, NetBoxObjectPermissio
         manufacturer = None
         if manufacturer_id:
             try:
-                manufacturer = Manufacturer.objects.get(pk=manufacturer_id)
-            except Manufacturer.DoesNotExist:
-                pass
+                manufacturer = self.restricted_queryset(Manufacturer).get(pk=manufacturer_id)
+            except (Manufacturer.DoesNotExist, ValueError):
+                messages.error(request, "Selected manufacturer is not available.")
+                return self._sync_redirect(
+                    request,
+                    pk,
+                    getattr(getattr(self, "_librenms_api", None), "server_key", None),
+                )
 
         with transaction.atomic():
             platform_created = False
@@ -495,7 +504,7 @@ class CreateAndAssignPlatformView(LibreNMSPermissionMixin, NetBoxObjectPermissio
                 platform = existing_platform
 
             try:
-                device = Device.objects.select_for_update().get(pk=pk)
+                device = self.restricted_queryset(Device, "change").select_for_update(of=("self",)).get(pk=pk)
             except Device.DoesNotExist:
                 transaction.set_rollback(True)
                 messages.error(request, "Device no longer exists.")
@@ -672,7 +681,7 @@ class AssignVCSerialView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, L
         if error := self.require_all_permissions("POST"):
             return error
 
-        device = get_object_or_404(Device, pk=pk)
+        device = self.restrict_object_or_404(Device, "change", pk=pk)
 
         if not device.virtual_chassis:
             messages.error(request, "Device is not part of a virtual chassis")
@@ -691,7 +700,10 @@ class AssignVCSerialView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, L
                 continue
 
             try:
-                member = Device.objects.get(pk=member_id)
+                # Scoped like the page device: the member's serial is overwritten below and its pk
+                # comes from the POST, so the same-VC check alone would let a constrained grant
+                # write a serial onto a member it does not cover.
+                member = self.restricted_queryset(Device, "change").get(pk=member_id)
 
                 if not member.virtual_chassis or member.virtual_chassis.pk != device.virtual_chassis.pk:
                     errors.append(f"{member.name} is not part of the same virtual chassis")
@@ -745,7 +757,7 @@ class RemoveServerMappingView(LibreNMSPermissionMixin, NetBoxObjectPermissionMix
     def _get_object(self, object_type, pk):
         """Return the Device or VirtualMachine for the given pk."""
         model = VirtualMachine if object_type == "vm" else Device
-        return get_object_or_404(model, pk=pk), model
+        return self.restrict_object_or_404(model, "change", pk=pk), model
 
     def _sync_url_name(self, object_type):
         if object_type == "vm":
@@ -811,7 +823,7 @@ class RemoveServerMappingView(LibreNMSPermissionMixin, NetBoxObjectPermissionMix
 
         with transaction.atomic():
             try:
-                obj_locked = model.objects.select_for_update().get(pk=pk)
+                obj_locked = self.restricted_queryset(model, "change").select_for_update(of=("self",)).get(pk=pk)
             except model.DoesNotExist:
                 messages.error(request, f"{model.__name__} no longer exists.")
                 return redirect(sync_url, pk=pk)
@@ -860,7 +872,7 @@ class ConvertLegacyLibreNMSIdView(LibreNMSPermissionMixin, NetBoxObjectPermissio
 
     def _get_model_and_object(self, object_type, pk):
         model = VirtualMachine if object_type == "vm" else Device
-        return model, get_object_or_404(model, pk=pk)
+        return model, self.restrict_object_or_404(model, "change", pk=pk)
 
     def _sync_url(self, object_type, pk):
         name = "vm_librenms_sync" if object_type == "vm" else "device_librenms_sync"
@@ -951,7 +963,7 @@ class ConvertLegacyLibreNMSIdView(LibreNMSPermissionMixin, NetBoxObjectPermissio
 
         with transaction.atomic():
             try:
-                locked = model.objects.select_for_update().get(pk=pk)
+                locked = self.restricted_queryset(model, "change").select_for_update(of=("self",)).get(pk=pk)
             except model.DoesNotExist:
                 messages.error(request, f"{model.__name__} no longer exists.")
                 return self._sync_url(object_type, pk)

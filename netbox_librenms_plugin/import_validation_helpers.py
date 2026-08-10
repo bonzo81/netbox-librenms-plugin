@@ -9,6 +9,40 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+# The two slots a Stage-2 merge_candidates payload carries (the hostname-matched device and the
+# serial-matched device). Centralised so the merge view, collision detection, and any future
+# reader agree on the slot names rather than each hard-coding the strings.
+MERGE_CANDIDATE_SLOTS = ("host_named", "oob_named")
+
+
+def merge_candidate_pks(validation: dict) -> set:
+    """
+    Return the set of NetBox device pks a row's ``merge_candidates`` would touch.
+
+    Args:
+        validation (dict): A per-row validation dict (or None).
+
+    Returns:
+        set: The non-None ``pk`` values from the ``host_named`` / ``oob_named`` slots.
+    """
+    from netbox_librenms_plugin.utils import coerce_positive_int
+
+    if not isinstance(validation, dict):
+        return set()
+    merge = validation.get("merge_candidates") or {}
+    if not isinstance(merge, dict):
+        return set()
+    pks = set()
+    for slot in MERGE_CANDIDATE_SLOTS:
+        entry = merge.get(slot) or {}
+        # Coerce to a positive int (a NetBox pk) before adding: a corrupt payload like
+        # {"pk": []} is unhashable and would crash set.add(), breaking the safe-extraction
+        # contract instead of failing closed on the bad slot.
+        pk = coerce_positive_int(entry.get("pk")) if isinstance(entry, dict) else None
+        if pk is not None:
+            pks.add(pk)
+    return pks
+
 
 def fetch_model_by_id(model_class, pk):
     """

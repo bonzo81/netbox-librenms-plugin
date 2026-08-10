@@ -7,7 +7,7 @@ from django.contrib.contenttypes.models import ContentType
 from django.core.cache import cache
 from django.db import transaction
 from django.db.models import Q
-from django.shortcuts import get_object_or_404, redirect
+from django.shortcuts import redirect
 from django.urls import reverse
 from django.views import View
 
@@ -27,6 +27,13 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libre
 
     required_object_permissions = {
         "POST": [
+            # The device whose cable tab is being synced is resolved through a restricted
+            # queryset, so state that read here: a missing grant is then an explicit 403
+            # rather than a puzzling 404 at the lookup.
+            ("view", Device),
+            # Creating a cable changes the cable state of both terminations. Resolve the
+            # client-supplied ids through the same change scope NetBox's cable form uses.
+            ("change", Interface),
             ("add", Cable),
             ("change", Cable),
         ],
@@ -137,6 +144,20 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libre
 
         return all(link_data.get(field) for field in required_fields)
 
+    def _selected_device_is_in_page_context(self, selected_device_id):
+        """Return whether a posted device is the page device or one of its VC members."""
+        initial_device = getattr(self, "_initial_device", None)
+        if initial_device is None:
+            return False
+        try:
+            selected_device_id = int(selected_device_id)
+        except (TypeError, ValueError):
+            return False
+        if selected_device_id == initial_device.pk:
+            return True
+        virtual_chassis = getattr(initial_device, "virtual_chassis", None)
+        return bool(virtual_chassis and virtual_chassis.members.filter(pk=selected_device_id).exists())
+
     def handle_cable_creation(self, link_data, interface):
         """Create a cable from link data and return the operation result."""
         display_name = link_data.get("local_port") or interface.get("local_port_id", "")
@@ -146,33 +167,49 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libre
             return {"status": "invalid", "interface": display_name}
 
         try:
-            local_interface = Interface.objects.get(pk=link_data["netbox_local_interface_id"])
+            local_interface = self.restricted_queryset(Interface, "change").get(
+                pk=link_data["netbox_local_interface_id"]
+            )
+        except Interface.DoesNotExist:
+            return {"status": "invalid", "interface": display_name}
 
-            # Honour user's VC member selection: if the selected device_id differs from
-            # the cached interface's device, look up the same port name on that device.
-            selected_device_id = interface.get("device_id")
-            if selected_device_id and str(local_interface.device_id) != str(selected_device_id):
-                port_name = link_data.get("local_port") or local_interface.name
-                try:
-                    local_interface = Interface.objects.get(device_id=selected_device_id, name=port_name)
-                except Interface.DoesNotExist:
-                    logger.debug(
-                        "Port %s not found on device %s; falling back to cached interface",
-                        port_name,
-                        selected_device_id,
-                    )
+        # Honour user's VC member selection: if the selected device_id differs from
+        # the cached interface's device, look up the same port name on that device.
+        selected_device_id = interface.get("device_id")
+        if selected_device_id and str(local_interface.device_id) != str(selected_device_id):
+            if not self._selected_device_is_in_page_context(selected_device_id):
+                logger.debug(
+                    "Selected device %s is outside the cable-sync page context; rejecting cable creation",
+                    selected_device_id,
+                )
+                return {"status": "rejected_selection", "interface": display_name}
+            port_name = link_data.get("local_port") or local_interface.name
+            try:
+                local_interface = self.restricted_queryset(Interface, "change").get(
+                    device_id=selected_device_id,
+                    name=port_name,
+                )
+            except Interface.DoesNotExist:
+                logger.debug(
+                    "Port %s not found on selected device %s; rejecting cable creation",
+                    port_name,
+                    selected_device_id,
+                )
+                return {"status": "invalid", "interface": display_name}
 
-            remote_interface = Interface.objects.get(pk=link_data["netbox_remote_interface_id"])
-
-            if self.check_existing_cable(local_interface, remote_interface):
-                return {"status": "duplicate", "interface": display_name}
-
-            if self.create_cable(local_interface, remote_interface, self.request):
-                return {"status": "valid", "interface": display_name}
-            return {"status": "invalid", "interface": display_name}  # pragma: no cover
-
+        try:
+            remote_interface = self.restricted_queryset(Interface, "change").get(
+                pk=link_data["netbox_remote_interface_id"]
+            )
         except Interface.DoesNotExist:
             return {"status": "missing_remote", "interface": display_name}
+
+        if self.check_existing_cable(local_interface, remote_interface):
+            return {"status": "duplicate", "interface": display_name}
+
+        if self.create_cable(local_interface, remote_interface, self.request):
+            return {"status": "valid", "interface": display_name}
+        return {"status": "invalid", "interface": display_name}  # pragma: no cover
 
     def process_interface_sync(self, selected_interfaces, cached_links):
         """
@@ -181,7 +218,14 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libre
         Each interface is processed in its own atomic block so individual
         failures roll back only that cable without affecting others.
         """
-        results = {"valid": [], "invalid": [], "duplicate": [], "missing_remote": [], "skipped": []}
+        results = {
+            "valid": [],
+            "invalid": [],
+            "duplicate": [],
+            "missing_remote": [],
+            "rejected_selection": [],
+            "skipped": [],
+        }
 
         for interface in selected_interfaces:
             try:
@@ -200,7 +244,7 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libre
         if error := self.require_all_permissions("POST"):
             return error
 
-        initial_device = get_object_or_404(Device, pk=pk)
+        initial_device = self.restrict_object_or_404(Device, pk=pk)
         server_key = request.POST.get("server_key") or self.librenms_api.server_key
         self._post_server_key = server_key
         self._initial_device = initial_device
@@ -231,6 +275,12 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libre
             messages.error(
                 request,
                 f"No LibreNMS link data found for interfaces: {', '.join(results['invalid'])}",
+            )
+        if results.get("rejected_selection"):
+            messages.error(
+                request,
+                "Selected device is not part of this cable-sync page for interfaces: "
+                f"{', '.join(results['rejected_selection'])}",
             )
         if results["duplicate"]:
             messages.warning(

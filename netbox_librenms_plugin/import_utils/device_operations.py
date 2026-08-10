@@ -13,6 +13,7 @@ from virtualization.models import Cluster  # noqa: F401 — used by test mock.pa
 from ..librenms_api import LibreNMSAPI
 from ..utils import (
     AmbiguousLibreNMSIdError,
+    cached_row_matches,
     coerce_librenms_id,
     find_by_librenms_id,
     find_matching_platform,
@@ -1120,11 +1121,17 @@ def validate_device_for_import(
                                     "pk": _hostname_match.pk,
                                     "name": _hostname_match.name,
                                     "librenms_link": host_link,
+                                    # Carry the concrete model so bulk-collision detection keys the
+                                    # right bucket. Stage-2 merge is Device-only today (gated on
+                                    # not import_as_vm), but reading it from the object future-proofs
+                                    # a VM-side merge instead of assuming "device".
+                                    "model_name": _hostname_match._meta.model_name,
                                 },
                                 oob_named={
                                     "pk": _serial_match.pk,
                                     "name": _serial_match.name,
                                     "librenms_link": oob_link,
+                                    "model_name": _serial_match._meta.model_name,
                                 },
                                 warning=(
                                     f"Two NetBox devices appear to represent this physical box: "
@@ -1162,6 +1169,10 @@ def validate_device_for_import(
                         )
                         result["can_import"] = False
                         result["is_ready"] = False
+                        # Terminal, like the ambiguous_librenms_id guard: return now so the
+                        # new-import validation below doesn't append unrelated site/role/device-type
+                        # blockers to a row that's already blocked on the duplicate-IP ambiguity.
+                        return result
                     elif device:
                         # Surface any existing host/OOB linkage so the import UI renders the
                         # correct row state (the librenms_id / serial branches do the same;
@@ -1797,9 +1808,12 @@ def fetch_device_with_cache(
         >>> cache_dict = {123: {...}, 456: {...}}
         >>> libre_device = fetch_device_with_cache(123, api, libre_devices_cache=cache_dict)
     """
-    # Check pre-fetched cache dict first (fastest)
-    if libre_devices_cache and device_id in libre_devices_cache:
-        return libre_devices_cache[device_id]
+    # Check pre-fetched cache dict first (fastest) — but only when the cached row's OWN device_id
+    # doesn't contradict the requested id (cached_row_matches), so a mis-keyed/stale entry isn't
+    # served AS this device. A contradiction falls through to the Django cache / API fetch below.
+    cached_row = libre_devices_cache.get(device_id) if libre_devices_cache else None
+    if cached_row_matches(cached_row, device_id):
+        return cached_row
 
     # Check Django cache
     cache_key = get_import_device_cache_key(device_id, server_key or api.server_key)
