@@ -20,6 +20,8 @@ from netbox_librenms_plugin.constants import OOB_BADGE_HTML
 
 logger = logging.getLogger(__name__)
 
+_ASCII_POSITIVE_INTEGER_RE = re.compile(r"^[ \t\r\n\f\v]*\+?[0-9]+[ \t\r\n\f\v]*$")
+
 
 def is_list_of_dicts(value) -> bool:
     """
@@ -112,13 +114,56 @@ def format_mac_address(mac_address: str) -> str:
 
 def normalize_librenms_port_id(value) -> int | None:
     """Normalize a LibreNMS port_id to a positive integer, or None."""
-    if not isinstance(value, (int, str)) or isinstance(value, bool):
-        return None
-    try:
-        int_value = int(value)
-    except (TypeError, ValueError):
-        return None
-    return int_value if int_value > 0 else None
+    return coerce_librenms_id(value)
+
+
+def interface_name_fallback_matches_port(interface, port_id, server_key) -> bool:
+    """Return true when a same-name interface is unbound or owns the requested port ID."""
+    requested_id = normalize_librenms_port_id(port_id)
+    if requested_id is None:
+        return False
+
+    raw_mapping = interface.custom_field_data.get("librenms_id")
+    if raw_mapping is None:
+        return True
+    if isinstance(raw_mapping, dict):
+        if server_key not in raw_mapping:
+            return True
+        raw_entry = raw_mapping[server_key]
+        raw_id = raw_entry.get("id") if isinstance(raw_entry, dict) else raw_entry
+    else:
+        raw_id = raw_mapping
+
+    return normalize_librenms_port_id(raw_id) == requested_id
+
+
+def get_interface_port_identity_sets(ports, interface_name_field) -> tuple[set[int], set[int]]:
+    """Return host IDs that are unique and the subset with a unique selected display name."""
+    if not is_list_of_dicts(ports):
+        return set(), set()
+
+    port_id_counts = {}
+    port_names = {}
+    name_counts = {}
+    for port in ports:
+        if port.get("_source") == "oob":
+            continue
+        port_id = normalize_librenms_port_id(port.get("port_id"))
+        interface_name = port.get(interface_name_field)
+        if port_id is None:
+            continue
+        port_id_counts[port_id] = port_id_counts.get(port_id, 0) + 1
+        port_names[port_id] = interface_name
+        if isinstance(interface_name, str) and interface_name:
+            name_counts[interface_name] = name_counts.get(interface_name, 0) + 1
+
+    unique_port_ids = {port_id for port_id, count in port_id_counts.items() if count == 1}
+    unambiguous_name_port_ids = {
+        port_id
+        for port_id in unique_port_ids
+        if isinstance(port_names[port_id], str) and port_names[port_id] and name_counts.get(port_names[port_id]) == 1
+    }
+    return unique_port_ids, unambiguous_name_port_ids
 
 
 def validate_regex_field(value, field_name):
@@ -166,9 +211,8 @@ def normalize_relationship_maps(relationships) -> tuple[dict, dict]:
     Fails soft against a corrupt / partial-write / format-migrated cache: a None or non-dict
     ``relationships`` (e.g. a list) — or a present-but-None / non-dict nested ``lag_members`` /
     ``sub_interfaces`` — collapses to ``{}`` so ``.items()`` never raises ``AttributeError``. Keys
-    are normalized via :func:`normalize_librenms_port_id` so the int-keyed lookups never miss a
-    stringified (JSON-round-tripped) cache key. Entries whose keys cannot be normalized are dropped
-    rather than sharing a ``None`` key that an invalid lookup could accidentally match.
+    and values are normalized via :func:`normalize_librenms_port_id` so int-keyed lookups never miss
+    stringified JSON values. An edge is dropped unless both endpoint IDs are valid.
     """
     if not isinstance(relationships, dict):
         relationships = {}
@@ -178,16 +222,25 @@ def normalize_relationship_maps(relationships) -> tuple[dict, dict]:
     sub_interfaces_raw = relationships.get("sub_interfaces")
     if not isinstance(sub_interfaces_raw, dict):
         sub_interfaces_raw = {}
-    lag_members = {
-        normalized_key: value
-        for key, value in lag_members_raw.items()
-        if (normalized_key := normalize_librenms_port_id(key)) is not None
-    }
-    sub_interfaces = {
-        normalized_key: value
-        for key, value in sub_interfaces_raw.items()
-        if (normalized_key := normalize_librenms_port_id(key)) is not None
-    }
+
+    def _normalize_edges(raw_edges):
+        normalized = {}
+        conflicted_sources = set()
+        for key, value in raw_edges.items():
+            normalized_key = normalize_librenms_port_id(key)
+            normalized_value = normalize_librenms_port_id(value)
+            if normalized_key is None or normalized_value is None or normalized_key in conflicted_sources:
+                continue
+            existing_value = normalized.get(normalized_key)
+            if existing_value is not None and existing_value != normalized_value:
+                normalized.pop(normalized_key, None)
+                conflicted_sources.add(normalized_key)
+                continue
+            normalized[normalized_key] = normalized_value
+        return normalized
+
+    lag_members = _normalize_edges(lag_members_raw)
+    sub_interfaces = _normalize_edges(sub_interfaces_raw)
     return lag_members, sub_interfaces
 
 
@@ -232,7 +285,12 @@ def get_virtual_chassis_member(
         return fallback
 
     try:
-        match = re.match(r"^[A-Za-z]+(\d+)", port_name)
+        match = re.match(r"^[A-Za-z]+-?(\d+)", port_name)
+        if not match:
+            # Some stack operating systems use a slot/port form with no alphabetic prefix,
+            # such as ``2/1/1``. Require the slash so a bare numeric label is not treated as a
+            # chassis position.
+            match = re.match(r"^(\d+)/", port_name)
         if not match:
             return fallback
 
@@ -243,6 +301,71 @@ def get_virtual_chassis_member(
         return device.virtual_chassis.members.get(vc_position=vc_position)
     except (re.error, ValueError, ObjectDoesNotExist):
         return fallback
+
+
+def resolve_interface_row_device(
+    device: Device,
+    port: dict,
+    interface_name_field: str,
+    *,
+    interfaces_by_port_id: dict | None = None,
+    members_by_position: dict | None = None,
+    members_by_id: dict | None = None,
+    return_device_on_failure: bool = True,
+) -> Device | None:
+    """Resolve a LibreNMS interface row to its likely Virtual Chassis member.
+
+    Prefer a unique interface already bound to the stable LibreNMS port ID. For an unbound
+    physical Ethernet row, use the member position encoded in the interface name. Do not apply
+    that heuristic to logical rows or sub-interfaces because their number is not reliably a
+    chassis position. Set ``return_device_on_failure`` to false when a writer must reject a row
+    whose owner has no stable evidence.
+    """
+    if not getattr(device, "virtual_chassis", None):
+        return device
+    fallback = device if return_device_on_failure else None
+    if not isinstance(port, dict):
+        return fallback
+
+    port_id = normalize_librenms_port_id(port.get("port_id"))
+    if port_id is not None and interfaces_by_port_id:
+        matches = interfaces_by_port_id.get(port_id, [])
+        if not isinstance(matches, (list, tuple, set)):
+            matches = [matches]
+        matches = [interface for interface in matches if interface is not None]
+        if len(matches) == 1:
+            owner_id = getattr(matches[0], "device_id", None)
+            if owner_id is not None:
+                if members_by_id and owner_id in members_by_id:
+                    return members_by_id[owner_id]
+                return matches[0].device
+
+    raw_if_type = port.get("ifType")
+    if_type = raw_if_type.lower() if isinstance(raw_if_type, str) else ""
+    if "ethernet" not in if_type:
+        return fallback
+
+    candidate_names = []
+    for field in (interface_name_field, "ifName", "ifDescr"):
+        name = port.get(field)
+        if isinstance(name, str) and name and name not in candidate_names:
+            candidate_names.append(name)
+    candidates = {
+        member.pk: member
+        for name in candidate_names
+        if (
+            member := get_virtual_chassis_member(
+                device,
+                name,
+                members_by_position=members_by_position,
+                return_device_on_failure=False,
+            )
+        )
+        is not None
+    }
+    if len(candidates) == 1:
+        return next(iter(candidates.values()))
+    return fallback
 
 
 def get_virtual_chassis_members(device: Device) -> list:
@@ -1268,11 +1391,13 @@ def coerce_librenms_id(value) -> int | None:
     if isinstance(value, int):
         return value if value > 0 else None
     if isinstance(value, str):
+        if not _ASCII_POSITIVE_INTEGER_RE.fullmatch(value):
+            return None
         try:
             coerced = int(value)
-            return coerced if coerced > 0 else None
         except ValueError:
             return None
+        return coerced if coerced > 0 else None
     return None
 
 
@@ -1628,7 +1753,8 @@ def build_librenms_id_qs(server_key, value):
     # still validate for their own reasons, but this makes the shared builder the last line of
     # defence. coerce_librenms_id() only gates validity here — the variant list below keeps its full
     # match breadth (incl. zero-padded string forms) for accepted values.
-    if coerce_librenms_id(value) is None:
+    normalized_value = coerce_librenms_id(value)
+    if normalized_value is None:
         match_none = Q(pk__in=[])
         return match_none, match_none
     variants = [value, str(value)]
@@ -1654,6 +1780,16 @@ def build_librenms_id_qs(server_key, value):
         host_q |= Q(custom_field_data__librenms_id=v)
         # The OOB controller's own device id — so a re-import recognises the merged device.
         oob_q |= Q(**{f"custom_field_data__librenms_id__{server_key}__oob__id": v})
+
+    # Every reader accepts numeric strings with leading zeroes, an optional plus sign, and
+    # surrounding whitespace. Exact JSON comparisons cannot find those forms when the caller
+    # supplies the canonical integer. Match the text extracted from each supported JSON shape so
+    # indexed candidate lookups and full in-memory scans enforce the same normalized-ID contract.
+    numeric_pattern = rf"^[ \t\r\n\f\v]*\+?0*{normalized_value}[ \t\r\n\f\v]*$"
+    host_q |= Q(**{f"custom_field_data__librenms_id__{server_key}__regex": numeric_pattern})
+    host_q |= Q(**{f"custom_field_data__librenms_id__{server_key}__id__regex": numeric_pattern})
+    host_q |= Q(custom_field_data__librenms_id__regex=numeric_pattern)
+    oob_q |= Q(**{f"custom_field_data__librenms_id__{server_key}__oob__id__regex": numeric_pattern})
     return host_q, oob_q
 
 

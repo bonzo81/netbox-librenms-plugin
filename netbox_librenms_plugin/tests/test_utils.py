@@ -395,7 +395,25 @@ class TestConversionHelpers:
         assert normalize_librenms_port_id(0) is None
         assert normalize_librenms_port_id(-1) is None
         assert normalize_librenms_port_id("abc") is None
+        assert normalize_librenms_port_id("2_0") is None
+        assert normalize_librenms_port_id("２０") is None
+        assert normalize_librenms_port_id("٢٠") is None
+        assert normalize_librenms_port_id("1" * 5000) is None
         assert normalize_librenms_port_id(1.5) is None
+
+    def test_unambiguous_interface_name_index_rejects_duplicate_ids_and_names(self):
+        from netbox_librenms_plugin.utils import get_interface_port_identity_sets
+
+        ports = [
+            {"port_id": 10, "ifDescr": "Ethernet"},
+            {"port_id": 11, "ifDescr": "Ethernet"},
+            {"port_id": 20, "ifDescr": "Parent"},
+            {"port_id": 20, "ifDescr": "Duplicate ID"},
+            {"port_id": 30, "ifDescr": "Unique"},
+            {"port_id": 40, "ifDescr": "Unique", "_source": "oob"},
+        ]
+
+        assert get_interface_port_identity_sets(ports, "ifDescr") == ({10, 11, 30}, {30})
 
     def test_normalize_relationship_maps_normalizes_and_guards(self):
         from netbox_librenms_plugin.utils import normalize_relationship_maps
@@ -417,6 +435,25 @@ class TestConversionHelpers:
 
         assert lag == {10: 103}
         assert sub == {5: 9}
+
+    def test_normalize_relationship_maps_normalizes_values_and_drops_invalid_edges(self):
+        from netbox_librenms_plugin.utils import normalize_relationship_maps
+
+        relationships = {
+            "lag_members": {"10": "100", "11": [], "12": 0},
+            "sub_interfaces": {"20": "21", "22": None, "23": False},
+        }
+
+        assert normalize_relationship_maps(relationships) == ({10: 100}, {20: 21})
+
+    def test_normalize_relationship_maps_drops_conflicting_canonical_sources(self):
+        from netbox_librenms_plugin.utils import normalize_relationship_maps
+
+        first = {"lag_members": {"10": 20, "010": 30}, "sub_interfaces": {}}
+        reversed_order = {"lag_members": {"010": 30, "10": 20}, "sub_interfaces": {}}
+
+        assert normalize_relationship_maps(first) == ({}, {})
+        assert normalize_relationship_maps(reversed_order) == ({}, {})
 
     def test_normalize_relationship_maps_coerces_corrupt_shapes_to_empty(self):
         from netbox_librenms_plugin.utils import normalize_relationship_maps

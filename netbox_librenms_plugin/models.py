@@ -976,11 +976,12 @@ class PortStackLagPattern(FullCleanOnSaveMixin, NetBoxModel):
         Return the compiled lag_name_pattern regexes scoped to *device_os*.
 
         Single home for the OS-scoping + compile-with-skip used by both the relationship
-        resolver and the lazy port_stack-fetch trigger (``_has_lag_signals``), so the two can't
+        resolver and the lazy port_stack-fetch trigger, so the two can't
         disagree on which patterns apply. ``device_os=None`` loads every stored pattern (legacy
         unscoped behaviour); a present-but-blank/non-string OS returns none (an unknown OS must
         not re-globalize every vendor's regex); otherwise the patterns whose ``librenms_os``
-        matches case-insensitively. Patterns that fail to compile are skipped and logged.
+        matches after the same trim/lower normalization as the database constraint. Patterns
+        that fail to compile are skipped and logged.
         """
         if device_os is None:
             queryset = cls.objects.all()
@@ -988,7 +989,9 @@ class PortStackLagPattern(FullCleanOnSaveMixin, NetBoxModel):
             os_filter = device_os.strip() if isinstance(device_os, str) else ""
             if not os_filter:
                 return []
-            queryset = cls.objects.filter(librenms_os__iexact=os_filter)
+            queryset = cls.objects.annotate(
+                normalized_librenms_os=Lower(_trim_python_whitespace("librenms_os"))
+            ).filter(normalized_librenms_os=os_filter.lower())
         compiled = []
         for pattern in queryset:
             regex = pattern._compiled_pattern
@@ -1038,14 +1041,13 @@ class PortStackLagPattern(FullCleanOnSaveMixin, NetBoxModel):
         verbose_name = "Port Stack LAG Pattern"
         verbose_name_plural = "Port Stack LAG Patterns"
         constraints = [
-            # Enforce uniqueness in the same case-insensitive way as the OS-scoped pattern lookup
-            # reads it (compiled_patterns_for_os filters librenms_os__iexact). A plain
-            # unique=True is case-sensitive, so at the DB level "ios" and "IOS" could coexist
-            # and both apply to one device, making the per-OS fallback ambiguous. clean()
-            # already normalizes with .strip().lower() on every save. BTRIM with Python's full
-            # whitespace set makes the database enforce the same canonical form for paths that
-            # skip full_clean, such as bulk_create, raw SQL, or loaddata. Lower() alone would let
-            # " ios " coexist with "ios".
+            # Enforce the same trimmed, case-insensitive key that the OS-scoped pattern lookup
+            # reads. A plain unique=True is case-sensitive, so at the DB level "ios" and "IOS"
+            # could coexist and both apply to one device, making the per-OS fallback ambiguous.
+            # clean() already normalizes with .strip().lower() on every save. BTRIM with Python's
+            # full whitespace set makes the database enforce the same canonical form for paths
+            # that skip full_clean, such as bulk_create, raw SQL, or loaddata. Lower() alone would
+            # let " ios " coexist with "ios".
             models.UniqueConstraint(
                 Lower(_trim_python_whitespace("librenms_os")),
                 name="unique_portstacklagpattern_librenms_os_ci",

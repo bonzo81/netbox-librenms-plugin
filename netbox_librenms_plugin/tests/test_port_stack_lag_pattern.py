@@ -95,10 +95,60 @@ class TestPortStackLagPattern:
 
         assert model.objects.filter(librenms_os="zztab").count() == 1
 
+    def test_scoped_read_normalizes_a_lone_bulk_created_os(self):
+        """The reader must use the same trim/lower key as the database constraint."""
+        model = self._model()
+        model.objects.bulk_create([model(librenms_os=" ZZFUT ", lag_name_pattern=r"^Po\d+$")])
+
+        patterns = model.compiled_patterns_for_os("zzfut")
+
+        assert len(patterns) == 1
+        assert patterns[0].fullmatch("Po7")
+
+    def test_api_requires_plugin_permission_and_supports_crud(self, client):
+        """The rule is available through the same permission-gated API as sibling rule models."""
+        from django.contrib.auth import get_user_model
+        from django.urls import reverse
+
+        from netbox_librenms_plugin.tests.conftest import make_superuser
+
+        url = reverse("plugins-api:netbox_librenms_plugin-api:portstacklagpattern-list")
+        user = get_user_model().objects.create_user(username="port-stack-api-denied", password="x")
+        client.force_login(user)
+        assert client.get(url).status_code == 403
+
+        client.force_login(make_superuser())
+        response = client.post(
+            url,
+            {
+                "librenms_os": "zzapi",
+                "lag_name_pattern": r"^Bundle-Ether\d+$",
+                "description": "Created through API",
+            },
+            content_type="application/json",
+        )
+
+        assert response.status_code == 201, response.json()
+        detail_url = reverse(
+            "plugins-api:netbox_librenms_plugin-api:portstacklagpattern-detail",
+            args=[response.json()["id"]],
+        )
+        response = client.patch(
+            detail_url,
+            {"description": "Updated through API"},
+            content_type="application/json",
+        )
+        assert response.status_code == 200
+        assert response.json()["description"] == "Updated through API"
+
+        response = client.delete(detail_url)
+        assert response.status_code == 204
+        assert not self._model().objects.filter(librenms_os="zzapi").exists()
+
 
 @pytest.mark.django_db
 class TestHasLagSignalsFieldSelection:
-    """_has_lag_signals() must scan the user-selected interface_name_field (plus ifName/ ifDescr), not just ifName."""
+    """Structural signals scan the active name field plus ifName and ifDescr."""
 
     def _make_view(self):
         from netbox_librenms_plugin.views.base.interfaces_view import BaseInterfaceTableView
@@ -113,8 +163,8 @@ class TestHasLagSignalsFieldSelection:
             {"ifName": "", "ifDescr": "ge-0/0/0.100"},  # sub-interface child
         ]
         # Default (ifName/ifDescr) already covers the ifDescr-driven case CR flagged.
-        assert view._has_lag_signals(ports) is True
-        assert view._has_lag_signals(ports, "ifDescr") is True
+        assert view._has_structural_relationship_signals(ports) is True
+        assert view._has_structural_relationship_signals(ports, "ifDescr") is True
 
     def test_field_parameter_changes_outcome(self):
         """The signal lives only in a non-default field (ifAlias)."""
@@ -124,9 +174,9 @@ class TestHasLagSignalsFieldSelection:
             {"ifAlias": "ae0.100"},  # sub-interface child
         ]
         # ifAlias is neither ifName nor ifDescr, so the default scan misses it...
-        assert view._has_lag_signals(ports) is False
+        assert view._has_structural_relationship_signals(ports) is False
         # ...but passing it as the selected field surfaces the LAG signal.
-        assert view._has_lag_signals(ports, "ifAlias") is True
+        assert view._has_structural_relationship_signals(ports, "ifAlias") is True
 
     def test_no_signal_returns_false(self):
         """Plain access ports with no LAG/sub-interface signal stay False (not vacuously True)."""
@@ -135,7 +185,7 @@ class TestHasLagSignalsFieldSelection:
             {"ifName": "Gi0/0", "ifDescr": "GigabitEthernet0/0", "ifType": "ethernetCsmacd"},
             {"ifName": "Gi0/1", "ifDescr": "GigabitEthernet0/1", "ifType": "ethernetCsmacd"},
         ]
-        assert view._has_lag_signals(ports, "ifDescr") is False
+        assert view._has_structural_relationship_signals(ports, "ifDescr") is False
 
     def test_propvirtual_alone_does_not_trigger_fetch(self):
         """A propVirtual ifType is NOT a LAG signal: loopbacks/SVIs/tunnels are propVirtual, so gating on it fired the lazy port_stack/device_info round-trips for nearly every device. Only ieee8023adLag, a name-pattern match, or a real sub-interface should gate the fetch — matching what the resolver can actually classify."""
@@ -146,12 +196,16 @@ class TestHasLagSignalsFieldSelection:
             {"ifName": "Loopback0", "ifType": "propVirtual"},
             {"ifName": "Vlan100", "ifType": "propVirtual"},
         ]
-        assert view._has_lag_signals(virtuals) is False
+        assert view._has_structural_relationship_signals(virtuals) is False
         # A structural aggregate (ieee8023adLag) still triggers it, regardless of name.
-        assert view._has_lag_signals([{"ifName": "agg-x", "ifType": "ieee8023adLag"}]) is True
+        assert view._has_structural_relationship_signals([{"ifName": "agg-x", "ifType": "ieee8023adLag"}]) is True
         # A propVirtual port-channel whose name matches a seeded pattern (^Po\\d+$) still
         # triggers it via the name-pattern branch — so real IOS LAGs are unaffected.
-        assert view._has_lag_signals([{"ifName": "Po10", "ifType": "propVirtual"}]) is True
+        from netbox_librenms_plugin.models import PortStackLagPattern
+
+        PortStackLagPattern.objects.get_or_create(librenms_os="ios", lag_name_pattern=r"^Po\d+$")
+        patterns = PortStackLagPattern.compiled_patterns_for_os(None)
+        assert view._has_lag_name_signals([{"ifName": "Po10", "ifType": "propVirtual"}], "ifName", patterns) is True
 
     def test_non_string_name_is_skipped_not_crashed(self):
         """A truthy non-string ifName/ifDescr (numeric/list from a malformed payload) is skipped, not crashed.
@@ -165,7 +219,7 @@ class TestHasLagSignalsFieldSelection:
             {"ifDescr": ["x", "y"], "ifType": "ethernetCsmacd"},  # truthy non-string in another field
         ]
         # Returns a bool (no TypeError); neither is a real LAG/sub-interface signal.
-        assert view._has_lag_signals(ports) is False
+        assert view._has_structural_relationship_signals(ports) is False
 
 
 @pytest.mark.django_db
@@ -184,18 +238,17 @@ class TestHasLagSignalsOsScoped:
         PortStackLagPattern.objects.create(librenms_os="znos", lag_name_pattern=r"^Zo\d+$")
         view = self._view()
         ports = [{"ifName": "Zo1", "ifType": "propVirtual"}]
-        # Scoped to the OS that defines the pattern -> signal fires.
-        assert view._has_lag_signals(ports, device_os="znos") is True
-        # Scoped to a different OS with no matching pattern -> no false-positive fetch trigger.
-        assert view._has_lag_signals(ports, device_os="some-other-os") is False
-        # Unscoped (legacy / OS unknown) still matches any stored pattern.
-        assert view._has_lag_signals(ports, device_os=None) is True
+        assert view._has_lag_name_signals(ports, "ifName", PortStackLagPattern.compiled_patterns_for_os("znos"))
+        assert not view._has_lag_name_signals(
+            ports, "ifName", PortStackLagPattern.compiled_patterns_for_os("some-other-os")
+        )
+        assert view._has_lag_name_signals(ports, "ifName", PortStackLagPattern.compiled_patterns_for_os(None))
 
     def test_structural_signal_is_os_independent(self):
         view = self._view()
         agg = [{"ifName": "agg0", "ifType": "ieee8023adLag"}]
         # ieee8023adLag is structural -> fires regardless of OS scope.
-        assert view._has_lag_signals(agg, device_os="some-other-os") is True
+        assert view._has_structural_relationship_signals(agg) is True
 
 
 @pytest.mark.django_db
@@ -402,7 +455,7 @@ class TestMigration0014Preflight:
 class TestLagPatternSharedLoad:
     """The interface-refresh LAG gating loads OS-scoped patterns once and shares them.
 
-    _has_lag_signals and resolve_port_relationships each re-queried + re-compiled
+    The signal check and resolve_port_relationships each re-queried and recompiled
     PortStackLagPattern per call, so a single refresh loaded the scoped patterns twice (plus the
     resolver's own load). Both now accept a pre-loaded compiled list so the caller loads once.
     """
@@ -423,8 +476,8 @@ class TestLagPatternSharedLoad:
     def _no_pattern_query(ctx):
         return not any("portstacklagpattern" in q["sql"].lower() for q in ctx.captured_queries)
 
-    def test_has_lag_signals_reuses_supplied_patterns_without_db(self):
-        """Passing lag_patterns skips the PortStackLagPattern query inside _has_lag_signals."""
+    def test_name_signal_reuses_supplied_patterns_without_db(self):
+        """The name signal scans supplied compiled patterns without a database query."""
         from django.db import connection
         from django.test.utils import CaptureQueriesContext
 
@@ -433,7 +486,7 @@ class TestLagPatternSharedLoad:
         ports = [{"ifName": "Gi0/0", "ifType": "ethernetCsmacd"}]
 
         with CaptureQueriesContext(connection) as ctx:
-            view._has_lag_signals(ports, device_os="sharedos", lag_patterns=compiled)
+            view._has_lag_name_signals(ports, "ifName", compiled)
 
         assert self._no_pattern_query(ctx)
 
@@ -447,7 +500,7 @@ class TestLagPatternSharedLoad:
             {"port_id": 11, "ifName": "Gi0/1", "ifType": "ethernetCsmacd"},
             {"port_id": 12, "ifName": "Po1", "ifType": "propVirtual"},
         ]
-        port_stack = [{"high_port_id": 11, "low_port_id": 12}]
+        port_stack = [{"port_id_high": 11, "port_id_low": 12}]
 
         with CaptureQueriesContext(connection) as ctx:
             result = mock_librenms_api.resolve_port_relationships(
@@ -459,7 +512,7 @@ class TestLagPatternSharedLoad:
         assert self._no_pattern_query(ctx)
 
     def test_string_zero_high_id_sentinel_is_skipped(self, mock_librenms_api):
-        """A string "0" high/low_port_id (the ifStack 'no port' sentinel) is skipped, not looked up — a bare truthy check would let it match a real port_id 0 row and fabricate a relationship."""
+        """A string "0" port ID (the ifStack 'no port' sentinel) is skipped, not looked up."""
         compiled = self._seed_and_compile()
         # A port whose id is 0 exists in by_id (keyed "0"); the sentinel entry references it as the
         # STRING "0". `not "0"` is False, so the old check would look it up and relate it to Po1.
@@ -467,7 +520,7 @@ class TestLagPatternSharedLoad:
             {"port_id": 0, "ifName": "phantom", "ifType": "ethernetCsmacd"},
             {"port_id": 12, "ifName": "Po1", "ifType": "propVirtual"},
         ]
-        port_stack = [{"high_port_id": "0", "low_port_id": 12}]
+        port_stack = [{"port_id_high": "0", "port_id_low": 12}]
 
         result = mock_librenms_api.resolve_port_relationships(
             ports, port_stack, device_os="sharedos", compiled_lag_patterns=compiled

@@ -21,6 +21,7 @@ from netbox_librenms_plugin.filters import (
     ModuleTypeMappingFilterSet,
     NormalizationRuleFilterSet,
     PlatformMappingFilterSet,
+    PortStackLagPatternFilterSet,
 )
 from netbox_librenms_plugin.jobs import FilterDevicesJob, ImportDevicesJob
 from netbox_librenms_plugin.models import (
@@ -32,6 +33,7 @@ from netbox_librenms_plugin.models import (
     ModuleTypeMapping,
     NormalizationRule,
     PlatformMapping,
+    PortStackLagPattern,
 )
 
 from .serializers import (
@@ -43,6 +45,7 @@ from .serializers import (
     ModuleTypeMappingSerializer,
     NormalizationRuleSerializer,
     PlatformMappingSerializer,
+    PortStackLagPatternSerializer,
 )
 
 logger = logging.getLogger(__name__)
@@ -142,6 +145,16 @@ class CarrierAutoInstallRuleViewSet(NetBoxModelViewSet):
 
     queryset = CarrierAutoInstallRule.objects.select_related("manufacturer", "carrier_module_type")
     serializer_class = CarrierAutoInstallRuleSerializer
+
+
+class PortStackLagPatternViewSet(NetBoxModelViewSet):
+    """API viewset for PortStackLagPattern CRUD operations."""
+
+    permission_classes = [LibreNMSPluginPermission]
+    filterset_class = PortStackLagPatternFilterSet
+
+    queryset = PortStackLagPattern.objects.all()
+    serializer_class = PortStackLagPatternSerializer
 
 
 @api_view(["POST"])

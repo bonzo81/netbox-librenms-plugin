@@ -21,11 +21,13 @@ from netbox_librenms_plugin.tables.modules import LibreNMSModuleTable, VCModuleT
 from netbox_librenms_plugin.utils import (
     build_migrated_context,
     cache_remaining_ttl,
+    coerce_positive_int,
     get_interface_name_field,
     get_librenms_sync_device,
     get_missing_vlan_warning,
     get_tagged_vlan_css_class,
     get_untagged_vlan_css_class,
+    get_interface_port_identity_sets,
     get_vlan_sync_css_class,
     is_valid_ports_payload,
     normalize_librenms_port_id,
@@ -42,6 +44,7 @@ from ..mixins import (
     LibreNMSAPIMixin,
     LibreNMSPermissionMixin,
     NetBoxObjectPermissionMixin,
+    VlanAssignmentMixin,
     extract_cached_ports,
     parse_request_json,
 )
@@ -123,7 +126,12 @@ class DeviceInterfaceTableView(BaseInterfaceTableView):
 
 
 class SingleInterfaceVerifyView(
-    LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreNMSAPIMixin, CacheMixin, View
+    LibreNMSPermissionMixin,
+    NetBoxObjectPermissionMixin,
+    LibreNMSAPIMixin,
+    VlanAssignmentMixin,
+    CacheMixin,
+    View,
 ):
     """Verify single interface data for a device via cached LibreNMS payload."""
 
@@ -145,11 +153,13 @@ class SingleInterfaceVerifyView(
         data, err = parse_request_json(request)
         if err:
             return err
-        selected_device_id = data.get("device_id")
-        interface_name = data.get("interface_name")
-        interface_name_field = data.get("interface_name_field") or get_interface_name_field()
+        selected_device_id = coerce_positive_int(data.get("device_id"))
+        posted_name_field = data.get("interface_name_field")
+        interface_name_field = (
+            posted_name_field if posted_name_field in ("ifName", "ifDescr") else get_interface_name_field()
+        )
 
-        if not selected_device_id:
+        if selected_device_id is None:
             return JsonResponse({"status": "error", "message": "No device ID provided"}, status=400)
         # Only honour a CONFIGURED string server_key (mirrors the cable/IP verify siblings):
         # the raw value scopes cache reads and the per-server cf lookups below, so a forged
@@ -162,6 +172,23 @@ class SingleInterfaceVerifyView(
         # model-level view_device perm, so a site-scoped grant would otherwise read another
         # device's cached verify payload by raw pk.
         selected_device = self.restrict_object_or_404(Device, pk=selected_device_id)
+        origin_device = selected_device
+        raw_origin_device_id = data.get("origin_device_id")
+        if raw_origin_device_id is not None:
+            origin_device_id = coerce_positive_int(raw_origin_device_id)
+            if origin_device_id is None:
+                return JsonResponse({"status": "error", "message": "A valid origin device ID is required."}, status=400)
+            origin_device = self.restrict_object_or_404(Device, pk=origin_device_id)
+            same_device = origin_device.pk == selected_device.pk
+            same_chassis = (
+                origin_device.virtual_chassis_id is not None
+                and origin_device.virtual_chassis_id == selected_device.virtual_chassis_id
+            )
+            if not same_device and not same_chassis:
+                return JsonResponse(
+                    {"status": "error", "message": "The interface page and selected device do not match."},
+                    status=400,
+                )
 
         # Normalise to the VC sync device so cache keys match what the sync view stored
         if selected_device.virtual_chassis:
@@ -183,43 +210,62 @@ class SingleInterfaceVerifyView(
         # and fall through to the controlled "not found" response, matching the base table view.
         if is_valid_ports_payload(cached_data):
             ports = cached_data.get("ports", [])
+            unique_host_port_ids, unambiguous_name_port_ids = get_interface_port_identity_sets(
+                ports, interface_name_field
+            )
             # Prefer the stable port_id the client posts (data-port-id on the row): display
             # names can collide (an OOB controller can reuse a host interface name), so a
             # name-only match can recompute and patch the wrong cached row. Exclude OOB rows
             # from both paths so a host row is never shadowed by a same-named controller port.
             posted_port_id = normalize_librenms_port_id(data.get("port_id"))
-            port_data = None
-            if posted_port_id is not None:
-                # A supplied stable port_id is authoritative: match ONLY by it. If it misses (the
-                # cached snapshot changed), do NOT fall back to name matching — a display name can
-                # be reused by another/OOB port and repaint the wrong row. A miss leaves port_data
-                # None so the row is simply not re-rendered.
-                port_data = next(
-                    (
-                        p
-                        for p in ports
-                        if normalize_librenms_port_id(p.get("port_id")) == posted_port_id and p.get("_source") != "oob"
-                    ),
-                    None,
+            if posted_port_id is None:
+                return JsonResponse(
+                    {"status": "error", "message": "A valid LibreNMS port ID is required."},
+                    status=404,
                 )
-            else:
-                port_data = next(
-                    (p for p in ports if p.get(interface_name_field) == interface_name and p.get("_source") != "oob"),
-                    None,
+            if posted_port_id not in unique_host_port_ids:
+                return JsonResponse(
+                    {"status": "error", "message": "Interface data is ambiguous. Refresh and retry."},
+                    status=404,
                 )
+            # A supplied stable port_id is authoritative: match only by it. If it misses, do not
+            # fall back to a display name that another host or OOB row can reuse.
+            port_data = next(
+                (
+                    p
+                    for p in ports
+                    if normalize_librenms_port_id(p.get("port_id")) == posted_port_id and p.get("_source") != "oob"
+                ),
+                None,
+            )
 
             if port_data:
-                table_class = VCInterfaceTable if selected_device.virtual_chassis else LibreNMSInterfaceTable
-                table = table_class(
+                vlan_groups = self.get_vlan_groups_for_device(selected_device)
+                vlan_lookup_maps = self._build_vlan_lookup_maps(vlan_groups)
+                vlan_group_overrides = cache.get(self.get_vlan_overrides_key(primary_device, server_key)) or {}
+                BaseInterfaceTableView._add_vlan_group_selection(
+                    self,
+                    port_data,
+                    vlan_lookup_maps,
+                    selected_device,
+                    vlan_group_overrides,
+                )
+                BaseInterfaceTableView._add_missing_vlans_info(self, port_data, vlan_lookup_maps)
+                port_data["vlan_groups"] = vlan_groups
+                # The caller keeps its existing VC member selector. The verify response only
+                # repaints comparison and relationship cells, so it does not need another
+                # member dropdown in the JSON payload.
+                table = LibreNMSInterfaceTable(
                     [],
                     device=selected_device,
                     interface_name_field=interface_name_field,
+                    vlan_groups=vlan_groups,
                     server_key=server_key,
                 )
                 # Mirror the main table render: a migrated donor's verify response must not
                 # re-introduce the per-row LAG/parent sync button (which posts directly).
                 table.migrated_to_marker = bool(
-                    build_migrated_context(selected_device, server_key).get("migrated_to_marker")
+                    build_migrated_context(origin_device, server_key).get("migrated_to_marker")
                 )
                 # Recompute the LAG/parent relationship for the *selected* member so the
                 # Parent/LAG cell isn't left showing the previously-rendered device's status.
@@ -237,27 +283,94 @@ class SingleInterfaceVerifyView(
                 # sync path. On any miss nb_iface stays None and format_interface_data still
                 # name-resolves it on selected_device.
                 from netbox_librenms_plugin.views.sync.interfaces import (
+                    _build_interface_index,
+                    _filter_interface_index,
+                    _interface_queryset_for_object,
                     _interface_owner_for_object,
+                    _relationship_candidate_q,
                     _resolve_interface_by_port_id,
                 )
 
-                nb_iface, _resolve_err = _resolve_interface_by_port_id(
-                    selected_device,
-                    str(port_data.get("port_id") or ""),
-                    server_key,
-                    # Derive the name fallback from the MATCHED cached row, not the posted display
-                    # name — when the row was matched by a stable port_id, its own name is
-                    # authoritative (the posted name could differ / belong to a reused name).
-                    name_hint=port_data.get(interface_name_field) or "",
-                    expected_owner=_interface_owner_for_object(selected_device),
+                raw_port_id = port_data.get("port_id")
+                port_id = normalize_librenms_port_id(raw_port_id)
+                if port_id is not None:
+                    port_data["port_id"] = port_id
+                name_fallback_allowed = port_id in unambiguous_name_port_ids
+                lag_members, sub_interfaces, by_port_id = BaseInterfaceTableView._build_relationship_maps(cached_data)
+                candidate_port_ids = [raw_port_id]
+                candidate_names = [port_data.get(interface_name_field)] if name_fallback_allowed else []
+                for related_port_id in (lag_members.get(port_id), sub_interfaces.get(port_id)):
+                    related_port = by_port_id.get(related_port_id)
+                    if related_port is None:
+                        continue
+                    candidate_port_ids.append(related_port.get("port_id", related_port_id))
+                    if related_port_id in unambiguous_name_port_ids:
+                        candidate_names.append(related_port.get(interface_name_field))
+
+                interface_queryset = _interface_queryset_for_object(selected_device).filter(
+                    _relationship_candidate_q(server_key, candidate_port_ids, candidate_names)
                 )
+                catalog_ids = set(interface_queryset.values_list("pk", flat=True))
+                catalog_index = _build_interface_index(
+                    selected_device,
+                    server_key,
+                    allowed_ids=catalog_ids,
+                )
+                actionable_owner_ids = set(
+                    Device.objects.restrict(request.user, "view")
+                    .filter(pk__in=interface_queryset.values("device_id"))
+                    .values_list("pk", flat=True)
+                )
+                permitted_queryset = interface_queryset.filter(device_id__in=actionable_owner_ids)
+                viewable_ids = set(permitted_queryset.restrict(request.user, "view").values_list("pk", flat=True))
+                changeable_ids = set(permitted_queryset.restrict(request.user, "change").values_list("pk", flat=True))
+                interface_index = _build_interface_index(
+                    selected_device,
+                    server_key,
+                    allowed_ids=viewable_ids | changeable_ids,
+                )
+                source_index = _filter_interface_index(interface_index, changeable_ids)
+                nb_iface = None
+                changeable_iface = None
+                if port_id in unique_host_port_ids:
+                    _, catalog_err = _resolve_interface_by_port_id(
+                        selected_device,
+                        str(port_data.get("port_id") or ""),
+                        server_key,
+                        name_hint=(port_data.get(interface_name_field) or "") if name_fallback_allowed else "",
+                        expected_owner=_interface_owner_for_object(selected_device),
+                        index=catalog_index,
+                    )
+                    if catalog_err is None:
+                        nb_iface, _resolve_err = _resolve_interface_by_port_id(
+                            selected_device,
+                            str(port_data.get("port_id") or ""),
+                            server_key,
+                            # Derive the name fallback from the MATCHED cached row, not the posted display
+                            # name — when the row was matched by a stable port_id, its own name is
+                            # authoritative (the posted name could differ / belong to a reused name).
+                            name_hint=(port_data.get(interface_name_field) or "") if name_fallback_allowed else "",
+                            expected_owner=_interface_owner_for_object(selected_device),
+                            index=interface_index,
+                        )
+                        changeable_iface, _change_resolve_err = _resolve_interface_by_port_id(
+                            selected_device,
+                            str(port_data.get("port_id") or ""),
+                            server_key,
+                            name_hint=(port_data.get(interface_name_field) or "") if name_fallback_allowed else "",
+                            expected_owner=_interface_owner_for_object(selected_device),
+                            index=source_index,
+                        )
                 port_data["netbox_interface"] = nb_iface
+                port_data["name_fallback_allowed"] = name_fallback_allowed and nb_iface is not None
+                port_data["relationship_source_resolvable"] = (
+                    self.has_write_permission() and changeable_iface is not None
+                )
                 # Reuse the exact prep the table path uses (normalize keys + corruption guard +
                 # host-scoping all live in _build_relationship_maps): the inline verify response
                 # must read the cache identically to get_context_data, or the Parent/LAG cell it
                 # repaints would diverge from the table — including failing soft on a malformed /
                 # partial-write snapshot rather than 500-ing on a present-but-None map.
-                lag_members, sub_interfaces, by_port_id = BaseInterfaceTableView._build_relationship_maps(cached_data)
                 BaseInterfaceTableView._enrich_port_with_lag_parent(
                     port_data,
                     lag_members,
@@ -266,6 +379,39 @@ class SingleInterfaceVerifyView(
                     interface_name_field,
                     server_key or "",
                 )
+                for relation in ("lag", "parent"):
+                    related_port_id = port_data.get(f"librenms_{relation}_port_id")
+                    related_port = by_port_id.get(related_port_id)
+                    related_iface = None
+                    if related_port is not None and related_port_id in unique_host_port_ids:
+                        related_name_fallback_allowed = related_port_id in unambiguous_name_port_ids
+                        _, catalog_err = _resolve_interface_by_port_id(
+                            selected_device,
+                            str(related_port_id),
+                            server_key,
+                            name_hint=(related_port.get(interface_name_field) or "")
+                            if related_name_fallback_allowed
+                            else "",
+                            index=catalog_index,
+                        )
+                        if catalog_err is None:
+                            related_iface, _ = _resolve_interface_by_port_id(
+                                selected_device,
+                                str(related_port_id),
+                                server_key,
+                                name_hint=(related_port.get(interface_name_field) or "")
+                                if related_name_fallback_allowed
+                                else "",
+                                index=interface_index,
+                            )
+                            if (
+                                relation == "lag"
+                                and related_iface is not None
+                                and related_iface.type != "lag"
+                                and related_iface.pk not in changeable_ids
+                            ):
+                                related_iface = None
+                    port_data[f"{relation}_target_resolvable"] = related_iface is not None
                 formatted_row = table.format_interface_data(port_data, selected_device)
                 return JsonResponse({"status": "success", "formatted_row": formatted_row})
 

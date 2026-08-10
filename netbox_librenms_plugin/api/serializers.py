@@ -9,6 +9,7 @@ from netbox_librenms_plugin.models import (
     ModuleTypeMapping,
     NormalizationRule,
     PlatformMapping,
+    PortStackLagPattern,
 )
 
 
@@ -129,3 +130,13 @@ class CarrierAutoInstallRuleSerializer(NetBoxModelSerializer):
             "carrier_module_type",
             "description",
         ]
+
+
+class PortStackLagPatternSerializer(NetBoxModelSerializer):
+    """Serialize PortStackLagPattern model for REST API."""
+
+    class Meta:
+        """Meta options for PortStackLagPatternSerializer."""
+
+        model = PortStackLagPattern
+        fields = ["id", "librenms_os", "lag_name_pattern", "description"]

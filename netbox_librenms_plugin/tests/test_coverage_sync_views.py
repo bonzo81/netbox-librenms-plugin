@@ -910,26 +910,6 @@ class TestSyncInterfacesViewGetRequiredPermissions:
         assert raised
 
 
-class TestSyncInterfacesViewGetSelectedInterfaces:
-    def test_empty_list_returns_none_and_shows_error(self):
-        from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
-
-        view = _make_view(SyncInterfacesView)
-        req = _make_request({"select": []})
-        with patch("netbox_librenms_plugin.views.sync.interfaces.messages") as mock_msg:
-            result = view.get_selected_interfaces(req, "ifName")
-        assert result is None
-        mock_msg.error.assert_called_once()
-
-    def test_non_empty_returns_list(self):
-        from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
-
-        view = _make_view(SyncInterfacesView)
-        req = _make_request({"select": ["eth0", "eth1"]})
-        result = view.get_selected_interfaces(req, "ifName")
-        assert result == ["eth0", "eth1"]
-
-
 class TestSyncInterfacesViewGetCachedPortsData:
     def test_cache_miss_returns_none_and_warns(self):
         from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
@@ -1041,144 +1021,6 @@ class TestSyncInterfacesViewServerRebind:
         assert "server_key=secondary" in resp["Location"]
 
 
-class TestSyncInterfacesViewPost:
-    def test_permission_denied_device_returns_early(self):
-        from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
-
-        view = _make_view(SyncInterfacesView)
-        mock_error = MagicMock()
-        with patch.object(view, "require_all_permissions", return_value=mock_error):
-            result = view.post(view.request, object_type="device", object_id=1)
-        assert result is mock_error
-
-    def test_permission_denied_vm_returns_early(self):
-        from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
-
-        view = _make_view(SyncInterfacesView)
-        mock_error = MagicMock()
-        with patch.object(view, "require_all_permissions", return_value=mock_error):
-            result = view.post(view.request, object_type="virtualmachine", object_id=1)
-        assert result is mock_error
-
-    def test_invalid_object_type_raises_404(self):
-        from django.http import Http404
-
-        from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
-
-        view = _make_view(SyncInterfacesView)
-        raised = False
-        try:
-            view.post(view.request, object_type="invalid", object_id=1)
-        except Http404:
-            raised = True
-        assert raised
-
-    def test_no_selection_redirects(self):
-        from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
-
-        view = _make_view(SyncInterfacesView)
-        mock_obj = MagicMock()
-        with patch.object(view, "require_all_permissions", return_value=None):
-            with patch.object(view, "get_object", return_value=mock_obj):
-                with patch(
-                    "netbox_librenms_plugin.views.sync.interfaces.get_interface_name_field",
-                    return_value="ifName",
-                ):
-                    with patch.object(view, "get_selected_interfaces", return_value=None):
-                        with patch(
-                            "netbox_librenms_plugin.views.sync.interfaces.reverse",
-                            return_value="/fake/",
-                        ):
-                            with patch("netbox_librenms_plugin.views.sync.interfaces.redirect") as mock_redirect:
-                                view.post(view.request, object_type="device", object_id=1)
-        mock_redirect.assert_called_once()
-
-    def test_cache_miss_redirects(self):
-        from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
-
-        view = _make_view(SyncInterfacesView)
-        mock_obj = MagicMock()
-        with patch.object(view, "require_all_permissions", return_value=None):
-            with patch.object(view, "get_object", return_value=mock_obj):
-                with patch(
-                    "netbox_librenms_plugin.views.sync.interfaces.get_interface_name_field",
-                    return_value="ifName",
-                ):
-                    with patch.object(view, "get_selected_interfaces", return_value=["eth0"]):
-                        with patch.object(view, "get_cached_ports_data", return_value=None):
-                            with patch(
-                                "netbox_librenms_plugin.views.sync.interfaces.reverse",
-                                return_value="/fake/",
-                            ):
-                                with patch("netbox_librenms_plugin.views.sync.interfaces.redirect") as mock_redirect:
-                                    view.post(view.request, object_type="device", object_id=1)
-        mock_redirect.assert_called_once()
-
-    def test_device_full_sync_success(self):
-        from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
-
-        view = _make_view(SyncInterfacesView)
-        mock_obj = MagicMock()
-        ports = [{"ifName": "eth0"}]
-        with patch.object(view, "require_all_permissions", return_value=None):
-            with patch.object(view, "get_object", return_value=mock_obj):
-                with patch(
-                    "netbox_librenms_plugin.views.sync.interfaces.get_interface_name_field",
-                    return_value="ifName",
-                ):
-                    with patch.object(view, "get_selected_interfaces", return_value=["eth0"]):
-                        with patch.object(view, "get_cached_ports_data", return_value=ports):
-                            with patch.object(view, "get_vlan_groups_for_device", return_value=[]):
-                                with patch.object(view, "_build_vlan_lookup_maps", return_value={}):
-                                    with patch.object(view, "sync_selected_interfaces"):
-                                        with patch(
-                                            "netbox_librenms_plugin.views.sync.interfaces.reverse",
-                                            return_value="/fake/",
-                                        ):
-                                            with patch("netbox_librenms_plugin.views.sync.interfaces.messages"):
-                                                with patch(
-                                                    "netbox_librenms_plugin.views.sync.interfaces.redirect"
-                                                ) as mock_redirect:
-                                                    view.post(
-                                                        view.request,
-                                                        object_type="device",
-                                                        object_id=1,
-                                                    )
-        mock_redirect.assert_called_once()
-
-    def test_vm_full_sync_success(self):
-        from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
-
-        view = _make_view(SyncInterfacesView)
-        mock_obj = MagicMock()
-        ports = [{"ifName": "eth0"}]
-        with patch.object(view, "require_all_permissions", return_value=None):
-            with patch.object(view, "get_object", return_value=mock_obj):
-                with patch(
-                    "netbox_librenms_plugin.views.sync.interfaces.get_interface_name_field",
-                    return_value="ifName",
-                ):
-                    with patch.object(view, "get_selected_interfaces", return_value=["eth0"]):
-                        with patch.object(view, "get_cached_ports_data", return_value=ports):
-                            with patch.object(view, "get_vlan_groups_for_device", return_value=[]):
-                                with patch.object(view, "_build_vlan_lookup_maps", return_value={}):
-                                    with patch.object(view, "sync_selected_interfaces"):
-                                        with patch(
-                                            "netbox_librenms_plugin.views.sync.interfaces.reverse",
-                                            return_value="/fake/",
-                                        ):
-                                            with patch("netbox_librenms_plugin.views.sync.interfaces.messages"):
-                                                with patch(
-                                                    "netbox_librenms_plugin.views.sync.interfaces.redirect"
-                                                ) as mock_redirect:
-                                                    view.post(
-                                                        view.request,
-                                                        object_type="virtualmachine",
-                                                        object_id=1,
-                                                    )
-        mock_redirect.assert_called_once()
-
-
 @pytest.mark.django_db
 class TestSyncInterfacesViewSyncInterface:
     """Real-DB tests for SyncInterfacesView.sync_interface target resolution."""
@@ -1239,8 +1081,8 @@ class TestSyncInterfacesViewSyncInterface:
         member2.vc_position = 2
         member2.save()
         # Select member2 (a valid VC member) → the interface lands on member2, not the master.
-        view.request = _make_request({"device_selection_eth0": str(member2.id)})
-        librenms_if = {"ifName": "eth0"}
+        view.request = _make_request({"device_selection_10": str(member2.id)})
+        librenms_if = {"ifName": "eth0", "port_id": 10}
 
         p_type, p_attrs, p_vlans = self._patches(view)
         with p_type, p_attrs, p_vlans:
@@ -1264,8 +1106,8 @@ class TestSyncInterfacesViewSyncInterface:
         master.save()
         # An existing device that is not a member of this VC is an invalid explicit target.
         outsider = make_device("vc-sync-outsider")
-        view.request = _make_request({"device_selection_eth0": str(outsider.id)})
-        librenms_if = {"ifName": "eth0"}
+        view.request = _make_request({"device_selection_10": str(outsider.id)})
+        librenms_if = {"ifName": "eth0", "port_id": 10}
 
         p_type, p_attrs, p_vlans = self._patches(view)
         with p_type, p_attrs, p_vlans:
@@ -1283,8 +1125,8 @@ class TestSyncInterfacesViewSyncInterface:
         device = make_device("sync-iface-noVC")  # no virtual_chassis
         other = make_device("sync-iface-other")
         # A selection for another device is invalid when the page device has no chassis.
-        view.request = _make_request({"device_selection_eth0": str(other.id)})
-        librenms_if = {"ifName": "eth0"}
+        view.request = _make_request({"device_selection_10": str(other.id)})
+        librenms_if = {"ifName": "eth0", "port_id": 10}
 
         p_type, p_attrs, p_vlans = self._patches(view)
         with p_type, p_attrs, p_vlans:

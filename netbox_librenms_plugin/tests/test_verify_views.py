@@ -12,7 +12,6 @@ import pytest
 from django.test import RequestFactory
 
 from netbox_librenms_plugin.views.base.cables_view import SingleCableVerifyView
-from netbox_librenms_plugin.views.base.interfaces_view import BaseInterfaceTableView as _RealBase
 from netbox_librenms_plugin.views.object_sync.devices import SingleInterfaceVerifyView
 
 
@@ -257,177 +256,1137 @@ class TestSingleInterfaceVerifyView:
         data = json.loads(response.content)
         assert data["status"] == "error"
 
-    @patch("netbox_librenms_plugin.views.object_sync.devices.BaseInterfaceTableView")
-    @patch("netbox_librenms_plugin.views.object_sync.devices.LibreNMSInterfaceTable")
-    @patch.object(SingleInterfaceVerifyView, "restrict_object_or_404")
-    @patch("netbox_librenms_plugin.views.object_sync.devices.cache")
-    def test_verify_normalizes_relationship_map_keys(self, mock_cache, mock_get_obj, mock_table_cls, mock_base):
-        """Cached relationship maps with stringified port_id keys must be normalized to ints before enrichment, mirroring the main table path — otherwise the int-keyed lookup in _enrich_port_with_lag_parent silently drops Parent/LAG context."""
-        device = MagicMock()
-        device.virtual_chassis = None
-        device.interfaces.all.return_value = []
-        device.interfaces.filter.return_value.first.return_value = None
-        mock_get_obj.return_value = device
+    @pytest.mark.django_db
+    def test_verify_does_not_name_match_interface_bound_to_another_port(self):
+        from django.core.cache import cache
 
-        # _build_relationship_maps is the shared prep both the table and verify paths use; run
-        # the REAL one (only _enrich_port_with_lag_parent stays a capturable mock) so this test
-        # exercises the actual normalization rather than a stubbed-out map.
-        mock_base._build_relationship_maps.side_effect = _RealBase._build_relationship_maps
+        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+        from netbox_librenms_plugin.tests.conftest import make_device, make_interface
+        from netbox_librenms_plugin.tests.view_test_helpers import make_request
+        from netbox_librenms_plugin.utils import set_librenms_device_id
 
-        mock_cache.get.return_value = {
-            "ports": [{"port_id": 10, "ifName": "Et1", "_source": "host"}],
-            "port_stack_relationships": {
-                "lag_members": {"10": 20},  # stringified keys, as they can arrive from cache
-                "sub_interfaces": {"10": 30},
+        device = make_device("verify-conflicting-port-id")
+        wrong_interface = make_interface(device, "Ethernet1")
+        set_librenms_device_id(wrong_interface, 30, "default")
+        wrong_interface.save()
+        view = SingleInterfaceVerifyView()
+        api = object.__new__(LibreNMSAPI)
+        api.server_key = "default"
+        view._librenms_api = api
+        cache_key = view.get_cache_key(device, "ports", "default")
+        cache.set(
+            cache_key,
+            {
+                "ports": [
+                    {
+                        "port_id": 20,
+                        "ifName": "Ethernet1",
+                        "ifDescr": "Ethernet1",
+                        "ifAlias": "",
+                        "ifType": "ethernetCsmacd",
+                        "ifSpeed": 1_000_000_000,
+                        "ifPhysAddress": "",
+                        "ifMtu": 1500,
+                        "ifAdminStatus": "up",
+                        "_source": "host",
+                    }
+                ],
+                "port_stack_relationships": {},
             },
-        }
-        mock_table_cls.return_value.format_interface_data.return_value = {"ok": True}
-
-        view = self._make_view()
-        view.require_object_permissions_json = MagicMock(return_value=None)
-        view.get_cache_key = MagicMock(return_value="ck")
-        request = _make_request(
-            {"device_id": 5, "interface_name": "Et1", "interface_name_field": "ifName", "port_id": 10}
         )
-        response = view.post(request)
+        request = make_request(
+            "post",
+            json.dumps(
+                {
+                    "device_id": device.pk,
+                    "interface_name": "Ethernet1",
+                    "interface_name_field": "ifName",
+                    "port_id": 20,
+                }
+            ),
+            user=_verify_superuser("conflicting-port-id"),
+            path="/verify/",
+            content_type="application/json",
+        )
+
+        try:
+            response = view.post(request)
+        finally:
+            cache.delete(cache_key)
 
         assert response.status_code == 200
-        mock_base._enrich_port_with_lag_parent.assert_called_once()
-        _, lag_members, sub_interfaces, *_ = mock_base._enrich_port_with_lag_parent.call_args.args
-        assert 10 in lag_members and "10" not in lag_members
-        assert 10 in sub_interfaces and "10" not in sub_interfaces
+        row = json.loads(response.content)["formatted_row"]
+        assert "text-danger" in row["name"]
 
-    @patch("netbox_librenms_plugin.views.object_sync.devices.BaseInterfaceTableView")
-    @patch("netbox_librenms_plugin.views.object_sync.devices.LibreNMSInterfaceTable")
-    @patch.object(SingleInterfaceVerifyView, "restrict_object_or_404")
-    @patch("netbox_librenms_plugin.views.object_sync.devices.cache")
-    def test_verify_handles_malformed_relationship_cache(self, mock_cache, mock_get_obj, mock_table_cls, mock_base):
-        """A cached port_stack_relationships that is None / a non-dict (or whose lag_members/sub_interfaces is None / a non-dict) must fail soft like the table path (test_malformed_port_stack_relationships_does_not_crash) — the .get(key, {}) default only fills a *missing* key, so a present-but-None value would AttributeError on .items() and 500 the verify endpoint."""
-        device = MagicMock()
-        device.virtual_chassis = None
-        device.interfaces.all.return_value = []
-        device.interfaces.filter.return_value.first.return_value = None
-        mock_get_obj.return_value = device
-        mock_table_cls.return_value.format_interface_data.return_value = {"ok": True}
-        # Run the REAL shared prep so this exercises the actual corruption guard, not a stub.
-        mock_base._build_relationship_maps.side_effect = _RealBase._build_relationship_maps
+    @pytest.mark.django_db
+    def test_verify_member_switch_returns_the_selected_members_vlan_group(self):
+        from django.contrib.contenttypes.models import ContentType
+        from django.core.cache import cache
+        from dcim.models import Rack
+        from ipam.models import VLAN, VLANGroup
 
-        view = self._make_view()
-        view.require_object_permissions_json = MagicMock(return_value=None)
-        view.get_cache_key = MagicMock(return_value="ck")
+        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+        from netbox_librenms_plugin.tests.conftest import make_virtual_chassis_members
+        from netbox_librenms_plugin.tests.view_test_helpers import make_request
 
-        malformed_relationships = [
+        _virtual_chassis, (member1, member2) = make_virtual_chassis_members("verify-vlan-owner")
+        rack1 = Rack.objects.create(name="Verify VLAN Rack 1", site=member1.site, status="active")
+        rack2 = Rack.objects.create(name="Verify VLAN Rack 2", site=member1.site, status="active")
+        member1.rack = rack1
+        member2.rack = rack2
+        member1.save()
+        member2.save()
+        rack_type = ContentType.objects.get_for_model(Rack)
+        group1 = VLANGroup.objects.create(
+            name="Verify VLAN Group 1",
+            slug="verify-vlan-group-1",
+            scope_type=rack_type,
+            scope_id=rack1.pk,
+        )
+        group2 = VLANGroup.objects.create(
+            name="Verify VLAN Group 2",
+            slug="verify-vlan-group-2",
+            scope_type=rack_type,
+            scope_id=rack2.pk,
+        )
+        VLAN.objects.create(vid=100, name="Verify Rack 1 VLAN", group=group1, status="active")
+        VLAN.objects.create(vid=100, name="Verify Rack 2 VLAN", group=group2, status="active")
+        view = SingleInterfaceVerifyView()
+        api = object.__new__(LibreNMSAPI)
+        api.server_key = "default"
+        view._librenms_api = api
+        cache_key = view.get_cache_key(member1, "ports", "default")
+        cache.set(
+            cache_key,
+            {
+                "ports": [
+                    {
+                        "port_id": 10,
+                        "ifName": "Ethernet2",
+                        "ifDescr": "Ethernet2",
+                        "ifAlias": "",
+                        "ifType": "ethernetCsmacd",
+                        "ifSpeed": 1_000_000_000,
+                        "ifPhysAddress": "",
+                        "ifMtu": 1500,
+                        "ifAdminStatus": "up",
+                        "untagged_vlan": 100,
+                        "tagged_vlans": [],
+                    }
+                ],
+                "port_stack_relationships": {},
+            },
+        )
+        request = make_request(
+            "post",
+            json.dumps(
+                {
+                    "device_id": member2.pk,
+                    "interface_name": "Ethernet2",
+                    "interface_name_field": "ifName",
+                    "port_id": 10,
+                }
+            ),
+            user=_verify_superuser("vlan-owner"),
+            path="/verify/",
+            content_type="application/json",
+        )
+
+        try:
+            response = view.post(request)
+        finally:
+            cache.delete(cache_key)
+
+        assert response.status_code == 200
+        vlan_cell = json.loads(response.content)["formatted_row"]["vlans"]
+        assert f'name="vlan_group_10_100" value="{group2.pk}"' in vlan_cell
+        assert f'name="vlan_group_10_100" value="{group1.pk}"' not in vlan_cell
+
+    @pytest.mark.django_db
+    def test_verify_normalizes_relationship_map_keys(self):
+        from django.core.cache import cache
+
+        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+        from netbox_librenms_plugin.tests.conftest import make_device, make_interface
+        from netbox_librenms_plugin.tests.view_test_helpers import make_request
+        from netbox_librenms_plugin.utils import set_librenms_device_id
+
+        device = make_device("verify-string-relationship-key")
+        child = make_interface(device, "Ethernet1.100", iface_type="virtual")
+        parent = make_interface(device, "Ethernet1")
+        set_librenms_device_id(child, 10, "default")
+        set_librenms_device_id(parent, 20, "default")
+        child.save()
+        parent.save()
+        view = SingleInterfaceVerifyView()
+        api = object.__new__(LibreNMSAPI)
+        api.server_key = "default"
+        view._librenms_api = api
+        cache_key = view.get_cache_key(device, "ports", "default")
+        cache.set(
+            cache_key,
+            {
+                "ports": [
+                    {
+                        "port_id": 10,
+                        "ifName": child.name,
+                        "ifDescr": child.name,
+                        "ifAlias": "",
+                        "ifType": "l2vlan",
+                        "ifSpeed": 1_000_000_000,
+                        "ifPhysAddress": "",
+                        "ifMtu": 1500,
+                        "ifAdminStatus": "up",
+                    },
+                    {
+                        "port_id": 20,
+                        "ifName": parent.name,
+                        "ifDescr": parent.name,
+                        "ifAlias": "",
+                        "ifType": "ethernetCsmacd",
+                        "ifSpeed": 1_000_000_000,
+                        "ifPhysAddress": "",
+                        "ifMtu": 1500,
+                        "ifAdminStatus": "up",
+                    },
+                ],
+                "port_stack_relationships": {"lag_members": {}, "sub_interfaces": {"10": 20}},
+            },
+        )
+        request = make_request(
+            "post",
+            json.dumps(
+                {
+                    "device_id": device.pk,
+                    "interface_name_field": "ifName",
+                    "port_id": 10,
+                }
+            ),
+            user=_verify_superuser("string-relationship-key"),
+            path="/verify/",
+            content_type="application/json",
+        )
+
+        try:
+            response = view.post(request)
+        finally:
+            cache.delete(cache_key)
+
+        assert response.status_code == 200
+        assert parent.name in json.loads(response.content)["formatted_row"]["parent"]
+
+    @pytest.mark.django_db
+    @pytest.mark.parametrize(
+        "bad_relationships",
+        [
             None,
             ["not", "a", "dict"],
             "garbage",
             {"lag_members": None, "sub_interfaces": None},
             {"lag_members": "nope", "sub_interfaces": 42},
-        ]
-        for bad in malformed_relationships:
-            mock_base.reset_mock()
-            mock_cache.get.return_value = {
-                "ports": [{"port_id": 10, "ifName": "Et1", "_source": "host"}],
-                "port_stack_relationships": bad,
-            }
-            request = _make_request(
-                {"device_id": 5, "interface_name": "Et1", "interface_name_field": "ifName", "port_id": 10}
-            )
-            response = view.post(request)  # must not raise
+        ],
+    )
+    def test_verify_handles_malformed_relationship_cache(self, bad_relationships):
+        from django.core.cache import cache
 
-            assert response.status_code == 200, f"malformed relationships {bad!r} should not 500"
-            # The guard collapses every malformed map to {}, so enrichment still runs with empties.
-            _, lag_members, sub_interfaces, *_ = mock_base._enrich_port_with_lag_parent.call_args.args
-            assert lag_members == {}
-            assert sub_interfaces == {}
-
-    @patch("netbox_librenms_plugin.views.object_sync.devices.cache")
-    def test_verify_missed_port_id_does_not_repaint_same_named_row(self, mock_cache, db):
-        """A supplied port_id is authoritative: if it misses, do NOT fall back to a same-named row."""
+        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
         from netbox_librenms_plugin.tests.conftest import make_device
+        from netbox_librenms_plugin.tests.view_test_helpers import make_request
 
-        # A REAL non-VC device, superuser, permission gate, and restricted DB lookup drive the
-        # real SingleInterfaceVerifyView.post() path; only the LibreNMS cache is stubbed.
+        device = make_device("verify-malformed-relationships")
+        view = SingleInterfaceVerifyView()
+        api = object.__new__(LibreNMSAPI)
+        api.server_key = "default"
+        view._librenms_api = api
+        cache_key = view.get_cache_key(device, "ports", "default")
+        cache.set(
+            cache_key,
+            {
+                "ports": [
+                    {
+                        "port_id": 10,
+                        "ifName": "Et1",
+                        "ifDescr": "Et1",
+                        "ifAlias": "",
+                        "ifType": "ethernetCsmacd",
+                        "ifSpeed": 1_000_000_000,
+                        "ifPhysAddress": "",
+                        "ifMtu": 1500,
+                        "ifAdminStatus": "up",
+                    }
+                ],
+                "port_stack_relationships": bad_relationships,
+            },
+        )
+        request = make_request(
+            "post",
+            json.dumps(
+                {
+                    "device_id": device.pk,
+                    "interface_name_field": "ifName",
+                    "port_id": 10,
+                }
+            ),
+            user=_verify_superuser(f"malformed-{type(bad_relationships).__name__}"),
+            path="/verify/",
+            content_type="application/json",
+        )
+
+        try:
+            response = view.post(request)
+        finally:
+            cache.delete(cache_key)
+
+        assert response.status_code == 200
+        row = json.loads(response.content)["formatted_row"]
+        assert "Parent" not in row["parent"]
+
+    @pytest.mark.django_db
+    def test_verify_missed_port_id_does_not_repaint_same_named_row(self):
+        """A supplied port_id is authoritative: if it misses, do NOT fall back to a same-named row."""
+        from django.core.cache import cache
+
+        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+        from netbox_librenms_plugin.tests.conftest import make_device
+        from netbox_librenms_plugin.tests.view_test_helpers import make_request
+
         device = make_device("verify-authoritative-pid")
         user = _verify_superuser("authoritative-pid")
-        # Cache holds a port NAMED "Et1" (port_id 99). The client posts a DIFFERENT stable id (777)
-        # matching no cached port. Name-fallback would wrongly repaint the port_id-99 row.
-        mock_cache.get.return_value = {
-            "ports": [
+        view = SingleInterfaceVerifyView()
+        api = object.__new__(LibreNMSAPI)
+        api.server_key = "default"
+        view._librenms_api = api
+        cache_key = view.get_cache_key(device, "ports", "default")
+        cache.set(
+            cache_key,
+            {
+                "ports": [
+                    {
+                        "port_id": 99,
+                        "ifName": "Et1",
+                        "ifDescr": "Et1",
+                        "ifAlias": "",
+                        "ifType": "ethernetCsmacd",
+                        "ifSpeed": 1_000_000_000,
+                        "ifPhysAddress": "",
+                        "ifMtu": 1500,
+                        "ifAdminStatus": "up",
+                        "_source": "host",
+                    }
+                ]
+            },
+        )
+        matching_request = make_request(
+            "post",
+            json.dumps(
+                {"device_id": device.pk, "interface_name": "Et1", "interface_name_field": "ifName", "port_id": 99}
+            ),
+            user=user,
+            path="/verify/",
+            content_type="application/json",
+        )
+        missed_request = make_request(
+            "post",
+            json.dumps(
                 {
-                    "port_id": 99,
-                    "ifName": "Et1",
-                    "ifDescr": "Et1",
-                    "ifAlias": "",
-                    "ifType": "ethernetCsmacd",
-                    "ifSpeed": 1_000_000_000,
-                    "ifPhysAddress": "",
-                    "ifMtu": 1500,
-                    "ifAdminStatus": "up",
-                    "_source": "host",
+                    "device_id": device.pk,
+                    "interface_name": "Et1",
+                    "interface_name_field": "ifName",
+                    "port_id": 777,
                 }
-            ]
-        }
-
-        view, request = _real_verify_view(
-            SingleInterfaceVerifyView,
-            {"device_id": device.pk, "interface_name": "Et1", "interface_name_field": "ifName", "port_id": 99},
-            user,
+            ),
+            user=user,
+            path="/verify/",
+            content_type="application/json",
         )
-        view.get_cache_key = MagicMock(return_value="ck")
-        response = view.post(request)
-        assert response.status_code == 200
 
-        view, request = _real_verify_view(
-            SingleInterfaceVerifyView,
-            {"device_id": device.pk, "interface_name": "Et1", "interface_name_field": "ifName", "port_id": 777},
-            user,
-        )
-        view.get_cache_key = MagicMock(return_value="ck")
-        response = view.post(request)
+        try:
+            assert view.post(matching_request).status_code == 200
+            response = view.post(missed_request)
+        finally:
+            cache.delete(cache_key)
 
         # The authoritative-but-missed id yields "not found", never a wrong-row repaint.
         assert response.status_code == 404
         data = json.loads(response.content)
         assert data["status"] == "error"
 
-    @patch("netbox_librenms_plugin.views.sync.interfaces._resolve_interface_by_port_id")
-    @patch("netbox_librenms_plugin.views.object_sync.devices.LibreNMSInterfaceTable")
-    @patch.object(SingleInterfaceVerifyView, "restrict_object_or_404")
-    @patch("netbox_librenms_plugin.views.object_sync.devices.cache")
-    def test_verify_name_hint_derived_from_matched_row(
-        self, mock_cache, mock_get_obj, mock_table_cls, mock_resolve, db
-    ):
+    @pytest.mark.django_db
+    def test_verify_name_hint_derived_from_matched_row(self):
         """The interface name fallback is taken from the port_id-matched cached row, not the posted display name."""
-        from netbox_librenms_plugin.tests.conftest import make_device
+        from django.core.cache import cache
 
-        # Real device + the REAL shared relationship-map prep run; _resolve_interface_by_port_id is
-        # spied to capture the exact name_hint it receives (the thing under test). Only the LibreNMS
-        # cache/object lookup and the downstream row RENDER (format_interface_data — not under test)
-        # are stubbed. The view resolves the device via restrict_object_or_404 (the sibling tests
-        # patch the same seam) — stubbing module-level get_object_or_404 would never be hit.
+        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+        from netbox_librenms_plugin.tests.conftest import make_device, make_interface
+        from netbox_librenms_plugin.tests.view_test_helpers import make_request
+
         device = make_device("verify-namehint")
-        mock_get_obj.return_value = device
-        mock_resolve.return_value = (None, None)
-        mock_table_cls.return_value.format_interface_data.return_value = {"ok": True}
-        # The port_id-10 row's real name is "Et1"; the client posts a STALE display name.
-        mock_cache.get.return_value = {"ports": [{"port_id": 10, "ifName": "Et1", "_source": "host"}]}
-
-        view = self._make_view()
-        view.require_object_permissions_json = MagicMock(return_value=None)
-        view.get_cache_key = MagicMock(return_value="ck")
-        request = _make_request(
+        make_interface(device, "Et1")
+        view = SingleInterfaceVerifyView()
+        api = object.__new__(LibreNMSAPI)
+        api.server_key = "default"
+        view._librenms_api = api
+        cache_key = view.get_cache_key(device, "ports", "default")
+        cache.set(
+            cache_key,
             {
-                "device_id": device.pk,
-                "interface_name": "stale-display-name",
-                "interface_name_field": "ifName",
-                "port_id": 10,
-            }
+                "ports": [
+                    {
+                        "port_id": 10,
+                        "ifName": "Et1",
+                        "ifDescr": "Et1",
+                        "ifAlias": "",
+                        "ifType": "ethernetCsmacd",
+                        "ifSpeed": 1_000_000_000,
+                        "ifPhysAddress": "",
+                        "ifMtu": 1500,
+                        "ifAdminStatus": "up",
+                    }
+                ]
+            },
         )
-        response = view.post(request)
+        request = make_request(
+            "post",
+            json.dumps(
+                {
+                    "device_id": device.pk,
+                    "interface_name": "stale-display-name",
+                    "interface_name_field": "ifName",
+                    "port_id": 10,
+                }
+            ),
+            user=_verify_superuser("namehint"),
+            path="/verify/",
+            content_type="application/json",
+        )
+
+        try:
+            response = view.post(request)
+        finally:
+            cache.delete(cache_key)
 
         assert response.status_code == 200
-        # name_hint is the matched row's own name ("Et1"), NOT the posted "stale-display-name".
-        assert mock_resolve.call_args.kwargs["name_hint"] == "Et1"
+        row = json.loads(response.content)["formatted_row"]
+        assert "text-success" in row["name"]
+        assert "stale-display-name" not in row["name"]
+
+    @pytest.mark.django_db
+    def test_verify_keeps_view_only_interface_match_without_offering_relationship_write(self):
+        from django.core.cache import cache
+        from dcim.models import Device, Interface
+
+        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+        from netbox_librenms_plugin.tests.conftest import make_device, make_interface
+        from netbox_librenms_plugin.tests.view_test_helpers import make_request, make_user_with_perms
+        from netbox_librenms_plugin.utils import set_librenms_device_id
+
+        device = make_device("verify-view-only-match")
+        child = make_interface(device, "Ethernet1.100", iface_type="virtual")
+        parent = make_interface(device, "Ethernet1")
+        set_librenms_device_id(child, 10, "default")
+        set_librenms_device_id(parent, 20, "default")
+        child.save()
+        parent.save()
+        user = make_user_with_perms(
+            "verify-view-only-match",
+            [("view", Device), ("view", Interface)],
+        )
+        snapshot = {
+            "ports": [
+                {
+                    "port_id": 10,
+                    "ifName": child.name,
+                    "ifDescr": child.name,
+                    "ifAlias": "",
+                    "ifType": "l2vlan",
+                    "ifSpeed": 1_000_000_000,
+                    "ifPhysAddress": "",
+                    "ifMtu": 1500,
+                    "ifAdminStatus": "up",
+                },
+                {
+                    "port_id": 20,
+                    "ifName": parent.name,
+                    "ifDescr": parent.name,
+                    "ifAlias": "",
+                    "ifType": "ethernetCsmacd",
+                    "ifSpeed": 1_000_000_000,
+                    "ifPhysAddress": "",
+                    "ifMtu": 1500,
+                    "ifAdminStatus": "up",
+                },
+            ],
+            "port_stack_relationships": {"lag_members": {}, "sub_interfaces": {10: 20}},
+        }
+        view = SingleInterfaceVerifyView()
+        api = object.__new__(LibreNMSAPI)
+        api.server_key = "default"
+        view._librenms_api = api
+        cache_key = view.get_cache_key(device, "ports", "default")
+        cache.set(cache_key, snapshot)
+        request = make_request(
+            "post",
+            json.dumps(
+                {
+                    "device_id": device.pk,
+                    "interface_name_field": "ifName",
+                    "port_id": 10,
+                }
+            ),
+            user=user,
+            path="/verify/",
+            content_type="application/json",
+        )
+
+        try:
+            response = view.post(request)
+        finally:
+            cache.delete(cache_key)
+
+        assert response.status_code == 200
+        row = json.loads(response.content)["formatted_row"]
+        assert "text-success" in row["name"]
+        assert "parent-sync-btn" not in row["parent"]
+
+    @pytest.mark.django_db
+    def test_plugin_read_only_user_never_receives_relationship_write_button(self):
+        from django.apps import apps
+        from django.core.cache import cache
+        from dcim.models import Device, Interface
+
+        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+        from netbox_librenms_plugin.tests.conftest import make_device, make_interface
+        from netbox_librenms_plugin.tests.view_test_helpers import (
+            grant,
+            make_request,
+            make_user_with_perms,
+        )
+        from netbox_librenms_plugin.utils import set_librenms_device_id
+        from netbox_librenms_plugin.views.object_sync.devices import DeviceInterfaceTableView
+
+        device = make_device("verify-plugin-read-only")
+        child = make_interface(device, "Ethernet1.100", iface_type="virtual")
+        parent = make_interface(device, "Ethernet1")
+        set_librenms_device_id(child, 10, "default")
+        set_librenms_device_id(parent, 20, "default")
+        child.save()
+        parent.save()
+        user = make_user_with_perms(
+            "verify-plugin-read-only",
+            [("view", Device), ("view", Interface), ("change", Interface)],
+            plugin_write=False,
+        )
+        settings_model = apps.get_model("netbox_librenms_plugin", "LibreNMSSettings")
+        user = grant(user, "view", settings_model)
+        snapshot = {
+            "ports": [
+                {
+                    "port_id": 10,
+                    "ifName": child.name,
+                    "ifDescr": child.name,
+                    "ifAlias": "",
+                    "ifType": "l2vlan",
+                    "ifSpeed": 1_000_000_000,
+                    "ifPhysAddress": "",
+                    "ifMtu": 1500,
+                    "ifAdminStatus": "up",
+                },
+                {
+                    "port_id": 20,
+                    "ifName": parent.name,
+                    "ifDescr": parent.name,
+                    "ifAlias": "",
+                    "ifType": "ethernetCsmacd",
+                    "ifSpeed": 1_000_000_000,
+                    "ifPhysAddress": "",
+                    "ifMtu": 1500,
+                    "ifAdminStatus": "up",
+                },
+            ],
+            "port_stack_relationships": {"lag_members": {}, "sub_interfaces": {10: 20}},
+        }
+        api = object.__new__(LibreNMSAPI)
+        api.server_key = "default"
+        table_request = make_request("get", user=user)
+        table_view = DeviceInterfaceTableView()
+        table_view._librenms_api = api
+        table_view.request = table_request
+        cache_key = table_view.get_cache_key(device, "ports", "default")
+        cache.set(cache_key, snapshot)
+
+        try:
+            context = table_view.get_context_data(
+                table_request,
+                device,
+                "ifName",
+                "default",
+                fresh_data=snapshot,
+                sync_device=device,
+            )
+            table_html = str(context["table"].render_parent(None, snapshot["ports"][0]))
+
+            verify_view = SingleInterfaceVerifyView()
+            verify_view._librenms_api = api
+            verify_request = make_request(
+                "post",
+                json.dumps({"device_id": device.pk, "interface_name_field": "ifName", "port_id": 10}),
+                user=user,
+                path="/verify/",
+                content_type="application/json",
+            )
+            verify_response = verify_view.post(verify_request)
+        finally:
+            cache.delete(cache_key)
+
+        assert verify_response.status_code == 200, verify_response.content
+        assert "parent-sync-btn" not in table_html
+        assert "parent-sync-btn" not in json.loads(verify_response.content)["formatted_row"]["parent"]
+
+    @pytest.mark.django_db
+    @pytest.mark.parametrize("migrated", [False, True], ids=["active-page", "migrated-page"])
+    def test_virtual_chassis_member_verify_uses_the_origin_page_mode(self, migrated):
+        """Member verification must keep the page mode and target the selected member."""
+        from django.core.cache import cache
+
+        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+        from netbox_librenms_plugin.tests.conftest import (
+            make_device,
+            make_interface,
+            make_virtual_chassis_members,
+        )
+        from netbox_librenms_plugin.tests.view_test_helpers import make_request, make_superuser
+        from netbox_librenms_plugin.utils import mark_librenms_migrated, set_librenms_device_id
+
+        _virtual_chassis, (page_device, selected_device) = make_virtual_chassis_members("verify-migrated-page")
+        winner = make_device("verify-migrated-winner")
+        child = make_interface(selected_device, "Ethernet2.100", iface_type="virtual")
+        parent = make_interface(selected_device, "Ethernet2")
+        set_librenms_device_id(child, 10, "default")
+        set_librenms_device_id(parent, 20, "default")
+        child.save()
+        parent.save()
+        if migrated:
+            mark_librenms_migrated(page_device, winner.pk, "default")
+            page_device.save()
+        snapshot = {
+            "ports": [
+                {
+                    "port_id": 10,
+                    "ifName": child.name,
+                    "ifDescr": child.name,
+                    "ifAlias": "",
+                    "ifType": "l2vlan",
+                    "ifSpeed": 1_000_000_000,
+                    "ifPhysAddress": "",
+                    "ifMtu": 1500,
+                    "ifAdminStatus": "up",
+                },
+                {
+                    "port_id": 20,
+                    "ifName": parent.name,
+                    "ifDescr": parent.name,
+                    "ifAlias": "",
+                    "ifType": "ethernetCsmacd",
+                    "ifSpeed": 1_000_000_000,
+                    "ifPhysAddress": "",
+                    "ifMtu": 1500,
+                    "ifAdminStatus": "up",
+                },
+            ],
+            "port_stack_relationships": {"lag_members": {}, "sub_interfaces": {10: 20}},
+        }
+        view = SingleInterfaceVerifyView()
+        api = object.__new__(LibreNMSAPI)
+        api.server_key = "default"
+        view._librenms_api = api
+        cache_key = view.get_cache_key(page_device, "ports", "default")
+        cache.set(cache_key, snapshot)
+        request = make_request(
+            "post",
+            json.dumps(
+                {
+                    "device_id": selected_device.pk,
+                    "origin_device_id": page_device.pk,
+                    "interface_name_field": "ifName",
+                    "port_id": 10,
+                }
+            ),
+            user=make_superuser("verify-migrated-page"),
+            path="/verify/",
+            content_type="application/json",
+        )
+
+        try:
+            response = view.post(request)
+        finally:
+            cache.delete(cache_key)
+
+        assert response.status_code == 200, response.content
+        parent_html = json.loads(response.content)["formatted_row"]["parent"]
+        if migrated:
+            assert "parent-sync-btn" not in parent_html
+        else:
+            assert "parent-sync-btn" in parent_html
+            assert f"/device/{selected_device.pk}/sync-interface-parent/" in parent_html
+
+    @pytest.mark.django_db
+    def test_verify_response_does_not_expose_inaccessible_vc_members(self):
+        from django.core.cache import cache
+        from dcim.models import Device
+
+        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+        from netbox_librenms_plugin.tests.conftest import make_virtual_chassis_members
+        from netbox_librenms_plugin.tests.view_test_helpers import grant, make_request, make_user_with_perms
+
+        _virtual_chassis, (page_device, selected_device, hidden_device) = make_virtual_chassis_members(
+            "verify-member-scope",
+            count=3,
+        )
+        user = make_user_with_perms("verify-member-scope", [])
+        user = grant(user, "view", Device, constraints={"pk": page_device.pk})
+        user = grant(user, "view", Device, constraints={"pk": selected_device.pk})
+        snapshot = {
+            "ports": [
+                {
+                    "port_id": 10,
+                    "ifName": "Ethernet2",
+                    "ifDescr": "Ethernet2",
+                    "ifAlias": "",
+                    "ifType": "ethernetCsmacd",
+                    "ifSpeed": 1_000_000_000,
+                    "ifPhysAddress": "",
+                    "ifMtu": 1500,
+                    "ifAdminStatus": "up",
+                }
+            ],
+            "port_stack_relationships": {},
+        }
+        view = SingleInterfaceVerifyView()
+        api = object.__new__(LibreNMSAPI)
+        api.server_key = "default"
+        view._librenms_api = api
+        cache_key = view.get_cache_key(page_device, "ports", "default")
+        cache.set(cache_key, snapshot)
+        request = make_request(
+            "post",
+            json.dumps(
+                {
+                    "device_id": selected_device.pk,
+                    "origin_device_id": page_device.pk,
+                    "interface_name_field": "ifName",
+                    "port_id": 10,
+                }
+            ),
+            user=user,
+            path="/verify/",
+            content_type="application/json",
+        )
+
+        try:
+            response = view.post(request)
+        finally:
+            cache.delete(cache_key)
+
+        assert response.status_code == 200, response.content
+        formatted_row = json.loads(response.content)["formatted_row"]
+        assert "device_selection" not in formatted_row
+        assert hidden_device.name not in response.content.decode()
+        assert str(hidden_device.pk) not in response.content.decode()
+
+    @pytest.mark.django_db
+    def test_hidden_related_owner_stays_unavailable_through_verify_and_inline_post(self):
+        from types import SimpleNamespace
+
+        from django.core.cache import cache
+        from dcim.models import Device, Interface
+
+        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+        from netbox_librenms_plugin.tests.conftest import make_interface, make_virtual_chassis_members
+        from netbox_librenms_plugin.tests.view_test_helpers import (
+            grant,
+            make_request,
+            make_user_with_perms,
+            post,
+        )
+        from netbox_librenms_plugin.utils import set_librenms_device_id
+        from netbox_librenms_plugin.views.object_sync.devices import DeviceInterfaceTableView
+        from netbox_librenms_plugin.views.sync.interfaces import SyncInterfaceParentView
+
+        _virtual_chassis, (page_device, hidden_parent_device) = make_virtual_chassis_members(
+            "verify-hidden-parent-owner"
+        )
+        child = make_interface(page_device, "Ethernet1.100", iface_type="virtual")
+        parent = make_interface(hidden_parent_device, "Ethernet2")
+        server_key = "stub"
+        set_librenms_device_id(child, 10, server_key)
+        set_librenms_device_id(parent, 20, server_key)
+        child.save()
+        parent.save()
+        user = make_user_with_perms("verify-hidden-parent-owner", [])
+        user = grant(user, "view", Device, constraints={"pk": page_device.pk})
+        user = grant(user, "change", Interface, constraints={"pk": child.pk})
+        user = grant(user, "view", Interface, constraints={"pk": parent.pk})
+        snapshot = {
+            "ports": [
+                {
+                    "port_id": 10,
+                    "ifName": child.name,
+                    "ifDescr": child.name,
+                    "ifAlias": "",
+                    "ifType": "l2vlan",
+                    "ifSpeed": 1_000_000_000,
+                    "ifPhysAddress": "",
+                    "ifMtu": 1500,
+                    "ifAdminStatus": "up",
+                },
+                {
+                    "port_id": 20,
+                    "ifName": parent.name,
+                    "ifDescr": parent.name,
+                    "ifAlias": "",
+                    "ifType": "ethernetCsmacd",
+                    "ifSpeed": 1_000_000_000,
+                    "ifPhysAddress": "",
+                    "ifMtu": 1500,
+                    "ifAdminStatus": "up",
+                },
+            ],
+            "port_stack_relationships": {"lag_members": {}, "sub_interfaces": {10: 20}},
+        }
+        api = object.__new__(LibreNMSAPI)
+        api.server_key = server_key
+        table_request = make_request("get", user=user)
+        table_view = DeviceInterfaceTableView()
+        table_view._librenms_api = api
+        table_view.request = table_request
+        cache_key = table_view.get_cache_key(page_device, "ports", server_key)
+        cache.set(cache_key, snapshot)
+
+        try:
+            context = table_view.get_context_data(
+                table_request,
+                page_device,
+                "ifName",
+                server_key,
+                fresh_data=snapshot,
+                sync_device=page_device,
+            )
+            assert "parent-sync-btn" not in str(context["table"].render_parent(None, snapshot["ports"][0]))
+
+            verify_view = SingleInterfaceVerifyView()
+            verify_view._librenms_api = api
+            verify_request = make_request(
+                "post",
+                json.dumps(
+                    {
+                        "device_id": page_device.pk,
+                        "server_key": server_key,
+                        "interface_name_field": "ifName",
+                        "port_id": 10,
+                    }
+                ),
+                user=user,
+                path="/verify/",
+                content_type="application/json",
+            )
+            verify_response = verify_view.post(verify_request)
+            assert verify_response.status_code == 200, verify_response.content
+            assert "parent-sync-btn" not in json.loads(verify_response.content)["formatted_row"]["parent"]
+
+            relationship_view = SyncInterfaceParentView()
+            relationship_view._librenms_api = SimpleNamespace(server_key=server_key)
+            relationship_request = make_request(
+                "post",
+                {
+                    "port_id": "10",
+                    "parent_port_id": "20",
+                    "server_key": server_key,
+                },
+                user=user,
+            )
+            relationship_response = post(
+                relationship_view,
+                relationship_request,
+                object_type="device",
+                object_id=page_device.pk,
+            )
+        finally:
+            cache.delete(cache_key)
+
+        assert relationship_response.status_code == 404, relationship_response.content
+        child.refresh_from_db()
+        assert child.parent_id is None
+
+    @pytest.mark.django_db
+    @pytest.mark.parametrize("invalid_origin_id", [[], {}])
+    def test_verify_rejects_malformed_origin_device_id(self, invalid_origin_id):
+        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+        from netbox_librenms_plugin.tests.conftest import make_device
+        from netbox_librenms_plugin.tests.view_test_helpers import make_request
+
+        device = make_device("verify-malformed-origin")
+        view = SingleInterfaceVerifyView()
+        api = object.__new__(LibreNMSAPI)
+        api.server_key = "default"
+        view._librenms_api = api
+        request = make_request(
+            "post",
+            json.dumps(
+                {
+                    "device_id": device.pk,
+                    "origin_device_id": invalid_origin_id,
+                    "interface_name_field": "ifName",
+                    "port_id": 10,
+                }
+            ),
+            user=_verify_superuser(f"malformed-origin-{type(invalid_origin_id).__name__}"),
+            path="/verify/",
+            content_type="application/json",
+        )
+
+        response = view.post(request)
+
+        assert response.status_code == 400
+        assert json.loads(response.content)["status"] == "error"
+
+    @pytest.mark.django_db
+    def test_view_only_non_lag_target_never_receives_lag_promotion_button(self):
+        from types import SimpleNamespace
+
+        from django.core.cache import cache
+        from dcim.models import Device, Interface
+
+        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+        from netbox_librenms_plugin.tests.conftest import make_device, make_interface
+        from netbox_librenms_plugin.tests.view_test_helpers import (
+            grant,
+            make_request,
+            make_user_with_perms,
+            post,
+        )
+        from netbox_librenms_plugin.utils import set_librenms_device_id
+        from netbox_librenms_plugin.views.object_sync.devices import DeviceInterfaceTableView
+        from netbox_librenms_plugin.views.sync.interfaces import SyncInterfaceLagView
+
+        device = make_device("verify-view-only-lag-target")
+        member = make_interface(device, "Ethernet1")
+        aggregate = make_interface(device, "Port-Channel1", iface_type="other")
+        set_librenms_device_id(member, 10, "default")
+        set_librenms_device_id(aggregate, 20, "default")
+        member.save()
+        aggregate.save()
+        user = make_user_with_perms("verify-view-only-lag-target", [("view", Device)])
+        user = grant(user, "change", Interface, constraints={"pk": member.pk})
+        user = grant(user, "view", Interface, constraints={"pk": aggregate.pk})
+        snapshot = {
+            "ports": [
+                {
+                    "port_id": 10,
+                    "ifName": member.name,
+                    "ifDescr": member.name,
+                    "ifAlias": "",
+                    "ifType": "ethernetCsmacd",
+                    "ifSpeed": 1_000_000_000,
+                    "ifPhysAddress": "",
+                    "ifMtu": 1500,
+                    "ifAdminStatus": "up",
+                },
+                {
+                    "port_id": 20,
+                    "ifName": aggregate.name,
+                    "ifDescr": aggregate.name,
+                    "ifAlias": "",
+                    "ifType": "ieee8023adLag",
+                    "ifSpeed": 1_000_000_000,
+                    "ifPhysAddress": "",
+                    "ifMtu": 1500,
+                    "ifAdminStatus": "up",
+                },
+            ],
+            "port_stack_relationships": {"lag_members": {10: 20}, "sub_interfaces": {}},
+        }
+        api = object.__new__(LibreNMSAPI)
+        api.server_key = "default"
+        table_request = make_request("get", user=user)
+        table_view = DeviceInterfaceTableView()
+        table_view._librenms_api = api
+        table_view.request = table_request
+        cache_key = table_view.get_cache_key(device, "ports", "default")
+        cache.set(cache_key, snapshot)
+
+        try:
+            context = table_view.get_context_data(
+                table_request,
+                device,
+                "ifName",
+                "default",
+                fresh_data=snapshot,
+                sync_device=device,
+            )
+            table_html = str(context["table"].render_parent(None, snapshot["ports"][0]))
+
+            verify_view = SingleInterfaceVerifyView()
+            verify_view._librenms_api = api
+            verify_request = make_request(
+                "post",
+                json.dumps({"device_id": device.pk, "interface_name_field": "ifName", "port_id": 10}),
+                user=user,
+                path="/verify/",
+                content_type="application/json",
+            )
+            verify_response = verify_view.post(verify_request)
+
+            inline_view = SyncInterfaceLagView()
+            inline_view._librenms_api = SimpleNamespace(server_key="default")
+            inline_request = make_request(
+                "post",
+                {"port_id": "10", "lag_port_id": "20", "server_key": "default"},
+                user=user,
+            )
+            inline_response = post(
+                inline_view,
+                inline_request,
+                object_type="device",
+                object_id=device.pk,
+            )
+        finally:
+            cache.delete(cache_key)
+
+        assert verify_response.status_code == 200, verify_response.content
+        assert inline_response.status_code != 200
+        assert "lag-sync-btn" not in table_html
+        assert "lag-sync-btn" not in json.loads(verify_response.content)["formatted_row"]["parent"]
+        member.refresh_from_db()
+        aggregate.refresh_from_db()
+        assert member.lag_id is None
+        assert aggregate.type != "lag"
+
+    @pytest.mark.django_db
+    def test_verify_rejects_non_string_interface_name_field_at_boundary(self):
+        from django.core.cache import cache
+
+        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+        from netbox_librenms_plugin.tests.conftest import make_device
+        from netbox_librenms_plugin.tests.view_test_helpers import make_request
+
+        device = make_device("verify-malformed-name-field")
+        snapshot = {
+            "ports": [
+                {
+                    "port_id": 10,
+                    "ifName": "Ethernet1",
+                    "ifDescr": "Ethernet1",
+                    "ifAlias": "",
+                    "ifType": "ethernetCsmacd",
+                    "ifSpeed": 1_000_000_000,
+                    "ifPhysAddress": "",
+                    "ifMtu": 1500,
+                    "ifAdminStatus": "up",
+                }
+            ],
+            "port_stack_relationships": {},
+        }
+        view = SingleInterfaceVerifyView()
+        api = object.__new__(LibreNMSAPI)
+        api.server_key = "default"
+        view._librenms_api = api
+        cache_key = view.get_cache_key(device, "ports", "default")
+        cache.set(cache_key, snapshot)
+        request = make_request(
+            "post",
+            json.dumps(
+                {
+                    "device_id": device.pk,
+                    "interface_name_field": ["ifName"],
+                    "port_id": 10,
+                }
+            ),
+            user=_verify_superuser("malformed-name-field"),
+            path="/verify/",
+            content_type="application/json",
+        )
+
+        try:
+            response = view.post(request)
+        finally:
+            cache.delete(cache_key)
+
+        assert response.status_code == 200
+
+    @pytest.mark.django_db
+    def test_verify_materializes_only_relationship_candidates(self):
+        from django.core.cache import cache
+        from django.db.models.signals import post_init
+        from dcim.models import Interface
+
+        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+        from netbox_librenms_plugin.tests.conftest import make_device, make_interface
+        from netbox_librenms_plugin.tests.view_test_helpers import make_request
+        from netbox_librenms_plugin.utils import set_librenms_device_id
+
+        device = make_device("verify-candidate-scope")
+        source = make_interface(device, "Ethernet1.100", iface_type="virtual")
+        parent = make_interface(device, "Ethernet1")
+        set_librenms_device_id(source, 10, "default")
+        set_librenms_device_id(parent, 20, "default")
+        source.save()
+        parent.save()
+        for index in range(40):
+            make_interface(device, f"unrelated-{index}")
+        snapshot = {
+            "ports": [
+                {
+                    "port_id": 10,
+                    "ifName": source.name,
+                    "ifDescr": source.name,
+                    "ifAlias": "",
+                    "ifType": "l2vlan",
+                    "ifSpeed": 1_000_000_000,
+                    "ifPhysAddress": "",
+                    "ifMtu": 1500,
+                    "ifAdminStatus": "up",
+                },
+                {
+                    "port_id": 20,
+                    "ifName": parent.name,
+                    "ifDescr": parent.name,
+                    "ifAlias": "",
+                    "ifType": "ethernetCsmacd",
+                    "ifSpeed": 1_000_000_000,
+                    "ifPhysAddress": "",
+                    "ifMtu": 1500,
+                    "ifAdminStatus": "up",
+                },
+            ],
+            "port_stack_relationships": {"lag_members": {}, "sub_interfaces": {10: 20}},
+        }
+        view = SingleInterfaceVerifyView()
+        api = object.__new__(LibreNMSAPI)
+        api.server_key = "default"
+        view._librenms_api = api
+        cache_key = view.get_cache_key(device, "ports", "default")
+        cache.set(cache_key, snapshot)
+        request = make_request(
+            "post",
+            json.dumps({"device_id": device.pk, "interface_name_field": "ifName", "port_id": 10}),
+            user=_verify_superuser("candidate-scope"),
+            path="/verify/",
+            content_type="application/json",
+        )
+        materialized_interface_ids = []
+
+        def capture_interface(instance, **_kwargs):
+            materialized_interface_ids.append(instance.pk)
+
+        post_init.connect(capture_interface, sender=Interface, weak=False)
+        try:
+            response = view.post(request)
+        finally:
+            post_init.disconnect(capture_interface, sender=Interface)
+            cache.delete(cache_key)
+
+        assert response.status_code == 200
+        assert len(materialized_interface_ids) <= 10
 
 
 # ---------------------------------------------------------------------------

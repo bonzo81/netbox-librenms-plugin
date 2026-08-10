@@ -121,28 +121,6 @@ class TestSyncInterfacesGetObject:
 
 
 # ===========================================================================
-# SyncInterfacesView.get_selected_interfaces
-# ===========================================================================
-
-
-class TestSyncGetSelectedInterfaces:
-    def test_empty_returns_none_and_error(self):
-        v = _make_iv()
-        req = MagicMock()
-        req.POST.getlist.return_value = []
-        with patch("netbox_librenms_plugin.views.sync.interfaces.messages") as mm:
-            result = v.get_selected_interfaces(req, "ifName")
-        assert result is None
-        mm.error.assert_called_once()
-
-    def test_with_values_returns_list(self):
-        v = _make_iv()
-        req = MagicMock()
-        req.POST.getlist.return_value = ["eth0", "eth1"]
-        assert v.get_selected_interfaces(req, "ifName") == ["eth0", "eth1"]
-
-
-# ===========================================================================
 # SyncInterfacesView.get_cached_ports_data
 # ===========================================================================
 
@@ -170,122 +148,6 @@ class TestGetCachedPortsData:
 # ===========================================================================
 # SyncInterfacesView.post
 # ===========================================================================
-
-
-class TestSyncInterfacesPost:
-    def _s(self):
-        v = _make_iv()
-        v.require_all_permissions = MagicMock(return_value=None)
-        v.get_vlan_groups_for_device = MagicMock(return_value=[])
-        v._build_vlan_lookup_maps = MagicMock(return_value={})
-        return v
-
-    def test_permission_denied(self):
-        v = self._s()
-        err = MagicMock()
-        v.require_all_permissions = MagicMock(return_value=err)
-        assert v.post(MagicMock(), "device", 1) is err
-
-    def test_no_selected_redirects(self):
-        from dcim.models import Device
-
-        v = self._s()
-        obj = MagicMock(spec=Device)
-        obj.pk = 1
-        v.get_object = MagicMock(return_value=obj)
-        v.get_selected_interfaces = MagicMock(return_value=None)
-        req = MagicMock()
-        req.POST.get = lambda k, *a: None
-        req.POST.getlist = lambda k: []
-        with patch("netbox_librenms_plugin.views.sync.interfaces.get_interface_name_field", return_value="ifName"):
-            with patch("netbox_librenms_plugin.views.sync.interfaces.reverse", return_value="/s/"):
-                with patch("netbox_librenms_plugin.views.sync.interfaces.redirect") as mr:
-                    v.request = req
-                    v.post(req, "device", 1)
-        mr.assert_called_once()
-
-    def test_no_ports_data_redirects(self):
-        from dcim.models import Device
-
-        v = self._s()
-        obj = MagicMock(spec=Device)
-        obj.pk = 1
-        v.get_object = MagicMock(return_value=obj)
-        v.get_selected_interfaces = MagicMock(return_value=["eth0"])
-        v.get_cached_ports_data = MagicMock(return_value=None)
-        req = MagicMock()
-        req.POST.get = lambda k, *a: None
-        req.POST.getlist = lambda k: []
-        with patch("netbox_librenms_plugin.views.sync.interfaces.get_interface_name_field", return_value="ifName"):
-            with patch("netbox_librenms_plugin.views.sync.interfaces.reverse", return_value="/s/"):
-                with patch("netbox_librenms_plugin.views.sync.interfaces.redirect") as mr:
-                    v.request = req
-                    v.post(req, "device", 1)
-        mr.assert_called_once()
-
-    def test_full_success_device(self):
-        from dcim.models import Device
-
-        v = self._s()
-        obj = MagicMock(spec=Device)
-        obj.pk = 1
-        v.get_object = MagicMock(return_value=obj)
-        v.get_selected_interfaces = MagicMock(return_value=["eth0"])
-        v.get_cached_ports_data = MagicMock(return_value=[{"ifName": "eth0"}])
-        # The real sync_selected_interfaces increments _synced_count per synced port; the
-        # success banner is now gated on that count. Mirror the effect (one port synced) so
-        # this stand-in doesn't leave the counter at post()'s reset value and suppress the banner.
-        v.sync_selected_interfaces = MagicMock(side_effect=lambda *a, **k: setattr(v, "_synced_count", 1))
-        req = MagicMock()
-        req.POST.get = lambda k, *a: "default" if k == "server_key" else None
-        req.POST.getlist = lambda k: []
-        with patch("netbox_librenms_plugin.views.sync.interfaces.get_interface_name_field", return_value="ifName"):
-            with patch("netbox_librenms_plugin.views.sync.interfaces.reverse", return_value="/s/"):
-                with patch("netbox_librenms_plugin.views.sync.interfaces.redirect") as mr:
-                    with patch("netbox_librenms_plugin.views.sync.interfaces.messages") as mm:
-                        v.request = req
-                        v.post(req, "device", 1)
-        v.sync_selected_interfaces.assert_called_once()
-        mm.success.assert_called_once()
-        mr.assert_called_once()
-
-    def test_full_success_vm(self):
-        from virtualization.models import VirtualMachine
-
-        v = self._s()
-        obj = MagicMock(spec=VirtualMachine)
-        obj.pk = 2
-        v.get_object = MagicMock(return_value=obj)
-        v.get_selected_interfaces = MagicMock(return_value=["eth0"])
-        v.get_cached_ports_data = MagicMock(return_value=[{"ifName": "eth0"}])
-        v.sync_selected_interfaces = MagicMock()
-        req = MagicMock()
-        req.POST.get = lambda k, *a: None
-        req.POST.getlist = lambda k: []
-        with patch("netbox_librenms_plugin.views.sync.interfaces.get_interface_name_field", return_value="ifName"):
-            with patch("netbox_librenms_plugin.views.sync.interfaces.reverse", return_value="/s/"):
-                with patch("netbox_librenms_plugin.views.sync.interfaces.redirect"):
-                    with patch("netbox_librenms_plugin.views.sync.interfaces.messages"):
-                        v.request = req
-                        v.post(req, "virtualmachine", 2)
-        v.sync_selected_interfaces.assert_called_once()
-
-
-# ===========================================================================
-# SyncInterfacesView.sync_selected_interfaces
-# ===========================================================================
-
-
-class TestSyncSelectedInterfaces:
-    def test_only_selected_processed(self):
-        v = _make_iv()
-        v.sync_interface = MagicMock()
-        obj = make_device("sync-selected")
-        ports = [{"ifName": "eth0"}, {"ifName": "eth1"}]
-        with patch("netbox_librenms_plugin.views.sync.interfaces.transaction"):
-            v.sync_selected_interfaces(obj, ["eth0"], ports, [], "ifName")
-        assert v.sync_interface.call_count == 1
-        assert v.sync_interface.call_args[0][1]["ifName"] == "eth0"
 
 
 # ===========================================================================
@@ -324,10 +186,10 @@ class TestSyncInterface:
         from dcim.models import Interface
 
         _vc, (host, sibling) = make_virtual_chassis_members("sync-vc-ok")
-        req = make_request("post", {"device_selection_eth0": str(sibling.pk)})
+        req = make_request("post", {"device_selection_10": str(sibling.pk)})
         v = self._v(req)
 
-        v.sync_interface(host, {"ifName": "eth0"}, [], "ifName")
+        v.sync_interface(host, {"ifName": "eth0", "port_id": 10}, [], "ifName")
 
         assert Interface.objects.filter(device=sibling, name="eth0").exists()
         assert not Interface.objects.filter(device=host, name="eth0").exists()
@@ -338,10 +200,10 @@ class TestSyncInterface:
 
         _vc, (host, _sibling) = make_virtual_chassis_members("sync-vc-outsider")
         outsider = make_device("sync-vc-outsider-x")
-        req = make_request("post", {"device_selection_eth0": str(outsider.pk)})
+        req = make_request("post", {"device_selection_10": str(outsider.pk)})
         v = self._v(req)
 
-        v.sync_interface(host, {"ifName": "eth0"}, [], "ifName")
+        v.sync_interface(host, {"ifName": "eth0", "port_id": 10}, [], "ifName")
 
         assert not Interface.objects.filter(device=host, name="eth0").exists()
         assert not Interface.objects.filter(device=outsider, name="eth0").exists()
@@ -352,10 +214,10 @@ class TestSyncInterface:
 
         dev = make_device("sync-novc-self")
         other = make_device("sync-novc-other")
-        req = make_request("post", {"device_selection_eth0": str(other.pk)})
+        req = make_request("post", {"device_selection_10": str(other.pk)})
         v = self._v(req)
 
-        v.sync_interface(dev, {"ifName": "eth0"}, [], "ifName")
+        v.sync_interface(dev, {"ifName": "eth0", "port_id": 10}, [], "ifName")
 
         assert not Interface.objects.filter(device=dev, name="eth0").exists()
         assert not Interface.objects.filter(device=other, name="eth0").exists()
@@ -366,10 +228,10 @@ class TestSyncInterface:
 
         dev = make_device("sync-gone")
         absent_pk = missing_pk(Device)
-        req = make_request("post", {"device_selection_eth0": str(absent_pk)})
+        req = make_request("post", {"device_selection_10": str(absent_pk)})
         v = self._v(req)
 
-        v.sync_interface(dev, {"ifName": "eth0"}, [], "ifName")
+        v.sync_interface(dev, {"ifName": "eth0", "port_id": 10}, [], "ifName")
 
         assert not Interface.objects.filter(device=dev, name="eth0").exists()
         assert v._skipped_conflicts == ["eth0 (selected target unavailable)"]
@@ -380,10 +242,10 @@ class TestSyncInterface:
 
         _vc, (host, sibling) = make_virtual_chassis_members("sync-vc-scoped")
         user = make_user_with_perms("sync-scoped", [("view", Device)], constraints={"name": "sync-vc-scoped-m1"})
-        req = make_request("post", {"device_selection_eth0": str(sibling.pk)}, user=user)
+        req = make_request("post", {"device_selection_10": str(sibling.pk)}, user=user)
         v = self._v(req)
 
-        v.sync_interface(host, {"ifName": "eth0"}, [], "ifName")
+        v.sync_interface(host, {"ifName": "eth0", "port_id": 10}, [], "ifName")
 
         assert not Interface.objects.filter(device=host, name="eth0").exists()
         assert not Interface.objects.filter(device=sibling, name="eth0").exists()
@@ -486,45 +348,6 @@ class TestGetNetboxInterfaceType:
         result = _make_iv().get_netbox_interface_type({"ifType": "unknown", "ifSpeed": None})
 
         assert result == "other"
-
-
-# ===========================================================================
-# SyncInterfacesView._sync_interface_vlans
-# ===========================================================================
-
-
-class TestSyncInterfaceVlans:
-    def test_builds_vlan_group_map_for_untagged_and_tagged(self):
-        v = _make_iv()
-        v._lookup_maps = {}
-        v._update_interface_vlan_assignment = MagicMock()
-        iface = MagicMock()
-        port = {"untagged_vlan": 100, "tagged_vlans": [200]}
-
-        def pg(key, default=""):
-            return {"vlan_group_eth0_100": "5", "vlan_group_eth0_200": "5"}.get(key, default)
-
-        v.request.POST.get = pg
-        v._sync_interface_vlans(iface, port, "eth0")
-        args = v._update_interface_vlan_assignment.call_args[0]
-        assert args[2].get("100") == "5"
-        assert args[2].get("200") == "5"
-
-    def test_no_vlans_empty_map(self):
-        v = _make_iv()
-        v._lookup_maps = {}
-        v._update_interface_vlan_assignment = MagicMock()
-        v.request.POST.get = lambda k, *a: ""
-        v._sync_interface_vlans(MagicMock(), {"untagged_vlan": None, "tagged_vlans": []}, "eth0")
-        assert v._update_interface_vlan_assignment.call_args[0][2] == {}
-
-    def test_special_chars_in_name(self):
-        v = _make_iv()
-        v._lookup_maps = {}
-        v._update_interface_vlan_assignment = MagicMock()
-        v.request.POST.get = lambda k, *a: ""
-        v._sync_interface_vlans(MagicMock(), {"untagged_vlan": None, "tagged_vlans": []}, "eth0/1:2")
-        v._update_interface_vlan_assignment.assert_called_once()
 
 
 # ===========================================================================

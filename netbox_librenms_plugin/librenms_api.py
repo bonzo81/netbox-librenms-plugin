@@ -557,7 +557,7 @@ class LibreNMSAPI:
 
         Returns:
             tuple: (success: bool, data: list[dict] | str)
-                On success: list of {high_port_id, low_port_id, high_ifIndex, low_ifIndex} dicts
+                On success: list of {port_id_high, port_id_low, high_ifIndex, low_ifIndex} dicts
                 On failure: error string
         """
         try:
@@ -588,12 +588,9 @@ class LibreNMSAPI:
                 logger.warning("port_stack error status for device %s: %r", device_id, data)
                 return False, str(message)
             mappings = data.get("mappings")
-            # null/missing genuinely means "no parent/LAG relationships" → empty list. But a
-            # non-list (or a list with non-dict items) is a malformed response: returning
-            # (True, []) there would be indistinguishable from "no relationships" and silently
-            # skip valid sync updates, so fail the call instead and let the caller surface it.
-            if mappings is None:
-                return True, []
+            # The documented success envelope always contains a list-valued mappings field,
+            # including when no relationships exist. Missing, null, non-list, or mixed-list data
+            # is malformed. It must not become an authoritative empty relationship snapshot.
             if not isinstance(mappings, list) or any(not isinstance(item, dict) for item in mappings):
                 logger.warning("Unexpected port_stack response for device %s: %r", device_id, data)
                 return False, "Unexpected response format from LibreNMS (invalid 'mappings' payload)"
@@ -640,7 +637,7 @@ class LibreNMSAPI:
         Args:
             ports: Port dicts from get_ports(), each with port_id, ifName, ifType keys.
             port_stack: Port stack dicts from get_port_stack(), each with
-                        high_port_id and low_port_id keys.
+                        port_id_high and port_id_low keys.
             lag_patterns: Optional dict of {librenms_os: pattern_str} overriding DB lookup.
                           Pass an empty dict to disable name-pattern matching entirely.
                           When None (default), patterns are fetched from PortStackLagPattern,
@@ -671,14 +668,19 @@ class LibreNMSAPI:
         safe_ports = [p for p in ports if isinstance(p, dict)]
 
         # Scan names across the selected interface_name_field plus ifName/ifDescr, mirroring
-        # _has_lag_signals. On an ifDescr-mode device the LAG aggregate / sub-unit name lives in
+        # the refresh relationship signal. On an ifDescr-mode device the aggregate or sub-unit name lives in
         # ifDescr (ifName may be empty), so keying only on ifName here would drop every such port
         # from the lookup maps and silently resolve no relationships even though the port_stack
         # fetch was triggered. dict.fromkeys de-dups while preserving precedence order.
         name_fields = tuple(dict.fromkeys((interface_name_field or "ifName", "ifName", "ifDescr")))
 
+        def _port_name_items(port: dict) -> list[tuple[str, str]]:
+            return [(field, name) for field in name_fields if isinstance(name := port.get(field), str) and name]
+
         def _port_names(port: dict) -> list[str]:
-            return [name for field in name_fields if isinstance(name := port.get(field), str) and name]
+            return [name for _, name in _port_name_items(port)]
+
+        from netbox_librenms_plugin.utils import normalize_librenms_port_id
 
         # by_id indexes EVERY port with a usable port_id, even a nameless one: a port_stack pair
         # references ports by id, and _is_lag_aggregate classifies an aggregate authoritatively by
@@ -686,44 +688,46 @@ class LibreNMSAPI:
         # LAG relationship the port_stack + ifType define, even though ifType alone is enough to
         # resolve it. (All downstream NAME ops iterate _port_names(port), which is empty for a
         # nameless port, so it simply won't match any name-based rule — no string op sees a None.)
-        ports_with_id = [p for p in safe_ports if p.get("port_id") is not None]
-        # Normalize port_id keys to str: ports (this map) and port_stack (high/low_port_id
-        # below) are independent LibreNMS payloads, so a str-vs-int discrepancy between them
-        # would silently miss every by_id.get() lookup and drop valid relationships. Coercing
-        # both sides to str makes the match type-agnostic.
-        by_id = {str(p["port_id"]): p for p in ports_with_id}
-        # Index every name a port is known by (selected field + ifName/ifDescr) so the
-        # physical-name / sub-unit lookups below resolve regardless of which field carries it.
-        # Drop AMBIGUOUS names: a name shared by two DIFFERENT ports (distinct port_ids) can't
-        # disambiguate which port a base/sub-unit lookup means. The old `by_name[name] = p`
-        # was last-write-wins, so in ifDescr mode a later port whose ifDescr happens to equal
-        # another port's structured base name would hijack `_resolve_physical_port()` /
-        # sub-interface matching and bind the relationship onto the wrong interface. Mirror the
-        # by_librenms_id collision drop in interfaces_view._build_interface_lookup_maps: keep a
-        # name only when it resolves to exactly one port, otherwise drop it entirely.
-        # by_name indexes only ports that actually carry a string name (the inner _port_names loop
-        # yields nothing for a nameless port, so iterating ports_with_id keeps by_name name-only).
-        by_name: dict = {}
-        ambiguous_names: set = set()
+        by_id = {}
+        ambiguous_port_ids = set()
+        for port in safe_ports:
+            port_id = normalize_librenms_port_id(port.get("port_id"))
+            if port_id is None or port_id in ambiguous_port_ids:
+                continue
+            if port_id in by_id:
+                by_id.pop(port_id)
+                ambiguous_port_ids.add(port_id)
+                continue
+            by_id[port_id] = port
+        ports_with_id = list(by_id.values())
+        # Index each name field separately. A sub-unit in ifName must resolve only through an
+        # ifName base. An unrelated ifDescr with the same text is not evidence that both rows
+        # describe one physical interface. Drop names that are ambiguous within one field.
+        by_name_by_field: dict[str, dict[str, dict]] = {field: {} for field in name_fields}
+        ambiguous_names_by_field: dict[str, set[str]] = {field: set() for field in name_fields}
         for p in ports_with_id:
-            for name in _port_names(p):
+            for field, name in _port_name_items(p):
+                field_index = by_name_by_field[field]
+                ambiguous_names = ambiguous_names_by_field[field]
                 if name in ambiguous_names:
                     continue
-                existing = by_name.get(name)
-                if existing is not None and str(existing.get("port_id")) != str(p.get("port_id")):
-                    del by_name[name]
+                existing = field_index.get(name)
+                if existing is not None and normalize_librenms_port_id(
+                    existing.get("port_id")
+                ) != normalize_librenms_port_id(p.get("port_id")):
+                    del field_index[name]
                     ambiguous_names.add(name)
                     continue
-                by_name[name] = p
+                field_index[name] = p
 
         if compiled_lag_patterns is not None:
             # Caller (e.g. the interface-refresh gating) already loaded + compiled the OS-scoped
             # patterns for this device_os and shares them here, so the DB read + regex compile
-            # happen once per refresh instead of once in _has_lag_signals and again here.
+            # happen once per refresh instead of once in the signal check and again here.
             compiled_patterns = compiled_lag_patterns
         elif lag_patterns is None:
             # OS-scoped pattern loading + compile-with-skip lives on the model so the resolver
-            # and the _has_lag_signals fetch-trigger can't diverge on which patterns apply. A
+            # and the refresh fetch trigger can't diverge on which patterns apply. A
             # PRESENT but unusable device_os disables name-pattern matching (returns []), so a
             # stale vendor regex can't be re-globalized; structural ieee8023adLag detection is
             # unaffected. device_os None preserves the legacy unscoped behaviour.
@@ -744,17 +748,17 @@ class LibreNMSAPI:
                     # user can tell why LAG detection isn't working.
                     logger.warning("Skipping invalid LAG name pattern %r: %s", pattern_str, exc)
 
-        from netbox_librenms_plugin.utils import normalize_librenms_port_id
-
         lag_members: dict = {}
         sub_interfaces: dict = {}
+        conflicted_lag_members: set = set()
+        conflicted_sub_interfaces: set = set()
 
         def _is_lag_aggregate(port: dict) -> bool:
             if port.get("ifType") == "ieee8023adLag":
                 return True
             return any(pat.search(name) for pat in compiled_patterns for name in _port_names(port))
 
-        def _relate(mapping: dict, key_port: dict, value_port: dict) -> None:
+        def _relate(mapping: dict, conflicted_keys: set, key_port: dict, value_port: dict) -> None:
             """
             Store a normalized ``port_id -> port_id`` edge in ``mapping``.
 
@@ -767,8 +771,14 @@ class LibreNMSAPI:
             """
             key_id = normalize_librenms_port_id(key_port.get("port_id"))
             value_id = normalize_librenms_port_id(value_port.get("port_id"))
-            if key_id is not None and value_id is not None:
+            if key_id is None or value_id is None or key_id in conflicted_keys:
+                return
+            existing = mapping.get(key_id)
+            if existing is None:
                 mapping[key_id] = value_id
+            elif existing != value_id:
+                mapping.pop(key_id, None)
+                conflicted_keys.add(key_id)
 
         def _resolve_physical_port(port: dict):
             """
@@ -780,15 +790,15 @@ class LibreNMSAPI:
             check would then fail to collapse the logical pair, and LAG sync would bind the wrong
             (logical) ports — e.g. ``202 -> 204`` instead of the physical ``201 -> 203``.
             """
-            for name in _port_names(port):
+            for field, name in _port_name_items(port):
                 if "." not in name:
                     continue
                 base, suffix = name.rsplit(".", 1)
                 # Only treat a NUMERIC suffix as a sub-unit (e.g. Gi0/1.100, ae1.0). A dotted name
                 # whose suffix isn't a number is a legitimate physical name, not a sub-interface,
                 # so it must not be remapped to a spurious base.
-                if suffix.isdigit() and base in by_name:
-                    return by_name[base]
+                if suffix.isdigit() and base in by_name_by_field[field]:
+                    return by_name_by_field[field][base]
             return port
 
         def _is_sub_unit_of(child_name: str, parent_name: str) -> bool:
@@ -807,25 +817,30 @@ class LibreNMSAPI:
             """
             return any(
                 _is_sub_unit_of(child_name, parent_name)
-                for child_name in _port_names(child_port)
-                for parent_name in _port_names(parent_port)
+                for field in name_fields
+                if isinstance(child_name := child_port.get(field), str)
+                and isinstance(parent_name := parent_port.get(field), str)
+                and child_name
+                and parent_name
             )
 
         for entry in port_stack:
             if not isinstance(entry, dict):
                 continue
-            high_id = entry.get("high_port_id")
-            low_id = entry.get("low_port_id")
+            high_id = entry.get("port_id_high")
+            low_id = entry.get("port_id_low")
             # 0 (int OR string) is the ifStack sentinel for "no port" (stack top/bottom).
             # normalize_librenms_port_id treats 0/negative/non-numeric as invalid whether the API
             # returned the id as an int or a string, so the sentinel skip stays consistent with the
-            # str/int type tolerance of by_id (deliberately keyed by str(port_id)) below — a bare
-            # ``not low_id`` would let a truthy string "0" fall through to the by_id lookup.
-            if normalize_librenms_port_id(high_id) is None or normalize_librenms_port_id(low_id) is None:
+            # canonical integer keys in by_id. A bare ``not low_id`` would let a truthy string "0"
+            # fall through to the by_id lookup.
+            normalized_high_id = normalize_librenms_port_id(high_id)
+            normalized_low_id = normalize_librenms_port_id(low_id)
+            if normalized_high_id is None or normalized_low_id is None:
                 continue
 
-            high_port = by_id.get(str(high_id))
-            low_port = by_id.get(str(low_id))
+            high_port = by_id.get(normalized_high_id)
+            low_port = by_id.get(normalized_low_id)
             if not high_port or not low_port:
                 continue
 
@@ -844,11 +859,25 @@ class LibreNMSAPI:
             # check BOTH directions. Without the reverse check a parent=low/child=high pair
             # falls through to the LAG branch, where _resolve_physical_port collapses both ports to
             # the same base and the self-reference guard silently drops the relationship.
-            if _has_sub_unit_relationship(low_port, high_port):
-                _relate(sub_interfaces, low_port, high_port)  # low is the child, high the parent
+            low_is_child = _has_sub_unit_relationship(low_port, high_port)
+            high_is_child = _has_sub_unit_relationship(high_port, low_port)
+            if low_is_child and high_is_child:
                 continue
-            if _has_sub_unit_relationship(high_port, low_port):
-                _relate(sub_interfaces, high_port, low_port)  # high is the child, low the parent
+            if low_is_child:
+                _relate(
+                    sub_interfaces,
+                    conflicted_sub_interfaces,
+                    low_port,
+                    high_port,
+                )  # low is the child, high the parent
+                continue
+            if high_is_child:
+                _relate(
+                    sub_interfaces,
+                    conflicted_sub_interfaces,
+                    high_port,
+                    low_port,
+                )  # high is the child, low the parent
                 continue
 
             # LAG membership: resolve each side to its physical-level port (strips the Junos
@@ -877,13 +906,23 @@ class LibreNMSAPI:
                 low_struct = low_phys.get("ifType") == "ieee8023adLag"
                 high_struct = high_phys.get("ifType") == "ieee8023adLag"
                 if low_struct and not high_struct:
-                    _relate(lag_members, high_phys, low_phys)
+                    _relate(lag_members, conflicted_lag_members, high_phys, low_phys)
                 elif high_struct and not low_struct:
-                    _relate(lag_members, low_phys, high_phys)
+                    _relate(lag_members, conflicted_lag_members, low_phys, high_phys)
             elif low_is_agg:
-                _relate(lag_members, high_phys, low_phys)  # high is the member, low the aggregate
+                _relate(
+                    lag_members,
+                    conflicted_lag_members,
+                    high_phys,
+                    low_phys,
+                )  # high is the member, low the aggregate
             elif high_is_agg:
-                _relate(lag_members, low_phys, high_phys)  # low is the member, high the aggregate
+                _relate(
+                    lag_members,
+                    conflicted_lag_members,
+                    low_phys,
+                    high_phys,
+                )  # low is the member, high the aggregate
 
         return {"lag_members": lag_members, "sub_interfaces": sub_interfaces}
 
