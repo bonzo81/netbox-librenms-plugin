@@ -50,6 +50,7 @@ def _configured_default():
 def _real_port(**overrides):
     """A LibreNMS-shaped port dict with every field LibreNMSInterfaceTable.format_interface_data reads."""
     port = {
+        "port_id": 4001,
         "ifName": "eth0",
         "ifDescr": "eth0",
         "ifAlias": "",
@@ -471,6 +472,7 @@ class TestSingleInterfaceVerifyView:
             {
                 "device_id": device.pk,
                 "interface_name": "eth0",
+                "port_id": 4001,
                 "interface_name_field": "ifName",
                 "server_key": "default",
             },
@@ -508,6 +510,7 @@ class TestSingleInterfaceVerifyView:
             {
                 "device_id": device.pk,
                 "interface_name": "eth0",
+                "port_id": 4001,
                 "interface_name_field": "ifName",
                 "server_key": "default",
             },

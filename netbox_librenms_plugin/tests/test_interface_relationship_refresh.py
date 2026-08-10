@@ -61,7 +61,8 @@ class TestInterfaceRelationshipRefresh:
         assert "relationship_data_incomplete" not in snapshot
 
     def test_mixed_structural_and_name_signals_warn_when_os_is_unknown(self, mock_librenms_api):
-        PortStackLagPattern.objects.create(librenms_os="ios", lag_name_pattern=r"^Po\d+$")
+        # "ios" is one of the rows migration 0013 seeds, so take the existing pattern.
+        PortStackLagPattern.objects.get_or_create(librenms_os="ios", defaults={"lag_name_pattern": r"^Po\d+$"})
         ports = [
             {"port_id": 10, "ifName": "Ethernet1", "ifType": "ethernetCsmacd"},
             {"port_id": 20, "ifName": "Bundle1", "ifType": "ieee8023adLag"},

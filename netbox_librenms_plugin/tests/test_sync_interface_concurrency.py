@@ -85,7 +85,6 @@ def test_selected_vc_target_is_locked_through_interface_sync():
             with connection.cursor() as cursor:
                 cursor.execute("SET lock_timeout = '500ms'")
                 cursor.execute("SET statement_timeout = '5s'")
-            move_started.set()
             Device.objects.filter(pk=target_device.pk).update(virtual_chassis=None, vc_position=None)
         finally:
             close_old_connections()

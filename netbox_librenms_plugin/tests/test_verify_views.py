@@ -989,9 +989,13 @@ class TestSingleInterfaceVerifyView:
 
         assert response.status_code == 200, response.content
         formatted_row = json.loads(response.content)["formatted_row"]
+        body = response.content.decode()
         assert "device_selection" not in formatted_row
-        assert hidden_device.name not in response.content.decode()
-        assert str(hidden_device.pk) not in response.content.decode()
+        assert hidden_device.name not in body
+        # Match the pk as a device REFERENCE, not as a bare substring: `str(pk) in body`
+        # also matches any rendered number (ifMtu 1500 collided with pk 1500), so the old
+        # assertion failed on pk allocation rather than on a member actually leaking.
+        assert f"/dcim/devices/{hidden_device.pk}/" not in body
 
     @pytest.mark.django_db
     def test_hidden_related_owner_stays_unavailable_through_verify_and_inline_post(self):
