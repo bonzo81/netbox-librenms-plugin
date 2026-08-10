@@ -244,6 +244,30 @@ class LibreNMSWritePermissionMixin(LibreNMSPermissionMixin):
     permission_required = PERM_CHANGE_PLUGIN
 
 
+def relock_scoped_row(model, **lookup):
+    """
+    Re-lock a row whose id came from an ALREADY-RESOLVED object: the single audited exception.
+
+    Scoping happened where that object was resolved. Restricting the re-read instead would demand a
+    permission the caller's gate never required: ``restrict()`` returns ``none()`` for a user
+    without the model-level grant, so a change-only caller would silently lose rows out of a lock
+    set and be told the object "no longer exists".
+
+    Every call asserts that *lookup* was derived from an object the request already resolved through
+    ``restricted_queryset``. Never pass a client-supplied id. One named chokepoint keeps these
+    greppable and lets the raw-pk scan drop its spelling heuristic, which any request-derived
+    ``*_id`` attribute satisfied by accident.
+
+    Args:
+        model: The model whose row to lock.
+        **lookup: Lookup kwargs identifying the row (e.g. ``pk=donor.oob_ip_id``).
+
+    Returns:
+        The locked instance, or None when the row is gone.
+    """
+    return model.objects.select_for_update().filter(**lookup).first()
+
+
 class NetBoxObjectPermissionMixin:
     """
     Mixin for views requiring specific NetBox object permissions.
@@ -365,6 +389,10 @@ class NetBoxObjectPermissionMixin:
         if select_related:
             queryset = queryset.select_related(*select_related)
         return get_object_or_404(queryset, **kwargs)
+
+    def relock_scoped_row(self, model, **lookup):
+        """Re-lock a row derived from an already-resolved object. See :func:`relock_scoped_row`."""
+        return relock_scoped_row(model, **lookup)
 
     def require_all_permissions(self, method="POST"):
         """

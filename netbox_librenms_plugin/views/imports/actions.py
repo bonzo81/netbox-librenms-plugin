@@ -3609,10 +3609,10 @@ class MergeNetBoxDevicesView(
                     from dcim.models import Interface
                     from ipam.models import IPAddress
 
-                    locked_oob_ip = IPAddress.objects.select_for_update().filter(pk=donor.oob_ip_id).first()
+                    locked_oob_ip = self.relock_scoped_row(IPAddress, pk=donor.oob_ip_id)
                     oob_assigned = locked_oob_ip.assigned_object if locked_oob_ip is not None else None
                     if isinstance(oob_assigned, Interface):
-                        locked_iface = Interface.objects.select_for_update().filter(pk=oob_assigned.pk).first()
+                        locked_iface = self.relock_scoped_row(Interface, pk=oob_assigned.pk)
                         if locked_iface is not None and locked_iface.device_id == winner.pk:
                             # Refresh the cached GenericForeignKey on locked_oob_ip to the freshly
                             # locked interface: set_device_ip_fk() re-reads locked_oob_ip.assigned_object
