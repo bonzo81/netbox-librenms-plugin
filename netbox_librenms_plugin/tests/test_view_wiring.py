@@ -1913,3 +1913,56 @@ class TestCacheKeysAreServerScoped:
             assert params[-1] == "server_key", f"{helper} no longer takes server_key last: {params}"
             # params includes self, so the positional count to reach server_key is len(params) - 1.
             assert len(params) - 1 == position, f"{helper} arity changed — update HELPERS: {params}"
+
+
+class TestRoutedSyncPagesScopeTheirObject:
+    """A routed sync page must not resolve an object the caller's grant excludes.
+
+    ``LibreNMSPermissionMixin`` extends Django's ``PermissionRequiredMixin``, which only checks the
+    model-level plugin permission and never evaluates NetBox object-permission constraints. The base
+    table views then resolve the URL pk with a raw ``get_object_or_404``, so a CONSTRAINED
+    ``dcim.view_device`` grant never narrows the lookup and the page renders any device by pk.
+
+    The static scan in :class:`TestGatedViewsResolveThroughRestrictedQuerysets` cannot see this: it
+    only considers classes that declare a gate lexically, and these classes declare none.
+    """
+
+    ROUTED_DEVICE_PAGES = (
+        ("object_sync.devices", "DeviceInterfaceTableView"),
+        ("object_sync.devices", "DeviceIPAddressTableView"),
+        ("object_sync.devices", "DeviceVLANTableView"),
+        ("object_sync.devices", "DeviceModuleTableView"),
+    )
+
+    @pytest.mark.django_db
+    @pytest.mark.parametrize("module_path,class_name", ROUTED_DEVICE_PAGES)
+    def test_a_constrained_grant_cannot_reach_a_hidden_device(self, module_path, class_name):
+        """A user granted view_device only for device A must not resolve device B."""
+        import importlib
+
+        from dcim.models import Device
+        from django.http import Http404
+
+        from netbox_librenms_plugin.tests.conftest import make_device
+        from netbox_librenms_plugin.tests.view_test_helpers import (
+            make_request,
+            make_user_with_perms,
+            make_view,
+        )
+
+        allowed = make_device(f"scoped-allowed-{class_name.lower()}")
+        hidden = make_device(f"scoped-hidden-{class_name.lower()}")
+        user = make_user_with_perms(
+            f"scoped-viewer-{class_name.lower()}",
+            [("view", Device)],
+            constraints={"name": allowed.name},
+        )
+        request = make_request("get", user=user, path=f"/plugins/librenms/devices/{hidden.pk}/sync/")
+        view_class = getattr(importlib.import_module(f"netbox_librenms_plugin.views.{module_path}"), class_name)
+        view = make_view(view_class, request)
+
+        # Sanity: the grant really is constrained — the allowed device stays reachable.
+        assert view.get_object(allowed.pk).pk == allowed.pk
+
+        with pytest.raises(Http404):
+            view.get_object(hidden.pk)

@@ -1,6 +1,5 @@
 from django.contrib import messages
 from django.core.cache import cache
-from django.shortcuts import get_object_or_404
 from django.utils import timezone
 from django.views import View
 
@@ -15,6 +14,7 @@ from netbox_librenms_plugin.views.mixins import (
     CacheMixin,
     LibreNMSAPIMixin,
     LibreNMSPermissionMixin,
+    NetBoxObjectPermissionMixin,
     VlanAssignmentMixin,
 )
 
@@ -23,7 +23,9 @@ from netbox_librenms_plugin.views.mixins import (
 _SERVER_KEY_UNSET = object()
 
 
-class BaseVLANTableView(VlanAssignmentMixin, LibreNMSAPIMixin, LibreNMSPermissionMixin, CacheMixin, View):
+class BaseVLANTableView(
+    VlanAssignmentMixin, LibreNMSAPIMixin, LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, CacheMixin, View
+):
     """
     Base view for VLAN synchronization table.
     Fetches LibreNMS VLAN data and compares with NetBox.
@@ -34,7 +36,7 @@ class BaseVLANTableView(VlanAssignmentMixin, LibreNMSAPIMixin, LibreNMSPermissio
 
     def get_object(self, pk):
         """Retrieve the object (Device or VirtualMachine)."""
-        return get_object_or_404(self.model, pk=pk)
+        return self.restrict_object_or_404(self.model, pk=pk)
 
     def post(self, request, pk):
         """Handle POST request to fetch and cache LibreNMS VLAN data."""

@@ -2,7 +2,7 @@ import re
 
 from django.conf import settings as django_settings
 from django.contrib import messages
-from django.shortcuts import get_object_or_404, render
+from django.shortcuts import render
 from netbox.views import generic
 
 from netbox_librenms_plugin.forms import AddToLIbreSNMPV1V2, AddToLIbreSNMPV3
@@ -19,10 +19,12 @@ from netbox_librenms_plugin.utils import (
     resolve_naming_preferences,
     resolve_server_mapping_display_id,
 )
-from netbox_librenms_plugin.views.mixins import LibreNMSAPIMixin, LibreNMSPermissionMixin
+from netbox_librenms_plugin.views.mixins import LibreNMSAPIMixin, LibreNMSPermissionMixin, NetBoxObjectPermissionMixin
 
 
-class BaseLibreNMSSyncView(LibreNMSPermissionMixin, LibreNMSAPIMixin, generic.ObjectListView):
+class BaseLibreNMSSyncView(
+    LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjectPermissionMixin, generic.ObjectListView
+):
     """
     Base view for LibreNMS sync information.
     """
@@ -37,7 +39,7 @@ class BaseLibreNMSSyncView(LibreNMSPermissionMixin, LibreNMSAPIMixin, generic.Ob
 
     def get(self, request, pk, context=None):
         """Handle GET request for the LibreNMS sync view."""
-        obj = get_object_or_404(self.model, pk=pk)
+        obj = self.restrict_object_or_404(self.model, pk=pk)
 
         # Scope the page header (device info, VC inventory serials, active-server highlight) to the
         # same ?server_key the embedded tabs rebind to. Without this the orchestrator reads the
