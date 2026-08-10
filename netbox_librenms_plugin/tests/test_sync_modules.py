@@ -6285,3 +6285,110 @@ class TestUpdateModuleInterfaceRedirectServerKey:
 
         assert response.status_code == 204
         assert "server_key=prod" in response["HX-Redirect"]
+
+
+class TestStandaloneAdoptionAcrossEveryComponentType:
+    """Every component NetBox can adopt must be authorized through the change-scoped queryset.
+
+    The adoption helper walks eight component specs, and each one resolves its template name
+    through ``_module_template_adoption_name``. Only interfaces and module bays were covered, so a
+    regression in any of the other six -- or in the version-dependent name resolution -- went
+    unnoticed. Drive all eight against the real ORM.
+    """
+
+    @staticmethod
+    def _module_with_one_template(spec, name):
+        """Build a real Device + ModuleType carrying exactly one template for *spec*."""
+        from dcim.models import Manufacturer, Module, ModuleBay, ModuleType
+
+        from netbox_librenms_plugin.tests.conftest import make_device
+
+        template_attribute, component_attribute, component_model = spec
+        device = make_device(f"adopt-{name}")
+        manufacturer = Manufacturer.objects.get_or_create(name="AdoptMfr", slug="adopt-mfr")[0]
+        module_type = ModuleType.objects.create(manufacturer=manufacturer, model=f"AdoptType-{name}")
+
+        template_model = getattr(ModuleType, template_attribute).rel.related_model
+        template_kwargs = {"module_type": module_type, "name": f"adopt-{name}-0"}
+        if template_model.__name__ == "FrontPortTemplate":
+            # This NetBox decouples the front-port TEMPLATE from a rear-port template: it carries
+            # only type/color/positions. The standalone FrontPort below still needs a rear port.
+            template_kwargs["type"] = "8p8c"
+        elif template_model.__name__ in ("RearPortTemplate", "InterfaceTemplate"):
+            template_kwargs["type"] = "8p8c" if "Port" in template_model.__name__ else "1000base-t"
+        template = template_model.objects.create(**template_kwargs)
+
+        bay = ModuleBay.objects.create(device=device, name=f"bay-{name}")
+        module = Module(device=device, module_bay=bay, module_type=module_type)
+        return device, module, template, component_attribute, component_model
+
+    @pytest.mark.django_db
+    @pytest.mark.parametrize("spec_index", range(8))
+    def test_a_standalone_component_is_authorized_for_adoption(self, spec_index):
+        """A standalone component matching the template name is locked and authorized."""
+        from netbox_librenms_plugin.views.sync.modules import (
+            _authorize_adoptable_module_components,
+            _module_component_specs,
+            _module_template_adoption_name,
+        )
+
+        spec = _module_component_specs()[spec_index]
+        template_attribute, _component_attribute, component_model = spec
+        device, module, template, component_attribute, component_model = self._module_with_one_template(
+            spec, component_model.__name__.lower()
+        )
+
+        # This is the call CodeRabbit questioned for NetBox 4.4/4.5: exercise it for every type.
+        expected_name = _module_template_adoption_name(template_attribute, template, module)
+        assert expected_name, f"{template_attribute} resolved an empty adoption name"
+
+        standalone_kwargs = {"device": device, "name": expected_name}
+        if component_model.__name__ == "Interface":
+            standalone_kwargs["type"] = "1000base-t"
+        elif component_model.__name__ in ("RearPort", "FrontPort"):
+            standalone_kwargs["type"] = "8p8c"
+        standalone = component_model.objects.create(**standalone_kwargs)
+
+        allowed = {model: model.objects.all() for _, _, model in _module_component_specs()}
+        expected = _authorize_adoptable_module_components(module, allowed)
+
+        assert expected.get(component_model) == {standalone.pk}, (
+            f"{component_model.__name__} standalone adoption was not authorized"
+        )
+
+    @pytest.mark.django_db
+    @pytest.mark.parametrize("spec_index", range(8))
+    def test_an_unauthorized_standalone_component_is_refused_by_name(self, spec_index):
+        """A component outside the change scope aborts the write and names the component."""
+        from netbox_librenms_plugin.views.sync.modules import (
+            _ModuleComponentAdoptionUnavailable,
+            _authorize_adoptable_module_components,
+            _module_component_specs,
+            _module_template_adoption_name,
+        )
+
+        spec = _module_component_specs()[spec_index]
+        template_attribute, _component_attribute, component_model = spec
+        device, module, template, component_attribute, component_model = self._module_with_one_template(
+            spec, f"deny-{component_model.__name__.lower()}"
+        )
+        expected_name = _module_template_adoption_name(template_attribute, template, module)
+
+        standalone_kwargs = {"device": device, "name": expected_name}
+        if component_model.__name__ == "Interface":
+            standalone_kwargs["type"] = "1000base-t"
+        elif component_model.__name__ in ("RearPort", "FrontPort"):
+            standalone_kwargs["type"] = "8p8c"
+        component_model.objects.create(**standalone_kwargs)
+
+        # Every model is in scope EXCEPT the one under test.
+        allowed = {
+            model: (model.objects.none() if model is component_model else model.objects.all())
+            for _, _, model in _module_component_specs()
+        }
+
+        with pytest.raises(_ModuleComponentAdoptionUnavailable) as exc:
+            _authorize_adoptable_module_components(module, allowed)
+        assert exc.value.component_label == component_model._meta.verbose_name, (
+            "the refusal must name the component the caller could not adopt"
+        )

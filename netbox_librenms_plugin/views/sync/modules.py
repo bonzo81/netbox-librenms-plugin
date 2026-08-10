@@ -168,7 +168,20 @@ class _SerialConflictUnavailable(Exception):
 
 
 class _ModuleComponentAdoptionUnavailable(Exception):
-    """Abort a module write that adopted a component outside the caller's change scope."""
+    """
+    Abort a module write that adopted a component outside the caller's change scope.
+
+    Carries the component so the operator is told WHICH of the eight adoptable types they lack
+    ``change`` on; without it all three handlers emitted the same untraceable sentence.
+
+    Args:
+        component_model: The component model that could not be adopted, when known.
+    """
+
+    def __init__(self, component_model=None):
+        self.component_model = component_model
+        self.component_label = str(component_model._meta.verbose_name) if component_model is not None else "component"
+        super().__init__(f"{self.component_label} is not available for module adoption")
 
 
 def _get_sync_device_for_inventory(device, server_key):
@@ -316,7 +329,7 @@ def _authorize_adoptable_module_components(module, component_querysets):
 
         allowed = component_querysets.get(component_model)
         if allowed is None or allowed.filter(pk__in=candidate_ids).count() != len(candidate_ids):
-            raise _ModuleComponentAdoptionUnavailable
+            raise _ModuleComponentAdoptionUnavailable(component_model)
         expected_ids[component_model] = candidate_ids
 
     return expected_ids
@@ -355,7 +368,11 @@ def _save_module_with_expected_component_adoption(module, expected_ids):
             if ids:
                 actual_ids[component_model] = ids
         if actual_ids != expected_ids:
-            raise _ModuleComponentAdoptionUnavailable
+            diverged = next(
+                (m for m in component_models if actual_ids.get(m) != expected_ids.get(m)),
+                None,
+            )
+            raise _ModuleComponentAdoptionUnavailable(diverged)
     return sum(len(ids) for ids in actual_ids.values())
 
 
@@ -813,8 +830,8 @@ class InstallModuleView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
                     "Installed module, but interface binding was skipped: "
                     f"{bind_result.get('reason', 'unknown reason')}",
                 )
-        except _ModuleComponentAdoptionUnavailable:
-            messages.error(request, "A matching component is not available for module adoption.")
+        except _ModuleComponentAdoptionUnavailable as exc:
+            messages.error(request, f"A matching {exc.component_label} is not available for module adoption.")
         except (ValidationError, IntegrityError) as e:
             messages.error(request, f"Failed to install module: {e}")
 
@@ -1147,11 +1164,11 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
                     changeable_interfaces,
                     deletable_interfaces,
                 )
-        except _ModuleComponentAdoptionUnavailable:
+        except _ModuleComponentAdoptionUnavailable as exc:
             return {
                 "status": "skipped",
                 "name": name,
-                "reason": "a matching component is not available for module adoption",
+                "reason": f"a matching {exc.component_label} is not available for module adoption",
             }
         except (ValidationError, IntegrityError) as e:
             error_msg = str(e)
@@ -2147,8 +2164,8 @@ class ReplaceModuleView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjectP
                     "Replaced module, but interface binding was skipped: "
                     f"{bind_result.get('reason', 'unknown reason')}",
                 )
-        except _ModuleComponentAdoptionUnavailable:
-            messages.error(request, "A matching component is not available for module adoption.")
+        except _ModuleComponentAdoptionUnavailable as exc:
+            messages.error(request, f"A matching {exc.component_label} is not available for module adoption.")
         except _SerialConflictAmbiguous as exc:
             messages.error(
                 request,
