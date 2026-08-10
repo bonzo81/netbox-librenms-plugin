@@ -669,7 +669,7 @@ def cable_is_point_to_point(cable) -> bool:
     return len(cable.a_terminations) == 1 and len(cable.b_terminations) == 1
 
 
-def classify_cable_action(local_term, remote_term, provenance_tag=None) -> dict:
+def classify_cable_action(local_term, remote_term, provenance_tag=_PROVENANCE_TAG_UNSET) -> dict:
     """
     Decide what syncing a cable between *local_term* and *remote_term* should do.
 

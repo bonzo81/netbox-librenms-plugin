@@ -584,9 +584,7 @@ class TestSerialLocalPortQueryBound:
         selects = [
             query["sql"] for query in captured.captured_queries if query["sql"].lstrip().upper().startswith("SELECT")
         ]
-        # One of these is the unrestricted ConsoleServerPort name scan that separates a port
-        # hidden by a grant from a port that does not exist in NetBox yet.
-        assert len(selects) <= 7
+        assert len(selects) <= 6
 
     @pytest.mark.parametrize("with_provenance", [False, True])
     def test_cabled_enrichment_query_count_does_not_grow_per_port(self, with_provenance):
@@ -639,7 +637,9 @@ class TestSerialLocalPortQueryBound:
             query["sql"] for query in captured.captured_queries if query["sql"].lstrip().upper().startswith("SELECT")
         ]
         tables = Counter(match.group(1) for sql in selects if (match := re.search(r'FROM "([^"]+)"', sql)))
-        assert len(selects) <= (13 if with_provenance else 15), tables
+        # One shared cable load serves both ends, so the provenance tag no longer changes the
+        # count: the tags come back with that single prefetch either way.
+        assert len(selects) <= 13, tables
 
 
 @pytest.mark.django_db

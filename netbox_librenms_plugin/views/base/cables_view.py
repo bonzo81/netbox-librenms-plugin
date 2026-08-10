@@ -1782,7 +1782,6 @@ class BaseCableTableView(
             .filter(Q(device_id__in=target_device_ids) | Q(pk__in=manual_ids))
             .filter(device__in=self._viewable_queryset(Device))
             .select_related("device", "cable")
-            .prefetch_related("cable__tags", "cable__terminations__termination")
             .order_by("device_id", "name", "pk")
         )
         ports_by_device = defaultdict(list)
@@ -1792,8 +1791,20 @@ class BaseCableTableView(
             if port.pk in manual_ids:
                 manual_ports[port.pk] = port
 
+        # Load each cable ONCE with its tags and terminations, then hand the same instance to both
+        # ends. A serial row's local ConsoleServerPort and its remote ConsolePort share a cable, so
+        # prefetching per queryset walked the same tag/termination sets twice per render.
         cable_ids = {port.cable_id for port in [*serial_ports, *console_ports] if port.cable_id is not None}
-        visible_cable_ids = set(self._viewable_queryset(Cable).filter(pk__in=cable_ids).values_list("pk", flat=True))
+        visible_cables = {
+            cable.pk: cable
+            for cable in self._viewable_queryset(Cable)
+            .filter(pk__in=cable_ids)
+            .prefetch_related("tags", "terminations__termination")
+        }
+        visible_cable_ids = set(visible_cables)
+        for port in (*serial_ports, *console_ports):
+            if (shared_cable := visible_cables.get(port.cable_id)) is not None:
+                port.cable = shared_cable
         changeable_console_port_ids = set(
             self._changeable_queryset(ConsolePort)
             .filter(pk__in=[port.pk for port in console_ports])
@@ -1939,12 +1950,7 @@ class BaseCableTableView(
         serial_sync_device = sync_device or self._viewable_sync_device(obj, server_key)
         serial_links_present = any(link.get("_source") == "serial" for link in links_data)
         serial_ports = (
-            list(
-                self._viewable_queryset(ConsoleServerPort)
-                .filter(device=serial_sync_device)
-                .select_related("cable")
-                .prefetch_related("cable__tags", "cable__terminations__termination")
-            )
+            list(self._viewable_queryset(ConsoleServerPort).filter(device=serial_sync_device).select_related("cable"))
             if serial_links_present and serial_sync_device is not None
             else []
         )
@@ -2026,9 +2032,21 @@ class BaseCableTableView(
         # "Console Server Port Not Found in NetBox" and tells the operator which port to create,
         # so hiding it would give a granted user a shorter table than an administrator.
         if serial_links_present and serial_sync_device is not None:
+            # Only a row that did NOT resolve can be hiding a port: everything else already
+            # matched a viewable one. When every row resolved, this costs no query at all.
+            unresolved_names = {
+                name
+                for link in links_data
+                if link.get("_source") == "serial" and (name := link.get("local_port")) not in serial_ports_by_name
+            }
             hidden_serial_port_names = (
-                set(ConsoleServerPort.objects.filter(device=serial_sync_device).values_list("name", flat=True))
-                - serial_ports_by_name.keys()
+                set(
+                    ConsoleServerPort.objects.filter(device=serial_sync_device, name__in=unresolved_names).values_list(
+                        "name", flat=True
+                    )
+                )
+                if unresolved_names
+                else set()
             )
             if hidden_serial_port_names:
                 links_data[:] = [
