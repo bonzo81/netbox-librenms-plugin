@@ -893,6 +893,37 @@ class TestInterfaceNameField:
             "plugins.netbox_librenms_plugin.interface_name_field", "ifDescr", commit=True
         )
 
+    @pytest.mark.django_db
+    def test_persisting_the_preference_does_not_leak_to_other_users(self):
+        """One user's choice must stay that user's.
+
+        NetBox creates each UserConfig with the ``DEFAULT_USER_PREFERENCES`` dict itself (not a
+        copy) and ``UserConfig.set()`` writes in place, so a naive write turns this choice into
+        the process-wide default that every later-created user inherits.
+        """
+        from copy import deepcopy
+
+        from django.contrib.auth import get_user_model
+        from django.test import RequestFactory
+        from netbox.config import get_config
+
+        from netbox_librenms_plugin.utils import get_interface_name_field
+
+        user_model = get_user_model()
+        chooser = user_model.objects.create_user(username="pref-chooser")
+        defaults_before = deepcopy(get_config().DEFAULT_USER_PREFERENCES)
+        request = RequestFactory().get("/", {"interface_name_field": "ifDescr"})
+        request.user = chooser
+
+        assert get_interface_name_field(request) == "ifDescr"
+
+        pref_path = "plugins.netbox_librenms_plugin.interface_name_field"
+        stored = user_model.objects.get(pk=chooser.pk)
+        assert stored.config.get(pref_path) == "ifDescr"
+        assert get_config().DEFAULT_USER_PREFERENCES == defaults_before
+        later = user_model.objects.create_user(username="pref-later")
+        assert later.config.get(pref_path) is None
+
 
 # =============================================================================
 # TestSaveUserPrefView - 6 tests
