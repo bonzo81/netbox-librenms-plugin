@@ -95,7 +95,7 @@ class TestSyncCablesViewGetSelectedInterfaces:
         assert result is not None
         assert len(result) == 1
         assert result[0]["device_id"] == 5
-        assert result[0]["local_port_id"] == "42"
+        assert result[0]["row_id"] == "42"
 
     def test_port_with_device_override(self):
         from netbox_librenms_plugin.views.sync.cables import SyncCablesView
@@ -120,29 +120,43 @@ class TestSyncCablesViewGetSelectedInterfaces:
         assert len(result) == 2
 
 
+@pytest.mark.django_db
 class TestSyncCablesViewGetCachedLinksData:
     def test_cache_miss_returns_none(self):
+        from netbox_librenms_plugin.tests.conftest import make_device
         from netbox_librenms_plugin.views.sync.cables import SyncCablesView
 
         view = _make_view(SyncCablesView)
-        obj = MagicMock()
-        with patch("netbox_librenms_plugin.views.sync.cables.cache") as mock_cache:
-            mock_cache.get.return_value = None
-            with patch.object(view, "get_cache_key", return_value="key1"):
-                result = view.get_cached_links_data(view.request, obj)
+        view._post_server_key = "default"
+        device = make_device("sync-cached-links-miss")
+
+        result = view.get_cached_links_data(view.request, device)
         assert result is None
 
-    def test_cache_hit_returns_links_list(self):
+    def test_cache_hit_returns_enriched_rows(self):
+        """The snapshot carries LibreNMS fields only, so the row identity and NetBox ids are derived."""
+        from django.core.cache import cache
+
+        from netbox_librenms_plugin.tests.conftest import make_device, make_interface
         from netbox_librenms_plugin.views.sync.cables import SyncCablesView
 
         view = _make_view(SyncCablesView)
-        obj = MagicMock()
-        links = [{"local_port_id": "1"}]
-        with patch("netbox_librenms_plugin.views.sync.cables.cache") as mock_cache:
-            mock_cache.get.return_value = {"links": links}
-            with patch.object(view, "get_cache_key", return_value="key1"):
-                result = view.get_cached_links_data(view.request, obj)
-        assert result == links
+        view._post_server_key = "default"
+        device = make_device("sync-cached-links-hit")
+        interface = make_interface(device, "Gi0/1")
+        cache_key = view.get_cache_key(device, "links", "default")
+        cache.set(
+            cache_key,
+            {"links": [{"local_port_id": "1", "local_port": interface.name, "device_id": device.pk}]},
+            timeout=300,
+        )
+        try:
+            result = view.get_cached_links_data(view.request, device)
+        finally:
+            cache.delete(cache_key)
+
+        assert [row["row_id"] for row in result] == ["1"]
+        assert result[0]["netbox_local_interface_id"] == interface.pk
 
 
 class TestSyncCablesViewValidatePrerequisites:
@@ -236,7 +250,7 @@ class TestSyncCablesViewHandleCableCreation:
 
         view = _make_view(SyncCablesView)
         link_data = {"netbox_local_interface_id": None, "netbox_remote_interface_id": 2, "netbox_remote_device_id": 5}
-        interface = {"local_port_id": "99"}
+        interface = {"row_id": "99"}
         result = view.handle_cable_creation(link_data, interface)
         assert result["status"] == "invalid"
         assert result["interface"] == "99"
@@ -326,8 +340,21 @@ class TestSyncCablesViewProcessSingleInterface:
         from netbox_librenms_plugin.views.sync.cables import SyncCablesView
 
         view = _make_view(SyncCablesView)
-        cached_links = [{"local_port_id": "5", "netbox_local_interface_id": 1, "netbox_remote_interface_id": 2}]
-        interface = {"local_port_id": "5", "device_id": 1}
+        cached_links = [
+            {
+                "row_id": "5",
+                "netbox_local_interface_id": 1,
+                "netbox_local_device_id": 1,
+                "netbox_remote_interface_id": 2,
+            }
+        ]
+        interface = {
+            "row_id": "5",
+            "device_id": 1,
+            "expected_local_id": 1,
+            "expected_local_device_id": 1,
+            "expected_remote_id": 2,
+        }
         expected = {"status": "valid", "interface": "eth0"}
         with patch.object(view, "handle_cable_creation", return_value=expected) as mock_handle:
             result = view.process_single_interface(interface, cached_links)
@@ -338,8 +365,8 @@ class TestSyncCablesViewProcessSingleInterface:
         from netbox_librenms_plugin.views.sync.cables import SyncCablesView
 
         view = _make_view(SyncCablesView)
-        cached_links = [{"local_port_id": "99"}]
-        interface = {"local_port_id": "42"}
+        cached_links = [{"row_id": "99"}]
+        interface = {"row_id": "42"}
         result = view.process_single_interface(interface, cached_links)
         assert result["status"] == "invalid"
         assert result["interface"] == "42"
@@ -383,7 +410,7 @@ class TestSyncCablesViewProcessInterfaceSync:
         from netbox_librenms_plugin.views.sync.cables import SyncCablesView
 
         view = _make_view(SyncCablesView)
-        interfaces = [{"local_port_id": "55"}]
+        interfaces = [{"row_id": "55"}]
         with patch("netbox_librenms_plugin.views.sync.cables.transaction", _atomic_txn()):
             with patch.object(view, "process_single_interface", side_effect=Exception("boom")):
                 results = view.process_interface_sync(interfaces, [])
@@ -511,19 +538,7 @@ class TestSyncCablesViewPost:
 
         from netbox_librenms_plugin.tests.conftest import make_device
 
-        # A second real server, derived from the active configured server. The posted key must be
-        # stored unchanged, and only a non-default key distinguishes that from fallback behavior.
-        plugins_config = copy.deepcopy(settings.PLUGINS_CONFIG)
-        servers = plugins_config["netbox_librenms_plugin"]["servers"]
-        servers["secondary"] = dict(servers[next(iter(servers))])
-
-        view = _make_view(SyncCablesView)
-        view.request = _make_request({"server_key": "secondary"})
-        mock_device = make_device("sync-server-key-post")
-        with (
-            override_settings(PLUGINS_CONFIG=plugins_config),
-            patch.object(view, "require_all_permissions", return_value=None),
-        ):
+        with patch.object(view, "require_all_permissions", return_value=None):
             with patch(
                 "netbox_librenms_plugin.views.mixins.NetBoxObjectPermissionMixin.restrict_object_or_404",
                 return_value=mock_device,

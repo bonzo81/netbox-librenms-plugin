@@ -588,7 +588,7 @@ class TestCablesExceptionPath:
 
         with patch("netbox_librenms_plugin.views.sync.cables.transaction") as mt:
             mt.atomic = _pa
-            results = v.process_interface_sync([{"local_port_id": "eth_x"}], [])
+            results = v.process_interface_sync([{"row_id": "eth_x"}], [])
 
         assert "eth_x" in results["invalid"]
 

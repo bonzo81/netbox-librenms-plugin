@@ -5,6 +5,7 @@ Most DB interactions are mocked via MagicMock, but some tests are DB-backed
 (``@pytest.mark.django_db``) where exercising the real ORM is clearer than mocking it.
 """
 
+import itertools
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -54,6 +55,14 @@ def _make_request(post_data=None, get_data=None, user=None):
     return request
 
 
+_cov_device_counter = itertools.count(1)
+
+
+def _cov_device():
+    """A REAL page Device: get_librenms_sync_device and the scoped querysets both walk it."""
+    return make_device(f"sync-cov-{next(_cov_device_counter)}")
+
+
 def _denied_response():
     resp = MagicMock()
     resp.status_code = 403
@@ -92,7 +101,7 @@ class TestSyncCablesViewCacheMiss:
         view.get_cache_key = MagicMock(return_value="key")
         view._post_server_key = "default"
 
-        mock_device = MagicMock(pk=1)
+        mock_device = _cov_device()
 
         with (
             patch(
@@ -124,7 +133,7 @@ class TestSyncCablesViewNoSelection:
         view.get_cache_key = MagicMock(return_value="key")
         view._post_server_key = "default"
 
-        mock_device = MagicMock(pk=1)
+        mock_device = _cov_device()
 
         with (
             patch(
@@ -162,12 +171,19 @@ class TestSyncCablesViewSuccessPath:
         dev_remote = make_device("cable-remote")
         remote = make_interface(dev_remote, "Gi0/2")
 
-        view.request = _make_request(post_data={"select": ["port1"], "device_selection_port1": str(dev_local.pk)})
+        view.request = _make_request(
+            post_data={
+                "select": ["port1"],
+                "device_selection_port1": str(dev_local.pk),
+                **_expected_fields("port1", local=local, remote=remote),
+            }
+        )
         link_data = {
             "local_port_id": "port1",
             "local_port": "Gi0/1",
             "netbox_local_interface_id": local.pk,
             "netbox_remote_interface_id": remote.pk,
+            "netbox_remote_device_id": dev_remote.pk,
         }
 
         with (
@@ -248,7 +264,8 @@ class TestSyncCablesViewSuccessPath:
         )
 
         selected = view.get_selected_interfaces(request, page_device)
-        assert selected == [{"device_id": str(unrelated_device.pk), "local_port_id": "port1"}]
+        assert selected[0]["device_id"] == str(unrelated_device.pk)
+        assert selected[0]["row_id"] == "port1"
         view._initial_device = page_device
         assert view._selected_device_is_in_page_context(unrelated_device.pk) is False
 
@@ -419,6 +436,22 @@ class TestSyncCablesViewSkipsOOBRows:
         mock_msgs.success.assert_not_called()
 
 
+def _expected_fields(row_id, *, local=None, remote=None):
+    """The hidden endpoint fields a rendered cable row posts back with its selection.
+
+    Sync rejects a selection whose endpoints no longer match what the page showed, so a POST that
+    omits these reads as stale rather than as a fresh confirmation.
+    """
+    data = {}
+    if local is not None:
+        data[f"expected_local_id_{row_id}"] = str(local.pk)
+        data[f"expected_local_device_id_{row_id}"] = str(local.device_id)
+    if remote is not None:
+        data[f"expected_remote_id_{row_id}"] = str(remote.pk)
+        data[f"expected_remote_device_id_{row_id}"] = str(remote.device_id)
+    return data
+
+
 def _cables_view(request, device, links):
     """The real SyncCablesView with the LibreNMS link snapshot seeded into the real cache."""
     from django.core.cache import cache
@@ -446,7 +479,9 @@ class TestSyncCablesViewDuplicateCable:
         # Plugin-owned, so the desired connection is a true noop; an untagged twin classifies as
         # tag_only and never reaches the duplicate warning.
         cable.tags.add(get_librenms_cable_tag())
-        req = _make_request(post_data={"select": ["port1"]})
+        req = _make_request(
+            post_data={"select": ["port1"], **_expected_fields("port1", local=local_iface, remote=remote_iface)}
+        )
         view = _cables_view(
             req,
             dev,
@@ -456,6 +491,7 @@ class TestSyncCablesViewDuplicateCable:
                     "local_port": "Gi0/1",
                     "netbox_local_interface_id": local_iface.pk,
                     "netbox_remote_interface_id": remote_iface.pk,
+                    "netbox_remote_device_id": remote_iface.device_id,
                 }
             ],
         )
@@ -472,7 +508,13 @@ class TestSyncCablesViewMissingRemote:
         dev = make_device("cable-missing-local")
         local_iface = make_interface(dev, "Gi0/1")
         gone_pk = missing_pk(Interface)
-        req = _make_request(post_data={"select": ["port1"]})
+        req = _make_request(
+            post_data={
+                "select": ["port1"],
+                **_expected_fields("port1", local=local_iface),
+                "expected_remote_id_port1": str(gone_pk),
+            }
+        )
         view = _cables_view(
             req,
             dev,
@@ -511,7 +553,10 @@ class TestSyncCablesViewMissingRemote:
             ],
         )
         user = grant(user, "change", Interface, constraints={"device__name": "cable-scoped-local"})
-        req = _make_request(post_data={"select": ["port1"]}, user=user)
+        req = _make_request(
+            post_data={"select": ["port1"], **_expected_fields("port1", local=local_iface, remote=remote_iface)},
+            user=user,
+        )
         view = _cables_view(
             req,
             dev,
@@ -521,6 +566,7 @@ class TestSyncCablesViewMissingRemote:
                     "local_port": "Gi0/1",
                     "netbox_local_interface_id": local_iface.pk,
                     "netbox_remote_interface_id": remote_iface.pk,
+                    "netbox_remote_device_id": remote_iface.device_id,
                 }
             ],
         )
@@ -569,7 +615,7 @@ class TestSyncCablesViewMissingLinkData:
         view.get_cache_key = MagicMock(return_value="key")
         view._post_server_key = "default"
 
-        mock_device = MagicMock(pk=1)
+        mock_device = _cov_device()
 
         with (
             patch(
@@ -601,7 +647,7 @@ class TestSyncCablesViewInvalidLinkData:
         view.get_cache_key = MagicMock(return_value="key")
         view._post_server_key = "default"
 
-        mock_device = MagicMock(pk=1)
+        mock_device = _cov_device()
         # Missing netbox_local_interface_id
         link_data = {"local_port_id": "port1", "local_port": "Gi0/1", "netbox_remote_interface_id": 20}
 
@@ -635,16 +681,42 @@ class TestSyncCablesViewHelpers:
         assert result is None
 
     def test_get_selected_interfaces_builds_list(self):
+        """Each selection carries the snapshot row identity plus the endpoints the page rendered."""
         from netbox_librenms_plugin.views.sync.cables import SyncCablesView
 
         view = object.__new__(SyncCablesView)
-        req = _make_request(post_data={"select": ["port1", "port2"], "device_selection_port1": "5"})
+        req = _make_request(
+            post_data={
+                "select": ["port1", "port2"],
+                "device_selection_port1": "5",
+                "expected_local_id_port1": "11",
+                "expected_local_device_id_port1": "12",
+                "expected_remote_id_port1": "13",
+                "expected_remote_device_id_port1": "14",
+                "expected_cable_intent_port1": "intent-token",
+            }
+        )
         result = view.get_selected_interfaces(req, MagicMock(id=1))
         assert len(result) == 2
-        assert result[0]["local_port_id"] == "port1"
+        assert result[0]["row_id"] == "port1"
         assert result[0]["device_id"] == "5"
-        # port2 defaults to initial_device.id
+        assert result[0]["expected_local_id"] == 11
+        assert result[0]["expected_local_device_id"] == 12
+        assert result[0]["expected_remote_id"] == 13
+        assert result[0]["expected_remote_device_id"] == 14
+        assert result[0]["expected_cable_intent"] == "intent-token"
+        # port2 defaults to initial_device.id and carries no rendered endpoints
         assert result[1]["device_id"] == 1
+        assert result[1]["expected_local_id"] is None
+
+    def test_sync_one_selects_exactly_that_row(self):
+        """A per-row Sync button posts sync_one, which must win over any checked boxes."""
+        from netbox_librenms_plugin.views.sync.cables import SyncCablesView
+
+        view = object.__new__(SyncCablesView)
+        req = _make_request(post_data={"select": ["port1", "port2"], "sync_one": "port2"})
+        result = view.get_selected_interfaces(req, MagicMock(id=1))
+        assert [row["row_id"] for row in result] == ["port2"]
 
     def test_validate_prerequisites_false_on_no_cache(self):
         from netbox_librenms_plugin.views.sync.cables import SyncCablesView
@@ -710,36 +782,49 @@ class TestSyncCablesViewHelpers:
     def test_get_cached_links_data_no_data(self):
         from netbox_librenms_plugin.views.sync.cables import SyncCablesView
 
+        device = _cov_device()
+        request = _make_request()
         view = object.__new__(SyncCablesView)
+        view.setup(request, pk=device.pk)
         view._post_server_key = "default"
-        view.get_cache_key = MagicMock(return_value="k")
 
-        with (
-            patch("netbox_librenms_plugin.views.sync.cables.cache") as mock_cache,
-            patch.object(
-                type(view), "librenms_api", new_callable=lambda: property(lambda s: MagicMock(server_key="default"))
-            ),
+        with patch.object(
+            type(view), "librenms_api", new_callable=lambda: property(lambda s: MagicMock(server_key="default"))
         ):
-            mock_cache.get.return_value = None
-            result = view.get_cached_links_data(_make_request(), MagicMock())
+            result = view.get_cached_links_data(request, device)
         assert result is None
 
-    def test_get_cached_links_data_returns_links(self):
+    def test_get_cached_links_data_returns_enriched_rows(self):
+        """The cached snapshot is given row identities and re-enriched against current NetBox state.
+
+        The snapshot itself stores only LibreNMS source fields, so the sync path has to derive the
+        NetBox ids for this request rather than trusting whatever was cached.
+        """
+        from django.core.cache import cache
+
         from netbox_librenms_plugin.views.sync.cables import SyncCablesView
 
+        device = _cov_device()
+        interface = make_interface(device, "Gi0/1")
+        request = _make_request()
         view = object.__new__(SyncCablesView)
+        view.setup(request, pk=device.pk)
         view._post_server_key = "default"
-        view.get_cache_key = MagicMock(return_value="k")
+        cache_key = view.get_cache_key(device, "links", "default")
+        _seeded_cache_keys.add(cache_key)
+        cache.set(
+            cache_key,
+            {"links": [{"local_port_id": "p", "local_port": interface.name, "device_id": device.pk}]},
+            timeout=300,
+        )
 
-        with (
-            patch("netbox_librenms_plugin.views.sync.cables.cache") as mock_cache,
-            patch.object(
-                type(view), "librenms_api", new_callable=lambda: property(lambda s: MagicMock(server_key="default"))
-            ),
+        with patch.object(
+            type(view), "librenms_api", new_callable=lambda: property(lambda s: MagicMock(server_key="default"))
         ):
-            mock_cache.get.return_value = {"links": [{"local_port_id": "p"}]}
-            result = view.get_cached_links_data(_make_request(), MagicMock())
-        assert result == [{"local_port_id": "p"}]
+            result = view.get_cached_links_data(request, device)
+
+        assert [row["row_id"] for row in result] == ["p"]
+        assert result[0]["netbox_local_interface_id"] == interface.pk
 
     def test_missing_local_interface_is_invalid_not_missing_remote(self):
         """A stale local interface ID must not be reported as missing remote data."""
@@ -771,7 +856,7 @@ class TestSyncCablesViewProcessInterfaceSyncException:
         view = object.__new__(SyncCablesView)
         view.request = _make_request()
 
-        interface = {"local_port_id": "port1"}
+        interface = {"row_id": "port1"}
         cached_links = []
 
         mock_transaction = MagicMock()
@@ -1245,7 +1330,7 @@ class TestSyncIPAddressesViewUnknownServerKey:
 
         view = object.__new__(SyncIPAddressesView)
         view.require_all_permissions = MagicMock(return_value=None)
-        mock_device = MagicMock(pk=1)
+        mock_device = _cov_device()
         mock_api = MagicMock(server_key="default")
 
         with (
@@ -1282,7 +1367,7 @@ class TestSyncIPAddressesViewCacheMiss:
         view.rebind_api_for_server = MagicMock(return_value="default")
         view.get_cache_key = MagicMock(return_value="k")
 
-        mock_device = MagicMock(pk=1)
+        mock_device = _cov_device()
         mock_api = MagicMock(server_key="default")
 
         with (
@@ -1313,7 +1398,7 @@ class TestSyncIPAddressesViewNoSelection:
         view.rebind_api_for_server = MagicMock(return_value="default")
         view.get_cache_key = MagicMock(return_value="k")
 
-        mock_device = MagicMock(pk=1)
+        mock_device = _cov_device()
         mock_api = MagicMock(server_key="default")
 
         with (
@@ -2169,7 +2254,7 @@ class TestSyncVLANsViewInvalidAction:
         view._post_server_key = "default"
         mock_api = MagicMock(server_key="default")
 
-        mock_device = MagicMock(pk=1)
+        mock_device = _cov_device()
 
         with (
             patch(
@@ -2198,7 +2283,7 @@ class TestSyncVLANsViewNoSelection:
         view.get_cache_key = MagicMock(return_value="k")
         mock_api = MagicMock(server_key="default")
 
-        mock_device = MagicMock(pk=1)
+        mock_device = _cov_device()
 
         with (
             patch(
@@ -2229,7 +2314,7 @@ class TestSyncVLANsViewCacheMiss:
         view.get_cache_key = MagicMock(return_value="k")
         mock_api = MagicMock(server_key="default")
 
-        mock_device = MagicMock(pk=1)
+        mock_device = _cov_device()
 
         with (
             patch(

@@ -1575,19 +1575,28 @@ class TestDeviceCableTableView:
         view._librenms_api = MagicMock()
         return view
 
+    @pytest.mark.django_db
     def test_get_table_returns_vc_cable_table_for_vc_device(self):
-        """get_table() returns VCCableTable when device has virtual_chassis."""
+        """get_table() returns VCCableTable, limited to the members this request may view."""
+        from netbox_librenms_plugin.tests.conftest import make_superuser, make_virtual_chassis
+
         view = self._make_view()
-        obj = MagicMock()
-        obj.virtual_chassis = MagicMock()
+        member = _make_real_device("cable-vc-a")
+        sibling = _make_real_device("cable-vc-b")
+        make_virtual_chassis("cable-vc-table", member, sibling)
+        member.refresh_from_db()
+        view.request = _real_verify_request({}, "cable-vc-table")
+        view.request.user = make_superuser()
 
         with patch("netbox_librenms_plugin.views.object_sync.devices.VCCableTable") as mock_vc_table:
             mock_table = MagicMock()
             mock_vc_table.return_value = mock_table
-            result = view.get_table([], obj)
+            result = view.get_table([], member)
 
         assert result is mock_table
-        mock_vc_table.assert_called_once_with([], device=obj)
+        _args, kwargs = mock_vc_table.call_args
+        assert kwargs["device"] == member
+        assert kwargs["allowed_vc_member_ids"] == {member.pk, sibling.pk}
 
     def test_get_table_returns_librenms_cable_table_for_non_vc_device(self):
         """get_table() returns LibreNMSCableTable when no virtual_chassis."""

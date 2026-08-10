@@ -1557,6 +1557,62 @@ class TestSerialCableReadScope:
         cache.set(key, {"links": [row]}, timeout=300)
         return row
 
+    def test_sensor_without_a_netbox_port_stays_visible_to_a_granted_user(self, client):
+        """A sensor with no ConsoleServerPort is LibreNMS data, so every granted user sees it.
+
+        Hiding it would tell a non-superuser nothing about the port they still have to create.
+        """
+        from dcim.models import ConsoleServerPort, Device
+        from django.core.cache import cache
+        from django.urls import reverse
+
+        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+        from netbox_librenms_plugin.tests.conftest import make_superuser
+        from netbox_librenms_plugin.views.sync.cables import SyncCablesView
+
+        acs, (csp,), _ = make_serial_device("serial-unmodelled-port", csp_names=["ttyS1"])
+        server_key = next(iter(LibreNMSAPI.get_available_servers()))
+        rows = [
+            {
+                "local_port": csp.name,
+                "local_port_id": f"serial:{csp.pk}",
+                "_source": "serial",
+                "device_id": acs.pk,
+                "remote_device": "",
+                "sensor_id": csp.pk,
+                "sensor_index_int": 1,
+                "is_configured": False,
+            },
+            {
+                "local_port": "ttyS9",
+                "local_port_id": f"serial:{csp.pk + 9000}",
+                "_source": "serial",
+                "device_id": acs.pk,
+                "remote_device": "",
+                "sensor_id": csp.pk + 9000,
+                "sensor_index_int": 9,
+                "is_configured": False,
+            },
+        ]
+        cache.set(
+            object.__new__(SyncCablesView).get_cache_key(acs, "links", server_key),
+            {"links": rows},
+            timeout=300,
+        )
+        url = reverse("plugins:netbox_librenms_plugin:device_librenms_sync", args=[acs.pk])
+
+        client.force_login(make_superuser())
+        admin_html = client.get(url, {"tab": "cables", "server_key": server_key}).content.decode()
+
+        granted = self._user("serial-unmodelled-port-user", acs)
+        self._grant(granted, "serial-unmodelled-port-csp", ConsoleServerPort, ["view"])
+        self._grant(granted, "serial-unmodelled-port-devices", Device, ["view"])
+        client.force_login(granted)
+        granted_html = client.get(url, {"tab": "cables", "server_key": server_key}).content.decode()
+
+        assert "ttyS9" in admin_html
+        assert "ttyS9" in granted_html
+
     def test_refresh_post_cannot_read_an_out_of_scope_device(self, client):
         from django.urls import reverse
 

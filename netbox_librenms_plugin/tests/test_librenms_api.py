@@ -3364,6 +3364,50 @@ class TestGetSerialPortSensors:
         assert success is False
         assert "invalid sensor_id" in msg.lower()
 
+    def test_unrelated_sensor_id_does_not_fail_the_serial_fetch(self, mock_librenms_api, mock_response_factory):
+        """The endpoint returns every sensor on the instance, so only serial rows may fail it."""
+        import unittest.mock as mock
+
+        unrelated = self._make_sensor(99, sensor_type="tempSensor", port_num=5)
+        unrelated["sensor_id"] = None
+        good = self._make_sensor(12, port_num=7)
+        mock_resp = mock_response_factory(status_code=200, json_data={"status": "ok", "sensors": [unrelated, good]})
+
+        with mock.patch("netbox_librenms_plugin.librenms_api.requests.get", return_value=mock_resp):
+            success, data = mock_librenms_api.get_serial_port_sensors(device_id=12)
+
+        assert success is True
+        assert [sensor["sensor_id"] for sensor in data] == [good["sensor_id"]]
+
+    def test_unrelated_sensor_deleted_does_not_fail_the_serial_fetch(self, mock_librenms_api, mock_response_factory):
+        """One unrelated sensor with an out-of-contract sensor_deleted must not drop serial rows."""
+        import unittest.mock as mock
+
+        unrelated = self._make_sensor(99, sensor_type="tempSensor", port_num=5)
+        unrelated["sensor_deleted"] = 2
+        good = self._make_sensor(12, port_num=7)
+        mock_resp = mock_response_factory(status_code=200, json_data={"status": "ok", "sensors": [unrelated, good]})
+
+        with mock.patch("netbox_librenms_plugin.librenms_api.requests.get", return_value=mock_resp):
+            success, data = mock_librenms_api.get_serial_port_sensors(device_id=12)
+
+        assert success is True
+        assert [sensor["sensor_id"] for sensor in data] == [good["sensor_id"]]
+
+    def test_non_boolean_sensor_deleted_on_a_serial_row_fails_closed(self, mock_librenms_api, mock_response_factory):
+        """A serial row with an unreadable sensor_deleted is still a malformed response."""
+        import unittest.mock as mock
+
+        bad = self._make_sensor(12, port_num=8)
+        bad["sensor_deleted"] = True
+        mock_resp = mock_response_factory(status_code=200, json_data={"status": "ok", "sensors": [bad]})
+
+        with mock.patch("netbox_librenms_plugin.librenms_api.requests.get", return_value=mock_resp):
+            success, msg = mock_librenms_api.get_serial_port_sensors(device_id=12)
+
+        assert success is False
+        assert "invalid sensor_deleted" in msg.lower()
+
     def test_empty_sensor_list_returns_empty(self, mock_librenms_api, mock_response_factory):
         import unittest.mock as mock
 
