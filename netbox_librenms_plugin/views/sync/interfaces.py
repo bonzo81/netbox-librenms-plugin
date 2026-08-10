@@ -38,6 +38,7 @@ from netbox_librenms_plugin.views.mixins import (
     LibreNMSPermissionMixin,
     NetBoxObjectPermissionMixin,
     VlanAssignmentMixin,
+    relock_scoped_row,
 )
 
 logger = logging.getLogger(__name__)
@@ -799,9 +800,8 @@ class SyncInterfacesView(
         virtual_chassis_id = obj.virtual_chassis_id
         target_ids = {obj.pk}
         if virtual_chassis_id is not None:
-            locked_chassis = (
-                VirtualChassis.objects.select_for_update(of=("self",)).filter(pk=virtual_chassis_id).first()
-            )
+            # The id came from obj, which this request already resolved through a scoped queryset.
+            locked_chassis = relock_scoped_row(VirtualChassis, pk=virtual_chassis_id)
             if locked_chassis is None:
                 return {}
             target_ids.update(Device.objects.filter(virtual_chassis_id=virtual_chassis_id).values_list("pk", flat=True))
@@ -1297,9 +1297,8 @@ def _lock_relationship_scope(obj, owner_queryset=None):
         virtual_chassis_id = obj.virtual_chassis_id
         device_ids = {obj.pk}
         if virtual_chassis_id is not None:
-            locked_chassis = (
-                VirtualChassis.objects.select_for_update(of=("self",)).filter(pk=virtual_chassis_id).first()
-            )
+            # The id came from obj, which this request already resolved through a scoped queryset.
+            locked_chassis = relock_scoped_row(VirtualChassis, pk=virtual_chassis_id)
             if locked_chassis is None:
                 return None, set()
             device_ids.update(Device.objects.filter(virtual_chassis_id=virtual_chassis_id).values_list("pk", flat=True))
