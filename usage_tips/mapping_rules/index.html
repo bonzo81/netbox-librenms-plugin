@@ -1,0 +1,1678 @@
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+      
+      
+        <link rel="canonical" href="https://bonzo81.github.io/netbox-librenms-plugin/usage_tips/mapping_rules/">
+      
+      
+        <link rel="prev" href="../module_sync/">
+      
+      
+        <link rel="next" href="../../development/">
+      
+      
+        
+      
+      
+      <link rel="icon" href="../../assets/images/favicon.png">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.7">
+    
+    
+      
+        <title>Mapping Rules - NetBox librenms Plugin</title>
+      
+    
+    
+      <link rel="stylesheet" href="../../assets/stylesheets/main.ec1eaa64.min.css">
+      
+        
+        <link rel="stylesheet" href="../../assets/stylesheets/palette.ab4e12ef.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Roboto:300,300i,400,400i,700,700i%7CRoboto+Mono:400,400i,700,700i&display=fallback">
+        <style>:root{--md-text-font:"Roboto";--md-code-font:"Roboto Mono"}</style>
+      
+    
+    
+      <link rel="stylesheet" href="../../assets/_mkdocstrings.css">
+    
+    <script>__md_scope=new URL("../..",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
+    
+      
+
+    
+    
+  </head>
+  
+  
+    
+    
+    
+    
+    
+    <body dir="ltr" data-md-color-scheme="preference" data-md-color-primary="indigo" data-md-color-accent="indigo">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#mapping-rules" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+    
+      
+
+  
+
+<header class="md-header md-header--shadow md-header--lifted" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href="../.." title="NetBox librenms Plugin" class="md-header__button md-logo" aria-label="NetBox librenms Plugin" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            NetBox librenms Plugin
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              Mapping Rules
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+      
+    
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog">
+  <label class="md-search__overlay" for="__search"></label>
+  <div class="md-search__inner" role="search">
+    <form class="md-search__form" name="search">
+      <input type="text" class="md-search__input" name="query" aria-label="Search" placeholder="Search" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" data-md-component="search-query" required>
+      <label class="md-search__icon md-icon" for="__search">
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+      </label>
+      <nav class="md-search__options" aria-label="Search">
+        
+        <button type="reset" class="md-search__icon md-icon" title="Clear" aria-label="Clear" tabindex="-1">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+        </button>
+      </nav>
+      
+    </form>
+    <div class="md-search__output">
+      <div class="md-search__scrollwrap" tabindex="0" data-md-scrollfix>
+        <div class="md-search-result" data-md-component="search-result">
+          <div class="md-search-result__meta">
+            Initializing search
+          </div>
+          <ol class="md-search-result__list" role="presentation"></ol>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+      
+    
+    
+      <div class="md-header__source">
+        <a href="https://github.com/bonzo81/netbox-librenms-plugin" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    /netbox-librenms-plugin
+  </div>
+</a>
+      </div>
+    
+  </nav>
+  
+    
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+
+<nav class="md-nav md-nav--primary" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href="../.." title="NetBox librenms Plugin" class="md-nav__button md-logo" aria-label="NetBox librenms Plugin" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    NetBox librenms Plugin
+  </label>
+  
+    <div class="md-nav__source">
+      <a href="https://github.com/bonzo81/netbox-librenms-plugin" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    /netbox-librenms-plugin
+  </div>
+</a>
+    </div>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../.." class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Home
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+      
+        
+          
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_2" >
+        
+          
+          <div class="md-nav__link md-nav__container">
+            <a href="../" class="md-nav__link ">
+              
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Getting Started
+  
+
+    
+  </span>
+  
+  
+
+            </a>
+            
+              
+              <label class="md-nav__link " for="__nav_2" id="__nav_2_label" tabindex="0">
+                <span class="md-nav__icon md-icon"></span>
+              </label>
+            
+          </div>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_2_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_2">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Getting Started
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../feature_list/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Feature Overview
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../custom_field/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Custom Field Setup
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../multi_server_configuration/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Multi-Server Setup
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../permissions/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Permissions & Access
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../suggested_workflow/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Suggested Workflow
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_3" >
+        
+          
+          <label class="md-nav__link" for="__nav_3" id="__nav_3_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Import Devices
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_3_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_3">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Import Devices
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../librenms_import/overview/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Overview
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../librenms_import/search/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Searching for Devices
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../librenms_import/validation/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Validation & Configuration
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../librenms_import/import_settings/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Import Settings
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../librenms_import/background_jobs/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Background Jobs & Caching
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+    
+  
+  
+  
+    
+    
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+    
+    <li class="md-nav__item md-nav__item--active md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_4" checked>
+        
+          
+          <label class="md-nav__link" for="__nav_4" id="__nav_4_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Sync & Configuration
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_4_label" aria-expanded="true">
+          <label class="md-nav__title" for="__nav_4">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Sync & Configuration
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../virtual_chassis/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Virtual Chassis
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../interface_mappings/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Interface Mappings
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../module_sync/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Module Sync
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+    
+  
+  
+  
+    <li class="md-nav__item md-nav__item--active">
+      
+      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
+      
+      
+      
+        <label class="md-nav__link md-nav__link--active" for="__toc">
+          
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Mapping Rules
+  
+
+    
+  </span>
+  
+  
+
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <a href="./" class="md-nav__link md-nav__link--active">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Mapping Rules
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+      
+        
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#mapping-rules" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Mapping Rules
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Mapping Rules">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#platform-mappings" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Platform Mappings
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#device-type-mappings" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Device Type Mappings
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#module-type-mappings" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Module Type Mappings
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#module-bay-mappings" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Module Bay Mappings
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#normalization-rules" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Normalization Rules
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#inventory-ignore-rules" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Inventory Ignore Rules
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#carrier-auto-install-rules" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Carrier Auto-Install Rules
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#bulk-import-export" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Bulk Import / Export
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+      
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+          
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_5" >
+        
+          
+          <div class="md-nav__link md-nav__container">
+            <a href="../../development/" class="md-nav__link ">
+              
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Development
+  
+
+    
+  </span>
+  
+  
+
+            </a>
+            
+              
+              <label class="md-nav__link " for="__nav_5" id="__nav_5_label" tabindex="0">
+                <span class="md-nav__icon md-icon"></span>
+              </label>
+            
+          </div>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_5_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_5">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Development
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../development/structure/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Project Structure
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../development/views/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Views & Inheritance
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../development/mixins/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Mixins
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../development/templates/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Templates
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../development/extension_points/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Extension Points
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../development/testing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Testing
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../changelog/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Changelog
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../contributing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Contributing
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#mapping-rules" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Mapping Rules
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Mapping Rules">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#platform-mappings" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Platform Mappings
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#device-type-mappings" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Device Type Mappings
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#module-type-mappings" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Module Type Mappings
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#module-bay-mappings" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Module Bay Mappings
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#normalization-rules" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Normalization Rules
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#inventory-ignore-rules" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Inventory Ignore Rules
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#carrier-auto-install-rules" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Carrier Auto-Install Rules
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#bulk-import-export" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Bulk Import / Export
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+
+  
+  
+
+
+  <h1>Mapping Rules</h1>
+
+<h2 id="mapping-rules">Mapping Rules<a class="headerlink" href="#mapping-rules" title="Permanent link">&para;</a></h2>
+<p>Mapping rules are the configuration layer that connects LibreNMS identifiers to NetBox objects. Without them the plugin relies on exact-string matching; with them you can cover vendor naming variations, OS string aliases, model-number differences, and bay naming schemes across your entire fleet.</p>
+<p>All mapping types live under <strong>Plugins &gt; LibreNMS &gt; Mappings</strong> in the NetBox menu and support individual creation, editing, deletion, and bulk YAML import/export.</p>
+<hr />
+<h3 id="platform-mappings">Platform Mappings<a class="headerlink" href="#platform-mappings" title="Permanent link">&para;</a></h3>
+<p>Maps a LibreNMS OS string (e.g. <code>junos</code>, <code>eos</code>, <code>ios</code>) to a NetBox Platform object.</p>
+<p><strong>Used by:</strong>
+- Device Field Sync — platform sync on the device LibreNMS-Sync page
+- Device Import — platform auto-match when importing devices from LibreNMS</p>
+<p>Matching is case-insensitive. The plugin first tries an exact <code>Platform.name</code> match against existing NetBox Platforms; if none (or ambiguous), it falls back to <code>PlatformMapping</code>. If neither produces a unique result, the field is left empty.</p>
+<p><strong>YAML format:</strong></p>
+<div class="highlight"><pre><span></span><code><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">librenms_os</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">junos</span>
+<span class="w">  </span><span class="nt">netbox_platform</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">JunOS</span>
+<span class="w">  </span><span class="nt">description</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;Juniper</span><span class="nv"> </span><span class="s">JunOS&quot;</span>
+</code></pre></div>
+<p><strong>Screenshot:</strong></p>
+<p><img alt="Platform Mapping List" src="../../img/platform_mappings/list.png" /></p>
+<hr />
+<h3 id="device-type-mappings">Device Type Mappings<a class="headerlink" href="#device-type-mappings" title="Permanent link">&para;</a></h3>
+<p>Maps a LibreNMS hardware string (e.g. <code>Juniper MX480 Internet Backbone Router</code>) to a NetBox DeviceType object.</p>
+<p><strong>Used by:</strong>
+- Device Import — device type auto-match when importing</p>
+<p>Matching is case-insensitive and exact: the LibreNMS hardware string must equal the DeviceTypeMapping's <code>librenms_hardware</code> value (or, if no mapping matches, the DeviceType's <code>part_number</code> or <code>model</code>). The plugin does not perform partial or containment matching.</p>
+<p><strong>YAML format:</strong></p>
+<div class="highlight"><pre><span></span><code><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">librenms_hardware</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;Juniper</span><span class="nv"> </span><span class="s">MX480</span><span class="nv"> </span><span class="s">Internet</span><span class="nv"> </span><span class="s">Backbone</span><span class="nv"> </span><span class="s">Router&quot;</span>
+<span class="w">  </span><span class="nt">netbox_device_type</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">MX480</span>
+<span class="w">  </span><span class="nt">description</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;Juniper</span><span class="nv"> </span><span class="s">MX480&quot;</span>
+</code></pre></div>
+<p><strong>Screenshot:</strong></p>
+<p><img alt="Device Type Mapping List" src="../../img/device_type_mappings/list.png" /></p>
+<hr />
+<h3 id="module-type-mappings">Module Type Mappings<a class="headerlink" href="#module-type-mappings" title="Permanent link">&para;</a></h3>
+<p>Maps a LibreNMS <code>entPhysicalModelName</code> string (e.g. <code>SFP-1G-T</code>, <code>3HE16474AA</code>) to a NetBox ModuleType object.</p>
+<p><strong>Used by:</strong>
+- Module Sync — determines which NetBox ModuleType to install or match</p>
+<p>Optionally scoped to a <strong>Manufacturer</strong>: when both a manufacturer-scoped and a global mapping exist for the same model string, the manufacturer-scoped row wins for devices from that vendor.</p>
+<p><strong>YAML format:</strong></p>
+<div class="highlight"><pre><span></span><code><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">librenms_model</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">SFP-1G-T</span>
+<span class="w">  </span><span class="nt">manufacturer</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;&quot;</span>
+<span class="w">  </span><span class="nt">netbox_module_type</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">SFP-1G-T</span>
+<span class="w">  </span><span class="nt">description</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;1G</span><span class="nv"> </span><span class="s">copper</span><span class="nv"> </span><span class="s">SFP&quot;</span>
+
+<span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">librenms_model</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">3HE16474AA</span>
+<span class="w">  </span><span class="nt">manufacturer</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">Nokia</span>
+<span class="w">  </span><span class="nt">netbox_module_type</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;3HE16474AA&quot;</span>
+<span class="w">  </span><span class="nt">description</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;Nokia</span><span class="nv"> </span><span class="s">CPM&quot;</span>
+</code></pre></div>
+<p><strong>Screenshot:</strong></p>
+<p><img alt="Module Type Mapping List" src="../../img/module_type_mappings/list.png" /></p>
+<hr />
+<h3 id="module-bay-mappings">Module Bay Mappings<a class="headerlink" href="#module-bay-mappings" title="Permanent link">&para;</a></h3>
+<p>Maps a LibreNMS <code>entPhysicalName</code> string (e.g. <code>Power Supply 1</code>) to a NetBox module bay name (e.g. <code>PSU1</code>).</p>
+<p><strong>Used by:</strong>
+- Module Sync — resolves which NetBox module bay a LibreNMS inventory row corresponds to</p>
+<p>Supports:
+- <strong>Exact match</strong> — simple string substitution
+- <strong>Regex match</strong> — <code>librenms_name</code> is a Python regex; <code>netbox_bay_name</code> can use backreferences (<code>\1</code>, <code>\2</code>, …)
+- <strong>Class filter</strong> — optional <code>librenms_class</code> field (e.g. <code>powerSupply</code>, <code>fan</code>) to restrict the mapping to items of that ENTITY-MIB class
+- <strong>Manufacturer scoping</strong> — vendor-scoped mapping wins over a global one when both match</p>
+<p><strong>YAML format:</strong></p>
+<div class="highlight"><pre><span></span><code><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">librenms_name</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;Power</span><span class="nv"> </span><span class="s">Supply</span><span class="nv"> </span><span class="s">1&quot;</span>
+<span class="w">  </span><span class="nt">librenms_class</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">powerSupply</span>
+<span class="w">  </span><span class="nt">netbox_bay_name</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">PSU1</span>
+<span class="w">  </span><span class="nt">is_regex</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">false</span>
+<span class="w">  </span><span class="nt">manufacturer</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;&quot;</span>
+<span class="w">  </span><span class="nt">description</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;&quot;</span>
+
+<span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">librenms_name</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;^FPC(\\d+)$&quot;</span>
+<span class="w">  </span><span class="nt">librenms_class</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">module</span>
+<span class="w">  </span><span class="nt">netbox_bay_name</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;FPC\\1&quot;</span>
+<span class="w">  </span><span class="nt">is_regex</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span>
+<span class="w">  </span><span class="nt">manufacturer</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">Juniper</span>
+<span class="w">  </span><span class="nt">description</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;FPC</span><span class="nv"> </span><span class="s">slot</span><span class="nv"> </span><span class="s">regex&quot;</span>
+</code></pre></div>
+<p><strong>Screenshot:</strong></p>
+<p><img alt="Module Bay Mapping List" src="../../img/module_bay_mappings/list.png" /></p>
+<hr />
+<h3 id="normalization-rules">Normalization Rules<a class="headerlink" href="#normalization-rules" title="Permanent link">&para;</a></h3>
+<p>Regex-based string transformations applied <em>before</em> ModuleTypeMapping or ModuleBayMapping lookups. Rules are chained in priority order (lower number = runs first); each rule transforms the output of the previous.</p>
+<p><strong>Scopes:</strong>
+- <code>module_type</code> — normalizes <code>entPhysicalModelName</code> before ModuleTypeMapping lookup
+- <code>device_type</code> — normalizes LibreNMS hardware string before DeviceTypeMapping lookup
+- <code>module_bay</code> — normalizes <code>entPhysicalName</code> before ModuleBayMapping lookup</p>
+<p>Useful for stripping vendor revision suffixes so a single ModuleTypeMapping entry covers all hardware revisions.</p>
+<p><strong>Example:</strong> strip Nokia revision suffixes</p>
+<div class="highlight"><pre><span></span><code>scope:         module_type
+manufacturer:  Nokia
+match_pattern: ^(3HE\w{5}[A-Z]{2})[A-Z]{2}\d{2}$
+replacement:   \1
+Result: 3HE16474AARA01 -&gt; 3HE16474AA
+</code></pre></div>
+<p><strong>YAML format:</strong></p>
+<div class="highlight"><pre><span></span><code><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">scope</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">module_type</span>
+<span class="w">  </span><span class="nt">manufacturer</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">Nokia</span>
+<span class="w">  </span><span class="nt">match_pattern</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;^(3HE\\w{5}[A-Z]{2})[A-Z]{2}\\d{2}$&quot;</span>
+<span class="w">  </span><span class="nt">replacement</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;\\1&quot;</span>
+<span class="w">  </span><span class="nt">priority</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">10</span>
+<span class="w">  </span><span class="nt">description</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;Strip</span><span class="nv"> </span><span class="s">Nokia</span><span class="nv"> </span><span class="s">revision</span><span class="nv"> </span><span class="s">suffix&quot;</span>
+</code></pre></div>
+<p><strong>Screenshot:</strong></p>
+<p><img alt="Normalization Rule List" src="../../img/normalization_rules/list.png" /></p>
+<hr />
+<h3 id="inventory-ignore-rules">Inventory Ignore Rules<a class="headerlink" href="#inventory-ignore-rules" title="Permanent link">&para;</a></h3>
+<p>Filter or reclassify specific ENTITY-MIB inventory items that would otherwise appear as spurious rows in the Module Sync table.</p>
+<p><strong>Actions:</strong>
+- <strong>Skip</strong> — removes the matched item from the sync table entirely. Use for phantom EEPROM/IDPROM child entities that some vendors (Cisco IOS-XR) report with the same model and serial as the parent.
+- <strong>Transparent</strong> — hides the row but <em>promotes</em> its children to device-level bay matching. Use for fixed-chassis devices (e.g. Cisco 8201-SYS) where the system board entity is the device itself and its children (transceivers, fans, PSUs) should be matched directly against device-level bays.</p>
+<p><strong>Match types:</strong>
+- <code>ends_with</code> / <code>starts_with</code> / <code>contains</code> — compare <code>entPhysicalName</code> (case-insensitive)
+- <code>regex</code> — Python regex against <code>entPhysicalName</code>
+- <code>serial_matches_device</code> — matches when <code>entPhysicalSerialNum</code> equals the NetBox device's own serial (no pattern required)</p>
+<p>The <strong>Require serial match parent</strong> option (recommended) adds a safety net: the name-based rule only fires when the item's serial number also matches an ancestor entity's serial.</p>
+<p><strong>YAML format:</strong></p>
+<div class="highlight"><pre><span></span><code><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">name</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;Cisco</span><span class="nv"> </span><span class="s">IOS-XR</span><span class="nv"> </span><span class="s">IDPROM</span><span class="nv"> </span><span class="s">phantom&quot;</span>
+<span class="w">  </span><span class="nt">match_type</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">ends_with</span>
+<span class="w">  </span><span class="nt">pattern</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;IDPROM&quot;</span>
+<span class="w">  </span><span class="nt">action</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">skip</span>
+<span class="w">  </span><span class="nt">require_serial_match_parent</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span>
+<span class="w">  </span><span class="nt">enabled</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span>
+<span class="w">  </span><span class="nt">description</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;Remove</span><span class="nv"> </span><span class="s">IDPROM</span><span class="nv"> </span><span class="s">phantoms</span><span class="nv"> </span><span class="s">from</span><span class="nv"> </span><span class="s">Cisco</span><span class="nv"> </span><span class="s">IOS-XR</span><span class="nv"> </span><span class="s">inventory&quot;</span>
+</code></pre></div>
+<p><strong>Screenshot:</strong></p>
+<p><img alt="Inventory Ignore Rule List" src="../../img/inventory_ignore_rules/list.png" /></p>
+<hr />
+<h3 id="carrier-auto-install-rules">Carrier Auto-Install Rules<a class="headerlink" href="#carrier-auto-install-rules" title="Permanent link">&para;</a></h3>
+<p>Some chassis report child components (CPMs, MDAs, mezzanines) without the intermediate carrier/holder module that must first exist in NetBox for those children to have a bay to live in. A Carrier Auto-Install Rule tells the plugin: "for this manufacturer / device type, when you see an orphan component of this class and name pattern, suggest installing this ModuleType into the matching empty bay."</p>
+<p>Rules are <strong>suggest-only</strong> — no module is installed automatically. The user clicks an <strong>Install Carrier</strong> button that appears in the Module Sync table when a rule fires.</p>
+<p><strong>Fields:</strong>
+- <code>manufacturer</code> — optional; scope to one vendor
+- <code>device_type_pattern</code> — optional regex (fullmatch) on DeviceType model name
+- <code>librenms_child_class</code> — exact <code>entPhysicalClass</code> of the orphan (e.g. <code>cpmModule</code>)
+- <code>librenms_child_name_pattern</code> — regex (fullmatch) on the orphan's <code>entPhysicalName</code>
+- <code>netbox_bay_name_pattern</code> — regex (fullmatch) on empty chassis-level bay name(s) to offer as install targets
+- <code>carrier_module_type</code> — the ModuleType to suggest installing</p>
+<p><strong>YAML format:</strong></p>
+<div class="highlight"><pre><span></span><code><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">manufacturer</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">Nokia</span>
+<span class="w">  </span><span class="nt">device_type_pattern</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;.*SR-s.*&quot;</span>
+<span class="w">  </span><span class="nt">librenms_child_class</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">cpmModule</span>
+<span class="w">  </span><span class="nt">librenms_child_name_pattern</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;^Slot</span><span class="nv"> </span><span class="s">[AB]$&quot;</span>
+<span class="w">  </span><span class="nt">netbox_bay_name_pattern</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;^CMA$&quot;</span>
+<span class="w">  </span><span class="nt">carrier_module_type</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;Nokia</span><span class="nv"> </span><span class="s">CMA</span><span class="nv"> </span><span class="s">Carrier&quot;</span>
+<span class="w">  </span><span class="nt">description</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;Nokia</span><span class="nv"> </span><span class="s">7750</span><span class="nv"> </span><span class="s">SR-s</span><span class="nv"> </span><span class="s">CMA</span><span class="nv"> </span><span class="s">carrier</span><span class="nv"> </span><span class="s">suggestion&quot;</span>
+</code></pre></div>
+<p><strong>Screenshot:</strong></p>
+<p><img alt="Carrier Auto-Install Rule List" src="../../img/carrier_auto_install_rules/list.png" /></p>
+<hr />
+<h3 id="bulk-import-export">Bulk Import / Export<a class="headerlink" href="#bulk-import-export" title="Permanent link">&para;</a></h3>
+<p>All mapping types support NetBox's standard bulk YAML import. Click the <strong>Import</strong> button next to any mapping list. You can also export existing mappings as YAML for backup or cross-environment migration using the <strong>Export</strong> action on the list page.</p>
+<p>Pre-built example rules for common vendor patterns are available in <a href="../../contrib/"><code>contrib/</code></a> in the plugin repository. Pull requests with additional examples or corrections are welcome.</p>
+
+
+
+
+
+
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+  
+    Made with
+    <a href="https://squidfunk.github.io/mkdocs-material/" target="_blank" rel="noopener">
+      Material for MkDocs
+    </a>
+  
+</div>
+      
+        
+<div class="md-social">
+  
+    
+    
+    
+    
+    <a href="https://github.com//netbox-librenms-plugin" target="_blank" rel="noopener" title="Github" class="md-social__link">
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M173.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3.3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6m-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5.3-6.2 2.3m44.2-1.7c-2.9.7-4.9 2.6-4.6 4.9.3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9M252.8 8C114.1 8 8 113.3 8 252c0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1C436.2 457.8 504 362.9 504 252 504 113.3 391.5 8 252.8 8M105.2 352.9c-1.3 1-1 3.3.7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1m-10.8-8.1c-.7 1.3.3 2.9 2.3 3.9 1.6 1 3.6.7 4.3-.7.7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3.7m32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3.7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1m-11.4-14.7c-1.6 1-1.6 3.6 0 5.9s4.3 3.3 5.6 2.3c1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2"/></svg>
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+    
+    
+      
+      
+      <script id="__config" type="application/json">{"annotate": null, "base": "../..", "features": ["navigation.indexes", "navigation.instant", "navigation.tabs.sticky"], "search": "../../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": null}</script>
+    
+    
+      <script src="../../assets/javascripts/bundle.d7400e89.min.js"></script>
+      
+    
+  </body>
+</html>
