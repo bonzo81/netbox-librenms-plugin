@@ -30,6 +30,7 @@ def test_selected_vc_target_is_locked_through_interface_sync():
     validation_done = Event()
     release_sync = Event()
     membership_changed = Event()
+    move_started = Event()
 
     port = {
         "ifName": "Gi0/1",
@@ -74,6 +75,7 @@ def test_selected_vc_target_is_locked_through_interface_sync():
             with connection.cursor() as cursor:
                 cursor.execute("SET lock_timeout = '5s'")
                 cursor.execute("SET statement_timeout = '5s'")
+            move_started.set()
             Device.objects.filter(pk=target_device.pk).update(virtual_chassis=None, vc_position=None)
             membership_changed.set()
         finally:
@@ -83,6 +85,9 @@ def test_selected_vc_target_is_locked_through_interface_sync():
         sync_future = executor.submit(sync_interface)
         assert validation_done.wait(5), "interface sync did not reach target validation"
         move_future = executor.submit(move_target_out_of_chassis)
+        # Without this the 0.5s window also covers thread start-up and the two SET
+        # statements, so the negative assertion below could pass with no lock held.
+        assert move_started.wait(5), "membership update thread did not start"
         changed_during_sync = membership_changed.wait(0.5)
         release_sync.set()
         sync_future.result(timeout=10)
