@@ -245,9 +245,22 @@ class BaseCableTableView(
         return self._viewable_queryset(type(obj)).filter(pk=obj.pk).exists()
 
     def _viewable_sync_device(self, obj, server_key):
-        """Return the chassis sync owner only when the request may view it."""
-        sync_device = get_librenms_sync_device(obj, server_key=server_key)
-        if sync_device is None or not self._object_is_viewable(sync_device):
+        """
+        Return the chassis sync owner only when the request may view it.
+
+        A chassis with no resolvable sync member falls back to the page object, which the caller
+        already resolved through a restricted queryset. A member that resolves but is out of the
+        request's scope returns None instead, so the page cannot act under a hidden owner.
+
+        Args:
+            obj: The page object (Device or VirtualMachine) the tab was opened on.
+            server_key (str): LibreNMS server key scoping the sync-member lookup.
+
+        Returns:
+            Device | None: The viewable sync owner, or None when it is out of scope.
+        """
+        sync_device = get_librenms_sync_device(obj, server_key=server_key) or obj
+        if not self._object_is_viewable(sync_device):
             return None
         return sync_device
 

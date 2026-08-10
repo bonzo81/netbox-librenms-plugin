@@ -3,20 +3,21 @@ Additional coverage tests for:
   - views/base/cables_view.py   (currently ~59%)
   - views/base/ip_addresses_view.py (~62%)
 
-All tests follow strict project conventions:
-  - Plain pytest classes, NO @pytest.mark.django_db
-  - Mock ALL database interactions with MagicMock
-  - Inline imports inside test methods
-  - assert x == y style
-  - Use object.__new__(ClassName) to bypass __init__
-  - No RequestFactory — mock request objects directly
+The page object and the request are REAL: the cable views resolve every object through
+``restrict(user, ...)``, so a MagicMock page object has no ``objects`` manager and a MagicMock
+request has no authenticated user. Only the LibreNMS HTTP client stays mocked, which is the
+external boundary these tests are about.
 """
 
+import itertools
 from unittest.mock import MagicMock, patch
 
 import pytest
 
-from netbox_librenms_plugin.tests.conftest import make_device, make_interface
+from netbox_librenms_plugin.tests.conftest import make_device, make_interface, make_superuser
+from netbox_librenms_plugin.tests.view_test_helpers import post as view_post
+
+pytestmark = pytest.mark.django_db
 
 
 def _seed_lib_id(iface, value, server_key="default"):
@@ -59,22 +60,24 @@ def _q_leaves(q):
     return leaves
 
 
-def _mock_obj(model_name="device", pk=1, name="test-device"):
-    obj = MagicMock()
-    obj._meta = MagicMock()
-    obj._meta.model_name = model_name
-    obj.pk = pk
-    obj.name = name
-    obj.virtual_chassis = None
-    return obj
+_obj_counter = itertools.count(1)
+
+
+def _mock_obj(model_name="device", pk=None, name=None):
+    """Return a REAL Device the scoped querysets can resolve."""
+    return make_device(name or f"cov-base2-{next(_obj_counter)}")
 
 
 def _mock_request(path="/plugins/librenms/device/1/cables/"):
-    req = MagicMock()
-    req.path = path
-    req.GET = {}
-    req.POST = {}
+    """Return a REAL request carrying a real superuser, as ``setup()`` would bind it."""
+    from django.contrib.messages.storage.fallback import FallbackStorage
+    from django.test import RequestFactory
+
+    req = RequestFactory().get(path)
+    req.user = make_superuser()
     req.headers = {}
+    req.session = {}
+    req._messages = FallbackStorage(req)
     return req
 
 
@@ -239,28 +242,32 @@ class TestGetObjectAndIpAddress:
         view.model = MagicMock()
         return view
 
-    @pytest.mark.django_db
-    def test_get_object_resolves_through_a_restricted_queryset(self):
-        """get_object returns a permitted object and 404s on one outside the caller's grant."""
+    def test_get_object_resolves_through_the_view_scope(self):
+        """get_object resolves the page object through the request's view scope.
+
+        A constrained grant clears the model-level gate, so an out-of-scope pk must 404 exactly
+        like a nonexistent one instead of exposing another device's cable rows.
+        """
+        import pytest as pytest_mod
         from dcim.models import Device
+        from django.contrib.auth import get_user_model
         from django.http import Http404
 
-        from netbox_librenms_plugin.tests.conftest import make_device
-        from netbox_librenms_plugin.tests.view_test_helpers import (
-            make_request,
-            make_user_with_perms,
-            make_view,
-        )
-        from netbox_librenms_plugin.views.base.cables_view import BaseCableTableView
+        from netbox_librenms_plugin.tests.view_test_helpers import grant
+        from netbox_librenms_plugin.views.object_sync.devices import DeviceCableTableView
 
-        allowed = make_device("getobj-allowed-cable")
-        hidden = make_device("getobj-hidden-cable")
-        user = make_user_with_perms("getobj-viewer-cable", [("view", Device)], constraints={"name": allowed.name})
-        view = make_view(BaseCableTableView, make_request("get", user=user))
-        view.model = Device
+        visible = make_device("cbv2-get-object-visible")
+        hidden = make_device("cbv2-get-object-hidden")
+        user = get_user_model().objects.create_user("cbv2-get-object")
+        user = grant(user, "view", Device, constraints={"pk": visible.pk})
 
-        assert view.get_object(allowed.pk).pk == allowed.pk
-        with pytest.raises(Http404):
+        view = object.__new__(DeviceCableTableView)
+        view._librenms_api = MagicMock(server_key="default")
+        view.request = _mock_request()
+        view.request.user = user
+
+        assert view.get_object(visible.pk) == visible
+        with pytest_mod.raises(Http404):
             view.get_object(hidden.pk)
 
     def test_get_ip_address_with_primary_ip(self):
@@ -417,7 +424,6 @@ class TestGetLinksDataOobOnlyEmptyRefresh:
     def test_oob_only_valid_empty_returns_empty_list_not_none(self):
         view = self._make_view()
         obj = _mock_obj()
-        obj.consoleserverports.exists.return_value = False  # no serial CSP rows to append
 
         # OOB-only: no host librenms_id, so the host get_device_links() call fails and records
         # _links_fetch_error even though no host fetch was meaningfully attempted; the OOB
@@ -461,7 +467,6 @@ class TestGetLinksDataOobOnlyEmptyRefresh:
         """An OOB-only device (no host librenms_id) must not issue host get_device_links(None)/get_ports(None) — those GET /devices/None/... and always 404; only the OOB controller id is fetched, and the OOB rows still render."""
         view = self._make_view()
         obj = _mock_obj()
-        obj.consoleserverports.exists.return_value = False
         view._librenms_api.get_librenms_id.return_value = None
         # Only the OOB controller (99) should ever reach the link/port fetches.
         view._librenms_api.get_device_links.return_value = (True, {"links": []})
@@ -492,7 +497,6 @@ class TestGetLinksDataOobOnlyEmptyRefresh:
         """A non-numeric stored OOB id must fail closed (coerced to None), never reach get_device_links/get_ports as a garbage device URL."""
         view = self._make_view()
         obj = _mock_obj()
-        obj.consoleserverports.exists.return_value = False
         view._librenms_api.get_librenms_id.return_value = None  # OOB-only: no host id to fetch
         view._librenms_api.get_device_links.return_value = (True, {"links": []})
         view._librenms_api.get_ports.return_value = (True, {"ports": []})
@@ -525,7 +529,6 @@ class TestGetLinksDataOobOnlyEmptyRefresh:
         """A linked OOB controller with a corrupt id must surface the failure, not silently drop it."""
         view = self._make_view()
         obj = _mock_obj()
-        obj.consoleserverports.exists.return_value = False
         view._librenms_api.get_librenms_id.return_value = None  # OOB-only: no host id
         view._librenms_api.get_device_links.return_value = (True, {"links": []})
         view._librenms_api.get_ports.return_value = (True, {"ports": []})
@@ -555,7 +558,6 @@ class TestGetLinksDataOobOnlyEmptyRefresh:
         """The OOB-scoped exemption holds ONLY when the OOB fetch succeeded."""
         view = self._make_view()
         obj = _mock_obj()
-        obj.consoleserverports.exists.return_value = False
 
         view._librenms_api.get_librenms_id.return_value = None
 
@@ -593,7 +595,6 @@ class TestGetLinksDataOobOnlyEmptyRefresh:
         """OOB fetch SUCCEEDS but returns a malformed links payload (links not a list)."""
         view = self._make_view()
         obj = _mock_obj()
-        obj.consoleserverports.exists.return_value = False
 
         view._librenms_api.get_librenms_id.return_value = None
 
@@ -630,7 +631,6 @@ class TestGetLinksDataOobOnlyEmptyRefresh:
         """A failed host links fetch may carry its detail under "message" (no "error" key)."""
         view = self._make_view()
         obj = _mock_obj()
-        obj.consoleserverports.exists.return_value = False
         view._librenms_api.get_librenms_id.return_value = 42  # host mapping present
 
         # Host fetch fails with a message-only body.
@@ -904,9 +904,17 @@ class TestCablePostHostFetchWarning:
         return view
 
     def _run(self, *, links_fetch_error, librenms_id):
+        from django.contrib.messages.storage.fallback import FallbackStorage
+        from django.test import RequestFactory
+
         view = self._make_view()
-        request = MagicMock()
-        request.POST.get.return_value = "default"
+        # post() gates on the real object-permission check before it warns, so the request needs
+        # a real authorized user.
+        request = RequestFactory().post("/cables/", {"server_key": "default"})
+        request.user = make_superuser()
+        request.headers = {}
+        request.session = {}
+        request._messages = FallbackStorage(request)
 
         def _prep(*a, **k):
             # Mirror get_links_data recording a host failure while other rows kept it "successful".
@@ -920,7 +928,7 @@ class TestCablePostHostFetchWarning:
             patch("netbox_librenms_plugin.views.mixins.render"),
             patch("netbox_librenms_plugin.utils.build_migrated_context", return_value={}),
         ):
-            view.post(request, pk=1)
+            view_post(view, request, pk=1)
         return [c.args[1] for c in mock_msgs.warning.call_args_list]
 
     def test_warns_on_host_fetch_failure_with_rows(self):
@@ -964,7 +972,7 @@ class TestCableTableHtmxUrl:
         ):
             mock_cache.get.return_value = {"links": []}
             mock_cache.ttl.return_value = 300
-            result = view._prepare_context(view.request, MagicMock(), fetch_fresh=False, server_key=server_key)
+            result = view._prepare_context(view.request, _mock_obj(), fetch_fresh=False, server_key=server_key)
         assert result is not None
         return mock_table
 
@@ -990,7 +998,7 @@ class TestCableTableHtmxUrl:
         ):
             mock_cache.get.return_value = {"links": []}
             mock_cache.ttl.return_value = 300
-            result = view._prepare_context(view.request, MagicMock(), fetch_fresh=False, server_key=None)
+            result = view._prepare_context(view.request, _mock_obj(), fetch_fresh=False, server_key=None)
 
         assert result is not None
         assert mock_table.htmx_url == "/cables/?tab=cables"
@@ -1013,7 +1021,6 @@ class TestPostHandlerVC:
         # dispatch() sets self.request in production; tests call post() directly, so set an
         # authorized request here for the object-permission gate (reads self.request.user).
         view.request = _mock_request()
-        view.request.user.has_perm.return_value = True
         return view
 
     @pytest.mark.django_db
@@ -1027,7 +1034,7 @@ class TestPostHandlerVC:
         device = _real_cable_device("srvkey")  # non-VC → primary_device = selected_device
 
         mock_request = MagicMock()
-        mock_request.body = json.dumps({"device_id": device.pk, "local_port_id": 10, "server_key": "ghost"}).encode()
+        mock_request.body = json.dumps({"device_id": device.pk, "row_id": "10", "server_key": "ghost"}).encode()
 
         captured = {}
 
@@ -1062,7 +1069,7 @@ class TestPostHandlerVC:
         mock_request.body = json.dumps(
             {
                 "device_id": device.pk,
-                "local_port_id": 10,
+                "row_id": "10",
                 "server_key": "default",
             }
         ).encode()
@@ -1113,10 +1120,6 @@ class TestPostHandlerVC:
                 return_value="/interface/99/",
             ),
             patch(
-                "netbox_librenms_plugin.views.base.cables_view.get_token",
-                return_value="csrf-token",
-            ),
-            patch(
                 "netbox_librenms_plugin.views.base.cables_view.escape",
                 side_effect=lambda x: x,
             ),
@@ -1124,7 +1127,9 @@ class TestPostHandlerVC:
             mock_cache.get.return_value = cached_links
             view.post(mock_request)
 
-        mock_vc.assert_called_once_with(device, "Gi0/0")
+        # Verify resolves the local port on the member the dropdown selected. Re-inferring a
+        # member from the port name would silently retarget the row away from that selection.
+        mock_vc.assert_not_called()
         # Verify server_key is forwarded to process_remote_device
         assert mock_process_remote.called
         call_kwargs = mock_process_remote.call_args[1]
@@ -1148,7 +1153,6 @@ class TestPostHandlerInterfaceNotFound:
         # dispatch() sets self.request in production; tests call post() directly, so set an
         # authorized request here for the object-permission gate (reads self.request.user).
         view.request = _mock_request()
-        view.request.user.has_perm.return_value = True
         return view
 
     @pytest.mark.django_db
@@ -1164,7 +1168,7 @@ class TestPostHandlerInterfaceNotFound:
         mock_request.body = json_mod.dumps(
             {
                 "device_id": device.pk,
-                "local_port_id": 10,
+                "row_id": "10",
                 "server_key": "default",
             }
         ).encode()
@@ -1231,7 +1235,7 @@ class TestPostHandlerInterfaceNotFound:
         mock_request.body = json_mod.dumps(
             {
                 "device_id": device.pk,
-                "local_port_id": 10,
+                "row_id": "10",
                 "server_key": "default",
             }
         ).encode()
@@ -1280,10 +1284,6 @@ class TestPostHandlerInterfaceNotFound:
             patch(
                 "netbox_librenms_plugin.views.base.cables_view.escape",
                 side_effect=lambda x: x,
-            ),
-            patch(
-                "netbox_librenms_plugin.views.base.cables_view.get_token",
-                return_value="csrf-token",
             ),
         ):
             mock_cache.get.return_value = cached_links
@@ -1413,7 +1413,6 @@ class TestEnrichIpDataPortInfo:
 
         ip_data = [{"port_id": 1, "ip_address": "10.0.0.1", "prefix_length": 24}]
         obj = _mock_obj()
-        obj.get_absolute_url.return_value = "/device/1/"
 
         port_info = {"ifName": "Gi0/0"}
         base_entry = {
@@ -1453,7 +1452,6 @@ class TestEnrichIpDataPortInfo:
 
         ip_data = [{"port_id": 1, "ip_address": "10.0.0.1", "prefix_length": 24}]
         obj = _mock_obj()
-        obj.get_absolute_url.return_value = "/device/1/"
 
         base_entry = {
             "ip_address": "10.0.0.1",
@@ -2149,7 +2147,6 @@ class TestSingleIPAddressVerifyViewPost:
         mock_obj = MagicMock()
         mock_obj.name = "device1"
         mock_obj.get_absolute_url.return_value = "/device/1/"
-
         cache_entry = {
             "ip_address": "10.0.0.1",
             "prefix_length": 24,
@@ -2221,7 +2218,6 @@ class TestSingleIPAddressVerifyViewPost:
         mock_obj = MagicMock()
         mock_obj.name = "device1"
         mock_obj.get_absolute_url.return_value = "/device/1/"
-
         mock_iface = MagicMock()
         mock_iface.name = "eth0"
         mock_iface.get_absolute_url.return_value = "/interface/1/"
@@ -2412,23 +2408,27 @@ class TestPostHandlerCanCreateCable:
         # dispatch() sets self.request in production; tests call post() directly, so set an
         # authorized request here for the object-permission gate (reads self.request.user).
         view.request = _mock_request()
-        view.request.user.has_perm.return_value = True
         return view
 
     @pytest.mark.django_db
-    def test_can_create_cable_adds_form_action(self):
-        """can_create_cable=True → formatted_row['actions'] contains form."""
+    def test_can_create_cable_adds_sync_action(self):
+        """can_create_cable=True → the actions cell submits the row through the table's form.
+
+        The verify row no longer renders a nested <form> with its own CSRF token: it posts the
+        row identity through the surrounding cable-sync form with a ``sync_one`` submit button.
+        """
         import json as json_mod
 
         view = self._make_view()
         view.request.user = _authorized_superuser("cancreate")
         device = _real_cable_device("cancreate", bound_port_id=10)  # local interface bound to librenms id 10
+        remote_interface = make_interface(make_device("cbv2-cancreate-remote"), "Gi0/1")
 
         mock_request = MagicMock()
         mock_request.body = json_mod.dumps(
             {
                 "device_id": device.pk,
-                "local_port_id": 10,
+                "row_id": "10",
                 "server_key": "default",
             }
         ).encode()
@@ -2452,12 +2452,13 @@ class TestPostHandlerCanCreateCable:
             "remote_device": "switch-b",
             "remote_port_id": 20,
             "remote_device_id": 99,
-            "netbox_remote_device_id": 5,
+            "netbox_remote_device_id": remote_interface.device_id,
+            "netbox_remote_interface_id": remote_interface.pk,
             "remote_device_url": "/device/5/",
             "remote_port_url": "/interface/20/",
             "remote_port_name": "Gi0/1",
             "cable_status": "No Cable",
-            "can_create_cable": True,  # triggers lines 519-525
+            "can_create_cable": True,
         }
 
         with (
@@ -2480,10 +2481,6 @@ class TestPostHandlerCanCreateCable:
                 "netbox_librenms_plugin.views.base.cables_view.escape",
                 side_effect=lambda x: x,
             ),
-            patch(
-                "netbox_librenms_plugin.views.base.cables_view.get_token",
-                return_value="csrf-token",
-            ),
         ):
             mock_cache.get.return_value = cached_links
             response = view.post(mock_request)
@@ -2492,9 +2489,10 @@ class TestPostHandlerCanCreateCable:
 
         data = json_mod2.loads(response.content)
         assert data["status"] == "success"
-        # can_create_cable=True → actions should contain a form
-        assert "form" in data["formatted_row"]["actions"]
+        assert 'name="sync_one"' in data["formatted_row"]["actions"]
+        assert 'value="10"' in data["formatted_row"]["actions"]
         assert "Sync Cable" in data["formatted_row"]["actions"]
+        assert data["formatted_row"]["can_create_cable"] is True
 
 
 # =============================================================================
@@ -2514,7 +2512,6 @@ class TestPostHandlerInterfaceNotFoundBranches:
         # dispatch() sets self.request in production; tests call post() directly, so set an
         # authorized request here for the object-permission gate (reads self.request.user).
         view.request = _mock_request()
-        view.request.user.has_perm.return_value = True
         return view
 
     def _run_post(self, view, process_result):
@@ -2528,7 +2525,7 @@ class TestPostHandlerInterfaceNotFoundBranches:
         mock_request.body = json_mod.dumps(
             {
                 "device_id": device.pk,
-                "local_port_id": 10,
+                "row_id": "10",
                 "server_key": "default",
             }
         ).encode()

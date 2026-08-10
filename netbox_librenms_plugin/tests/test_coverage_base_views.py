@@ -4,45 +4,48 @@ Coverage tests for base view classes:
   - views/base/interfaces_view.py (~14% → target 95%+)
   - views/base/ip_addresses_view.py (~34% → target 95%+)
 
-All tests follow the project conventions:
-  - Plain pytest classes, NO @pytest.mark.django_db
-  - Mock ALL database interactions with MagicMock
-  - Inline imports inside test methods
-  - assert x == y style
-  - No RequestFactory — mock request objects directly
+The page object and the request are REAL: the cable views resolve every object through
+``restrict(user, ...)``, so a MagicMock page object has no ``objects`` manager and a MagicMock
+request has no authenticated user. Only the LibreNMS HTTP client stays mocked, which is the
+external boundary these tests are about.
 """
 
+import itertools
 from unittest.mock import MagicMock, patch
 
 import pytest
 
 from dcim.models import Device
 
-from netbox_librenms_plugin.tests.conftest import make_device, make_interface, make_ip
+from netbox_librenms_plugin.tests.conftest import make_device, make_interface, make_ip, make_superuser
 from netbox_librenms_plugin.tests.mock_librenms_server import librenms_mock_server as run_librenms_server
 from netbox_librenms_plugin.tests.view_test_helpers import make_user_with_perms
+from netbox_librenms_plugin.tests.view_test_helpers import post as view_post
+
+pytestmark = pytest.mark.django_db
 
 # =============================================================================
 # Helpers
 # =============================================================================
 
+_obj_counter = itertools.count(1)
 
-def _mock_obj(model_name="device", pk=1, name="test-device"):
-    obj = MagicMock()
-    obj._meta = MagicMock()
-    obj._meta.model_name = model_name
-    obj.pk = pk
-    obj.id = pk
-    obj.name = name
-    return obj
+
+def _mock_obj(model_name="device", pk=None, name=None):
+    """Return a REAL Device the scoped querysets can resolve."""
+    return make_device(name or f"cov-base-{next(_obj_counter)}")
 
 
 def _mock_request(path="/plugins/librenms/device/1/cables/"):
-    req = MagicMock()
-    req.path = path
-    req.GET = {}
-    req.POST = {}
+    """Return a REAL request carrying a real superuser, as ``setup()`` would bind it."""
+    from django.contrib.messages.storage.fallback import FallbackStorage
+    from django.test import RequestFactory
+
+    req = RequestFactory().get(path)
+    req.user = make_superuser()
     req.headers = {}
+    req.session = {}
+    req._messages = FallbackStorage(req)
     return req
 
 
@@ -174,8 +177,13 @@ class TestBaseCableTableViewGetLinksData:
         assert ctx is not None
         assert view._oob_links_fetch_failed is True
 
-    def test_prepare_context_deletes_stale_links_cache_on_partial_fetch(self):
-        """A partial fresh fetch must DELETE any prior full links snapshot, not leave it cached."""
+    def test_prepare_context_replaces_stale_links_cache_on_partial_fetch(self):
+        """A partial fresh fetch must REPLACE the prior snapshot and record the failed source.
+
+        Downstream verify/sync resolve rows from this key, so the superseded full snapshot must
+        not survive. The partial rows still cache, flagged through ``incomplete_sources`` so the
+        table can warn instead of presenting the short list as complete.
+        """
         from django.core.cache import cache as real_cache
 
         view = self._make_view()
@@ -193,15 +201,17 @@ class TestBaseCableTableViewGetLinksData:
             with (
                 patch.object(view, "get_links_data", side_effect=_fake_links),
                 patch.object(view, "get_cache_key", return_value=cache_key),
-                patch.object(view, "enrich_links_data", side_effect=lambda d, *a, **k: d) as mock_enrich,
+                patch.object(view, "enrich_links_data", side_effect=lambda d, *a, **k: d),
                 patch.object(view, "get_table", return_value=MagicMock()),
                 patch("netbox_librenms_plugin.views.base.cables_view.get_librenms_sync_device", return_value=obj),
             ):
-                view._prepare_context(view.request, obj, fetch_fresh=True, server_key="default")
+                context = view._prepare_context(view.request, obj, fetch_fresh=True, server_key="default")
 
-            # The stale full snapshot must be gone so downstream verify/sync can't serve it.
-            assert real_cache.get(cache_key) is None
-            mock_enrich.assert_not_called()
+            cached = real_cache.get(cache_key)
+            # The superseded full snapshot is gone; only the fresh partial rows remain.
+            assert [row["local_port_id"] for row in cached["links"]] == [22]
+            assert cached["incomplete_sources"] == ["OOB"]
+            assert context["incomplete_sources"] == ["OOB"]
         finally:
             real_cache.delete(cache_key)
 
@@ -1224,7 +1234,7 @@ class TestBaseCableTableViewPost:
             patch("netbox_librenms_plugin.views.mixins.render") as mock_render,
         ):
             mock_render.return_value = MagicMock()
-            view.post(request, pk=1)
+            view_post(view, request, pk=1)
 
         mock_messages.error.assert_called_once()
         mock_render.assert_called_once()
@@ -1246,7 +1256,7 @@ class TestBaseCableTableViewPost:
             patch("netbox_librenms_plugin.views.mixins.render") as mock_render,
         ):
             mock_render.return_value = MagicMock()
-            view.post(request, pk=1)
+            view_post(view, request, pk=1)
 
         mock_messages.success.assert_called_once()
         mock_messages.error.assert_not_called()
@@ -3863,7 +3873,7 @@ class TestSingleCableVerifyViewPermissionGate:
         view._librenms_api = MagicMock()
         view._librenms_api.server_key = "default"
         request = MagicMock()
-        request.body = json.dumps({"device_id": 999, "local_port_id": "serial:1"}).encode()
+        request.body = json.dumps({"device_id": 999, "row_id": "serial:1"}).encode()
         request.user.has_perm.return_value = False  # unauthorized → real gate returns 403
         view.request = request  # check_object_permissions reads self.request.user
 
