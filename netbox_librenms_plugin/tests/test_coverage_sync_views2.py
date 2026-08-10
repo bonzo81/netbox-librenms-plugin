@@ -1745,6 +1745,52 @@ class TestSyncIPAddressesViewInterfaceResolution:
         )
         assert result is None
 
+    def test_existing_ip_is_locked_before_it_is_rewritten(self):
+        """The authorized existing row must be SELECT ... FOR UPDATE before its FK/VRF are rewritten.
+
+        The scope check that authorizes the row takes no lock, so without a re-lock a concurrent
+        assignment or VRF change can commit between the check and the save and be silently
+        overwritten.
+        """
+        from django.db import connection
+        from django.test.utils import CaptureQueriesContext
+        from ipam.models import IPAddress
+
+        from netbox_librenms_plugin.utils import set_librenms_device_id
+
+        view = self._view()
+        view._post_server_key = "default"
+
+        dev = make_device("iplock-existing")
+        iface = make_interface(dev, "eth9")
+        set_librenms_device_id(iface, 91, "default")
+        iface.save()
+        # Pre-existing row for the same address, not yet bound to this interface.
+        existing = IPAddress.objects.create(address="10.9.9.9/24")
+
+        ip_data = {
+            "ip_address": "10.9.9.9",
+            "ip_with_mask": "10.9.9.9/24",
+            "interface_url": None,
+            "port_id": 91,
+            "interface_name": "eth9",
+        }
+        request = _make_request(post_data={"select": ["10.9.9.9"]})
+
+        with CaptureQueriesContext(connection) as ctx:
+            results = view.process_ip_sync(request, ["10.9.9.9"], [ip_data], dev, "device")
+
+        locked_ip = [
+            q["sql"]
+            for q in ctx.captured_queries
+            if "ipam_ipaddress" in q["sql"].lower() and "for update" in q["sql"].lower()
+        ]
+        assert locked_ip, "the existing IPAddress must be SELECT ... FOR UPDATE before it is rewritten"
+
+        existing.refresh_from_db()
+        assert existing.assigned_object == iface
+        assert results["updated"] == ["10.9.9.9"]
+
     def test_stale_interface_url_still_assigns_after_interface_synced(self):
         """Regression: cached row was enriched before the interface existed (``interface_url`` is None), but the interface has since been synced."""
         from ipam.models import IPAddress

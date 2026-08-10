@@ -3049,10 +3049,19 @@ class AddAsOOBView(
                 return None, None
             # Lock the candidate so a concurrent create/delete can't flip add-vs-reuse
             # between this check and the create below.
-            existing = Interface.objects.select_for_update().filter(device=device, name=name).first()
+            # Scope BEFORE locking: locking first lets a caller hold a row it cannot even see and
+            # stall concurrent work on it. Lock only within the caller's view scope.
+            existing = (
+                Interface.objects.restrict(request.user, "view")
+                .select_for_update()
+                .filter(device=device, name=name)
+                .first()
+            )
             if existing is not None:
-                if Interface.objects.restrict(request.user, "view").filter(pk=existing.pk).exists():
-                    return existing, None
+                return existing, None
+            # The name may still be taken by a row outside that scope; refuse rather than race the
+            # create below into an IntegrityError. `.exists()` reads no row data and takes no lock.
+            if Interface.objects.filter(device=device, name=name).exists():
                 return None, None
             if not request.user.has_perm(get_permission_for_model(Interface, "add")):
                 return None, "permission_add"

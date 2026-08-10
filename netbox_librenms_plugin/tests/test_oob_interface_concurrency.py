@@ -67,3 +67,53 @@ def test_concurrent_hidden_interface_winner_is_not_reused(monkeypatch):
 
     assert resolved is None and reason is None
     assert Interface.objects.filter(pk=winner.pk).exists()
+
+
+def test_an_interface_outside_the_view_scope_is_never_locked():
+    """Locking must happen inside the caller's view scope, not before it.
+
+    The resolver used to lock the (device, name) row and only hide it afterwards, so a caller could
+    take a row lock on an interface it cannot see and stall whoever legitimately owns it. Hold that
+    row from a second connection: the scoped resolver must return without waiting on it.
+    """
+    from dcim.models import Interface
+    from django.db import close_old_connections, connection, transaction
+
+    from netbox_librenms_plugin.tests.view_test_helpers import make_request, make_user_with_perms
+    from netbox_librenms_plugin.views.imports.actions import AddAsOOBView
+
+    device = make_device("oob-lock-scope")
+    hidden = make_interface(device, "idrac0")  # exists, but the user gets no view grant for it
+    user = make_user_with_perms("oob-lock-scope", [("add", Interface)])
+
+    holder_has_lock = Event()
+    release_holder = Event()
+
+    def hold_the_row():
+        close_old_connections()
+        try:
+            with transaction.atomic():
+                Interface.objects.select_for_update().filter(pk=hidden.pk).first()
+                holder_has_lock.set()
+                release_holder.wait(10)
+        finally:
+            close_old_connections()
+
+    request = make_request("post", {"oob_interface_id": "__new__", "oob_new_interface_name": "idrac0"}, user=user)
+
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        holder = executor.submit(hold_the_row)
+        assert holder_has_lock.wait(10), "helper thread never took the row lock"
+        try:
+            with transaction.atomic():
+                # Fail fast rather than hang: the unfixed resolver blocks here on the held row.
+                with connection.cursor() as cursor:
+                    cursor.execute("SET LOCAL lock_timeout = '2s'")
+                resolved, reason = AddAsOOBView._resolve_oob_interface(request, device)
+        finally:
+            release_holder.set()
+            holder.result(timeout=10)
+
+    # The name is taken by a row this caller cannot see, so it is refused — without ever locking it.
+    assert resolved is None
+    assert reason is None

@@ -422,6 +422,14 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
                             raise ValueError(
                                 "Existing IP address is no longer available or you do not have permission to change it."
                             )
+                        # The scope check does not lock, so a concurrent assignment or VRF change
+                        # could commit between it and the save below and be overwritten. Re-read
+                        # the authorized row under a lock and decide from that.
+                        existing_ip = self.relock_scoped_row(IPAddress, pk=existing_ip.pk)
+                        if existing_ip is None:
+                            raise ValueError(
+                                "Existing IP address is no longer available or you do not have permission to change it."
+                            )
                         if existing_ip.assigned_object != interface or existing_ip.vrf != vrf:
                             existing_ip.assigned_object = interface
                             existing_ip.vrf = vrf
