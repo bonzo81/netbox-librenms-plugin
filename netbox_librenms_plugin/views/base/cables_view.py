@@ -2021,13 +2021,21 @@ class BaseCableTableView(
                     link = self.check_cable_status(link, normal_context=normal_context)
             self._set_remote_picker_affordance(link, obj, server_key)
 
-        user = getattr(getattr(self, "request", None), "user", None)
-        if getattr(user, "is_authenticated", False) and not getattr(user, "is_superuser", False):
-            links_data[:] = [
-                link
-                for link in links_data
-                if link.get("_source") != "serial" or link.get("local_port") in serial_ports_by_name
-            ]
+        # Drop a serial row only when its ConsoleServerPort exists but is out of view scope. A
+        # sensor with no NetBox port at all is LibreNMS data, not NetBox data: it renders as
+        # "Console Server Port Not Found in NetBox" and tells the operator which port to create,
+        # so hiding it would give a granted user a shorter table than an administrator.
+        if serial_links_present and serial_sync_device is not None:
+            hidden_serial_port_names = (
+                set(ConsoleServerPort.objects.filter(device=serial_sync_device).values_list("name", flat=True))
+                - serial_ports_by_name.keys()
+            )
+            if hidden_serial_port_names:
+                links_data[:] = [
+                    link
+                    for link in links_data
+                    if link.get("_source") != "serial" or link.get("local_port") not in hidden_serial_port_names
+                ]
         self._apply_termination_change_scope(
             links_data,
             preloaded_changeable_ids={

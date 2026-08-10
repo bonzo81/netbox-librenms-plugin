@@ -1900,8 +1900,14 @@ class LibreNMSAPI:
                 if any(not isinstance(s.get("sensor_type"), str) for s in all_sensors):
                     logger.warning("Unexpected sensors response for %s: invalid sensor_type", self.server_key)
                     return False, result.get("message") or "Unexpected response format: invalid sensor_type"
-                normalized_sensors = []
+                # Narrow to the serial subset BEFORE validating the rest of each row. This
+                # endpoint returns every sensor on the instance, so a temperature probe with an
+                # out-of-contract sensor_id would otherwise fail the whole serial refresh (and
+                # every row would be copied for normalization).
+                serial_sensors = []
                 for sensor in all_sensors:
+                    if sensor.get("sensor_type") not in serial_types:
+                        continue
                     deleted = sensor.get("sensor_deleted", 0)
                     if isinstance(deleted, bool) or deleted not in (0, 1, "0", "1"):
                         logger.warning(
@@ -1915,8 +1921,7 @@ class LibreNMSAPI:
                     if sensor_id is None:
                         logger.warning("Unexpected sensors response for %s: invalid sensor_id", self.server_key)
                         return False, result.get("message") or "Unexpected response format: invalid sensor_id"
-                    normalized_sensors.append({**sensor, "sensor_id": sensor_id})
-                serial_sensors = [s for s in normalized_sensors if s.get("sensor_type") in serial_types]
+                    serial_sensors.append({**sensor, "sensor_id": sensor_id})
                 return True, serial_sensors
             if isinstance(result, dict):
                 return False, result.get("message") or "Unexpected response format"
