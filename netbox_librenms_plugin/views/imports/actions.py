@@ -3053,7 +3053,9 @@ class AddAsOOBView(
             # stall concurrent work on it. Lock only within the caller's view scope.
             existing = (
                 Interface.objects.restrict(request.user, "view")
-                .select_for_update()
+                # of=("self",): restrict() joins the permission tables, and a bare
+                # select_for_update() would try to lock those joined rows too.
+                .select_for_update(of=("self",))
                 .filter(device=device, name=name)
                 .first()
             )
