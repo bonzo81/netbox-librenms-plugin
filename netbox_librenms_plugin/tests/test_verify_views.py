@@ -15,6 +15,17 @@ from netbox_librenms_plugin.views.base.cables_view import SingleCableVerifyView
 from netbox_librenms_plugin.views.object_sync.devices import SingleInterfaceVerifyView
 
 
+@pytest.fixture(autouse=True)
+def mock_librenms_config():
+    """Neutralize the suite-wide autouse config mock (registered via ``pytest_plugins``).
+
+    That mock pins ``get_plugin_config`` to a ``default``-only server map, so the ``stub`` key
+    these tests post becomes an unknown explicit key and the view fails closed before it reaches
+    the behaviour under test. Same-name module fixture wins over the plugin's autouse one.
+    """
+    yield
+
+
 def _make_request(body: dict) -> MagicMock:
     """Create a mock POST request with JSON body."""
     request = MagicMock()
