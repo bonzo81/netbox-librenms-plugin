@@ -151,7 +151,7 @@ def test_capture_serial_sensors_excludes_other_devices(recording_server):
 
 
 def test_capture_serial_sensors_bypasses_stale_cache(recording_server):
-    """Capture must read sensors fresh (use_cache=False), not a stale per-server cache from an earlier refresh."""
+    """Capture must read sensors fresh, never a stale per-server cache left by an earlier refresh."""
     from django.core.cache import cache
 
     seed = _transceiver_serial_seed()  # server serves sensors 1 & 2 for device 2000
