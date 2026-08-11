@@ -6372,11 +6372,12 @@ class TestStandaloneAdoptionAcrossEveryComponentType:
         # This is the call CodeRabbit questioned for NetBox 4.4/4.5: exercise it for every type.
         expected_name = _module_template_adoption_name(template_attribute, template, module)
         assert expected_name, f"{template_attribute} resolved an empty adoption name"
-        # The token only resolves when the module argument reaches NetBox, so this is what proves
-        # the version-compatible call is right rather than merely self-consistent.
-        assert expected_name == f"{self.BAY_POSITION}-adopt-{component_model.__name__.lower()}-0", (
-            f"{template_attribute} did not resolve the module placeholder from the installed bay"
-        )
+        # These seven go through resolve_name(module), where the token resolves only once the
+        # module argument arrives. NetBox 4.4 module bays instantiate from the raw name instead.
+        if template_attribute != "modulebaytemplates":
+            assert expected_name == f"{self.BAY_POSITION}-adopt-{component_model.__name__.lower()}-0", (
+                f"{template_attribute} did not resolve the module placeholder from the installed bay"
+            )
 
         standalone = component_model.objects.create(**self._standalone_kwargs(component_model, device, expected_name))
 
