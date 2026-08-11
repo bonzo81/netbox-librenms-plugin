@@ -8,6 +8,9 @@
     "topology": "single"
   },
   "device_id": 1002,
+  "lag_patterns": {
+    "os-901310": "^Po\\d+$"
+  },
   "responses": {
     "GET /api/v0/devices/1002": {
       "status": "ok",

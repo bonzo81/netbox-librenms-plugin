@@ -10,6 +10,7 @@
     }
   },
   "device_id": 12,
+  "lag_patterns": {},
   "serial_type_patterns": {
     "acsSerialPortTable": "ttyS{N}",
     "ciscoAsyncLine": "Line {N}"

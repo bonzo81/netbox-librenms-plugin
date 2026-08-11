@@ -10,6 +10,9 @@
     }
   },
   "device_id": 5,
+  "lag_patterns": {
+    "os-57cfb3": "^lag-\\d+$"
+  },
   "responses": {
     "GET /api/v0/devices/5": {
       "status": "ok",

@@ -6,7 +6,9 @@
     "os": "os-48b51d"
   },
   "device_id": 45,
-  "lag_patterns": {},
+  "lag_patterns": {
+    "os-48b51d": "^Po\\d+$"
+  },
   "responses": {
     "GET /api/v0/devices/45": {
       "status": "ok",

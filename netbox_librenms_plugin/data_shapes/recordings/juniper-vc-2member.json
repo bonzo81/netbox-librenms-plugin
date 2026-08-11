@@ -4,6 +4,9 @@
   "description": "Juniper EX Virtual Chassis, 2 members under a chassis-class root, 0-based positions.",
   "meta": {"os": "os-990f10", "vendor": "juniper", "topology": "virtual-chassis"},
   "device_id": 1001,
+  "lag_patterns": {
+    "os-990f10": "^ae\\d+$"
+  },
   "responses": {
     "GET /api/v0/devices/1001": {
       "status": "ok",

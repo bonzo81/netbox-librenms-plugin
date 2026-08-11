@@ -8,6 +8,9 @@
     "topology": "stackwise"
   },
   "device_id": 1000,
+  "lag_patterns": {
+    "os-901310": "^Po\\d+$"
+  },
   "responses": {
     "GET /api/v0/devices/1000": {
       "status": "ok",

@@ -6,7 +6,9 @@
     "os": "os-990f10"
   },
   "device_id": 15,
-  "lag_patterns": {},
+  "lag_patterns": {
+    "os-990f10": "^ae\\d+$"
+  },
   "responses": {
     "GET /api/v0/devices/15": {
       "status": "ok",

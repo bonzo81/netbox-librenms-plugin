@@ -10,6 +10,9 @@
     }
   },
   "device_id": 1,
+  "lag_patterns": {
+    "os-2519ea": "^bond\\d+$"
+  },
   "responses": {
     "GET /api/v0/devices/1": {
       "status": "ok",

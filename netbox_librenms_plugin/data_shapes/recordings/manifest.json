@@ -118,9 +118,9 @@
         "position_base": null
       },
       "lag": {
-        "present": false,
+        "present": true,
         "ieee8023ad": false,
-        "name_prefix": null
+        "name_prefix": "Po"
       },
       "sub_interfaces": {
         "present": true,

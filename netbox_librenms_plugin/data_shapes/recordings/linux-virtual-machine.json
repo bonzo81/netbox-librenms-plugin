@@ -7,6 +7,7 @@
     "synthetic": true
   },
   "device_id": 2000,
+  "lag_patterns": {},
   "responses": {
     "GET /api/v0/devices/2000": {
       "status": "ok",

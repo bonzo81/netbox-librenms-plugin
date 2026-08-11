@@ -10,6 +10,7 @@
     }
   },
   "device_id": 32,
+  "lag_patterns": {},
   "responses": {
     "GET /api/v0/devices/32": {
       "status": "ok",
