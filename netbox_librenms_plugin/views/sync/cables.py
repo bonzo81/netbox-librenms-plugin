@@ -42,17 +42,26 @@ logger = logging.getLogger(__name__)
 
 
 @functools.cache
-def _cable_termination_has_connector():
+def _termination_topology_columns():
     """
-    Return whether this NetBox gives CableTermination a ``connector`` column.
+    Return the ``(order_by, values)`` column tuples the topology fingerprint may name.
 
-    NetBox added it after 4.4, where naming it raises ``FieldError: Cannot resolve keyword
-    'connector'`` and takes down every cable sync. Follow the model, not the version.
+    NetBox added ``connector`` and ``positions`` to CableTermination after 4.4. Naming either one
+    there raises ``FieldError: Cannot resolve keyword ...`` and takes down every cable sync, and
+    Django reports only the first unresolvable keyword, so both are resolved from the model rather
+    than assumed. Follow the model, not the version.
 
     Returns:
-        bool: True when the column exists and belongs in the topology fingerprint.
+        tuple[tuple[str, ...], tuple[str, ...]]: Columns for ``order_by()`` and for
+            ``values_list()``, in the order the fingerprint hashes them.
     """
-    return any(field.name == "connector" for field in CableTermination._meta.get_fields())
+    present = {field.name for field in CableTermination._meta.get_fields()}
+    connector = ("connector",) if "connector" in present else ()
+    optional = tuple(name for name in ("connector", "positions") if name in present)
+    return (
+        ("cable_id", "cable_end", *connector, "pk"),
+        ("cable_id", "cable_end", "termination_type_id", "termination_id", *optional),
+    )
 
 
 class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreNMSAPIMixin, CacheMixin, View):
@@ -453,25 +462,11 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libre
     def _cable_state_token(cables, *, lock=False):
         """Fingerprint the exact Cable rows and termination topology."""
         cable_ids = sorted(cables)
-        connector = ("connector",) if _cable_termination_has_connector() else ()
-        terminations = CableTermination.objects.filter(cable_id__in=cable_ids).order_by(
-            "cable_id",
-            "cable_end",
-            *connector,
-            "pk",
-        )
+        order_by, values = _termination_topology_columns()
+        terminations = CableTermination.objects.filter(cable_id__in=cable_ids).order_by(*order_by)
         if lock:
             terminations = terminations.select_for_update()
-        topology = list(
-            terminations.values_list(
-                "cable_id",
-                "cable_end",
-                "termination_type_id",
-                "termination_id",
-                *connector,
-                "positions",
-            )
-        )
+        topology = list(terminations.values_list(*values))
         payload = json.dumps([cable_ids, topology], separators=(",", ":"), sort_keys=False)
         return hashlib.sha256(payload.encode()).hexdigest()
 

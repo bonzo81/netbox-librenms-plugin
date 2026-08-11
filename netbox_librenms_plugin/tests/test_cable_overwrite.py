@@ -129,50 +129,54 @@ def _classify(local, remote):
 class TestCableStateTokenColumns:
     """The topology fingerprint may only name columns this NetBox's CableTermination actually has."""
 
+    # CableTermination on NetBox 4.4: no `connector`, no `positions`. Naming either raises
+    # FieldError and takes down every cable sync, and Django reports only the first one.
+    NETBOX_44_COLUMNS = (
+        ("cable_id", "cable_end", "pk"),
+        ("cable_id", "cable_end", "termination_type_id", "termination_id"),
+    )
+    ADDED_AFTER_44 = ("connector", "positions")
+
     @staticmethod
     def _cabled_pair(name):
         _acs, csps, _ = make_serial_device(f"tok-acs-{name}", csp_names=["ttyS1"])
         _r, _, cps = make_serial_device(f"tok-r-{name}", cp_names=["console-A"])
         return cable_together(csps[0], cps[0])
 
-    def test_connector_is_dropped_when_the_model_has_no_such_column(self):
-        """NetBox 4.4 has no ``connector``: naming it raises FieldError and takes down every sync."""
+    def _as_netbox_44(self):
         from unittest.mock import patch
 
+        return patch(
+            "netbox_librenms_plugin.views.sync.cables._termination_topology_columns",
+            return_value=self.NETBOX_44_COLUMNS,
+        )
+
+    def test_columns_added_after_44_are_dropped_when_the_model_lacks_them(self):
+        """The fingerprint query must name nothing the running NetBox's model does not have."""
         from django.db import connection
         from django.test.utils import CaptureQueriesContext
 
         from netbox_librenms_plugin.views.sync.cables import SyncCablesView
 
-        cable = self._cabled_pair("no-connector")
+        cable = self._cabled_pair("netbox-44")
 
-        with (
-            patch(
-                "netbox_librenms_plugin.views.sync.cables._cable_termination_has_connector",
-                return_value=False,
-            ),
-            CaptureQueriesContext(connection) as queries,
-        ):
+        with self._as_netbox_44(), CaptureQueriesContext(connection) as queries:
             token = SyncCablesView._cable_state_token({cable.pk: cable})
 
         assert token
-        assert not any("connector" in query["sql"] for query in queries), (
-            "the fingerprint named a column this NetBox may not have"
-        )
+        for column in self.ADDED_AFTER_44:
+            assert not any(column in query["sql"] for query in queries), (
+                f"the fingerprint named {column}, which NetBox 4.4 has no column for"
+            )
 
-    def test_a_cable_still_syncs_without_the_connector_column(self):
-        """The whole sync in the 4.4 shape: the fingerprint is one step of a longer flow."""
-        from unittest.mock import patch
-
+    def test_a_cable_still_syncs_in_the_netbox_44_shape(self):
+        """The whole sync, not just the fingerprint: it is one step of a longer flow."""
         from dcim.models import Cable
 
         acs, csps, _ = make_serial_device("tok-e2e-acs", csp_names=["ttyS1"])
         _r, _, cps = make_serial_device("tok-e2e-r", cp_names=["console-A"])
 
-        with patch(
-            "netbox_librenms_plugin.views.sync.cables._cable_termination_has_connector",
-            return_value=False,
-        ):
+        with self._as_netbox_44():
             result = _sync_view().handle_cable_creation(
                 _serial_link(csps[0], cps[0]),
                 {"device_id": acs.id},
@@ -183,26 +187,27 @@ class TestCableStateTokenColumns:
         assert csps[0].cable_id is not None
         assert Cable.objects.filter(pk=csps[0].cable_id).exists()
 
-    def test_connector_is_fingerprinted_where_the_column_exists(self):
-        """The other direction: the column must not be dropped on a NetBox that has it."""
+    def test_every_column_this_netbox_has_is_fingerprinted(self):
+        """The other direction: a column the model does have must not be dropped everywhere."""
+        from dcim.models import CableTermination
         from django.db import connection
         from django.test.utils import CaptureQueriesContext
 
-        from netbox_librenms_plugin.views.sync.cables import (
-            SyncCablesView,
-            _cable_termination_has_connector,
-        )
+        from netbox_librenms_plugin.views.sync.cables import SyncCablesView
 
-        if not _cable_termination_has_connector():
-            pytest.skip("this NetBox has no CableTermination.connector")
+        present = {field.name for field in CableTermination._meta.get_fields()}
+        expected = [column for column in self.ADDED_AFTER_44 if column in present]
+        if not expected:
+            pytest.skip("this NetBox has none of the post-4.4 termination columns")
 
-        cable = self._cabled_pair("with-connector")
+        cable = self._cabled_pair("current-netbox")
 
         with CaptureQueriesContext(connection) as queries:
             token = SyncCablesView._cable_state_token({cable.pk: cable})
 
         assert token
-        assert any("connector" in query["sql"] for query in queries)
+        for column in expected:
+            assert any(column in query["sql"] for query in queries), f"{column} is missing from the fingerprint"
 
 
 @pytest.mark.django_db
