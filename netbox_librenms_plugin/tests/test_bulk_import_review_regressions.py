@@ -164,7 +164,12 @@ def test_collision_scope_handles_virtual_machines_with_real_permissions():
 
 @pytest.mark.django_db
 def test_background_collision_gate_uses_job_user_scope(monkeypatch):
-    """The real job runner scopes collision details and blocks device and VM imports."""
+    """The real job runner scopes collision details and blocks device and VM imports.
+
+    The batch collides on two targets, one of them outside the job user's view grant. Only the
+    visible pk may appear: an unscoped resolution would name the hidden target as well, so the
+    scoping is what the pk list pins.
+    """
     from core.models import Job
     from dcim.models import Device
     from virtualization.models import VirtualMachine
@@ -173,12 +178,14 @@ def test_background_collision_gate_uses_job_user_scope(monkeypatch):
     from netbox_librenms_plugin import librenms_api as librenms_api_module
 
     target = make_device("visible-job-collision-target")
+    hidden = make_device("hidden-job-collision-target")
     user = make_user_with_perms("job-collision-scope", [])
     user = grant(user, "add", Device)
     user = grant(user, "change", Device, constraints={"pk": target.pk})
     user = grant(user, "view", Device, constraints={"pk": target.pk})
     user = grant(user, "add", VirtualMachine)
     rows = _collision_rows(96301, 96302, target.name)
+    rows.update(_collision_rows(96304, 96305, hidden.name))
     rows[96303] = {
         "device_id": 96303,
         "hostname": "unique-job-vm-row",
@@ -200,19 +207,24 @@ def test_background_collision_gate_uses_job_user_scope(monkeypatch):
     vm_count = VirtualMachine.objects.count()
 
     ImportDevicesJob(job_row).run(
-        device_ids=[96301, 96302],
+        device_ids=[96301, 96302, 96304, 96305],
         vm_imports={96303: {"cluster_id": 1}},
         server_key="default",
         libre_devices_cache=rows,
     )
 
     job_row.refresh_from_db()
+    errors = job_row.data["errors"]
     assert Device.objects.count() == device_count
     assert VirtualMachine.objects.count() == vm_count
-    assert {entry["device_id"] for entry in job_row.data["errors"]} == {96301, 96302, 96303}
-    assert all("Bulk import blocked" in entry["error"] for entry in job_row.data["errors"])
-    assert all(f"Visible pk(s): {target.pk}" in entry["error"] for entry in job_row.data["errors"])
-    assert job_row.data["failed_count"] == 3
+    assert {entry["device_id"] for entry in errors} == {96301, 96302, 96303, 96304, 96305}
+    assert all("Bulk import blocked" in entry["error"] for entry in errors)
+    # Both collisions block the batch...
+    assert all("2 NetBox object collision(s)" in entry["error"] for entry in errors)
+    # ...and the trailing period pins the list to the visible pk alone.
+    assert all(f"Visible pk(s): {target.pk}." in entry["error"] for entry in errors)
+    assert all(hidden.name not in entry["error"] for entry in errors)
+    assert job_row.data["failed_count"] == 5
     assert job_row.data["success_count"] == 0
 
 
