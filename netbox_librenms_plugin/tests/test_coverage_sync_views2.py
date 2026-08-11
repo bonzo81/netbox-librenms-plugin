@@ -218,7 +218,7 @@ class TestSyncCablesViewSuccessPath:
 
         device = make_device("cable-missing-local-id")
         remote = make_interface(device, "Gi0/2")
-        missing_local_pk = Interface.objects.order_by("-pk").first().pk + 1000
+        missing_local_pk = missing_pk(Interface)
         request = _make_request()
         view = make_view(SyncCablesView, request)
 
@@ -825,6 +825,39 @@ class TestSyncCablesViewHelpers:
 
         assert [row["row_id"] for row in result] == ["p"]
         assert result[0]["netbox_local_interface_id"] == interface.pk
+
+    def test_duplicate_cached_row_identities_report_the_real_cause(self):
+        """Duplicate row identities must not be reported as an expired cache."""
+        from django.core.cache import cache
+
+        from netbox_librenms_plugin.views.sync.cables import SyncCablesView
+
+        device = _cov_device()
+        request = _make_request()
+        view = object.__new__(SyncCablesView)
+        view.setup(request, pk=device.pk)
+        view._post_server_key = "default"
+        cache_key = view.get_cache_key(device, "links", "default")
+        _seeded_cache_keys.add(cache_key)
+        duplicate = {
+            "local_port_id": "duplicate",
+            "local_port": "Gi0/1",
+            "remote_device": "remote-device",
+            "remote_port": "Gi0/2",
+        }
+        cache.set(cache_key, {"links": [duplicate, duplicate]}, timeout=300)
+
+        with patch.object(
+            type(view), "librenms_api", new_callable=lambda: property(lambda s: MagicMock(server_key="default"))
+        ):
+            cached_links = view.get_cached_links_data(request, device)
+
+        assert cached_links == []
+        assert view.validate_prerequisites(cached_links, [{"row_id": "duplicate"}]) is False
+        assert message_texts(request, "error") == [
+            "Cable sync cannot continue because multiple cached cable rows have the same identity. "
+            "Resolve the duplicate LibreNMS link data before syncing."
+        ]
 
     def test_missing_local_interface_is_invalid_not_missing_remote(self):
         """A stale local interface ID must not be reported as missing remote data."""

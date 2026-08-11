@@ -126,6 +126,7 @@ Ships pre-seeded with Avocent ACS (`acsSerialPortTable` → `ttyS{N}`) and Cisco
 **Fields:**
 - `sensor_type` — the LibreNMS sensor_type, matched exactly (case-sensitive), case-insensitively unique
 - `port_name_pattern` — local ConsoleServerPort name template; must contain `{N}`
+- `description` — optional free text; included in the YAML export
 
 **YAML format:**
 

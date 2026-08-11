@@ -630,10 +630,10 @@ def _normalize_module_interface_names_for_vc_member(
     conflicting interface is removed.
 
     Args:
-        device (Device): The selected virtual chassis member.
-        module (Module): The installed module whose interfaces are normalized.
-        changeable_interfaces (QuerySet): The interfaces the caller can change.
-        deletable_interfaces (QuerySet): The interfaces the caller can delete.
+        device (Device): The selected virtual chassis member that owns the installed module.
+        module (Module): The newly installed module whose interfaces are normalized.
+        changeable_interfaces (QuerySet): The permission-scoped change queryset.
+        deletable_interfaces (QuerySet): The permission-scoped delete queryset.
 
     Returns:
         dict[str, int]: The counts of renamed, adopted, removed, and skipped interfaces.
@@ -655,9 +655,11 @@ def _normalize_module_interface_names_for_vc_member(
     from dcim.models import Interface
 
     module_interfaces = list(Interface.objects.filter(device=device, module=module).order_by("pk"))
+    changeable_interface_ids = set(changeable_interfaces.filter(device=device).values_list("pk", flat=True))
+    deletable_interface_ids = set(deletable_interfaces.filter(device=device).values_list("pk", flat=True))
 
     for interface in module_interfaces:
-        if not changeable_interfaces.filter(pk=interface.pk).exists():
+        if interface.pk not in changeable_interface_ids:
             result["skipped"] += 1
             continue
         desired_name = _rewrite_interface_name_for_vc_member(
@@ -671,10 +673,10 @@ def _normalize_module_interface_names_for_vc_member(
         conflict = Interface.objects.filter(device=device, name=desired_name).exclude(pk=interface.pk).first()
         if conflict is not None:
             if getattr(conflict, "module_id", None) is None:
-                if not changeable_interfaces.filter(pk=conflict.pk).exists():
+                if conflict.pk not in changeable_interface_ids:
                     result["skipped"] += 1
                     continue
-                if not deletable_interfaces.filter(pk=interface.pk).exists():
+                if interface.pk not in deletable_interface_ids:
                     result["skipped"] += 1
                     continue
                 conflict.module = module

@@ -177,7 +177,9 @@ def map_sensors_to_serial_links(
         if not isinstance(sensor, dict):
             continue
         sensor_type = sensor.get("sensor_type")
-        if sensor_type not in recognized_types:
+        # An unhashable value (LibreNMS can return []) raises TypeError on the membership test and
+        # would abort mapping for every serial row in the response.
+        if not isinstance(sensor_type, str) or sensor_type not in recognized_types:
             continue
 
         sensor_id = coerce_librenms_id(sensor.get("sensor_id"))

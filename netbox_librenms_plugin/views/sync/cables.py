@@ -149,7 +149,17 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libre
         return selected_interfaces
 
     def get_cached_links_data(self, request, obj):
-        """Return cached LibreNMS link data for the given object."""
+        """
+        Return cached LibreNMS link data for the given object.
+
+        Args:
+            request: The current sync request.
+            obj: The page device.
+
+        Returns:
+            list[dict] | None: Enriched link rows, or None when the cache is unavailable.
+        """
+        self._cable_row_identity_error = False
         server_key = getattr(self, "_post_server_key", None) or self.librenms_api.server_key
         cache_obj = get_librenms_sync_device(obj, server_key=server_key) or obj
         if not self.restricted_queryset(Device, "view").filter(pk=cache_obj.pk).exists():
@@ -166,6 +176,8 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libre
             request.user.pk,
             cached_data["links"],
         )
+        if cached_data["links"] and not links:
+            self._cable_row_identity_error = True
         from netbox_librenms_plugin.views.object_sync.devices import DeviceCableTableView
 
         view = DeviceCableTableView()
@@ -565,7 +577,24 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libre
         }
 
     def validate_prerequisites(self, cached_links, selected_interfaces):
-        """Validate that cached data and selections are present before sync."""
+        """
+        Validate that cached data and selections are present before sync.
+
+        Args:
+            cached_links: The cached and enriched cable rows.
+            selected_interfaces: The rows selected by the user.
+
+        Returns:
+            bool: True when cable sync can continue.
+        """
+        if getattr(self, "_cable_row_identity_error", False):
+            messages.error(
+                self.request,
+                "Cable sync cannot continue because multiple cached cable rows have the same identity. "
+                "Resolve the duplicate LibreNMS link data before syncing.",
+            )
+            return False
+
         if not cached_links:
             messages.error(
                 self.request,
@@ -699,17 +728,31 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libre
         )
 
     def _resolve_cable_terminations(self, link_data, interface):
-        """Resolve one row's current permission-scoped cable terminations."""
+        """
+        Resolve one row's current permission-scoped cable terminations.
+
+        Args:
+            link_data: The enriched cached cable row.
+            interface: The selected row data from the request.
+
+        Returns:
+            dict: The resolved terminations or a status result.
+        """
         display_name = link_data.get("local_port") or interface.get("row_id", "")
         if link_data.get("_source") == "serial":
             csp_id = link_data.get("netbox_local_interface_id")
             cp_id = link_data.get("netbox_remote_interface_id")
-            if not csp_id or not cp_id:
+            if not csp_id:
+                return {"status": "invalid", "interface": display_name}
+            if not cp_id:
                 return {"status": "missing_remote", "interface": display_name}
             try:
                 csp = self.restricted_queryset(ConsoleServerPort, "change").get(pk=csp_id)
+            except ConsoleServerPort.DoesNotExist:
+                return {"status": "invalid", "interface": display_name}
+            try:
                 cp = self.restricted_queryset(ConsolePort, "change").get(pk=cp_id)
-            except (ConsoleServerPort.DoesNotExist, ConsolePort.DoesNotExist):
+            except ConsolePort.DoesNotExist:
                 return {"status": "missing_remote", "interface": display_name}
             if str(interface.get("device_id")) != str(csp.device_id):
                 return {"status": "rejected_selection", "interface": display_name}

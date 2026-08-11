@@ -1,6 +1,7 @@
 import logging
 
 from django.contrib import messages
+from django.core.exceptions import PermissionDenied
 from django.http import HttpResponse
 from django.shortcuts import redirect, render
 from django.utils.html import escape
@@ -115,12 +116,19 @@ class LibreNMSSettingsView(LibreNMSPermissionMixin, View):
             cable_sync_form = CableSyncSettingsForm(request.POST, instance=settings, user=request.user)
 
             if cable_sync_form.is_valid():
-                cable_sync_form.save()
-                messages.success(
-                    request,
-                    "Cable sync settings updated successfully.",
-                )
-                return redirect("plugins:netbox_librenms_plugin:settings")
+                try:
+                    cable_sync_form.save()
+                except PermissionDenied as exc:
+                    # The provenance Tag is a separate NetBox object: plugin write permission does
+                    # not imply Tag change permission. Re-render with the input instead of a bare
+                    # 403 page that discards it.
+                    cable_sync_form.add_error(None, str(exc))
+                else:
+                    messages.success(
+                        request,
+                        "Cable sync settings updated successfully.",
+                    )
+                    return redirect("plugins:netbox_librenms_plugin:settings")
 
         else:
             # Unknown form_type - shouldn't happen, but handle gracefully

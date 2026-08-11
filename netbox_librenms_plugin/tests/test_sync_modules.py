@@ -2979,6 +2979,40 @@ class TestVCMemberInterfaceNormalization:
         interface.refresh_from_db()
         assert interface.name == expected
 
+    def test_normalize_batches_interface_permission_checks(self):
+        """VC normalization must not probe change permission once per generated interface."""
+        from dcim.models import Interface
+        from django.db import connection
+        from django.test.utils import CaptureQueriesContext
+
+        from netbox_librenms_plugin.views.sync.modules import _normalize_module_interface_names_for_vc_member
+
+        device, module = self._module("permission-query-batch")
+        for port in range(1, 4):
+            Interface.objects.create(
+                device=device,
+                module=module,
+                name=f"TenGigabitEthernet1/1/{port}",
+                type="10gbase-x-sfpp",
+            )
+
+        with CaptureQueriesContext(connection) as captured:
+            result = _normalize_module_interface_names_for_vc_member(
+                device,
+                module,
+                Interface.objects.all(),
+                Interface.objects.all(),
+            )
+
+        permission_probes = [
+            query["sql"]
+            for query in captured.captured_queries
+            if 'SELECT 1 AS "a" FROM "dcim_interface"' in query["sql"]
+            and 'WHERE "dcim_interface"."id" =' in query["sql"]
+        ]
+        assert result["renamed"] == 3
+        assert permission_probes == []
+
     def test_normalize_adopts_existing_standalone_conflict(self):
         from dcim.models import Interface
 

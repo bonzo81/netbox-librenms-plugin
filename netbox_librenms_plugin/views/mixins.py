@@ -1199,10 +1199,10 @@ class VlanAssignmentMixin:
           precedence over auto-selection.
 
         Args:
-            port (dict): The port record to update.
-            lookup_maps (dict): The VLAN lookup maps used for group selection.
-            device (Device): The device that supplies the scope hierarchy.
-            vlan_group_overrides (dict | None): User-selected VLAN groups keyed by VID.
+            port (dict): The LibreNMS port record to update.
+            lookup_maps (dict): The VLAN lookup maps for the row's device.
+            device (Device): The device used for scope-specific group selection.
+            vlan_group_overrides (dict | None): Optional apply-to-all selections keyed by VID.
         """
         vid_to_groups = lookup_maps.get("vid_to_groups", {})
         untagged_vid = port.get("untagged_vlan")

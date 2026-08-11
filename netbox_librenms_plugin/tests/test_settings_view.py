@@ -85,6 +85,12 @@ class TestCableSyncSettingsTab:
 
         settings, _ = LibreNMSSettings.objects.get_or_create()
         tag = get_librenms_cable_tag(sync_settings=settings)
+        settings_state = (
+            settings.cable_sync_tag,
+            settings.cable_sync_tag_color,
+            settings.cable_sync_description,
+        )
+        tag_state = (tag.name, tag.color)
         user = make_user_with_perms("settings-no-tag-change", [])
         client.force_login(user)
 
@@ -98,11 +104,22 @@ class TestCableSyncSettingsTab:
             },
         )
 
-        assert response.status_code == 403
+        assert response.status_code == 200
+        form = response.context["cable_sync_form"]
+        refusal = "You do not have permission to change the cable provenance tag."
+        assert list(form.non_field_errors()) == [refusal]
+        assert refusal in response.content.decode()
+        assert form["cable_sync_tag"].value() == "renamed-without-tag-permission"
+        assert form["cable_sync_tag_color"].value() == "ff5722"
+        assert form["cable_sync_description"].value() == "Managed cable"
         settings.refresh_from_db()
         tag.refresh_from_db()
-        assert settings.cable_sync_tag == "librenms"
-        assert tag.name == "librenms"
+        assert (
+            settings.cable_sync_tag,
+            settings.cable_sync_tag_color,
+            settings.cable_sync_description,
+        ) == settings_state
+        assert (tag.name, tag.color) == tag_state
         assert Tag.objects.count() == 1
 
     def test_existing_target_tag_cannot_be_recolored_without_tag_permission(self, client):
@@ -115,6 +132,12 @@ class TestCableSyncSettingsTab:
         settings.cable_sync_tag = "missing-old-provenance"
         settings.save(update_fields=["cable_sync_tag"])
         target = Tag.objects.create(name="shared-provenance", slug="shared-provenance", color="00aa00")
+        settings_state = (
+            settings.cable_sync_tag,
+            settings.cable_sync_tag_color,
+            settings.cable_sync_description,
+        )
+        target_state = (target.name, target.color)
         user = make_user_with_perms("settings-target-tag-no-change", [])
         client.force_login(user)
 
@@ -128,11 +151,23 @@ class TestCableSyncSettingsTab:
             },
         )
 
-        assert response.status_code == 403
+        assert response.status_code == 200
+        form = response.context["cable_sync_form"]
+        refusal = "A different tag already uses this name."
+        assert list(form["cable_sync_tag"].errors) == [refusal]
+        assert refusal in response.content.decode()
+        assert form["cable_sync_tag"].value() == "shared-provenance"
+        assert form["cable_sync_tag_color"].value() == "ff5722"
+        assert form["cable_sync_description"].value() == "Managed cable"
         settings.refresh_from_db()
         target.refresh_from_db()
-        assert settings.cable_sync_tag == "missing-old-provenance"
-        assert target.color == "00aa00"
+        assert (
+            settings.cable_sync_tag,
+            settings.cable_sync_tag_color,
+            settings.cable_sync_description,
+        ) == settings_state
+        assert (target.name, target.color) == target_state
+        assert Tag.objects.count() == 1
 
     def test_blank_tag_name_is_rejected_and_nothing_persists(self, client):
         """A blank provenance tag would slugify to '' and break the ownership get_or_create — the form must reject it (whitespace-only strips to '' → required-field error) and the stored settings must keep their previous value."""

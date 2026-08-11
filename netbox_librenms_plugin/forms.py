@@ -391,7 +391,12 @@ class CableSyncSettingsForm(NetBoxModelForm):
         if not slugify(tag_name):
             raise forms.ValidationError("The tag name must contain letters or numbers.")
         old_tag = Tag.objects.filter(name=self._original_tag_name).first()
-        if old_tag and Tag.objects.filter(name=tag_name).exclude(pk=old_tag.pk).exists():
+        # Check the collision even when the provenance tag is gone: without the old row to exclude,
+        # every tag carrying this name is an unrelated one this setting must not adopt.
+        clash = Tag.objects.filter(name=tag_name)
+        if old_tag is not None:
+            clash = clash.exclude(pk=old_tag.pk)
+        if clash.exists():
             raise forms.ValidationError("A different tag already uses this name.")
         return tag_name
 
@@ -409,10 +414,11 @@ class CableSyncSettingsForm(NetBoxModelForm):
         old_tag_name = locked_settings.cable_sync_tag
         new_tag_name = self.cleaned_data["cable_sync_tag"]
 
+        # Lock both names so a concurrent create of the target name cannot land between the clean
+        # check and the rename, but only ever mutate the row this setting owns. Falling back to a
+        # row matching the new name would rename an unrelated global tag when the old one is gone.
         locked_tags = list(Tag.objects.select_for_update().filter(name__in={old_tag_name, new_tag_name}))
         tag = next((candidate for candidate in locked_tags if candidate.name == old_tag_name), None)
-        if tag is None:
-            tag = next((candidate for candidate in locked_tags if candidate.name == new_tag_name), None)
         if tag is not None:
             update_fields = []
             if tag.name != new_tag_name:

@@ -272,6 +272,25 @@ class TestSyncInterface:
         view.update_interface_attributes.assert_not_called()
         assert view._skipped_conflicts == ["eth0 (port already mapped elsewhere or ambiguous)"]
 
+    def test_existing_interface_with_an_unconstrained_change_grant_is_synced(self):
+        """The permission-scoped skip must disappear when the existing interface is changeable."""
+        from dcim.models import Device, Interface
+
+        device = make_device("sync-interface-change-control")
+        existing = make_interface(device, "eth0")
+        make_interface(device, "eth1")
+        user = make_user_with_perms(
+            "sync-interface-change-control",
+            [("view", Device), ("add", Interface), ("change", Interface)],
+        )
+        request = make_request("post", user=user)
+        view = self._v(request)
+
+        view.sync_interface(device, {"ifName": existing.name}, [], "ifName")
+
+        view.update_interface_attributes.assert_called_once()
+        assert view._skipped_conflicts == []
+
     def test_vm_uses_vminterface(self):
         from virtualization.models import VMInterface
 

@@ -1054,14 +1054,16 @@ class TestSerialSyncSurvivesHostLinks404:
         from netbox_librenms_plugin.views.sync.cables import SyncCablesView
 
         acs, csps, _ = make_serial_device("acs-ts26", csp_names=["ttyS7"])
-        acs.custom_field_data["librenms_id"] = 13
+        from netbox_librenms_plugin.utils import set_librenms_device_id
+
+        server_key = next(iter(LibreNMSAPI.get_available_servers()))
+        set_librenms_device_id(acs, 13, server_key)
         acs.save()
         _router, _, cps = make_serial_device("router-z", cp_names=["console"])
         csp = csps[0]
         console_port = cps[0]
 
         client.force_login(make_superuser())
-        server_key = next(iter(LibreNMSAPI.get_available_servers()))
         with patch("netbox_librenms_plugin.librenms_api.requests.get", side_effect=self._routed_get()):
             refreshed = client.post(
                 reverse("plugins:netbox_librenms_plugin:device_cable_sync", args=[acs.pk]),
@@ -1125,7 +1127,10 @@ class TestSerialSyncSurvivesHostLinks404:
         from netbox_librenms_plugin.views.sync.cables import SyncCablesView
 
         local, _csps, _ = make_serial_device("serial-partial-host-local", csp_names=["ttyS1"])
-        local.custom_field_data["librenms_id"] = 13
+        from netbox_librenms_plugin.utils import set_librenms_device_id
+
+        server_key = next(iter(LibreNMSAPI.get_available_servers()))
+        set_librenms_device_id(local, 13, server_key)
         local.save()
         local_interface = make_interface(local, "Ethernet1")
         remote = make_device("serial-partial-host-remote")
@@ -1173,7 +1178,6 @@ class TestSerialSyncSurvivesHostLinks404:
             return response
 
         client.force_login(make_superuser())
-        server_key = next(iter(LibreNMSAPI.get_available_servers()))
         with patch("netbox_librenms_plugin.librenms_api.requests.get", side_effect=routed_get):
             refreshed = client.post(
                 reverse("plugins:netbox_librenms_plugin:device_cable_sync", args=[local.pk]),
@@ -1231,7 +1235,10 @@ class TestSerialSyncSurvivesHostLinks404:
         from netbox_librenms_plugin.views.sync.cables import SyncCablesView
 
         local, (csp,), _ = make_serial_device("serial-partial-sensor-local", csp_names=["ttyS7"])
-        local.custom_field_data["librenms_id"] = 13
+        from netbox_librenms_plugin.utils import set_librenms_device_id
+
+        server_key = next(iter(LibreNMSAPI.get_available_servers()))
+        set_librenms_device_id(local, 13, server_key)
         local.save()
         _remote, _, (console_port,) = make_serial_device("serial-partial-sensor-remote", cp_names=["console"])
 
@@ -1266,7 +1273,6 @@ class TestSerialSyncSurvivesHostLinks404:
             return response
 
         client.force_login(make_superuser())
-        server_key = next(iter(LibreNMSAPI.get_available_servers()))
         with patch("netbox_librenms_plugin.librenms_api.requests.get", side_effect=routed_get):
             refreshed = client.post(
                 reverse("plugins:netbox_librenms_plugin:device_cable_sync", args=[local.pk]),
@@ -1621,14 +1627,14 @@ class TestSerialCableReadScope:
         refresh_url = reverse("plugins:netbox_librenms_plugin:device_cable_sync", args=[device.pk])
 
         client.force_login(make_superuser())
-        with patch("requests.get", side_effect=external_get):
+        with patch("netbox_librenms_plugin.librenms_api.requests.get", side_effect=external_get):
             admin_html = client.post(refresh_url, {"server_key": server_key}, HTTP_HX_REQUEST="true").content.decode()
 
         granted = self._user("serial-unmodelled-port-user", device)
         self._grant(granted, "serial-unmodelled-port-csp", ConsoleServerPort, ["view"])
         self._grant(granted, "serial-unmodelled-port-devices", Device, ["view"])
         client.force_login(granted)
-        with patch("requests.get", side_effect=external_get):
+        with patch("netbox_librenms_plugin.librenms_api.requests.get", side_effect=external_get):
             granted_html = client.post(refresh_url, {"server_key": server_key}, HTTP_HX_REQUEST="true").content.decode()
 
         # ttyS9 has no ConsoleServerPort in NetBox at all.
@@ -1684,7 +1690,7 @@ class TestSerialCableReadScope:
         assert csp.name not in html
         assert reverse("dcim:consoleserverport", args=[csp.pk]) not in html
 
-        with patch("requests.get") as http_get:
+        with patch("netbox_librenms_plugin.librenms_api.requests.get") as http_get:
             refreshed = client.post(
                 reverse("plugins:netbox_librenms_plugin:device_cable_sync", args=[visible.pk]),
                 {"server_key": server_key},
@@ -1761,7 +1767,7 @@ class TestSerialCableReadScope:
                 response._content = b'{"status":"ok"}'
             return response
 
-        with patch("requests.get", side_effect=external_get):
+        with patch("netbox_librenms_plugin.librenms_api.requests.get", side_effect=external_get):
             response = client.post(
                 reverse("plugins:netbox_librenms_plugin:device_cable_sync", args=[device.pk]),
                 {"server_key": server_key},
@@ -1811,7 +1817,7 @@ class TestSerialCableReadScope:
                 raise AssertionError(f"unexpected LibreNMS request: {url}")
             return response
 
-        with patch("requests.get", side_effect=external_get):
+        with patch("netbox_librenms_plugin.librenms_api.requests.get", side_effect=external_get):
             response = client.post(
                 reverse("plugins:netbox_librenms_plugin:device_cable_sync", args=[device.pk]),
                 {"server_key": server_key},

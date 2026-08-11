@@ -304,6 +304,12 @@ def test_grouped_vlan_deleted_after_the_scope_check_is_skipped_not_crashed():
     def sync_as_caller():
         close_old_connections()
         try:
+            # Bound both racing connections, as the sibling concurrency tests do. The test assumes
+            # the gate fires on the scope-check read, before the re-lock; if that order changes the
+            # main-thread delete blocks on the row lock and resume.set() can never run.
+            with connection.cursor() as cursor:
+                cursor.execute("SET lock_timeout = '5s'")
+                cursor.execute("SET statement_timeout = '10s'")
             thread_user = get_user_model().objects.get(pk=user.pk)
             with connection.execute_wrapper(_ScopedVLANReadGate(read_done, resume)):
                 return _drive_grouped_sync(device, thread_user, group, vid=42, librenms_name="librenms-name")

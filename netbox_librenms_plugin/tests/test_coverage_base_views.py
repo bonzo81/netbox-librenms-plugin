@@ -2800,6 +2800,34 @@ class TestBaseInterfaceTableViewAddVlanGroupSelection:
         assert port["vlan_group_map"][100]["group_name"] == "Boolean Override Group"
 
     @pytest.mark.django_db
+    def test_override_allows_an_applicable_group_that_does_not_contain_the_vid(self):
+        """An apply-to-all override may select a row group before VLAN Sync creates the VID."""
+        from ipam.models import VLANGroup
+
+        view = self._make_view()
+        applicable_group = VLANGroup.objects.create(name="Applicable-Group", slug="applicable-group")
+        port = {
+            "untagged_vlan": 100,
+            "tagged_vlans": [],
+            "vlan_groups": [applicable_group],
+        }
+        lookup_maps = {"vid_to_groups": {}, "vid_group_to_vlan": {}}
+        device = make_device("vlan-override-missing-vid")
+
+        view._add_vlan_group_selection(
+            port,
+            lookup_maps,
+            device,
+            vlan_group_overrides={"100": str(applicable_group.pk)},
+        )
+
+        assert port["vlan_group_map"][100] == {
+            "group_id": str(applicable_group.pk),
+            "group_name": applicable_group.name,
+            "is_ambiguous": False,
+        }
+
+    @pytest.mark.django_db
     def test_override_with_empty_string_forces_global(self):
         """Override with empty string means 'No Group (Global)' (real in_bulk returns nothing)."""
         view = self._make_view()

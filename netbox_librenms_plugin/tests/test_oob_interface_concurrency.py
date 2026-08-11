@@ -1,7 +1,7 @@
 """Concurrency coverage for OOB interface name reuse."""
 
 from concurrent.futures import ThreadPoolExecutor
-from threading import Event
+from threading import Event, get_ident
 
 import pytest
 from django.apps import apps
@@ -30,10 +30,20 @@ def test_concurrent_hidden_interface_winner_is_not_reused(monkeypatch):
     create_ready = Event()
     winner_committed = Event()
     original_full_clean = Interface.full_clean
+    resolver_thread = {}
 
     def pause_before_create(interface, *args, **kwargs):
         result = original_full_clean(interface, *args, **kwargs)
-        if interface.device_id == device.pk and interface.name == "idrac0" and interface.pk is None:
+        # Pin the pause to the resolver thread. The patch is on the class, so it is live on the
+        # main thread too, whose competing create matches device/name/pk exactly. create() does
+        # not call full_clean() today; if that changes, the main thread would wait on an event
+        # only it can set and the test would stall behind a misleading message.
+        if (
+            get_ident() == resolver_thread.get("id")
+            and interface.device_id == device.pk
+            and interface.name == "idrac0"
+            and interface.pk is None
+        ):
             create_ready.set()
             assert winner_committed.wait(5), "test did not commit the competing interface"
         return result
@@ -41,6 +51,7 @@ def test_concurrent_hidden_interface_winner_is_not_reused(monkeypatch):
     monkeypatch.setattr(Interface, "full_clean", pause_before_create)
 
     def resolve_interface():
+        resolver_thread["id"] = get_ident()
         close_old_connections()
         try:
             with connection.cursor() as cursor:
