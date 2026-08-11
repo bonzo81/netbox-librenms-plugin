@@ -14,7 +14,13 @@ from django.core.cache import cache
 from django.db import close_old_connections, connection
 
 from netbox_librenms_plugin.tests.conftest import make_device
-from netbox_librenms_plugin.tests.view_test_helpers import make_request, make_user_with_perms, messages_on, post
+from netbox_librenms_plugin.tests.view_test_helpers import (
+    assert_locked_before_update,
+    make_request,
+    make_user_with_perms,
+    messages_on,
+    post,
+)
 
 
 class _GlobalVLANLookupBarrier:
@@ -146,10 +152,7 @@ def test_grouped_vlan_row_is_locked_before_the_rename():
     with transaction.atomic(), CaptureQueriesContext(connection) as captured:
         _drive_grouped_sync(device, user, group, vid=41, librenms_name="librenms-name")
 
-    locking = [
-        q["sql"] for q in captured.captured_queries if "FOR UPDATE" in q["sql"].upper() and "ipam_vlan" in q["sql"]
-    ]
-    assert locking, "the resolved VLAN row was never locked"
+    assert_locked_before_update(captured, "ipam_vlan")
     vlan.refresh_from_db()
     assert vlan.name == "librenms-name"
 

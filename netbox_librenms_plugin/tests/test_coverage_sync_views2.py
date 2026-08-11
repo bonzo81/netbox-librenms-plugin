@@ -11,6 +11,7 @@ import pytest
 
 from netbox_librenms_plugin.tests.conftest import make_device, make_interface, make_vm
 from netbox_librenms_plugin.tests.view_test_helpers import (
+    assert_locked_before_update,
     grant,
     make_request,
     make_user_with_perms,
@@ -1780,12 +1781,7 @@ class TestSyncIPAddressesViewInterfaceResolution:
         with CaptureQueriesContext(connection) as ctx:
             results = view.process_ip_sync(request, ["10.9.9.9"], [ip_data], dev, "device")
 
-        locked_ip = [
-            q["sql"]
-            for q in ctx.captured_queries
-            if "ipam_ipaddress" in q["sql"].lower() and "for update" in q["sql"].lower()
-        ]
-        assert locked_ip, "the existing IPAddress must be SELECT ... FOR UPDATE before it is rewritten"
+        assert_locked_before_update(ctx, "ipam_ipaddress")
 
         existing.refresh_from_db()
         assert existing.assigned_object == iface
