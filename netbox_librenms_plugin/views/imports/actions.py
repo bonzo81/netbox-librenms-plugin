@@ -245,6 +245,36 @@ def _mapping_change_is_allowed(view, model, pk) -> bool:
     return view.restricted_queryset(model, "change").filter(pk=pk).exists()
 
 
+def _oob_ip_is_reassignable(candidate, interface) -> bool:
+    """
+    Return whether *candidate* may be re-homed to *interface* without taking another device's IP.
+
+    Shared by the pre-lock refusal and the post-lock re-verify so the two readings cannot drift.
+
+    Args:
+        candidate: The existing IPAddress row matching the requested host address.
+        interface: The interface the caller wants the address assigned to.
+
+    Returns:
+        bool: True when the row is free or already on this device, and no other device
+            references it through primary_ip4/primary_ip6/oob_ip.
+    """
+    from dcim.models import Device
+    from django.db.models import Q
+
+    assigned = candidate.assigned_object
+    if not (assigned is None or getattr(assigned, "device_id", None) == interface.device_id):
+        return False
+    # An unassigned row can still be ANOTHER device's primary_ip4/primary_ip6/oob_ip — a direct
+    # Device FK, separate from assigned_object and UNIQUE per address. Claiming it would trip that
+    # constraint and roll the whole attach back with an opaque IntegrityError.
+    return not (
+        Device.objects.filter(Q(primary_ip4=candidate) | Q(primary_ip6=candidate) | Q(oob_ip=candidate))
+        .exclude(pk=interface.device_id)
+        .exists()
+    )
+
+
 def _acquire_serial_assignment_lock(serial: str) -> None:
     """
     Serialize serial-assignment guards on the serial value (transaction-scoped advisory lock).
@@ -2140,14 +2170,29 @@ class AddDeviceTypeMappingView(
                 # created duplicate rather than mutating an arbitrary row. Key on the
                 # NORMALISED hardware string (mapping_hardware) so the lock matches
                 # the existing_mapping lookup and create() below.
-                locked_rows = list(
-                    DeviceTypeMapping.objects.select_for_update().filter(librenms_hardware__iexact=mapping_hardware)[:2]
+                # Scope BEFORE locking: locking first lets a caller hold a row it cannot even see
+                # and stall concurrent work on it. The duplicate check still has to see every
+                # row, so it reads unlocked and by pk only.
+                present_pks = list(
+                    DeviceTypeMapping.objects.filter(librenms_hardware__iexact=mapping_hardware).values_list(
+                        "pk", flat=True
+                    )[:2]
                 )
-                if len(locked_rows) > 1:
+                if len(present_pks) > 1:
                     return _htmx_error_response(
                         "Multiple mappings exist for this hardware string. Remove duplicates before updating."
                     )
-                locked = locked_rows[0] if locked_rows else None
+                locked = None
+                if present_pks:
+                    locked = (
+                        self.restricted_queryset(DeviceTypeMapping, "change")
+                        .select_for_update(of=("self",))
+                        .filter(pk=present_pks[0])
+                        .first()
+                    )
+                    # A row appeared (or left this caller's scope) after the upfront check.
+                    if locked is None:
+                        return _htmx_error_response("Existing mapping is no longer available.")
                 if locked and not existing_mapping:
                     # A concurrent request created the mapping after our upfront read.
                     # Only escalate to change permission if we would actually mutate the row;
@@ -3146,37 +3191,40 @@ class AddAsOOBView(
         # Scope to the global table (vrf__isnull): the create path below makes a global
         # /32, and a same-host address inside a tenant VRF is a DIFFERENT address
         # (overlapping RFC1918 space) — re-homing it would hijack that VRF's IPAM record.
-        candidates = list(IPAddress.objects.select_for_update().filter(address__net_host=ip_str, vrf__isnull=True)[:2])
-        if len(candidates) > 1:
+        # Scope BEFORE locking: locking first lets a caller hold a row it cannot even see and
+        # stall concurrent work on it. The ambiguity check still has to see every row, so it
+        # reads unlocked and by pk only, then the lock is taken inside the caller's change scope.
+        host_rows = list(IPAddress.objects.filter(address__net_host=ip_str, vrf__isnull=True)[:2])
+        if len(host_rows) > 1:
             return None, "conflict"
-        existing = candidates[0] if candidates else None
-        if existing is not None:
-            assigned = existing.assigned_object
-            owned = assigned is None or getattr(assigned, "device_id", None) == interface.device_id
-            # A row that isn't on any interface (assigned_object is None) can still be ANOTHER
-            # device's primary_ip4/primary_ip6/oob_ip — a direct Device FK, separate from
-            # assigned_object and UNIQUE per address. Claiming it as this device's oob_ip would
-            # trip that constraint and roll the whole attach back with an opaque IntegrityError,
-            # so treat it as a conflict the user can resolve rather than a re-homeable row.
-            if owned:
-                from dcim.models import Device
-                from django.db.models import Q
-
-                if (
-                    Device.objects.filter(Q(primary_ip4=existing) | Q(primary_ip6=existing) | Q(oob_ip=existing))
-                    .exclude(pk=interface.device_id)
-                    .exists()
-                ):
-                    owned = False
-            if not owned:
+        existing = None
+        if host_rows:
+            # Ownership belongs to the data, not the caller, so judge it before taking any lock:
+            # a row owned elsewhere is refused without ever being pinned.
+            if not _oob_ip_is_reassignable(host_rows[0], interface):
                 return None, "conflict"
-            if assigned != interface:
-                # Re-homing an existing IP is a 'change'. The add-vs-change permission
-                # decision can only be made from the locked row: the unlocked pre-flight
-                # in _missing_oob_ip_permissions can race a concurrent create and wave
-                # through an 'add'-only user, so verify 'change' here before saving.
-                if not IPAddress.objects.restrict(request.user, "change").filter(pk=existing.pk).exists():
-                    return None, "permission_change"
+            existing = (
+                IPAddress.objects.restrict(request.user, "change")
+                # of=("self",): restrict() joins the permission tables, and a bare
+                # select_for_update() would try to lock those joined rows too.
+                .select_for_update(of=("self",))
+                .filter(pk=host_rows[0].pk)
+                .first()
+            )
+            # The row was there a moment ago, so a miss means the caller's change grant does not
+            # cover it (or it was deleted in the race). Refuse either way rather than lock it.
+            if existing is None:
+                return None, "permission_change"
+        if existing is not None:
+            # Re-verify from the locked row: the pre-check above read it unlocked, so a concurrent
+            # attach could have claimed it in between.
+            if not _oob_ip_is_reassignable(existing, interface):
+                return None, "conflict"
+            if existing.assigned_object != interface:
+                # Re-homing an existing IP is a 'change'. The lock above already ran through the
+                # caller's change scope, so reaching here means the grant covers this row: the
+                # unlocked pre-flight in _missing_oob_ip_permissions can race a concurrent create
+                # and wave through an 'add'-only user, and the scoped lock is what catches that.
                 existing.assigned_object = interface
                 existing.save()
             return existing, None
@@ -3825,14 +3873,27 @@ class AddPlatformMappingView(
                 # lock absent rows, so the create branch handles IntegrityError.
                 # Materialise the locked rows in one query — count() would drop
                 # the FOR UPDATE clause, leaving the rows unlocked.
-                locked_rows = list(
-                    PlatformMapping.objects.select_for_update().filter(librenms_os__iexact=librenms_os)[:2]
+                # Scope BEFORE locking: locking first lets a caller hold a row it cannot even see
+                # and stall concurrent work on it. The duplicate check still has to see every
+                # row, so it reads unlocked and by pk only.
+                present_pks = list(
+                    PlatformMapping.objects.filter(librenms_os__iexact=librenms_os).values_list("pk", flat=True)[:2]
                 )
-                if len(locked_rows) > 1:
+                if len(present_pks) > 1:
                     return _htmx_error_response(
                         "Multiple mappings exist for this OS string. Remove duplicates before updating."
                     )
-                locked = locked_rows[0] if locked_rows else None
+                locked = None
+                if present_pks:
+                    locked = (
+                        self.restricted_queryset(PlatformMapping, "change")
+                        .select_for_update(of=("self",))
+                        .filter(pk=present_pks[0])
+                        .first()
+                    )
+                    # A row appeared (or left this caller's scope) after the upfront check.
+                    if locked is None:
+                        return _htmx_error_response("Existing mapping is no longer available.")
                 if locked and not existing_mapping:
                     # Concurrent request created the mapping after our upfront read.
                     # Only escalate to change permission if we would actually mutate.

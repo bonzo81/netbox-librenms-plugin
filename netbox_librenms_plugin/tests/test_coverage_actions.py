@@ -7530,21 +7530,32 @@ class TestAttachOOBIp:
         assert not IPAddress.objects.filter(address__net_host="10.0.0.9").exists()
 
     def test_locks_candidate_row_with_select_for_update(self):
-        """The candidate IPAddress row must be locked (load-bearing TOCTOU mitigation)."""
+        """The candidate IPAddress row must be locked, and only through the caller's change scope.
+
+        Asserting on the emitted SQL rather than on a patched manager: a mock records whichever
+        call the code happens to make, so it stayed green when the lock ran through an
+        unrestricted queryset and pinned rows the caller had no grant for.
+        """
+        from django.db import connection, transaction
+        from django.test.utils import CaptureQueriesContext
+        from ipam.models import IPAddress
+
+        from netbox_librenms_plugin.tests.view_test_helpers import make_request, make_user_with_perms
+
         view = self._view()
-        iface = MagicMock(device_id=1)
-        existing = MagicMock()
-        existing.assigned_object = None
-        with (
-            patch("ipam.models.IPAddress") as mock_ip_cls,
-            patch("dcim.models.Device") as mock_device_cls,
-        ):
-            mock_ip_cls.objects.select_for_update.return_value.filter.return_value.__getitem__.return_value = [existing]
-            # The cross-device FK guard must see no OTHER device referencing this IP, so the row
-            # is treated as re-homeable and the lock path under test runs.
-            mock_device_cls.objects.filter.return_value.exclude.return_value.exists.return_value = False
-            view._attach_oob_ip(_make_request(post={}), "10.0.0.9", iface)
-        mock_ip_cls.objects.select_for_update.assert_called_once()
+        dev = make_device("oob-ip-lock-sql")
+        iface = make_interface(dev, "idrac0")
+        existing = make_ip("10.0.0.9/24")
+        user = make_user_with_perms("oob-ip-lock-sql", [("change", IPAddress)])
+        with transaction.atomic(), CaptureQueriesContext(connection) as captured:
+            ip, reason = view._attach_oob_ip(make_request("post", user=user), "10.0.0.9", iface)
+
+        assert reason is None and ip.pk == existing.pk
+        locking = [q["sql"] for q in captured.captured_queries if "FOR UPDATE" in q["sql"].upper()]
+        assert locking, "the candidate row was never locked"
+        # The lock must carry the permission join, i.e. it ran through restrict(), and must lock
+        # only the address row rather than the joined permission tables.
+        assert any("OF " in sql.upper() for sql in locking), "the lock did not restrict itself to the row"
 
 
 @pytest.mark.django_db

@@ -117,3 +117,71 @@ def test_an_interface_outside_the_view_scope_is_never_locked():
     # The name is taken by a row this caller cannot see, so it is refused — without ever locking it.
     assert resolved is None
     assert reason is None
+
+
+def test_hidden_ip_row_is_not_locked_by_an_out_of_scope_caller():
+    """A caller who cannot see the matching IP must refuse without locking its row.
+
+    Locking first lets a caller pin a row it has no grant for, stalling the request that owns it
+    for the rest of the enclosing transaction. The hidden row here is held from a second
+    connection, so an unscoped lock blocks until lock_timeout instead of returning.
+    """
+    from dcim.models import Device, Interface
+    from django.contrib.auth import get_user_model
+    from django.db import close_old_connections, connection, transaction
+    from ipam.models import IPAddress
+
+    from netbox_librenms_plugin.tests.view_test_helpers import grant, make_request, make_user_with_perms
+    from netbox_librenms_plugin.views.imports.actions import AddAsOOBView
+
+    device = make_device("oob-ip-scope")
+    target = make_interface(device, "idrac0")
+    hidden_ip = IPAddress.objects.create(address="10.77.0.5/32")
+    visible_ip = IPAddress.objects.create(address="10.77.0.9/32")
+    user = make_user_with_perms("oob-ip-scope", [("add", IPAddress)])
+    # The grant deliberately excludes hidden_ip, so the caller may not change it.
+    user = grant(user, "change", IPAddress, constraints={"pk": visible_ip.pk})
+
+    row_locked = Event()
+    release_row = Event()
+
+    def hold_hidden_row():
+        close_old_connections()
+        try:
+            with transaction.atomic():
+                IPAddress.objects.select_for_update().get(pk=hidden_ip.pk)
+                row_locked.set()
+                assert release_row.wait(10), "test did not release the hidden row"
+        finally:
+            close_old_connections()
+
+    def attach_as_caller():
+        close_old_connections()
+        try:
+            with connection.cursor() as cursor:
+                cursor.execute("SET lock_timeout = '2s'")
+                cursor.execute("SET statement_timeout = '10s'")
+            thread_user = get_user_model().objects.get(pk=user.pk)
+            thread_iface = Interface.objects.get(pk=target.pk)
+            request = make_request("post", {}, user=thread_user)
+            with transaction.atomic():
+                return AddAsOOBView._attach_oob_ip(request, "10.77.0.5", thread_iface)
+        finally:
+            close_old_connections()
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        holder = executor.submit(hold_hidden_row)
+        assert row_locked.wait(10), "the hidden row was never locked"
+        caller = executor.submit(attach_as_caller)
+        try:
+            resolved, reason = caller.result(timeout=20)
+        finally:
+            release_row.set()
+            holder.result(timeout=10)
+
+    # Refused on scope, not blocked on the lock, and the hidden row is untouched.
+    assert resolved is None
+    assert reason == "permission_change"
+    hidden_ip.refresh_from_db()
+    assert hidden_ip.assigned_object_id is None
+    assert Device.objects.filter(pk=device.pk, oob_ip__isnull=True).exists()
