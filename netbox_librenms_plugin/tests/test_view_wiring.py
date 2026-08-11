@@ -1976,6 +1976,7 @@ class TestRoutedSyncPagesScopeTheirObject:
 
     ROUTED_DEVICE_PAGES = (
         ("object_sync.devices", "DeviceInterfaceTableView"),
+        ("object_sync.devices", "DeviceCableTableView"),
         ("object_sync.devices", "DeviceIPAddressTableView"),
         ("object_sync.devices", "DeviceVLANTableView"),
         ("object_sync.devices", "DeviceModuleTableView"),

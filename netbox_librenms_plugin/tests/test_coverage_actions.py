@@ -7331,7 +7331,58 @@ class TestResolveOOBInterface:
         with transaction.atomic():
             result_iface, reason = view._resolve_oob_interface(request, device)
 
-        assert result_iface is None and reason is None
+        # A dedicated reason, not the "no selection made" pair: the caller DID choose a name, and
+        # the message chain would otherwise tell the operator to choose one.
+        assert result_iface is None and reason == "name_out_of_scope"
+
+    def test_out_of_scope_name_tells_the_operator_what_actually_blocked_it(self):
+        """The whole view: the refusal must not surface as "choose an interface" when one was chosen."""
+        from dcim.models import Interface
+        from django.http import HttpResponse
+        from ipam.models import IPAddress
+
+        from netbox_librenms_plugin.tests.view_test_helpers import grant, make_request, messages_on
+        from netbox_librenms_plugin.views.imports.actions import AddAsOOBView
+
+        device = make_device("oob-msg-name-scope")
+        make_interface(device, "idrac0")  # exists, and the caller gets no view grant for it
+        user = _scoped_device_writer(device, "oob-msg-name-scope-writer")
+        user = grant(user, "add", Interface)
+        user = grant(user, "add", IPAddress)
+        request = make_request(
+            "post",
+            {
+                "existing_device_id": str(device.pk),
+                "server_key": "default",
+                "oob_interface_id": "__new__",
+                "oob_new_interface_name": "idrac0",
+            },
+            user=user,
+            path="/add-as-oob/",
+        )
+        view = AddAsOOBView()
+        view.kwargs = {}
+        view._librenms_api = _make_api()
+        view.request = request
+        libre_device = {"device_id": 4444, "hostname": f"{device.name}-oob", "sysName": f"{device.name}-oob"}
+        validation = {"oob_candidate": {"device": device, "type": "idrac", "ip": "10.88.0.7"}}
+
+        with (
+            patch.object(
+                AddAsOOBView, "get_validated_device_with_selections", return_value=(libre_device, validation, {})
+            ),
+            patch.object(AddAsOOBView, "render_device_row", return_value=HttpResponse(b"row-ok")),
+            patch.object(AddAsOOBView, "rebind_api_for_server", return_value=view._librenms_api),
+        ):
+            view.post(request, device_id=4444)
+
+        warnings = [text for level, text in messages_on(request) if level == "warning"]
+        assert any("outside your view scope" in text for text in warnings), warnings
+        assert not any("Choose an interface" in text for _level, text in messages_on(request))
+        # The link still committed; only the IP set was skipped.
+        device.refresh_from_db()
+        assert device.custom_field_data["librenms_id"]["default"]["oob"]["id"] == 4444
+        assert device.oob_ip_id is None
 
     def test_create_without_add_perm_returns_permission_add(self):
         """No existing row + user lacks Interface 'add' → the write-time re-check refuses the create rather than silently creating it."""
@@ -8153,8 +8204,11 @@ class TestMappingChangeScope:
             ),
             patch.object(view, "validate_and_apply_selections", return_value=(None, None)),
         ):
-            view.post(request, device_id=1)
+            response = view.post(request, device_id=1)
 
+        # The refusal text, not just the unchanged row: a failed permission gate, a rebind
+        # failure and the broad except all leave the mapping alone too.
+        assert b"Existing mapping is no longer available." in response.content
         hidden.refresh_from_db()
         assert hidden.netbox_device_type_id == old_type.pk
 
@@ -8189,8 +8243,9 @@ class TestMappingChangeScope:
             ),
             patch.object(view, "get_validated_device_with_selections", return_value=(None, None, None)),
         ):
-            view.post(request, device_id=1)
+            response = view.post(request, device_id=1)
 
+        assert b"Existing mapping is no longer available." in response.content
         hidden.refresh_from_db()
         assert hidden.netbox_platform_id == old_platform.pk
 

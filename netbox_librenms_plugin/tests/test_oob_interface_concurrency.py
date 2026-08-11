@@ -65,7 +65,9 @@ def test_concurrent_hidden_interface_winner_is_not_reused(monkeypatch):
         winner_committed.set()
         resolved, reason = future.result(timeout=10)
 
-    assert resolved is None and reason is None
+    # The race winner sits outside the caller's view grant, so it is refused with the same
+    # reason as the pre-create check rather than the "no selection made" pair.
+    assert resolved is None and reason == "name_out_of_scope"
     assert Interface.objects.filter(pk=winner.pk).exists()
 
 
@@ -116,7 +118,7 @@ def test_an_interface_outside_the_view_scope_is_never_locked():
 
     # The name is taken by a row this caller cannot see, so it is refused — without ever locking it.
     assert resolved is None
-    assert reason is None
+    assert reason == "name_out_of_scope"
 
 
 def test_hidden_ip_row_is_not_locked_by_an_out_of_scope_caller():

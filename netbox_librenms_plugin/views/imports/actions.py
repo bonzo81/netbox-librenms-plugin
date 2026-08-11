@@ -2848,6 +2848,14 @@ class AddAsOOBView(
                             "invalid (too long or contains unsupported characters).",
                         )
                     )
+                elif iface_reason == "name_out_of_scope":
+                    deferred_messages.append(
+                        (
+                            messages.WARNING,
+                            f"OOB linked, but OOB IP {oob_ip_str} not set — an interface with that name "
+                            "already exists on the device and is outside your view scope.",
+                        )
+                    )
                 elif oob_iface is None:
                     deferred_messages.append(
                         (
@@ -3080,8 +3088,9 @@ class AddAsOOBView(
         Returns:
             tuple: ``(interface, None)`` on success, ``(None, None)`` when no
                 selection was made, ``(None, "permission_add")`` when creating is
-                required but the user lacks Interface ``add``, or
-                ``(None, "invalid_name")`` for a malformed new name.
+                required but the user lacks Interface ``add``, ``(None, "invalid_name")``
+                for a malformed new name, or ``(None, "name_out_of_scope")`` when the
+                requested name belongs to an interface outside the caller's view scope.
         """
         from django.core.exceptions import ValidationError
         from dcim.models import Interface
@@ -3109,7 +3118,7 @@ class AddAsOOBView(
             # The name may still be taken by a row outside that scope; refuse rather than race the
             # create below into an IntegrityError. `.exists()` reads no row data and takes no lock.
             if Interface.objects.filter(device=device, name=name).exists():
-                return None, None
+                return None, "name_out_of_scope"
             if not request.user.has_perm(get_permission_for_model(Interface, "add")):
                 return None, "permission_add"
             # Nested savepoint: catching IntegrityError without one would poison the outer
@@ -3136,7 +3145,9 @@ class AddAsOOBView(
                     .filter(device=device, name=name)
                     .first()
                 )
-                return (existing, None) if existing is not None else (None, None)
+                # The winner of the race can sit outside the caller's view scope, which is the
+                # same refusal as the pre-create check above.
+                return (existing, None) if existing is not None else (None, "name_out_of_scope")
         if iface_id:
             try:
                 # Lock the reused row too (same orphan-on-concurrent-delete reasoning).
