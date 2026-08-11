@@ -2099,7 +2099,7 @@ class TestGetPortStack:
         fake_response.json.return_value = {
             "status": "ok",
             "mappings": [
-                {"port_id_high": 1, "port_id_low": 2, "high_ifIndex": 1, "low_ifIndex": 2},
+                {"high_port_id": 1, "low_port_id": 2, "high_ifIndex": 1, "low_ifIndex": 2},
             ],
         }
         fake_response.raise_for_status = MagicMock()
@@ -2107,7 +2107,7 @@ class TestGetPortStack:
             success, data = mock_librenms_api.get_port_stack(42)
 
         assert success is True
-        assert data == [{"port_id_high": 1, "port_id_low": 2, "high_ifIndex": 1, "low_ifIndex": 2}]
+        assert data == [{"high_port_id": 1, "low_port_id": 2, "high_ifIndex": 1, "low_ifIndex": 2}]
         mock_get.assert_called_once()
         call_url = mock_get.call_args[0][0]
         assert "/api/v0/devices/42/port_stack" in call_url
@@ -2232,7 +2232,7 @@ class TestGetPortStack:
         """A non-object top-level payload (list/string/null) is malformed, not 'no relationships'."""
         from unittest.mock import MagicMock, patch
 
-        for bad in ([{"port_id_high": 1, "port_id_low": 2}], "oops", None):
+        for bad in ([{"high_port_id": 1, "low_port_id": 2}], "oops", None):
             fake_response = MagicMock()
             fake_response.raise_for_status = MagicMock()
             fake_response.json.return_value = bad
@@ -2252,8 +2252,8 @@ NOKIA_PORTS = [
     {"port_id": 102, "ifName": "lag-1", "ifType": "ieee8023adLag"},
 ]
 NOKIA_PORT_STACK = [
-    {"port_id_high": 101, "port_id_low": 102},  # valid LAG membership
-    {"port_id_high": 102, "port_id_low": 200},  # low_id 200 not in ports (missing = skip)
+    {"high_port_id": 101, "low_port_id": 102},  # valid LAG membership
+    {"high_port_id": 102, "low_port_id": 200},  # low_id 200 not in ports (missing = skip)
 ]
 NOKIA_SAP_PORTS = [
     {"port_id": 101, "ifName": "1/1/c1/1", "ifType": "ethernetCsmacd"},
@@ -2261,8 +2261,8 @@ NOKIA_SAP_PORTS = [
     {"port_id": 200, "ifName": "lag1:0", "ifType": "ipForward"},  # SAP entry with colon
 ]
 NOKIA_SAP_PORT_STACK = [
-    {"port_id_high": 101, "port_id_low": 102},  # valid LAG
-    {"port_id_high": 102, "port_id_low": 200},  # SAP: should be excluded
+    {"high_port_id": 101, "low_port_id": 102},  # valid LAG
+    {"high_port_id": 102, "low_port_id": 200},  # SAP: should be excluded
 ]
 JUNOS_PORTS = [
     {"port_id": 201, "ifName": "xe-0/0/0", "ifType": "ethernetCsmacd"},
@@ -2273,8 +2273,8 @@ JUNOS_PORTS = [
     {"port_id": 206, "ifName": "ae10.2221", "ifType": "l2vlan"},
 ]
 JUNOS_PORT_STACK = [
-    {"port_id_high": 202, "port_id_low": 204},  # xe-0/0/0.0 -> ae1.0 resolves to xe-0/0/0 in ae1
-    {"port_id_high": 205, "port_id_low": 206},  # ae10 -> ae10.2221 (sub-interface)
+    {"high_port_id": 202, "low_port_id": 204},  # xe-0/0/0.0 -> ae1.0 resolves to xe-0/0/0 in ae1
+    {"high_port_id": 205, "low_port_id": 206},  # ae10 -> ae10.2221 (sub-interface)
 ]
 CISCO_IOS_PORTS = [
     {"port_id": 301, "ifName": "Te1/1", "ifType": "ethernetCsmacd"},
@@ -2282,8 +2282,8 @@ CISCO_IOS_PORTS = [
     {"port_id": 303, "ifName": "Po10.100", "ifType": "l2vlan"},
 ]
 CISCO_IOS_PORT_STACK = [
-    {"port_id_high": 301, "port_id_low": 302},  # LAG membership
-    {"port_id_high": 302, "port_id_low": 303},  # sub-interface
+    {"high_port_id": 301, "low_port_id": 302},  # LAG membership
+    {"high_port_id": 302, "low_port_id": 303},  # sub-interface
 ]
 ARCOS_PORTS = [
     {"port_id": 401, "ifName": "swp4", "ifType": "ethernetCsmacd"},
@@ -2292,8 +2292,8 @@ ARCOS_PORTS = [
     {"port_id": 404, "ifName": "swp15.3", "ifType": "ethernetCsmacd"},  # sub-if, not propVirtual
 ]
 ARCOS_PORT_STACK = [
-    {"port_id_high": 401, "port_id_low": 402},  # LAG membership
-    {"port_id_high": 403, "port_id_low": 404},  # sub-interface
+    {"high_port_id": 401, "low_port_id": 402},  # LAG membership
+    {"high_port_id": 403, "low_port_id": 404},  # sub-interface
 ]
 
 
@@ -2310,6 +2310,43 @@ def ios_lag_patterns():
 
 class TestResolvePortRelationships:
     """Tests for LibreNMSAPI.resolve_port_relationships()."""
+
+    def test_resolves_a_verbatim_live_port_stack_entry(self, mock_librenms_api):
+        """A port_stack entry exactly as a live LibreNMS returns it must resolve.
+
+        Pinned to a real response, not a hand-written one: LibreNMS serves the ports_stack rows
+        verbatim, so an entry carries id/device_id/high_ifIndex/high_port_id/low_ifIndex/
+        low_port_id/ifStackStatus. The API docs advertise port_id_high/port_id_low instead, and
+        every synthetic fixture in this file once used that spelling, so production and its tests
+        agreed on a shape no server sends and every relationship resolved to nothing.
+        """
+        ports = [
+            {"port_id": 6477, "ifName": "em0", "ifType": "ethernetCsmacd"},
+            {"port_id": 6482, "ifName": "em0.0", "ifType": "propVirtual"},
+        ]
+        live_entry = {
+            "id": 2795,
+            "device_id": 15,
+            "high_ifIndex": 17,
+            "high_port_id": 6477,
+            "low_ifIndex": 18,
+            "low_port_id": 6482,
+            "ifStackStatus": "active",
+        }
+
+        result = mock_librenms_api.resolve_port_relationships(ports, [live_entry], lag_patterns={})
+
+        assert result["sub_interfaces"] == {6482: 6477}
+
+    def test_unrecognized_port_stack_shape_is_logged(self, mock_librenms_api, caplog):
+        """An entry carrying neither id key must warn, not silently drop every relationship."""
+        ports = [{"port_id": 1, "ifName": "eth0", "ifType": "ethernetCsmacd"}]
+        with caplog.at_level("WARNING"):
+            result = mock_librenms_api.resolve_port_relationships(
+                ports, [{"port_id_high": 1, "port_id_low": 2}], lag_patterns={}
+            )
+        assert result == {"lag_members": {}, "sub_interfaces": {}}
+        assert any("Unrecognized port_stack entry shape" in r.getMessage() for r in caplog.records)
 
     def test_nokia_lag_membership(self, mock_librenms_api):
         """Nokia: high=physical, low=lag-1 (ieee8023adLag) -> member in lag_members."""
@@ -2328,7 +2365,7 @@ class TestResolvePortRelationships:
             {"port_id": 201, "ifName": "1/1/c1/1", "ifType": "ethernetCsmacd"},
             {"port_id": 202, "ifName": "", "ifDescr": "", "ifType": "ieee8023adLag"},  # nameless aggregate
         ]
-        port_stack = [{"port_id_high": 201, "port_id_low": 202}]
+        port_stack = [{"high_port_id": 201, "low_port_id": 202}]
         result = mock_librenms_api.resolve_port_relationships(ports, port_stack, lag_patterns={})
         assert result["lag_members"] == {201: 202}
 
@@ -2336,12 +2373,12 @@ class TestResolvePortRelationships:
         "port_stack",
         [
             [
-                {"port_id_high": 10, "port_id_low": 100},
-                {"port_id_high": 10, "port_id_low": 200},
+                {"high_port_id": 10, "low_port_id": 100},
+                {"high_port_id": 10, "low_port_id": 200},
             ],
             [
-                {"port_id_high": 10, "port_id_low": 200},
-                {"port_id_high": 10, "port_id_low": 100},
+                {"high_port_id": 10, "low_port_id": 200},
+                {"high_port_id": 10, "low_port_id": 100},
             ],
         ],
     )
@@ -2362,7 +2399,7 @@ class TestResolvePortRelationships:
             {"port_id": 1, "ifName": "", "ifDescr": "ge-0/0/0", "ifType": "ethernetCsmacd"},
             {"port_id": 2, "ifName": "", "ifDescr": "ge-0/0/0.100", "ifType": "l3ipvlan"},
         ]
-        port_stack = [{"port_id_high": 2, "port_id_low": 1}]
+        port_stack = [{"high_port_id": 2, "low_port_id": 1}]
         result = mock_librenms_api.resolve_port_relationships(
             ports, port_stack, lag_patterns={}, interface_name_field="ifDescr"
         )
@@ -2374,7 +2411,7 @@ class TestResolvePortRelationships:
             {"port_id": 11, "ifName": "", "ifDescr": "Gi0/1", "ifType": "ethernetCsmacd"},
             {"port_id": 12, "ifName": "", "ifDescr": "Po1", "ifType": "propVirtual"},
         ]
-        port_stack = [{"port_id_high": 11, "port_id_low": 12}]
+        port_stack = [{"high_port_id": 11, "low_port_id": 12}]
         # low (Po1) is the aggregate via the configured pattern; member -> aggregate.
         result = mock_librenms_api.resolve_port_relationships(
             ports, port_stack, lag_patterns={"ios": r"^Po\d+$"}, interface_name_field="ifDescr"
@@ -2382,9 +2419,9 @@ class TestResolvePortRelationships:
         assert result["lag_members"] == {11: 12}
 
     def test_string_port_stack_ids_match_int_port_ids(self, mock_librenms_api):
-        """String port_id_high/port_id_low values must match integer port records and vice versa."""
+        """String high_port_id/low_port_id values must match integer port records and vice versa."""
         # NOKIA_PORTS carries int port_ids 101/102; reference them as strings in the stack.
-        str_stack = [{"port_id_high": "101", "port_id_low": "102"}]
+        str_stack = [{"high_port_id": "101", "low_port_id": "102"}]
         result = mock_librenms_api.resolve_port_relationships(NOKIA_PORTS, str_stack, lag_patterns={})
         assert result["lag_members"] == {101: 102}
         # And the inverse: int stack ids against str port_ids. The map is normalized at the
@@ -2395,7 +2432,7 @@ class TestResolvePortRelationships:
             {"port_id": "102", "ifName": "lag-1", "ifType": "ieee8023adLag"},
         ]
         result = mock_librenms_api.resolve_port_relationships(
-            str_ports, [{"port_id_high": 101, "port_id_low": 102}], lag_patterns={}
+            str_ports, [{"high_port_id": 101, "low_port_id": 102}], lag_patterns={}
         )
         assert result["lag_members"] == {101: 102}
 
@@ -2407,7 +2444,7 @@ class TestResolvePortRelationships:
 
         result = mock_librenms_api.resolve_port_relationships(
             ports,
-            [{"port_id_high": 101, "port_id_low": 102}],
+            [{"high_port_id": 101, "low_port_id": 102}],
             lag_patterns={},
         )
 
@@ -2422,7 +2459,7 @@ class TestResolvePortRelationships:
 
         result = mock_librenms_api.resolve_port_relationships(
             ports,
-            [{"port_id_high": 101, "port_id_low": 102}],
+            [{"high_port_id": 101, "low_port_id": 102}],
             lag_patterns={},
         )
 
@@ -2435,7 +2472,7 @@ class TestResolvePortRelationships:
             {"port_id": "205", "ifName": "ae10", "ifType": "ieee8023adLag"},
             {"port_id": "206", "ifName": "ae10.2221", "ifType": "l2vlan"},
         ]
-        int_stack = [{"port_id_high": 205, "port_id_low": 206}]
+        int_stack = [{"high_port_id": 205, "low_port_id": 206}]
         result = mock_librenms_api.resolve_port_relationships(str_ports, int_stack, lag_patterns={})
         # Canonical normalized ids (port-record-derived, not the stack ids): str port_ids are
         # normalized to ints at the source so the map is self-consistent for every consumer.
@@ -2456,8 +2493,8 @@ class TestResolvePortRelationships:
             {"port_id": 200, "ifName": "lag1:0", "ifDescr": "sap-clean", "ifType": "ipForward"},
         ]
         port_stack = [
-            {"port_id_high": 101, "port_id_low": 102},  # genuine LAG membership
-            {"port_id_high": 200, "port_id_low": 102},  # SAP row: must be skipped
+            {"high_port_id": 101, "low_port_id": 102},  # genuine LAG membership
+            {"high_port_id": 200, "low_port_id": 102},  # SAP row: must be skipped
         ]
         result = mock_librenms_api.resolve_port_relationships(
             ports, port_stack, lag_patterns={}, interface_name_field="ifDescr"
@@ -2483,7 +2520,7 @@ class TestResolvePortRelationships:
             # Child: the .N marker lives in ifName; its ifDescr is NOT a sub-unit of the parent's ifDescr.
             {"port_id": 402, "ifName": "xe-0/0/0.100", "ifDescr": "vlan-100-svc", "ifType": "l2vlan"},
         ]
-        port_stack = [{"port_id_high": 401, "port_id_low": 402}]
+        port_stack = [{"high_port_id": 401, "low_port_id": 402}]
         result = mock_librenms_api.resolve_port_relationships(
             ports, port_stack, lag_patterns={}, interface_name_field="ifDescr"
         )
@@ -2506,7 +2543,7 @@ class TestResolvePortRelationships:
             {"port_id": 204, "ifName": "ae1.0", "ifDescr": "bundle-unit", "ifType": "l2vlan"},
         ]
         # ifStack relates the LOGICAL units (their ifDescr primaries are arbitrary labels).
-        port_stack = [{"port_id_high": 204, "port_id_low": 202}]
+        port_stack = [{"high_port_id": 204, "low_port_id": 202}]
         result = mock_librenms_api.resolve_port_relationships(
             ports, port_stack, lag_patterns={"junos": r"^ae\d"}, interface_name_field="ifDescr"
         )
@@ -2529,7 +2566,7 @@ class TestResolvePortRelationships:
             {"port_id": 302, "ifName": "xe-0/0/0.foo", "ifType": "ethernetCsmacd"},  # non-numeric suffix
             {"port_id": 303, "ifName": "ae1", "ifType": "ieee8023adLag"},
         ]
-        stack = [{"port_id_high": 303, "port_id_low": 302}]  # ae1 <- xe-0/0/0.foo
+        stack = [{"high_port_id": 303, "low_port_id": 302}]  # ae1 <- xe-0/0/0.foo
         result = mock_librenms_api.resolve_port_relationships(ports, stack, lag_patterns={})
         # The member is the actual port 302, NOT the base 301 (which the old .N-agnostic strip
         # would have wrongly resolved "xe-0/0/0.foo" to).
@@ -2562,11 +2599,11 @@ class TestResolvePortRelationships:
         # Reverse ordering: the child (Gi0/1.100) is the HIGH side, the parent (Gi0/1) the LOW.
         # The forward-only check (l_name.startswith(h_name + '.')) misses this; the reverse
         # check must catch it. Map is child -> parent.
-        reverse_stack = [{"port_id_high": 602, "port_id_low": 601}]
+        reverse_stack = [{"high_port_id": 602, "low_port_id": 601}]
         result = mock_librenms_api.resolve_port_relationships(ports, reverse_stack, lag_patterns={})
         assert result["sub_interfaces"] == {602: 601}
         # And the forward ordering still resolves identically (child stays the map key).
-        forward_stack = [{"port_id_high": 601, "port_id_low": 602}]
+        forward_stack = [{"high_port_id": 601, "low_port_id": 602}]
         result = mock_librenms_api.resolve_port_relationships(ports, forward_stack, lag_patterns={})
         assert result["sub_interfaces"] == {602: 601}
 
@@ -2592,7 +2629,7 @@ class TestResolvePortRelationships:
                 "ifType": "ethernetCsmacd",
             },
         ]
-        port_stack = [{"port_id_high": high_id, "port_id_low": low_id}]
+        port_stack = [{"high_port_id": high_id, "low_port_id": low_id}]
 
         result = mock_librenms_api.resolve_port_relationships(ports, port_stack, lag_patterns={})
 
@@ -2604,7 +2641,7 @@ class TestResolvePortRelationships:
             {"port_id": 701, "ifName": "bond0", "ifType": "ieee8023adLag"},  # the real aggregate
             {"port_id": 702, "ifName": "bond0-slave", "ifType": "ethernetCsmacd"},  # member
         ]
-        stack = [{"port_id_high": 702, "port_id_low": 701}]
+        stack = [{"high_port_id": 702, "low_port_id": 701}]
         # 'bond' (unanchored) matches BOTH bond0 and bond0-slave, so name-matching alone makes
         # both look like aggregates. The aggregate is the one whose ifType is ieee8023adLag.
         broad = {"linux": r"bond"}
@@ -2617,7 +2654,7 @@ class TestResolvePortRelationships:
             {"port_id": 711, "ifName": "bond0", "ifType": "ethernetCsmacd"},
             {"port_id": 712, "ifName": "bond0-slave", "ifType": "ethernetCsmacd"},
         ]
-        stack = [{"port_id_high": 712, "port_id_low": 711}]
+        stack = [{"high_port_id": 712, "low_port_id": 711}]
         broad = {"linux": r"bond"}
         result = mock_librenms_api.resolve_port_relationships(ports, stack, lag_patterns=broad)
         assert result["lag_members"] == {}
@@ -2628,8 +2665,8 @@ class TestResolvePortRelationships:
         assert result == {"lag_members": {}, "sub_interfaces": {}}
 
     def test_missing_port_ids_are_skipped(self, mock_librenms_api):
-        """Entries where port_id_high or port_id_low is absent from ports list are skipped."""
-        stack = [{"port_id_high": 9999, "port_id_low": 101}]
+        """Entries where high_port_id or low_port_id is absent from ports list are skipped."""
+        stack = [{"high_port_id": 9999, "low_port_id": 101}]
         result = mock_librenms_api.resolve_port_relationships(NOKIA_PORTS, stack, lag_patterns={})
         assert result["lag_members"] == {}
 
@@ -2651,7 +2688,7 @@ class TestResolvePortRelationships:
             {"port_id": 501, "ifName": 12345, "ifType": "ethernetCsmacd"},  # malformed: non-string
             {"port_id": 502, "ifName": "lag9", "ifType": "ieee8023adLag"},
         ]
-        stack = [{"port_id_high": 501, "port_id_low": 502}]
+        stack = [{"high_port_id": 501, "low_port_id": 502}]
         result = mock_librenms_api.resolve_port_relationships(ports, stack, lag_patterns={})
         assert result == {"lag_members": {501: 502}, "sub_interfaces": {}}
 
@@ -2738,7 +2775,7 @@ class TestResolvePortRelationships:
             # indexes ifDescr). Processed last, so last-write-wins would point by_name["ae1"] HERE.
             {"port_id": 999, "ifName": "ae99", "ifDescr": "ae1", "ifType": "ieee8023adLag"},
         ]
-        port_stack = [{"port_id_high": 201, "port_id_low": 204}]  # xe-0/0/0 <-> ae1.0
+        port_stack = [{"high_port_id": 201, "low_port_id": 204}]  # xe-0/0/0 <-> ae1.0
         result = mock_librenms_api.resolve_port_relationships(ports, port_stack, lag_patterns={})
         # The ifName base resolves to the real aggregate 203. The unrelated ifDescr on 999 does
         # not make the ifName lookup ambiguous and cannot hijack the edge.
@@ -2757,7 +2794,7 @@ class TestResolvePortRelationships:
                 "ifType": "ieee8023adLag",
             },
         ]
-        port_stack = [{"port_id_high": 201, "port_id_low": 204}]
+        port_stack = [{"high_port_id": 201, "low_port_id": 204}]
 
         result = mock_librenms_api.resolve_port_relationships(
             ports,

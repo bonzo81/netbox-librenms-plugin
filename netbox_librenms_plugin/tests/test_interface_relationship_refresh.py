@@ -46,7 +46,7 @@ class TestInterfaceRelationshipRefresh:
         api = _RelationshipAPI(
             mock_librenms_api,
             device_info=(False, "must not be requested"),
-            port_stack=(True, [{"port_id_high": 10, "port_id_low": 20}]),
+            port_stack=(True, [{"high_port_id": 10, "low_port_id": 20}]),
         )
         view = object.__new__(BaseInterfaceTableView)
         view._librenms_api = api
@@ -75,8 +75,8 @@ class TestInterfaceRelationshipRefresh:
             port_stack=(
                 True,
                 [
-                    {"port_id_high": 10, "port_id_low": 20},
-                    {"port_id_high": 30, "port_id_low": 40},
+                    {"high_port_id": 10, "low_port_id": 20},
+                    {"high_port_id": 30, "low_port_id": 40},
                 ],
             ),
         )

@@ -557,7 +557,7 @@ class LibreNMSAPI:
 
         Returns:
             tuple: (success: bool, data: list[dict] | str)
-                On success: list of {port_id_high, port_id_low, high_ifIndex, low_ifIndex} dicts
+                On success: list of {high_port_id, low_port_id, high_ifIndex, low_ifIndex} dicts
                 On failure: error string
         """
         try:
@@ -637,7 +637,7 @@ class LibreNMSAPI:
         Args:
             ports: Port dicts from get_ports(), each with port_id, ifName, ifType keys.
             port_stack: Port stack dicts from get_port_stack(), each with
-                        port_id_high and port_id_low keys.
+                        high_port_id and low_port_id keys.
             lag_patterns: Optional dict of {librenms_os: pattern_str} overriding DB lookup.
                           Pass an empty dict to disable name-pattern matching entirely.
                           When None (default), patterns are fetched from PortStackLagPattern,
@@ -827,8 +827,19 @@ class LibreNMSAPI:
         for entry in port_stack:
             if not isinstance(entry, dict):
                 continue
-            high_id = entry.get("port_id_high")
-            low_id = entry.get("port_id_low")
+            # LibreNMS returns the ports_stack rows verbatim (api_success($device->portsStack)),
+            # so the keys are the table columns: high_port_id / low_port_id. The API docs show
+            # port_id_high / port_id_low, which no server actually sends — verified against a live
+            # instance, where an entry is {id, device_id, high_ifIndex, high_port_id, low_ifIndex,
+            # low_port_id, ifStackStatus}. Reading the documented spelling silently resolved every
+            # relationship to nothing.
+            if "high_port_id" not in entry and "low_port_id" not in entry:
+                # Neither key present: a shape change would otherwise zero out every LAG and
+                # sub-interface relationship without a single error.
+                logger.warning("Unrecognized port_stack entry shape, keys: %s", sorted(entry))
+                continue
+            high_id = entry.get("high_port_id")
+            low_id = entry.get("low_port_id")
             # 0 (int OR string) is the ifStack sentinel for "no port" (stack top/bottom).
             # normalize_librenms_port_id treats 0/negative/non-numeric as invalid whether the API
             # returned the id as an int or a string, so the sentinel skip stays consistent with the

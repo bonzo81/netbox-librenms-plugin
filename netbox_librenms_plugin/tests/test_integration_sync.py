@@ -152,8 +152,8 @@ class TestLibreNMSAPIPortStack:
                 "mappings": [
                     {
                         "device_id": "42",
-                        "port_id_high": "101",
-                        "port_id_low": "102",
+                        "high_port_id": "101",
+                        "low_port_id": "102",
                         "ifStackStatus": "active",
                     }
                 ],

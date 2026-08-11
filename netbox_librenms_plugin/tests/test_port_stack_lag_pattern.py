@@ -500,7 +500,7 @@ class TestLagPatternSharedLoad:
             {"port_id": 11, "ifName": "Gi0/1", "ifType": "ethernetCsmacd"},
             {"port_id": 12, "ifName": "Po1", "ifType": "propVirtual"},
         ]
-        port_stack = [{"port_id_high": 11, "port_id_low": 12}]
+        port_stack = [{"high_port_id": 11, "low_port_id": 12}]
 
         with CaptureQueriesContext(connection) as ctx:
             result = mock_librenms_api.resolve_port_relationships(
@@ -520,7 +520,7 @@ class TestLagPatternSharedLoad:
             {"port_id": 0, "ifName": "phantom", "ifType": "ethernetCsmacd"},
             {"port_id": 12, "ifName": "Po1", "ifType": "propVirtual"},
         ]
-        port_stack = [{"port_id_high": "0", "port_id_low": 12}]
+        port_stack = [{"high_port_id": "0", "low_port_id": 12}]
 
         result = mock_librenms_api.resolve_port_relationships(
             ports, port_stack, device_os="sharedos", compiled_lag_patterns=compiled
