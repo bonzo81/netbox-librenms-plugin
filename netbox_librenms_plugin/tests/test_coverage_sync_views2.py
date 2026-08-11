@@ -2029,7 +2029,13 @@ class TestSyncIPAddressesViewInterfaceResolution:
         assert min(device_locks) < min(address_writes), "the device lock must precede the address write"
 
     def test_primary_ip_row_fails_if_owner_disappears_before_lock(self):
-        """A concurrent owner deletion must not write an orphan address or recreate stale owner data."""
+        """A concurrent owner deletion must not write an orphan address or recreate stale owner data.
+
+        The owner is deleted for real, from inside the query wrapper, just before its lock runs. A
+        stubbed ``select_for_update()`` chain would instead pin the exact call shape the code
+        happens to use today and break on any equivalent rewrite.
+        """
+        from django.db import connection
         from ipam.models import IPAddress
 
         from netbox_librenms_plugin.utils import set_librenms_device_id
@@ -2051,16 +2057,31 @@ class TestSyncIPAddressesViewInterfaceResolution:
         }
         request = _make_request(post_data={"select": ["10.0.0.1"]})
 
+        class _DeleteOwnerBeforeItsLock:
+            """Delete the device row as the sync is about to lock it."""
+
+            def __init__(self, device_pk):
+                self.device_pk = device_pk
+                self.fired = False
+
+            def __call__(self, execute, sql, params, many, context):
+                if not self.fired and 'FROM "dcim_device"' in sql and "FOR UPDATE" in sql.upper():
+                    # Set first: the cascade below re-enters this wrapper.
+                    self.fired = True
+                    type(dev).objects.filter(pk=self.device_pk).delete()
+                return execute(sql, params, many, context)
+
+        deleter = _DeleteOwnerBeforeItsLock(dev.pk)
         with (
             patch(
                 "netbox_librenms_plugin.views.sync.ip_addresses.resolve_set_primary_ip",
                 return_value=True,
             ),
-            patch.object(type(dev).objects, "select_for_update") as select_for_update,
+            connection.execute_wrapper(deleter),
         ):
-            select_for_update.return_value.filter.return_value.first.return_value = None
             results = view.process_ip_sync(request, ["10.0.0.1"], [ip_data], dev, "device")
 
+        assert deleter.fired, "the sync never reached the device lock"
         assert results["failed"] == ["10.0.0.1"]
         assert "no longer exists" in results["errors"]["10.0.0.1"]
         assert not IPAddress.objects.filter(address="10.0.0.1/24").exists()
