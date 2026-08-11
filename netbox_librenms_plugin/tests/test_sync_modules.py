@@ -6296,10 +6296,29 @@ class TestStandaloneAdoptionAcrossEveryComponentType:
     unnoticed. Drive all eight against the real ORM.
     """
 
+    BAY_POSITION = "A1"
+
     @staticmethod
-    def _module_with_one_template(spec, name):
+    def _couples_a_rear_port(model):
+        """True while this NetBox still gives *model* a mandatory rear-port foreign key."""
+        # NetBox 4.5 replaced the front-port rear_port FK with PortTemplateMapping, so the field
+        # decides the shape and the test stays correct on both sides of that change.
+        return any(field.name == "rear_port" for field in model._meta.get_fields())
+
+    @staticmethod
+    def _type_kwargs(model_name):
+        """Return the mandatory ``type`` for the component models that require one."""
+        if "Interface" in model_name:
+            return {"type": "1000base-t"}
+        if "FrontPort" in model_name or "RearPort" in model_name:
+            return {"type": "8p8c"}
+        return {}
+
+    @classmethod
+    def _module_with_one_template(cls, spec, name):
         """Build a real Device + ModuleType carrying exactly one template for *spec*."""
-        from dcim.models import Manufacturer, Module, ModuleBay, ModuleType
+        from dcim.constants import MODULE_TOKEN
+        from dcim.models import Manufacturer, Module, ModuleBay, ModuleType, RearPortTemplate
 
         from netbox_librenms_plugin.tests.conftest import make_device
 
@@ -6309,18 +6328,30 @@ class TestStandaloneAdoptionAcrossEveryComponentType:
         module_type = ModuleType.objects.create(manufacturer=manufacturer, model=f"AdoptType-{name}")
 
         template_model = getattr(ModuleType, template_attribute).rel.related_model
-        template_kwargs = {"module_type": module_type, "name": f"adopt-{name}-0"}
-        if template_model.__name__ == "FrontPortTemplate":
-            # This NetBox decouples the front-port TEMPLATE from a rear-port template: it carries
-            # only type/color/positions. The standalone FrontPort below still needs a rear port.
-            template_kwargs["type"] = "8p8c"
-        elif template_model.__name__ in ("RearPortTemplate", "InterfaceTemplate"):
-            template_kwargs["type"] = "8p8c" if "Port" in template_model.__name__ else "1000base-t"
+        # The {module} token makes the module argument load-bearing in the name resolution.
+        template_kwargs = {"module_type": module_type, "name": f"{MODULE_TOKEN}-adopt-{name}-0"}
+        template_kwargs |= cls._type_kwargs(template_model.__name__)
+        if template_model.__name__ == "FrontPortTemplate" and cls._couples_a_rear_port(template_model):
+            template_kwargs["rear_port"] = RearPortTemplate.objects.create(
+                module_type=module_type, name=f"rear-for-{name}", type="8p8c"
+            )
+            template_kwargs["rear_port_position"] = 1
         template = template_model.objects.create(**template_kwargs)
 
-        bay = ModuleBay.objects.create(device=device, name=f"bay-{name}")
+        bay = ModuleBay.objects.create(device=device, name=f"bay-{name}", position=cls.BAY_POSITION)
         module = Module(device=device, module_bay=bay, module_type=module_type)
         return device, module, template, component_attribute, component_model
+
+    @classmethod
+    def _standalone_kwargs(cls, component_model, device, expected_name):
+        """Return the kwargs a standalone *component_model* needs on the running NetBox."""
+        from dcim.models import RearPort
+
+        kwargs = {"device": device, "name": expected_name} | cls._type_kwargs(component_model.__name__)
+        if component_model.__name__ == "FrontPort" and cls._couples_a_rear_port(component_model):
+            kwargs["rear_port"] = RearPort.objects.create(device=device, name=f"rear-for-{expected_name}", type="8p8c")
+            kwargs["rear_port_position"] = 1
+        return kwargs
 
     @pytest.mark.django_db
     @pytest.mark.parametrize("spec_index", range(8))
@@ -6341,13 +6372,13 @@ class TestStandaloneAdoptionAcrossEveryComponentType:
         # This is the call CodeRabbit questioned for NetBox 4.4/4.5: exercise it for every type.
         expected_name = _module_template_adoption_name(template_attribute, template, module)
         assert expected_name, f"{template_attribute} resolved an empty adoption name"
+        # The token only resolves when the module argument reaches NetBox, so this is what proves
+        # the version-compatible call is right rather than merely self-consistent.
+        assert expected_name == f"{self.BAY_POSITION}-adopt-{component_model.__name__.lower()}-0", (
+            f"{template_attribute} did not resolve the module placeholder from the installed bay"
+        )
 
-        standalone_kwargs = {"device": device, "name": expected_name}
-        if component_model.__name__ == "Interface":
-            standalone_kwargs["type"] = "1000base-t"
-        elif component_model.__name__ in ("RearPort", "FrontPort"):
-            standalone_kwargs["type"] = "8p8c"
-        standalone = component_model.objects.create(**standalone_kwargs)
+        standalone = component_model.objects.create(**self._standalone_kwargs(component_model, device, expected_name))
 
         allowed = {model: model.objects.all() for _, _, model in _module_component_specs()}
         expected = _authorize_adoptable_module_components(module, allowed)
@@ -6374,12 +6405,7 @@ class TestStandaloneAdoptionAcrossEveryComponentType:
         )
         expected_name = _module_template_adoption_name(template_attribute, template, module)
 
-        standalone_kwargs = {"device": device, "name": expected_name}
-        if component_model.__name__ == "Interface":
-            standalone_kwargs["type"] = "1000base-t"
-        elif component_model.__name__ in ("RearPort", "FrontPort"):
-            standalone_kwargs["type"] = "8p8c"
-        component_model.objects.create(**standalone_kwargs)
+        component_model.objects.create(**self._standalone_kwargs(component_model, device, expected_name))
 
         # Every model is in scope EXCEPT the one under test.
         allowed = {
