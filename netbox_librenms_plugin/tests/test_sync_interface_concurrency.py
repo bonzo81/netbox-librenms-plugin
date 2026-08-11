@@ -130,7 +130,9 @@ def test_vlan_scope_is_built_after_the_selected_vc_target_is_locked():
     from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
 
     _vc, (page_device, target_device) = make_virtual_chassis_members("sync-vlan-scope-lock")
-    server_key = "stub"
+    # "default" is the only server CI configures: the sync refuses an unconfigured key before it
+    # ever reaches the target lock this test is about.
+    server_key = "default"
     set_librenms_device_id(page_device, 1, server_key)
     page_device.save()
     new_site = Site.objects.create(name="Sync VLAN New Site", slug="sync-vlan-new-site", status="active")

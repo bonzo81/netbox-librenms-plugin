@@ -4188,6 +4188,67 @@ class TestSyncLagAndParentRelationships:
         assert member.lag is None
         assert member.lag_id is None
 
+    # NetBox 4.4.x reads Interface.virtual_chassis (no such attribute) when the parent sits on
+    # another device, so the validation it means to run raises AttributeError. The NetBox pinned
+    # here validates that edge correctly, so the three tests below inject the failure. `name` is
+    # what a real attribute access sets, and what the production check reads.
+    _CORE_VC_BUG = AttributeError("'Interface' object has no attribute 'virtual_chassis'", name="virtual_chassis")
+
+    def test_cross_member_parent_survives_a_netbox_that_cannot_validate_it(self, db):
+        """The edge NetBox 4.4.x cannot validate is the one it exists to allow: same chassis."""
+        from dcim.models import Interface
+
+        from netbox_librenms_plugin.views.sync.interfaces import _apply_interface_relationship
+
+        _vc, (member1, member2) = make_virtual_chassis_members("relationship-vc-clean-bug")
+        child = make_interface(member2, "Ethernet4.100", iface_type="virtual")
+        parent = make_interface(member1, "Ethernet4")
+
+        with patch.object(Interface, "clean", side_effect=self._CORE_VC_BUG):
+            _apply_interface_relationship(child, "parent", parent)
+
+        child.refresh_from_db()
+        assert child.parent_id == parent.pk
+
+    def test_same_device_parent_does_not_swallow_the_attribute_error(self, db):
+        """Only the cross-chassis edge is tolerated: NetBox never reaches that branch otherwise."""
+        from dcim.models import Interface
+
+        from netbox_librenms_plugin.views.sync.interfaces import _apply_interface_relationship
+
+        device = make_device("relationship-clean-bug-standalone")
+        child = make_interface(device, "Ethernet5.100", iface_type="virtual")
+        parent = make_interface(device, "Ethernet5")
+
+        with patch.object(Interface, "clean", side_effect=self._CORE_VC_BUG), pytest.raises(AttributeError):
+            _apply_interface_relationship(child, "parent", parent)
+
+        child.refresh_from_db()
+        assert child.parent_id is None
+
+    def test_an_unrelated_attribute_error_still_propagates(self, db):
+        """The tolerance is keyed on the failing attribute, not on the shape of the edge alone."""
+        from dcim.models import Interface
+
+        from netbox_librenms_plugin.views.sync.interfaces import _apply_interface_relationship
+
+        _vc, (member1, member2) = make_virtual_chassis_members("relationship-vc-other-error")
+        child = make_interface(member2, "Ethernet6.100", iface_type="virtual")
+        parent = make_interface(member1, "Ethernet6")
+
+        with (
+            patch.object(
+                Interface,
+                "clean",
+                side_effect=AttributeError("'Interface' object has no attribute 'nope'", name="nope"),
+            ),
+            pytest.raises(AttributeError),
+        ):
+            _apply_interface_relationship(child, "parent", parent)
+
+        child.refresh_from_db()
+        assert child.parent_id is None
+
     def test_name_hint_resolves_on_expected_owner_across_vc_duplicate_names(self, db):
         """On a VC, an id-less interface whose name is shared across members resolves to the SELECTED member, not chassis-wide ambiguity."""
         from netbox_librenms_plugin.tests.conftest import make_virtual_chassis

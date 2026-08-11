@@ -1032,7 +1032,9 @@ class TestSingleInterfaceVerifyView:
         )
         child = make_interface(page_device, "Ethernet1.100", iface_type="virtual")
         parent = make_interface(hidden_parent_device, "Ethernet2")
-        server_key = "stub"
+        # "default" is the only server CI configures: an unconfigured key makes the inline POST
+        # fail its rebind with a 400 before the scoped lookup this test asserts on.
+        server_key = "default"
         set_librenms_device_id(child, 10, server_key)
         set_librenms_device_id(parent, 20, server_key)
         child.save()

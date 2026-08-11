@@ -1676,6 +1676,47 @@ def _promote_lag_aggregate(agg, *, with_restore):
     return _persist
 
 
+def _validate_relationship(source_iface, relation_field, related_iface):
+    """
+    Run NetBox's model validation for the new relationship FK.
+
+    NetBox 4.4.x reads ``self.parent.virtual_chassis`` when the parent sits on another device.
+    ``Interface`` has no such attribute (4.6 reads ``self.device.virtual_chassis``), so the
+    validation NetBox means to run raises AttributeError instead. Tolerate it only for the edge
+    that comparison exists to allow, two interfaces on members of one virtual chassis, and only
+    when the failure really is that attribute.
+
+    Args:
+        source_iface: The interface whose FK was set.
+        relation_field: The FK attribute that changed (``"lag"`` | ``"parent"``).
+        related_iface: The interface the FK now points at.
+
+    Raises:
+        ValidationError: when NetBox rejects the relationship.
+        AttributeError: any failure that is not the 4.4.x cross-chassis parent bug.
+    """
+    try:
+        source_iface.clean()
+    except AttributeError as exc:
+        source_chassis = getattr(source_iface.device, "virtual_chassis_id", None)
+        related_chassis = getattr(getattr(related_iface, "device", None), "virtual_chassis_id", None)
+        if not (
+            relation_field == "parent"
+            # exc.name is the attribute the failed access asked for (Python 3.10+), so this
+            # matches the one dereference rather than any message mentioning it.
+            and getattr(exc, "name", None) == "virtual_chassis"
+            and source_chassis is not None
+            and source_chassis == related_chassis
+        ):
+            raise
+        logger.debug(
+            "Interface %s: this NetBox cannot validate a parent on another chassis member; "
+            "both interfaces belong to virtual chassis %s, so the edge is accepted.",
+            source_iface.name,
+            source_chassis,
+        )
+
+
 def _apply_interface_relationship(source_iface, relation_field, related_iface, prepare_related=None):
     """
     Set ``source_iface.<relation_field> = related_iface``, validate, and persist both sides.
@@ -1722,7 +1763,7 @@ def _apply_interface_relationship(source_iface, relation_field, related_iface, p
         # NetBox's model clean() contains the cross-owner/type/self-link rules that matter here.
         # Running full_clean() would revalidate every unchanged FK and uniqueness constraint,
         # adding several SELECTs per edge while all relationship rows remain locked.
-        source_iface.clean()
+        _validate_relationship(source_iface, relation_field, related_iface)
         if persist_related:
             persist_related()
         source_iface.save(update_fields=[relation_field])
