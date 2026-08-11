@@ -1,3 +1,4 @@
+import copy
 import json as json_module
 from functools import cached_property
 
@@ -84,24 +85,32 @@ class LibreNMSInterfaceTable(tables.Table):
         # 1-2 InterfaceTypeMapping queries for every interface row (the table is small and static).
         self._interface_type_mapping_cache = None
 
-        # Submit the stable LibreNMS port ID. Display names can collide when ifDescr is active.
-        self.base_columns["selection"].accessor = "port_id"
-        self.base_columns["name"].accessor = self.interface_name_field
+        # Retarget the two columns per instance. ``base_columns`` and ``_meta`` are class
+        # attributes, so writing to them here would retarget every later table in this worker
+        # process. ``extra_columns`` is applied to Table.__init__'s own copy, and the accessor
+        # must be set before it runs because BoundColumn.accessor is cached during binding.
+        # Submit the stable LibreNMS port ID: display names can collide when ifDescr is active.
+        selection_column = copy.deepcopy(type(self).base_columns["selection"])
+        selection_column.accessor = "port_id"
+        name_column = copy.deepcopy(type(self).base_columns["name"])
+        name_column.accessor = self.interface_name_field
 
-        # Set row attributes using interface_name_field
-        self._meta.row_attrs = {
-            "data-interface": lambda record: record.get(self.interface_name_field),
-            "data-name": lambda record: record.get(self.interface_name_field),
-            "data-enabled": lambda record: (
-                str(record.get("ifAdminStatus")).lower() if record.get("ifAdminStatus") is not None else ""
-            ),
-            "data-port-id": lambda record: str(record.get("port_id", "")),
-            "data-member-of-lag": lambda record: str(record.get("librenms_lag_port_id") or ""),
-            "data-parent-port-id": lambda record: str(record.get("librenms_parent_port_id") or ""),
-            "data-parent-name": lambda record: str(record.get("librenms_parent_name") or ""),
-        }
-
-        super().__init__(*args, **kwargs)
+        super().__init__(
+            *args,
+            extra_columns=[("selection", selection_column), ("name", name_column)],
+            row_attrs={
+                "data-interface": lambda record: record.get(self.interface_name_field),
+                "data-name": lambda record: record.get(self.interface_name_field),
+                "data-enabled": lambda record: (
+                    str(record.get("ifAdminStatus")).lower() if record.get("ifAdminStatus") is not None else ""
+                ),
+                "data-port-id": lambda record: str(record.get("port_id", "")),
+                "data-member-of-lag": lambda record: str(record.get("librenms_lag_port_id") or ""),
+                "data-parent-port-id": lambda record: str(record.get("librenms_parent_port_id") or ""),
+                "data-parent-name": lambda record: str(record.get("librenms_parent_name") or ""),
+            },
+            **kwargs,
+        )
         self.tab = "interfaces"
         self.htmx_url = None
         self.prefix = "interfaces_"

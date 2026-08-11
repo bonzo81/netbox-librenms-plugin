@@ -1959,6 +1959,35 @@ class TestRelationshipBadgeCompactLayout:
         assert 'aria-label="Update LAG to match LibreNMS"' in html
 
     @pytest.mark.django_db
+    def test_name_field_does_not_leak_into_a_later_table(self):
+        """A non-default name field must not retarget the columns of the next table built.
+
+        ``base_columns`` and ``_meta`` are class attributes, and Table.__init__ deep-copies
+        base_columns only after ``__init__`` runs, so assigning to either before ``super()``
+        rewrote the accessor for every later table in the worker process, across requests.
+        """
+        from netbox_librenms_plugin.tables.interfaces import LibreNMSInterfaceTable
+
+        with patch("netbox_librenms_plugin.tables.interfaces.get_interface_name_field", return_value="ifName"):
+            LibreNMSInterfaceTable(data=[], device=None, interface_name_field="ifDescr", server_key="default")
+            later = LibreNMSInterfaceTable(data=[], device=None, server_key="default")
+
+        assert later.interface_name_field == "ifName"
+        assert later.columns["name"].column.accessor == "ifName"
+        # The class itself must be untouched, so a fresh worker sees the declared default.
+        assert LibreNMSInterfaceTable.base_columns["name"].accessor is None
+
+    def test_row_attrs_are_per_instance_not_shared_on_the_class(self):
+        """The row-attribute map must be bound to the instance, not written onto Meta."""
+        from netbox_librenms_plugin.tables.interfaces import LibreNMSInterfaceTable
+
+        with patch("netbox_librenms_plugin.tables.interfaces.get_interface_name_field", return_value="ifName"):
+            table = LibreNMSInterfaceTable(data=[], device=None, interface_name_field="ifDescr", server_key="default")
+
+        assert "data-interface" in table.row_attrs
+        assert not LibreNMSInterfaceTable._meta.row_attrs
+
+    @pytest.mark.django_db
     def test_unresolvable_owner_renders_badge_only_instead_of_failing_the_render(self):
         """An unresolved owner must degrade this cell, not raise NoReverseMatch for the table.
 
