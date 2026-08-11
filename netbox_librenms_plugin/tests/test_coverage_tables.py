@@ -1958,6 +1958,38 @@ class TestRelationshipBadgeCompactLayout:
         # Icon-only button also carries an accessible name (title alone is not a reliable one).
         assert 'aria-label="Update LAG to match LibreNMS"' in html
 
+    @pytest.mark.django_db
+    def test_unresolvable_owner_renders_badge_only_instead_of_failing_the_render(self):
+        """An unresolved owner must degrade this cell, not raise NoReverseMatch for the table.
+
+        ``_resolve_row_member_id`` returns "" when the table has no device context and the row's
+        interface carries no device id. ``reverse()`` with an empty object_id raises, which would
+        take down the whole table render instead of dropping one button.
+        """
+        from netbox_librenms_plugin.tables.interfaces import LibreNMSInterfaceTable
+        from netbox_librenms_plugin.tests.conftest import make_device, make_interface
+
+        with patch("netbox_librenms_plugin.tables.interfaces.get_interface_name_field", return_value="ifName"):
+            table = LibreNMSInterfaceTable(data=[], device=None, server_key="default")
+        source = make_interface(make_device("relationship-no-owner"), "eth0")
+        source.device_id = None  # in-memory only: models the row whose owner cannot be resolved
+
+        html = str(
+            table._render_relationship_column(
+                type_label="LAG",
+                lnms_name="ae9",
+                lnms_port_id=42,
+                sync_status="mismatch",
+                record={"port_id": 7, "netbox_interface": source},
+                btn_class="lag-sync-btn",
+                data_related_key="data-lag-port-id",
+            )
+        )
+
+        assert "lag-sync-btn" not in html
+        assert "mdi-sync" not in html
+        assert 'class="badge' in html
+
     def test_missing_lnms_renders_badge_only_no_button(self):
         """missing_lnms (NetBox has the relationship, LibreNMS doesn't) has no LibreNMS port_id to sync TO, so the lnms_port_id guard keeps the button off — only the status pill renders."""
         table = self._table()

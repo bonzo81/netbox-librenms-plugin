@@ -1960,6 +1960,58 @@ class TestInterfaceContextVirtualChassisOwner:
 
 
 class TestSyncInterfacesViewPost:
+    def test_integrity_error_at_the_outer_commit_is_reported_not_a_500(self):
+        """An IntegrityError escaping the outer atomic must redirect with an error, not propagate.
+
+        The relationship pass catches IntegrityError around an inner savepoint. Postgres validates
+        Django's DEFERRABLE INITIALLY DEFERRED foreign keys at the OUTERMOST commit, so a
+        concurrently deleted related row surfaces past that handler. Injected here because a real
+        deferred violation needs a concurrent deletion inside the commit window.
+        """
+        from types import SimpleNamespace
+
+        from django.core.cache import cache
+        from django.db import IntegrityError
+
+        from netbox_librenms_plugin.tests.view_test_helpers import make_superuser, message_texts
+        from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
+
+        device = make_device("outer-commit-integrity")
+        port = {
+            "port_id": 10,
+            "ifName": "Ethernet1",
+            "ifDescr": "Ethernet1",
+            "ifAlias": "",
+            "ifType": "ethernetCsmacd",
+            "ifSpeed": 1_000_000_000,
+            "ifPhysAddress": "",
+            "ifMtu": 1500,
+            "ifAdminStatus": "up",
+            "untagged_vlan": None,
+            "tagged_vlans": [],
+        }
+        request = _make_request(
+            post_data={"select": ["10"], "exclude_columns": ["mac_address", "description", "mtu", "speed", "type"]},
+            user=make_superuser("outer-commit-integrity"),
+        )
+        view = SyncInterfacesView()
+        view._librenms_api = SimpleNamespace(server_key="default")
+        cache_key = view.get_cache_key(device, "ports", "default")
+        cache.set(cache_key, {"ports": [port], "port_stack_relationships": {}})
+
+        try:
+            with patch.object(
+                SyncInterfacesView,
+                "_sync_lag_and_parent_relationships",
+                side_effect=IntegrityError("deferred FK violated at COMMIT"),
+            ):
+                response = _post(view, request, object_type="device", object_id=device.pk)
+        finally:
+            cache.delete(cache_key)
+
+        assert response.status_code == 302
+        assert any("rolled back by a concurrent change" in text for text in message_texts(request, "error"))
+
     def test_vlan_maps_cover_only_selected_row_owners(self):
         """One selected row must not build VLAN scope maps for unrelated chassis members."""
         from types import SimpleNamespace
@@ -3959,6 +4011,33 @@ class TestSyncInterfacesViewSyncInterfaceVlans:
         interface.refresh_from_db()
         assert interface.mode == "tagged"
         assert list(interface.tagged_vlans.all()) == [existing_vlan]
+
+    def test_non_numeric_cached_vid_is_dropped_instead_of_aborting_the_sync(self):
+        """A non-numeric VLAN id in the cached payload must not raise out of the sync.
+
+        ``get_cached_ports_data`` only checks that each port is a dict, so the value reaches the
+        int() coercions. A ValueError here aborts the enclosing sync transaction after other
+        rows have already applied their changes.
+        """
+        from ipam.models import VLAN
+
+        from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
+
+        device = make_device("bad-vid-owner")
+        interface = make_interface(device, "Ethernet1")
+        real_vlan = VLAN.objects.create(vid=100, name="Real VLAN", status="active")
+        view = object.__new__(SyncInterfacesView)
+        # The group override is keyed by port_id and VID, so post the malformed VID's key too.
+        view.request = _make_request({"vlan_group_10_not-a-vid": "1", "vlan_group_10_100": "1"})
+        view._lookup_maps = view._index_vlans([real_vlan])
+        view._lookup_maps_by_owner = None
+        view._vlan_owners_by_id = {}
+
+        view._sync_interface_vlans(interface, {"port_id": 10, "untagged_vlan": "not-a-vid", "tagged_vlans": [100]})
+
+        interface.refresh_from_db()
+        # The good VID still applied; only the malformed one was dropped.
+        assert list(interface.tagged_vlans.all()) == [real_vlan]
 
 
 # ===========================================================================

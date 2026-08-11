@@ -1270,7 +1270,9 @@ class TestSingleInterfaceVerifyView:
             cache.delete(cache_key)
 
         assert verify_response.status_code == 200, verify_response.content
-        assert inline_response.status_code != 200
+        # Pin the refusal status: "!= 200" also passes for a 500 from an unrelated crash, and the
+        # state assertions below hold after any failed request because nothing was written.
+        assert inline_response.status_code == 403, inline_response.content
         assert "lag-sync-btn" not in table_html
         assert "lag-sync-btn" not in json.loads(verify_response.content)["formatted_row"]["parent"]
         member.refresh_from_db()
@@ -1279,7 +1281,7 @@ class TestSingleInterfaceVerifyView:
         assert aggregate.type != "lag"
 
     @pytest.mark.django_db
-    def test_verify_rejects_non_string_interface_name_field_at_boundary(self):
+    def test_verify_falls_back_when_interface_name_field_is_not_a_string(self):
         from django.core.cache import cache
 
         from netbox_librenms_plugin.librenms_api import LibreNMSAPI
@@ -1329,6 +1331,9 @@ class TestSingleInterfaceVerifyView:
             cache.delete(cache_key)
 
         assert response.status_code == 200
+        # 200 alone does not say how the list was handled: a regression that coerced it into a
+        # column name would also return 200. Pin the fallback to the default name column.
+        assert "Ethernet1" in json.loads(response.content)["formatted_row"]["name"]
 
     @pytest.mark.django_db
     def test_verify_materializes_only_relationship_candidates(self):

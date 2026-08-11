@@ -652,6 +652,10 @@ class LibreNMSInterfaceTable(tables.Table):
             # data-object-id and the dropdown agree (the JS posts the dropdown value, so a
             # disagreement would 404). See _resolve_row_member_id.
             object_id = self._resolve_row_member_id(record)
+            if not object_id:
+                # No resolvable owner. reverse() would raise NoReverseMatch and take down the
+                # whole table render, so degrade this one cell the way target_resolvable does.
+                return format_html('<div class="text-nowrap lh-sm">{}</div>', badge)
             object_type = record.get("selected_object_type") or self.sync_object_type
             route_name = "sync_interface_lag" if btn_class == "lag-sync-btn" else "sync_interface_parent"
             sync_url = reverse(

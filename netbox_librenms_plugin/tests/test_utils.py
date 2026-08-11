@@ -401,6 +401,22 @@ class TestConversionHelpers:
         assert normalize_librenms_port_id("1" * 5000) is None
         assert normalize_librenms_port_id(1.5) is None
 
+    def test_oversized_digit_string_is_rejected_by_the_helper_not_the_interpreter(self):
+        """The length cap must hold with CPython's int_max_str_digits limit disabled."""
+        import sys
+
+        from netbox_librenms_plugin.utils import normalize_librenms_port_id
+
+        previous = sys.get_int_max_str_digits()
+        sys.set_int_max_str_digits(0)
+        try:
+            assert normalize_librenms_port_id("1" * 5000) is None
+            # 19 digits is the bigint width and stays acceptable.
+            assert normalize_librenms_port_id("9" * 19) == int("9" * 19)
+            assert normalize_librenms_port_id("9" * 20) is None
+        finally:
+            sys.set_int_max_str_digits(previous)
+
     def test_unambiguous_interface_name_index_rejects_duplicate_ids_and_names(self):
         from netbox_librenms_plugin.utils import get_interface_port_identity_sets
 

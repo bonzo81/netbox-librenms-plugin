@@ -2717,10 +2717,16 @@ class TestResolvePortRelationships:
         """Without device_os, every stored pattern is loaded (legacy behaviour)."""
         from netbox_librenms_plugin.models import PortStackLagPattern
 
-        PortStackLagPattern.objects.create(librenms_os="ztest_pochannel", lag_name_pattern=r"^Po\d+$")
+        # Migration 0013 seeds ios/iosxe with ^Po\d+$, which already classifies Po10. Use a name
+        # no seeded row can match, so only the unscoped load of every stored pattern explains it.
+        PortStackLagPattern.objects.create(librenms_os="ztest_zagg", lag_name_pattern=r"^Zagg\d+$")
+        ports = [
+            {"port_id": 801, "ifName": "Te1/1", "ifType": "ethernetCsmacd"},
+            {"port_id": 802, "ifName": "Zagg7", "ifType": "propVirtual"},
+        ]
 
-        result = mock_librenms_api.resolve_port_relationships(CISCO_IOS_PORTS, CISCO_IOS_PORT_STACK[:1])
-        assert result["lag_members"] == {301: 302}
+        result = mock_librenms_api.resolve_port_relationships(ports, [{"high_port_id": 801, "low_port_id": 802}])
+        assert result["lag_members"] == {801: 802}
 
     @pytest.mark.django_db
     def test_db_patterns_non_string_device_os_disables_name_patterns(self, mock_librenms_api):

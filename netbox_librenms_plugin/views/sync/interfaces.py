@@ -169,28 +169,40 @@ class SyncInterfacesView(
         # below so the skip isn't silent — otherwise the user only sees it in the logs.
         self._skipped_conflicts = []
         self._synced_count = 0
-        with transaction.atomic():
-            try:
-                self.sync_selected_interfaces(
-                    obj,
-                    ports_data,
-                    exclude_columns,
-                    interface_name_field,
-                    keep_locked_targets=True,
-                )
+        try:
+            with transaction.atomic():
+                try:
+                    self.sync_selected_interfaces(
+                        obj,
+                        ports_data,
+                        exclude_columns,
+                        interface_name_field,
+                        keep_locked_targets=True,
+                    )
 
-                # Keep the target-device locks and their current object map through relationship
-                # validation and persistence. Reusing the map also avoids one permission-filtered
-                # Device lookup per selected VC relationship edge.
-                self._sync_lag_and_parent_relationships(
-                    self.object,
-                    ports_data,
-                    relationships,
-                    server_key,
-                    excluded_columns=exclude_columns,
-                )
-            finally:
-                self.__dict__.pop("_locked_target_devices", None)
+                    # Keep the target-device locks and their current object map through relationship
+                    # validation and persistence. Reusing the map also avoids one permission-filtered
+                    # Device lookup per selected VC relationship edge.
+                    self._sync_lag_and_parent_relationships(
+                        self.object,
+                        ports_data,
+                        relationships,
+                        server_key,
+                        excluded_columns=exclude_columns,
+                    )
+                finally:
+                    self.__dict__.pop("_locked_target_devices", None)
+        except IntegrityError:
+            # This block is the outermost transaction, and Postgres validates Django's DEFERRABLE
+            # INITIALLY DEFERRED foreign keys at its COMMIT. A related row deleted mid-sync
+            # therefore surfaces here, past every inner savepoint handler, and would otherwise 500.
+            logger.warning("Bulk sync: rolled back by a concurrent DB conflict at commit", exc_info=True)
+            messages.error(
+                request,
+                "The sync was rolled back by a concurrent change to a related interface. "
+                "Refresh the LibreNMS data and try again.",
+            )
+            return redirect(redirect_url)
 
         if self._skipped_conflicts:
             skipped = ", ".join(self._skipped_conflicts)
@@ -532,11 +544,9 @@ class SyncInterfacesView(
                         if child_iface and child_iface.parent_id != parent_iface.pk:
                             self._apply_relationship_edge(child_iface, "parent", parent_iface, None, "parent")
         except IntegrityError:
-            # Django's Postgres FK constraints are INITIALLY DEFERRED: a related row
-            # deleted mid-batch surfaces only at this block's COMMIT — after every
-            # per-row guard has already passed — so it cannot be caught per edge. The
-            # relationship pass rolls back as a unit (the interface sync itself already
-            # committed); fail soft with a retry hint instead of 500ing the sync POST.
+            # Immediate conflicts (a unique violation, a row already gone at write time) surface
+            # here and roll the relationship pass back as a unit. Deferred FK violations do NOT:
+            # Postgres validates those at the outermost COMMIT, which post() handles.
             logger.warning(
                 "Bulk sync: LAG/parent relationship pass rolled back by a concurrent DB conflict",
                 exc_info=True,
@@ -1157,13 +1167,21 @@ class SyncInterfacesView(
         owner = getattr(self, "_vlan_owners_by_id", {}).get(owner_id)
         for vid, group_id in list(vlan_group_map.items()):
             try:
+                vid_int = int(vid)
+            except (TypeError, ValueError):
+                # The VID comes from the cached LibreNMS payload, which is only checked for being
+                # a dict. A non-numeric value here would abort the whole sync transaction.
+                logger.warning("Skipping VLAN group selection for non-numeric VID %r on %s", vid, interface)
+                vlan_group_map.pop(vid, None)
+                continue
+            try:
                 group_id_int = int(group_id)
             except (TypeError, ValueError):
                 group_id_int = None
-            if group_id_int is not None and (int(vid), group_id_int) in lookup_maps.get("vid_group_to_vlan", {}):
+            if group_id_int is not None and (vid_int, group_id_int) in lookup_maps.get("vid_group_to_vlan", {}):
                 continue
 
-            groups = lookup_maps.get("vid_to_groups", {}).get(int(vid), [])
+            groups = lookup_maps.get("vid_to_groups", {}).get(vid_int, [])
             selected_group = groups[0] if len(groups) == 1 else self._select_most_specific_group(groups, owner)
             if selected_group is None:
                 vlan_group_map.pop(vid, None)

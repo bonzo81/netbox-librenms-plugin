@@ -248,6 +248,37 @@ def _mapping_change_is_allowed(view, model, pk) -> bool:
     return view.restricted_queryset(model, "change").filter(pk=pk).exists()
 
 
+def _lock_mapping_in_scope(view, model, lookup, duplicate_message):
+    """
+    Read the candidate mapping pks unlocked, then lock the first one inside the change scope.
+
+    Shared by the device-type and platform mapping views so the permission guarantee cannot drift
+    between two copies. Scope BEFORE locking: locking first lets a caller pin a row it cannot see
+    and stall concurrent work on it. The duplicate check still has to see every row, so it reads
+    unlocked and by pk only, materialised in one query (count() would drop the FOR UPDATE clause).
+
+    Args:
+        view: The calling view, used for ``restricted_queryset``.
+        model: The mapping model to lock.
+        lookup: Filter kwargs identifying the mapping's natural key.
+        duplicate_message: Error text shown when more than one row matches.
+
+    Returns:
+        tuple: ``(locked, None)`` on success, where *locked* is None when no row exists, or
+        ``(None, error_response)`` when the caller must stop.
+    """
+    present_pks = list(model.objects.filter(**lookup).values_list("pk", flat=True)[:2])
+    if len(present_pks) > 1:
+        return None, _htmx_error_response(duplicate_message)
+    if not present_pks:
+        return None, None
+    locked = view.restricted_queryset(model, "change").select_for_update(of=("self",)).filter(pk=present_pks[0]).first()
+    # A row appeared (or left this caller's scope) after the upfront check.
+    if locked is None:
+        return None, _htmx_error_response("Existing mapping is no longer available.")
+    return locked, None
+
+
 def _oob_ip_is_reassignable(candidate, interface) -> bool:
     """
     Return whether *candidate* may be re-homed to *interface* without taking another device's IP.
@@ -2173,29 +2204,14 @@ class AddDeviceTypeMappingView(
                 # created duplicate rather than mutating an arbitrary row. Key on the
                 # NORMALISED hardware string (mapping_hardware) so the lock matches
                 # the existing_mapping lookup and create() below.
-                # Scope BEFORE locking: locking first lets a caller hold a row it cannot even see
-                # and stall concurrent work on it. The duplicate check still has to see every
-                # row, so it reads unlocked and by pk only.
-                present_pks = list(
-                    DeviceTypeMapping.objects.filter(librenms_hardware__iexact=mapping_hardware).values_list(
-                        "pk", flat=True
-                    )[:2]
+                locked, lock_error = _lock_mapping_in_scope(
+                    self,
+                    DeviceTypeMapping,
+                    {"librenms_hardware__iexact": mapping_hardware},
+                    "Multiple mappings exist for this hardware string. Remove duplicates before updating.",
                 )
-                if len(present_pks) > 1:
-                    return _htmx_error_response(
-                        "Multiple mappings exist for this hardware string. Remove duplicates before updating."
-                    )
-                locked = None
-                if present_pks:
-                    locked = (
-                        self.restricted_queryset(DeviceTypeMapping, "change")
-                        .select_for_update(of=("self",))
-                        .filter(pk=present_pks[0])
-                        .first()
-                    )
-                    # A row appeared (or left this caller's scope) after the upfront check.
-                    if locked is None:
-                        return _htmx_error_response("Existing mapping is no longer available.")
+                if lock_error is not None:
+                    return lock_error
                 if locked and not existing_mapping:
                     # A concurrent request created the mapping after our upfront read.
                     # Only escalate to change permission if we would actually mutate the row;
@@ -3887,27 +3903,14 @@ class AddPlatformMappingView(
                 # lock absent rows, so the create branch handles IntegrityError.
                 # Materialise the locked rows in one query — count() would drop
                 # the FOR UPDATE clause, leaving the rows unlocked.
-                # Scope BEFORE locking: locking first lets a caller hold a row it cannot even see
-                # and stall concurrent work on it. The duplicate check still has to see every
-                # row, so it reads unlocked and by pk only.
-                present_pks = list(
-                    PlatformMapping.objects.filter(librenms_os__iexact=librenms_os).values_list("pk", flat=True)[:2]
+                locked, lock_error = _lock_mapping_in_scope(
+                    self,
+                    PlatformMapping,
+                    {"librenms_os__iexact": librenms_os},
+                    "Multiple mappings exist for this OS string. Remove duplicates before updating.",
                 )
-                if len(present_pks) > 1:
-                    return _htmx_error_response(
-                        "Multiple mappings exist for this OS string. Remove duplicates before updating."
-                    )
-                locked = None
-                if present_pks:
-                    locked = (
-                        self.restricted_queryset(PlatformMapping, "change")
-                        .select_for_update(of=("self",))
-                        .filter(pk=present_pks[0])
-                        .first()
-                    )
-                    # A row appeared (or left this caller's scope) after the upfront check.
-                    if locked is None:
-                        return _htmx_error_response("Existing mapping is no longer available.")
+                if lock_error is not None:
+                    return lock_error
                 if locked and not existing_mapping:
                     # Concurrent request created the mapping after our upfront read.
                     # Only escalate to change permission if we would actually mutate.

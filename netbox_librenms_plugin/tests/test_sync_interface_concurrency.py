@@ -288,7 +288,9 @@ def test_inaccessible_selected_target_is_not_locked():
         close_old_connections()
         try:
             with connection.cursor() as cursor:
-                cursor.execute("SET lock_timeout = '5s'")
+                # Below the caller's future.result(timeout=5): if this test regresses and the row
+                # IS locked, the lock timeout must fire first so the failure names the real cause.
+                cursor.execute("SET lock_timeout = '500ms'")
                 cursor.execute("SET statement_timeout = '5s'")
             thread_page = Device.objects.get(pk=page_device.pk)
             thread_user = get_user_model().objects.get(pk=user.pk)
@@ -789,7 +791,8 @@ def test_bulk_relationship_pass_skips_scope_locks_without_selected_edges():
         close_old_connections()
         try:
             with connection.cursor() as cursor:
-                cursor.execute("SET lock_timeout = '5s'")
+                # Below the caller's future.result(timeout=5), as in sync_forged_target above.
+                cursor.execute("SET lock_timeout = '500ms'")
                 cursor.execute("SET statement_timeout = '5s'")
             thread_device = type(device).objects.get(pk=device.pk)
             thread_user = get_user_model().objects.get(pk=user.pk)

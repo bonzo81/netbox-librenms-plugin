@@ -20,7 +20,9 @@ from netbox_librenms_plugin.constants import OOB_BADGE_HTML
 
 logger = logging.getLogger(__name__)
 
-_ASCII_POSITIVE_INTEGER_RE = re.compile(r"^[ \t\r\n\f\v]*\+?[0-9]+[ \t\r\n\f\v]*$")
+# Bounded at 19 digits, the width of a PostgreSQL bigint. Without the bound an oversized string is
+# rejected only by CPython's int_max_str_digits limit, which a host may raise or disable.
+_ASCII_POSITIVE_INTEGER_RE = re.compile(r"^[ \t\r\n\f\v]*\+?[0-9]{1,19}[ \t\r\n\f\v]*$")
 
 
 def is_list_of_dicts(value) -> bool:
