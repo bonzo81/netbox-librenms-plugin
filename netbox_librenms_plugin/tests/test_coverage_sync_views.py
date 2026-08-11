@@ -554,7 +554,20 @@ class TestSyncCablesViewPost:
 
         from netbox_librenms_plugin.tests.conftest import make_device
 
-        with patch.object(view, "require_all_permissions", return_value=None):
+        # A second REAL server, derived from the configured default: the posted key must be the
+        # one stored, and only a non-default key can tell that apart from the fallback. Configured
+        # here rather than assumed, because the test settings define "default" alone.
+        plugins_config = copy.deepcopy(settings.PLUGINS_CONFIG)
+        servers = plugins_config["netbox_librenms_plugin"]["servers"]
+        servers["secondary"] = dict(servers["default"])
+
+        view = _make_view(SyncCablesView)
+        view.request = _make_request({"server_key": "secondary"})
+        mock_device = make_device("sync-server-key-post")
+        with (
+            override_settings(PLUGINS_CONFIG=plugins_config),
+            patch.object(view, "require_all_permissions", return_value=None),
+        ):
             with patch(
                 "netbox_librenms_plugin.views.mixins.NetBoxObjectPermissionMixin.restrict_object_or_404",
                 return_value=mock_device,

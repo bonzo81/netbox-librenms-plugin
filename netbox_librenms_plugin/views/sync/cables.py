@@ -1,3 +1,4 @@
+import functools
 import hashlib
 import json
 import logging
@@ -38,6 +39,20 @@ from netbox_librenms_plugin.views.mixins import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+@functools.cache
+def _cable_termination_has_connector():
+    """
+    Return whether this NetBox gives CableTermination a ``connector`` column.
+
+    NetBox added it after 4.4, where naming it raises ``FieldError: Cannot resolve keyword
+    'connector'`` and takes down every cable sync. Follow the model, not the version.
+
+    Returns:
+        bool: True when the column exists and belongs in the topology fingerprint.
+    """
+    return any(field.name == "connector" for field in CableTermination._meta.get_fields())
 
 
 class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreNMSAPIMixin, CacheMixin, View):
@@ -438,10 +453,11 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libre
     def _cable_state_token(cables, *, lock=False):
         """Fingerprint the exact Cable rows and termination topology."""
         cable_ids = sorted(cables)
+        connector = ("connector",) if _cable_termination_has_connector() else ()
         terminations = CableTermination.objects.filter(cable_id__in=cable_ids).order_by(
             "cable_id",
             "cable_end",
-            "connector",
+            *connector,
             "pk",
         )
         if lock:
@@ -452,7 +468,7 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libre
                 "cable_end",
                 "termination_type_id",
                 "termination_id",
-                "connector",
+                *connector,
                 "positions",
             )
         )
