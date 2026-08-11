@@ -265,7 +265,10 @@ def relock_scoped_row(model, **lookup):
     Returns:
         The locked instance, or None when the row is gone.
     """
-    return model.objects.select_for_update().filter(**lookup).first()
+    # order_by() drops the model ordering, which can traverse a nullable FK (VLAN orders by
+    # site/group): PostgreSQL refuses FOR UPDATE over the nullable side of the resulting outer
+    # join. first() then orders by pk, which joins nothing.
+    return model.objects.select_for_update().filter(**lookup).order_by().first()
 
 
 class NetBoxObjectPermissionMixin:

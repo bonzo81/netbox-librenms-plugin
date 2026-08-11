@@ -245,6 +245,17 @@ class SyncVLANsView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreN
                         permission_skipped_count += 1
                         continue
 
+                    # The advisory lock above covers global VIDs only, so a grouped row is still
+                    # unprotected between this scope check and the save below.
+                    vlan = self.relock_scoped_row(VLAN, pk=vlan.pk)
+                    if vlan is None:
+                        messages.error(
+                            request,
+                            f"VLAN {vid}: the VLAN could not be resolved after a concurrent change; skipped.",
+                        )
+                        concurrent_change_count += 1
+                        continue
+
                 if created:
                     created_count += 1
                 elif vlan.name != librenms_name:
