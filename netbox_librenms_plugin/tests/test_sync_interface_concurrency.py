@@ -125,14 +125,15 @@ def test_vlan_scope_is_built_after_the_selected_vc_target_is_locked():
     from django.db import close_old_connections, connection
     from ipam.models import VLAN, VLANGroup
 
+    from netbox_librenms_plugin.librenms_api import LibreNMSAPI
     from netbox_librenms_plugin.tests.view_test_helpers import make_request, make_superuser, post
     from netbox_librenms_plugin.utils import set_librenms_device_id
     from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
 
     _vc, (page_device, target_device) = make_virtual_chassis_members("sync-vlan-scope-lock")
-    # Use the configured devcontainer server key. The "default" alias resolves to this key
-    # during POST, so a literal "default" cache entry cannot reach the lock boundary.
-    server_key = "stub"
+    # Use the real configured key. The devcontainer and CI use different names, and the request
+    # must pass the configured-server guard before this test can reach the lock boundary.
+    server_key = next(iter(LibreNMSAPI.get_available_servers()))
     set_librenms_device_id(page_device, 1, server_key)
     page_device.save()
     new_site = Site.objects.create(name="Sync VLAN New Site", slug="sync-vlan-new-site", status="active")

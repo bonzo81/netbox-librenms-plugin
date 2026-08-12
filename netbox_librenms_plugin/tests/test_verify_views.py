@@ -1032,9 +1032,9 @@ class TestSingleInterfaceVerifyView:
         )
         child = make_interface(page_device, "Ethernet1.100", iface_type="virtual")
         parent = make_interface(hidden_parent_device, "Ethernet2")
-        # Use the configured devcontainer server key. The "default" alias resolves to this key
-        # during the inline POST, so seeding a literal "default" cache key would test a cache miss.
-        server_key = "stub"
+        # Use the real configured key. The devcontainer names it ``stub`` while CI names it
+        # ``default``; a hardcoded key makes the request fail before the permission behavior.
+        server_key = next(iter(LibreNMSAPI.get_available_servers()))
         set_librenms_device_id(child, 10, server_key)
         set_librenms_device_id(parent, 20, server_key)
         child.save()
@@ -1185,7 +1185,7 @@ class TestSingleInterfaceVerifyView:
         from netbox_librenms_plugin.views.object_sync.devices import DeviceInterfaceTableView
         from netbox_librenms_plugin.views.sync.interfaces import SyncInterfaceLagView
 
-        server_key = "stub"
+        server_key = next(iter(LibreNMSAPI.get_available_servers()))
         device = make_device("verify-view-only-lag-target")
         member = make_interface(device, "Ethernet1")
         aggregate = make_interface(device, "Port-Channel1", iface_type="other")
