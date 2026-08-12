@@ -1825,8 +1825,7 @@ class TestMigratedDonorRendersSyncTabs:
         from django.contrib.auth import get_user_model
         from django.urls import reverse
 
-        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
-        from netbox_librenms_plugin.tests.conftest import ip_on, make_device
+        from netbox_librenms_plugin.tests.conftest import configured_server_key, ip_on, make_device
         from netbox_librenms_plugin.utils import mark_librenms_migrated
 
         user = get_user_model().objects.create_superuser("mig-tabs-admin", "a@b.c", "pw")
@@ -1835,15 +1834,13 @@ class TestMigratedDonorRendersSyncTabs:
         winner = make_device("mt-winner")
         donor = make_device("mt-donor")
         ip = ip_on(donor, "10.50.0.5/24", "eth0")  # a real interface-assigned IP to move
-        active_server_key = LibreNMSAPI(server_key="default").server_key
-        mark_librenms_migrated(donor, winner.pk, active_server_key)  # clears the active id -> donor not found
+        server_key = configured_server_key()
+        mark_librenms_migrated(donor, winner.pk, server_key)  # clears the active id -> donor not found
         donor.save()
 
         url = reverse("plugins:netbox_librenms_plugin:device_librenms_sync", args=[donor.pk])
-        # Pass an explicit ?server_key so the view resolves the server via LibreNMSAPI("default")
-        # (which skips the LibreNMSSettings.selected_server read); otherwise this real-client render
-        # is flaky under a suite where another test leaks a LibreNMSSettings mock.
-        resp = client.get(url, {"tab": "ipaddresses", "server_key": "default"})
+        # Pass the real configured key so the request and migration marker share one server scope.
+        resp = client.get(url, {"tab": "ipaddresses", "server_key": server_key})
 
         assert resp.status_code == 200
         html = resp.content.decode()

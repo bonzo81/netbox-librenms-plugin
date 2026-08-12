@@ -20,6 +20,7 @@ import pytest
 
 from netbox_librenms_plugin.tests.conftest import (
     cable_together,
+    configured_server_key,
     librenms_cable_tag as _librenms_tag,
     make_device,
     make_interface,
@@ -28,6 +29,8 @@ from netbox_librenms_plugin.tests.conftest import (
     make_serial_row as _serial_row,
 )
 from netbox_librenms_plugin.tests.test_serial_cables_view import _make_view
+
+SERVER_KEY = configured_server_key()
 
 
 # ---------------------------------------------------------------------------
@@ -162,7 +165,7 @@ class TestSerialRowResyncStatus:
 
     def _enrich(self, obj, row):
         view = _make_view()
-        return view.enrich_links_data([row], obj, server_key="default")[0]
+        return view.enrich_links_data([row], obj, server_key=SERVER_KEY)[0]
 
     def test_matched_untagged_serial_cable_offers_adopt(self):
         acs, (csp,), _ = make_serial_device("ser-adopt", csp_names=["ttyS1"])
@@ -254,7 +257,7 @@ class TestCableAdoptHtmx:
             "sensor_index_int": 9,
         }
         key_view = object.__new__(SyncCablesView)
-        cache.set(key_view.get_cache_key(acs, "links", "default"), {"links": [link]}, timeout=300)
+        cache.set(key_view.get_cache_key(acs, "links", SERVER_KEY), {"links": [link]}, timeout=300)
 
         user = get_user_model().objects.create_superuser("adopt-admin", "adopt@example.com", "pw")
         client = Client()
@@ -262,7 +265,7 @@ class TestCableAdoptHtmx:
         url = reverse("plugins:netbox_librenms_plugin:sync_device_cables", args=[acs.pk])
         rendered = client.get(
             reverse("plugins:netbox_librenms_plugin:device_librenms_sync", args=[acs.pk]),
-            {"tab": "cables", "server_key": "default"},
+            {"tab": "cables", "server_key": SERVER_KEY},
         )
         record = next(iter(rendered.context["cable_sync"]["table"].rows)).record
         row_id = record["row_id"]
@@ -270,7 +273,7 @@ class TestCableAdoptHtmx:
             url,
             data={
                 "sync_one": row_id,
-                "server_key": "default",
+                "server_key": SERVER_KEY,
                 f"expected_local_id_{row_id}": record["netbox_local_interface_id"],
                 f"expected_local_device_id_{row_id}": record["netbox_local_device_id"],
                 f"expected_remote_id_{row_id}": record["netbox_remote_interface_id"],
@@ -368,6 +371,9 @@ class TestPatchPathSyncGuard:
         )
 
         assert synced.status_code == 200
+        content = synced.content.decode()
+        assert "Skipped OOB-controller links" not in content
+        assert "already modeled through a patch path" in content
         local.refresh_from_db()
         remote.refresh_from_db()
         assert local.cable_id == local_segment.pk
@@ -387,7 +393,7 @@ class TestCabledSerialRowFarEndDisplay:
     """
 
     def _enrich(self, obj, row):
-        return _make_view().enrich_links_data([row], obj, server_key="default")[0]
+        return _make_view().enrich_links_data([row], obj, server_key=SERVER_KEY)[0]
 
     def _row(self, csp, label, obj):
         return _serial_row(csp, label, obj)

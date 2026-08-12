@@ -5790,33 +5790,14 @@ class TestGetContextDataOOBCacheFingerprint:
 class TestInterfacePortIdActiveServerScope:
     """Verify interface port IDs use the active server key during module verification."""
 
-    @pytest.fixture(autouse=True)
-    def _configure_default_server(self, settings):
-        """Configure the bound API key without a suite-wide configuration mock."""
-        from copy import deepcopy
-
-        plugin_config = deepcopy(settings.PLUGINS_CONFIG)
-        plugin_config["netbox_librenms_plugin"]["servers"] = {
-            "default": {
-                "librenms_url": "https://default.example.com",
-                "api_token": "test-token",
-            },
-            "server2": {
-                "librenms_url": "https://server2.example.com",
-                "api_token": "test-token",
-            },
-        }
-        settings.PLUGINS_CONFIG = plugin_config
-
-    def _real_default_api(self):
+    def _real_configured_api(self):
         from netbox_librenms_plugin.librenms_api import LibreNMSAPI
 
-        # Pass server_key explicitly so construction skips the LibreNMSSettings.objects.first()
-        # selected-server lookup — in the full suite a prior test can leave that mocked, which would
-        # otherwise make LibreNMSAPI() resolve to a MagicMock server and raise KeyError. Pinning to
-        # "default" keeps the fix (read under _active_server_key) and the bug (read under the client
-        # key) resolving to visibly different port_ids.
-        return LibreNMSAPI(server_key="default")
+        from netbox_librenms_plugin.tests.conftest import configured_server_key
+
+        # Bind the client to the real configured server. The explicit key keeps the client scope
+        # distinct from the alternate key under test without assuming a key named "default".
+        return LibreNMSAPI(server_key=configured_server_key())
 
     def test_reads_port_id_under_active_server_not_default_client(self):
         """With _active_server_key set, the per-server port_id for THAT server is returned."""
@@ -5825,11 +5806,11 @@ class TestInterfacePortIdActiveServerScope:
 
         device = make_device("mod-verify-scope")
         iface = make_interface(device, "Gi0/1")
-        iface.custom_field_data["librenms_id"] = {"default": 111, "server2": 222}
+        iface.custom_field_data["librenms_id"] = {self._real_configured_api().server_key: 111, "server2": 222}
         iface.save()
 
         view = object.__new__(BaseModuleTableView)
-        view._librenms_api = self._real_default_api()
+        view._librenms_api = self._real_configured_api()
         view._active_server_key = "server2"
 
         # Must resolve under the active server (222), not the default-bound client (111).
@@ -5841,11 +5822,11 @@ class TestInterfacePortIdActiveServerScope:
 
         device = make_device("mod-verify-scope-api")
         iface = make_interface(device, "Gi0/2")
-        iface.custom_field_data["librenms_id"] = {"default": 111, "server2": 222}
+        iface.custom_field_data["librenms_id"] = {self._real_configured_api().server_key: 111, "server2": 222}
         iface.save()
 
-        api = self._real_default_api()
-        assert api.get_stored_librenms_id(iface) == 111  # bound (default) key
+        api = self._real_configured_api()
+        assert api.get_stored_librenms_id(iface) == 111  # bound client key
         assert api.get_stored_librenms_id(iface, server_key="server2") == 222  # explicit override
 
 

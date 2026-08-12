@@ -216,7 +216,7 @@ class LibreNMSInterfaceTable(tables.Table):
         # _sync_interface_vlans() reads vlan_group_<canonical port id>_<vid>, so a raw value such
         # as "010" would render a key the view never looks up and the override would be dropped.
         canonical_port_id = normalize_librenms_port_id(record.get("port_id"))
-        row_key = str(canonical_port_id) if canonical_port_id is not None else str(record.get("port_id", ""))
+        row_key = str(canonical_port_id) if canonical_port_id is not None else str(record.get("port_id") or "")
 
         # Build compact colored summary (show up to 3 VLANs, summarize rest)
         vlan_group_map = record.get("vlan_group_map", {})
@@ -939,7 +939,7 @@ class VCInterfaceTable(LibreNMSInterfaceTable):
         # the chassis members for every row (N+1 on a large chassis).
         members = self._vc_members
         interface_name = record.get(self.interface_name_field)
-        port_id = record.get("port_id", "")
+        port_id = record.get("port_id") or ""
 
         # Default the dropdown to the same owner the relationship sync button resolves (matched
         # NetBox interface's device → cross-page selection → name heuristic), so the JS — which

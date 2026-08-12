@@ -599,6 +599,7 @@ def test_relationship_write_locks_virtual_chassis_members_through_validation():
     member.refresh_from_db()
     assert not changed_during_relationship
     assert member.lag_id == aggregate.pk
+    cache.delete(cache_key)
 
 
 def test_inline_relationship_rechecks_migrated_donor_after_lock():

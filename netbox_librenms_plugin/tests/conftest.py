@@ -33,6 +33,13 @@ def clear_test_cache(cache_backend):
         cache_backend.clear()
 
 
+def configured_server_key():
+    """Return the first real LibreNMS server key from the active test settings."""
+    from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+
+    return next(iter(LibreNMSAPI.get_available_servers()))
+
+
 def _isolated_cache_config(caches_config):
     """Return the worker cache config with a unique per-test namespace."""
     isolated = deepcopy(caches_config)

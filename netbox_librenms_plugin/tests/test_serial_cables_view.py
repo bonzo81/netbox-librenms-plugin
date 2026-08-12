@@ -99,7 +99,7 @@ class TestEnrichLocalPortSerial:
 
     def test_csp_resolved_on_sync_device_not_viewed_obj(self):
         """On a VC-member page the CSP lives on the resolved sync device; enrich_local_port must resolve it there, not on the viewed obj (which would drop the row to 'Console Server Port Not Found')."""
-        from netbox_librenms_plugin.tests.conftest import make_virtual_chassis
+        from netbox_librenms_plugin.tests.conftest import configured_server_key, make_virtual_chassis
         from netbox_librenms_plugin.utils import set_librenms_device_id
 
         view = _make_view()
@@ -107,7 +107,7 @@ class TestEnrichLocalPortSerial:
         viewed, _, _ = make_serial_device("ser-enrich-viewed")
         sync_device, (csp,), _ = make_serial_device("ser-enrich-sync", csp_names=["ttyS5"])
         make_virtual_chassis("ser-enrich-vc", viewed, sync_device)
-        set_librenms_device_id(sync_device, view.librenms_id, "default")
+        set_librenms_device_id(sync_device, view.librenms_id, configured_server_key())
         sync_device.save()
 
         link = {"local_port": "ttyS5", "local_port_id": "serial:1005", "_source": "serial"}
@@ -1668,12 +1668,13 @@ class TestSerialCableReadScope:
 
         from netbox_librenms_plugin.librenms_api import LibreNMSAPI
         from netbox_librenms_plugin.tests.conftest import make_virtual_chassis
+        from netbox_librenms_plugin.utils import set_librenms_device_id
 
         hidden, (csp,), _ = make_serial_device("serial-hidden-sync-owner", csp_names=["ttyS1"])
         visible, _, _ = make_serial_device("serial-visible-vc-member")
         make_virtual_chassis("serial-read-scope-vc", hidden, visible)
         server_key = next(iter(LibreNMSAPI.get_available_servers()))
-        hidden.custom_field_data["librenms_id"] = {server_key: 42}
+        set_librenms_device_id(hidden, 42, server_key)
         hidden.save(update_fields=["custom_field_data"])
         self._cache_row(hidden, csp, visible, server_key)
         user = self._user("serial-hidden-sync-owner-user", visible)
@@ -1885,6 +1886,7 @@ class TestSerialCableReadScope:
         from netbox_librenms_plugin.librenms_api import LibreNMSAPI
         from netbox_librenms_plugin.models import LibreNMSSettings
         from netbox_librenms_plugin.tests.conftest import make_device, make_interface
+        from netbox_librenms_plugin.utils import set_librenms_device_id
         from netbox_librenms_plugin.views.sync.cables import SyncCablesView
 
         local = make_device("cable-strong-id-local")
@@ -1893,7 +1895,7 @@ class TestSerialCableReadScope:
         visible = make_device("cable-strong-id-advertised")
         visible_interface = make_interface(visible, "Ethernet9")
         server_key = next(iter(LibreNMSAPI.get_available_servers()))
-        hidden.custom_field_data["librenms_id"] = {server_key: 42}
+        set_librenms_device_id(hidden, 42, server_key)
         hidden.save()
         cache_key = object.__new__(SyncCablesView).get_cache_key(local, "links", server_key)
         cache.set(

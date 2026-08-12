@@ -20,6 +20,7 @@ from django.core.cache.backends.locmem import LocMemCache
 
 from netbox_librenms_plugin.tests.conftest import (
     cable_together,
+    configured_server_key,
     librenms_cable_tag as _librenms_tag,
     make_device,
     make_interface,
@@ -29,6 +30,8 @@ from netbox_librenms_plugin.tests.conftest import (
     make_virtual_chassis,
 )
 from netbox_librenms_plugin.tests.test_serial_cables_view import _make_view
+
+SERVER_KEY = configured_server_key()
 
 
 class CountingLocMemCache(LocMemCache):
@@ -80,7 +83,7 @@ def _serial_refetch_get(link):
     return external_get
 
 
-def _rendered_sync_data(client, device, row_ids, server_key="default", submit_name="select"):
+def _rendered_sync_data(client, device, row_ids, server_key=SERVER_KEY, submit_name="select"):
     """Return the endpoint-bound fields emitted by the real cable table."""
     from django.urls import reverse
 
@@ -116,7 +119,7 @@ class TestManualRemoteEnrichment:
     """enrich honors a manually picked remote over label/name matching."""
 
     def _enrich(self, obj, row):
-        return _make_view().enrich_links_data([row], obj, server_key="default")[0]
+        return _make_view().enrich_links_data([row], obj, server_key=SERVER_KEY)[0]
 
     def test_manual_pick_resolves_serial_row_without_label_match(self):
         """A serial row whose label matches nothing still resolves via manual_remote_id."""
@@ -157,7 +160,7 @@ class TestManualRemoteEnrichment:
             "remote_port": "also-no-match",
             "manual_remote_id": remote.pk,
         }
-        link = _make_view().enrich_links_data([row], local_dev, server_key="default")[0]
+        link = _make_view().enrich_links_data([row], local_dev, server_key=SERVER_KEY)[0]
 
         assert link["netbox_local_interface_id"] == local.pk
         assert link["netbox_remote_interface_id"] == remote.pk
@@ -282,7 +285,7 @@ class TestTaggedSerialCableTrustedOverLabel:
         cable.tags.add(_librenms_tag())
 
         row = _serial_row(csp, "trust-ser-label", acs)
-        link = _make_view().enrich_links_data([row], acs, server_key="default")[0]
+        link = _make_view().enrich_links_data([row], acs, server_key=SERVER_KEY)[0]
 
         assert link["cable_status"] == "Cable Found"
         assert link["can_create_cable"] is False
@@ -295,7 +298,7 @@ class TestTaggedSerialCableTrustedOverLabel:
         cable_together(csp, actual_cp)  # untagged
 
         row = _serial_row(csp, "trust-ser2-label", acs)
-        link = _make_view().enrich_links_data([row], acs, server_key="default")[0]
+        link = _make_view().enrich_links_data([row], acs, server_key=SERVER_KEY)[0]
 
         assert link["cable_status"] == "Cable Mismatch"
         assert link["can_create_cable"] is True
@@ -327,7 +330,7 @@ class TestRemotePickerEndpoint:
         link = _serial_row(csp, label, acs)
         link["local_port_id"] = f"serial:{csp.pk}-s"
         key_view = object.__new__(SyncCablesView)
-        cache.set(key_view.get_cache_key(acs, "links", "default"), {"links": [link]}, timeout=300)
+        cache.set(key_view.get_cache_key(acs, "links", SERVER_KEY), {"links": [link]}, timeout=300)
         url = reverse("plugins:netbox_librenms_plugin:cable_remote_picker", args=[acs.pk])
         return acs, csp, link, url
 
@@ -335,7 +338,7 @@ class TestRemotePickerEndpoint:
         client = self._client("modal")
         _acs, _csp, link, url = self._seed_serial("modal")
 
-        resp = client.get(url, {"row_id": link["local_port_id"], "server_key": "default"})
+        resp = client.get(url, {"row_id": link["local_port_id"], "server_key": SERVER_KEY})
 
         assert resp.status_code == 200
         content = resp.content.decode()
@@ -363,7 +366,7 @@ class TestRemotePickerEndpoint:
             "remote_device": "unknown",
             "remote_port": "unknown",
         }
-        cache_key = object.__new__(SyncCablesView).get_cache_key(local_device, "links", "default")
+        cache_key = object.__new__(SyncCablesView).get_cache_key(local_device, "links", SERVER_KEY)
         cache.set(cache_key, {"links": [row], "snapshot_token": "physical-interfaces"}, timeout=300)
         url = reverse("plugins:netbox_librenms_plugin:cable_remote_picker", args=[local_device.pk])
 
@@ -371,7 +374,7 @@ class TestRemotePickerEndpoint:
             url,
             {
                 "row_id": "10",
-                "server_key": "default",
+                "server_key": SERVER_KEY,
                 "source": "main",
                 "action": "ports",
                 "device_id": remote_device.pk,
@@ -386,7 +389,7 @@ class TestRemotePickerEndpoint:
             url,
             {
                 "row_id": "10",
-                "server_key": "default",
+                "server_key": SERVER_KEY,
                 "remote_interface_id": lag.pk,
             },
             HTTP_HX_REQUEST="true",
@@ -395,7 +398,7 @@ class TestRemotePickerEndpoint:
             url,
             {
                 "row_id": "10",
-                "server_key": "default",
+                "server_key": SERVER_KEY,
                 "remote_interface_id": physical.pk,
             },
             HTTP_HX_REQUEST="true",
@@ -412,7 +415,7 @@ class TestRemotePickerEndpoint:
         _acs, _csp, _link, url = self._seed_serial("unknown-row")
 
         with patch("netbox_librenms_plugin.librenms_api.requests.get") as external_get:
-            response = client.get(url, {"row_id": "missing", "server_key": "default"})
+            response = client.get(url, {"row_id": "missing", "server_key": SERVER_KEY})
 
         assert response.status_code == 404
         external_get.assert_not_called()
@@ -889,7 +892,7 @@ class TestRemotePickerEndpoint:
 
         resp = client.get(
             url,
-            {"row_id": link["local_port_id"], "server_key": "default", "action": "search", "q": "search-target"},
+            {"row_id": link["local_port_id"], "server_key": SERVER_KEY, "action": "search", "q": "search-target"},
         )
 
         assert resp.status_code == 200
@@ -913,7 +916,7 @@ class TestRemotePickerEndpoint:
                 url,
                 {
                     "row_id": link["local_port_id"],
-                    "server_key": "default",
+                    "server_key": SERVER_KEY,
                     "action": "search",
                     "q": "picker-search-site-",
                 },
@@ -950,7 +953,7 @@ class TestRemotePickerEndpoint:
                 url,
                 {
                     "row_id": "not-needed-for-search",
-                    "server_key": "default",
+                    "server_key": SERVER_KEY,
                     "source": "serial",
                     "action": "search",
                     "q": "nothing",
@@ -970,7 +973,7 @@ class TestRemotePickerEndpoint:
             url,
             {
                 "row_id": link["local_port_id"],
-                "server_key": "default",
+                "server_key": SERVER_KEY,
                 "source": "serial",
                 "action": "ports",
                 "device_id": remote.pk,
@@ -1000,7 +1003,7 @@ class TestRemotePickerEndpoint:
             url,
             {
                 "row_id": link["local_port_id"],
-                "server_key": "default",
+                "server_key": SERVER_KEY,
                 "action": "ports",
                 "device_id": remote.pk,
                 "source": "serial",
@@ -1017,7 +1020,7 @@ class TestRemotePickerEndpoint:
         client = self._client("srcurl")
         _acs, _csp, link, url = self._seed_serial("srcurl")
 
-        resp = client.get(url, {"row_id": link["local_port_id"], "server_key": "default"})
+        resp = client.get(url, {"row_id": link["local_port_id"], "server_key": SERVER_KEY})
 
         assert resp.status_code == 200
         assert "source=serial" in resp.content.decode()
@@ -1031,7 +1034,7 @@ class TestRemotePickerEndpoint:
             url,
             {
                 "row_id": link["local_port_id"],
-                "server_key": "default",
+                "server_key": SERVER_KEY,
                 "source": "serial",
                 "action": "ports",
                 "device_id": "abc",
@@ -1049,7 +1052,7 @@ class TestRemotePickerEndpoint:
             url,
             {
                 "row_id": link["local_port_id"],
-                "server_key": "default",
+                "server_key": SERVER_KEY,
                 "source": "serial",
                 "action": "ports",
                 "device_id": "9" * 100,
@@ -1067,7 +1070,7 @@ class TestRemotePickerEndpoint:
             url,
             {
                 "row_id": link["local_port_id"],
-                "server_key": "default",
+                "server_key": SERVER_KEY,
                 "remote_interface_id": "9" * 100,
             },
             HTTP_HX_REQUEST="true",
@@ -1110,7 +1113,7 @@ class TestRemotePickerEndpoint:
             url,
             {
                 "row_id": link["local_port_id"],
-                "server_key": "default",
+                "server_key": SERVER_KEY,
                 "source": "serial",
                 "action": "ports",
                 "device_id": remote.pk,
@@ -1138,7 +1141,7 @@ class TestRemotePickerEndpoint:
             url,
             data={
                 "row_id": link["local_port_id"],
-                "server_key": "default",
+                "server_key": SERVER_KEY,
                 "remote_interface_id": cp.pk,
             },
             HTTP_HX_REQUEST="true",
@@ -1146,7 +1149,7 @@ class TestRemotePickerEndpoint:
 
         assert resp.status_code == 200
         key_view = object.__new__(SyncCablesView)
-        snapshot_key = key_view.get_cache_key(acs, "links", "default")
+        snapshot_key = key_view.get_cache_key(acs, "links", SERVER_KEY)
         cached = cache.get(snapshot_key)
         row = next(r for r in cached["links"] if r["local_port_id"] == link["local_port_id"])
         assert "manual_remote_id" not in row
@@ -1263,7 +1266,7 @@ class TestRemotePickerEndpoint:
         )
         auto_row = _serial_row(auto_csp, remote.name, local, sensor_index_int=1)
         manual_row = _serial_row(manual_csp, "no-label-match", local, sensor_index_int=2)
-        cache_key = object.__new__(SyncCablesView).get_cache_key(local, "links", "default")
+        cache_key = object.__new__(SyncCablesView).get_cache_key(local, "links", SERVER_KEY)
         cache.set(
             cache_key,
             {"links": [auto_row, manual_row], "snapshot_token": "manual-reservation-snapshot"},
@@ -1274,7 +1277,7 @@ class TestRemotePickerEndpoint:
             picker_url,
             {
                 "row_id": manual_row["local_port_id"],
-                "server_key": "default",
+                "server_key": SERVER_KEY,
                 "remote_interface_id": reserved_cp.pk,
             },
             HTTP_HX_REQUEST="true",
@@ -1720,7 +1723,7 @@ class TestRemotePickerEndpoint:
         first = make_device("picker-vc-topology-first")
         second = make_device("picker-vc-topology-second")
         make_virtual_chassis("picker-vc-topology", first, second)
-        first.custom_field_data["librenms_id"] = {"default": 600}
+        first.custom_field_data["librenms_id"] = {SERVER_KEY: 600}
         first.save()
         first_local = make_interface(first, "Ethernet1")
         second_local = make_interface(second, "Ethernet1")
@@ -1877,7 +1880,7 @@ class TestRemotePickerEndpoint:
             url,
             data={
                 "row_id": link["local_port_id"],
-                "server_key": "default",
+                "server_key": SERVER_KEY,
                 "remote_interface_id": cp.pk,
             },
             HTTP_HX_REQUEST="true",
@@ -1890,7 +1893,7 @@ class TestRemotePickerEndpoint:
             request.user = get_user_model().objects.get(pk=client.session["_auth_user_id"])
             sync_view = object.__new__(SyncCablesView)
             sync_view.request = request
-            sync_view._post_server_key = "default"
+            sync_view._post_server_key = SERVER_KEY
             return sync_view.get_cached_links_data(request, acs)
 
         picker_links = links_for(picker)
@@ -1915,7 +1918,7 @@ class TestRemotePickerEndpoint:
             url,
             data={
                 "row_id": link["local_port_id"],
-                "server_key": "default",
+                "server_key": SERVER_KEY,
                 "remote_interface_id": iface.pk,
             },
             HTTP_HX_REQUEST="true",
@@ -1923,7 +1926,7 @@ class TestRemotePickerEndpoint:
 
         assert resp.status_code == 400
         key_view = object.__new__(SyncCablesView)
-        cached = cache.get(key_view.get_cache_key(acs, "links", "default"))
+        cached = cache.get(key_view.get_cache_key(acs, "links", SERVER_KEY))
         row = next(r for r in cached["links"] if r["local_port_id"] == link["local_port_id"])
         assert "manual_remote_id" not in row
 
@@ -1947,7 +1950,7 @@ class TestRemotePickerEndpoint:
             url,
             data={
                 "row_id": link["local_port_id"],
-                "server_key": "default",
+                "server_key": SERVER_KEY,
                 "remote_interface_id": cp.pk,
             },
             HTTP_HX_REQUEST="true",
@@ -1955,7 +1958,7 @@ class TestRemotePickerEndpoint:
         assert pick.status_code == 200
 
         key_view = object.__new__(SyncCablesView)
-        snapshot_key = key_view.get_cache_key(acs, "links", "default")
+        snapshot_key = key_view.get_cache_key(acs, "links", SERVER_KEY)
         cached = cache.get(snapshot_key)
         overlaid, applied = apply_cable_manual_picks(
             cache,
@@ -2000,7 +2003,7 @@ class TestRemotePickerEndpoint:
             _serial_row(csp_b, "no-label-b", acs, sensor_index_int=2),
         ]
         key_view = object.__new__(SyncCablesView)
-        cache.set(key_view.get_cache_key(acs, "links", "default"), {"links": links}, timeout=300)
+        cache.set(key_view.get_cache_key(acs, "links", SERVER_KEY), {"links": links}, timeout=300)
         picker_url = reverse("plugins:netbox_librenms_plugin:cable_remote_picker", args=[acs.pk])
         _remote, _, (remote_port,) = make_serial_device(
             "picker-duplicate-remote-target",
@@ -2011,7 +2014,7 @@ class TestRemotePickerEndpoint:
                 picker_url,
                 data={
                     "row_id": link["local_port_id"],
-                    "server_key": "default",
+                    "server_key": SERVER_KEY,
                     "remote_interface_id": remote_port.pk,
                 },
                 HTTP_HX_REQUEST="true",
@@ -2068,7 +2071,7 @@ class TestRemotePickerEndpoint:
                 "netbox_remote_device_id": device.pk,
             },
         ]
-        cache_key = object.__new__(SyncCablesView).get_cache_key(device, "links", "default")
+        cache_key = object.__new__(SyncCablesView).get_cache_key(device, "links", SERVER_KEY)
         cache.set(cache_key, {"links": rows}, timeout=300)
         client = self._client("cross-role")
         post_data = _rendered_sync_data(
@@ -2112,7 +2115,7 @@ class TestRemotePickerEndpoint:
         remote_device = make_device("cable-vc-collapse-remote")
         first_remote = make_interface(remote_device, "R1")
         second_remote = make_interface(remote_device, "R2")
-        set_librenms_device_id(page, 700, "default")
+        set_librenms_device_id(page, 700, SERVER_KEY)
         page.save()
         rows = [
             {
@@ -2132,13 +2135,13 @@ class TestRemotePickerEndpoint:
             },
         ]
         cache.set(
-            object.__new__(SyncCablesView).get_cache_key(page, "links", "default"),
+            object.__new__(SyncCablesView).get_cache_key(page, "links", SERVER_KEY),
             {"links": rows, "snapshot_token": "vc-collapse"},
             timeout=300,
         )
 
         post_data = {
-            "server_key": "default",
+            "server_key": SERVER_KEY,
             "origin_device_id": page.pk,
             "select": ["11", "12"],
         }
@@ -2179,7 +2182,7 @@ class TestRemotePickerEndpoint:
 
         device, (csp,), _ = make_serial_device("picker-malformed-cache", csp_names=["ttyS1"])
         target = make_device("picker-malformed-cache-target")
-        cache_key = object.__new__(SyncCablesView).get_cache_key(device, "links", "default")
+        cache_key = object.__new__(SyncCablesView).get_cache_key(device, "links", SERVER_KEY)
         cached = {"links": malformed} if isinstance(malformed, list) else malformed
         cache.set(cache_key, cached, timeout=300)
         client = self._client("malformed-cache")
@@ -2188,7 +2191,7 @@ class TestRemotePickerEndpoint:
             reverse("plugins:netbox_librenms_plugin:cable_remote_picker", args=[device.pk]),
             {
                 "row_id": f"serial:{csp.pk}",
-                "server_key": "default",
+                "server_key": SERVER_KEY,
                 "action": "search",
                 "q": target.name,
             },
@@ -2216,7 +2219,7 @@ class TestManualRepointOfExistingCable:
         cable = cable_together(csp, cp)
         cable.tags.add(_librenms_tag())
 
-        link = _make_view().enrich_links_data([_serial_row(csp, "repoint-aff-r", acs)], acs, server_key="default")[0]
+        link = _make_view().enrich_links_data([_serial_row(csp, "repoint-aff-r", acs)], acs, server_key=SERVER_KEY)[0]
 
         assert link["can_create_cable"] is False  # nothing to sync as-is
         assert link.get("picker_url")  # ...but the cable can be re-pointed
@@ -2229,7 +2232,9 @@ class TestManualRepointOfExistingCable:
         cable_together(csp, fp)
         cable_together(rp, cp)
 
-        link = _make_view().enrich_links_data([_serial_row(csp, "repoint-path-end", acs)], acs, server_key="default")[0]
+        link = _make_view().enrich_links_data([_serial_row(csp, "repoint-path-end", acs)], acs, server_key=SERVER_KEY)[
+            0
+        ]
 
         assert link["cable_status"] == "Connected via Patch Path"
         assert link.get("picker_url")
@@ -2249,7 +2254,7 @@ class TestManualRepointOfExistingCable:
         link = _make_view().enrich_links_data(
             [_serial_row(csp, target.name, acs)],
             acs,
-            server_key="default",
+            server_key=SERVER_KEY,
         )[0]
 
         assert link["cable_status"] == "Cable Mismatch"
@@ -2267,7 +2272,7 @@ class TestManualRepointOfExistingCable:
 
         pick = client.post(
             picker_url,
-            data={"row_id": link["local_port_id"], "server_key": "default", "remote_interface_id": new_cp.pk},
+            data={"row_id": link["local_port_id"], "server_key": SERVER_KEY, "remote_interface_id": new_cp.pk},
             HTTP_HX_REQUEST="true",
         )
         assert pick.status_code == 200
@@ -2318,7 +2323,7 @@ class TestManualRepointOfExistingCable:
         client = self._client_e2e("expiry-post")
         acs, csp, _old, link, picker_url = self._seed_cabled("expiry-post")
         _t, _, (new_cp,) = make_serial_device("expiry-post-target", cp_names=["console"])
-        acs.custom_field_data["librenms_id"] = {"default": 13}
+        acs.custom_field_data["librenms_id"] = {SERVER_KEY: 13}
         acs.save(update_fields=["custom_field_data"])
 
         clear_test_cache(cache)  # the snapshot expired between render and pick
@@ -2329,11 +2334,11 @@ class TestManualRepointOfExistingCable:
         ) as external_get:
             resp = client.post(
                 picker_url,
-                data={"row_id": link["local_port_id"], "server_key": "default", "remote_interface_id": new_cp.pk},
+                data={"row_id": link["local_port_id"], "server_key": SERVER_KEY, "remote_interface_id": new_cp.pk},
                 HTTP_HX_REQUEST="true",
             )
 
-        refetched = cache.get(object.__new__(SyncCablesView).get_cache_key(acs, "links", "default"))
+        refetched = cache.get(object.__new__(SyncCablesView).get_cache_key(acs, "links", SERVER_KEY))
         assert refetched is not None, [call.args[0] for call in external_get.call_args_list]
         assert resp.status_code == 200, resp.content.decode()
         assert new_cp.name in resp.content.decode()
@@ -2368,7 +2373,7 @@ class TestManualRepointOfExistingCable:
 
         client = self._client_e2e("expiry-get")
         acs, _csp, _old, link, picker_url = self._seed_cabled("expiry-get")
-        acs.custom_field_data["librenms_id"] = {"default": 13}
+        acs.custom_field_data["librenms_id"] = {SERVER_KEY: 13}
         acs.save(update_fields=["custom_field_data"])
 
         clear_test_cache(cache)
@@ -2377,9 +2382,9 @@ class TestManualRepointOfExistingCable:
             "netbox_librenms_plugin.librenms_api.requests.get",
             side_effect=_serial_refetch_get(link),
         ) as external_get:
-            resp = client.get(picker_url, {"row_id": link["local_port_id"], "server_key": "default"})
+            resp = client.get(picker_url, {"row_id": link["local_port_id"], "server_key": SERVER_KEY})
 
-        refetched = cache.get(object.__new__(SyncCablesView).get_cache_key(acs, "links", "default"))
+        refetched = cache.get(object.__new__(SyncCablesView).get_cache_key(acs, "links", SERVER_KEY))
         assert refetched is not None, [call.args[0] for call in external_get.call_args_list]
         assert resp.status_code == 200
         content = resp.content.decode()
@@ -2418,7 +2423,7 @@ class TestManualRepointOfExistingCable:
 
         link = _serial_row(csp, f"router-{name}", acs, sensor_index_int=8)
         key_view = object.__new__(SyncCablesView)
-        cache.set(key_view.get_cache_key(acs, "links", "default"), {"links": [link]}, timeout=300)
+        cache.set(key_view.get_cache_key(acs, "links", SERVER_KEY), {"links": [link]}, timeout=300)
         picker_url = reverse("plugins:netbox_librenms_plugin:cable_remote_picker", args=[acs.pk])
         return acs, csp, old, link, picker_url
 
@@ -2486,7 +2491,7 @@ class TestRemotePickerObjectScope:
         link = _serial_row(csp, label, acs)
         link["local_port_id"] = f"serial:{csp.pk}-s"
         key_view = object.__new__(SyncCablesView)
-        cache.set(key_view.get_cache_key(acs, "links", "default"), {"links": [link]}, timeout=300)
+        cache.set(key_view.get_cache_key(acs, "links", SERVER_KEY), {"links": [link]}, timeout=300)
         url = reverse("plugins:netbox_librenms_plugin:cable_remote_picker", args=[acs.pk])
         return acs, link, url
 
@@ -2494,7 +2499,7 @@ class TestRemotePickerObjectScope:
         _acs, link, url = self._seed("scope-modal")
         client = self._scoped_client("modal", ["some-other-device"])
 
-        resp = client.get(url, {"row_id": link["local_port_id"], "server_key": "default"})
+        resp = client.get(url, {"row_id": link["local_port_id"], "server_key": SERVER_KEY})
 
         assert resp.status_code == 404
 
@@ -2517,12 +2522,12 @@ class TestRemotePickerObjectScope:
         client = Client()
         client.force_login(user)
 
-        modal = client.get(url, {"row_id": link["local_port_id"], "server_key": "default"})
+        modal = client.get(url, {"row_id": link["local_port_id"], "server_key": SERVER_KEY})
         picked = client.post(
             url,
             {
                 "row_id": link["local_port_id"],
-                "server_key": "default",
+                "server_key": SERVER_KEY,
                 "remote_interface_id": remote_port.pk,
             },
             HTTP_HX_REQUEST="true",
@@ -2555,7 +2560,7 @@ class TestRemotePickerObjectScope:
             "remote_port": remote_interface.name,
         }
         cache.set(
-            object.__new__(SyncCablesView).get_cache_key(local_device, "links", "default"),
+            object.__new__(SyncCablesView).get_cache_key(local_device, "links", SERVER_KEY),
             {"links": [row], "snapshot_token": "hidden-interface-picker"},
             timeout=300,
         )
@@ -2568,12 +2573,12 @@ class TestRemotePickerObjectScope:
         client.force_login(user)
         url = reverse("plugins:netbox_librenms_plugin:cable_remote_picker", args=[local_device.pk])
 
-        modal = client.get(url, {"row_id": "100", "server_key": "default"})
+        modal = client.get(url, {"row_id": "100", "server_key": SERVER_KEY})
         picked = client.post(
             url,
             {
                 "row_id": "100",
-                "server_key": "default",
+                "server_key": SERVER_KEY,
                 "remote_interface_id": remote_interface.pk,
             },
             HTTP_HX_REQUEST="true",
@@ -2877,7 +2882,7 @@ class TestRemotePickerObjectScope:
         first = make_device("picker-verify-scope-first")
         second = make_device("picker-verify-scope-second")
         make_virtual_chassis("picker-verify-scope-vc", first, second)
-        first.custom_field_data["librenms_id"] = {"default": 500}
+        first.custom_field_data["librenms_id"] = {SERVER_KEY: 500}
         first.save()
         first_local = make_interface(first, "Ethernet1")
         second_local = make_interface(second, "Ethernet1")
@@ -2954,7 +2959,7 @@ class TestRemotePickerObjectScope:
 
         resp = client.get(
             url,
-            {"row_id": link["local_port_id"], "server_key": "default", "action": "search", "q": "picker-scope"},
+            {"row_id": link["local_port_id"], "server_key": SERVER_KEY, "action": "search", "q": "picker-scope"},
         )
 
         assert resp.status_code == 200
@@ -2971,7 +2976,7 @@ class TestRemotePickerObjectScope:
             url,
             {
                 "row_id": link["local_port_id"],
-                "server_key": "default",
+                "server_key": SERVER_KEY,
                 "source": "serial",
                 "action": "ports",
                 "device_id": hidden.pk,
@@ -2999,7 +3004,7 @@ class TestRemotePickerObjectScope:
             url,
             data={
                 "row_id": link["local_port_id"],
-                "server_key": "default",
+                "server_key": SERVER_KEY,
                 "remote_interface_id": cp.pk,
             },
             HTTP_HX_REQUEST="true",
@@ -3007,7 +3012,7 @@ class TestRemotePickerObjectScope:
 
         assert resp.status_code == 400
         key_view = object.__new__(SyncCablesView)
-        cached = cache.get(key_view.get_cache_key(acs, "links", "default"))
+        cached = cache.get(key_view.get_cache_key(acs, "links", SERVER_KEY))
         row = next(r for r in cached["links"] if r["local_port_id"] == link["local_port_id"])
         assert "manual_remote_id" not in row  # nothing bound
 
@@ -3020,7 +3025,7 @@ class TestRemotePickerObjectScope:
             url,
             {
                 "row_id": link["local_port_id"],
-                "server_key": "default",
+                "server_key": SERVER_KEY,
                 "source": "serial",
                 "action": "ports",
                 "device_id": remote.pk,
@@ -3051,7 +3056,7 @@ class TestRemotePickerObjectScope:
             url,
             {
                 "row_id": link["local_port_id"],
-                "server_key": "default",
+                "server_key": SERVER_KEY,
                 "source": "serial",
                 "action": "ports",
                 "device_id": remote.pk,
@@ -3082,14 +3087,14 @@ class TestRemotePickerObjectScope:
             url,
             data={
                 "row_id": link["local_port_id"],
-                "server_key": "default",
+                "server_key": SERVER_KEY,
                 "remote_interface_id": cp.pk,
             },
             HTTP_HX_REQUEST="true",
         )
 
         key_view = object.__new__(SyncCablesView)
-        snapshot_key = key_view.get_cache_key(acs, "links", "default")
+        snapshot_key = key_view.get_cache_key(acs, "links", SERVER_KEY)
         cached = cache.get(snapshot_key)
         pick_key = cable_manual_pick_cache_key(
             snapshot_key,
@@ -3120,7 +3125,7 @@ class TestRemotePickerObjectScope:
             url,
             data={
                 "row_id": link["local_port_id"],
-                "server_key": "default",
+                "server_key": SERVER_KEY,
                 "remote_interface_id": cp.pk,
             },
             HTTP_HX_REQUEST="true",
@@ -3128,7 +3133,7 @@ class TestRemotePickerObjectScope:
 
         assert resp.status_code == 200
         key_view = object.__new__(SyncCablesView)
-        cached = cache.get(key_view.get_cache_key(acs, "links", "default"))
+        cached = cache.get(key_view.get_cache_key(acs, "links", SERVER_KEY))
         row = next(r for r in cached["links"] if r["local_port_id"] == link["local_port_id"])
         assert "manual_remote_id" not in row
 

@@ -1900,6 +1900,7 @@ class TestGetDeviceTransceiversResponseShape:
 
         assert success is False
         assert "Invalid JSON" in msg
+        assert "Error connecting" not in msg
 
     @patch("netbox_librenms_plugin.librenms_api.requests.get")
     def test_non_dict_response_returns_failure(self, mock_get, mock_librenms_config):

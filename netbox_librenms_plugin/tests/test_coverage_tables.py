@@ -1117,6 +1117,18 @@ class TestInterfaceVlans:
         assert "vlan-edit-btn" not in html
         assert "vlan-group-hidden" not in html
 
+    def test_missing_port_id_does_not_render_literal_none_form_keys(self):
+        table = _interface_table(make_device("vlan-missing-port-id"))
+        record = _port(
+            port_id=None,
+            untagged_vlan=100,
+        )
+
+        html = str(table.render_vlans(None, record))
+
+        assert "vlan_group_None_100" not in html
+        assert "vlan_group__100" in html
+
 
 @pytest.mark.django_db
 class TestInterfaceRelationships:
@@ -1344,6 +1356,17 @@ class TestVirtualChassisInterfaceTable:
         assert 'name="select" value="11"' in selections[1]
         assert 'name="device_selection_10"' in dropdowns[0]
         assert 'name="device_selection_11"' in dropdowns[1]
+
+    def test_missing_port_id_does_not_render_literal_none_dropdown_key(self):
+        from netbox_librenms_plugin.tables.interfaces import VCInterfaceTable
+
+        first, _second = self._members("vc-missing-port-id")
+        table = VCInterfaceTable(data=[], device=first, interface_name_field="ifName")
+
+        html = str(table.render_device_selection(None, _port(port_id=None)))
+
+        assert "device_selection_None" not in html
+        assert 'name="device_selection_"' in html
 
     def test_member_names_are_escaped_in_dropdown_options(self):
         from netbox_librenms_plugin.tables.interfaces import VCInterfaceTable

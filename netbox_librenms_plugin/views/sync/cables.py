@@ -298,7 +298,7 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libre
                 and local_term.cable_id != remote_term.cable_id
                 and cable_path_reaches(local_term, remote_termination=remote_term)
             ):
-                return {"status": "skipped", "interface": display_name}
+                return {"status": "patch_path", "interface": display_name}
             current_cable_state = self._cable_state_token(locked_cables, lock=True)
             current_cable_intent = self._cable_intent_token(
                 current_cable_state,
@@ -857,6 +857,7 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libre
             "denied": [],
             "stale": [],
             "unsupported": [],
+            "patch_path": [],
         }
         self._pending_conflicts = []
 
@@ -1069,6 +1070,11 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libre
                 request,
                 "Skipped OOB-controller links (context only, not syncable to the host): "
                 f"{', '.join(results['skipped'])}",
+            )
+        if results.get("patch_path"):
+            messages.info(
+                request,
+                f"Skipped links already modeled through a patch path: {', '.join(results['patch_path'])}",
             )
         if results.get("tagged"):
             messages.info(

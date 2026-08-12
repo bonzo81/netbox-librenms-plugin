@@ -554,12 +554,11 @@ class TestSyncCablesViewPost:
 
         from netbox_librenms_plugin.tests.conftest import make_device
 
-        # A second REAL server, derived from the configured default: the posted key must be the
-        # one stored, and only a non-default key can tell that apart from the fallback. Configured
-        # here rather than assumed, because the test settings define "default" alone.
+        # A second real server, derived from the active configured server. The posted key must be
+        # stored unchanged, and only a non-default key distinguishes that from fallback behavior.
         plugins_config = copy.deepcopy(settings.PLUGINS_CONFIG)
         servers = plugins_config["netbox_librenms_plugin"]["servers"]
-        servers["secondary"] = dict(servers["default"])
+        servers["secondary"] = dict(servers[next(iter(servers))])
 
         view = _make_view(SyncCablesView)
         view.request = _make_request({"server_key": "secondary"})
