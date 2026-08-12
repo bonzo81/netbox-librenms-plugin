@@ -120,6 +120,39 @@ class BaseInterfaceTableView(
             return None
         return normalize_librenms_port_id(librenms_id)
 
+    @staticmethod
+    def _row_relationship_source_is_actionable(
+        *,
+        can_write_relationships,
+        owner_id,
+        actionable_owner_ids,
+        port_id,
+        unique_host_port_ids,
+        catalog_id_matches,
+        netbox_interface,
+        changeable_interface_ids,
+        name_candidate,
+        unambiguous_name_port_ids,
+        server_key,
+    ):
+        """Return whether the row identifies one changeable relationship source."""
+        if not can_write_relationships or owner_id not in actionable_owner_ids or port_id not in unique_host_port_ids:
+            return False
+
+        if catalog_id_matches:
+            if len(catalog_id_matches) != 1:
+                return False
+            id_match = catalog_id_matches[0]
+            return id_match.pk == getattr(netbox_interface, "pk", None) and id_match.pk in changeable_interface_ids
+
+        if name_candidate is None:
+            return False
+        return (
+            name_candidate.pk in changeable_interface_ids
+            and port_id in unambiguous_name_port_ids
+            and interface_name_fallback_matches_port(name_candidate, port_id, server_key)
+        )
+
     def _build_interface_lookup_maps(self, obj):
         """
         Build name and LibreNMS ID indexes, dropping conflicting IDs entirely.
@@ -786,20 +819,18 @@ class BaseInterfaceTableView(
                 port["netbox_interface"] = netbox_interface
                 catalog_id_matches = catalog_interfaces_by_port_id.get(port_id, [])
                 name_candidate = device_interfaces["by_name"].get(port.get(interface_name_field))
-                port["relationship_source_resolvable"] = bool(
-                    can_write_relationships
-                    and chassis_member.pk in actionable_owner_ids
-                    and port_id in unique_host_port_ids
-                    and (
-                        len(catalog_id_matches) == 1
-                        and catalog_id_matches[0].pk == getattr(netbox_interface, "pk", None)
-                        and catalog_id_matches[0].pk in changeable_interface_ids
-                        or not catalog_id_matches
-                        and name_candidate is not None
-                        and name_candidate.pk in changeable_interface_ids
-                        and port_id in unambiguous_name_port_ids
-                        and interface_name_fallback_matches_port(name_candidate, port_id, server_key)
-                    )
+                port["relationship_source_resolvable"] = self._row_relationship_source_is_actionable(
+                    can_write_relationships=can_write_relationships,
+                    owner_id=chassis_member.pk,
+                    actionable_owner_ids=actionable_owner_ids,
+                    port_id=port_id,
+                    unique_host_port_ids=unique_host_port_ids,
+                    catalog_id_matches=catalog_id_matches,
+                    netbox_interface=netbox_interface,
+                    changeable_interface_ids=changeable_interface_ids,
+                    name_candidate=name_candidate,
+                    unambiguous_name_port_ids=unambiguous_name_port_ids,
+                    server_key=server_key,
                 )
                 port["selected_object_id"] = chassis_member.pk
                 port["sync_target_resolvable"] = (
