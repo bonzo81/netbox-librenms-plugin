@@ -1,5 +1,6 @@
 import django_filters
 from dcim.models import Manufacturer
+from django.db.models import Q
 
 from .models import (
     CarrierAutoInstallRule,
@@ -149,9 +150,16 @@ class CarrierAutoInstallRuleFilterSet(django_filters.FilterSet):
 class PortStackLagPatternFilterSet(django_filters.FilterSet):
     """Filter set for PortStackLagPattern model."""
 
+    q = django_filters.CharFilter(method="search")
     librenms_os = django_filters.CharFilter(lookup_expr="icontains")
     lag_name_pattern = django_filters.CharFilter(lookup_expr="icontains")
     description = django_filters.CharFilter(lookup_expr="icontains")
+
+    def search(self, queryset, _name, value):
+        """Search the fields exposed by the pattern list."""
+        return queryset.filter(
+            Q(librenms_os__icontains=value) | Q(lag_name_pattern__icontains=value) | Q(description__icontains=value)
+        )
 
     class Meta:
         """Meta options."""

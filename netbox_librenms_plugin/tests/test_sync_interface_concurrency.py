@@ -130,9 +130,9 @@ def test_vlan_scope_is_built_after_the_selected_vc_target_is_locked():
     from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
 
     _vc, (page_device, target_device) = make_virtual_chassis_members("sync-vlan-scope-lock")
-    # "default" is the only server CI configures: the sync refuses an unconfigured key before it
-    # ever reaches the target lock this test is about.
-    server_key = "default"
+    # Use the configured devcontainer server key. The "default" alias resolves to this key
+    # during POST, so a literal "default" cache entry cannot reach the lock boundary.
+    server_key = "stub"
     set_librenms_device_id(page_device, 1, server_key)
     page_device.save()
     new_site = Site.objects.create(name="Sync VLAN New Site", slug="sync-vlan-new-site", status="active")

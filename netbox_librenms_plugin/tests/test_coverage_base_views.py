@@ -3974,7 +3974,7 @@ class TestVCInterfaceRenderMemberResolutionNotPerPort:
         the prebuilt {vc_position: member} map makes it O(1), so the query count no longer scales
         with the number of ports.
         """
-        from django.contrib.auth.models import AnonymousUser
+        from dcim.models import Interface
         from django.core.cache import cache as dj_cache
         from django.db import connection
         from django.test import RequestFactory
@@ -3991,7 +3991,10 @@ class TestVCInterfaceRenderMemberResolutionNotPerPort:
 
         view = self._view()
         request = RequestFactory().get("/x/")
-        request.user = AnonymousUser()
+        request.user = make_user_with_perms(
+            "vc-if-render-viewer",
+            [("view", Device), ("view", Interface)],
+        )
         view.request = request
         cache_key = view.get_cache_key(obj, "ports", "default")
 
@@ -3999,15 +4002,17 @@ class TestVCInterfaceRenderMemberResolutionNotPerPort:
             ports = [{"port_id": i, "ifName": f"Gi1/0/{i}", "ifType": "ethernetCsmacd"} for i in range(1, nports + 1)]
             dj_cache.set(cache_key, {"ports": ports})
             with CaptureQueriesContext(connection) as ctx:
-                view.get_context_data(request, obj, "ifName", server_key="default", sync_device=obj)
-            return len(ctx.captured_queries)
+                context = view.get_context_data(request, obj, "ifName", server_key="default", sync_device=obj)
+            return len(ctx.captured_queries), list(context["table"].data)
 
         try:
             # Warm process-level caches (ContentType etc.) first so the two measured renders differ
             # ONLY by port count, not by cold-cache one-time queries on the first call.
             render(3)
-            q_small = render(2)
-            q_large = render(8)
+            q_small, small_rows = render(2)
+            q_large, large_rows = render(8)
+            assert any(row.get("netbox_interface") is not None for row in small_rows)
+            assert any(row.get("netbox_interface") is not None for row in large_rows)
             assert q_large == q_small, f"query count scaled with ports: {q_small} -> {q_large} (per-port N+1)"
         finally:
             # Django's cache isn't wrapped in the test's DB-transaction rollback, so delete the

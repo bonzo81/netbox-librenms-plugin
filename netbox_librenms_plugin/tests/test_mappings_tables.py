@@ -4,6 +4,46 @@ import pytest
 
 
 @pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("query", "expected_os"),
+    [
+        ("review-os-token", "review-os-token"),
+        ("ReviewPatternToken", "review-pattern-os"),
+        ("review description token", "review-description-os"),
+    ],
+)
+def test_port_stack_lag_pattern_searches_all_exposed_fields(query, expected_os):
+    """The list search filters OS, pattern, and description through its q field."""
+    from netbox_librenms_plugin.filters import PortStackLagPatternFilterSet
+    from netbox_librenms_plugin.models import PortStackLagPattern
+
+    PortStackLagPattern.objects.bulk_create(
+        [
+            PortStackLagPattern(
+                librenms_os="review-os-token",
+                lag_name_pattern=r"^ReviewOs\d+$",
+                description="OS field match",
+            ),
+            PortStackLagPattern(
+                librenms_os="review-pattern-os",
+                lag_name_pattern=r"^ReviewPatternToken\d+$",
+                description="Pattern field match",
+            ),
+            PortStackLagPattern(
+                librenms_os="review-description-os",
+                lag_name_pattern=r"^ReviewDescription\d+$",
+                description="Review description token",
+            ),
+        ]
+    )
+
+    filterset = PortStackLagPatternFilterSet({"q": query}, queryset=PortStackLagPattern.objects.all())
+
+    assert filterset.is_valid(), filterset.errors
+    assert list(filterset.qs.values_list("librenms_os", flat=True)) == [expected_os]
+
+
+@pytest.mark.django_db
 class TestPortStackLagPatternTableSelection:
     """PortStackLagPatternTable's selection column must submit name='pk'."""
 
@@ -55,6 +95,8 @@ class TestPortStackLagPatternBulkExportContract:
         response = PortStackLagPatternBulkExportYAMLView.as_view()(request)
 
         assert response.status_code == 200
+        assert response["Content-Type"] == "text/yaml; charset=utf-8"
+        assert response["Content-Disposition"] == 'attachment; filename="export.yaml"'
         assert "exportos" in response.content.decode()
 
     def test_select_named_inputs_alone_export_nothing(self):

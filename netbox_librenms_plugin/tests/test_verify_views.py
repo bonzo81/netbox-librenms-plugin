@@ -1032,9 +1032,9 @@ class TestSingleInterfaceVerifyView:
         )
         child = make_interface(page_device, "Ethernet1.100", iface_type="virtual")
         parent = make_interface(hidden_parent_device, "Ethernet2")
-        # "default" is the only server CI configures: an unconfigured key makes the inline POST
-        # fail its rebind with a 400 before the scoped lookup this test asserts on.
-        server_key = "default"
+        # Use the configured devcontainer server key. The "default" alias resolves to this key
+        # during the inline POST, so seeding a literal "default" cache key would test a cache miss.
+        server_key = "stub"
         set_librenms_device_id(child, 10, server_key)
         set_librenms_device_id(parent, 20, server_key)
         child.save()
@@ -1185,11 +1185,12 @@ class TestSingleInterfaceVerifyView:
         from netbox_librenms_plugin.views.object_sync.devices import DeviceInterfaceTableView
         from netbox_librenms_plugin.views.sync.interfaces import SyncInterfaceLagView
 
+        server_key = "stub"
         device = make_device("verify-view-only-lag-target")
         member = make_interface(device, "Ethernet1")
         aggregate = make_interface(device, "Port-Channel1", iface_type="other")
-        set_librenms_device_id(member, 10, "default")
-        set_librenms_device_id(aggregate, 20, "default")
+        set_librenms_device_id(member, 10, server_key)
+        set_librenms_device_id(aggregate, 20, server_key)
         member.save()
         aggregate.save()
         user = make_user_with_perms("verify-view-only-lag-target", [("view", Device)])
@@ -1223,12 +1224,12 @@ class TestSingleInterfaceVerifyView:
             "port_stack_relationships": {"lag_members": {10: 20}, "sub_interfaces": {}},
         }
         api = object.__new__(LibreNMSAPI)
-        api.server_key = "default"
+        api.server_key = server_key
         table_request = make_request("get", user=user)
         table_view = DeviceInterfaceTableView()
         table_view._librenms_api = api
         table_view.request = table_request
-        cache_key = table_view.get_cache_key(device, "ports", "default")
+        cache_key = table_view.get_cache_key(device, "ports", server_key)
         cache.set(cache_key, snapshot)
 
         try:
@@ -1236,7 +1237,7 @@ class TestSingleInterfaceVerifyView:
                 table_request,
                 device,
                 "ifName",
-                "default",
+                server_key,
                 fresh_data=snapshot,
                 sync_device=device,
             )
@@ -1254,10 +1255,10 @@ class TestSingleInterfaceVerifyView:
             verify_response = verify_view.post(verify_request)
 
             inline_view = SyncInterfaceLagView()
-            inline_view._librenms_api = SimpleNamespace(server_key="default")
+            inline_view._librenms_api = SimpleNamespace(server_key=server_key)
             inline_request = make_request(
                 "post",
-                {"port_id": "10", "lag_port_id": "20", "server_key": "default"},
+                {"port_id": "10", "lag_port_id": "20", "server_key": server_key},
                 user=user,
             )
             inline_response = post(
