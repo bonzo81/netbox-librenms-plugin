@@ -6,23 +6,29 @@ from django.contrib import messages
 from django.core.cache import cache
 from django.core.exceptions import ValidationError
 from django.db import IntegrityError, transaction
-from django.db.models import Q
 from django.http import Http404, JsonResponse
 from django.shortcuts import redirect
 from django.urls import reverse
 from django.views import View
 from virtualization.models import VirtualMachine, VMInterface
 
+from netbox_librenms_plugin.interface_relationships import (
+    build_interface_index,
+    filter_interface_index,
+    interface_owner_for_object,
+    interface_queryset_for_object,
+    relationship_candidate_ids,
+    relationship_candidate_q,
+    resolve_interface_by_port_id,
+)
 from netbox_librenms_plugin.models import InterfaceTypeMapping
 from netbox_librenms_plugin.utils import (
     AmbiguousLibreNMSIdError,
     build_migrated_context,
-    build_librenms_id_qs,
     convert_speed_to_kbps,
     validation_error_detail,
     find_by_librenms_id,
     get_interface_name_field,
-    get_librenms_device_id,
     get_librenms_sync_device,
     get_interface_port_identity_sets,
     interface_name_fallback_matches_port,
@@ -42,8 +48,6 @@ from netbox_librenms_plugin.views.mixins import (
 )
 
 logger = logging.getLogger(__name__)
-
-_RELATIONSHIP_CANDIDATE_BATCH_SIZE = 64
 
 
 def _get_syncable_interface_name(port, interface_name_field):
@@ -111,7 +115,7 @@ class SyncInterfacesView(
         redirect_url = (
             reverse(url_name, kwargs={"pk": object_id})
             # quote_plus the field too: it comes from the request, so unescaped special chars
-            # could corrupt the redirect or inject extra query params (issue #107).
+            # could corrupt the redirect or inject extra query parameters.
             + f"?tab=interfaces&interface_name_field={quote_plus(interface_name_field)}"
             + (f"&server_key={quote_plus(server_key)}" if server_key else "")
         )
@@ -305,11 +309,11 @@ class SyncInterfacesView(
         ]
         if not candidate_port_ids:
             return {}
-        candidate_ids = _relationship_candidate_ids(obj, server_key, candidate_port_ids, ())
-        interface_queryset = _interface_queryset_for_object(obj).filter(pk__in=candidate_ids)
+        candidate_ids = relationship_candidate_ids(obj, server_key, candidate_port_ids, ())
+        interface_queryset = interface_queryset_for_object(obj).filter(pk__in=candidate_ids)
         viewable_ids = set(interface_queryset.restrict(self.request.user, "view").values_list("pk", flat=True))
         changeable_ids = set(interface_queryset.restrict(self.request.user, "change").values_list("pk", flat=True))
-        interface_index = _build_interface_index(
+        interface_index = build_interface_index(
             obj,
             server_key,
             allowed_ids=viewable_ids | changeable_ids,
@@ -374,9 +378,9 @@ class SyncInterfacesView(
             return
         excluded_columns = set(excluded_columns)
 
-        # Normalize the relationship-map keys once at load through the shared helper (the same one
-        # get_context_data / SingleInterfaceVerifyView use via _build_relationship_maps), so the
-        # bulk path can't drift on the corruption guard or key normalization. resolve_port_relationships
+        # Normalize the relationship-map keys once at load through the helper used by both
+        # readers, so the bulk path cannot drift on the corruption guard or key normalization.
+        # resolve_port_relationships
         # emits normalized int keys, but a JSON cache round-trip stringifies dict keys, so the cached
         # map can arrive str- or int-keyed; re-normalizing lets every lookup below use a single
         # normalize_librenms_port_id(port_id) call. The helper also coerces a non-dict relationships
@@ -454,7 +458,7 @@ class SyncInterfacesView(
                 )
                 if obj is None:
                     return
-                candidate_ids = _relationship_candidate_ids(
+                candidate_ids = relationship_candidate_ids(
                     obj,
                     server_key,
                     candidate_port_ids,
@@ -479,7 +483,7 @@ class SyncInterfacesView(
                     target_device = self._resolve_row_target_device(obj, port_id=port_id)
                     if target_device is None:
                         continue
-                    expected_owner = _interface_owner_for_object(target_device)
+                    expected_owner = interface_owner_for_object(target_device)
 
                     # LAG membership: this interface is a member of a LAG aggregate. Both ends are
                     # resolved/validated/persisted by the shared helpers below (same flow as the
@@ -605,7 +609,7 @@ class SyncInterfacesView(
             related_target = self._resolve_row_target_device(obj, port_id=normalized_related_port_id)
             if related_target is None:
                 return None, None
-            related_expected_owner = _interface_owner_for_object(related_target)
+            related_expected_owner = interface_owner_for_object(related_target)
         related_entry = port_by_id.get(related_port_id, {})
         # Use the active display field for the name fallback: in ifDescr mode the NetBox
         # interface name matches ifDescr, so hinting ifName would look up the wrong name and
@@ -614,7 +618,7 @@ class SyncInterfacesView(
         if normalized_related_port_id in unambiguous_name_port_ids:
             related_name = related_entry.get(interface_name_field) or related_entry.get("ifName", "")
 
-        _, err = _resolve_interface_by_port_id(
+        _, err = resolve_interface_by_port_id(
             obj,
             port_id,
             server_key,
@@ -624,7 +628,7 @@ class SyncInterfacesView(
         if err:
             logger.debug("%s source catalog lookup failed during bulk sync: %s", log_kind, err)
             return None, None
-        source_iface, err = _resolve_interface_by_port_id(
+        source_iface, err = resolve_interface_by_port_id(
             obj,
             port_id,
             server_key,
@@ -637,7 +641,7 @@ class SyncInterfacesView(
         if require_interface_source and not isinstance(source_iface, Interface):
             return None, None  # VMInterface does not support lag
 
-        _, err = _resolve_interface_by_port_id(
+        _, err = resolve_interface_by_port_id(
             obj,
             related_port_id,
             server_key,
@@ -648,7 +652,7 @@ class SyncInterfacesView(
         if err:
             logger.debug("%s related catalog lookup failed during bulk sync: %s", log_kind, err)
             return None, None
-        related_iface, err = _resolve_interface_by_port_id(
+        related_iface, err = resolve_interface_by_port_id(
             obj,
             related_port_id,
             server_key,
@@ -1287,28 +1291,6 @@ class DeleteNetBoxInterfacesView(LibreNMSPermissionMixin, NetBoxObjectPermission
         return JsonResponse(response_data)
 
 
-def _interface_owner(iface):
-    """Owner tuple ``(device_id, virtual_machine_id)`` for an Interface/VMInterface."""
-    return (getattr(iface, "device_id", None), getattr(iface, "virtual_machine_id", None))
-
-
-def _interface_owner_for_object(obj):
-    """
-    Build the owner tuple for the Device/VM that owns an interface.
-
-    Matches the shape :func:`_interface_owner` produces (used as ``expected_owner``).
-
-    Args:
-        obj: The owning Device or VirtualMachine.
-
-    Returns:
-        tuple: ``(device_id, virtual_machine_id)`` — one element set, the other None.
-    """
-    if isinstance(obj, Device):
-        return (obj.pk, None)
-    return (None, obj.pk)
-
-
 def _lock_relationship_scope(obj, owner_queryset=None):
     """Lock an object's current relationship scope and recheck owner visibility."""
     if isinstance(obj, Device):
@@ -1342,136 +1324,6 @@ def _lock_relationship_scope(obj, owner_queryset=None):
     return None, set()
 
 
-def _interface_queryset_for_object(obj):
-    """Return the interfaces in a Device chassis or Virtual Machine scope."""
-    if isinstance(obj, Device):
-        if obj.virtual_chassis_id is not None:
-            member_ids = obj.virtual_chassis.members.values_list("id", flat=True)
-            return Interface.objects.filter(device__in=member_ids)
-        return Interface.objects.filter(device=obj)
-    if isinstance(obj, VirtualMachine):
-        return VMInterface.objects.filter(virtual_machine=obj)
-    return None
-
-
-def _relationship_candidate_q(server_key, port_ids, names):
-    """Build one query for the two stable IDs and safe name hints in an inline edge."""
-    candidate_q = Q(pk__in=[])
-    unique_port_ids = {
-        (type(port_id).__name__, str(port_id)): port_id
-        for port_id in port_ids
-        if normalize_librenms_port_id(port_id) is not None
-    }
-    for marker in sorted(unique_port_ids):
-        port_id = unique_port_ids[marker]
-        host_q, oob_q = build_librenms_id_qs(server_key, port_id)
-        candidate_q |= host_q | oob_q
-    unique_names = sorted({name for name in names if isinstance(name, str) and name})
-    if unique_names:
-        candidate_q |= Q(name__in=unique_names)
-    return candidate_q
-
-
-def _relationship_candidate_ids(obj, server_key, port_ids, names):
-    """Find relationship candidates in bounded batches without locking unrelated rows."""
-    interface_queryset = _interface_queryset_for_object(obj)
-    candidate_ids = set()
-    unique_port_ids = sorted(
-        {port_id for raw_port_id in port_ids if (port_id := normalize_librenms_port_id(raw_port_id)) is not None}
-    )
-    unique_names = sorted({name for name in names if isinstance(name, str) and name})
-
-    for start in range(0, len(unique_port_ids), _RELATIONSHIP_CANDIDATE_BATCH_SIZE):
-        batch = unique_port_ids[start : start + _RELATIONSHIP_CANDIDATE_BATCH_SIZE]
-        candidate_q = _relationship_candidate_q(server_key, batch, ())
-        candidate_ids.update(interface_queryset.filter(candidate_q).values_list("pk", flat=True))
-
-    for start in range(0, len(unique_names), _RELATIONSHIP_CANDIDATE_BATCH_SIZE):
-        batch = unique_names[start : start + _RELATIONSHIP_CANDIDATE_BATCH_SIZE]
-        candidate_ids.update(interface_queryset.filter(name__in=batch).values_list("pk", flat=True))
-
-    return candidate_ids
-
-
-def _build_interface_index(obj, server_key, user=None, action="change", *, lock=False, allowed_ids=None):
-    """
-    Build a one-pass index of a device's interfaces for repeated resolution.
-
-    VC-wide for a chassis member. A bulk relationship sync resolves many port_ids
-    against the same interface set; without a shared index each
-    :func:`_resolve_interface_by_port_id` call re-queries the DB and re-reads every
-    interface's ``librenms_id`` custom field — O(selected × interfaces). Building this
-    once collapses that to a single scan.
-
-    Args:
-        obj: The Device (or VirtualMachine) whose interfaces are indexed.
-        server_key (str): The LibreNMS server key scoping stored-id reads.
-        user: When given, scope the index to the interfaces this user may *action*. The view
-            gate only asks ``has_perm`` at model level, which a CONSTRAINED grant clears, so a
-            write path must pass the request user or it resolves out-of-grant interfaces.
-        action (str): The permission action to scope by (default ``"change"``).
-        lock (bool): Lock indexed interface rows in primary-key order. The caller must be in a
-            transaction.
-        allowed_ids: Optional precomputed primary-key set used to build a union of permission
-            scopes without scanning interface custom fields twice.
-
-    Returns:
-        dict | None: ``{"by_lnms_id": {int: [iface, ...]}, "by_name": {name: [iface,
-            ...]}}`` (lists so ambiguity stays detectable), or None for an unsupported
-            object type.
-    """
-    iface_qs = _interface_queryset_for_object(obj)
-    if iface_qs is None:
-        return None
-
-    if allowed_ids is not None:
-        iface_qs = iface_qs.filter(pk__in=allowed_ids)
-    elif user is not None:
-        iface_qs = iface_qs.restrict(user, action)
-    if isinstance(obj, Device):
-        iface_qs = iface_qs.select_related(
-            "bridge__device__virtual_chassis",
-            "device__virtual_chassis",
-            "device__location",
-            "device__rack",
-            "device__site",
-            "lag__device__virtual_chassis",
-            "parent__device__virtual_chassis",
-            "untagged_vlan__site",
-        )
-    else:
-        iface_qs = iface_qs.select_related(
-            "bridge__virtual_machine",
-            "virtual_machine",
-            "virtual_machine__site",
-            "parent__virtual_machine",
-            "untagged_vlan__site",
-        )
-    if lock:
-        iface_qs = iface_qs.select_for_update(of=("self",)).order_by("pk")
-
-    by_lnms_id: dict = {}
-    by_name: dict = {}
-    for iface in iface_qs:
-        stored_id = normalize_librenms_port_id(get_librenms_device_id(iface, server_key, auto_save=False))
-        if stored_id is not None:
-            by_lnms_id.setdefault(stored_id, []).append(iface)
-        by_name.setdefault(iface.name, []).append(iface)
-    return {"by_lnms_id": by_lnms_id, "by_name": by_name}
-
-
-def _filter_interface_index(index, allowed_ids):
-    """Return an interface index containing only rows whose primary keys are allowed."""
-    return {
-        key: {
-            value: [interface for interface in interfaces if interface.pk in allowed_ids]
-            for value, interfaces in mapping.items()
-            if any(interface.pk in allowed_ids for interface in interfaces)
-        }
-        for key, mapping in index.items()
-    }
-
-
 def _build_locked_relationship_indexes(
     obj,
     server_key,
@@ -1483,11 +1335,11 @@ def _build_locked_relationship_indexes(
 ):
     """Lock candidate interfaces, then derive permission indexes from their locked state."""
     if candidate_ids is None:
-        candidate_queryset = _interface_queryset_for_object(obj).filter(candidate_q)
+        candidate_queryset = interface_queryset_for_object(obj).filter(candidate_q)
         candidate_ids = set(candidate_queryset.values_list("pk", flat=True))
     else:
         candidate_ids = set(candidate_ids)
-    catalog_index = _build_interface_index(
+    catalog_index = build_interface_index(
         obj,
         server_key,
         allowed_ids=candidate_ids,
@@ -1499,14 +1351,14 @@ def _build_locked_relationship_indexes(
             for interface in interfaces
             if interface.device_id in locked_device_ids
         }
-        catalog_index = _filter_interface_index(catalog_index, locked_ids)
+        catalog_index = filter_interface_index(catalog_index, locked_ids)
         candidate_ids &= locked_ids
 
     # A constrained grant can stop matching while this transaction waits for a candidate
     # row lock. Lock only rows the user could act on before the wait, then evaluate the grant
     # again from their locked state. The catalog stays unfiltered so hidden duplicate IDs and
     # names still make resolution fail closed without locking rows that were never permitted.
-    permission_candidates = _interface_queryset_for_object(obj).filter(pk__in=candidate_ids)
+    permission_candidates = interface_queryset_for_object(obj).filter(pk__in=candidate_ids)
     if isinstance(obj, Device):
         actionable_owner_ids = set(
             Device.objects.restrict(user, "view").filter(pk__in=locked_device_ids).values_list("pk", flat=True)
@@ -1515,146 +1367,18 @@ def _build_locked_relationship_indexes(
     prelock_viewable_ids = set(permission_candidates.restrict(user, "view").values_list("pk", flat=True))
     prelock_changeable_ids = set(permission_candidates.restrict(user, "change").values_list("pk", flat=True))
     prelock_permitted_ids = prelock_viewable_ids | prelock_changeable_ids
-    locked_index = _build_interface_index(
+    locked_index = build_interface_index(
         obj,
         server_key,
         lock=True,
         allowed_ids=prelock_permitted_ids,
     )
-    locked_candidates = _interface_queryset_for_object(obj).filter(pk__in=prelock_permitted_ids)
+    locked_candidates = interface_queryset_for_object(obj).filter(pk__in=prelock_permitted_ids)
     viewable_ids = set(locked_candidates.restrict(user, "view").values_list("pk", flat=True))
     changeable_ids = set(locked_candidates.restrict(user, "change").values_list("pk", flat=True))
-    related_index = _filter_interface_index(locked_index, viewable_ids | changeable_ids)
-    source_index = _filter_interface_index(related_index, changeable_ids)
+    related_index = filter_interface_index(locked_index, viewable_ids | changeable_ids)
+    source_index = filter_interface_index(related_index, changeable_ids)
     return catalog_index, source_index, related_index, changeable_ids
-
-
-def _resolve_interface_by_port_id(
-    obj, port_id: str, server_key: str, name_hint: str = "", expected_owner=None, index=None
-):
-    """
-    Resolve a LibreNMS port_id to a NetBox Interface/VMInterface.
-
-    Searches obj's interfaces for one whose librenms_id custom field matches port_id
-    (all VC member interfaces for a Device in a Virtual Chassis), then falls back to an
-    exact name match when *name_hint* is provided (e.g. the interface was created
-    manually without a librenms_id).
-
-    Args:
-        obj: The Device (or VirtualMachine) whose interfaces are searched.
-        port_id (str): The LibreNMS port_id to resolve.
-        server_key (str): The LibreNMS server key scoping stored-id reads.
-        name_hint (str): An exact interface name to fall back to.
-        expected_owner: Optional ``(device_id, virtual_machine_id)`` tuple; a match
-            whose owner differs is rejected. Because the VC search spans every member,
-            a stale/reused librenms_id can otherwise resolve uniquely onto a different
-            member than the row was synced to.
-        index: Optional prebuilt lookup from :func:`_build_interface_index` so a bulk
-            caller doesn't rebuild it per call; built once here when None.
-
-    Returns:
-        tuple: ``(interface, None)`` on success or ``(None, error_str)`` on failure
-            (missing, ambiguous, or wrong-owner).
-    """
-    if not port_id:
-        return None, "port_id is required"
-
-    if index is None:
-        index = _build_interface_index(obj, server_key)
-        if index is None:
-            return None, f"Unsupported object type: {type(obj).__name__}"
-
-    # Use the shared normalizer (rejects bools / non-positive ids) so id resolution stays
-    # consistent with every other port_id coercion in this module, rather than a hand-rolled
-    # int(port_id) if isdigit() that would accept e.g. "0".
-    target_id = normalize_librenms_port_id(port_id)
-    # Collect every interface in scope whose stored LibreNMS id matches, then fail on
-    # ambiguity rather than binding lag/parent to an arbitrary first match. Mirrors the
-    # ambiguity-safe behaviour of _resolve_device_interface()/_resolve_vm_interface():
-    # two interfaces carrying the same stale librenms_id must surface, not silently pick one.
-    matches = list(index["by_lnms_id"].get(target_id, [])) if target_id is not None else []
-    ambiguous_msg = f"LibreNMS port_id {port_id} is ambiguous on {obj} (matches multiple interfaces)"
-    if len(matches) > 1:
-        return None, ambiguous_msg
-    if expected_owner is not None:
-        # Prefer an id-match on the owner this row was synced onto. A stale/reused librenms_id
-        # can resolve uniquely onto a *different* VC member; don't let that foreign match block
-        # the name_hint fallback to the (often manually-created, id-less) interface on the
-        # expected owner — fall through to the name lookup below before giving up.
-        owned = [m for m in matches if _interface_owner(m) == expected_owner]
-        if len(owned) == 1:
-            return owned[0], None
-    else:
-        if len(matches) == 1:
-            return matches[0], None
-
-    if name_hint:
-        iface, err = _resolve_interface_by_name_hint(obj, name_hint, index=index, expected_owner=expected_owner)
-        if err:
-            return None, err
-        if iface is not None:
-            if expected_owner is not None and _interface_owner(iface) != expected_owner:
-                return None, f"Interface name '{name_hint}' resolves to a different owner than the selected row"
-            if not interface_name_fallback_matches_port(iface, target_id, server_key):
-                stored_id = normalize_librenms_port_id(get_librenms_device_id(iface, server_key, auto_save=False))
-                return None, (f"Interface name '{name_hint}' is already bound to LibreNMS port_id {stored_id}")
-            return iface, None
-
-    # Nothing resolved. If an id-match existed but only on a different owner, report that
-    # (the row points at a port owned elsewhere); otherwise it's a plain not-found.
-    if expected_owner is not None and matches:
-        return None, f"LibreNMS port_id {port_id} resolves to a different owner than the selected row"
-    return None, f"Interface with LibreNMS port_id {port_id} not found on {obj}"
-
-
-def _resolve_interface_by_name_hint(obj, name_hint, index=None, expected_owner=None):
-    """
-    Exact-name fallback for :func:`_resolve_interface_by_port_id`.
-
-    Args:
-        obj: The Device (or VirtualMachine) whose interfaces are searched.
-        name_hint (str): The exact interface name to match.
-        index: Optional prebuilt lookup from :func:`_build_interface_index`; used when
-            supplied so a bulk caller avoids a per-name DB query.
-        expected_owner: Optional ``(device_id, virtual_machine_id)`` tuple. On a VC, members
-            commonly share interface names, so the whole chassis matching a name would read as
-            ambiguous; narrow to the selected owner FIRST — mirroring the port-id resolution — so
-            an id-less interface still resolves on its own member (genuine same-owner duplicates
-            still error).
-
-    Returns:
-        tuple: ``(iface, None)`` on a unique match, ``(None, None)`` when nothing
-            matches, or ``(None, error_str)`` on an ambiguous name.
-    """
-    if index is not None:
-        matches = index["by_name"].get(name_hint, [])
-        if expected_owner is not None:
-            owned = [m for m in matches if _interface_owner(m) == expected_owner]
-            if owned:
-                matches = owned
-        if not matches:
-            return None, None
-        if len(matches) > 1:
-            return None, f"Interface name '{name_hint}' is ambiguous on {obj}"
-        return matches[0], None
-    try:
-        if isinstance(obj, Device):
-            if expected_owner is not None and expected_owner[0] is not None:
-                # Owner-pinned to the selected VC member so identical names on other members
-                # don't read as ambiguous (matches the index branch above).
-                iface = Interface.objects.get(device_id=expected_owner[0], name=name_hint)
-            elif hasattr(obj, "virtual_chassis") and obj.virtual_chassis:
-                member_ids = obj.virtual_chassis.members.values_list("id", flat=True)
-                iface = Interface.objects.get(device__in=member_ids, name=name_hint)
-            else:
-                iface = Interface.objects.get(device=obj, name=name_hint)
-        else:
-            iface = VMInterface.objects.get(virtual_machine=obj, name=name_hint)
-        return iface, None
-    except (Interface.DoesNotExist, VMInterface.DoesNotExist):
-        return None, None
-    except (Interface.MultipleObjectsReturned, VMInterface.MultipleObjectsReturned):
-        return None, f"Interface name '{name_hint}' is ambiguous on {obj}"
 
 
 def _promote_lag_aggregate(agg, *, with_restore):
@@ -1967,7 +1691,7 @@ class _BaseRelationshipSyncView(
                 if error := self._migrated_donor_error(obj, server_key):
                     return error
 
-                candidate_q = _relationship_candidate_q(
+                candidate_q = relationship_candidate_q(
                     server_key,
                     (source_port.get("port_id"), related_port.get("port_id")),
                     (source_name, related_name),
@@ -1980,28 +1704,28 @@ class _BaseRelationshipSyncView(
                     candidate_q=candidate_q,
                 )
 
-                _, err = _resolve_interface_by_port_id(
+                _, err = resolve_interface_by_port_id(
                     obj,
                     port_id,
                     server_key,
                     name_hint=source_name,
-                    expected_owner=_interface_owner_for_object(obj),
+                    expected_owner=interface_owner_for_object(obj),
                     index=catalog_index,
                 )
                 if err:
                     return JsonResponse({"error": f"{self.source_label} interface: {err}"}, status=404)
-                source_iface, err = _resolve_interface_by_port_id(
+                source_iface, err = resolve_interface_by_port_id(
                     obj,
                     port_id,
                     server_key,
                     name_hint=source_name,
-                    expected_owner=_interface_owner_for_object(obj),
+                    expected_owner=interface_owner_for_object(obj),
                     index=source_index,
                 )
                 if err:
                     return JsonResponse({"error": f"{self.source_label} interface: {err}"}, status=404)
 
-                _, err = _resolve_interface_by_port_id(
+                _, err = resolve_interface_by_port_id(
                     obj,
                     related_port_id,
                     server_key,
@@ -2010,7 +1734,7 @@ class _BaseRelationshipSyncView(
                 )
                 if err:
                     return JsonResponse({"error": f"{self.related_label} interface: {err}"}, status=404)
-                related_iface, err = _resolve_interface_by_port_id(
+                related_iface, err = resolve_interface_by_port_id(
                     obj,
                     related_port_id,
                     server_key,

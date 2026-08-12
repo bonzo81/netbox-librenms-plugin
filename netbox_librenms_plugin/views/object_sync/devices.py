@@ -9,6 +9,11 @@ from ipam.models import VLAN, VLANGroup
 from utilities.views import ViewTab, register_model_view
 
 from netbox_librenms_plugin.constants import PERM_VIEW_PLUGIN
+from netbox_librenms_plugin.interface_relationships import (
+    build_candidate_relationship_context,
+    build_relationship_maps,
+    resolve_relationship_row,
+)
 from netbox_librenms_plugin.tables.cables import (
     LibreNMSCableTable,
     VCCableTable,
@@ -267,151 +272,41 @@ class SingleInterfaceVerifyView(
                 table.migrated_to_marker = bool(
                     build_migrated_context(origin_device, server_key).get("migrated_to_marker")
                 )
-                # Recompute the LAG/parent relationship for the *selected* member so the
-                # Parent/LAG cell isn't left showing the previously-rendered device's status.
-                # netbox_interface must be set first — the enrichment reads it to compare
-                # NetBox lag/parent against LibreNMS. format_interface_data re-sets it (no-op).
-                #
-                # Resolve by the interface's stored LibreNMS port_id (stable), not the display
-                # name: ifName/ifDescr is a render-time preference with no canonical value, so
-                # a name lookup breaks whenever the current naming mode differs from the one the
-                # interface was synced under. Fall back to the name only for interfaces created
-                # without a librenms_id.
-                # Reuse the canonical resolver (stable librenms_id, then exact-name fallback,
-                # owner-pinned to the selected member) instead of a hand-rolled per-interface
-                # scan: one indexed pass, and the id/name precedence stays identical to the bulk
-                # sync path. On any miss nb_iface stays None and format_interface_data still
-                # name-resolves it on selected_device.
-                from netbox_librenms_plugin.views.sync.interfaces import (
-                    _build_interface_index,
-                    _filter_interface_index,
-                    _interface_queryset_for_object,
-                    _interface_owner_for_object,
-                    _relationship_candidate_q,
-                    _resolve_interface_by_port_id,
-                )
-
                 raw_port_id = port_data.get("port_id")
                 port_id = normalize_librenms_port_id(raw_port_id)
                 if port_id is not None:
                     port_data["port_id"] = port_id
                 name_fallback_allowed = port_id in unambiguous_name_port_ids
-                lag_members, sub_interfaces, by_port_id = BaseInterfaceTableView._build_relationship_maps(cached_data)
+                relationship_maps = build_relationship_maps(cached_data)
                 candidate_port_ids = [raw_port_id]
                 candidate_names = [port_data.get(interface_name_field)] if name_fallback_allowed else []
-                for related_port_id in (lag_members.get(port_id), sub_interfaces.get(port_id)):
-                    related_port = by_port_id.get(related_port_id)
+                for related_port_id in (
+                    relationship_maps.lag_members.get(port_id),
+                    relationship_maps.sub_interfaces.get(port_id),
+                ):
+                    related_port = relationship_maps.ports_by_id.get(related_port_id)
                     if related_port is None:
                         continue
                     candidate_port_ids.append(related_port.get("port_id", related_port_id))
                     if related_port_id in unambiguous_name_port_ids:
                         candidate_names.append(related_port.get(interface_name_field))
-
-                interface_queryset = _interface_queryset_for_object(selected_device).filter(
-                    _relationship_candidate_q(server_key, candidate_port_ids, candidate_names)
-                )
-                catalog_ids = set(interface_queryset.values_list("pk", flat=True))
-                catalog_index = _build_interface_index(
+                relationship_context = build_candidate_relationship_context(
                     selected_device,
                     server_key,
-                    allowed_ids=catalog_ids,
+                    request.user,
+                    self.has_write_permission(),
+                    candidate_port_ids,
+                    candidate_names,
                 )
-                actionable_owner_ids = set(
-                    Device.objects.restrict(request.user, "view")
-                    .filter(pk__in=interface_queryset.values("device_id"))
-                    .values_list("pk", flat=True)
-                )
-                permitted_queryset = interface_queryset.filter(device_id__in=actionable_owner_ids)
-                viewable_ids = set(permitted_queryset.restrict(request.user, "view").values_list("pk", flat=True))
-                changeable_ids = set(permitted_queryset.restrict(request.user, "change").values_list("pk", flat=True))
-                interface_index = _build_interface_index(
-                    selected_device,
-                    server_key,
-                    allowed_ids=viewable_ids | changeable_ids,
-                )
-                source_index = _filter_interface_index(interface_index, changeable_ids)
-                nb_iface = None
-                changeable_iface = None
-                if port_id in unique_host_port_ids:
-                    _, catalog_err = _resolve_interface_by_port_id(
-                        selected_device,
-                        str(port_data.get("port_id") or ""),
-                        server_key,
-                        name_hint=(port_data.get(interface_name_field) or "") if name_fallback_allowed else "",
-                        expected_owner=_interface_owner_for_object(selected_device),
-                        index=catalog_index,
-                    )
-                    if catalog_err is None:
-                        nb_iface, _resolve_err = _resolve_interface_by_port_id(
-                            selected_device,
-                            str(port_data.get("port_id") or ""),
-                            server_key,
-                            # Derive the name fallback from the MATCHED cached row, not the posted display
-                            # name — when the row was matched by a stable port_id, its own name is
-                            # authoritative (the posted name could differ / belong to a reused name).
-                            name_hint=(port_data.get(interface_name_field) or "") if name_fallback_allowed else "",
-                            expected_owner=_interface_owner_for_object(selected_device),
-                            index=interface_index,
-                        )
-                        changeable_iface, _change_resolve_err = _resolve_interface_by_port_id(
-                            selected_device,
-                            str(port_data.get("port_id") or ""),
-                            server_key,
-                            name_hint=(port_data.get(interface_name_field) or "") if name_fallback_allowed else "",
-                            expected_owner=_interface_owner_for_object(selected_device),
-                            index=source_index,
-                        )
-                port_data["netbox_interface"] = nb_iface
-                port_data["name_fallback_allowed"] = name_fallback_allowed and nb_iface is not None
-                port_data["relationship_source_resolvable"] = (
-                    self.has_write_permission() and changeable_iface is not None
-                )
-                # Reuse the exact prep the table path uses (normalize keys + corruption guard +
-                # host-scoping all live in _build_relationship_maps): the inline verify response
-                # must read the cache identically to get_context_data, or the Parent/LAG cell it
-                # repaints would diverge from the table — including failing soft on a malformed /
-                # partial-write snapshot rather than 500-ing on a present-but-None map.
-                BaseInterfaceTableView._enrich_port_with_lag_parent(
+                resolve_relationship_row(
+                    relationship_context,
                     port_data,
-                    lag_members,
-                    sub_interfaces,
-                    by_port_id,
+                    selected_device,
                     interface_name_field,
-                    server_key or "",
+                    unique_host_port_ids,
+                    unambiguous_name_port_ids,
+                    relationship_maps,
                 )
-                for relation in ("lag", "parent"):
-                    related_port_id = port_data.get(f"librenms_{relation}_port_id")
-                    related_port = by_port_id.get(related_port_id)
-                    related_iface = None
-                    if related_port is not None and related_port_id in unique_host_port_ids:
-                        related_name_fallback_allowed = related_port_id in unambiguous_name_port_ids
-                        _, catalog_err = _resolve_interface_by_port_id(
-                            selected_device,
-                            str(related_port_id),
-                            server_key,
-                            name_hint=(related_port.get(interface_name_field) or "")
-                            if related_name_fallback_allowed
-                            else "",
-                            index=catalog_index,
-                        )
-                        if catalog_err is None:
-                            related_iface, _ = _resolve_interface_by_port_id(
-                                selected_device,
-                                str(related_port_id),
-                                server_key,
-                                name_hint=(related_port.get(interface_name_field) or "")
-                                if related_name_fallback_allowed
-                                else "",
-                                index=interface_index,
-                            )
-                            if (
-                                relation == "lag"
-                                and related_iface is not None
-                                and related_iface.type != "lag"
-                                and related_iface.pk not in changeable_ids
-                            ):
-                                related_iface = None
-                    port_data[f"{relation}_target_resolvable"] = related_iface is not None
                 formatted_row = table.format_interface_data(port_data, selected_device)
                 return JsonResponse({"status": "success", "formatted_row": formatted_row})
 

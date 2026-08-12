@@ -4022,7 +4022,7 @@ class TestVCInterfaceRenderMemberResolutionNotPerPort:
 
 @pytest.mark.django_db
 class TestEnrichPortLagParentNameFallback:
-    """_enrich_port_with_lag_parent's name fallback must honour the user-selected name field.
+    """Relationship name fallback must honor the user-selected name field.
 
     The displayed LAG/parent name comes from port.get(interface_name_field) and
     The relationship signal already scans {ifName, ifDescr, interface_name_field}; the
@@ -4031,7 +4031,7 @@ class TestEnrichPortLagParentNameFallback:
     """
 
     def test_lag_match_via_interface_name_field_alias(self):
-        from netbox_librenms_plugin.views.base.interfaces_view import BaseInterfaceTableView
+        from netbox_librenms_plugin.interface_relationships import RelationshipMaps, enrich_port_relationships
 
         dev = make_device("lag-alias-host")
         agg = make_interface(dev, "CUSTOMER-UPLINK-A", iface_type="lag")  # named from ifAlias
@@ -4042,15 +4042,17 @@ class TestEnrichPortLagParentNameFallback:
         agg_port = {"port_id": 10, "ifName": "Po1", "ifDescr": "Port-channel1", "ifAlias": "CUSTOMER-UPLINK-A"}
         port = {"port_id": 1, "netbox_interface": member}
 
-        BaseInterfaceTableView._enrich_port_with_lag_parent(
-            port, {1: 10}, {}, {10: agg_port}, interface_name_field="ifAlias"
+        enrich_port_relationships(
+            port,
+            RelationshipMaps({1: 10}, {}, {10: agg_port}),
+            interface_name_field="ifAlias",
         )
 
         assert port["librenms_lag_name"] == "CUSTOMER-UPLINK-A"
         assert port["lag_sync_status"] == "match"
 
     def test_parent_match_via_interface_name_field_alias(self):
-        from netbox_librenms_plugin.views.base.interfaces_view import BaseInterfaceTableView
+        from netbox_librenms_plugin.interface_relationships import RelationshipMaps, enrich_port_relationships
 
         dev = make_device("parent-alias-host")
         parent = make_interface(dev, "CORE-TRUNK-B")  # named from ifAlias
@@ -4061,8 +4063,10 @@ class TestEnrichPortLagParentNameFallback:
         parent_port = {"port_id": 20, "ifName": "Gi0/2", "ifDescr": "GigabitEthernet0/2", "ifAlias": "CORE-TRUNK-B"}
         port = {"port_id": 2, "netbox_interface": child}
 
-        BaseInterfaceTableView._enrich_port_with_lag_parent(
-            port, {}, {2: 20}, {20: parent_port}, interface_name_field="ifAlias"
+        enrich_port_relationships(
+            port,
+            RelationshipMaps({}, {2: 20}, {20: parent_port}),
+            interface_name_field="ifAlias",
         )
 
         assert port["librenms_parent_name"] == "CORE-TRUNK-B"
@@ -4078,8 +4082,8 @@ class TestEnrichPortLagParentStatusSymmetry:
 
         kind: "lag" | "parent". nb_related: None | "matching" | "nonmatching".
         """
+        from netbox_librenms_plugin.interface_relationships import RelationshipMaps, enrich_port_relationships
         from netbox_librenms_plugin.utils import set_librenms_device_id
-        from netbox_librenms_plugin.views.base.interfaces_view import BaseInterfaceTableView
 
         dev = make_device(f"rel-sym-{kind}-{n}")
         child = make_interface(dev, f"child-{kind}-{n}")
@@ -4107,11 +4111,13 @@ class TestEnrichPortLagParentStatusSymmetry:
                 related.save()
 
         port = {"port_id": child_pid, "netbox_interface": child}
-        BaseInterfaceTableView._enrich_port_with_lag_parent(
+        enrich_port_relationships(
             port,
-            rel_map if kind == "lag" else {},
-            rel_map if kind == "parent" else {},
-            by_id,
+            RelationshipMaps(
+                rel_map if kind == "lag" else {},
+                rel_map if kind == "parent" else {},
+                by_id,
+            ),
             interface_name_field="ifName",
         )
         return port["lag_sync_status" if kind == "lag" else "parent_sync_status"]

@@ -206,9 +206,8 @@ def normalize_relationship_maps(relationships) -> tuple[dict, dict]:
     Normalize a cached ``port_stack_relationships`` mapping into int-keyed relationship maps.
 
     Returns ``(lag_members, sub_interfaces)``. The single home for the corruption guard + key
-    normalization shared by the interface-table readers
-    (:meth:`BaseInterfaceTableView._build_relationship_maps`) and the bulk sync writer
-    (:meth:`SyncInterfacesView._sync_lag_and_parent_relationships`), so the two can't drift.
+    normalization shared by :func:`build_relationship_maps` and the bulk sync writer, so the
+    readers and writer cannot drift.
 
     Fails soft against a corrupt / partial-write / format-migrated cache: a None or non-dict
     ``relationships`` (e.g. a list) — or a present-but-None / non-dict nested ``lag_members`` /

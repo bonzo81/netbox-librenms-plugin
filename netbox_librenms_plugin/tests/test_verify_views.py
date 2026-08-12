@@ -682,6 +682,87 @@ class TestSingleInterfaceVerifyView:
         assert "stale-display-name" not in row["name"]
 
     @pytest.mark.django_db
+    def test_table_and_verify_resolve_the_same_stable_id_row(self, client):
+        """The table and verify endpoint must prefer the same stable-ID interface."""
+        from django.core.cache import cache
+        from django.urls import reverse
+
+        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+        from netbox_librenms_plugin.tests.conftest import make_device, make_interface
+        from netbox_librenms_plugin.tests.view_test_helpers import make_request
+        from netbox_librenms_plugin.utils import set_librenms_device_id
+        from netbox_librenms_plugin.views.object_sync.devices import DeviceInterfaceTableView
+
+        server_key = next(iter(LibreNMSAPI.get_available_servers()))
+        device = make_device("verify-table-resolution")
+        stable_match = make_interface(device, "NetBoxStable")
+        name_candidate = make_interface(device, "Ethernet1")
+        set_librenms_device_id(stable_match, 10, server_key)
+        stable_match.mtu = 9000
+        stable_match.save()
+        name_candidate.mtu = 1500
+        name_candidate.save()
+        snapshot = {
+            "ports": [
+                {
+                    "port_id": 10,
+                    "ifName": "Ethernet1",
+                    "ifDescr": "Ethernet1",
+                    "ifAlias": "",
+                    "ifType": "ethernetCsmacd",
+                    "ifSpeed": 1_000_000_000,
+                    "ifPhysAddress": "",
+                    "ifMtu": 9000,
+                    "ifAdminStatus": "up",
+                }
+            ],
+            "port_stack_relationships": {},
+        }
+        user = _verify_superuser("table-resolution")
+        table_request = make_request("get", user=user)
+        table_view = DeviceInterfaceTableView()
+        table_view._librenms_api = LibreNMSAPI(server_key)
+        table_view.request = table_request
+        cache_key = table_view.get_cache_key(device, "ports", server_key)
+        cache.set(cache_key, snapshot)
+
+        try:
+            context = table_view.get_context_data(
+                table_request,
+                device,
+                "ifName",
+                server_key,
+                fresh_data=snapshot,
+                sync_device=device,
+            )
+            table_row = snapshot["ports"][0]
+            table_name = str(context["table"].render_name(table_row["ifName"], table_row))
+            table_mtu = str(context["table"].render_mtu(table_row["ifMtu"], table_row))
+
+            client.force_login(user)
+            response = client.post(
+                reverse("plugins:netbox_librenms_plugin:verify_interface"),
+                data=json.dumps(
+                    {
+                        "device_id": device.pk,
+                        "server_key": server_key,
+                        "interface_name_field": "ifName",
+                        "port_id": 10,
+                    }
+                ),
+                content_type="application/json",
+            )
+        finally:
+            cache.delete(cache_key)
+
+        assert response.status_code == 200, response.content
+        formatted_row = json.loads(response.content)["formatted_row"]
+        verify_name = formatted_row["name"]
+        assert verify_name == table_name
+        assert formatted_row["mtu"] == table_mtu
+        assert "text-success" in formatted_row["mtu"]
+
+    @pytest.mark.django_db
     def test_verify_keeps_view_only_interface_match_without_offering_relationship_write(self):
         from django.core.cache import cache
         from dcim.models import Device, Interface

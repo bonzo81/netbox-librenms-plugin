@@ -9,6 +9,11 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from netbox_librenms_plugin.interface_relationships import (
+    build_interface_index,
+    interface_owner_for_object,
+    resolve_interface_by_port_id,
+)
 from netbox_librenms_plugin.tests.conftest import (
     make_device,
     make_interface,
@@ -4349,10 +4354,6 @@ class TestSyncLagAndParentRelationships:
     def test_name_hint_resolves_on_expected_owner_across_vc_duplicate_names(self, db):
         """On a VC, an id-less interface whose name is shared across members resolves to the SELECTED member, not chassis-wide ambiguity."""
         from netbox_librenms_plugin.tests.conftest import make_virtual_chassis
-        from netbox_librenms_plugin.views.sync.interfaces import (
-            _interface_owner_for_object,
-            _resolve_interface_by_port_id,
-        )
 
         dev1 = make_device("vc-nh-m1")
         dev2 = make_device("vc-nh-m2")
@@ -4362,8 +4363,8 @@ class TestSyncLagAndParentRelationships:
 
         # port_id 909 matches no stored id → name-hint fallback. "Gi0/1" is duplicated across the
         # chassis; without owner-pinning the name lookup reports ambiguity and never resolves.
-        iface, err = _resolve_interface_by_port_id(
-            dev1, "909", "default", name_hint="Gi0/1", expected_owner=_interface_owner_for_object(dev1)
+        iface, err = resolve_interface_by_port_id(
+            dev1, "909", "default", name_hint="Gi0/1", expected_owner=interface_owner_for_object(dev1)
         )
         assert err is None, err
         assert iface is not None and iface.pk == i1.pk
@@ -4417,7 +4418,7 @@ class TestSyncLagAndParentRelationships:
 # (test_posted_server_key_is_bound_for_the_sync / test_stale_server_key_fails_closed_without_sync).
 
 # ===========================================================================
-# _resolve_interface_by_port_id: correct librenms_id dict lookup
+# Stable-ID interface resolution
 # ===========================================================================
 
 
@@ -4429,14 +4430,13 @@ class TestResolveInterfaceByPortId:
         """When librenms_id = {'production': 42}, resolves for port_id=42 and server_key='production'."""
         from netbox_librenms_plugin.tests.conftest import make_device, make_interface
         from netbox_librenms_plugin.utils import set_librenms_device_id
-        from netbox_librenms_plugin.views.sync.interfaces import _resolve_interface_by_port_id
 
         device = make_device("pci-byid")
         iface = make_interface(device, "Gi0/1", iface_type="1000base-t")
         set_librenms_device_id(iface, 42, "production")  # stored as {"production": 42}
         iface.save()
 
-        found, err = _resolve_interface_by_port_id(device, "42", "production")
+        found, err = resolve_interface_by_port_id(device, "42", "production")
 
         assert err is None
         assert found == iface
@@ -4445,7 +4445,6 @@ class TestResolveInterfaceByPortId:
         """Returns (None, error) when no interface has matching port_id."""
         from netbox_librenms_plugin.tests.conftest import make_device, make_interface
         from netbox_librenms_plugin.utils import set_librenms_device_id
-        from netbox_librenms_plugin.views.sync.interfaces import _resolve_interface_by_port_id
 
         device = make_device("pci-notfound")
         # An interface exists, but carries a different port id than the one we look up.
@@ -4453,7 +4452,7 @@ class TestResolveInterfaceByPortId:
         set_librenms_device_id(iface, 42, "production")
         iface.save()
 
-        found, err = _resolve_interface_by_port_id(device, "99", "production")
+        found, err = resolve_interface_by_port_id(device, "99", "production")
 
         assert found is None
         assert err is not None
@@ -4461,13 +4460,12 @@ class TestResolveInterfaceByPortId:
     def test_name_hint_fallback_when_no_librenms_id(self):
         """Falls back to exact name lookup when no interface has a matching librenms_id."""
         from netbox_librenms_plugin.tests.conftest import make_device, make_interface
-        from netbox_librenms_plugin.views.sync.interfaces import _resolve_interface_by_port_id
 
         device = make_device("pci-namehint")
         # The interface was created manually (no librenms_id) — only the name matches.
         iface = make_interface(device, "lag-1", iface_type="lag")
 
-        found, err = _resolve_interface_by_port_id(device, "42", "production", name_hint="lag-1")
+        found, err = resolve_interface_by_port_id(device, "42", "production", name_hint="lag-1")
 
         assert err is None
         assert found == iface
@@ -4476,7 +4474,6 @@ class TestResolveInterfaceByPortId:
         """Two interfaces carrying the same stale librenms_id must fail as ambiguous, not silently bind lag/parent to whichever happens to be first."""
         from netbox_librenms_plugin.tests.conftest import make_device, make_interface
         from netbox_librenms_plugin.utils import set_librenms_device_id
-        from netbox_librenms_plugin.views.sync.interfaces import _resolve_interface_by_port_id
 
         device = make_device("pci-ambig")
         for name in ("Gi0/1", "Gi0/2"):
@@ -4484,7 +4481,7 @@ class TestResolveInterfaceByPortId:
             set_librenms_device_id(iface, 42, "production")  # same stale id on both
             iface.save()
 
-        found, err = _resolve_interface_by_port_id(device, "42", "production")
+        found, err = resolve_interface_by_port_id(device, "42", "production")
 
         assert found is None
         assert err is not None
@@ -4493,11 +4490,10 @@ class TestResolveInterfaceByPortId:
     def test_name_hint_does_not_exist_falls_through_to_not_found(self):
         """A name-hint miss (DoesNotExist) is swallowed and reported as not-found."""
         from netbox_librenms_plugin.tests.conftest import make_device
-        from netbox_librenms_plugin.views.sync.interfaces import _resolve_interface_by_port_id
 
         device = make_device("pci-namemiss")  # no interfaces at all
 
-        found, err = _resolve_interface_by_port_id(device, "42", "production", name_hint="lag-1")
+        found, err = resolve_interface_by_port_id(device, "42", "production", name_hint="lag-1")
 
         assert found is None
         assert err is not None
@@ -4506,7 +4502,6 @@ class TestResolveInterfaceByPortId:
     def test_name_hint_multiple_matches_returns_ambiguous(self):
         """A name-hint matching multiple interfaces returns an ambiguity error, not a silent not-found."""
         from netbox_librenms_plugin.tests.conftest import make_device, make_interface, make_virtual_chassis
-        from netbox_librenms_plugin.views.sync.interfaces import _resolve_interface_by_port_id
 
         member1 = make_device("pci-vc-m1")
         member2 = make_device("pci-vc-m2")
@@ -4515,7 +4510,7 @@ class TestResolveInterfaceByPortId:
         make_interface(member1, "lag-1", iface_type="lag")
         make_interface(member2, "lag-1", iface_type="lag")
 
-        found, err = _resolve_interface_by_port_id(member1, "42", "production", name_hint="lag-1")
+        found, err = resolve_interface_by_port_id(member1, "42", "production", name_hint="lag-1")
 
         assert found is None
         assert err is not None
@@ -4524,8 +4519,6 @@ class TestResolveInterfaceByPortId:
     def test_unexpected_error_during_resolution_propagates(self):
         """A real DB/runtime fault while scanning the device's interfaces must propagate, not be masked as a silent not-found."""
         from django.db import connection
-
-        from netbox_librenms_plugin.views.sync.interfaces import _resolve_interface_by_port_id
 
         device = make_device("relationship-resolution-db-failure")
 
@@ -4536,11 +4529,11 @@ class TestResolveInterfaceByPortId:
 
         with connection.execute_wrapper(fail_interface_query):
             with pytest.raises(RuntimeError):
-                _resolve_interface_by_port_id(device, "42", "production", name_hint="lag-1")
+                resolve_interface_by_port_id(device, "42", "production", name_hint="lag-1")
 
 
 class TestResolveInterfaceByPortIdExpectedOwner:
-    """Real-DB coverage for the expected_owner guard in _resolve_interface_by_port_id."""
+    """Real database coverage for owner-pinned stable-ID resolution."""
 
     @staticmethod
     def _make_vc_members():
@@ -4563,41 +4556,36 @@ class TestResolveInterfaceByPortIdExpectedOwner:
 
     def test_rejects_match_on_a_different_vc_member(self, db):
         """port_id resolves uniquely onto member2's interface; resolving from member1 with expected_owner=member1 must reject it (the fix) — and accept it without the guard."""
-        from netbox_librenms_plugin.views.sync.interfaces import _resolve_interface_by_port_id
-
         member1, member2 = self._make_vc_members()
         iface2 = self._iface_with_librenms_id(member2, "Gi0/1", 42)
 
         # Without the guard: the VC-wide search finds member2's interface (the latent bug).
-        found, err = _resolve_interface_by_port_id(member1, "42", "default")
+        found, err = resolve_interface_by_port_id(member1, "42", "default")
         assert err is None
         assert found == iface2
 
         # With expected_owner pinned to member1: the foreign-member match is rejected.
-        found, err = _resolve_interface_by_port_id(member1, "42", "default", expected_owner=(member1.pk, None))
+        found, err = resolve_interface_by_port_id(member1, "42", "default", expected_owner=(member1.pk, None))
         assert found is None
         assert err and "different owner" in err
 
         # With expected_owner matching the real owner (member2): accepted.
-        found, err = _resolve_interface_by_port_id(member1, "42", "default", expected_owner=(member2.pk, None))
+        found, err = resolve_interface_by_port_id(member1, "42", "default", expected_owner=(member2.pk, None))
         assert err is None
         assert found == iface2
 
     def test_accepts_match_on_the_expected_member(self, db):
         """An interface that genuinely lives on the expected member resolves cleanly."""
-        from netbox_librenms_plugin.views.sync.interfaces import _resolve_interface_by_port_id
-
         member1, _ = self._make_vc_members()
         iface1 = self._iface_with_librenms_id(member1, "Gi0/1", 7)
 
-        found, err = _resolve_interface_by_port_id(member1, "7", "default", expected_owner=(member1.pk, None))
+        found, err = resolve_interface_by_port_id(member1, "7", "default", expected_owner=(member1.pk, None))
         assert err is None
         assert found == iface1
 
     def test_owner_mismatch_falls_back_to_name_hint(self, db):
         """A stale port_id on a foreign VC member must not block the name_hint fallback to the manually-created interface on the expected owner."""
         from netbox_librenms_plugin.tests.conftest import make_interface
-        from netbox_librenms_plugin.views.sync.interfaces import _resolve_interface_by_port_id
 
         member1, member2 = self._make_vc_members()
         # Stale/reused librenms_id 42 lives on member2 (a foreign member).
@@ -4607,7 +4595,7 @@ class TestResolveInterfaceByPortIdExpectedOwner:
 
         # port_id 42 uniquely id-matches member2, but pinned to member1 with name_hint 'Po1'
         # the foreign id-match must be skipped and the name fallback must find member1's Po1.
-        found, err = _resolve_interface_by_port_id(
+        found, err = resolve_interface_by_port_id(
             member1, "42", "default", name_hint="Po1", expected_owner=(member1.pk, None)
         )
         assert err is None, err
@@ -4624,7 +4612,7 @@ class TestBulkRelationshipRobustness:
 
         device = make_device("rel-shape")
         view = object.__new__(SyncInterfacesView)
-        # Mirrors the hardened reader _build_relationship_maps; without the guard this raises
+        # Mirrors the hardened relationship-map reader. Without the guard this raises
         # AttributeError ('list' object has no attribute 'items').
         view._sync_lag_and_parent_relationships(device, [], {"lag_members": [1, 2], "sub_interfaces": ["x"]}, "default")
 
@@ -4661,7 +4649,7 @@ class TestBulkRelationshipRobustness:
         from django.test.utils import CaptureQueriesContext
         from ipam.models import VLAN
 
-        from netbox_librenms_plugin.views.sync.interfaces import _apply_interface_relationship, _build_interface_index
+        from netbox_librenms_plugin.views.sync.interfaces import _apply_interface_relationship
 
         _virtual_chassis, (member1, member2) = make_virtual_chassis_members("relationship-index")
         location = Location.objects.create(
@@ -4691,7 +4679,7 @@ class TestBulkRelationshipRobustness:
         source.save(update_fields=["parent", "bridge", "mode", "untagged_vlan"])
 
         with transaction.atomic():
-            index = _build_interface_index(member1, "default", lock=True)
+            index = build_interface_index(member1, "default", lock=True)
             indexed_source = index["by_name"][source.name][0]
             indexed_lag_member = index["by_name"][lag_member.name][0]
             with django_assert_num_queries(0):
@@ -4714,7 +4702,7 @@ class TestBulkRelationshipRobustness:
         from ipam.models import VLAN
         from virtualization.models import VMInterface
 
-        from netbox_librenms_plugin.views.sync.interfaces import _apply_interface_relationship, _build_interface_index
+        from netbox_librenms_plugin.views.sync.interfaces import _apply_interface_relationship
 
         vm = make_vm("relationship-index-vm")
         site = make_device("relationship-index-vm-site").site
@@ -4733,7 +4721,7 @@ class TestBulkRelationshipRobustness:
         )
 
         with transaction.atomic():
-            index = _build_interface_index(vm, "default", lock=True)
+            index = build_interface_index(vm, "default", lock=True)
             indexed_source = index["by_name"][source.name][0]
             with django_assert_num_queries(0):
                 assert indexed_source.virtual_machine.site_id == site.pk
@@ -5202,7 +5190,7 @@ class TestRelationshipSyncObjectScope:
         view = sync_interfaces.SyncInterfaceParentView()
         view._librenms_api = SimpleNamespace(server_key="default")
         _cache_relationship(view, device, "sub_interfaces", 722, 723, child.name, parent.name)
-        real_build_index = sync_interfaces._build_interface_index
+        real_build_index = sync_interfaces.build_interface_index
         permission_revoked = False
 
         def revoke_before_lock(*args, **kwargs):
@@ -5212,7 +5200,7 @@ class TestRelationshipSyncObjectScope:
                 permission_revoked = True
             return real_build_index(*args, **kwargs)
 
-        monkeypatch.setattr(sync_interfaces, "_build_interface_index", revoke_before_lock)
+        monkeypatch.setattr(sync_interfaces, "build_interface_index", revoke_before_lock)
 
         response = _post(view, request, object_type="device", object_id=device.pk)
 
