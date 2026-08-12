@@ -1716,7 +1716,7 @@ def _validate_relationship(source_iface, relation_field, related_iface):
     try:
         source_iface.clean()
     except AttributeError as exc:
-        source_chassis = getattr(source_iface.device, "virtual_chassis_id", None)
+        source_chassis = getattr(getattr(source_iface, "device", None), "virtual_chassis_id", None)
         related_chassis = getattr(getattr(related_iface, "device", None), "virtual_chassis_id", None)
         if not (
             relation_field == "parent"

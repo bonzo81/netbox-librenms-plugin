@@ -4328,6 +4328,24 @@ class TestSyncLagAndParentRelationships:
         child.refresh_from_db()
         assert child.parent_id is None
 
+    def test_vm_parent_preserves_the_original_attribute_error(self, db):
+        """A VMInterface validation error must not be replaced by a missing device attribute."""
+        from virtualization.models import VMInterface
+
+        from netbox_librenms_plugin.views.sync.interfaces import _apply_interface_relationship
+
+        vm = make_vm("relationship-vm-clean-error")
+        child = VMInterface.objects.create(virtual_machine=vm, name="Ethernet1.100")
+        parent = VMInterface.objects.create(virtual_machine=vm, name="Ethernet1")
+        original = AttributeError("validation failed", name="unexpected")
+
+        with patch.object(VMInterface, "clean", side_effect=original), pytest.raises(AttributeError) as raised:
+            _apply_interface_relationship(child, "parent", parent)
+
+        assert raised.value is original
+        child.refresh_from_db()
+        assert child.parent_id is None
+
     def test_name_hint_resolves_on_expected_owner_across_vc_duplicate_names(self, db):
         """On a VC, an id-less interface whose name is shared across members resolves to the SELECTED member, not chassis-wide ambiguity."""
         from netbox_librenms_plugin.tests.conftest import make_virtual_chassis
