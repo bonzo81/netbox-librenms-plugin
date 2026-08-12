@@ -584,22 +584,24 @@ def test_relationship_write_locks_virtual_chassis_members_through_validation():
         finally:
             close_old_connections()
 
-    with ThreadPoolExecutor(max_workers=2) as executor:
-        relationship_future = executor.submit(write_relationship)
-        if not validation_reached.wait(5):
+    try:
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            relationship_future = executor.submit(write_relationship)
+            if not validation_reached.wait(5):
+                release_relationship.set()
+                relationship_future.result(timeout=10)
+                pytest.fail("relationship sync did not reach validation")
+            membership_future = executor.submit(move_member_out_of_chassis)
+            changed_during_relationship = membership_changed.wait(BLOCKED_WAIT_SECONDS)
             release_relationship.set()
             relationship_future.result(timeout=10)
-            pytest.fail("relationship sync did not reach validation")
-        membership_future = executor.submit(move_member_out_of_chassis)
-        changed_during_relationship = membership_changed.wait(BLOCKED_WAIT_SECONDS)
-        release_relationship.set()
-        relationship_future.result(timeout=10)
-        membership_future.result(timeout=10)
+            membership_future.result(timeout=10)
 
-    member.refresh_from_db()
-    assert not changed_during_relationship
-    assert member.lag_id == aggregate.pk
-    cache.delete(cache_key)
+        member.refresh_from_db()
+        assert not changed_during_relationship
+        assert member.lag_id == aggregate.pk
+    finally:
+        cache.delete(cache_key)
 
 
 def test_inline_relationship_rechecks_migrated_donor_after_lock():

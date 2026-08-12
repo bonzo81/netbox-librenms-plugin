@@ -5806,7 +5806,9 @@ class TestInterfacePortIdActiveServerScope:
 
         device = make_device("mod-verify-scope")
         iface = make_interface(device, "Gi0/1")
-        iface.custom_field_data["librenms_id"] = {self._real_configured_api().server_key: 111, "server2": 222}
+        bound_key = self._real_configured_api().server_key
+        assert bound_key != "server2", "the alternate key must differ from the bound client key"
+        iface.custom_field_data["librenms_id"] = {bound_key: 111, "server2": 222}
         iface.save()
 
         view = object.__new__(BaseModuleTableView)

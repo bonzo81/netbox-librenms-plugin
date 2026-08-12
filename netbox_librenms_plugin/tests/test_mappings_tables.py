@@ -44,6 +44,49 @@ def test_port_stack_lag_pattern_searches_all_exposed_fields(query, expected_os):
 
 
 @pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("query", "expected_sensor_type"),
+    [
+        ("serial-type-token", "serial-type-token"),
+        ("ConsolePatternToken", "serial-pattern-type"),
+        ("serial description token", "serial-description-type"),
+    ],
+)
+def test_serial_sensor_type_pattern_searches_all_exposed_fields(query, expected_sensor_type):
+    """The list search filters sensor type, port pattern, and description through its q field."""
+    from netbox_librenms_plugin.filters import SerialSensorTypePatternFilterSet
+    from netbox_librenms_plugin.models import SerialSensorTypePattern
+
+    SerialSensorTypePattern.objects.bulk_create(
+        [
+            SerialSensorTypePattern(
+                sensor_type="serial-type-token",
+                port_name_pattern="type{N}",
+                description="Sensor type field match",
+            ),
+            SerialSensorTypePattern(
+                sensor_type="serial-pattern-type",
+                port_name_pattern="ConsolePatternToken{N}",
+                description="Port pattern field match",
+            ),
+            SerialSensorTypePattern(
+                sensor_type="serial-description-type",
+                port_name_pattern="description{N}",
+                description="Serial description token",
+            ),
+        ]
+    )
+
+    filterset = SerialSensorTypePatternFilterSet(
+        {"q": query},
+        queryset=SerialSensorTypePattern.objects.all(),
+    )
+
+    assert filterset.is_valid(), filterset.errors
+    assert list(filterset.qs.values_list("sensor_type", flat=True)) == [expected_sensor_type]
+
+
+@pytest.mark.django_db
 class TestPortStackLagPatternTableSelection:
     """PortStackLagPatternTable's selection column must submit name='pk'."""
 
