@@ -23,6 +23,36 @@ from netbox_librenms_plugin.tests.view_test_helpers import (
 )
 
 
+class _CapturedQueries:
+    """Expose synthetic SQL through the CaptureQueriesContext contract."""
+
+    def __init__(self, *statements):
+        self.captured_queries = [{"sql": statement} for statement in statements]
+
+
+def test_lock_order_assertion_ignores_sibling_table_names():
+    """A lock on ipam_vlangroup must not satisfy the ipam_vlan assertion."""
+    captured = _CapturedQueries(
+        'SELECT "ipam_vlangroup"."id" FROM "ipam_vlangroup" FOR UPDATE',
+        'UPDATE "ipam_vlan" SET "name" = \'new\' WHERE "ipam_vlan"."id" = 1',
+    )
+
+    with pytest.raises(AssertionError, match="ipam_vlan was never locked"):
+        assert_locked_before_update(captured, "ipam_vlan")
+
+
+def test_lock_order_assertion_requires_one_exact_update_pair():
+    """One early lock must not hide a later unpaired update in the same capture."""
+    captured = _CapturedQueries(
+        'SELECT "ipam_vlan"."id" FROM "ipam_vlan" FOR UPDATE',
+        'UPDATE "ipam_vlan" SET "name" = \'one\' WHERE "ipam_vlan"."id" = 1',
+        'UPDATE "ipam_vlan" SET "name" = \'two\' WHERE "ipam_vlan"."id" = 2',
+    )
+
+    with pytest.raises(AssertionError, match="exactly one lock/update pair"):
+        assert_locked_before_update(captured, "ipam_vlan")
+
+
 class _GlobalVLANLookupBarrier:
     """Pause both workers after their first global VLAN lookup completes."""
 
@@ -220,6 +250,8 @@ def test_grouped_vlan_deleted_after_the_scope_check_is_skipped_not_crashed():
         syncing = executor.submit(sync_as_caller)
         try:
             assert read_done.wait(10), "the VLAN sync never reached its scoped read"
+            with connection.cursor() as cursor:
+                cursor.execute("SET lock_timeout = '5s'")
             VLAN.objects.filter(pk=vlan.pk).delete()
         finally:
             resume.set()

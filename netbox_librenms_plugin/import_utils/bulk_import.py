@@ -307,12 +307,14 @@ def classify_bulk_precheck(collisions, unresolved, device_ids, vm_imports) -> Bu
 
     block_message = ""
     if collisions:
+        scoped = any("target_visible" in group for group in collisions)
         visible_pks = [group["nb_device_pk"] for group in collisions if group.get("target_visible") is True]
-        target_detail = (
-            f" Visible pk(s): {', '.join(str(pk) for pk in visible_pks)}."
-            if visible_pks
-            else " Target details are omitted when they are outside your view scope."
-        )
+        if visible_pks:
+            target_detail = f" Visible pk(s): {', '.join(str(pk) for pk in visible_pks)}."
+        elif scoped:
+            target_detail = " Target details are omitted when they are outside your view scope."
+        else:
+            target_detail = ""
         block_message = (
             f"Bulk import blocked: {len(collisions)} NetBox object collision(s) in this batch."
             f"{target_detail} Two or more selected LibreNMS devices resolve to the same NetBox "

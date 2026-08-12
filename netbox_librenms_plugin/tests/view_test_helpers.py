@@ -190,13 +190,15 @@ def assert_locked_before_update(captured, table):
         table: Database table name, for example ``"ipam_ipaddress"``.
     """
     statements = [q["sql"] for q in captured.captured_queries]
-    locks = [i for i, sql in enumerate(statements) if table in sql.lower() and "for update" in sql.lower()]
-    updates = [
-        i for i, sql in enumerate(statements) if sql.lstrip().upper().startswith("UPDATE") and table in sql.lower()
-    ]
+    quoted_table = f'"{table.lower()}"'
+    locks = [i for i, sql in enumerate(statements) if quoted_table in sql.lower() and "for update" in sql.lower()]
+    updates = [i for i, sql in enumerate(statements) if sql.lower().lstrip().startswith(f"update {quoted_table}")]
     assert locks, f"{table} was never locked with SELECT ... FOR UPDATE"
     assert updates, f"{table} was never updated, so the lock ordering is untested"
-    assert min(locks) < min(updates), f"{table} was updated before it was locked: locks={locks} updates={updates}"
+    assert len(locks) == len(updates) == 1, (
+        f"{table} must have exactly one lock/update pair: locks={locks} updates={updates}"
+    )
+    assert locks[0] < updates[0], f"{table} was updated before it was locked: locks={locks} updates={updates}"
 
 
 # =============================================================================

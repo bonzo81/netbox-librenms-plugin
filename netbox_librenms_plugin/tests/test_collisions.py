@@ -462,13 +462,13 @@ def test_classify_collisions_block_whole_batch():
 
 
 def test_classify_collision_without_visibility_metadata_omits_pk():
-    """An unscoped collision payload must not expose its target PK."""
+    """An unscoped collision payload must not claim that permission scoping hid its target."""
     outcome = classify_bulk_precheck([{"nb_device_pk": 77}], [], device_ids=[1, 2], vm_imports={})
 
     assert outcome.blocked is True
     assert "Visible pk(s)" not in outcome.block_message
     assert "77" not in outcome.block_message
-    assert "Target details are omitted" in outcome.block_message
+    assert "Target details are omitted" not in outcome.block_message
 
 
 def test_classify_blocked_batch_omits_imported_rows_message():
