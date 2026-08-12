@@ -1529,8 +1529,8 @@ class _BaseRelationshipSyncView(
 
     SyncInterfaceLagView and SyncInterfaceParentView share the permission gate, current-cache
     edge validation, stable port ID resolution, and one transactional write path. They differ
-    differing only in the FK attribute set,
-    the POST field/label wording, VM support, and the LAG-only aggregate type bump. Keeping
+    only in the FK attribute set, the POST field/label wording, VM support, and the LAG-only
+    aggregate type bump. Keeping
     one flow here stops the two endpoints drifting (a fix to the resolve/validate/persist
     sequence applies once, not twice).
 

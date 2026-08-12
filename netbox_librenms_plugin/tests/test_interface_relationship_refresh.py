@@ -93,3 +93,27 @@ class TestInterfaceRelationshipRefresh:
         assert snapshot["port_stack_relationships"]["lag_members"] == {10: 20}
         assert snapshot["relationship_data_incomplete"] is True
         assert any("device OS could not be determined" in str(message) for message in get_messages(request))
+
+    def test_structural_signal_marks_snapshot_incomplete_when_port_stack_fetch_fails(self, mock_librenms_api):
+        """A failed structural relationship fetch marks the rendered snapshot incomplete."""
+        ports = [
+            {"port_id": 10, "ifName": "Ethernet1", "ifType": "ethernetCsmacd"},
+            {"port_id": 20, "ifName": "Bundle1", "ifType": "ieee8023adLag"},
+        ]
+        api = _RelationshipAPI(
+            mock_librenms_api,
+            device_info=(False, "must not be requested"),
+            port_stack=(False, "unavailable"),
+        )
+        view = object.__new__(BaseInterfaceTableView)
+        view._librenms_api = api
+        view.librenms_id = 42
+        request = _message_request()
+        snapshot = {"ports": ports}
+
+        view._enrich_port_stack_relationships(request, snapshot, ports, "ifName")
+
+        assert api.device_info_calls == 0
+        assert api.port_stack_calls == 1
+        assert snapshot["relationship_data_incomplete"] is True
+        assert any("relationship data could not be fetched" in str(message) for message in get_messages(request))
