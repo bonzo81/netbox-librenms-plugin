@@ -44,8 +44,8 @@ def iter_recording_paths():
     return sorted(p for p in RECORDINGS_DIR.glob("*.json") if p.name != MANIFEST_NAME)
 
 
-def load_recording(name: str) -> dict:
-    """Load a single recording by name, with or without the ``.json`` suffix."""
+def load_recording_from_directory(name: str, recordings_dir) -> dict:
+    """Load one recording from a directory, with or without the ``.json`` suffix."""
     filename = name if name.endswith(".json") else f"{name}.json"
     # The manifest is a list of signatures, not a recording — iter_recording_paths() excludes it,
     # so reject it here too rather than return a list from a helper that advertises a single dict.
@@ -54,7 +54,7 @@ def load_recording(name: str) -> dict:
     # Constrain the resolved path to RECORDINGS_DIR so a name like "../../secrets" can't escape
     # the recordings directory (defensive: callers pass fixed fixture names today, but keep the
     # loader safe if a name ever becomes caller-derived).
-    base_dir = RECORDINGS_DIR.resolve()
+    base_dir = Path(recordings_dir).resolve()
     candidate = (base_dir / filename).resolve()
     try:
         candidate.relative_to(base_dir)
@@ -64,6 +64,11 @@ def load_recording(name: str) -> dict:
     if not isinstance(loaded, dict):
         raise ValueError(f"{filename!r} is not a recording object")
     return loaded
+
+
+def load_recording(name: str) -> dict:
+    """Load a single bundled recording by name."""
+    return load_recording_from_directory(name, RECORDINGS_DIR)
 
 
 def iter_recordings() -> list[dict]:

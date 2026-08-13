@@ -353,21 +353,24 @@ class LibreNMSStubServer(MockLibreNMSServer):
         self.links_by_device = {}
         self.locations = []
         self._aliases = {}
+        self._aliases_by_device = {}
 
         recordings = list(recordings)
         seen_device_ids = set()
-        for recording in recordings:
-            device_id = recording.get("device_id")
-            if device_id in seen_device_ids or device_id in self.devices:
-                self._server.server_close()
-                raise ValueError(f"Duplicate recording device_id {device_id}")
-            seen_device_ids.add(device_id)
-            self.load_recording(recording)
-            self._load_stub_recording(recording)
+        try:
+            for recording in recordings:
+                device_id = recording.get("device_id")
+                if device_id in seen_device_ids or device_id in self.devices:
+                    raise ValueError(f"Duplicate recording device_id {device_id}")
+                seen_device_ids.add(device_id)
+                self.load_recording(recording)
+                self._load_stub_recording(recording)
 
-        if not self.devices:
+            if not self.devices:
+                raise ValueError("At least one recording with a device response is required")
+        except BaseException:
             self._server.server_close()
-            raise ValueError("At least one recording with a device response is required")
+            raise
 
         self._next_device_id = max(self.devices) + 1
         self._install_instance_routes()
@@ -542,20 +545,29 @@ class LibreNMSStubServer(MockLibreNMSServer):
 
     def _register_device_routes(self, device_id):
         device = self.devices[device_id]
-        aliases = (device_id, device.get("hostname"), device.get("sysName"), device.get("ip"))
-        for alias in aliases:
-            if alias in (None, ""):
-                continue
-            alias_key = str(alias)
+        alias_keys = {
+            str(alias)
+            for alias in (device_id, device.get("hostname"), device.get("sysName"), device.get("ip"))
+            if alias not in (None, "")
+        }
+        for alias_key in alias_keys:
             other_id = self._aliases.get(alias_key)
             if other_id is not None and other_id != device_id:
                 raise ValueError(f"Duplicate device lookup alias {alias_key!r}")
+
+        old_alias_keys = self._aliases_by_device.get(device_id, set())
+        for alias_key in old_alias_keys - alias_keys:
+            self._aliases.pop(alias_key, None)
+            self.routes.pop(f"GET /api/v0/devices/{alias_key}", None)
+
+        for alias_key in alias_keys:
             self._aliases[alias_key] = device_id
             self.register(
                 f"/api/v0/devices/{alias_key}",
                 self._device_info_handler(device_id),
                 method="GET",
             )
+        self._aliases_by_device[device_id] = alias_keys
 
         self.register(
             f"/api/v0/devices/{device_id}",
@@ -677,7 +689,16 @@ class LibreNMSStubServer(MockLibreNMSServer):
             if any(not isinstance(field, str) or not field for field in fields):
                 return 422, {"status": "error", "message": "field names must be non-empty strings"}
             with self._lock:
-                self.devices[device_id].update(zip(fields, values, strict=True))
+                updates = dict(zip(fields, values, strict=True))
+                candidate = {**self.devices[device_id], **updates}
+                aliases = (candidate.get("hostname"), candidate.get("sysName"), candidate.get("ip"))
+                if any(
+                    self._aliases.get(str(alias)) not in (None, device_id)
+                    for alias in aliases
+                    if alias not in (None, "")
+                ):
+                    return 409, {"status": "error", "message": "Device lookup alias already exists"}
+                self.devices[device_id].update(updates)
                 self._register_device_routes(device_id)
             return 200, {"status": "ok", "message": "Device fields updated"}
 
@@ -867,24 +888,9 @@ def librenms_mock_server():
 
 def load_stub_recordings(recording_names, recordings_dir=DEFAULT_RECORDINGS_DIR):
     """Load named source-tree recordings for the development stub."""
-    recordings_dir = Path(recordings_dir).resolve()
-    recordings = []
-    for name in recording_names:
-        if Path(name).name != name or name in ("", ".", ".."):
-            raise ValueError(f"Invalid recording name: {name!r}")
-        filename = name if name.endswith(".json") else f"{name}.json"
-        path = (recordings_dir / filename).resolve()
-        try:
-            path.relative_to(recordings_dir)
-        except ValueError as exc:
-            raise ValueError(f"Invalid recording name: {name!r}") from exc
-        if path.name == "manifest.json":
-            raise ValueError("manifest.json is not a recording")
-        recording = json.loads(path.read_text())
-        if not isinstance(recording, dict):
-            raise ValueError(f"{filename!r} is not a recording object")
-        recordings.append(recording)
-    return recordings
+    from netbox_librenms_plugin.data_shapes.recordings_store import load_recording_from_directory
+
+    return [load_recording_from_directory(name, recordings_dir) for name in recording_names]
 
 
 def main(argv=None):
