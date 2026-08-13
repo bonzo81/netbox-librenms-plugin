@@ -222,11 +222,11 @@ def test_inventory_seed_survives_duplicate_operator_rules():
     )
 
 
-def test_migration_0015_serial_sensor_field_help_text_matches_model():
-    """Same drift guard for SerialSensorTypePattern: migration 0015's fields must carry the model's help_text, else makemigrations tracks a phantom AlterField."""
+def test_migration_0016_serial_sensor_field_help_text_matches_model():
+    """Same drift guard for SerialSensorTypePattern: migration 0016's fields must carry the model's help_text, else makemigrations tracks a phantom AlterField."""
     from netbox_librenms_plugin.models import SerialSensorTypePattern
 
-    mod = importlib.import_module("netbox_librenms_plugin.migrations.0015_serialsensortypepattern")
+    mod = importlib.import_module("netbox_librenms_plugin.migrations.0016_serialsensortypepattern")
     create_op = next(
         op
         for op in mod.Migration.operations
@@ -241,11 +241,11 @@ def test_migration_0015_serial_sensor_field_help_text_matches_model():
         )
 
 
-def test_migration_0016_librenms_settings_field_help_text_matches_model():
-    """Same drift guard for LibreNMSSettings's cable-sync fields: migration 0016's AddField ops must carry the model's help_text, else makemigrations tracks a phantom AlterField."""
+def test_migration_0017_librenms_settings_field_help_text_matches_model():
+    """Same drift guard for LibreNMSSettings's cable-sync fields: migration 0017's AddField ops must carry the model's help_text, else makemigrations tracks a phantom AlterField."""
     from netbox_librenms_plugin.models import LibreNMSSettings
 
-    mod = importlib.import_module("netbox_librenms_plugin.migrations.0016_librenmssettings_cable_sync")
+    mod = importlib.import_module("netbox_librenms_plugin.migrations.0017_librenmssettings_cable_sync")
 
     for field_name in ("cable_sync_tag", "cable_sync_tag_color", "cable_sync_description"):
         add_op = next(

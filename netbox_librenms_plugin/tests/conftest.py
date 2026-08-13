@@ -90,7 +90,7 @@ def _seeded_model_rows():
 
     # The migration module names start with a digit, so import syntax cannot reach them.
     lag = importlib.import_module("netbox_librenms_plugin.migrations.0013_portstacklagpattern")
-    serial = importlib.import_module("netbox_librenms_plugin.migrations.0015_serialsensortypepattern")
+    serial = importlib.import_module("netbox_librenms_plugin.migrations.0016_serialsensortypepattern")
     yield PortStackLagPattern, "librenms_os", "lag_name_pattern", lag.INITIAL_LAG_PATTERNS
     yield SerialSensorTypePattern, "sensor_type", "port_name_pattern", serial.INITIAL_SERIAL_SENSOR_TYPES
 

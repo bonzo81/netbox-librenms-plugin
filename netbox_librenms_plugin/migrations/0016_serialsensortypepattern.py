@@ -48,7 +48,7 @@ class Migration(migrations.Migration):
         # ``makemigrations`` will try to bump this to the dev environment's NetBox tip;
         # revert it unless we actually start depending on a newer field.
         ("extras", "0122_charfield_null_choices"),
-        ("netbox_librenms_plugin", "0014_portstacklagpattern_ci_unique"),
+        ("netbox_librenms_plugin", "0015_librenmssettings_remember_interface_name_per_platform"),
     ]
 
     operations = [

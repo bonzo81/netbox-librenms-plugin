@@ -6,34 +6,6 @@ from uuid import uuid4
 import pytest
 from django.core.cache import cache
 
-import pytest
-
-
-@pytest.mark.parametrize(
-    ("location", "expected"),
-    [
-        ("redis://cache.example.test:6379", "redis://cache.example.test:6379/9"),
-        ("redis://cache.example.test:6379/", "redis://cache.example.test:6379/9"),
-        ("redis://cache.example.test:6379/0/", "redis://cache.example.test:6379/9"),
-        ("redis://cache.example.test:6379/2?socket_timeout=1", "redis://cache.example.test:6379/9?socket_timeout=1"),
-    ],
-)
-def test_isolated_cache_location_handles_redis_url_shapes(location, expected):
-    from netbox_librenms_plugin.tests.conftest import _isolated_cache_location
-
-    assert _isolated_cache_location(location) == expected
-
-
-def test_isolated_cache_location_handles_redis_server_lists():
-    from netbox_librenms_plugin.tests.conftest import _isolated_cache_location
-
-    locations = ["redis://cache-a.example.test:6379/0", "redis://cache-b.example.test:6379/"]
-
-    assert _isolated_cache_location(locations) == [
-        "redis://cache-a.example.test:6379/9",
-        "redis://cache-b.example.test:6379/9",
-    ]
-
 
 @pytest.fixture
 def server_key():
@@ -65,7 +37,7 @@ def _store_indexed_search(server_key, metadata, *, cache_key=None):
     return cache_key
 
 
-def test_isolated_cache_config_uses_a_unique_prefix_per_test():
+def test_isolated_cache_config_preserves_worker_location_and_uses_a_unique_prefix():
     from netbox_librenms_plugin.tests.conftest import _isolated_cache_config
 
     original = {"default": {"BACKEND": "django_redis.cache.RedisCache", "LOCATION": "redis://cache:6379/0"}}
@@ -74,7 +46,7 @@ def test_isolated_cache_config_uses_a_unique_prefix_per_test():
     second = _isolated_cache_config(original)
 
     assert original["default"]["LOCATION"] == "redis://cache:6379/0"
-    assert first["default"]["LOCATION"] == "redis://cache:6379/9"
+    assert first["default"]["LOCATION"] == "redis://cache:6379/0"
     assert first["default"]["KEY_PREFIX"] != second["default"]["KEY_PREFIX"]
 
 
