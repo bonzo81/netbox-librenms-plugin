@@ -180,7 +180,7 @@ class BaseInterfaceTableView(
         """Handle POST request to fetch and cache LibreNMS interface data for an object."""
         obj = self.get_object(pk)
 
-        interface_name_field = get_interface_name_field(request)
+        interface_name_field = get_interface_name_field(request, obj)
 
         # Rebind the API to the POSTed server BEFORE fetching the id/ports, so the live
         # lookups AND the cache writes below all target the same server in a multi-server
@@ -523,7 +523,7 @@ class BaseInterfaceTableView(
         netbox_only_interfaces = []
 
         if interface_name_field is None:
-            interface_name_field = get_interface_name_field(request)
+            interface_name_field = get_interface_name_field(request, obj)
 
         unresolved = False
         if server_key is None:

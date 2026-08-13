@@ -95,6 +95,11 @@ class LibreNMSSettings(models.Model):
         help_text="Remove domain suffix from device names during import",
     )
 
+    remember_interface_name_per_platform = models.BooleanField(
+        default=False,
+        help_text="Remember each user's ifName or ifDescr choice separately for each device platform",
+    )
+
     def save(self, *args, **kwargs):
         self.pk = 1
         super().save(*args, **kwargs)

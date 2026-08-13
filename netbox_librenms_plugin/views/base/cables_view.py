@@ -384,7 +384,7 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObject
             # post() can surface the actual LibreNMS error instead of a generic "No links found".
             self._links_fetch_error = self._classify_links_fetch_error(success, data)
 
-        interface_name_field = get_interface_name_field(getattr(self, "request", None))
+        interface_name_field = get_interface_name_field(getattr(self, "request", None), obj)
         # The alternate LibreNMS name field: when the user displays ifName, a NetBox
         # interface may still be named from ifDescr (and vice versa). Carrying the alternate
         # name lets enrich_local_port fall back to either field (issue #88).

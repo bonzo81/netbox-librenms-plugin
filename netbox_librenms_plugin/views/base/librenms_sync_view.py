@@ -21,6 +21,8 @@ from netbox_librenms_plugin.utils import (
 )
 from netbox_librenms_plugin.views.mixins import LibreNMSAPIMixin, LibreNMSPermissionMixin, NetBoxObjectPermissionMixin
 
+INTERFACE_NAME_SELECTOR_TABS = ("interfaces", "cables", "ipaddresses")
+
 
 class BaseLibreNMSSyncView(
     LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjectPermissionMixin, generic.ObjectListView
@@ -134,12 +136,16 @@ class BaseLibreNMSSyncView(
         """Get the context data for the LibreNMS sync view."""
         # Get context from parent classes (including LibreNMSAPIMixin)
         context = super().get_context_data()
+        active_sync_tab = request.GET.get("tab") or "interfaces"
 
         # Add our specific context
         context.update(
             {
                 "object": obj,
                 "tab": self.tab,
+                "active_sync_tab": active_sync_tab,
+                "interface_name_selector_tabs": ",".join(INTERFACE_NAME_SELECTOR_TABS),
+                "interface_name_selector_visible": active_sync_tab in INTERFACE_NAME_SELECTOR_TABS,
                 # self.librenms_id is normalised to a positive int or None at assignment
                 # (see post()), so `is not None` is correct here — 0/negatives never reach it.
                 "has_librenms_id": self.librenms_id is not None,
@@ -185,7 +191,7 @@ class BaseLibreNMSSyncView(
         vlan_context = self.get_vlan_context(request, obj)
         module_context = self.get_module_context(request, obj)
 
-        interface_name_field = get_interface_name_field(request)
+        interface_name_field = get_interface_name_field(request, obj)
 
         # Get platform info for display and sync
         platform_info = self._get_platform_info(librenms_info, obj)

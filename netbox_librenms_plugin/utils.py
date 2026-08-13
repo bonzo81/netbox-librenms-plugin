@@ -17,6 +17,7 @@ from netbox.plugins import get_plugin_config
 from utilities.paginator import get_paginate_count as netbox_get_paginate_count
 
 from netbox_librenms_plugin.constants import OOB_BADGE_HTML
+from netbox_librenms_plugin.ip_addressing import parse_host_address
 
 logger = logging.getLogger(__name__)
 
@@ -929,10 +930,8 @@ def resolve_naming_preferences(request) -> tuple[bool, bool]:
 
 def same_host(a, b) -> bool:
     """True if two address strings refer to the same host IP (version-aware)."""
-    from ipaddress import ip_address
-
     try:
-        return ip_address(a) == ip_address(b)
+        return parse_host_address(a) == parse_host_address(b)
     except ValueError:
         return False
 
@@ -974,31 +973,96 @@ def resolve_set_primary_ip(request) -> bool:
     return False
 
 
-def get_interface_name_field(request: Optional[HttpRequest] = None) -> str:
+INTERFACE_NAME_FIELDS = frozenset({"ifName", "ifDescr"})
+INTERFACE_NAME_PREFERENCE_PATH = "plugins.netbox_librenms_plugin.interface_name_field"
+INTERFACE_NAME_PLATFORM_PREFERENCES_PATH = "plugins.netbox_librenms_plugin.interface_name_fields_by_platform"
+_POSTGRES_BIGINT_MAX = 9_223_372_036_854_775_807
+
+
+def _remember_interface_name_per_platform(request: HttpRequest) -> bool:
+    """Return the installation setting, cached for the lifetime of this request."""
+    cache_attribute = "_librenms_remember_interface_name_per_platform"
+    request_state = getattr(request, "__dict__", {})
+    if cache_attribute in request_state:
+        return request_state[cache_attribute]
+
+    from netbox_librenms_plugin.models import LibreNMSSettings
+
+    configured = (
+        LibreNMSSettings.objects.filter(pk=1).values_list("remember_interface_name_per_platform", flat=True).first()
+    )
+    enabled = bool(configured)
+    setattr(request, cache_attribute, enabled)
+    return enabled
+
+
+def normalize_platform_id(value) -> int | None:
+    """Normalize a platform primary key without allowing PostgreSQL bigint overflow."""
+    platform_id = coerce_positive_int(value)
+    if platform_id is None or platform_id > _POSTGRES_BIGINT_MAX:
+        return None
+    return platform_id
+
+
+def save_interface_name_preference(
+    request: HttpRequest,
+    value: str,
+    platform_id: int | None = None,
+) -> bool:
+    """Persist an interface-name choice at the configured user preference scope."""
+    if value not in INTERFACE_NAME_FIELDS:
+        return False
+
+    normalized_platform_id = normalize_platform_id(platform_id)
+    if normalized_platform_id is not None and _remember_interface_name_per_platform(request):
+        stored = get_user_pref(request, INTERFACE_NAME_PLATFORM_PREFERENCES_PATH, {})
+        stored = stored if isinstance(stored, dict) else {}
+        preferences = {}
+        for key, candidate in stored.items():
+            stored_platform_id = normalize_platform_id(key)
+            if stored_platform_id is not None and candidate in INTERFACE_NAME_FIELDS:
+                preferences[str(stored_platform_id)] = candidate
+        preferences[str(normalized_platform_id)] = value
+        save_user_pref(request, INTERFACE_NAME_PLATFORM_PREFERENCES_PATH, preferences)
+        return True
+
+    save_user_pref(request, INTERFACE_NAME_PREFERENCE_PATH, value)
+    return True
+
+
+def get_interface_name_field(request: Optional[HttpRequest] = None, obj=None) -> str:
     """
     Get interface name field with request override support.
 
-    Checks in order: GET/POST params, user preference, plugin config default.
-    When a param is explicitly provided, persists it to user preferences.
+    Checks in order: GET/POST params, platform-specific user preference, global
+    user preference, plugin config default. Platform-specific storage is used
+    only when the installation setting is enabled and the object has a platform.
 
     Args:
-        request: Optional HTTP request object that may contain override
+        request: Optional HTTP request object that may contain an override.
+        obj: Optional NetBox object whose platform scopes the preference.
 
     Returns:
         str: Interface name field to use
     """
+    platform_id = normalize_platform_id(getattr(obj, "platform_id", None))
     if request:
         # Explicit override from request params
         param_val = request.GET.get("interface_name_field") or request.POST.get("interface_name_field")
-        if param_val:
-            existing = get_user_pref(request, "plugins.netbox_librenms_plugin.interface_name_field")
-            if param_val != existing:
-                save_user_pref(request, "plugins.netbox_librenms_plugin.interface_name_field", param_val)
+        if param_val in INTERFACE_NAME_FIELDS:
+            save_interface_name_preference(request, param_val, platform_id)
             return param_val
 
+        if platform_id is not None and _remember_interface_name_per_platform(request):
+            platform_preferences = get_user_pref(request, INTERFACE_NAME_PLATFORM_PREFERENCES_PATH, {})
+            if isinstance(platform_preferences, dict):
+                platform_value = platform_preferences.get(str(platform_id))
+                if platform_value in INTERFACE_NAME_FIELDS:
+                    return platform_value
+
         # Check user preference
-        pref_val = get_user_pref(request, "plugins.netbox_librenms_plugin.interface_name_field")
-        if pref_val:
+        pref_val = get_user_pref(request, INTERFACE_NAME_PREFERENCE_PATH)
+        if pref_val in INTERFACE_NAME_FIELDS:
             return pref_val
 
     # Fall back to plugin config

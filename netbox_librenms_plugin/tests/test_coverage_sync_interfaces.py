@@ -3819,13 +3819,7 @@ class TestSyncInterfacesViewSyncInterfaceVM:
 
 class TestSyncInterfacesViewUpdateInterfaceAttributes:
     def _make_view(self):
-        from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
-
-        view = object.__new__(SyncInterfacesView)
-        view.request = _make_request()
-        view._post_server_key = "default"
-        view.handle_mac_address = MagicMock()  # MAC parsing has its own dedicated test class
-        return view
+        return _sync_view()
 
     def test_basic_attributes_set(self):
         """Real Interface: the LibreNMS→NetBox field mapping is applied and persisted; the real convert_speed_to_kbps runs (bps→kbps)."""
@@ -3882,8 +3876,6 @@ class TestSyncInterfacesViewUpdateInterfaceAttributes:
             "ifName",
         )
 
-        # MAC handler must not be invoked when "mac_address" is excluded.
-        view.handle_mac_address.assert_not_called()
         # Excluded attributes keep their pre-update values.
         reloaded = Interface.objects.get(pk=interface.pk)
         assert reloaded.name == "orig-name"
@@ -3917,56 +3909,49 @@ class TestSyncInterfacesViewUpdateInterfaceAttributes:
 
     def test_port_id_calls_set_librenms_device_id(self):
         from dcim.models import Interface
+        from netbox_librenms_plugin.utils import get_librenms_device_id
 
         view = self._make_view()
-        interface = MagicMock()
-        interface.__class__ = Interface
+        interface = make_interface(make_device("port-id-write"), "Gi0/0")
         librenms_port = {
             "ifName": "Gi0/1",
-            "ifType": None,
+            "ifType": "ethernetCsmacd",
             "ifSpeed": None,
-            "ifAlias": None,
+            "ifAlias": "",
             "ifMtu": None,
             "port_id": 42,
             "ifAdminStatus": "up",
         }
 
-        with (
-            patch("netbox_librenms_plugin.views.sync.interfaces.convert_speed_to_kbps", return_value=None),
-            patch("netbox_librenms_plugin.views.sync.interfaces.find_by_librenms_id", return_value=None),
-            patch("netbox_librenms_plugin.views.sync.interfaces.set_librenms_device_id") as mock_set,
-        ):
-            view.update_interface_attributes(interface, librenms_port, None, [], "ifName")
+        view.update_interface_attributes(interface, librenms_port, "other", [], "ifName")
 
-        mock_set.assert_called_once_with(interface, 42, "default")
+        interface = Interface.objects.get(pk=interface.pk)
+        assert get_librenms_device_id(interface, "default", auto_save=False) == 42
 
     def test_port_id_conflict_does_not_overwrite(self):
         from dcim.models import Interface
+        from netbox_librenms_plugin.utils import get_librenms_device_id
 
         view = self._make_view()
-        interface = MagicMock()
-        interface.__class__ = Interface
-        interface.pk = 1
-        conflicting_owner = MagicMock()
-        conflicting_owner.pk = 2
+        conflicting_owner = make_interface(make_device("port-id-owner"), "Gi0/0")
+        conflicting_owner.custom_field_data["librenms_id"] = {"default": 42}
+        conflicting_owner.save(update_fields=["custom_field_data"])
+        interface = make_interface(make_device("port-id-target"), "Gi0/0")
         librenms_port = {
             "ifName": "Gi0/1",
-            "ifType": None,
+            "ifType": "ethernetCsmacd",
             "ifSpeed": None,
-            "ifAlias": None,
+            "ifAlias": "",
             "ifMtu": None,
             "port_id": 42,
             "ifAdminStatus": "up",
         }
 
-        with (
-            patch("netbox_librenms_plugin.views.sync.interfaces.convert_speed_to_kbps", return_value=None),
-            patch("netbox_librenms_plugin.views.sync.interfaces.find_by_librenms_id", return_value=conflicting_owner),
-            patch("netbox_librenms_plugin.views.sync.interfaces.set_librenms_device_id") as mock_set,
-        ):
-            view.update_interface_attributes(interface, librenms_port, None, [], "ifName")
+        view.update_interface_attributes(interface, librenms_port, "other", [], "ifName")
 
-        mock_set.assert_not_called()
+        interface = Interface.objects.get(pk=interface.pk)
+        assert get_librenms_device_id(interface, "default", auto_save=False) is None
+        assert get_librenms_device_id(conflicting_owner, "default", auto_save=False) == 42
 
     def test_ifalias_not_set_when_same_as_name(self):
         """ifAlias should not overwrite when equal to interface name."""
