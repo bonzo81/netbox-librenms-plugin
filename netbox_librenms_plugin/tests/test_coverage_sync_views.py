@@ -1348,31 +1348,6 @@ class TestSyncIPAddressesViewGetManagementIp:
         assert view.get_management_ip(MagicMock()) == "10.0.0.5"
 
 
-class TestSyncIPAddressesViewGetCachedIpData:
-    def test_cache_miss_returns_none(self):
-        from netbox_librenms_plugin.views.sync.ip_addresses import SyncIPAddressesView
-
-        view = _make_view(SyncIPAddressesView)
-        obj = MagicMock()
-        with patch("netbox_librenms_plugin.views.sync.ip_addresses.cache") as mock_cache:
-            mock_cache.get.return_value = None
-            with patch.object(view, "get_cache_key", return_value="key"):
-                result = view.get_cached_ip_data(view.request, obj)
-        assert result is None
-
-    def test_cache_hit_returns_ip_list(self):
-        from netbox_librenms_plugin.views.sync.ip_addresses import SyncIPAddressesView
-
-        view = _make_view(SyncIPAddressesView)
-        obj = MagicMock()
-        ips = [{"ip_address": "192.168.1.1"}]
-        with patch("netbox_librenms_plugin.views.sync.ip_addresses.cache") as mock_cache:
-            mock_cache.get.return_value = {"ip_addresses": ips}
-            with patch.object(view, "get_cache_key", return_value="key"):
-                result = view.get_cached_ip_data(view.request, obj)
-        assert result == ips
-
-
 class TestSyncIPAddressesViewGetObject:
     def test_device_type_returns_device(self):
         from netbox_librenms_plugin.views.sync.ip_addresses import SyncIPAddressesView
@@ -1486,84 +1461,6 @@ class TestSyncIPAddressesViewGetIpTabUrl:
         assert "server_key" not in url
 
 
-class TestSyncIPAddressesViewPost:
-    def test_invalid_object_type_raises_404_before_permission_check(self):
-        from django.http import Http404
-
-        from netbox_librenms_plugin.views.sync.ip_addresses import SyncIPAddressesView
-
-        view = _make_view(SyncIPAddressesView)
-        with patch.object(view, "require_all_permissions") as permission_check:
-            with pytest.raises(Http404, match="Invalid object type"):
-                view.post(view.request, object_type="rack", pk=1)
-
-        permission_check.assert_not_called()
-
-    def test_permission_denied_returns_early(self):
-        from netbox_librenms_plugin.views.sync.ip_addresses import SyncIPAddressesView
-
-        view = _make_view(SyncIPAddressesView)
-        mock_error = MagicMock()
-        with patch.object(view, "require_all_permissions", return_value=mock_error):
-            result = view.post(view.request, object_type="device", pk=1)
-        assert result is mock_error
-
-    def test_cache_miss_shows_error_and_redirects(self):
-        from netbox_librenms_plugin.views.sync.ip_addresses import SyncIPAddressesView
-
-        view = _make_view(SyncIPAddressesView)
-        mock_obj = MagicMock()
-        with patch.object(view, "require_all_permissions", return_value=None):
-            with patch.object(view, "get_object", return_value=mock_obj):
-                with patch.object(view, "get_cached_ip_data", return_value=None):
-                    with patch.object(view, "get_ip_tab_url", return_value="/fake/?tab=ipaddresses"):
-                        with patch("netbox_librenms_plugin.views.sync.ip_addresses.messages") as mock_msg:
-                            with patch("netbox_librenms_plugin.views.sync.ip_addresses.redirect") as mock_redirect:
-                                view.post(view.request, object_type="device", pk=1)
-        mock_msg.error.assert_called()
-        mock_redirect.assert_called_once()
-
-    def test_no_selected_ips_shows_error_and_redirects(self):
-        from netbox_librenms_plugin.views.sync.ip_addresses import SyncIPAddressesView
-
-        view = _make_view(SyncIPAddressesView)
-        mock_obj = MagicMock()
-        with patch.object(view, "require_all_permissions", return_value=None):
-            with patch.object(view, "get_object", return_value=mock_obj):
-                with patch.object(view, "get_cached_ip_data", return_value=[{"ip_address": "10.0.0.1"}]):
-                    with patch.object(view, "get_selected_ips", return_value=[]):
-                        with patch.object(view, "get_ip_tab_url", return_value="/fake/?tab=ipaddresses"):
-                            with patch("netbox_librenms_plugin.views.sync.ip_addresses.messages") as mock_msg:
-                                with patch("netbox_librenms_plugin.views.sync.ip_addresses.redirect") as mock_redirect:
-                                    view.post(view.request, object_type="device", pk=1)
-        mock_msg.error.assert_called()
-        mock_redirect.assert_called_once()
-
-    def test_successful_sync_redirects(self):
-        from netbox_librenms_plugin.views.sync.ip_addresses import SyncIPAddressesView
-
-        view = _make_view(SyncIPAddressesView)
-        mock_obj = MagicMock()
-        results = {"created": [], "updated": [], "unchanged": [], "failed": []}
-        with patch.object(view, "require_all_permissions", return_value=None):
-            with patch.object(view, "get_object", return_value=mock_obj):
-                with patch.object(view, "get_cached_ip_data", return_value=[{"ip_address": "10.0.0.1"}]):
-                    with patch.object(view, "get_selected_ips", return_value=["10.0.0.1"]):
-                        with patch.object(view, "process_ip_sync", return_value=results):
-                            with patch.object(view, "display_sync_results"):
-                                with patch.object(
-                                    view,
-                                    "get_ip_tab_url",
-                                    return_value="/fake/?tab=ipaddresses",
-                                ):
-                                    with patch(
-                                        "netbox_librenms_plugin.views.sync.ip_addresses.redirect"
-                                    ) as mock_redirect:
-                                        view.post(view.request, object_type="device", pk=1)
-        mock_redirect.assert_called_once()
-
-
-@pytest.mark.django_db
 @pytest.mark.django_db
 class TestSyncIPAddressesViewProcessIpSync:
     """Real-DB tests for SyncIPAddressesView.process_ip_sync."""
@@ -1599,13 +1496,13 @@ class TestSyncIPAddressesViewProcessIpSync:
         # can't mask a port-id break).
         cached = [{"ip_address": "10.0.0.1", "ip_with_mask": "10.0.0.1/24", "port_id": 5}]
 
-        results = self._run(view, ["10.0.0.1"], cached, obj, "device")
+        results = self._run(view, ["10.0.0.1/24"], cached, obj, "device")
 
-        assert "10.0.0.1" in results["created"]
+        assert "10.0.0.1/24" in results["created"]
         created = IPAddress.objects.get(address="10.0.0.1/24")
         assert created.assigned_object == iface
 
-    def test_updates_existing_ip_address_different_interface(self):
+    def test_existing_ip_address_on_another_interface_requires_confirmation(self):
         view = self._setup_view()
         obj = make_device("ipsync-update-dev")
         iface = make_interface(obj, "eth0")
@@ -1614,11 +1511,12 @@ class TestSyncIPAddressesViewProcessIpSync:
         existing = make_ip("10.0.0.1/24", assigned_object=other)  # currently on a different interface
         cached = [{"ip_address": "10.0.0.1", "ip_with_mask": "10.0.0.1/24", "port_id": 5}]
 
-        results = self._run(view, ["10.0.0.1"], cached, obj, "device")
+        results = self._run(view, ["10.0.0.1/24"], cached, obj, "device")
 
-        assert "10.0.0.1" in results["updated"]
+        assert results["updated"] == []
+        assert results["conflicts"][0]["row_id"] == "10.0.0.1/24"
         existing.refresh_from_db()
-        assert existing.assigned_object == iface
+        assert existing.assigned_object == other
 
     def test_unchanged_ip_address_skipped(self):
         view = self._setup_view()
@@ -1628,9 +1526,9 @@ class TestSyncIPAddressesViewProcessIpSync:
         make_ip("10.0.0.1/24", assigned_object=iface)  # already on the matched interface
         cached = [{"ip_address": "10.0.0.1", "ip_with_mask": "10.0.0.1/24", "port_id": 5}]
 
-        results = self._run(view, ["10.0.0.1"], cached, obj, "device")
+        results = self._run(view, ["10.0.0.1/24"], cached, obj, "device")
 
-        assert "10.0.0.1" in results["unchanged"]
+        assert "10.0.0.1/24" in results["unchanged"]
 
     def test_no_matching_interface_skips_without_writing(self):
         """No NetBox interface matches the row → skip (no create/update)."""
@@ -1640,10 +1538,10 @@ class TestSyncIPAddressesViewProcessIpSync:
         obj = make_device("ipsync-nomatch-dev")  # no interfaces
         cached = [{"ip_address": "10.0.0.1", "ip_with_mask": "10.0.0.1/24", "interface_url": None}]
 
-        results = self._run(view, ["10.0.0.1"], cached, obj, "device")
+        results = self._run(view, ["10.0.0.1/24"], cached, obj, "device")
 
-        assert "10.0.0.1" in results["skipped_no_interface"]
-        assert "10.0.0.1" not in results["created"]
+        assert "10.0.0.1/24" in results["skipped_no_interface"]
+        assert "10.0.0.1/24" not in results["created"]
         assert not IPAddress.objects.filter(address="10.0.0.1/24").exists()
 
     def test_renamed_interface_resolved_via_cached_url_pk(self):
@@ -1665,9 +1563,9 @@ class TestSyncIPAddressesViewProcessIpSync:
             }
         ]
 
-        results = self._run(view, ["10.0.0.1"], cached, obj, "device")
+        results = self._run(view, ["10.0.0.1/24"], cached, obj, "device")
 
-        assert "10.0.0.1" in results["created"], results
+        assert "10.0.0.1/24" in results["created"], results
         created = IPAddress.objects.get(address="10.0.0.1/24")
         assert created.assigned_object == iface
 
@@ -1681,9 +1579,9 @@ class TestSyncIPAddressesViewProcessIpSync:
         # No port_id/interface_name → _match_interface returns None → row skipped before update.
         cached = [{"ip_address": "10.0.0.1", "ip_with_mask": "10.0.0.1/24", "interface_url": None}]
 
-        results = self._run(view, ["10.0.0.1"], cached, obj, "device")
+        results = self._run(view, ["10.0.0.1/24"], cached, obj, "device")
 
-        assert "10.0.0.1" in results["skipped_no_interface"]
+        assert "10.0.0.1/24" in results["skipped_no_interface"]
         existing_ip.refresh_from_db()
         # The existing binding must be untouched — not nulled.
         assert existing_ip.assigned_object == bound_iface
@@ -1697,7 +1595,7 @@ class TestSyncIPAddressesViewProcessIpSync:
         self._seed_lib_id(iface, 5)
         cached = [{"ip_address": "10.0.0.1", "ip_with_mask": "10.0.0.1/24", "port_id": 5, "interface_name": "eth0"}]
 
-        self._run(view, ["10.0.0.1"], cached, obj, "device")
+        self._run(view, ["10.0.0.1/24"], cached, obj, "device")
 
         assert IPAddress.objects.get(address="10.0.0.1/24").assigned_object == iface
 
@@ -1711,7 +1609,7 @@ class TestSyncIPAddressesViewProcessIpSync:
         # port_id 7 matches nothing (no CF on the VM interface) → falls back to the name "eth0".
         cached = [{"ip_address": "10.0.0.1", "ip_with_mask": "10.0.0.1/24", "port_id": 7, "interface_name": "eth0"}]
 
-        self._run(view, ["10.0.0.1"], cached, vm, "virtualmachine")
+        self._run(view, ["10.0.0.1/24"], cached, vm, "virtualmachine")
 
         assert IPAddress.objects.get(address="10.0.0.1/24").assigned_object == vmiface
 
@@ -1732,10 +1630,10 @@ class TestSyncIPAddressesViewProcessIpSync:
         self._seed_lib_id(b, 5)  # both share port id 5 → ambiguous
         cached = [{"ip_address": "10.0.0.1", "ip_with_mask": "10.0.0.1/24", "port_id": 5, "interface_name": "eth0"}]
 
-        results = self._run(view, ["10.0.0.1"], cached, obj, "device")
+        results = self._run(view, ["10.0.0.1/24"], cached, obj, "device")
 
         assert IPAddress.objects.get(address="10.0.0.1/24").assigned_object == a
-        assert "10.0.0.1" not in results["skipped_no_interface"]
+        assert "10.0.0.1/24" not in results["skipped_no_interface"]
 
     def test_ambiguous_port_id_and_unresolvable_name_still_skips(self):
         """When the port id is ambiguous AND the row's name matches no interface, it still fails closed (skip, no bind)."""
@@ -1750,9 +1648,9 @@ class TestSyncIPAddressesViewProcessIpSync:
         # interface_name "eth9" resolves nowhere, and interface_url is absent → nothing to fall through to.
         cached = [{"ip_address": "10.0.0.1", "ip_with_mask": "10.0.0.1/24", "port_id": 5, "interface_name": "eth9"}]
 
-        results = self._run(view, ["10.0.0.1"], cached, obj, "device")
+        results = self._run(view, ["10.0.0.1/24"], cached, obj, "device")
 
-        assert "10.0.0.1" in results["skipped_no_interface"]
+        assert "10.0.0.1/24" in results["skipped_no_interface"]
         assert not IPAddress.objects.filter(address="10.0.0.1/24").exists()
 
     def test_shared_vc_interface_name_binds_to_viewed_member(self):
@@ -1774,10 +1672,10 @@ class TestSyncIPAddressesViewProcessIpSync:
         make_interface(m2, "eth0")  # sibling reuses the name — must NOT block binding to m1's own
         cached = [{"ip_address": "10.0.0.1", "ip_with_mask": "10.0.0.1/24", "interface_name": "eth0"}]
 
-        results = self._run(view, ["10.0.0.1"], cached, m1, "device")
+        results = self._run(view, ["10.0.0.1/24"], cached, m1, "device")
 
         # The render (obj-only) shows this IP linked to m1's eth0; the sync must agree, not skip.
-        assert "10.0.0.1" in results["created"]
+        assert "10.0.0.1/24" in results["created"]
         assert IPAddress.objects.get(address="10.0.0.1/24").assigned_object == m1_eth0
 
     def test_sibling_only_name_collision_stays_ambiguous(self):
@@ -1804,9 +1702,9 @@ class TestSyncIPAddressesViewProcessIpSync:
         make_interface(m3, "eth9")
         cached = [{"ip_address": "10.0.0.9", "ip_with_mask": "10.0.0.9/24", "interface_name": "eth9"}]
 
-        results = self._run(view, ["10.0.0.9"], cached, m1, "device")
+        results = self._run(view, ["10.0.0.9/24"], cached, m1, "device")
 
-        assert "10.0.0.9" in results["skipped_no_interface"]
+        assert "10.0.0.9/24" in results["skipped_no_interface"]
         assert not IPAddress.objects.filter(address="10.0.0.9/24").exists()
 
 
@@ -2693,7 +2591,7 @@ class TestSyncIPAddressesViewSetPrimaryIp:
         """Drive process_ip_sync against a REAL Device + interface so _build_interface_maps() takes the production Device branch."""
         from netbox_librenms_plugin.tests.conftest import make_device, make_interface
 
-        selected = ["10.0.0.1"]
+        selected = ["10.0.0.1/24"]
         obj = make_device("ipsync-setprimary-dev")
         make_interface(obj, "eth0")  # matched by LibreNMS port id (5, patched) or name ("eth0")
         with patch("netbox_librenms_plugin.views.sync.ip_addresses.resolve_set_primary_ip", return_value=set_primary):
@@ -2714,7 +2612,7 @@ class TestSyncIPAddressesViewSetPrimaryIp:
         # can't be masked by the name fallback.
         cached = [{"ip_address": "10.0.0.1", "ip_with_mask": "10.0.0.1/24", "port_id": 5}]
         results, obj, _ = self._run_process(view, cached, mgmt_ip="10.0.0.1")
-        assert results["primary_set"] == ["10.0.0.1"]
+        assert results["primary_set"] == ["10.0.0.1/24"]
         # The real device now points its primary_ip4 at the (real) created address.
         assert obj.primary_ip4_id is not None
         assert str(obj.primary_ip4.address).startswith("10.0.0.1")
@@ -2725,7 +2623,7 @@ class TestSyncIPAddressesViewSetPrimaryIp:
         cached = [{"ip_address": "10.0.0.1", "ip_with_mask": "10.0.0.1/24", "interface_name": None}]
         results, obj, _ = self._run_process(view, cached, mgmt_ip="10.0.0.1")
         assert results["primary_set"] == []
-        assert results["primary_no_interface"] == ["10.0.0.1"]
+        assert results["primary_no_interface"] == ["10.0.0.1/24"]
         assert obj.primary_ip4_id is None  # nothing persisted as primary
 
     def test_primary_skipped_when_ip_does_not_match_mgmt(self):

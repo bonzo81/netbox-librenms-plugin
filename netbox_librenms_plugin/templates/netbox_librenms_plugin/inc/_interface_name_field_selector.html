@@ -1,0 +1,17 @@
+<div id="interface-name-field-selector"
+     class="btn-group btn-group-sm mt-3{% if not interface_name_selector_visible %} d-none{% endif %}"
+     role="group"
+     data-visible-tabs="{{ interface_name_selector_tabs }}"
+     data-bs-toggle="tooltip"
+     data-bs-placement="top"
+     title="Select preferred interface name field"
+     data-platform-id="{{ object.platform_id|default:'' }}"
+     data-save-pref-url="{% url 'plugins:netbox_librenms_plugin:save_user_pref' %}">
+    <input type="radio" class="btn-check interface-name-field" name="interface_name_field" value="ifDescr"
+        id="ifDescr" {% if interface_name_field == 'ifDescr' %}checked{% endif %}>
+    <label class="btn btn-outline-primary" for="ifDescr">ifDescr</label>
+
+    <input type="radio" class="btn-check interface-name-field" name="interface_name_field" value="ifName"
+        id="ifName" {% if interface_name_field == 'ifName' %}checked{% endif %}>
+    <label class="btn btn-outline-primary" for="ifName">ifName</label>
+</div>

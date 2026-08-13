@@ -627,7 +627,6 @@ class TestImportDevicesJob:
         sync_options = {
             "sync_interfaces": True,
             "sync_cables": False,
-            "sync_ips": True,
             "use_sysname": True,
             "strip_domain": True,
         }

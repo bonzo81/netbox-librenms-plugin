@@ -197,6 +197,13 @@ class ImportSettingsForm(NetBoxModelForm):
         help_text="Treat the pattern as a raw regular expression with named groups",
     )
 
+    remember_interface_name_per_platform = forms.BooleanField(
+        label="Remember interface naming per platform",
+        required=False,
+        widget=forms.CheckboxInput(attrs={"class": "form-check-input"}),
+        help_text="Store each user's ifName or ifDescr choice separately for each device platform",
+    )
+
     class Meta:
         model = LibreNMSSettings
         fields = [
@@ -205,6 +212,7 @@ class ImportSettingsForm(NetBoxModelForm):
             "strip_domain_default",
             "location_parse_pattern",
             "location_parse_is_regex",
+            "remember_interface_name_per_platform",
         ]
 
     def clean_vc_member_name_pattern(self):
@@ -1443,12 +1451,6 @@ class DeviceImportConfigForm(forms.Form):
         required=False,
         label="Sync Cables",
         help_text="Automatically sync cable connections from LibreNMS after import",
-    )
-    sync_ips = forms.BooleanField(
-        initial=True,
-        required=False,
-        label="Sync IP Addresses",
-        help_text="Automatically sync IP addresses from LibreNMS after import",
     )
 
     def __init__(self, *args, **kwargs):

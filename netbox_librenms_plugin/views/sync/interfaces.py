@@ -1,7 +1,7 @@
 import logging
 from urllib.parse import quote_plus
 
-from dcim.models import Device, Interface, MACAddress, VirtualChassis
+from dcim.models import Device, Interface, VirtualChassis
 from django.contrib import messages
 from django.core.cache import cache
 from django.core.exceptions import ValidationError
@@ -21,7 +21,11 @@ from netbox_librenms_plugin.interface_relationships import (
     relationship_candidate_q,
     resolve_interface_by_port_id,
 )
-from netbox_librenms_plugin.models import InterfaceTypeMapping
+from netbox_librenms_plugin.interface_sync import (
+    assign_interface_mac,
+    get_netbox_interface_type,
+    update_interface_from_port,
+)
 from netbox_librenms_plugin.utils import (
     AmbiguousLibreNMSIdError,
     build_migrated_context,
@@ -36,7 +40,6 @@ from netbox_librenms_plugin.utils import (
     normalize_librenms_port_id,
     normalize_relationship_maps,
     resolve_interface_row_device,
-    set_librenms_device_id,
 )
 from netbox_librenms_plugin.views.mixins import (
     CacheMixin,
@@ -93,7 +96,7 @@ class SyncInterfacesView(
         obj = self.get_object(object_type, object_id)
         self.object = obj  # Store for use in sync methods
 
-        interface_name_field = get_interface_name_field(request)
+        interface_name_field = get_interface_name_field(request, obj)
         self.interface_name_field = interface_name_field
 
         # Rebind the client to the POSTed server so cache reads, per-server id writes and
@@ -1031,29 +1034,11 @@ class SyncInterfacesView(
 
     def get_netbox_interface_type(self, librenms_interface):
         """Return the NetBox interface type mapped from LibreNMS type and speed."""
-        speed = convert_speed_to_kbps(librenms_interface.get("ifSpeed"))
-        mappings = InterfaceTypeMapping.objects.filter(librenms_type=librenms_interface.get("ifType"))
-
-        if speed is not None:
-            speed_mapping = mappings.filter(librenms_speed__lte=speed).order_by("-librenms_speed").first()
-            mapping = speed_mapping or mappings.filter(librenms_speed__isnull=True).first()
-        else:
-            mapping = mappings.filter(librenms_speed__isnull=True).first()
-
-        return mapping.netbox_type if mapping else "other"
+        return get_netbox_interface_type(librenms_interface, speed_converter=convert_speed_to_kbps)
 
     def handle_mac_address(self, interface, ifPhysAddress):
         """Assign or create the MAC address for the given interface."""
-        if ifPhysAddress:
-            existing_mac = interface.mac_addresses.filter(mac_address=ifPhysAddress).first()
-            if existing_mac:
-                mac_obj = existing_mac
-            else:
-                mac_obj = MACAddress.objects.create(mac_address=ifPhysAddress)
-
-            interface.mac_addresses.add(mac_obj)
-            if hasattr(interface, "primary_mac_address"):
-                interface.primary_mac_address = mac_obj
+        assign_interface_mac(interface, ifPhysAddress)
 
     def update_interface_attributes(
         self,
@@ -1064,69 +1049,16 @@ class SyncInterfacesView(
         interface_name_field,
     ):
         """Update interface fields from LibreNMS data, respecting excluded columns."""
-        is_device_interface = isinstance(interface, Interface)
-
-        LIBRENMS_TO_NETBOX_MAPPING = {
-            interface_name_field: "name",
-            "ifType": "type",
-            "ifSpeed": "speed",
-            "ifAlias": "description",
-            "ifMtu": "mtu",
-        }
-
-        for librenms_key, netbox_key in LIBRENMS_TO_NETBOX_MAPPING.items():
-            if netbox_key in exclude_columns:
-                continue
-
-            if librenms_key == "ifSpeed":
-                speed = convert_speed_to_kbps(librenms_interface.get(librenms_key))
-                setattr(interface, netbox_key, speed)
-            elif librenms_key == "ifType":
-                if is_device_interface and hasattr(interface, netbox_key):
-                    setattr(interface, netbox_key, netbox_type)
-            elif librenms_key == "ifAlias":
-                interface_name = librenms_interface.get(interface_name_field)
-                if librenms_interface.get("ifAlias") != interface_name:
-                    setattr(interface, netbox_key, librenms_interface.get(librenms_key))
-            else:
-                setattr(interface, netbox_key, librenms_interface.get(librenms_key))
-
-        port_id = librenms_interface.get("port_id")
-        if port_id is not None:
-            server_key = getattr(self, "_post_server_key", None) or self.librenms_api.server_key
-            normalized_port_id = normalize_librenms_port_id(port_id)
-            if normalized_port_id is not None:
-                try:
-                    existing_owner = find_by_librenms_id(interface.__class__, normalized_port_id, server_key)
-                except AmbiguousLibreNMSIdError:
-                    logger.warning(
-                        "Not setting port_id %s — it is ambiguous (matches multiple interfaces).",
-                        normalized_port_id,
-                    )
-                else:
-                    if existing_owner is None or existing_owner.pk == interface.pk:
-                        set_librenms_device_id(interface, normalized_port_id, server_key)
-                    else:
-                        logger.warning(
-                            "Not reassigning port_id %s from %s to %s.",
-                            normalized_port_id,
-                            existing_owner,
-                            interface,
-                        )
-
-        if "enabled" not in exclude_columns:
-            admin_status = librenms_interface.get("ifAdminStatus")
-            interface.enabled = (
-                True
-                if admin_status is None
-                else (admin_status.lower() == "up" if isinstance(admin_status, str) else bool(admin_status))
-            )
-
-        if "mac_address" not in exclude_columns:
-            ifPhysAddress = librenms_interface.get("ifPhysAddress")
-            self.handle_mac_address(interface, ifPhysAddress)
-
-        interface.save()
+        server_key = getattr(self, "_post_server_key", None) or self.librenms_api.server_key
+        update_interface_from_port(
+            interface,
+            librenms_interface,
+            server_key=server_key,
+            interface_name_field=interface_name_field,
+            exclude_columns=exclude_columns,
+            netbox_type=netbox_type,
+            speed_converter=convert_speed_to_kbps,
+        )
 
     def _sync_interface_vlans(self, interface, librenms_port):
         """
@@ -1631,7 +1563,7 @@ class _BaseRelationshipSyncView(
         if source_port is None or related_port is None:
             return None
 
-        interface_name_field = get_interface_name_field(request)
+        interface_name_field = get_interface_name_field(request, obj)
         _unique_host_port_ids, unambiguous_name_port_ids = get_interface_port_identity_sets(ports, interface_name_field)
         source_name = ""
         if source_id in unambiguous_name_port_ids:

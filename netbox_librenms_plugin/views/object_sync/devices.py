@@ -65,7 +65,7 @@ class DeviceLibreNMSSyncView(BaseLibreNMSSyncView):
 
     def get_interface_context(self, request, obj):
         """Return interface sync context for the device."""
-        interface_name_field = get_interface_name_field(request)
+        interface_name_field = get_interface_name_field(request, obj)
         interface_table_view = DeviceInterfaceTableView()
         interface_table_view.request = copy.copy(request)
         return interface_table_view.get_context_data(request, obj, interface_name_field)
@@ -160,9 +160,6 @@ class SingleInterfaceVerifyView(
             return err
         selected_device_id = coerce_positive_int(data.get("device_id"))
         posted_name_field = data.get("interface_name_field")
-        interface_name_field = (
-            posted_name_field if posted_name_field in ("ifName", "ifDescr") else get_interface_name_field()
-        )
 
         if selected_device_id is None:
             return JsonResponse({"status": "error", "message": "No device ID provided"}, status=400)
@@ -177,6 +174,11 @@ class SingleInterfaceVerifyView(
         # model-level view_device perm, so a site-scoped grant would otherwise read another
         # device's cached verify payload by raw pk.
         selected_device = self.restrict_object_or_404(Device, pk=selected_device_id)
+        interface_name_field = (
+            posted_name_field
+            if posted_name_field in ("ifName", "ifDescr")
+            else get_interface_name_field(request, selected_device)
+        )
         origin_device = selected_device
         raw_origin_device_id = data.get("origin_device_id")
         if raw_origin_device_id is not None:
