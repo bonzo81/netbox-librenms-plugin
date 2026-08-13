@@ -1,11 +1,16 @@
 """Shared pytest fixtures for NetBox LibreNMS Plugin tests."""
 
+import os
 from copy import deepcopy
-from urllib.parse import urlsplit, urlunsplit
 from unittest.mock import MagicMock, patch
 from uuid import uuid4
 
 import pytest
+
+from netbox_librenms_plugin.tests.parallel import isolated_test_database_name
+
+
+_TEST_DATABASE_BASE_NAME = os.environ["TEST_DB_NAME"]
 
 
 def clear_test_cache(cache_backend):
@@ -16,30 +21,10 @@ def clear_test_cache(cache_backend):
         cache_backend.clear()
 
 
-def _isolated_cache_location(location):
-    """Move Redis cache URLs to database 9 without changing other locations."""
-    if isinstance(location, list):
-        return [_isolated_cache_location(item) for item in location]
-    if isinstance(location, tuple):
-        return tuple(_isolated_cache_location(item) for item in location)
-    if not isinstance(location, str):
-        return location
-
-    parsed = urlsplit(location)
-    if parsed.scheme not in {"redis", "rediss"}:
-        return location
-
-    database = parsed.path.strip("/")
-    if database and not database.isdigit():
-        return location
-    return urlunsplit(parsed._replace(path="/9"))
-
-
 def _isolated_cache_config(caches_config):
-    """Return a cache config with a unique per-test namespace."""
+    """Return the worker cache config with a unique per-test namespace."""
     isolated = deepcopy(caches_config)
     default = isolated.setdefault("default", {})
-    default["LOCATION"] = _isolated_cache_location(default.get("LOCATION", ""))
     unique_prefix = f"nblp-test-{uuid4().hex}"
     configured_prefix = default.get("KEY_PREFIX")
     default["KEY_PREFIX"] = f"{configured_prefix}:{unique_prefix}" if configured_prefix else unique_prefix
@@ -48,18 +33,27 @@ def _isolated_cache_config(caches_config):
 
 @pytest.fixture(autouse=True)
 def _isolate_test_cache(settings):
-    """Run every test in a unique cache namespace outside the dev-server database.
+    """Run every test in a unique namespace inside its worker cache database.
 
-    The devcontainer test settings point the cache at the SAME Redis DB the dev runserver
-    uses, and NetBox's DEBUG startup runs ``cache.clear()`` on every auto-reload (any ``.py``
-    edit under the workspace restarts it). A restart landing mid-test wiped seeded snapshots
-    and made cache-dependent tests flake nondeterministically. Rehoming tests to a sibling
-    Redis DB keeps django-redis semantics (``ttl()``, pickling) while being invisible to the
-    dev server. A unique key prefix isolates this test from other pytest processes and avoids
-    clearing a shared Redis database.
+    The isolated settings assign each pytest worker its own Redis database. A unique key
+    prefix then isolates individual tests without changing that worker assignment or clearing
+    another test process's cache.
     """
     settings.CACHES = _isolated_cache_config(settings.CACHES)
     yield
+
+
+@pytest.fixture(scope="session")
+def django_db_modify_db_settings(django_db_modify_db_settings):
+    """Give each pytest worker a private PostgreSQL database."""
+    from django.conf import settings
+
+    test_config = dict(settings.DATABASES["default"].get("TEST") or {})
+    test_config["NAME"] = isolated_test_database_name(
+        _TEST_DATABASE_BASE_NAME,
+        os.environ.get("PYTEST_XDIST_WORKER"),
+    )
+    settings.DATABASES["default"]["TEST"] = test_config
 
 
 @pytest.fixture(autouse=True)

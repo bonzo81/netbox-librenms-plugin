@@ -1516,9 +1516,10 @@ class TestInterfaceContextOOBRows:
             assert str(hidden_member.pk) not in str(table.render_device_selection(None, source_row))
             assert "parent-sync-btn" not in str(table.render_parent(None, source_row))
             vlan_html = str(table.render_vlans(None, source_row))
-            assert str(hidden_member.pk) not in vlan_html
-            assert str(hidden_group.pk) not in vlan_html
             assert hidden_group.name not in vlan_html
+            assert "vlan-group-hidden" not in vlan_html
+            assert "vlan-edit-btn" not in vlan_html
+            assert "data-vlan-groups" not in vlan_html
 
             request = _make_request(
                 {"port_id": "10", "interface_name_field": "ifName", "parent_port_id": "20"},

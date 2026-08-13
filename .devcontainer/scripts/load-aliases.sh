@@ -131,8 +131,37 @@ netbox-shell() {
   cd /opt/netbox/netbox && source /opt/netbox/venv/bin/activate && python manage.py shell
 }
 
+_netbox-test() {
+  local coverage="$1"
+  shift
+  local workers="${NETBOX_TEST_WORKERS:-8}"
+  local target="netbox_librenms_plugin/tests"
+  local coverage_args=()
+  local parallel_args=()
+  if [ "$#" -gt 0 ] && [[ "$1" != -* ]]; then
+    target="$1"
+    shift
+  fi
+  if [ "$workers" -gt 1 ]; then
+    parallel_args=(-n "$workers" --maxschedchunk=1)
+  fi
+  if [ "$coverage" != "yes" ]; then
+    coverage_args=(--no-cov)
+  fi
+  if [ -z "${TEST_DB_NAME:-}" ] || [ -z "${TEST_REDIS_HOST:-}" ]; then
+    echo "Set TEST_DB_NAME and TEST_REDIS_HOST before running tests." >&2
+    return 1
+  fi
+  cd "$PLUGIN_DIR" && source /opt/netbox/venv/bin/activate && \
+    pytest "$target" -q --disable-warnings "${coverage_args[@]}" "${parallel_args[@]}" "$@"
+}
+
 netbox-test() {
-  cd "$PLUGIN_DIR" && source /opt/netbox/venv/bin/activate && python -m pytest "$@"
+  _netbox-test no "$@"
+}
+
+netbox-test-coverage() {
+  _netbox-test yes "$@"
 }
 
 netbox-manage() {
@@ -205,7 +234,8 @@ dev-help() {
   echo ""
   echo "🛠️  Development Tools:"
   echo "  netbox-shell        : Open NetBox Django shell"
-  echo "  netbox-test         : Run plugin tests"
+  echo "  netbox-test         : Run plugin tests (8 workers, no coverage)"
+  echo "  netbox-test-coverage: Run plugin tests with coverage"
   echo "  netbox-manage       : Run Django management commands"
   echo "  plugin-install      : Reinstall plugin in development mode"
   echo ""
