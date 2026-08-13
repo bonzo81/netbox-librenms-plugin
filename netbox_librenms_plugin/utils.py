@@ -603,6 +603,16 @@ def get_cable_sync_settings(*, lock=False):
     return LibreNMSSettings.objects.first() or LibreNMSSettings()
 
 
+def normalize_cable_tag_slug(name):
+    """Return the tag slug, or reject a name that cannot produce one."""
+    from django.utils.text import slugify
+
+    slug = slugify(name)
+    if not slug:
+        raise ValidationError("The tag name must contain letters or numbers.")
+    return slug
+
+
 def get_librenms_cable_tag(*, create=True, sync_settings=None):
     """
     Return (creating on first use) the Tag stamped on cables the LibreNMS cable sync creates.
@@ -615,17 +625,16 @@ def get_librenms_cable_tag(*, create=True, sync_settings=None):
     Returns:
         extras.models.Tag: The (existing or newly created) provenance tag.
     """
-    from django.utils.text import slugify
     from extras.models import Tag
 
     sync_settings = sync_settings or get_cable_sync_settings()
     name = sync_settings.cable_sync_tag
+    slug = normalize_cable_tag_slug(name)
     if tag := Tag.objects.filter(name=name).first():
         return tag
     if not create:
         return None
 
-    slug = slugify(name)
     candidate = slug[: Tag._meta.get_field("slug").max_length]
     suffix = 2
     while Tag.objects.filter(slug=candidate).exists():

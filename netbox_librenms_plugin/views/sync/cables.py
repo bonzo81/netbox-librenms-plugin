@@ -161,9 +161,11 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libre
             list[dict] | None: Enriched link rows, or None when the cache is unavailable.
         """
         self._cable_row_identity_error = False
+        self._cable_source_permission_error = False
         server_key = getattr(self, "_post_server_key", None) or self.librenms_api.server_key
         cache_obj = get_librenms_sync_device(obj, server_key=server_key) or obj
         if not self.restricted_queryset(Device, "view").filter(pk=cache_obj.pk).exists():
+            self._cable_source_permission_error = True
             return None
         self._cache_device = cache_obj
         cache_key = self.get_cache_key(cache_obj, "links", server_key)
@@ -588,6 +590,13 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libre
         Returns:
             bool: True when cable sync can continue.
         """
+        if getattr(self, "_cable_source_permission_error", False):
+            messages.error(
+                self.request,
+                "You do not have permission to view the LibreNMS cable source device.",
+            )
+            return False
+
         if getattr(self, "_cable_row_identity_error", False):
             messages.error(
                 self.request,

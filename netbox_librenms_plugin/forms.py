@@ -19,7 +19,6 @@ from django.core.exceptions import MultipleObjectsReturned
 from django.db import transaction
 from django.db.models import Case, IntegerField, Q, Value, When
 from django.http import QueryDict
-from django.utils.text import slugify
 from django.utils.translation import gettext_lazy as _
 from netbox.forms import (
     NetBoxModelFilterSetForm,
@@ -50,6 +49,7 @@ from .models import (
     PortStackLagPattern,
     SerialSensorTypePattern,
 )
+from .utils import normalize_cable_tag_slug
 
 logger = logging.getLogger(__name__)
 
@@ -388,8 +388,7 @@ class CableSyncSettingsForm(NetBoxModelForm):
         from extras.models import Tag
 
         tag_name = self.cleaned_data["cable_sync_tag"]
-        if not slugify(tag_name):
-            raise forms.ValidationError("The tag name must contain letters or numbers.")
+        normalize_cable_tag_slug(tag_name)
         old_tag = Tag.objects.filter(name=self._original_tag_name).first()
         # Check the collision even when the provenance tag is gone: without the old row to exclude,
         # every tag carrying this name is an unrelated one this setting must not adopt.

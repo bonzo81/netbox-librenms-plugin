@@ -2019,6 +2019,40 @@ class TestSerialCableReadScope:
         assert Cable.objects.filter(pk=csp.cable_id).exists()
         assert csp.cable_id == cp.cable_id
 
+    def test_hidden_cache_owner_reports_permission_failure_instead_of_expiry(self, client):
+        """A hidden chassis cache owner is not an expired LibreNMS snapshot."""
+        from dcim.models import Cable
+        from django.contrib.messages import get_messages
+        from django.urls import reverse
+
+        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+        from netbox_librenms_plugin.tests.conftest import make_virtual_chassis
+        from netbox_librenms_plugin.utils import set_librenms_device_id
+
+        page, (csp,), _ = make_serial_device("serial-cache-page", csp_names=["ttyS1"])
+        cache_owner = make_serial_device("serial-cache-owner")[0]
+        make_virtual_chassis("serial-cache-scope-vc", page, cache_owner)
+        remote = make_serial_device("serial-cache-target")[0]
+        server_key = next(iter(LibreNMSAPI.get_available_servers()))
+        set_librenms_device_id(cache_owner, 42, server_key)
+        cache_owner.save()
+        row = self._cache_row(cache_owner, csp, remote, server_key)
+        user = self._user("serial-hidden-cache-owner-user", page)
+        self._grant(user, "serial-hidden-cache-owner-cable", Cable, ["add", "change"])
+        client.force_login(user)
+
+        response = client.post(
+            reverse("plugins:netbox_librenms_plugin:sync_device_cables", args=[page.pk]),
+            {
+                "sync_one": row["local_port_id"],
+                "server_key": server_key,
+            },
+        )
+
+        notices = [str(message) for message in get_messages(response.wsgi_request)]
+        assert response.status_code == 302
+        assert notices == ["You do not have permission to view the LibreNMS cable source device."]
+
 
 # ---------------------------------------------------------------------------
 # Cable enrichment: created cables carry the librenms tag, color, description, tenant

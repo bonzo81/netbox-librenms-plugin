@@ -244,3 +244,19 @@ class TestCableSyncSettingsTab:
         cp.refresh_from_db()
         assert csp.cable_id == cp.cable_id
         assert set(csp.cable.tags.values_list("slug", flat=True)) == {"librenms"}
+
+    def test_direct_settings_write_cannot_create_an_empty_tag_slug(self):
+        """Tag creation must reject a malformed setting written outside the form."""
+        from django.core.exceptions import ValidationError
+        from extras.models import Tag
+
+        from netbox_librenms_plugin.utils import get_librenms_cable_tag
+
+        settings, _ = LibreNMSSettings.objects.get_or_create()
+        settings.cable_sync_tag = "!!!"
+        settings.save(update_fields=["cable_sync_tag"])
+
+        with pytest.raises(ValidationError, match="letters or numbers"):
+            get_librenms_cable_tag(sync_settings=settings)
+
+        assert Tag.objects.count() == 0
