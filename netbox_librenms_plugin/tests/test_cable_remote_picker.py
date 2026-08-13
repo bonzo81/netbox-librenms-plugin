@@ -504,6 +504,25 @@ class TestRemotePickerEndpoint:
         assert csp.cable_id is None
         assert cp.cable_id is None
 
+    def test_malformed_origin_redirect_stays_on_the_cable_tab(self):
+        """A rejected POST must preserve only the validated server key in a local redirect."""
+        from django.urls import reverse
+
+        client = self._client("malformed-origin")
+        local = make_device("picker-malformed-origin-local")
+
+        response = client.post(
+            reverse("plugins:netbox_librenms_plugin:sync_device_cables", args=[local.pk]),
+            {
+                "origin_device_id": "not-a-device-id",
+                "server_key": SERVER_KEY,
+            },
+        )
+
+        expected_path = reverse("plugins:netbox_librenms_plugin:device_librenms_sync", args=[local.pk])
+        assert response.status_code == 302
+        assert response["Location"] == f"{expected_path}?tab=cables&server_key={SERVER_KEY}"
+
     def test_migrated_selected_member_is_read_only_in_render_and_verify(self):
         """The exact local termination owner must suppress actions before the writer rejects it."""
         import json

@@ -36,6 +36,7 @@ from netbox_librenms_plugin.views.mixins import (
     LibreNMSAPIMixin,
     LibreNMSPermissionMixin,
     NetBoxObjectPermissionMixin,
+    redirect_with_server_key,
 )
 
 logger = logging.getLogger(__name__)
@@ -902,9 +903,11 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libre
             origin_device_id = coerce_librenms_id(raw_origin_device_id)
             if origin_device_id is None:
                 messages.error(request, "A valid cable page device is required.")
-                return redirect(
+                return redirect_with_server_key(
+                    request,
                     f"{reverse('plugins:netbox_librenms_plugin:device_librenms_sync', args=[initial_device.pk])}"
-                    f"?tab=cables&server_key={quote_plus(server_key)}"
+                    "?tab=cables",
+                    server_key,
                 )
             origin_device = self.restrict_object_or_404(Device, pk=origin_device_id)
             same_device = origin_device.pk == initial_device.pk
@@ -914,15 +917,19 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libre
             )
             if not same_device and not same_chassis:
                 messages.error(request, "The cable page and selected device do not match.")
-                return redirect(
+                return redirect_with_server_key(
+                    request,
                     f"{reverse('plugins:netbox_librenms_plugin:device_librenms_sync', args=[initial_device.pk])}"
-                    f"?tab=cables&server_key={quote_plus(server_key)}"
+                    "?tab=cables",
+                    server_key,
                 )
         if get_migrated_to_marker(origin_device, server_key) or get_migrated_to_marker(initial_device, server_key):
             messages.error(request, "This device has been migrated and is read-only for this LibreNMS server.")
-            return redirect(
+            return redirect_with_server_key(
+                request,
                 f"{reverse('plugins:netbox_librenms_plugin:device_librenms_sync', args=[initial_device.pk])}"
-                f"?tab=cables&server_key={quote_plus(server_key)}"
+                "?tab=cables",
+                server_key,
             )
         self._post_server_key = server_key
         self._initial_device = initial_device
