@@ -2813,13 +2813,13 @@ class TestBaseIPAddressTableViewCreateBaseIpEntry:
         assert result["ip_address"] == "2001:db8::1"
         assert result["ip_with_mask"] == "2001:db8::1/64"
 
-    def test_no_valid_format_raises_key_error(self):
-        """When no valid IP format is found, KeyError is raised."""
+    def test_no_valid_format_raises_value_error(self):
+        """When no supported IP fields exist, the boundary rejects the row."""
         view = self._make_view()
         ip_entry = {"port_id": 1}  # No IP address fields
         obj = MagicMock()
 
-        with pytest.raises(KeyError):
+        with pytest.raises(ValueError, match="no supported address fields"):
             view._create_base_ip_entry(ip_entry, obj, vrfs=[])
 
 
@@ -2916,7 +2916,7 @@ class TestBaseIPAddressTableViewEnrichIpData:
         ip_data = [{"ip_address": "192.168.1.1", "prefix_length": 24, "port_id": 20}]
         prefetched = {
             "vrfs": [],
-            "ip_addresses_map": {"192.168.1.1/24": existing_ip},
+            "ip_addresses_map": {"192.168.1.1/24": [existing_ip]},
             "interfaces_by_librenms_id": {},
             "interfaces_by_name": {},
             "all_interfaces": [],

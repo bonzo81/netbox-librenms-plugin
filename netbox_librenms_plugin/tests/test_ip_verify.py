@@ -223,7 +223,17 @@ class TestFindInCacheFailsClosed:
     def test_dict_cache_entry_still_matches(self):
         """Positive control: a well-formed dict entry still resolves normally."""
         view = self._make_view()
-        cached = {"ip_addresses": [{"ip_address": "10.0.0.1", "prefix_length": 32, "vrf_id": 7, "port_id": 5}]}
+        cached = {
+            "ip_addresses": [
+                {
+                    "ip_address": "10.0.0.1",
+                    "ip_with_mask": "10.0.0.1/32",
+                    "prefix_length": 32,
+                    "vrf_id": 7,
+                    "port_id": 5,
+                }
+            ]
+        }
         entry, vrf_id, port_id = view._find_in_cache(cached, "10.0.0.1", 32)
         assert entry is not None and vrf_id == 7 and port_id == 5
 
@@ -234,7 +244,13 @@ class TestFindInCacheFailsClosed:
             "ip_addresses": [
                 "not-a-dict",
                 ["also", "bad"],
-                {"ip_address": "10.0.0.1", "prefix_length": 32, "vrf_id": 7, "port_id": 5},
+                {
+                    "ip_address": "10.0.0.1",
+                    "ip_with_mask": "10.0.0.1/32",
+                    "prefix_length": 32,
+                    "vrf_id": 7,
+                    "port_id": 5,
+                },
             ]
         }
         entry, vrf_id, port_id = view._find_in_cache(cached, "10.0.0.1", 32)

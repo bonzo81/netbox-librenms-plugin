@@ -14,7 +14,6 @@
                     {% if model_name == "device" %}
                         <button hx-post="{% url 'plugins:netbox_librenms_plugin:device_vlan_sync' pk=object.pk %}"
                                 hx-target="#vlan-sync-content"
-                                hx-include="[name='interface_name_field']"
                                 class="btn btn-outline-primary">
                             Refresh VLANs
                         </button>

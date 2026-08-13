@@ -1,21 +1,27 @@
 import logging
 from urllib.parse import quote_plus
 
-from dcim.models import Device, Interface
+from dcim.models import Device, Interface, VirtualChassis
 from django.contrib import messages
+from django.core import signing
 from django.core.cache import cache
 from django.db import transaction
-from django.http import Http404
-from django.shortcuts import redirect
+from django.http import Http404, HttpResponse
+from django.shortcuts import redirect, render
 from django.urls import reverse
 from django.views import View
 from ipam.models import VRF, IPAddress
 from virtualization.models import VirtualMachine, VMInterface
 
+from netbox_librenms_plugin.interface_sync import resolve_or_create_interface_from_port
+from netbox_librenms_plugin.ip_addressing import parse_address_with_prefix
 from netbox_librenms_plugin.utils import (
     get_librenms_device_id,
+    get_migrated_to_marker,
     get_virtual_chassis_members,
     ip_family,
+    normalize_librenms_port_id,
+    resolve_interface_row_device,
     resolve_set_primary_ip,
     same_host,
 )
@@ -28,6 +34,8 @@ from netbox_librenms_plugin.views.mixins import (
 
 logger = logging.getLogger(__name__)
 
+IP_CONFLICT_SIGNING_SALT = "netbox_librenms_plugin.ip_address_conflict"
+
 
 class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreNMSAPIMixin, CacheMixin, View):
     """Synchronize IP addresses from LibreNMS cache into NetBox."""
@@ -38,6 +46,11 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
             ("change", IPAddress),
         ],
     }
+
+    @staticmethod
+    def _create_missing_interfaces(request):
+        """Return true when this request may materialize missing interfaces."""
+        return request.POST.get("create-missing-interfaces-toggle", "").lower() in {"on", "true", "1"}
 
     def _required_permissions(self, object_type):
         """
@@ -69,6 +82,8 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
         ]
         if resolve_set_primary_ip(self.request):
             perms.append(("change", owner_model))
+        if self._create_missing_interfaces(self.request):
+            perms.extend((("add", interface_model), ("change", interface_model)))
         # A per-row VRF is resolved by client-supplied id through a restricted queryset. Only
         # demand its view permission when one is actually posted, so the common no-VRF sync
         # is not gated on a permission it never uses.
@@ -77,8 +92,11 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
         return {"POST": perms}
 
     def get_selected_ips(self, request):
-        """Return selected IP addresses from POST data."""
-        return [x for x in request.POST.getlist("select") if x]
+        """Return unique selected canonical IP row identifiers from POST data."""
+        sync_one = request.POST.get("sync_one")
+        if sync_one:
+            return [sync_one]
+        return list(dict.fromkeys(value for value in request.POST.getlist("select") if value))
 
     def get_vrf_selection(self, request, ip_address):
         """Return the selected VRF, or None only when the row requests no VRF."""
@@ -92,13 +110,13 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
         except (VRF.DoesNotExist, TypeError, ValueError):
             raise ValueError("Selected VRF is no longer available or you do not have permission to view it.") from None
 
-    def get_cached_ip_data(self, request, obj):
-        """Return cached LibreNMS IP address data for the given object."""
+    def get_cached_ip_snapshot(self, obj):
+        """Return the complete cached LibreNMS IP snapshot for the given object."""
         server_key = getattr(self, "_post_server_key", None) or self.librenms_api.server_key
         cached_data = cache.get(self.get_cache_key(obj, "ip_addresses", server_key))
-        if not cached_data:
+        if not isinstance(cached_data, dict) or not isinstance(cached_data.get("ip_addresses"), list):
             return None
-        return cached_data.get("ip_addresses", [])
+        return cached_data
 
     def get_object(self, object_type, pk, action="view"):
         """Return the Device or VirtualMachine instance for the given type and pk (object-scoped)."""
@@ -136,6 +154,13 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
             url += f"&server_key={quote_plus(server_key)}"
         return url
 
+    def redirect_to_ip_tab(self, request, obj):
+        """Reload the full sync page for HTMX requests, or redirect a normal request."""
+        url = self.get_ip_tab_url(obj)
+        if request.headers.get("HX-Request") == "true":
+            return HttpResponse("", headers={"HX-Redirect": url})
+        return redirect(url)
+
     def post(self, request, object_type, pk):
         """Sync selected IP addresses from LibreNMS into NetBox."""
         # Check both plugin write and NetBox object permissions (owner read included).
@@ -154,24 +179,96 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
         post_server_key = self.rebind_api_for_server(request.POST.get("server_key"))
         if post_server_key is None:
             messages.error(request, "Selected LibreNMS server is no longer configured.")
-            return redirect(self.get_ip_tab_url(obj))
+            return self.redirect_to_ip_tab(request, obj)
         self._post_server_key = post_server_key
 
-        selected_ips = self.get_selected_ips(request)
-        cached_ips = self.get_cached_ip_data(request, obj)
+        cached_snapshot = self.get_cached_ip_snapshot(obj)
 
-        if not cached_ips:
+        if not cached_snapshot or not cached_snapshot["ip_addresses"]:
             messages.error(request, "Cache has expired. Please refresh the IP data.")
-            return redirect(self.get_ip_tab_url(obj))
+            return self.redirect_to_ip_tab(request, obj)
+        cached_ips = cached_snapshot["ip_addresses"]
+
+        force_intents, intent_errors = self._load_force_intents(request, obj, object_type, post_server_key)
+        if request.POST.get("force_all"):
+            selected_ips = list(force_intents)
+        elif request.POST.getlist("force_conflict"):
+            selected_ips = list(dict.fromkeys(request.POST.getlist("force_conflict")))
+        else:
+            selected_ips = self.get_selected_ips(request)
 
         if not selected_ips:
             messages.error(request, "No IP addresses selected for synchronization.")
-            return redirect(self.get_ip_tab_url(obj))
+            return self.redirect_to_ip_tab(request, obj)
 
-        results = self.process_ip_sync(request, selected_ips, cached_ips, obj, object_type)
+        results = self.process_ip_sync(
+            request,
+            selected_ips,
+            cached_ips,
+            obj,
+            object_type,
+            force_intents=force_intents,
+            cached_ports_by_id=cached_snapshot.get("ports_by_id") or {},
+            interface_name_field=cached_snapshot.get("interface_name_field"),
+        )
+        for row_id, error in intent_errors.items():
+            results["failed"].append(row_id)
+            results["errors"][row_id] = error
         self.display_sync_results(request, results)
 
-        return redirect(self.get_ip_tab_url(obj))
+        if results["conflicts"]:
+            return render(
+                request,
+                "netbox_librenms_plugin/htmx/ip_address_conflicts.html",
+                {
+                    "conflicts": results["conflicts"],
+                    "has_forceable_conflicts": any(conflict["forceable"] for conflict in results["conflicts"]),
+                    "object_type": object_type,
+                    "object": obj,
+                    "server_key": post_server_key,
+                    "set_primary_ip": resolve_set_primary_ip(request),
+                },
+            )
+
+        return self.redirect_to_ip_tab(request, obj)
+
+    @staticmethod
+    def _interface_identity(interface):
+        """Return a signed-payload-safe interface identity."""
+        return {"model": interface._meta.label_lower, "pk": str(interface.pk)}
+
+    @staticmethod
+    def _ip_state(ip_obj):
+        """Return the mutable IP state protected by a conflict intent."""
+        return {
+            "address": str(ip_obj.address),
+            "vrf_id": ip_obj.vrf_id,
+            "assigned_object_type_id": ip_obj.assigned_object_type_id,
+            "assigned_object_id": str(ip_obj.assigned_object_id) if ip_obj.assigned_object_id is not None else None,
+        }
+
+    def _load_force_intents(self, request, obj, object_type, server_key):
+        """Validate submitted conflict intents and return them by canonical row id."""
+        intents = {}
+        errors = {}
+        for token in request.POST.getlist("conflict_intent"):
+            try:
+                payload = signing.loads(token, salt=IP_CONFLICT_SIGNING_SALT, max_age=3600)
+                row_id = str(parse_address_with_prefix(payload["row_id"]))
+                if (
+                    payload.get("object_type") != object_type
+                    or str(payload.get("object_pk")) != str(obj.pk)
+                    or payload.get("server_key") != server_key
+                ):
+                    raise signing.BadSignature("Conflict intent belongs to another sync context.")
+                if row_id in intents:
+                    raise signing.BadSignature("Duplicate conflict intent.")
+                intents[row_id] = payload
+            except (KeyError, TypeError, ValueError, signing.BadSignature, signing.SignatureExpired):
+                errors["unknown"] = (
+                    "IP address confirmation is invalid or has expired. Refresh the IP data and try again."
+                )
+        return intents, errors
 
     def get_management_ip(self, obj):
         """Return the LibreNMS management/polling IP for *obj*, or None.
@@ -319,6 +416,152 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
                 return by_pk[pk]
         return None
 
+    def _lock_interface_owner_scope(self, obj):
+        """Lock the current interface-owner scope in the shared chassis-first order."""
+        if isinstance(obj, VirtualMachine):
+            locked = self.restricted_queryset(VirtualMachine).select_for_update(of=("self",)).filter(pk=obj.pk).first()
+            return locked, [locked] if locked is not None else []
+
+        virtual_chassis_id = obj.virtual_chassis_id
+        owner_ids = {obj.pk}
+        if virtual_chassis_id is not None:
+            locked_chassis = self.relock_scoped_row(VirtualChassis, pk=virtual_chassis_id)
+            if locked_chassis is None:
+                return None, []
+            owner_ids.update(Device.objects.filter(virtual_chassis_id=virtual_chassis_id).values_list("pk", flat=True))
+        locked_by_id = {
+            device.pk: device
+            for device in self.restricted_queryset(Device)
+            .select_for_update(of=("self",))
+            .filter(pk__in=owner_ids)
+            .order_by("pk")
+        }
+        locked_obj = locked_by_id.get(obj.pk)
+        if locked_obj is None or locked_obj.virtual_chassis_id != virtual_chassis_id:
+            return None, []
+        members = [device for device in locked_by_id.values() if device.virtual_chassis_id == virtual_chassis_id]
+        return locked_obj, members
+
+    @staticmethod
+    def _cached_port(cached_ports_by_id, port_id):
+        """Return one cached port whose canonical ID matches the IP row."""
+        normalized_id = normalize_librenms_port_id(port_id)
+        if normalized_id is None or not isinstance(cached_ports_by_id, dict):
+            return None
+        matches = [
+            port
+            for raw_id, port in cached_ports_by_id.items()
+            if normalize_librenms_port_id(raw_id) == normalized_id and isinstance(port, dict)
+        ]
+        return matches[0] if len(matches) == 1 else None
+
+    def _create_interface_for_ip(
+        self,
+        obj,
+        ip_data,
+        cached_ports_by_id,
+        interface_name_field,
+        server_key,
+        interfaces_by_librenms_id,
+    ):
+        """Create one missing interface from the cached port that owns an IP row."""
+        if interface_name_field not in {"ifName", "ifDescr"}:
+            raise ValueError("The cached interface naming field is missing or invalid. Refresh the IP data.")
+        port = self._cached_port(cached_ports_by_id, ip_data.get("port_id"))
+        if port is None or port.get("_source") == "oob":
+            raise ValueError("The cached LibreNMS port is missing or ambiguous. Refresh the IP data.")
+        if normalize_librenms_port_id(port.get("port_id")) != normalize_librenms_port_id(ip_data.get("port_id")):
+            raise ValueError("The cached LibreNMS port identity changed. Refresh the IP data.")
+        interface_name = port.get(interface_name_field)
+        same_name_port_ids = {
+            normalize_librenms_port_id(candidate.get("port_id"))
+            for candidate in cached_ports_by_id.values()
+            if isinstance(candidate, dict) and candidate.get(interface_name_field) == interface_name
+        }
+        same_name_port_ids.discard(None)
+        if not isinstance(interface_name, str) or not interface_name.strip() or len(same_name_port_ids) != 1:
+            raise ValueError("The cached LibreNMS interface name is missing or ambiguous. Refresh the IP data.")
+
+        locked_obj, locked_members = self._lock_interface_owner_scope(obj)
+        if locked_obj is None:
+            raise ValueError("The interface owner is no longer available in your view scope.")
+        if isinstance(locked_obj, Device):
+            members_by_id = {member.pk: member for member in locked_members}
+            members_by_position = {
+                member.vc_position: member for member in locked_members if member.vc_position is not None
+            }
+            current_interfaces = list(Interface.objects.filter(device_id__in=members_by_id).select_related("device"))
+            interfaces_by_port_id = {}
+            for interface in current_interfaces:
+                bound_id = get_librenms_device_id(interface, server_key, auto_save=False)
+                if bound_id is not None:
+                    interfaces_by_port_id.setdefault(bound_id, []).append(interface)
+            owner = resolve_interface_row_device(
+                locked_obj,
+                port,
+                interface_name_field,
+                interfaces_by_port_id=interfaces_by_port_id,
+                members_by_position=members_by_position,
+                members_by_id=members_by_id,
+                return_device_on_failure=False,
+            )
+            if owner is None or owner.pk not in members_by_id:
+                raise ValueError("The LibreNMS port does not identify one viewable chassis member.")
+            if get_migrated_to_marker(locked_obj, server_key) or get_migrated_to_marker(owner, server_key):
+                raise ValueError("The interface owner is read-only because it was migrated.")
+            interface_model = Interface
+        else:
+            owner = locked_obj
+            interface_model = VMInterface
+
+        interface = resolve_or_create_interface_from_port(
+            owner,
+            port,
+            server_key=server_key,
+            interface_name_field=interface_name_field,
+            changeable_queryset=self.restricted_queryset(interface_model, "change"),
+            viewable_queryset=self.restricted_queryset(interface_model, "view"),
+        )
+        port_id_key = str(normalize_librenms_port_id(port.get("port_id")))
+        interfaces_by_librenms_id[port_id_key] = interface
+        return interface
+
+    def _lock_target_interface(self, obj, interface):
+        """Lock and recheck the current interface owner before an IP assignment."""
+        locked_obj, locked_owners = self._lock_interface_owner_scope(obj)
+        if locked_obj is None:
+            return None
+        if isinstance(locked_obj, Device):
+            if not isinstance(interface, Interface):
+                return None
+            allowed_owner_ids = {owner.pk for owner in locked_owners}
+            locked_interface = (
+                self.restricted_queryset(Interface, "view")
+                .select_for_update(of=("self",))
+                .filter(pk=interface.pk)
+                .first()
+            )
+            if locked_interface is None or locked_interface.device_id not in allowed_owner_ids:
+                return None
+            owner_by_id = {owner.pk: owner for owner in locked_owners}
+            server_key = getattr(self, "_post_server_key", None) or self.librenms_api.server_key
+            if get_migrated_to_marker(locked_obj, server_key) or get_migrated_to_marker(
+                owner_by_id[locked_interface.device_id], server_key
+            ):
+                raise ValueError("The interface owner is read-only because it was migrated.")
+            return locked_interface
+        if not isinstance(interface, VMInterface):
+            return None
+        locked_interface = (
+            self.restricted_queryset(VMInterface, "view")
+            .select_for_update(of=("self",))
+            .filter(pk=interface.pk)
+            .first()
+        )
+        if locked_interface is None or locked_interface.virtual_machine_id != locked_obj.pk:
+            return None
+        return locked_interface
+
     @staticmethod
     def _set_primary_ip(obj, ip_obj):
         """
@@ -343,7 +586,313 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
         obj.save()
         return True
 
-    def process_ip_sync(self, request, selected_ips, cached_ips, obj, object_type):
+    @staticmethod
+    def _cached_ip_index(cached_ips):
+        """Index cached rows by canonical CIDR and record duplicate row identities."""
+        index = {}
+        duplicates = set()
+        for row in cached_ips:
+            if not isinstance(row, dict):
+                continue
+            try:
+                row_id = str(parse_address_with_prefix(row.get("ip_with_mask")))
+            except (TypeError, ValueError):
+                continue
+            if row_id in index:
+                duplicates.add(row_id)
+            else:
+                index[row_id] = row
+        return index, duplicates
+
+    @staticmethod
+    def _vrf_label(vrf):
+        """Return a user-facing VRF label."""
+        return vrf.name if vrf is not None else "Global"
+
+    def _conflict_intent(self, *, row_id, obj, object_type, server_key, interface, vrf, ip_obj, kind):
+        """Sign the complete state required to confirm one destructive IP change."""
+        payload = {
+            "row_id": row_id,
+            "object_type": object_type,
+            "object_pk": str(obj.pk),
+            "server_key": server_key,
+            "target_interface": self._interface_identity(interface),
+            "target_vrf_id": vrf.pk if vrf is not None else None,
+            "ip_pk": str(ip_obj.pk),
+            "ip_state": self._ip_state(ip_obj),
+            "kind": kind,
+        }
+        return signing.dumps(payload, salt=IP_CONFLICT_SIGNING_SALT, compress=True)
+
+    def _resolve_vrf_id(self, vrf_id):
+        """Resolve a signed or posted VRF id through the current view scope."""
+        if vrf_id is None:
+            return None
+        try:
+            return self.restricted_queryset(VRF).get(pk=vrf_id)
+        except (VRF.DoesNotExist, TypeError, ValueError):
+            raise ValueError("Selected VRF is no longer available or you do not have permission to view it.") from None
+
+    @staticmethod
+    def _host_rows(vrf, parsed):
+        """Return current rows for one host inside one VRF."""
+        return list(IPAddress.objects.filter(address__net_host=str(parsed.ip), vrf=vrf).order_by("pk"))
+
+    def _locked_changeable_ip(self, pk):
+        """Lock an IP row only when it remains in the caller's change scope."""
+        return self.restricted_queryset(IPAddress, "change").select_for_update(of=("self",)).filter(pk=pk).first()
+
+    def _build_conflict(
+        self,
+        *,
+        row_id,
+        obj,
+        object_type,
+        server_key,
+        interface,
+        vrf,
+        reason,
+        ip_obj=None,
+        kind=None,
+    ):
+        """Return one user-facing conflict and its signed force intent when safe."""
+        conflict = {
+            "row_id": row_id,
+            "address": row_id,
+            "target_interface": str(interface),
+            "target_vrf": self._vrf_label(vrf),
+            "reason": reason,
+            "forceable": ip_obj is not None and kind is not None,
+            "intent": "",
+        }
+        if conflict["forceable"]:
+            conflict["intent"] = self._conflict_intent(
+                row_id=row_id,
+                obj=obj,
+                object_type=object_type,
+                server_key=server_key,
+                interface=interface,
+                vrf=vrf,
+                ip_obj=ip_obj,
+                kind=kind,
+            )
+        return conflict
+
+    def _classify_ip_change(self, *, row_id, parsed, ip_data, obj, object_type, server_key, interface, vrf):
+        """Classify a current VRF-scoped IP state without mutating it."""
+        target_rows = self._host_rows(vrf, parsed)
+        exact_rows = [row for row in target_rows if str(row.address) == row_id]
+        other_prefix_rows = [row for row in target_rows if str(row.address) != row_id]
+
+        if other_prefix_rows:
+            if len(other_prefix_rows) == 1 and not exact_rows:
+                existing_ip = other_prefix_rows[0]
+                if not self.restricted_queryset(IPAddress, "change").filter(pk=existing_ip.pk).exists():
+                    return (
+                        None,
+                        None,
+                        self._build_conflict(
+                            row_id=row_id,
+                            obj=obj,
+                            object_type=object_type,
+                            server_key=server_key,
+                            interface=interface,
+                            vrf=vrf,
+                            reason="The existing IP address is outside your change scope.",
+                        ),
+                    )
+                return (
+                    None,
+                    None,
+                    self._build_conflict(
+                        row_id=row_id,
+                        obj=obj,
+                        object_type=object_type,
+                        server_key=server_key,
+                        interface=interface,
+                        vrf=vrf,
+                        reason=(
+                            f"Change the existing IP address from {existing_ip.address} to {row_id} "
+                            "because it has a different prefix length, and assign it to the selected interface."
+                        ),
+                        ip_obj=existing_ip,
+                        kind="change_prefix",
+                    ),
+                )
+            return (
+                None,
+                None,
+                self._build_conflict(
+                    row_id=row_id,
+                    obj=obj,
+                    object_type=object_type,
+                    server_key=server_key,
+                    interface=interface,
+                    vrf=vrf,
+                    reason="The destination VRF already contains this host with a different prefix length.",
+                ),
+            )
+        if len(exact_rows) > 1:
+            return (
+                None,
+                None,
+                self._build_conflict(
+                    row_id=row_id,
+                    obj=obj,
+                    object_type=object_type,
+                    server_key=server_key,
+                    interface=interface,
+                    vrf=vrf,
+                    reason="The destination VRF contains duplicate matching IP addresses.",
+                ),
+            )
+        if exact_rows:
+            existing_ip = exact_rows[0]
+            if existing_ip.assigned_object == interface:
+                return existing_ip, "unchanged", None
+            if not self.restricted_queryset(IPAddress, "change").filter(pk=existing_ip.pk).exists():
+                return (
+                    None,
+                    None,
+                    self._build_conflict(
+                        row_id=row_id,
+                        obj=obj,
+                        object_type=object_type,
+                        server_key=server_key,
+                        interface=interface,
+                        vrf=vrf,
+                        reason="The existing IP address is outside your change scope.",
+                    ),
+                )
+            return (
+                None,
+                None,
+                self._build_conflict(
+                    row_id=row_id,
+                    obj=obj,
+                    object_type=object_type,
+                    server_key=server_key,
+                    interface=interface,
+                    vrf=vrf,
+                    reason="Reassign the existing IP address to the selected interface.",
+                    ip_obj=existing_ip,
+                    kind="reassign",
+                ),
+            )
+
+        source_pk = ip_data.get("netbox_ip_id")
+        if source_pk is not None:
+            exact_rows_across_vrfs = list(IPAddress.objects.filter(address=row_id).order_by("pk"))
+            source_ip = next((row for row in exact_rows_across_vrfs if str(row.pk) == str(source_pk)), None)
+            if source_ip is None:
+                return (
+                    None,
+                    None,
+                    self._build_conflict(
+                        row_id=row_id,
+                        obj=obj,
+                        object_type=object_type,
+                        server_key=server_key,
+                        interface=interface,
+                        vrf=vrf,
+                        reason="The previously matched IP address changed. Refresh the IP data.",
+                    ),
+                )
+            if not self.restricted_queryset(IPAddress, "change").filter(pk=source_ip.pk).exists():
+                return (
+                    None,
+                    None,
+                    self._build_conflict(
+                        row_id=row_id,
+                        obj=obj,
+                        object_type=object_type,
+                        server_key=server_key,
+                        interface=interface,
+                        vrf=vrf,
+                        reason="The existing IP address is outside your change scope.",
+                    ),
+                )
+            return (
+                None,
+                None,
+                self._build_conflict(
+                    row_id=row_id,
+                    obj=obj,
+                    object_type=object_type,
+                    server_key=server_key,
+                    interface=interface,
+                    vrf=vrf,
+                    reason=f"Move the existing IP address to {self._vrf_label(vrf)} and assign it to the selected interface.",
+                    ip_obj=source_ip,
+                    kind="move_vrf",
+                ),
+            )
+
+        ip_obj = IPAddress.objects.create(
+            address=row_id,
+            assigned_object=interface,
+            status="active",
+            vrf=vrf,
+        )
+        return ip_obj, "created", None
+
+    def _apply_confirmed_ip_change(self, *, row_id, parsed, payload, interface, vrf):
+        """Recheck and apply one signed IP change while the target row is locked."""
+        if payload.get("target_interface") != self._interface_identity(interface):
+            raise ValueError("The target interface changed. Refresh the IP data and try again.")
+        if payload.get("target_vrf_id") != (vrf.pk if vrf is not None else None):
+            raise ValueError("The target VRF changed. Refresh the IP data and try again.")
+
+        ip_obj = self._locked_changeable_ip(payload.get("ip_pk"))
+        if ip_obj is None:
+            raise ValueError("The existing IP address is no longer available in your change scope.")
+        if payload.get("ip_state") != self._ip_state(ip_obj):
+            raise ValueError("The existing IP address changed after confirmation. Refresh the IP data and try again.")
+        kind = payload.get("kind")
+        if kind != "change_prefix" and str(ip_obj.address) != row_id:
+            raise ValueError("The existing IP address changed after confirmation. Refresh the IP data and try again.")
+
+        target_rows = self._host_rows(vrf, parsed)
+        exact_rows = [row for row in target_rows if str(row.address) == row_id]
+        other_prefix_rows = [row for row in target_rows if str(row.address) != row_id]
+        if other_prefix_rows and kind != "change_prefix":
+            raise ValueError("The destination VRF now contains this host with a different prefix length.")
+
+        target_vrf_id = vrf.pk if vrf is not None else None
+        if kind == "reassign":
+            if len(exact_rows) != 1 or exact_rows[0].pk != ip_obj.pk or ip_obj.vrf_id != target_vrf_id:
+                raise ValueError("The destination VRF changed after confirmation. Refresh the IP data and try again.")
+        elif kind == "move_vrf":
+            if exact_rows or ip_obj.vrf_id == target_vrf_id:
+                raise ValueError("The destination VRF changed after confirmation. Refresh the IP data and try again.")
+            ip_obj.vrf = vrf
+        elif kind == "change_prefix":
+            if (
+                exact_rows
+                or len(other_prefix_rows) != 1
+                or other_prefix_rows[0].pk != ip_obj.pk
+                or ip_obj.vrf_id != target_vrf_id
+            ):
+                raise ValueError("The destination VRF changed after confirmation. Refresh the IP data and try again.")
+            ip_obj.address = row_id
+        else:
+            raise ValueError("IP address confirmation is invalid. Refresh the IP data and try again.")
+
+        ip_obj.assigned_object = interface
+        ip_obj.save()
+        return ip_obj
+
+    def process_ip_sync(
+        self,
+        request,
+        selected_ips,
+        cached_ips,
+        obj,
+        object_type,
+        force_intents=None,
+        cached_ports_by_id=None,
+        interface_name_field=None,
+    ):
         """Create or update IP addresses in NetBox from cached LibreNMS data.
 
         When the "set Primary IP" toggle is on, the synced IP that matches the
@@ -360,6 +909,7 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
             "primary_interface_not_eligible": [],
             "skipped_no_interface": [],
             "errors": {},
+            "conflicts": [],
         }
 
         set_primary = resolve_set_primary_ip(request)
@@ -370,23 +920,53 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
         # picked up without a manual cache refresh.
         server_key = getattr(self, "_post_server_key", None) or self.librenms_api.server_key
         interfaces_by_librenms_id, interfaces_by_name, interfaces_by_pk = self._build_interface_maps(obj, server_key)
+        cached_index, duplicate_cached_rows = self._cached_ip_index(cached_ips)
+        force_intents = force_intents or {}
+        create_missing_interfaces = self._create_missing_interfaces(request)
+        cached_ports_by_id = cached_ports_by_id or {}
 
-        for ip_address in selected_ips:
+        for selected_ip in selected_ips:
+            row_id = str(selected_ip)
             try:
                 # Per-IP savepoint so one bad address rolls back only itself and
                 # surfaces a real error, instead of poisoning the whole batch.
                 with transaction.atomic():
-                    ip_data = next(ip for ip in cached_ips if ip["ip_address"] == ip_address)
+                    row_id = str(parse_address_with_prefix(selected_ip))
+                    if row_id in duplicate_cached_rows:
+                        raise ValueError("The cached snapshot contains duplicate rows for this IP address.")
+                    ip_data = cached_index.get(row_id)
+                    if ip_data is None:
+                        raise ValueError("The selected IP address is no longer present in the cached snapshot.")
+                    parsed = parse_address_with_prefix(row_id)
 
-                    vrf = self.get_vrf_selection(request, ip_address)
+                    force_payload = force_intents.get(row_id)
+                    if force_payload is not None:
+                        vrf = self._resolve_vrf_id(force_payload.get("target_vrf_id"))
+                    else:
+                        vrf = self.get_vrf_selection(request, row_id)
 
                     interface = self._match_interface(
                         ip_data, interfaces_by_librenms_id, interfaces_by_name, interfaces_by_pk
                     )
 
+                    if interface is None and create_missing_interfaces:
+                        interface = self._create_interface_for_ip(
+                            obj,
+                            ip_data,
+                            cached_ports_by_id,
+                            interface_name_field,
+                            server_key,
+                            interfaces_by_librenms_id,
+                        )
+                        interfaces_by_name[interface.name] = interface
+                        interfaces_by_pk[str(interface.pk)] = interface
+
+                    if interface is not None:
+                        interface = self._lock_target_interface(obj, interface)
+
                     # This row ends in obj.save() (primary_ip) when it matches the management
                     # address, so it takes BOTH an ipam_ipaddress and a dcim_device row lock.
-                    is_primary_candidate = bool(mgmt_ip) and self._same_host(ip_data["ip_address"], mgmt_ip)
+                    is_primary_candidate = bool(mgmt_ip) and self._same_host(row_id, mgmt_ip)
 
                     if interface is None:
                         # No matching NetBox interface — the row is stale, the interface isn't
@@ -395,9 +975,9 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
                         # or create an unassigned/global address, both of which violate the
                         # interface-assigned model. Skip the row instead of corrupting state.
                         if is_primary_candidate:
-                            results["primary_no_interface"].append(ip_address)
+                            results["primary_no_interface"].append(row_id)
                         else:
-                            results["skipped_no_interface"].append(ip_address)
+                            results["skipped_no_interface"].append(row_id)
                         continue
 
                     if is_primary_candidate:
@@ -410,42 +990,36 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
                         # would make _set_primary_ip skip a set it must perform.
                         obj.refresh_from_db()
 
-                    ip_with_mask = ip_data["ip_with_mask"]
-
-                    # Scope the lookup to the target VRF: the same address can
-                    # legitimately exist in multiple VRFs, and matching on address
-                    # alone would hijack an unrelated IP and rewrite its VRF.
-                    existing_ip = IPAddress.objects.filter(address=ip_with_mask, vrf=vrf).first()
-
-                    if existing_ip:
-                        if not self.restricted_queryset(IPAddress, "change").filter(pk=existing_ip.pk).exists():
-                            raise ValueError(
-                                "Existing IP address is no longer available or you do not have permission to change it."
-                            )
-                        # The scope check does not lock, so a concurrent assignment or VRF change
-                        # could commit between it and the save below and be overwritten. Re-read
-                        # the authorized row under a lock and decide from that.
-                        existing_ip = self.relock_scoped_row(IPAddress, pk=existing_ip.pk)
-                        if existing_ip is None:
-                            raise ValueError(
-                                "Existing IP address is no longer available or you do not have permission to change it."
-                            )
-                        if existing_ip.assigned_object != interface or existing_ip.vrf != vrf:
-                            existing_ip.assigned_object = interface
-                            existing_ip.vrf = vrf
-                            existing_ip.save()
-                            results["updated"].append(ip_address)
-                        else:
-                            results["unchanged"].append(ip_address)
-                        ip_obj = existing_ip
-                    else:
-                        ip_obj = IPAddress.objects.create(
-                            address=ip_with_mask,
-                            assigned_object=interface,
-                            status="active",
+                    if force_payload is not None:
+                        ip_obj = self._apply_confirmed_ip_change(
+                            row_id=row_id,
+                            parsed=parsed,
+                            payload=force_payload,
+                            interface=interface,
                             vrf=vrf,
                         )
-                        results["created"].append(ip_address)
+                        results["updated"].append(row_id)
+                    else:
+                        ip_obj, outcome, conflict = self._classify_ip_change(
+                            row_id=row_id,
+                            parsed=parsed,
+                            ip_data=ip_data,
+                            obj=obj,
+                            object_type=object_type,
+                            server_key=server_key,
+                            interface=interface,
+                            vrf=vrf,
+                        )
+                        if conflict is not None:
+                            logger.info(
+                                "IP sync skipped %s in VRF %s pending confirmation: %s",
+                                row_id,
+                                conflict["target_vrf"],
+                                conflict["reason"],
+                            )
+                            results["conflicts"].append(conflict)
+                            continue
+                        results[outcome].append(row_id)
 
                     # Primary-IP auto-match for the management IP. The no-interface case is
                     # handled above (the row was skipped before any write), so here the IP is
@@ -469,14 +1043,14 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
                                 and not interface.mgmt_only
                             )
                         ):
-                            results["primary_interface_not_eligible"].append(ip_address)
+                            results["primary_interface_not_eligible"].append(row_id)
                         elif self._set_primary_ip(obj, ip_obj):
-                            results["primary_set"].append(ip_address)
+                            results["primary_set"].append(row_id)
 
             except Exception as exc:
-                logger.warning("IP sync failed for %s: %s", ip_address, exc, exc_info=True)
-                results["failed"].append(ip_address)
-                results["errors"][ip_address] = str(exc) or exc.__class__.__name__
+                logger.warning("IP sync failed for %s: %s", row_id, exc, exc_info=True)
+                results["failed"].append(row_id)
+                results["errors"][row_id] = str(exc) or exc.__class__.__name__
 
         return results
 
