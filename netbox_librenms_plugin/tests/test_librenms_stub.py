@@ -1,8 +1,11 @@
 """Real-HTTP contract tests for the development LibreNMS stub."""
 
+import copy
 import runpy
+import socket
 from pathlib import Path
 
+import pytest
 import requests
 
 from netbox_librenms_plugin.data_shapes.recordings_store import load_recording
@@ -169,6 +172,15 @@ def test_stub_supports_filtered_inventory_without_a_recorded_query_variant():
 
         assert ok is True
         assert inventory == []
+
+        ok, unfiltered = api.get_inventory_filtered(1000)
+        assert ok is True
+        present_class = unfiltered[0]["entPhysicalClass"]
+
+        ok, matched = api.get_inventory_filtered(1000, ent_physical_class=present_class)
+        assert ok is True
+        assert matched
+        assert all(item["entPhysicalClass"] == present_class for item in matched)
     finally:
         server.stop()
 
@@ -217,6 +229,18 @@ def test_stub_device_and_location_writes_are_visible_until_restart():
         assert updated["location"] == "Stub Row B"
         assert updated["override_sysLocation"] == "1"
 
+        old_hostname = created["hostname"]
+        new_hostname = "device-renamed.example.test"
+        ok, message = api.update_device_field(
+            created["device_id"],
+            {"field": ["hostname"], "data": [new_hostname]},
+        )
+        assert ok is True, message
+        assert _request(server, "GET", f"/api/v0/devices/{old_hostname}").status_code == 404
+        renamed = _request(server, "GET", f"/api/v0/devices/{new_hostname}")
+        assert renamed.status_code == 200
+        assert renamed.json()["devices"][0]["device_id"] == created["device_id"]
+
         ok, location = api.add_location({"location": "Stub Row B", "lat": None, "lng": None})
         assert ok is True, location
         ok, locations = api.get_locations()
@@ -235,3 +259,44 @@ def test_stub_rejects_duplicate_recording_device_ids():
         assert "Duplicate recording device_id 1000" in str(exc)
     else:
         raise AssertionError("duplicate device ids must fail closed")
+
+
+def test_stub_rejects_alias_collision_without_mutating_the_device():
+    server = _start_stub()
+    try:
+        first = server.devices[1]
+        second = server.devices[12]
+        original_hostname = first["hostname"]
+
+        response = _request(
+            server,
+            "PATCH",
+            "/api/v0/devices/1",
+            json={"field": ["hostname"], "data": [second["hostname"]]},
+        )
+
+        assert response.status_code == 409
+        assert server.devices[1]["hostname"] == original_hostname
+        assert _request(server, "GET", f"/api/v0/devices/{original_hostname}").status_code == 200
+        assert _request(server, "GET", f"/api/v0/devices/{second['hostname']}").json()["devices"][0]["device_id"] == 12
+    finally:
+        server.stop()
+
+
+def test_constructor_failure_releases_the_bound_port():
+    recording = copy.deepcopy(load_recording("linux-host-oob"))
+    oob_id = recording["meta"]["oob_id"]
+    recording["responses"].pop(f"GET /api/v0/devices/{oob_id}/ports")
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+
+    with pytest.raises(ValueError, match="has no ports response"):
+        LibreNMSStubServer(recordings=[recording], api_token=TOKEN, port=port)
+
+    replacement = LibreNMSStubServer(
+        recordings=[load_recording("linux-host")],
+        api_token=TOKEN,
+        port=port,
+    )
+    replacement._server.server_close()
