@@ -251,16 +251,13 @@ def test_classify_novelty_likely_covered_for_known_shape():
 def test_classify_novelty_new_for_unseen_axes():
     """A shape with axes no manifest entry shares is reported new."""
     manifest = build_manifest(iter_recordings())
-    # An Arista device that is BOTH a VC and has LAG + sub-interfaces — not covered by the seeds.
-    novel = {
-        "os": "eos",
-        "virtual_chassis": {"present": True, "root_class": "stack", "member_count": 2, "position_base": 1},
-        "lag": {"present": True, "ieee8023ad": True, "name_prefix": "Port-Channel"},
-        "sub_interfaces": {"present": True, "styles": ["dot-numeric"]},
-        "port_stack": True,
-        "vlans": False,
-        "transceivers": False,
-    }
+    # Start with the real signature schema so new axes cannot be omitted when it grows. Change the
+    # structural dimensions to a combination that no bundled recording covers.
+    novel = compute_shape_signature(load_recording("cisco-stackwise-3member"))
+    novel["os"] = "eos"
+    novel["lag"] = {"present": True, "ieee8023ad": True, "name_prefix": "Port-Channel"}
+    novel["sub_interfaces"] = {"present": True, "styles": ["dot-numeric"]}
+    novel["port_stack"] = True
     verdict = classify_novelty(novel, manifest)
     assert verdict["verdict"] == "new"
     assert verdict["closest"] is None

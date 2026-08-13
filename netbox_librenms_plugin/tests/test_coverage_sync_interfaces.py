@@ -231,6 +231,18 @@ def test_interface_member_verify_rebinds_replaced_vlan_controls():
     assert "initializeVlanGroupSelects();" in handler[handler.index(vlan_repaint) :]
 
 
+def test_copy_fallback_removes_temporary_textarea_after_an_error():
+    """The fallback must remove its temporary control even when execCommand raises."""
+    handler = _js_block(
+        _js_source(),
+        "function wireCopyButton(btn, targetId, labels)",
+        "function initializeVCReportCopyButton()",
+    )
+
+    assert "let temp = null;\n        try {" in handler
+    assert "finally {\n            if (temp) document.body.removeChild(temp);\n        }" in handler
+
+
 def test_interface_member_verify_posts_the_origin_page_device():
     """The verify response must preserve page-level migrated mode across a member change."""
     handler = _js_block(

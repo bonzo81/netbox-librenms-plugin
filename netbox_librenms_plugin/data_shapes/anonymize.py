@@ -245,7 +245,7 @@ _IF_PREFIXES = (
     "TwentyFiveGigE|FastEthernet|Ethernet|Port-channel|Bundle-Ether|MgmtEth|Management|Loopback|"
     "Tunnel|Serial|Vlan|"
     "ge|xe|et|fe|ae|irb|lo|em|fxp|gr|ip|lt|mt|pp|st|vcp|vme|fab|gre|ipip|pime|pimd|cbp|pip|esi|"
-    "fti|sp|dsc|lsi|mtun|vt|esa|lag|"
+    "fti|sp|dsc|lsi|mtun|vt|esa|lag|demux|"
     "swp|bond|eth|ens|eno|enp|veth|mgmt|vni|br|"
     "Gi|Te|Fa|Hu|Fo|Twe|Eth|Po|BE|Lo|Tu|Se|nve|BVI|Null"
 )
@@ -255,9 +255,9 @@ _IF_PREFIXES = (
 # name-based sub-unit pairing (low_name startswith high_name + '.') is lost. Match the bare base
 # (optionally + '.unit') as a COMPLETE token, word-bounded, so the relationship survives while free
 # text like "jsrv-customer" is still pseudonymized rather than preserved verbatim (which would leak
-# it — unlike CR's "make the trailing digit optional", which would also preserve any value starting
-# with a short prefix such as "ip"/"lo").
-_DIGITLESS_IF_NAMES = "jsrv|irb|dsc|lsi|mtun|pimd|pime|tap"
+# it. Making the trailing digit optional would also preserve any value that starts with a short
+# prefix such as "ip" or "lo".
+_DIGITLESS_IF_NAMES = "jsrv|irb|dsc|lsi|mtun|pimd|pime|tap|gre|ipip|esi|mif|rbeb|vtep"
 # systemd "predictable" Linux names (eno1np0, ens3f1, enp2s0f1np0): the n<phys_port> / f<function>
 # segments are letters+digits that the general "stop at the first letter" run below would truncate,
 # collapsing siblings like …np0 / …np1 onto one preserved token and breaking name-based correlation

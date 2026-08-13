@@ -787,7 +787,10 @@ class LibreNMSAPI:
             # The documented success envelope always contains a list-valued mappings field,
             # including when no relationships exist. Missing, null, non-list, or mixed-list data
             # is malformed. It must not become an authoritative empty relationship snapshot.
-            if not isinstance(mappings, list) or any(not isinstance(item, dict) for item in mappings):
+            if not isinstance(mappings, list) or any(
+                not isinstance(item, dict) or "high_port_id" not in item or "low_port_id" not in item
+                for item in mappings
+            ):
                 logger.warning("Unexpected port_stack response for device %s: %r", device_id, data)
                 return False, "Unexpected response format from LibreNMS (invalid 'mappings' payload)"
             return True, mappings

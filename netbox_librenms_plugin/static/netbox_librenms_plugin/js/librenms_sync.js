@@ -3600,9 +3600,9 @@ function wireCopyButton(btn, targetId, labels) {
         }
         // Fallback for older browsers or insecure contexts: execCommand needs a selectable
         // form control, so copy through a throwaway textarea when the target isn't one.
+        let temp = null;
         try {
             let ta = target;
-            let temp = null;
             if (typeof ta.select !== 'function') {
                 temp = document.createElement('textarea');
                 temp.value = text;
@@ -3614,10 +3614,11 @@ function wireCopyButton(btn, targetId, labels) {
             }
             ta.select();
             const ok = document.execCommand('copy');
-            if (temp) document.body.removeChild(temp);
             flash(ok ? doneHtml : errHtml);
         } catch (e) {
             flash(errHtml);
+        } finally {
+            if (temp) document.body.removeChild(temp);
         }
     });
 }

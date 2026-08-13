@@ -550,6 +550,13 @@ _PORT_PATTERNS = [
     "jsrv.1",
     "irb",
     "irb.100",
+    "gre",
+    "ipip",
+    "esi",
+    "mif",
+    "rbeb",
+    "vtep",
+    "demux0",
 ]
 
 
