@@ -10,7 +10,6 @@ from virtualization.models import VirtualMachine
 from netbox_librenms_plugin.sync_cache import (
     SyncCacheConsistency,
     SyncTab,
-    configured_cache_timeout,
     mapped_server_keys,
     request_actor_id,
 )
@@ -39,7 +38,7 @@ class SyncCacheStatusView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
         if not server_key or server_key not in mapped_server_keys(obj, server_key):
             raise Http404("LibreNMS server is not mapped to this object.")
 
-        coordinator = SyncCacheConsistency(obj, cache_timeout=self._cache_timeout())
+        coordinator = SyncCacheConsistency(obj)
         return JsonResponse(
             {
                 "object_type": object_type,
@@ -48,12 +47,6 @@ class SyncCacheStatusView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
                 "tabs": coordinator.status(server_key, actor_id=request_actor_id(request)),
             }
         )
-
-    @staticmethod
-    def _cache_timeout():
-        """Read the configured cache lifetime without constructing an API client."""
-
-        return configured_cache_timeout()
 
 
 class SyncCacheFragmentView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, View):
@@ -108,7 +101,7 @@ class SyncCacheFragmentView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin
         if not server_key or server_key not in mapped_server_keys(obj, server_key):
             raise Http404("LibreNMS server is not mapped to this object.")
 
-        coordinator = SyncCacheConsistency(obj, cache_timeout=configured_cache_timeout())
+        coordinator = SyncCacheConsistency(obj)
         if not coordinator.status(server_key, actor_id=request_actor_id(request))[sync_tab.value]["snapshot_available"]:
             raise Http404("The sync snapshot is not available.")
 

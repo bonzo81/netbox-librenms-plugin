@@ -2,6 +2,7 @@
 
 import json
 import logging
+import math
 from dataclasses import dataclass, field
 from enum import StrEnum
 from uuid import uuid4
@@ -11,8 +12,11 @@ from django.contrib import messages
 from django.db import transaction
 from django.shortcuts import render
 from django.utils import timezone
+from django.utils.dateparse import parse_datetime
 
+from netbox_librenms_plugin.librenms_api import configured_cache_timeout
 from netbox_librenms_plugin.utils import (
+    cache_remaining_ttl,
     coerce_librenms_id,
     get_librenms_device_id,
     get_librenms_sync_device,
@@ -46,6 +50,8 @@ class SyncTabSpec:
     """Describe one tab's cache payload and object support."""
 
     data_type: str
+    context_name: str
+    content_id: str
     label: str
     shared_vc_owner: bool
     supports_virtual_machine: bool
@@ -57,6 +63,8 @@ class SyncTabSpec:
 TAB_SPECS = {
     SyncTab.INTERFACES: SyncTabSpec(
         data_type="ports",
+        context_name="interface_sync",
+        content_id="interface-sync-content",
         label="Interface",
         shared_vc_owner=True,
         supports_virtual_machine=True,
@@ -65,6 +73,8 @@ TAB_SPECS = {
     ),
     SyncTab.CABLES: SyncTabSpec(
         data_type="links",
+        context_name="cable_sync",
+        content_id="cable-sync-content",
         label="Cable",
         shared_vc_owner=True,
         supports_virtual_machine=False,
@@ -72,18 +82,24 @@ TAB_SPECS = {
     ),
     SyncTab.IP_ADDRESSES: SyncTabSpec(
         data_type="ip_addresses",
+        context_name="ip_sync",
+        content_id="ipaddress-sync-content",
         label="IP address",
         shared_vc_owner=False,
         supports_virtual_machine=True,
     ),
     SyncTab.MODULES: SyncTabSpec(
         data_type="inventory",
+        context_name="module_sync",
+        content_id="module-sync-content",
         label="Module",
         shared_vc_owner=True,
         supports_virtual_machine=False,
     ),
     SyncTab.VLANS: SyncTabSpec(
         data_type="vlans",
+        context_name="vlan_sync",
+        content_id="vlan-sync-content",
         label="VLAN",
         shared_vc_owner=False,
         supports_virtual_machine=False,
@@ -195,9 +211,8 @@ def mapped_server_keys(page_object, active_server_key=None):
 class SyncCacheConsistency:
     """Own sync-tab cache keys, transitions, and status serialization."""
 
-    def __init__(self, page_object, *, cache_timeout):
+    def __init__(self, page_object):
         self.page_object = page_object
-        self.cache_timeout = cache_timeout
 
     def applicable_tabs(self):
         """Return the tabs supported by this page object's model."""
@@ -251,7 +266,11 @@ class SyncCacheConsistency:
         revision=None,
     ):
         record = self._state_record(state, tab, source_tab, actor_id, reason, revision)
-        cache.set(self.state_key(tab, server_key), record, timeout=self.cache_timeout)
+        cache.set(
+            self.state_key(tab, server_key),
+            record,
+            timeout=configured_cache_timeout(server_key),
+        )
         return record
 
     def mark_refresh_success(self, tab, server_key, *, actor_id=None):
@@ -260,15 +279,18 @@ class SyncCacheConsistency:
 
     def mark_refresh_failure(self, tab, server_key, *, actor_id=None):
         """Record a failed refresh unless an earlier invalidation reason must remain."""
-        prior = cache.get(self.state_key(tab, server_key))
+        state_key = self.state_key(tab, server_key)
+        prior = cache.get(state_key)
         if isinstance(prior, dict) and prior.get("state") == SyncTabState.INVALIDATED.value:
-            prior = {
-                **prior,
-                "refresh_error": "The latest LibreNMS refresh failed.",
-                "refresh_error_timestamp": timezone.now().isoformat(),
-            }
-            cache.set(self.state_key(tab, server_key), prior, timeout=self.cache_timeout)
-            return prior
+            remaining_timeout = self._remaining_state_timeout(state_key, prior, server_key)
+            if remaining_timeout > 0:
+                prior = {
+                    **prior,
+                    "refresh_error": "The latest LibreNMS refresh failed.",
+                    "refresh_error_timestamp": timezone.now().isoformat(),
+                }
+                cache.set(state_key, prior, timeout=remaining_timeout)
+                return prior
         reason = (
             f"Cached {TAB_SPECS[tab].label} data is unavailable because another user attempted "
             "to refresh it from LibreNMS and the refresh failed."
@@ -281,6 +303,17 @@ class SyncCacheConsistency:
             actor_id=actor_id,
             reason=reason,
         )
+
+    def _remaining_state_timeout(self, state_key, record, server_key):
+        """Return a state record's remaining lifetime without extending it."""
+        remaining_timeout = cache_remaining_ttl(cache, state_key)
+        if isinstance(remaining_timeout, int):
+            return remaining_timeout
+        created_at = parse_datetime(record.get("timestamp") or "")
+        if created_at is None or not timezone.is_aware(created_at):
+            return 0
+        elapsed = max(0, (timezone.now() - created_at).total_seconds())
+        return max(0, math.ceil(configured_cache_timeout(server_key) - elapsed))
 
     def schedule_mutation(
         self,
@@ -543,27 +576,16 @@ def render_sync_cache_miss(request, refresh_label, *, retarget=None):
     return response
 
 
-def configured_cache_timeout():
-    """Return the sync cache lifetime without constructing a LibreNMS client."""
-    from netbox.plugins import get_plugin_config
-
-    return get_plugin_config("netbox_librenms_plugin", "cache_timeout", 300)
-
-
 def schedule_request_cache_mutation(
     request,
     page_object,
     source_tab,
     server_key,
     *,
-    cache_timeout=None,
     source_fragment_required=False,
 ):
     """Schedule one mutation transition and retain it for the endpoint response."""
-    transition = SyncCacheConsistency(
-        page_object,
-        cache_timeout=cache_timeout or configured_cache_timeout(),
-    ).schedule_mutation(
+    transition = SyncCacheConsistency(page_object).schedule_mutation(
         source_tab,
         server_key,
         actor_id=request_actor_id(request),

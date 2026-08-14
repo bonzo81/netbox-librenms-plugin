@@ -8,14 +8,22 @@ from playwright import sync_api as playwright
 SCRIPT_PATH = Path(__file__).parents[2] / "static" / "netbox_librenms_plugin" / "js" / "librenms_sync.js"
 
 
-def _page_html(initial_state):
+def _page_html(initial_state, contract=None):
     state = json.dumps(initial_state)
+    contract = contract or {
+        "interfaces": {"content_id": "interface-sync-content", "label": "Interface"},
+        "ipaddresses": {"content_id": "ipaddress-sync-content", "label": "IP address"},
+    }
+    contract_json = json.dumps(contract)
+    interface_content_id = contract["interfaces"]["content_id"]
+    ip_content_id = contract["ipaddresses"]["content_id"]
     return f"""
         <div id="librenms-sync-cache-state"
              data-status-url="https://plugin.example.com/status"
              data-server-key="primary"
              data-active-tab="interfaces"></div>
         <script id="librenms-sync-cache-initial" type="application/json">{state}</script>
+        <script id="librenms-sync-cache-contract" type="application/json">{contract_json}</script>
         <ul id="librenmsSync">
           <li><button id="interfaces-tab" class="active" data-bs-toggle="tab" aria-controls="interfaces"></button></li>
           <li><button id="ipaddresses-tab" data-bs-toggle="tab" aria-controls="ipaddresses"></button></li>
@@ -24,16 +32,51 @@ def _page_html(initial_state):
         <span id="ipaddresses-cache-badge" class="d-none"></span>
         <div id="interfaces" class="tab-pane active" data-tab-id="interfaces"
              data-fragment-url="https://plugin.example.com/fragment/interfaces">
-          <div id="interface-sync-content"><button id="interface-action">Sync</button></div>
+          <div id="{interface_content_id}"><button id="interface-action">Sync</button></div>
         </div>
         <div id="ipaddresses" class="tab-pane" data-tab-id="ipaddresses"
              data-fragment-url="https://plugin.example.com/fragment/ipaddresses">
-          <div id="ipaddress-sync-content"><button id="ip-action">Sync</button></div>
+          <div id="{ip_content_id}"><button id="ip-action">Sync</button></div>
         </div>
         <div id="htmx-modal-content">
           <form><button id="modal-force-action" type="submit">Force</button></form>
         </div>
     """
+
+
+def test_server_contract_drives_cache_content_replacement():
+    """The browser must use the tab metadata supplied by the server."""
+    initial = {
+        "interfaces": _state("before-interfaces"),
+        "ipaddresses": _state("before-ip"),
+    }
+    current = {
+        **initial,
+        "interfaces": _state(
+            "after-interfaces",
+            state="invalidated",
+            source_tab="ipaddresses",
+            available=False,
+        ),
+    }
+    contract = {
+        "interfaces": {"content_id": "custom-interface-content", "label": "Network port"},
+        "ipaddresses": {"content_id": "ipaddress-sync-content", "label": "IP address"},
+    }
+
+    with playwright.sync_playwright() as runtime:
+        browser = runtime.chromium.launch(headless=True)
+        page = browser.new_page()
+        page.set_content(_page_html(initial, contract))
+        page.add_script_tag(path=str(SCRIPT_PATH))
+        page.evaluate(
+            "status => { initializeSyncCacheConsistency(); return reconcileSyncCacheStatus(status); }",
+            current,
+        )
+
+        assert page.locator("#interface-action").count() == 0
+        assert "Network port data" in page.locator("#custom-interface-content").inner_text()
+        browser.close()
 
 
 def _state(
@@ -58,6 +101,103 @@ def _state(
         "same_user": same_user,
         "snapshot_available": available,
     }
+
+
+def test_cold_tab_does_not_show_stale_state_before_first_refresh():
+    """A tab with no snapshot history must retain its initial refresh state."""
+    initial = {
+        "interfaces": _state(None, state="missing", available=False),
+        "ipaddresses": _state(None, state="missing", available=False),
+    }
+    initial["interfaces"]["timestamp"] = None
+    initial["ipaddresses"]["timestamp"] = None
+    html = _page_html(initial).replace(
+        '<button id="interface-action">Sync</button>',
+        '<button id="interface-refresh">Refresh Interfaces</button>',
+    )
+
+    with playwright.sync_playwright() as runtime:
+        browser = runtime.chromium.launch(headless=True)
+        page = browser.new_page()
+        page.set_content(html)
+        page.add_script_tag(path=str(SCRIPT_PATH))
+        page.evaluate("initializeSyncCacheConsistency()")
+
+        assert page.locator("#interface-refresh").count() == 1
+        assert page.locator("#interfaces-cache-badge").evaluate("node => node.classList.contains('d-none')")
+        assert "cache is unavailable" not in page.locator("#interface-sync-content").inner_text()
+        browser.close()
+
+
+def test_cold_tab_does_not_flash_stale_during_tab_navigation():
+    """Checking a never-refreshed tab must not briefly mark it stale."""
+    initial = {
+        "interfaces": _state("interfaces-ready"),
+        "ipaddresses": _state(None, state="missing", available=False),
+    }
+    initial["ipaddresses"]["timestamp"] = None
+
+    with playwright.sync_playwright() as runtime:
+        browser = runtime.chromium.launch(headless=True)
+        page = browser.new_page()
+        page.route(
+            "https://plugin.example.com/page*",
+            lambda route: route.fulfill(body=_page_html(initial)),
+        )
+        page.route(
+            "https://plugin.example.com/status?*",
+            lambda route: route.fulfill(json={"tabs": initial}),
+        )
+        page.goto("https://plugin.example.com/page")
+        page.add_script_tag(path=str(SCRIPT_PATH))
+        page.evaluate(
+            """
+            () => {
+                initializeSyncCacheConsistency();
+                initializeTabs();
+                const badge = document.querySelector('#ipaddresses-cache-badge');
+                new MutationObserver(() => {
+                    if (!badge.classList.contains('d-none')) {
+                        sessionStorage.setItem('ip-badge-flashed', 'true');
+                    }
+                }).observe(badge, { attributes: true, attributeFilter: ['class'] });
+                document.querySelector('#ipaddresses-tab').dispatchEvent(
+                    new Event('show.bs.tab', { bubbles: true, cancelable: true })
+                );
+            }
+            """
+        )
+        page.wait_for_url("**/page?tab=ipaddresses")
+
+        assert page.evaluate("sessionStorage.getItem('ip-badge-flashed')") is None
+        browser.close()
+
+
+def test_refreshing_one_tab_does_not_mark_never_refreshed_tabs_stale():
+    """A successful refresh must not change untouched cold-tab affordances."""
+    initial = {
+        "interfaces": _state(None, state="missing", available=False),
+        "ipaddresses": _state(None, state="missing", available=False),
+    }
+    initial["interfaces"]["timestamp"] = None
+    initial["ipaddresses"]["timestamp"] = None
+    refreshed = {
+        "interfaces": _state("interfaces-refresh"),
+        "ipaddresses": initial["ipaddresses"],
+    }
+
+    with playwright.sync_playwright() as runtime:
+        browser = runtime.chromium.launch(headless=True)
+        page = browser.new_page()
+        page.set_content(_page_html(initial))
+        page.add_script_tag(path=str(SCRIPT_PATH))
+        page.evaluate(
+            "status => { initializeSyncCacheConsistency(); return reconcileSyncCacheStatus(status); }",
+            refreshed,
+        )
+
+        assert page.locator("#ipaddresses-cache-badge").evaluate("node => node.classList.contains('d-none')")
+        browser.close()
 
 
 def test_focus_check_clears_invalidated_rows_and_reports_anonymous_actor():
@@ -121,6 +261,32 @@ def test_cache_status_failure_disables_every_loaded_sync_control():
         assert page.locator("#modal-force-action").is_disabled()
         assert "could not be verified" in page.locator("#interface-sync-content").inner_text()
         assert "could not be verified" in page.locator("#ipaddress-sync-content").inner_text()
+        browser.close()
+
+
+def test_malformed_cache_status_disables_every_loaded_sync_control():
+    """A successful response with an invalid schema must fail closed."""
+    initial = {
+        "interfaces": _state("before-interfaces"),
+        "ipaddresses": _state("before-ip"),
+    }
+
+    with playwright.sync_playwright() as runtime:
+        browser = runtime.chromium.launch(headless=True)
+        page = browser.new_page()
+        page.set_content(_page_html(initial))
+        page.route(
+            "https://plugin.example.com/status?*",
+            lambda route: route.fulfill(json={"tabs": None}),
+        )
+        page.add_script_tag(path=str(SCRIPT_PATH))
+        page.evaluate("initializeSyncCacheConsistency(); checkSyncCacheStatus()")
+        page.wait_for_function("syncCacheController().checking === null")
+
+        assert page.locator("#interface-action").count() == 0
+        assert page.locator("#ip-action").count() == 0
+        assert page.locator("#modal-force-action").is_disabled()
+        assert page.evaluate("syncCacheController().lastCheckFailed") is True
         browser.close()
 
 
@@ -499,7 +665,7 @@ def test_cleanup_failure_removes_controls_from_every_planned_tab():
 
         assert page.locator("#ip-action").count() == 0
         assert "cleanup could not be verified" in page.locator("#ipaddress-sync-content").inner_text()
-        assert page.locator("#ipaddresses-cache-badge").inner_text() == "Refresh required"
+        assert page.locator("#ipaddresses-cache-badge").inner_text() == "Stale"
         browser.close()
 
 

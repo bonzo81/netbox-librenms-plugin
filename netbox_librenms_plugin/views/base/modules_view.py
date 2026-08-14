@@ -382,7 +382,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         self.librenms_id = coerce_librenms_id(self.librenms_api.get_librenms_id(sync_device))
         if self.librenms_id is None:
             cache.delete(self.get_cache_key(sync_device, "inventory", server_key=server_key))
-            SyncCacheConsistency(obj, cache_timeout=self.librenms_api.cache_timeout).mark_refresh_failure(
+            SyncCacheConsistency(obj).mark_refresh_failure(
                 SyncTab.MODULES,
                 server_key,
                 actor_id=request_actor_id(request),
@@ -407,7 +407,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
             or any(not isinstance(item, dict) for item in inventory_data)
         ):
             cache.delete(self.get_cache_key(sync_device, "inventory", server_key=server_key))
-            SyncCacheConsistency(obj, cache_timeout=self.librenms_api.cache_timeout).mark_refresh_failure(
+            SyncCacheConsistency(obj).mark_refresh_failure(
                 SyncTab.MODULES,
                 server_key,
                 actor_id=request_actor_id(request),
@@ -555,13 +555,13 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
             )
         if not refresh_incomplete:
             messages.success(request, "Inventory data refreshed successfully.")
-            SyncCacheConsistency(obj, cache_timeout=self.librenms_api.cache_timeout).mark_refresh_success(
+            SyncCacheConsistency(obj).mark_refresh_success(
                 SyncTab.MODULES,
                 server_key,
                 actor_id=request_actor_id(request),
             )
         else:
-            SyncCacheConsistency(obj, cache_timeout=self.librenms_api.cache_timeout).mark_refresh_failure(
+            SyncCacheConsistency(obj).mark_refresh_failure(
                 SyncTab.MODULES,
                 server_key,
                 actor_id=request_actor_id(request),

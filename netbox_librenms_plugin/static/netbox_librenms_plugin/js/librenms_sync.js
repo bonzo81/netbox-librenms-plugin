@@ -17,20 +17,6 @@
 
 const TOMSELECT_INIT_DELAY_MS = 100;
 const COUNTDOWN_UPDATE_INTERVAL_MS = 1000;
-const SYNC_CACHE_CONTENT_IDS = {
-    interfaces: 'interface-sync-content',
-    cables: 'cable-sync-content',
-    ipaddresses: 'ipaddress-sync-content',
-    modules: 'module-sync-content',
-    vlans: 'vlan-sync-content',
-};
-const SYNC_CACHE_LABELS = {
-    interfaces: 'Interface',
-    cables: 'Cable',
-    ipaddresses: 'IP address',
-    modules: 'Module',
-    vlans: 'VLAN',
-};
 
 /**
  * Return the CSRF token value, or null when the hidden input is missing/empty.
@@ -341,9 +327,19 @@ function syncCacheController() {
             initial = {};
         }
     }
+    let contract = {};
+    const contractElement = document.getElementById('librenms-sync-cache-contract');
+    if (contractElement) {
+        try {
+            contract = JSON.parse(contractElement.textContent) || {};
+        } catch (_) {
+            contract = {};
+        }
+    }
     root._controller = {
         root,
         status: initial,
+        contract,
         invalidatedLocally: new Set(),
         reloadTabs: new Set(),
         ownRevisions: new Set(),
@@ -354,8 +350,8 @@ function syncCacheController() {
         lostFocus: false,
     };
     Object.entries(initial).forEach(([tab, state]) => {
-        const content = document.getElementById(SYNC_CACHE_CONTENT_IDS[tab]);
-        if (content && !state.snapshot_available) {
+        const content = syncCacheContent(tab);
+        if (content && !state.snapshot_available && !isColdSyncCacheState(state)) {
             root._controller.invalidatedLocally.add(tab);
             clearSyncTabContent(tab, syncCacheUnavailableReason(tab, state));
         }
@@ -364,12 +360,41 @@ function syncCacheController() {
     return root._controller;
 }
 
+function syncCacheTabSpec(tab) {
+    return syncCacheController()?.contract?.[tab] || null;
+}
+
+function syncCacheContent(tab) {
+    const contentId = syncCacheTabSpec(tab)?.content_id;
+    return contentId ? document.getElementById(contentId) : null;
+}
+
+function syncCacheLabel(tab) {
+    return syncCacheTabSpec(tab)?.label || 'Sync';
+}
+
+function isColdSyncCacheState(state) {
+    return Boolean(
+        state &&
+        state.state === 'missing' &&
+        !state.snapshot_available &&
+        !state.revision &&
+        !state.timestamp &&
+        !state.reason &&
+        !state.refresh_error
+    );
+}
+
 function updateSyncCacheBadge(tab, state) {
     const badge = document.getElementById(`${tab}-cache-badge`);
     if (!badge) return;
+    if (isColdSyncCacheState(state)) {
+        badge.classList.add('d-none');
+        return;
+    }
     const unavailable = !state || !state.snapshot_available || ['invalidated', 'refresh_failed', 'missing', 'expired'].includes(state.state);
     badge.classList.toggle('d-none', !unavailable);
-    badge.textContent = state?.state === 'expired' ? 'Expired' : 'Refresh required';
+    badge.textContent = state?.state === 'expired' ? 'Expired' : 'Stale';
 }
 
 function showSyncCacheNotice(message, revision, level = 'warning') {
@@ -397,8 +422,8 @@ function showSyncCacheNotice(message, revision, level = 'warning') {
 }
 
 function syncCacheReason(tab, state) {
-    const source = SYNC_CACHE_LABELS[state.source_tab] || 'another sync tab';
-    const target = SYNC_CACHE_LABELS[tab] || 'Sync';
+    const source = syncCacheTabSpec(state.source_tab)?.label || 'another sync tab';
+    const target = syncCacheLabel(tab);
     const relative = formatSyncCacheRelativeTime(state.timestamp);
     const suffix = relative ? ` ${relative}.` : '';
     if (state.same_user) {
@@ -409,11 +434,11 @@ function syncCacheReason(tab, state) {
 
 function syncCacheUnavailableReason(tab, state) {
     if (state.state === 'refresh_failed') {
-        const reason = state.reason || `${SYNC_CACHE_LABELS[tab]} refresh failed.`;
+        const reason = state.reason || `${syncCacheLabel(tab)} refresh failed.`;
         return `${reason} Refresh this tab to try again.`;
     }
     if (state.state === 'missing' && !state.reason) {
-        return `${SYNC_CACHE_LABELS[tab]} cache is unavailable. Refresh this tab to load current data.`;
+        return `${syncCacheLabel(tab)} cache is unavailable. Refresh this tab to load current data.`;
     }
     return syncCacheReason(tab, state);
 }
@@ -439,7 +464,7 @@ function formatSyncCacheRelativeTime(timestamp) {
 }
 
 function clearSyncTabContent(tab, message) {
-    const content = document.getElementById(SYNC_CACHE_CONTENT_IDS[tab]);
+    const content = syncCacheContent(tab);
     if (!content) return;
     const card = document.createElement('div');
     card.className = 'card';
@@ -459,7 +484,7 @@ function clearSyncTabContent(tab, message) {
 function failClosedSyncControls(message) {
     const controller = syncCacheController();
     if (!controller) return;
-    Object.keys(SYNC_CACHE_CONTENT_IDS).forEach(tab => {
+    Object.keys(controller.contract).forEach(tab => {
         controller.invalidatedLocally.add(tab);
         clearSyncTabContent(tab, message);
         updateSyncCacheBadge(tab, { state: 'missing', snapshot_available: false });
@@ -475,7 +500,7 @@ function expireSyncTabFromElement(element) {
     const controller = syncCacheController();
     if (!controller) return;
     controller.invalidatedLocally.add(tab);
-    clearSyncTabContent(tab, `${SYNC_CACHE_LABELS[tab]} cache expired. Refresh this tab to load current data.`);
+    clearSyncTabContent(tab, `${syncCacheLabel(tab)} cache expired. Refresh this tab to load current data.`);
     updateSyncCacheBadge(tab, { state: 'expired', snapshot_available: false });
 }
 
@@ -492,7 +517,7 @@ function activeSyncTab() {
 
 function loadSyncCacheFragment(tab) {
     const pane = document.getElementById(tab);
-    const content = document.getElementById(SYNC_CACHE_CONTENT_IDS[tab]);
+    const content = syncCacheContent(tab);
     const controller = syncCacheController();
     if (!pane || !content || !controller || !pane.dataset.fragmentUrl) return Promise.resolve();
     const url = new URL(pane.dataset.fragmentUrl, window.location.href);
@@ -577,7 +602,7 @@ function reconcileSyncCacheStatus(nextStatus) {
         } else if (
             state.snapshot_available &&
             tab === activeTab &&
-            document.getElementById(SYNC_CACHE_CONTENT_IDS[tab])?.dataset.cacheEmpty === 'true' &&
+            syncCacheContent(tab)?.dataset.cacheEmpty === 'true' &&
             !controller.invalidatedLocally.has(tab)
         ) {
             fragmentLoads.push(loadSyncCacheFragment(tab));
@@ -586,6 +611,24 @@ function reconcileSyncCacheStatus(nextStatus) {
     controller.status = nextStatus || {};
     if (notice) showSyncCacheNotice(notice.message, notice.revision);
     return Promise.all(fragmentLoads);
+}
+
+function isValidSyncCacheStatusPayload(payload, expectedTabs) {
+    const tabs = payload?.tabs;
+    if (!tabs || typeof tabs !== 'object' || Array.isArray(tabs)) return false;
+    const tabNames = Object.keys(tabs);
+    if (tabNames.length !== expectedTabs.length || !expectedTabs.every(tab => tabNames.includes(tab))) return false;
+    const validStates = new Set(['ready', 'invalidated', 'refresh_failed', 'locally_changed', 'missing']);
+    return tabNames.every(tab => {
+        const state = tabs[tab];
+        return Boolean(
+            state &&
+            typeof state === 'object' &&
+            !Array.isArray(state) &&
+            typeof state.snapshot_available === 'boolean' &&
+            validStates.has(state.state)
+        );
+    });
 }
 
 function checkSyncCacheStatus() {
@@ -598,7 +641,12 @@ function checkSyncCacheStatus() {
             if (!response.ok) throw new Error(`HTTP ${response.status}`);
             return response.json();
         })
-        .then(payload => reconcileSyncCacheStatus(payload.tabs))
+        .then(payload => {
+            if (!isValidSyncCacheStatusPayload(payload, Object.keys(controller.status || {}))) {
+                throw new Error('Invalid cache status response');
+            }
+            return reconcileSyncCacheStatus(payload.tabs);
+        })
         .then(() => { controller.lastCheckFailed = false; })
         .catch(() => {
             controller.lastCheckFailed = true;
@@ -2856,9 +2904,10 @@ document.addEventListener('DOMContentLoaded', function () {
 
 // Initialize scripts after HTMX swaps content
 document.body.addEventListener('htmx:afterSwap', function (event) {
-    const swappedTab = Object.entries(SYNC_CACHE_CONTENT_IDS).find(([, id]) => id === event.target.id)?.[0];
+    const controller = syncCacheController();
+    const swappedTab = Object.entries(controller?.contract || {})
+        .find(([, spec]) => spec.content_id === event.target.id)?.[0];
     if (swappedTab) {
-        const controller = syncCacheController();
         if (controller) {
             controller.invalidatedLocally.delete(swappedTab);
             delete event.target.dataset.cacheEmpty;

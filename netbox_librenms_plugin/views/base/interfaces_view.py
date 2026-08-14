@@ -95,7 +95,7 @@ class BaseInterfaceTableView(
         Returns:
             HttpResponseRedirect: Redirect to the sync tab (with server_key when it validates).
         """
-        SyncCacheConsistency(obj, cache_timeout=self.librenms_api.cache_timeout).mark_refresh_failure(
+        SyncCacheConsistency(obj).mark_refresh_failure(
             SyncTab.INTERFACES,
             server_key,
             actor_id=request_actor_id(request),
@@ -388,7 +388,7 @@ class BaseInterfaceTableView(
             timezone.now(),
             timeout=self.librenms_api.cache_timeout,
         )
-        SyncCacheConsistency(obj, cache_timeout=self.librenms_api.cache_timeout).mark_refresh_success(
+        SyncCacheConsistency(obj).mark_refresh_success(
             SyncTab.INTERFACES,
             _server_key,
             actor_id=request_actor_id(request),

@@ -83,7 +83,7 @@ class BaseVLANTableView(
             # cache is scoped by server_key, so evict the same scoped keys.
             cache.delete(self.get_cache_key(obj, "vlans", server_key))
             cache.delete(self.get_last_fetched_key(obj, "vlans", server_key))
-            SyncCacheConsistency(obj, cache_timeout=self.librenms_api.cache_timeout).mark_refresh_failure(
+            SyncCacheConsistency(obj).mark_refresh_failure(
                 SyncTab.VLANS,
                 server_key,
                 actor_id=request_actor_id(request),
@@ -101,7 +101,7 @@ class BaseVLANTableView(
         if not success:
             cache.delete(self.get_cache_key(obj, "vlans", server_key))
             cache.delete(self.get_last_fetched_key(obj, "vlans", server_key))
-            SyncCacheConsistency(obj, cache_timeout=self.librenms_api.cache_timeout).mark_refresh_failure(
+            SyncCacheConsistency(obj).mark_refresh_failure(
                 SyncTab.VLANS,
                 server_key,
                 actor_id=request_actor_id(request),
@@ -112,7 +112,7 @@ class BaseVLANTableView(
             )
 
         messages.success(request, "VLAN data refreshed successfully.")
-        SyncCacheConsistency(obj, cache_timeout=self.librenms_api.cache_timeout).mark_refresh_success(
+        SyncCacheConsistency(obj).mark_refresh_success(
             SyncTab.VLANS,
             server_key,
             actor_id=request_actor_id(request),

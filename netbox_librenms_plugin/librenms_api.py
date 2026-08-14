@@ -8,6 +8,7 @@ from netbox.plugins import get_plugin_config
 # HTTP request timeout constants (in seconds)
 DEFAULT_API_TIMEOUT = 10
 EXTENDED_API_TIMEOUT = 20  # For endpoints that may take longer (e.g., device listing)
+DEFAULT_CACHE_TIMEOUT = 300
 
 # Short-lived cache for get_device_info(). The device-info header is fetched on every sync-tab
 # render (and again on the post-action redirect), but a device's identity/metadata is stable, so
@@ -16,6 +17,16 @@ EXTENDED_API_TIMEOUT = 20  # For endpoints that may take longer (e.g., device li
 DEVICE_INFO_CACHE_TIMEOUT = 60
 
 logger = logging.getLogger(__name__)
+
+
+def configured_cache_timeout(server_key):
+    """Return the cache lifetime configured for one LibreNMS server."""
+    servers_config = get_plugin_config("netbox_librenms_plugin", "servers")
+    if isinstance(servers_config, dict):
+        server_config = servers_config.get(server_key)
+        if isinstance(server_config, dict):
+            return server_config.get("cache_timeout", DEFAULT_CACHE_TIMEOUT)
+    return get_plugin_config("netbox_librenms_plugin", "cache_timeout", DEFAULT_CACHE_TIMEOUT)
 
 
 def build_librenms_api(server_key):
@@ -159,7 +170,7 @@ class LibreNMSAPI:
             # url/token completeness is enforced by the single guard at the end of __init__.
             self.librenms_url = config.get("librenms_url")
             self.api_token = config.get("api_token")
-            self.cache_timeout = config.get("cache_timeout", 300)
+            self.cache_timeout = configured_cache_timeout(server_key)
             self.verify_ssl = config.get("verify_ssl", True)
         else:
             # Fallback to legacy single-server configuration. Legacy mode has only the implicit
@@ -169,7 +180,7 @@ class LibreNMSAPI:
             self.server_key = "default"
             self.librenms_url = get_plugin_config("netbox_librenms_plugin", "librenms_url")
             self.api_token = get_plugin_config("netbox_librenms_plugin", "api_token")
-            self.cache_timeout = get_plugin_config("netbox_librenms_plugin", "cache_timeout", 300)
+            self.cache_timeout = configured_cache_timeout(self.server_key)
             self.verify_ssl = get_plugin_config("netbox_librenms_plugin", "verify_ssl", True)
 
         if not self.librenms_url or not self.api_token:
@@ -482,7 +493,6 @@ class LibreNMSAPI:
                 (still refreshing the cache on success). Import decisions pass False so a
                 value just corrected in LibreNMS isn't read back stale within the cache window.
             cache_only: When True, return a cached value or a miss without querying LibreNMS.
-
         Returns:
             tuple: (success: bool, data: dict)
         """

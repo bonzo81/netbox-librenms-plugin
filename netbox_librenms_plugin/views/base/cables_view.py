@@ -845,7 +845,7 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObject
                 messages.error(request, f"Failed to fetch links from LibreNMS: {self._links_fetch_error}")
             else:
                 messages.error(request, "No links found in LibreNMS")
-            SyncCacheConsistency(obj, cache_timeout=self.librenms_api.cache_timeout).mark_refresh_failure(
+            SyncCacheConsistency(obj).mark_refresh_failure(
                 SyncTab.CABLES,
                 server_key,
                 actor_id=request_actor_id(request),
@@ -862,7 +862,7 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObject
                 request,
                 "Cable refresh was incomplete. No cable rows were loaded. Refresh Cables to try again.",
             )
-            SyncCacheConsistency(obj, cache_timeout=self.librenms_api.cache_timeout).mark_refresh_failure(
+            SyncCacheConsistency(obj).mark_refresh_failure(
                 SyncTab.CABLES,
                 server_key,
                 actor_id=request_actor_id(request),
@@ -891,7 +891,7 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObject
                 "Cables refreshed, but OOB controller links fetch failed; "
                 "showing host cables only. See server logs for details.",
             )
-        coordinator = SyncCacheConsistency(obj, cache_timeout=self.librenms_api.cache_timeout)
+        coordinator = SyncCacheConsistency(obj)
         if cache.has_key(coordinator.snapshot_key(SyncTab.CABLES, server_key)):
             coordinator.mark_refresh_success(SyncTab.CABLES, server_key, actor_id=request_actor_id(request))
         else:

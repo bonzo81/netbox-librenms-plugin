@@ -10,9 +10,8 @@ from netbox_librenms_plugin.forms import AddToLIbreSNMPV1V2, AddToLIbreSNMPV3
 from netbox_librenms_plugin.import_utils import _determine_device_name
 from netbox_librenms_plugin.import_utils.virtual_chassis import _generate_vc_member_name
 from netbox_librenms_plugin.sync_cache import (
+    TAB_SPECS,
     SyncCacheConsistency,
-    SyncTab,
-    configured_cache_timeout,
     mapped_server_keys,
 )
 from netbox_librenms_plugin.utils import (
@@ -194,18 +193,18 @@ class BaseLibreNMSSyncView(
         coordinator = None
         sync_cache_status = None
         if render_server_key and render_server_key in mapped_server_keys(obj, render_server_key):
-            coordinator = SyncCacheConsistency(obj, cache_timeout=configured_cache_timeout())
+            coordinator = SyncCacheConsistency(obj)
             sync_cache_status = coordinator.status(render_server_key, actor_id=request.user.pk)
 
-        active_snapshot_missing = bool(
-            sync_cache_status
-            and active_sync_tab in sync_cache_status
-            and not sync_cache_status[active_sync_tab]["snapshot_available"]
+        active_cache_state = sync_cache_status.get(active_sync_tab) if sync_cache_status else None
+        cache_only_device_info = bool(
+            active_cache_state and active_cache_state["state"] in {"invalidated", "refresh_failed"}
         )
-        if active_snapshot_missing:
-            librenms_info = self.get_librenms_device_info(obj, request, cache_only=True)
-        else:
-            librenms_info = self.get_librenms_device_info(obj, request)
+        librenms_info = self.get_librenms_device_info(
+            obj,
+            request,
+            cache_only=cache_only_device_info,
+        )
 
         interface_context = self.get_interface_context(request, obj)
         cable_context = self.get_cable_context(request, obj)
@@ -295,17 +294,10 @@ class BaseLibreNMSSyncView(
 
         if coordinator is not None and sync_cache_status is not None:
             object_type = obj._meta.model_name
-            context_names = {
-                SyncTab.INTERFACES: "interface_sync",
-                SyncTab.CABLES: "cable_sync",
-                SyncTab.IP_ADDRESSES: "ip_sync",
-                SyncTab.MODULES: "module_sync",
-                SyncTab.VLANS: "vlan_sync",
-            }
             for sync_tab in coordinator.applicable_tabs():
                 if sync_cache_status[sync_tab.value]["snapshot_available"]:
                     continue
-                context_name = context_names[sync_tab]
+                context_name = TAB_SPECS[sync_tab].context_name
                 tab_context = context.get(context_name)
                 if isinstance(tab_context, dict):
                     context[context_name] = {
@@ -316,6 +308,13 @@ class BaseLibreNMSSyncView(
             context.update(
                 {
                     "sync_cache_status": sync_cache_status,
+                    "sync_cache_contract": {
+                        tab.value: {
+                            "content_id": TAB_SPECS[tab].content_id,
+                            "label": TAB_SPECS[tab].label,
+                        }
+                        for tab in coordinator.applicable_tabs()
+                    },
                     "sync_cache_status_url": reverse(
                         "plugins:netbox_librenms_plugin:sync_cache_status",
                         kwargs={"object_type": object_type, "pk": obj.pk},
@@ -448,11 +447,8 @@ class BaseLibreNMSSyncView(
         }
 
         if self.librenms_id is not None:
-            if cache_only:
-                success, device_info = self.librenms_api.get_device_info(self.librenms_id, cache_only=True)
-                device_info_unavailable = not success
-            else:
-                success, device_info = self.librenms_api.get_device_info(self.librenms_id)
+            success, device_info = self.librenms_api.get_device_info(self.librenms_id, cache_only=cache_only)
+            device_info_unavailable = cache_only and not success
             # isinstance(dict) guard: a truthy non-dict payload (string/list) would 500 on the
             # device_info.get(...) calls below; fall back to the default details block instead
             # of trusting success=True alone (issue #100).

@@ -662,7 +662,7 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxOb
             # LibreNMS fetch failed (a genuine empty result yields a context with an
             # empty table). Report the failure rather than a misleading "no data".
             messages.error(request, "Failed to fetch IP addresses from LibreNMS; see server logs for details.")
-            SyncCacheConsistency(obj, cache_timeout=self.librenms_api.cache_timeout).mark_refresh_failure(
+            SyncCacheConsistency(obj).mark_refresh_failure(
                 SyncTab.IP_ADDRESSES,
                 server_key,
                 actor_id=request_actor_id(request),
@@ -692,7 +692,7 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxOb
             )
 
         messages.success(request, "IP address data refreshed successfully.")
-        SyncCacheConsistency(obj, cache_timeout=self.librenms_api.cache_timeout).mark_refresh_success(
+        SyncCacheConsistency(obj).mark_refresh_success(
             SyncTab.IP_ADDRESSES,
             server_key,
             actor_id=request_actor_id(request),

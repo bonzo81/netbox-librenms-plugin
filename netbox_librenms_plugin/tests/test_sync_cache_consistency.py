@@ -60,6 +60,47 @@ def _json_response(url, payload, status=200):
     return response
 
 
+def _device_info_response(url, device_id, name, hardware):
+    return _json_response(
+        url,
+        {
+            "status": "ok",
+            "devices": [
+                {
+                    "device_id": device_id,
+                    "sysName": name,
+                    "hostname": name,
+                    "hardware": hardware,
+                }
+            ],
+        },
+    )
+
+
+@pytest.mark.django_db
+def test_cold_sync_page_load_fetches_librenms_status(client, settings):
+    """The status card must load even when the active tab has no snapshot."""
+    _configure_servers(settings)
+    device = make_device("cache-cold-status", librenms_cf={"primary": {"id": 7401}})
+    client.force_login(make_superuser("cache-cold-status-user"))
+    requested_urls = []
+
+    def librenms_response(url, **_kwargs):
+        requested_urls.append(url)
+        if url.endswith("/api/v0/devices/7401"):
+            return _device_info_response(url, 7401, device.name, "Status Hardware 7401")
+        raise AssertionError(f"Unexpected LibreNMS request: {url}")
+
+    url = reverse("plugins:netbox_librenms_plugin:device_librenms_sync", args=[device.pk])
+    with patch("netbox_librenms_plugin.librenms_api.requests.get", side_effect=librenms_response):
+        response = client.get(url, {"server_key": "primary", "tab": SyncTab.INTERFACES.value})
+
+    assert response.status_code == 200
+    assert requested_urls == ["https://primary.example.com/api/v0/devices/7401"]
+    assert b"Status Hardware 7401" in response.content
+    assert b"Details unavailable" not in response.content
+
+
 @pytest.mark.django_db
 def test_committed_interface_sync_invalidates_only_mapped_page_and_shared_snapshots(
     client,
@@ -68,6 +109,8 @@ def test_committed_interface_sync_invalidates_only_mapped_page_and_shared_snapsh
 ):
     """A VC mutation must keep its source and clear only mapped page/shared namespaces."""
     _configure_servers(settings)
+    settings.PLUGINS_CONFIG["netbox_librenms_plugin"]["servers"]["primary"]["cache_timeout"] = 60
+    settings.PLUGINS_CONFIG["netbox_librenms_plugin"]["servers"]["secondary"]["cache_timeout"] = 600
     _chassis, (page_device, secondary_owner, sibling) = make_virtual_chassis_members("cache-scope", count=3)
     page_device.custom_field_data["librenms_id"] = {"primary": {"id": 41}}
     page_device.save(update_fields=["custom_field_data"])
@@ -139,7 +182,7 @@ def test_committed_interface_sync_invalidates_only_mapped_page_and_shared_snapsh
     for data_type in ("ports", "links", "ip_addresses", "inventory", "vlans"):
         assert cache.get(_cache_key(data_type, page_device, "unmapped")) is not None
 
-    coordinator = SyncCacheConsistency(page_device, cache_timeout=300)
+    coordinator = SyncCacheConsistency(page_device)
     primary_state = cache.get(coordinator.state_key(SyncTab.INTERFACES, "primary"))
     assert primary_state["state"] == "locally_changed"
     assert primary_state["source_tab"] == "interfaces"
@@ -147,6 +190,8 @@ def test_committed_interface_sync_invalidates_only_mapped_page_and_shared_snapsh
     secondary_state = cache.get(coordinator.state_key(SyncTab.INTERFACES, "secondary"))
     assert secondary_state["state"] == "invalidated"
     assert secondary_state["revision"] == primary_state["revision"]
+    assert 0 < cache.ttl(coordinator.state_key(SyncTab.INTERFACES, "primary")) <= 60
+    assert 60 < cache.ttl(coordinator.state_key(SyncTab.INTERFACES, "secondary")) <= 600
 
     status_url = reverse(
         "plugins:netbox_librenms_plugin:sync_cache_status",
@@ -202,7 +247,7 @@ def test_fully_skipped_interface_request_preserves_all_snapshots(client, setting
     assert response.status_code == 302
     assert cache.get(_cache_key("ports", device, "primary")) == source_payload
     assert cache.get(_cache_key("ip_addresses", device, "primary")) == ip_payload
-    coordinator = SyncCacheConsistency(device, cache_timeout=300)
+    coordinator = SyncCacheConsistency(device)
     assert cache.get(coordinator.state_key(SyncTab.INTERFACES, "primary")) is None
 
 
@@ -239,7 +284,7 @@ def test_selected_interface_that_already_matches_preserves_other_snapshots(clien
 
     assert response.status_code == 302
     assert cache.get(_cache_key("ip_addresses", device, "primary")) == ip_payload
-    coordinator = SyncCacheConsistency(device, cache_timeout=300)
+    coordinator = SyncCacheConsistency(device)
     assert cache.get(coordinator.state_key(SyncTab.INTERFACES, "primary")) is None
 
 
@@ -251,6 +296,7 @@ def test_ip_sync_invalidates_other_tabs_after_creating_an_address(
 ):
     """A committed IP row must retain its source snapshot and clear other tabs."""
     _configure_servers(settings)
+    settings.PLUGINS_CONFIG["netbox_librenms_plugin"]["servers"]["primary"]["cache_timeout"] = 60
     device = make_device("cache-ip-writer", librenms_cf={"primary": {"id": 61}})
     interface = make_interface(device, "Ethernet1", iface_type="1000base-t")
     interface.custom_field_data["librenms_id"] = {"primary": 7101}
@@ -283,6 +329,8 @@ def test_ip_sync_invalidates_other_tabs_after_creating_an_address(
     assert IPAddress.objects.filter(address=address, assigned_object_id=interface.pk).exists()
     assert cache.get(_cache_key("ip_addresses", device, "primary")) == ip_payload
     assert cache.get(_cache_key("ports", device, "primary")) is None
+    state_key = SyncCacheConsistency(device).state_key(SyncTab.IP_ADDRESSES, "primary")
+    assert 0 < cache.ttl(state_key) <= 60
 
 
 @pytest.mark.django_db
@@ -556,7 +604,7 @@ def test_unchanged_module_serial_preserves_other_snapshots(client, settings):
 
     assert response.status_code == 302
     assert cache.get(_cache_key("ports", device, "primary")) is not None
-    coordinator = SyncCacheConsistency(device, cache_timeout=300)
+    coordinator = SyncCacheConsistency(device)
     assert cache.get(coordinator.state_key(SyncTab.MODULES, "primary")) is None
 
 
@@ -658,7 +706,7 @@ def test_inline_relationship_noop_preserves_other_snapshots(
 
     assert response.status_code == 200
     assert cache.get(_cache_key("ip_addresses", device, "primary")) is not None
-    coordinator = SyncCacheConsistency(device, cache_timeout=300)
+    coordinator = SyncCacheConsistency(device)
     assert cache.get(coordinator.state_key(SyncTab.INTERFACES, "primary")) is None
 
 
@@ -770,7 +818,7 @@ def test_cleanup_failure_invalidates_every_dependent_tab(
     """A partial cache-backend failure must leave all dependent tabs fail-closed."""
     _configure_servers(settings)
     device = make_device("cache-cleanup-failure", librenms_cf={"primary": {"id": 650}})
-    coordinator = SyncCacheConsistency(device, cache_timeout=300)
+    coordinator = SyncCacheConsistency(device)
     for data_type in ("ports", "links", "ip_addresses", "inventory", "vlans"):
         _seed_snapshot(data_type, device, "primary")
     cache.set(f"{_cache_key('links', device, 'primary')}:manual-remote:test-row", 1, timeout=300)
@@ -811,7 +859,7 @@ def test_cleanup_failure_does_not_mark_tabs_without_cache_state(
     """Cleanup failure reasons must be limited to tabs that had snapshot-bound state."""
     _configure_servers(settings)
     device = make_device("cache-cleanup-sparse", librenms_cf={"primary": {"id": 651}})
-    coordinator = SyncCacheConsistency(device, cache_timeout=300)
+    coordinator = SyncCacheConsistency(device)
     _seed_snapshot("ports", device, "primary")
     _seed_snapshot("links", device, "primary")
     cache.set(f"{_cache_key('links', device, 'primary')}:manual-remote:test-row", 1, timeout=300)
@@ -869,7 +917,7 @@ def test_refresh_failure_reason_is_anonymous_across_users(settings):
     """The shared failure reason must identify only whether this user initiated it."""
     _configure_servers(settings)
     device = make_device("cache-refresh-failure-reason", librenms_cf={"primary": {"id": 653}})
-    coordinator = SyncCacheConsistency(device, cache_timeout=300)
+    coordinator = SyncCacheConsistency(device)
     coordinator.mark_refresh_failure(SyncTab.IP_ADDRESSES, "primary", actor_id=101)
 
     same_user = coordinator.status("primary", actor_id=101)[SyncTab.IP_ADDRESSES.value]
@@ -957,7 +1005,7 @@ def test_status_fragment_and_invalidated_tab_navigation_never_call_librenms(
     }
     _seed_snapshot("ports", device, "primary", ports_payload)
     _seed_snapshot("ip_addresses", device, "primary")
-    coordinator = SyncCacheConsistency(device, cache_timeout=300)
+    coordinator = SyncCacheConsistency(device)
     with django_capture_on_commit_callbacks(execute=True):
         coordinator.schedule_mutation(SyncTab.INTERFACES, "primary", actor_id=1)
     client.force_login(make_superuser("cache-browser-flows-user"))
@@ -991,7 +1039,7 @@ def test_status_fragment_and_invalidated_tab_navigation_never_call_librenms(
     assert fragment_response.status_code == 200
     assert b"Ethernet1" in fragment_response.content
     assert page_response.status_code == 200
-    assert b"Refresh required" in page_response.content
+    assert b"Stale" in page_response.content
     assert b"Details unavailable" in page_response.content
     assert b'id="add-device-modal"' not in page_response.content
     assert b'data-bs-target="#add-device-modal"' not in page_response.content
@@ -1007,7 +1055,7 @@ def test_rolled_back_mutation_keeps_snapshots_and_publishes_no_state(
     device = make_device("cache-rollback", librenms_cf={"primary": {"id": 66}})
     _seed_snapshot("ports", device, "primary")
     _seed_snapshot("ip_addresses", device, "primary")
-    coordinator = SyncCacheConsistency(device, cache_timeout=300)
+    coordinator = SyncCacheConsistency(device)
 
     with django_capture_on_commit_callbacks(execute=True):
         with pytest.raises(RuntimeError, match="roll back"):
@@ -1065,7 +1113,7 @@ def test_source_snapshot_expiry_before_commit_callback_is_not_reversed(
     assert response.status_code == 302
     assert cache.get(source_key) is None
     assert cache.get(_cache_key("links", device, "primary")) is None
-    source_status = SyncCacheConsistency(device, cache_timeout=300).status("primary")[SyncTab.INTERFACES.value]
+    source_status = SyncCacheConsistency(device).status("primary")[SyncTab.INTERFACES.value]
     assert source_status["state"] == "missing"
     assert source_status["snapshot_available"] is False
 
@@ -1078,18 +1126,21 @@ def test_failed_refresh_retains_an_existing_invalidation_reason(
     """A failed retry must not erase why another tab cleared this snapshot."""
     _configure_servers(settings)
     device = make_device("cache-failed-refresh", librenms_cf={"primary": {"id": 67}})
-    coordinator = SyncCacheConsistency(device, cache_timeout=300)
+    coordinator = SyncCacheConsistency(device)
     _seed_snapshot("ports", device, "primary")
     _seed_snapshot("ip_addresses", device, "primary")
     with django_capture_on_commit_callbacks(execute=True):
         coordinator.schedule_mutation(SyncTab.INTERFACES, "primary", actor_id=1)
-    prior = cache.get(coordinator.state_key(SyncTab.IP_ADDRESSES, "primary"))
+    state_key = coordinator.state_key(SyncTab.IP_ADDRESSES, "primary")
+    prior = cache.get(state_key)
+    cache.touch(state_key, timeout=17)
 
     failed = coordinator.mark_refresh_failure(SyncTab.IP_ADDRESSES, "primary", actor_id=2)
 
     assert failed["revision"] == prior["revision"]
     assert failed["reason"] == prior["reason"]
     assert failed["refresh_error"] == "The latest LibreNMS refresh failed."
+    assert 0 < cache.ttl(state_key) <= 17
 
 
 @pytest.mark.django_db
