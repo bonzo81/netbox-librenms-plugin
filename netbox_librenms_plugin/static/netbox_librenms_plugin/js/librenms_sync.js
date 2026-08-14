@@ -1839,8 +1839,10 @@ function updateInterfaceNameField() {
             const preferenceSelector = this.closest('[data-save-pref-url]');
             const savePrefUrl = preferenceSelector?.dataset.savePrefUrl;
             if (savePrefUrl) {
-                const csrfToken = document.querySelector('[name=csrfmiddlewaretoken]')?.value;
-                if (csrfToken) {
+                const csrfToken = getCsrfToken();
+                if (!csrfToken) {
+                    console.debug('Failed to save interface_name_field pref: missing CSRF token');
+                } else {
                     const platformId = preferenceSelector.dataset.platformId || null;
                     fetch(savePrefUrl, {
                         method: 'POST',
@@ -1850,7 +1852,11 @@ function updateInterfaceNameField() {
                             value: this.value,
                             platform_id: platformId
                         })
-                    }).catch(err => console.debug('Failed to save interface_name_field pref:', err));
+                    }).then(response => {
+                        if (!response.ok) {
+                            throw new Error(`HTTP ${response.status}`);
+                        }
+                    }).catch(error => console.debug('Failed to save interface_name_field pref:', error.message));
                 }
             }
 

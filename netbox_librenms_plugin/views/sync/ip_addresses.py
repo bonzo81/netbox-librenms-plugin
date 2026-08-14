@@ -16,6 +16,7 @@ from virtualization.models import VirtualMachine, VMInterface
 from netbox_librenms_plugin.interface_sync import resolve_or_create_interface_from_port
 from netbox_librenms_plugin.ip_addressing import parse_address_with_prefix
 from netbox_librenms_plugin.utils import (
+    acquire_advisory_transaction_lock,
     get_librenms_device_id,
     get_migrated_to_marker,
     get_virtual_chassis_members,
@@ -35,6 +36,12 @@ from netbox_librenms_plugin.views.mixins import (
 logger = logging.getLogger(__name__)
 
 IP_CONFLICT_SIGNING_SALT = "netbox_librenms_plugin.ip_address_conflict"
+
+
+def _acquire_ip_host_lock(parsed, vrf) -> None:
+    """Serialize writes for one canonical host and VRF."""
+    vrf_identity = vrf.pk if vrf is not None else 0
+    acquire_advisory_transaction_lock(f"netbox-librenms-plugin:ip-host:{parsed.ip}:vrf:{vrf_identity}")
 
 
 class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreNMSAPIMixin, CacheMixin, View):
@@ -198,6 +205,10 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
             selected_ips = self.get_selected_ips(request)
 
         if not selected_ips:
+            if intent_errors:
+                for error in dict.fromkeys(intent_errors.values()):
+                    messages.error(request, error)
+                return self.redirect_to_ip_tab(request, obj)
             messages.error(request, "No IP addresses selected for synchronization.")
             return self.redirect_to_ip_tab(request, obj)
 
@@ -217,17 +228,26 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
         self.display_sync_results(request, results)
 
         if results["conflicts"]:
+            conflict_context = {
+                "conflicts": results["conflicts"],
+                "has_forceable_conflicts": any(conflict["forceable"] for conflict in results["conflicts"]),
+                "object_type": object_type,
+                "object": obj,
+                "server_key": post_server_key,
+                "set_primary_ip": resolve_set_primary_ip(request),
+                "cancel_url": self.get_ip_tab_url(obj),
+            }
+            if request.headers.get("HX-Request") != "true":
+                conflict_context["full_page"] = True
+                return render(
+                    request,
+                    "netbox_librenms_plugin/ip_address_conflicts_page.html",
+                    conflict_context,
+                )
             return render(
                 request,
                 "netbox_librenms_plugin/htmx/ip_address_conflicts.html",
-                {
-                    "conflicts": results["conflicts"],
-                    "has_forceable_conflicts": any(conflict["forceable"] for conflict in results["conflicts"]),
-                    "object_type": object_type,
-                    "object": obj,
-                    "server_key": post_server_key,
-                    "set_primary_ip": resolve_set_primary_ip(request),
-                },
+                conflict_context,
             )
 
         return self.redirect_to_ip_tab(request, obj)
@@ -944,6 +964,7 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
                         vrf = self._resolve_vrf_id(force_payload.get("target_vrf_id"))
                     else:
                         vrf = self.get_vrf_selection(request, row_id)
+                    _acquire_ip_host_lock(parsed, vrf)
 
                     interface = self._match_interface(
                         ip_data, interfaces_by_librenms_id, interfaces_by_name, interfaces_by_pk
@@ -962,7 +983,13 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
                         interfaces_by_pk[str(interface.pk)] = interface
 
                     if interface is not None:
-                        interface = self._lock_target_interface(obj, interface)
+                        locked_interface = self._lock_target_interface(obj, interface)
+                        if locked_interface is None:
+                            raise ValueError(
+                                "The matched NetBox interface is no longer available in your view scope. "
+                                "Refresh the IP data and try again."
+                            )
+                        interface = locked_interface
 
                     # This row ends in obj.save() (primary_ip) when it matches the management
                     # address, so it takes BOTH an ipam_ipaddress and a dcim_device row lock.

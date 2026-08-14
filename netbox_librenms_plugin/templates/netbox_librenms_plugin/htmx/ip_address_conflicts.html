@@ -4,13 +4,19 @@
     <i class="mdi mdi-alert-outline text-warning me-1"></i>
     Confirm IP address changes
   </h5>
-  <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+  {% if full_page %}
+    <a href="{{ cancel_url }}" class="btn-close" aria-label="Close"></a>
+  {% else %}
+    <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+  {% endif %}
 </div>
 <form method="post"
       action="{% url 'plugins:netbox_librenms_plugin:sync_device_ip_addresses' object_type=object_type pk=object.pk %}"
+      {% if not full_page %}
       hx-post="{% url 'plugins:netbox_librenms_plugin:sync_device_ip_addresses' object_type=object_type pk=object.pk %}"
       hx-target="#htmx-modal-content"
-      hx-swap="innerHTML">
+      hx-swap="innerHTML"
+      {% endif %}>
   <div class="modal-body">
     {% csrf_token %}
     <input type="hidden" name="server_key" value="{{ server_key }}">
@@ -48,7 +54,11 @@
     {% endfor %}
   </div>
   <div class="modal-footer">
-    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+    {% if full_page %}
+      <a href="{{ cancel_url }}" class="btn btn-secondary">Cancel</a>
+    {% else %}
+      <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+    {% endif %}
     {% if has_forceable_conflicts %}
       <button type="submit" class="btn btn-warning">
         Force selected
