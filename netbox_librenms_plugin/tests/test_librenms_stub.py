@@ -16,6 +16,13 @@ TOKEN = "dev-stub-token"
 RECORDING_NAMES = DEFAULT_STUB_RECORDINGS
 
 
+@pytest.fixture(autouse=True)
+def bypass_proxy_for_local_stub(monkeypatch):
+    """Send local stub requests directly to the in-process HTTP server."""
+    monkeypatch.setenv("NO_PROXY", "127.0.0.1,localhost")
+    monkeypatch.setenv("no_proxy", "127.0.0.1,localhost")
+
+
 def test_devcontainer_stub_keeps_import_cache_enabled():
     config_path = Path(__file__).resolve().parents[2] / ".devcontainer/config/plugin-config.py.example"
     plugin_config = runpy.run_path(config_path)["PLUGINS_CONFIG"]["netbox_librenms_plugin"]
