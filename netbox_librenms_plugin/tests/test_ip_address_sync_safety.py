@@ -1,11 +1,17 @@
 """End-to-end safety tests for LibreNMS IP address synchronization."""
 
 import json
+from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
+from threading import Barrier, BrokenBarrierError
 from unittest.mock import patch
 
 import pytest
+from django.apps import apps
+from django.contrib.messages import get_messages
 from django.core.cache import cache
+from django.db import close_old_connections, connection
+from django.test import Client
 from django.urls import reverse
 from ipam.models import IPAddress, VRF
 from requests import Response
@@ -101,6 +107,11 @@ def _configure_test_server(settings):
     settings.PLUGINS_CONFIG = plugin_config
 
 
+def _message_texts(response):
+    """Return messages emitted by one real client request."""
+    return [str(message) for message in get_messages(response.wsgi_request)]
+
+
 def _refresh_ip_snapshot(client, device, address, prefix_length):
     """Refresh one IP row through the real view and cache pipeline."""
     refresh_url = reverse("plugins:netbox_librenms_plugin:device_ipaddress_sync", args=[device.pk])
@@ -113,6 +124,112 @@ def _refresh_ip_snapshot(client, device, address, prefix_length):
             {"server_key": "default", "interface_name_field": "ifName"},
             HTTP_HX_REQUEST="true",
         )
+
+
+class _IPHostLookupBarrier:
+    """Pause concurrent requests after their first destination-host lookup."""
+
+    def __init__(self, barrier):
+        self.barrier = barrier
+        self.lookup_seen = False
+
+    def __call__(self, execute, sql, params, many, context):
+        result = execute(sql, params, many, context)
+        if (
+            not self.lookup_seen
+            and sql.lstrip().upper().startswith("SELECT")
+            and 'FROM "ipam_ipaddress"' in sql
+            and "HOST(" in sql.upper()
+        ):
+            self.lookup_seen = True
+            try:
+                self.barrier.wait(timeout=1)
+            except BrokenBarrierError:
+                # With serialization, the first request times out while the second
+                # waits for the host lock. It can then create and commit.
+                pass
+        return result
+
+
+def _sync_cached_ip(device_pk, user_pk, row_id, lookup_wrapper):
+    """Submit one cached IP row through the public sync endpoint."""
+    from django.contrib.auth import get_user_model
+
+    close_old_connections()
+    try:
+        with connection.cursor() as cursor:
+            cursor.execute("SET lock_timeout = '5s'")
+            cursor.execute("SET statement_timeout = '10s'")
+        thread_client = Client()
+        thread_client.force_login(get_user_model().objects.get(pk=user_pk))
+        url = reverse(
+            "plugins:netbox_librenms_plugin:sync_device_ip_addresses",
+            kwargs={"object_type": "device", "pk": device_pk},
+        )
+        with connection.execute_wrapper(lookup_wrapper):
+            response = thread_client.post(
+                url,
+                {
+                    "server_key": "default",
+                    "select": row_id,
+                    f"vrf_{row_id}": "",
+                },
+            )
+        return response.status_code
+    finally:
+        connection.close()
+
+
+@pytest.mark.django_db(
+    transaction=True,
+    available_apps=[app.name for app in apps.get_app_configs()],
+)
+def test_concurrent_global_ip_sync_creates_one_address(settings):
+    """Two requests for one global host must not create duplicate IP rows."""
+    from netbox_librenms_plugin.utils import set_librenms_device_id
+
+    _configure_test_server(settings)
+    user = make_superuser("global-ip-concurrency-user")
+    row_id = "198.18.20.10/24"
+    devices = [
+        make_device("global-ip-device-a", librenms_cf={"default": {"id": 42}}),
+        make_device("global-ip-device-b", librenms_cf={"default": {"id": 43}}),
+    ]
+    for port_id, device in enumerate(devices, start=7040):
+        interface = make_interface(device, "Ethernet1", iface_type="1000base-t")
+        set_librenms_device_id(interface, port_id, "default")
+        interface.save(update_fields=["custom_field_data"])
+        cache.set(
+            f"librenms_ip_addresses_device_{device.pk}_default",
+            {
+                "ip_addresses": [
+                    {
+                        "ip_address": "198.18.20.10",
+                        "prefix_length": 24,
+                        "ip_with_mask": row_id,
+                        "port_id": port_id,
+                        "interface_name": "Ethernet1",
+                    }
+                ],
+                "mgmt_ip": "",
+                "ports_by_id": {},
+                "interface_name_field": "ifName",
+            },
+            timeout=300,
+        )
+
+    lookup_barrier = Barrier(2)
+    lookup_wrappers = [_IPHostLookupBarrier(lookup_barrier) for _device in devices]
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        futures = [
+            executor.submit(_sync_cached_ip, device.pk, user.pk, row_id, wrapper)
+            for device, wrapper in zip(devices, lookup_wrappers, strict=True)
+        ]
+        statuses = [future.result(timeout=15) for future in futures]
+
+    assert sorted(statuses) == [200, 302]
+    assert all(wrapper.lookup_seen for wrapper in lookup_wrappers)
+    assert IPAddress.objects.filter(address__net_host="198.18.20.10", vrf=None).count() == 1
 
 
 @pytest.mark.django_db
@@ -279,6 +396,40 @@ def test_sync_requires_confirmation_before_reassigning_an_ip_in_the_same_vrf(cli
     existing.refresh_from_db()
     assert existing.assigned_object == current_interface
     assert existing.assigned_object != target_interface
+
+
+@pytest.mark.django_db
+def test_native_ip_conflict_response_renders_a_complete_page(client, settings):
+    """A native form submission must not replace the browser document with an HTMX fragment."""
+    _configure_test_server(settings)
+    device = make_device("native-ip-conflict", librenms_cf={"default": {"id": 42}})
+    target_interface = make_interface(device, "Ethernet1", iface_type="1000base-t")
+    target_interface.custom_field_data["librenms_id"] = {"default": 7001}
+    target_interface.save(update_fields=["custom_field_data"])
+    existing_interface = make_interface(device, "Ethernet2", iface_type="1000base-t")
+    existing = IPAddress.objects.create(address="198.18.2.20/24", assigned_object=existing_interface)
+    client.force_login(make_superuser("native-ip-conflict-user"))
+    assert _refresh_ip_snapshot(client, device, "198.18.2.20", 24).status_code == 200
+
+    response = client.post(
+        reverse(
+            "plugins:netbox_librenms_plugin:sync_device_ip_addresses",
+            kwargs={"object_type": "device", "pk": device.pk},
+        ),
+        {
+            "server_key": "default",
+            "select": "198.18.2.20/24",
+            "vrf_198.18.2.20/24": "",
+        },
+    )
+
+    assert response.status_code == 200
+    assert any(
+        template.name == "netbox_librenms_plugin/ip_address_conflicts_page.html" for template in response.templates
+    )
+    assert b"Confirm IP address changes" in response.content
+    existing.refresh_from_db()
+    assert existing.assigned_object == existing_interface
 
 
 @pytest.mark.django_db
@@ -658,6 +809,7 @@ def test_create_missing_interfaces_rejects_ambiguous_cached_port_names(client, s
     )
 
     assert response.status_code == 302
+    assert any("ambiguous" in message for message in _message_texts(response))
     assert not Interface.objects.filter(device=device).exists()
     assert not IPAddress.objects.filter(address="198.18.15.10/24").exists()
     assert not IPAddress.objects.filter(address="198.18.15.11/24").exists()
@@ -839,6 +991,7 @@ def test_create_missing_interfaces_does_not_adopt_a_hidden_existing_interface(cl
     )
 
     assert response.status_code == 302
+    assert any("outside your view scope" in message for message in _message_texts(response))
     hidden_interface.refresh_from_db()
     assert hidden_interface.name == "Ethernet1"
     assert not IPAddress.objects.filter(address="198.18.18.10/24").exists()
@@ -891,7 +1044,128 @@ def test_direct_ip_sync_post_does_not_mutate_a_migrated_donor(client, settings):
     )
 
     assert response.status_code == 302
+    assert any("read-only because it was migrated" in message for message in _message_texts(response))
     assert not IPAddress.objects.filter(address="198.18.19.10/24").exists()
+
+
+@pytest.mark.django_db
+def test_invalid_force_all_confirmation_reports_the_confirmation_error(client, settings):
+    """An invalid force token must not be reported as an empty row selection."""
+    _configure_test_server(settings)
+    device = make_device("invalid-force-confirmation", librenms_cf={"default": {"id": 42}})
+    cache.set(
+        f"librenms_ip_addresses_device_{device.pk}_default",
+        {
+            "ip_addresses": [
+                {
+                    "ip_address": "198.18.19.20",
+                    "prefix_length": 24,
+                    "ip_with_mask": "198.18.19.20/24",
+                    "port_id": 7020,
+                    "interface_name": "Ethernet1",
+                }
+            ],
+            "mgmt_ip": "",
+            "ports_by_id": {},
+            "interface_name_field": "ifName",
+        },
+        timeout=300,
+    )
+    client.force_login(make_superuser("invalid-force-confirmation-user"))
+
+    response = client.post(
+        reverse(
+            "plugins:netbox_librenms_plugin:sync_device_ip_addresses",
+            kwargs={"object_type": "device", "pk": device.pk},
+        ),
+        {
+            "server_key": "default",
+            "force_all": "1",
+            "conflict_intent": "invalid-token",
+        },
+    )
+
+    assert response.status_code == 302
+    message_texts = _message_texts(response)
+    assert message_texts == ["IP address confirmation is invalid or has expired. Refresh the IP data and try again."]
+
+
+@pytest.mark.django_db
+def test_interface_scope_change_during_lock_is_reported_as_a_failure(client, settings):
+    """A matched interface that leaves view scope must not be reported as missing."""
+    from dcim.models import Device, Interface
+    from django.db import connection
+
+    from netbox_librenms_plugin.utils import set_librenms_device_id
+
+    _configure_test_server(settings)
+    device = make_device("interface-lock-view-scope", librenms_cf={"default": {"id": 42}})
+    interface = make_interface(device, "Ethernet1", iface_type="1000base-t")
+    interface.description = "managed"
+    set_librenms_device_id(interface, 7030, "default")
+    interface.save()
+    user = make_user_with_perms("interface-lock-view-scope-user", [])
+    user = grant(user, "view", Device, constraints={"pk": device.pk})
+    user = grant(user, "view", Interface, constraints={"description": "managed"})
+    user = grant(user, "add", IPAddress)
+    user = grant(user, "change", IPAddress)
+    client.force_login(user)
+    cache.set(
+        f"librenms_ip_addresses_device_{device.pk}_default",
+        {
+            "ip_addresses": [
+                {
+                    "ip_address": "198.18.19.30",
+                    "prefix_length": 24,
+                    "ip_with_mask": "198.18.19.30/24",
+                    "port_id": 7030,
+                    "interface_name": "Ethernet1",
+                }
+            ],
+            "mgmt_ip": "",
+            "ports_by_id": {
+                7030: {
+                    "port_id": 7030,
+                    "ifName": "Ethernet1",
+                    "ifDescr": "Ethernet1",
+                    "ifType": "ethernetCsmacd",
+                }
+            },
+            "interface_name_field": "ifName",
+        },
+        timeout=300,
+    )
+
+    class RestrictInterfaceBeforeLock:
+        """Move the matched interface outside the grant before its locking read."""
+
+        def __init__(self):
+            self.fired = False
+
+        def __call__(self, execute, sql, params, many, context):
+            if not self.fired and 'FROM "dcim_interface"' in sql and "FOR UPDATE" in sql.upper():
+                self.fired = True
+                Interface.objects.filter(pk=interface.pk).update(description="restricted")
+            return execute(sql, params, many, context)
+
+    scope_change = RestrictInterfaceBeforeLock()
+    with connection.execute_wrapper(scope_change):
+        response = client.post(
+            reverse(
+                "plugins:netbox_librenms_plugin:sync_device_ip_addresses",
+                kwargs={"object_type": "device", "pk": device.pk},
+            ),
+            {
+                "server_key": "default",
+                "select": "198.18.19.30/24",
+                "vrf_198.18.19.30/24": "",
+            },
+        )
+
+    assert response.status_code == 302
+    assert scope_change.fired
+    assert any("no longer available in your view scope" in message for message in _message_texts(response))
+    assert not IPAddress.objects.filter(address="198.18.19.30/24").exists()
 
 
 @pytest.mark.django_db

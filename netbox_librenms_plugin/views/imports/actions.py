@@ -1,6 +1,5 @@
 """HTMX endpoints and POST handlers for importing LibreNMS devices."""
 
-import hashlib
 import json
 import logging
 import re
@@ -48,10 +47,11 @@ from netbox_librenms_plugin.import_validation_helpers import (
 from netbox_librenms_plugin.ip_addressing import parse_host_address
 from netbox_librenms_plugin.tables.device_status import DeviceImportTable
 from netbox_librenms_plugin.utils import (
+    acquire_advisory_transaction_lock,
     coerce_librenms_id,
+    coerce_model_pk,
     get_librenms_sync_device,
     is_legacy_librenms_id,
-    normalize_platform_id,
     normalize_serial,
     resolve_naming_preferences,
     resolve_server_mapping_display_id,
@@ -329,20 +329,7 @@ def _acquire_serial_assignment_lock(serial: str) -> None:
     Raises:
         RuntimeError: When called in autocommit — the lock would release immediately.
     """
-    from django.db import connection
-
-    if not connection.in_atomic_block:
-        raise RuntimeError("_acquire_serial_assignment_lock() requires an open transaction")
-    lock_key = int.from_bytes(
-        hashlib.blake2b(
-            f"netbox-librenms-plugin:device-serial:{serial}".encode(),
-            digest_size=8,
-        ).digest(),
-        byteorder="big",
-        signed=True,
-    )
-    with connection.cursor() as cursor:
-        cursor.execute("SELECT pg_advisory_xact_lock(%s)", [lock_key])
+    acquire_advisory_transaction_lock(f"netbox-librenms-plugin:device-serial:{serial}")
 
 
 def _apply_conflict_checked_serial(device, incoming_serial: str) -> HttpResponse | None:
@@ -3832,7 +3819,7 @@ class SaveUserPrefView(LibreNMSPermissionMixin, View):
 
         if key == "interface_name_field":
             raw_platform_id = data.get("platform_id")
-            platform_id = normalize_platform_id(raw_platform_id)
+            platform_id = coerce_model_pk(raw_platform_id)
             if raw_platform_id is not None and platform_id is None:
                 return JsonResponse({"error": "Invalid platform ID"}, status=400)
             if not save_interface_name_preference(request, value, platform_id):

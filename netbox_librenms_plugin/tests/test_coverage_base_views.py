@@ -2639,6 +2639,27 @@ class TestBaseInterfaceTableViewAddVlanGroupSelection:
         assert port["vlan_group_map"][100]["group_name"] == "Override-Group"
 
     @pytest.mark.django_db
+    def test_malformed_vlan_group_override_keeps_the_automatic_selection(self):
+        """A malformed cached override must not abort interface table enrichment."""
+        from ipam.models import VLANGroup
+
+        view = self._make_view()
+        available_group = VLANGroup.objects.create(name="Available Group", slug="available-group")
+        port = {"untagged_vlan": 100, "tagged_vlans": []}
+        lookup_maps = {"vid_to_groups": {100: [available_group]}}
+        device = make_device("malformed-vlan-override")
+
+        view._add_vlan_group_selection(
+            port,
+            lookup_maps,
+            device,
+            vlan_group_overrides={"100": "not-a-group-id"},
+        )
+
+        assert port["vlan_group_map"][100]["group_id"] == str(available_group.pk)
+        assert port["vlan_group_map"][100]["group_name"] == "Available Group"
+
+    @pytest.mark.django_db
     def test_override_with_empty_string_forces_global(self):
         """Override with empty string means 'No Group (Global)' (real in_bulk returns nothing)."""
         view = self._make_view()
