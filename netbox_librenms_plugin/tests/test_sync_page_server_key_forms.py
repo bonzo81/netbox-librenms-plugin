@@ -13,6 +13,7 @@ assert each form contains the hidden ``server_key`` input scoped to the tab.
 from unittest.mock import patch
 
 import pytest
+from django.contrib.sessions.middleware import SessionMiddleware
 from django.test import RequestFactory
 
 from netbox_librenms_plugin.tests.conftest import make_device
@@ -57,6 +58,7 @@ def _render_sync_page(device, query=""):
     request = RequestFactory().get(f"/x/{query}")
     request.user = user
     request.htmx = False
+    SessionMiddleware(lambda _request: None).process_request(request)
 
     view = DeviceLibreNMSSyncView()
     view.setup(request, pk=device.pk)
