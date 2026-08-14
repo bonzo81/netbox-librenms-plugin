@@ -12,6 +12,7 @@ from netbox_librenms_plugin.import_utils.virtual_chassis import _generate_vc_mem
 from netbox_librenms_plugin.sync_cache import (
     TAB_SPECS,
     SyncCacheConsistency,
+    SyncTab,
     mapped_server_keys,
 )
 from netbox_librenms_plugin.utils import (
@@ -142,7 +143,16 @@ class BaseLibreNMSSyncView(
         """Get the context data for the LibreNMS sync view."""
         # Get context from parent classes (including LibreNMSAPIMixin)
         context = super().get_context_data()
-        active_sync_tab = request.GET.get("tab") or "interfaces"
+        applicable_tabs = SyncCacheConsistency(obj).applicable_tabs()
+        applicable_tab_names = {tab.value for tab in applicable_tabs}
+        requested_sync_tab = request.GET.get("tab") or SyncTab.INTERFACES.value
+        active_sync_tab = requested_sync_tab if requested_sync_tab in applicable_tab_names else SyncTab.INTERFACES.value
+        sync_tab_urls = {}
+        for sync_tab in applicable_tabs:
+            query = request.GET.copy()
+            query["tab"] = sync_tab.value
+            query.pop("interface_name_field", None)
+            sync_tab_urls[sync_tab.value] = f"{request.path}?{query.urlencode()}"
 
         # Add our specific context
         context.update(
@@ -150,7 +160,7 @@ class BaseLibreNMSSyncView(
                 "object": obj,
                 "tab": self.tab,
                 "active_sync_tab": active_sync_tab,
-                "interface_name_selector_tabs": ",".join(INTERFACE_NAME_SELECTOR_TABS),
+                "sync_tab_urls": sync_tab_urls,
                 "interface_name_selector_visible": active_sync_tab in INTERFACE_NAME_SELECTOR_TABS,
                 # self.librenms_id is normalised to a positive int or None at assignment
                 # (see post()), so `is not None` is correct here — 0/negatives never reach it.

@@ -341,7 +341,6 @@ function syncCacheController() {
         status: initial,
         contract,
         invalidatedLocally: new Set(),
-        reloadTabs: new Set(),
         ownRevisions: new Set(),
         requiredSourceFragments: new Set(),
         notifiedRevisions: new Set(),
@@ -504,15 +503,9 @@ function expireSyncTabFromElement(element) {
     updateSyncCacheBadge(tab, { state: 'expired', snapshot_available: false });
 }
 
-function syncCacheTabUrl(tab) {
-    const url = new URL(window.location.href);
-    url.searchParams.set('tab', tab);
-    return url.toString();
-}
-
 function activeSyncTab() {
-    const active = document.querySelector('#librenmsSync [data-bs-toggle="tab"].active');
-    return active?.getAttribute('aria-controls') || new URLSearchParams(window.location.search).get('tab') || 'interfaces';
+    const region = document.getElementById('librenms-sync-tabs');
+    return region?.dataset.activeTab || new URLSearchParams(window.location.search).get('tab') || 'interfaces';
 }
 
 function loadSyncCacheFragment(tab) {
@@ -583,8 +576,6 @@ function reconcileSyncCacheStatus(nextStatus) {
             if (tab === activeTab) {
                 fragmentLoads.push(loadSyncCacheFragment(tab));
                 controller.requiredSourceFragments.delete(tab);
-            } else {
-                controller.reloadTabs.add(tab);
             }
         } else if (
             state.state === 'ready' &&
@@ -596,7 +587,6 @@ function reconcileSyncCacheStatus(nextStatus) {
                 fragmentLoads.push(loadSyncCacheFragment(tab));
             } else {
                 controller.invalidatedLocally.add(tab);
-                controller.reloadTabs.add(tab);
                 updateSyncCacheBadge(tab, { state: 'invalidated', snapshot_available: false });
             }
         } else if (
@@ -2154,103 +2144,6 @@ function initializeFilters() {
 }
 
 // ============================================
-// TAB NAVIGATION
-// ============================================
-
-/**
- * Initialize tab navigation with URL parameter synchronization.
- * Activates correct tab based on URL and updates URL when tabs change.
- */
-function initializeTabs() {
-    const urlParams = new URLSearchParams(window.location.search);
-    const activeTab = urlParams.get('tab') || 'interfaces'; // Set default tab
-    const interfaceNameField = urlParams.get('interface_name_field');
-    updateInterfaceNameFieldVisibility(activeTab);
-
-    // Activate the tab based on the 'tab' parameter in the URL
-    if (activeTab) {
-        const tabElement = document.querySelector(`#${activeTab}-tab`);
-        const tabContent = document.querySelector(`#${activeTab}`);
-
-        if (tabElement && tabContent) {
-            tabContent.classList.add('show', 'active');
-            tabElement.classList.add('active');
-        }
-    }
-
-    // Add event listeners to update URL when tabs are clicked
-    const tabs = document.querySelectorAll('[data-bs-toggle="tab"]')
-    tabs.forEach(tab => {
-        if (tab.dataset.syncTabInitialized === 'true') return;
-        tab.dataset.syncTabInitialized = 'true';
-        tab.addEventListener('show.bs.tab', function (e) {
-            const tabId = this.getAttribute('aria-controls');
-            const controller = syncCacheController();
-            if (this.dataset.cacheStatusApproved === 'true') {
-                delete this.dataset.cacheStatusApproved;
-                return;
-            }
-            if (controller) {
-                e.preventDefault();
-                checkSyncCacheStatus().then(() => {
-                    const currentState = controller.status?.[tabId];
-                    const unavailable =
-                        controller.lastCheckFailed ||
-                        controller.invalidatedLocally.has(tabId) ||
-                        controller.reloadTabs.has(tabId) ||
-                        (currentState && (
-                            !currentState.snapshot_available ||
-                            ['invalidated', 'refresh_failed', 'missing'].includes(currentState.state)
-                        ));
-                    if (unavailable) {
-                        if (!controller.lastCheckFailed) window.location.assign(syncCacheTabUrl(tabId));
-                        return;
-                    }
-                    if (typeof bootstrap !== 'undefined' && bootstrap.Tab) {
-                        this.dataset.cacheStatusApproved = 'true';
-                        bootstrap.Tab.getOrCreateInstance(this).show();
-                    }
-                });
-                return;
-            }
-            const state = controller?.status?.[tabId];
-            if (
-                controller?.invalidatedLocally.has(tabId) ||
-                controller?.reloadTabs.has(tabId) ||
-                (state && (!state.snapshot_available || ['invalidated', 'refresh_failed', 'missing'].includes(state.state)))
-            ) {
-                e.preventDefault();
-                window.location.assign(syncCacheTabUrl(tabId));
-            }
-        });
-        tab.addEventListener('shown.bs.tab', function (e) {
-            const tabId = this.getAttribute('aria-controls');
-            const url = new URL(window.location);
-            updateInterfaceNameFieldVisibility(tabId);
-
-            // Update the 'tab' parameter in the URL
-            url.searchParams.set('tab', tabId);
-
-            // Preserve 'interface_name_field' parameter if it exists
-            if (interfaceNameField) {
-                url.searchParams.set('interface_name_field', interfaceNameField);
-            }
-
-            // Update the browser history without reloading the page
-            window.history.replaceState({}, '', url);
-            checkSyncCacheStatus();
-        });
-    });
-}
-
-function updateInterfaceNameFieldVisibility(tabId) {
-    const selector = document.getElementById('interface-name-field-selector');
-    if (!selector) return;
-    const visibleTabs = (selector.dataset.visibleTabs || '').split(',').filter(Boolean);
-    selector.classList.toggle('d-none', !visibleTabs.includes(tabId));
-}
-
-// ============================================
 // SNMP CONFIGURATION MODAL
 // ============================================
 
@@ -2851,7 +2744,6 @@ function initializeScripts() {
     initializeBulkEditApply();
     updateInterfaceNameField();
     setInterfaceNameFieldFromURL();
-    initializeTabs();
     initializeNetBoxOnlyInterfaces();
     initializeSyncFormSpinners();
     initializeVlanSyncGroupSelects();

@@ -1,0 +1,9 @@
+<a class="nav-link{% if current_tab == tab_id %} active{% endif %}" id="{{ tab_id }}-tab"
+    data-tab="{{ tab_id }}" href="{{ tab_url }}" hx-get="{{ tab_url }}"
+    hx-target="#librenms-sync-tabs" hx-select="#librenms-sync-tabs" hx-swap="outerHTML"
+    hx-push-url="true" hx-sync="#librenms-sync-tabs:replace"
+    hx-include="#interface-name-field-selector" role="tab" aria-controls="{{ tab_id }}"
+    aria-selected="{% if current_tab == tab_id %}true{% else %}false{% endif %}">
+    {{ tab_label }}
+    <span id="{{ tab_id }}-cache-badge" class="badge bg-warning text-dark ms-1 px-1 py-0{% if tab_status.snapshot_available or not tab_status.revision %} d-none{% endif %}">Stale</span>
+</a>

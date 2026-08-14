@@ -8,7 +8,7 @@ from playwright import sync_api as playwright
 SCRIPT_PATH = Path(__file__).parents[2] / "static" / "netbox_librenms_plugin" / "js" / "librenms_sync.js"
 
 
-def _page_html(initial_state, contract=None):
+def _page_html(initial_state, contract=None, active_tab="interfaces"):
     state = json.dumps(initial_state)
     contract = contract or {
         "interfaces": {"content_id": "interface-sync-content", "label": "Interface"},
@@ -20,23 +20,30 @@ def _page_html(initial_state, contract=None):
     return f"""
         <div id="librenms-sync-cache-state"
              data-status-url="https://plugin.example.com/status"
-             data-server-key="primary"
-             data-active-tab="interfaces"></div>
+             data-server-key="primary"></div>
         <script id="librenms-sync-cache-initial" type="application/json">{state}</script>
         <script id="librenms-sync-cache-contract" type="application/json">{contract_json}</script>
-        <ul id="librenmsSync">
-          <li><button id="interfaces-tab" class="active" data-bs-toggle="tab" aria-controls="interfaces"></button></li>
-          <li><button id="ipaddresses-tab" data-bs-toggle="tab" aria-controls="ipaddresses"></button></li>
-        </ul>
+        <div id="librenms-sync-tabs" data-active-tab="{active_tab}">
+          <ul id="librenmsSync">
+            <li><a id="interfaces-tab" class="{"active" if active_tab == "interfaces" else ""}"
+                   data-tab="interfaces" href="https://plugin.example.com/page?tab=interfaces"
+                   aria-controls="interfaces">Interfaces</a></li>
+            <li><a id="ipaddresses-tab" class="{"active" if active_tab == "ipaddresses" else ""}"
+                   data-tab="ipaddresses" href="https://plugin.example.com/page?tab=ipaddresses"
+                   aria-controls="ipaddresses">IP Addresses</a></li>
+          </ul>
         <span id="interfaces-cache-badge" class="d-none"></span>
         <span id="ipaddresses-cache-badge" class="d-none"></span>
-        <div id="interfaces" class="tab-pane active" data-tab-id="interfaces"
+        <div id="interfaces" class="tab-pane{" active" if active_tab == "interfaces" else ""}"
+             data-tab-id="interfaces"
              data-fragment-url="https://plugin.example.com/fragment/interfaces">
           <div id="{interface_content_id}"><button id="interface-action">Sync</button></div>
         </div>
-        <div id="ipaddresses" class="tab-pane" data-tab-id="ipaddresses"
+        <div id="ipaddresses" class="tab-pane{" active" if active_tab == "ipaddresses" else ""}"
+             data-tab-id="ipaddresses"
              data-fragment-url="https://plugin.example.com/fragment/ipaddresses">
           <div id="{ip_content_id}"><button id="ip-action">Sync</button></div>
+        </div>
         </div>
         <div id="htmx-modal-content">
           <form><button id="modal-force-action" type="submit">Force</button></form>
@@ -154,22 +161,51 @@ def test_cold_tab_does_not_flash_stale_during_tab_navigation():
             """
             () => {
                 initializeSyncCacheConsistency();
-                initializeTabs();
                 const badge = document.querySelector('#ipaddresses-cache-badge');
                 new MutationObserver(() => {
                     if (!badge.classList.contains('d-none')) {
                         sessionStorage.setItem('ip-badge-flashed', 'true');
                     }
                 }).observe(badge, { attributes: true, attributeFilter: ['class'] });
-                document.querySelector('#ipaddresses-tab').dispatchEvent(
-                    new Event('show.bs.tab', { bubbles: true, cancelable: true })
-                );
             }
             """
         )
+        page.locator("#ipaddresses-tab").click()
         page.wait_for_url("**/page?tab=ipaddresses")
 
         assert page.evaluate("sessionStorage.getItem('ip-badge-flashed')") is None
+        assert page.locator("#ipaddresses-cache-badge").evaluate("node => node.classList.contains('d-none')")
+        browser.close()
+
+
+def test_healthy_tab_click_navigates_without_bootstrap_global():
+    """A ready tab must load when NetBox does not expose Bootstrap as a global."""
+    initial = {
+        "interfaces": _state("interfaces-ready"),
+        "ipaddresses": _state("ipaddresses-ready"),
+    }
+
+    def serve_page(route):
+        active_tab = "ipaddresses" if "tab=ipaddresses" in route.request.url else "interfaces"
+        route.fulfill(body=_page_html(initial, active_tab=active_tab))
+
+    with playwright.sync_playwright() as runtime:
+        browser = runtime.chromium.launch(headless=True)
+        page = browser.new_page()
+        page.route("https://plugin.example.com/page*", serve_page)
+        page.route(
+            "https://plugin.example.com/status?*",
+            lambda route: route.fulfill(json={"tabs": initial}),
+        )
+        page.goto("https://plugin.example.com/page")
+        page.add_script_tag(path=str(SCRIPT_PATH))
+        page.evaluate("initializeSyncCacheConsistency()")
+
+        assert page.evaluate("typeof bootstrap") == "undefined"
+        page.locator("#ipaddresses-tab").click()
+        page.wait_for_url("**/page?tab=ipaddresses", timeout=1000)
+
+        assert page.locator("#ipaddresses").evaluate("node => node.classList.contains('active')")
         browser.close()
 
 
@@ -555,7 +591,7 @@ def test_cross_user_refresh_failure_shows_shared_failure_reason():
         browser.close()
 
 
-def test_refreshed_hidden_tab_stays_marked_until_navigation():
+def test_refreshed_hidden_tab_stays_marked_until_server_rendered_navigation():
     """A hidden tab with replaced rows must retain its refresh-required badge."""
     initial = {
         "interfaces": _state("before"),
@@ -580,15 +616,13 @@ def test_refreshed_hidden_tab_stays_marked_until_navigation():
         page = browser.new_page()
         page.set_content(_page_html(initial))
         page.add_script_tag(path=str(SCRIPT_PATH))
-        result = page.evaluate(
+        page.evaluate(
             "async states => { initializeSyncCacheConsistency(); "
             "await reconcileSyncCacheStatus(states.invalidated); "
-            "await reconcileSyncCacheStatus(states.refreshed); "
-            "return syncCacheController().reloadTabs.has('ipaddresses'); }",
+            "await reconcileSyncCacheStatus(states.refreshed); }",
             {"invalidated": invalidated, "refreshed": refreshed},
         )
 
-        assert result is True
         assert not page.locator("#ipaddresses-cache-badge").evaluate("node => node.classList.contains('d-none')")
         browser.close()
 

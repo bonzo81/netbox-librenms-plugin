@@ -702,55 +702,35 @@ Render the tabs in migrated mode too, or those interface/IP move controls are un
 {% if sync_cache_status_url %}
 <div id="librenms-sync-cache-state"
     data-status-url="{{ sync_cache_status_url }}"
-    data-server-key="{{ server_key }}"
-    data-active-tab="{{ active_sync_tab }}"></div>
+    data-server-key="{{ server_key }}"></div>
 {{ sync_cache_status|json_script:"librenms-sync-cache-initial" }}
 {{ sync_cache_contract|json_script:"librenms-sync-cache-contract" }}
 {% endif %}
+<div id="librenms-sync-tabs" data-active-tab="{{ active_sync_tab }}">
 <!-- Tab Navigation -->
 <div class="d-flex justify-content-between align-items-center">
     <ul class="nav nav-tabs mt-3" id="librenmsSync" role="tablist">
         <li class="nav-item" role="presentation">
-            <button class="nav-link" id="interfaces-tab" data-tab="interfaces" data-bs-toggle="tab"
-                data-bs-target="#interfaces" type="button" role="tab" aria-controls="interfaces">
-                Interfaces
-                <span id="interfaces-cache-badge" class="badge bg-warning text-dark ms-1 px-1 py-0{% if sync_cache_status.interfaces.state != 'invalidated' %} d-none{% endif %}">Stale</span>
-            </button>
+            {% include 'netbox_librenms_plugin/inc/_sync_tab_link.html' with current_tab=active_sync_tab tab_id='interfaces' tab_label='Interfaces' tab_url=sync_tab_urls.interfaces tab_status=sync_cache_status.interfaces only %}
         </li>
         {% if cable_sync %}
         <li class="nav-item" role="presentation">
-            <button class="nav-link" id="cables-tab" data-tab="cables" data-bs-toggle="tab" data-bs-target="#cables"
-                type="button" role="tab" aria-controls="cables">
-                Cables
-                <span id="cables-cache-badge" class="badge bg-warning text-dark ms-1 px-1 py-0{% if sync_cache_status.cables.state != 'invalidated' %} d-none{% endif %}">Stale</span>
-            </button>
+            {% include 'netbox_librenms_plugin/inc/_sync_tab_link.html' with current_tab=active_sync_tab tab_id='cables' tab_label='Cables' tab_url=sync_tab_urls.cables tab_status=sync_cache_status.cables only %}
         </li>
         {% endif %}
         <li class="nav-item" role="presentation">
-            <button class="nav-link" id="ipaddresses-tab" data-tab="ipaddresses" data-bs-toggle="tab"
-                data-bs-target="#ipaddresses" type="button" role="tab" aria-controls="ipaddresses">
-                IP Addresses
-                <span id="ipaddresses-cache-badge" class="badge bg-warning text-dark ms-1 px-1 py-0{% if sync_cache_status.ipaddresses.state != 'invalidated' %} d-none{% endif %}">Stale</span>
-            </button>
+            {% include 'netbox_librenms_plugin/inc/_sync_tab_link.html' with current_tab=active_sync_tab tab_id='ipaddresses' tab_label='IP Addresses' tab_url=sync_tab_urls.ipaddresses tab_status=sync_cache_status.ipaddresses only %}
         </li>
         {% with model_name=object|meta:"model_name" %}
         {% if model_name == "device" %}
         <li class="nav-item" role="presentation">
-            <button class="nav-link" id="vlans-tab" data-tab="vlans" data-bs-toggle="tab"
-                data-bs-target="#vlans" type="button" role="tab" aria-controls="vlans">
-                VLANs
-                <span id="vlans-cache-badge" class="badge bg-warning text-dark ms-1 px-1 py-0{% if sync_cache_status.vlans.state != 'invalidated' %} d-none{% endif %}">Stale</span>
-            </button>
+            {% include 'netbox_librenms_plugin/inc/_sync_tab_link.html' with current_tab=active_sync_tab tab_id='vlans' tab_label='VLANs' tab_url=sync_tab_urls.vlans tab_status=sync_cache_status.vlans only %}
         </li>
         {% endif %}
         {% endwith %}
         {% if module_sync and object|meta:"model_name" == "device" %}
         <li class="nav-item" role="presentation">
-            <button class="nav-link" id="modules-tab" data-tab="modules" data-bs-toggle="tab"
-                data-bs-target="#modules" type="button" role="tab" aria-controls="modules">
-                Modules
-                <span id="modules-cache-badge" class="badge bg-warning text-dark ms-1 px-1 py-0{% if sync_cache_status.modules.state != 'invalidated' %} d-none{% endif %}">Stale</span>
-            </button>
+            {% include 'netbox_librenms_plugin/inc/_sync_tab_link.html' with current_tab=active_sync_tab tab_id='modules' tab_label='Modules' tab_url=sync_tab_urls.modules tab_status=sync_cache_status.modules only %}
         </li>
         {% endif %}
     </ul>
@@ -758,23 +738,27 @@ Render the tabs in migrated mode too, or those interface/IP move controls are un
 </div>
 <!-- Tab Content -->
 <div class="tab-content mt-3" id="librenmsTabContent">
-    <div class="tab-pane fade" id="interfaces" role="tabpanel" aria-labelledby="interfaces-tab"
+    <div class="tab-pane{% if active_sync_tab == 'interfaces' %} show active{% endif %}" id="interfaces"
+        role="tabpanel" aria-labelledby="interfaces-tab"
         data-tab-id="interfaces" data-fragment-url="{{ sync_cache_fragment_urls.interfaces }}">
         {% include 'netbox_librenms_plugin/_interface_sync.html' %}
     </div>
 
-    <div class="tab-pane fade" id="cables" role="tabpanel" aria-labelledby="cables-tab" data-tab-id="cables"
+    <div class="tab-pane{% if active_sync_tab == 'cables' %} show active{% endif %}" id="cables"
+        role="tabpanel" aria-labelledby="cables-tab" data-tab-id="cables"
         data-fragment-url="{{ sync_cache_fragment_urls.cables }}">
         {% include 'netbox_librenms_plugin/_cable_sync.html' %}
     </div>
 
-    <div class="tab-pane fade" id="ipaddresses" role="tabpanel" aria-labelledby="ipaddresses-tab"
+    <div class="tab-pane{% if active_sync_tab == 'ipaddresses' %} show active{% endif %}" id="ipaddresses"
+        role="tabpanel" aria-labelledby="ipaddresses-tab"
         data-tab-id="ipaddresses" data-fragment-url="{{ sync_cache_fragment_urls.ipaddresses }}">
         {% include 'netbox_librenms_plugin/_ipaddress_sync.html' %}
     </div>
 
     {% if module_sync and object|meta:"model_name" == "device" %}
-    <div class="tab-pane fade" id="modules" role="tabpanel" aria-labelledby="modules-tab"
+    <div class="tab-pane{% if active_sync_tab == 'modules' %} show active{% endif %}" id="modules"
+        role="tabpanel" aria-labelledby="modules-tab"
         data-tab-id="modules" data-fragment-url="{{ sync_cache_fragment_urls.modules }}">
         {% include 'netbox_librenms_plugin/_module_sync.html' %}
     </div>
@@ -782,12 +766,14 @@ Render the tabs in migrated mode too, or those interface/IP move controls are un
 
     {% with model_name=object|meta:"model_name" %}
     {% if model_name == "device" %}
-    <div class="tab-pane fade" id="vlans" role="tabpanel" aria-labelledby="vlans-tab"
+    <div class="tab-pane{% if active_sync_tab == 'vlans' %} show active{% endif %}" id="vlans"
+        role="tabpanel" aria-labelledby="vlans-tab"
         data-tab-id="vlans" data-fragment-url="{{ sync_cache_fragment_urls.vlans }}">
         {% include 'netbox_librenms_plugin/_vlan_sync.html' %}
     </div>
     {% endif %}
     {% endwith %}
+</div>
 </div>
 
 

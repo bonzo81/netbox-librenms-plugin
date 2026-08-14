@@ -77,6 +77,13 @@ def _device_info_response(url, device_id, name, hardware):
     )
 
 
+def _opening_tag(html, element_id):
+    """Return one rendered opening tag by its element ID."""
+    marker = f'id="{element_id}"'
+    position = html.index(marker)
+    return html[html.rfind("<", 0, position) : html.index(">", position) + 1]
+
+
 @pytest.mark.django_db
 def test_cold_sync_page_load_fetches_librenms_status(client, settings):
     """The status card must load even when the active tab has no snapshot."""
@@ -99,6 +106,8 @@ def test_cold_sync_page_load_fetches_librenms_status(client, settings):
     assert requested_urls == ["https://primary.example.com/api/v0/devices/7401"]
     assert b"Status Hardware 7401" in response.content
     assert b"Details unavailable" not in response.content
+    badge = _opening_tag(response.content.decode(), "interfaces-cache-badge")
+    assert "d-none" in badge.split('class="', 1)[1].split('"', 1)[0].split()
 
 
 @pytest.mark.django_db
@@ -925,6 +934,27 @@ def test_refresh_failure_reason_is_anonymous_across_users(settings):
 
     assert "your latest LibreNMS refresh failed" in same_user["reason"]
     assert "another user attempted to refresh" in other_user["reason"]
+
+
+@pytest.mark.django_db
+def test_refresh_failed_badge_is_visible_in_server_rendered_tab_region(client, settings):
+    """HTMX navigation must receive a visible stale badge without client-side repair."""
+    _configure_servers(settings)
+    device = make_device("cache-refresh-failed-badge", librenms_cf={"primary": {"id": 655}})
+    user = make_superuser("cache-refresh-failed-badge-user")
+    SyncCacheConsistency(device).mark_refresh_failure(SyncTab.IP_ADDRESSES, "primary", actor_id=user.pk)
+    client.force_login(user)
+    page_url = reverse("plugins:netbox_librenms_plugin:device_librenms_sync", args=[device.pk])
+
+    with patch(
+        "netbox_librenms_plugin.librenms_api.requests.get",
+        side_effect=AssertionError("Server-rendered cache state contacted LibreNMS"),
+    ):
+        response = client.get(page_url, {"server_key": "primary", "tab": SyncTab.IP_ADDRESSES.value})
+
+    assert response.status_code == 200
+    badge = _opening_tag(response.content.decode(), "ipaddresses-cache-badge")
+    assert "d-none" not in badge.split('class="', 1)[1].split('"', 1)[0].split()
 
 
 def test_cleanup_failure_payload_names_tabs_that_must_fail_closed():
