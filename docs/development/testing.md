@@ -7,13 +7,19 @@ This guide explains how to run the test suite, write new tests, and debug failur
 Run all tests with a single command:
 
 ```bash
+make test
+```
+
+Run the Django suite without the separate browser suite:
+
+```bash
 make unittest
 ```
 
-Or run pytest directly:
+Run the Playwright browser suite:
 
 ```bash
-pytest netbox_librenms_plugin/tests/ -v
+make browser
 ```
 
 ## Test Structure

@@ -529,15 +529,18 @@ def apply_transition_to_response(request, response, transition):
     return response
 
 
-def render_sync_cache_miss(request, refresh_label):
+def render_sync_cache_miss(request, refresh_label, *, retarget=None):
     """Return an empty HTMX tab fragment for a writer whose snapshot is unavailable."""
     if request.headers.get("HX-Request") != "true":
         return None
-    return render(
+    response = render(
         request,
         "netbox_librenms_plugin/htmx/sync_cache_missing.html",
         {"refresh_label": refresh_label},
     )
+    if retarget:
+        response["HX-Retarget"] = retarget
+    return response
 
 
 def configured_cache_timeout():

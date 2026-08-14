@@ -285,6 +285,77 @@ def test_ip_sync_invalidates_other_tabs_after_creating_an_address(
     assert cache.get(_cache_key("ports", device, "primary")) is None
 
 
+@pytest.mark.django_db
+def test_partial_ip_commit_invalidates_other_tabs_before_conflict_confirmation(
+    client,
+    settings,
+    django_capture_on_commit_callbacks,
+):
+    """A safe committed row must invalidate stale tabs when another row needs confirmation."""
+    _configure_servers(settings)
+    device = make_device("cache-ip-partial-conflict", librenms_cf={"primary": {"id": 612}})
+    conflict_target = make_interface(device, "Ethernet1", iface_type="1000base-t")
+    set_librenms_device_id(conflict_target, 7121, "primary")
+    conflict_target.save(update_fields=["custom_field_data"])
+    safe_target = make_interface(device, "Ethernet2", iface_type="1000base-t")
+    set_librenms_device_id(safe_target, 7122, "primary")
+    safe_target.save(update_fields=["custom_field_data"])
+    current = make_interface(device, "Ethernet3", iface_type="1000base-t")
+    conflict_address = "198.18.62.10/24"
+    safe_address = "198.18.62.11/24"
+    IPAddress.objects.create(address=conflict_address, assigned_object=current)
+    ip_payload = {
+        "ip_addresses": [
+            {
+                "ip_with_mask": conflict_address,
+                "ip_address": "198.18.62.10",
+                "prefix_length": 24,
+                "port_id": 7121,
+                "interface": conflict_target.name,
+            },
+            {
+                "ip_with_mask": safe_address,
+                "ip_address": "198.18.62.11",
+                "prefix_length": 24,
+                "port_id": 7122,
+                "interface": safe_target.name,
+            },
+        ],
+        "ports_by_id": {
+            7121: {"port_id": 7121, "ifName": conflict_target.name, "ifDescr": conflict_target.name},
+            7122: {"port_id": 7122, "ifName": safe_target.name, "ifDescr": safe_target.name},
+        },
+        "interface_name_field": "ifName",
+        "mgmt_ip": None,
+    }
+    _seed_snapshot("ip_addresses", device, "primary", ip_payload)
+    _seed_snapshot("ports", device, "primary")
+    client.force_login(make_superuser("cache-ip-partial-conflict-user"))
+    url = reverse(
+        "plugins:netbox_librenms_plugin:sync_device_ip_addresses",
+        kwargs={"object_type": "device", "pk": device.pk},
+    )
+
+    with django_capture_on_commit_callbacks(execute=True):
+        response = client.post(
+            url,
+            {
+                "server_key": "primary",
+                "select": [conflict_address, safe_address],
+                f"vrf_{conflict_address}": "",
+                f"vrf_{safe_address}": "",
+            },
+            HTTP_HX_REQUEST="true",
+        )
+
+    assert response.status_code == 200
+    assert b"Confirm IP address changes" in response.content
+    assert IPAddress.objects.get(address=safe_address).assigned_object == safe_target
+    assert IPAddress.objects.get(address=conflict_address).assigned_object == current
+    assert cache.get(_cache_key("ip_addresses", device, "primary")) == ip_payload
+    assert cache.get(_cache_key("ports", device, "primary")) is None
+
+
 @pytest.mark.django_db(
     transaction=True,
     available_apps=tuple(app.name for app in django_apps.get_app_configs()),
@@ -610,6 +681,7 @@ def test_htmx_ip_cache_miss_replaces_active_tab_with_warning(client, settings):
 
     assert response.status_code == 200
     assert "HX-Redirect" not in response
+    assert response["HX-Retarget"] == "#ipaddress-sync-content"
     assert b"Refresh IP Addresses" in response.content
     assert b'name="select"' not in response.content
 
@@ -863,6 +935,69 @@ def test_fragment_restores_from_cache_without_calling_librenms(client, settings)
 
 
 @pytest.mark.django_db
+def test_status_fragment_and_invalidated_tab_navigation_never_call_librenms(
+    client,
+    settings,
+    django_capture_on_commit_callbacks,
+):
+    """Cache checks, fragment restoration, and tab navigation must remain cache-only."""
+    _configure_servers(settings)
+    device = make_device("cache-browser-flows", librenms_cf={"primary": {"id": 654}})
+    ports_payload = {
+        "ports": [
+            {
+                "port_id": 7541,
+                "ifName": "Ethernet1",
+                "ifDescr": "Access Ethernet1",
+                "ifType": "ethernetCsmacd",
+                "ifAdminStatus": "up",
+            }
+        ],
+        "port_stack_relationships": {},
+    }
+    _seed_snapshot("ports", device, "primary", ports_payload)
+    _seed_snapshot("ip_addresses", device, "primary")
+    coordinator = SyncCacheConsistency(device, cache_timeout=300)
+    with django_capture_on_commit_callbacks(execute=True):
+        coordinator.schedule_mutation(SyncTab.INTERFACES, "primary", actor_id=1)
+    client.force_login(make_superuser("cache-browser-flows-user"))
+    status_url = reverse(
+        "plugins:netbox_librenms_plugin:sync_cache_status",
+        kwargs={"object_type": "device", "pk": device.pk},
+    )
+    fragment_url = reverse(
+        "plugins:netbox_librenms_plugin:sync_cache_fragment",
+        kwargs={"object_type": "device", "pk": device.pk, "tab": SyncTab.INTERFACES.value},
+    )
+    page_url = reverse("plugins:netbox_librenms_plugin:device_librenms_sync", args=[device.pk])
+
+    with patch(
+        "netbox_librenms_plugin.librenms_api.requests.get",
+        side_effect=AssertionError("A cache-only browser flow contacted LibreNMS"),
+    ) as requests_get:
+        status_response = client.get(status_url, {"server_key": "primary"})
+        fragment_response = client.get(fragment_url, {"server_key": "primary"})
+        page_response = client.get(
+            page_url,
+            {
+                "server_key": "primary",
+                "tab": SyncTab.IP_ADDRESSES.value,
+                "interface_name_field": "ifDescr",
+            },
+        )
+
+    requests_get.assert_not_called()
+    assert status_response.status_code == 200
+    assert fragment_response.status_code == 200
+    assert b"Ethernet1" in fragment_response.content
+    assert page_response.status_code == 200
+    assert b"Refresh required" in page_response.content
+    assert b"Details unavailable" in page_response.content
+    assert b'id="add-device-modal"' not in page_response.content
+    assert b'data-bs-target="#add-device-modal"' not in page_response.content
+
+
+@pytest.mark.django_db
 def test_rolled_back_mutation_keeps_snapshots_and_publishes_no_state(
     settings,
     django_capture_on_commit_callbacks,
@@ -883,6 +1018,56 @@ def test_rolled_back_mutation_keeps_snapshots_and_publishes_no_state(
     assert cache.get(_cache_key("ports", device, "primary")) is not None
     assert cache.get(_cache_key("ip_addresses", device, "primary")) is not None
     assert cache.get(coordinator.state_key(SyncTab.INTERFACES, "primary")) is None
+
+
+@pytest.mark.django_db
+def test_source_snapshot_expiry_before_commit_callback_is_not_reversed(
+    client,
+    settings,
+    django_capture_on_commit_callbacks,
+):
+    """A successful mutation must not restore or extend a source snapshot that expires in flight."""
+    _configure_servers(settings)
+    device = make_device("cache-source-expiry", librenms_cf={"primary": {"id": 661}})
+    ports_payload = {
+        "ports": [
+            {
+                "port_id": 7361,
+                "ifName": "Ethernet1",
+                "ifDescr": "Ethernet1",
+                "ifType": "ethernetCsmacd",
+                "ifAdminStatus": "up",
+            }
+        ],
+        "port_stack_relationships": {},
+    }
+    _seed_snapshot("ports", device, "primary", ports_payload)
+    _seed_snapshot("links", device, "primary")
+    source_key = _cache_key("ports", device, "primary")
+    client.force_login(make_superuser("cache-source-expiry-user"))
+    url = reverse(
+        "plugins:netbox_librenms_plugin:sync_selected_interfaces",
+        kwargs={"object_type": "device", "object_id": device.pk},
+    )
+
+    with django_capture_on_commit_callbacks(execute=True):
+        response = client.post(
+            url,
+            {
+                "server_key": "primary",
+                "interface_name_field": "ifName",
+                "select": "7361",
+                "exclude_columns": "vlans",
+            },
+        )
+        cache.delete(source_key)
+
+    assert response.status_code == 302
+    assert cache.get(source_key) is None
+    assert cache.get(_cache_key("links", device, "primary")) is None
+    source_status = SyncCacheConsistency(device, cache_timeout=300).status("primary")[SyncTab.INTERFACES.value]
+    assert source_status["state"] == "missing"
+    assert source_status["snapshot_available"] is False
 
 
 @pytest.mark.django_db

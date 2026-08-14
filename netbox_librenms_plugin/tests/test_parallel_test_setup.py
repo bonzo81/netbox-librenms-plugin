@@ -46,6 +46,18 @@ def test_the_plugin_scan_sees_both_assignment_forms(source):
     assert _pytest_plugins_lines(source) == [1]
 
 
+def test_location_mapping_bulk_import_url_resolves():
+    """The explicit import route must reach the location mapping form."""
+    from django.urls import resolve, reverse
+
+    from netbox_librenms_plugin.forms import LocationMappingImportForm
+    from netbox_librenms_plugin.views.mapping_views import LocationMappingBulkImportView
+
+    match = resolve(reverse("plugins:netbox_librenms_plugin:locationmapping_bulk_import"))
+    assert match.func.view_class is LocationMappingBulkImportView
+    assert match.func.view_class.model_form is LocationMappingImportForm
+
+
 def test_no_test_module_registers_a_session_wide_plugin():
     """``pytest_plugins`` in a test module registers that plugin for the whole session.
 
@@ -259,16 +271,21 @@ def test_settings_module_exports_the_stripped_redis_host():
     assert "CACHE_HOST='redis'" in result.stdout, result.stdout
 
 
-def test_location_mapping_bulk_import_url_resolves():
-    """The explicit import route must reach the location mapping form."""
-    from django.urls import resolve, reverse
+def test_playwright_state_machine_has_a_required_separate_ci_job():
+    """Run browser behavior independently from the NetBox test matrix."""
+    workflow = (REPOSITORY_ROOT / ".github/workflows/test.yaml").read_text()
+    requirements = (REPOSITORY_ROOT / "requirements_dev.txt").read_text()
+    setup = (REPOSITORY_ROOT / ".devcontainer/scripts/setup.sh").read_text()
+    browser_tests = (REPOSITORY_ROOT / "netbox_librenms_plugin/tests/browser/test_sync_cache_browser.py").read_text()
 
-    from netbox_librenms_plugin.forms import LocationMappingImportForm
-    from netbox_librenms_plugin.views.mapping_views import LocationMappingBulkImportView
-
-    match = resolve(reverse("plugins:netbox_librenms_plugin:locationmapping_bulk_import"))
-    assert match.func.view_class is LocationMappingBulkImportView
-    assert match.func.view_class.model_form is LocationMappingImportForm
+    assert "playwright>=" in requirements
+    assert "pytest.importorskip" not in browser_tests
+    assert "browser-tests:" in workflow
+    assert "pip install -r requirements_dev.txt" in workflow
+    assert "python -m playwright install --with-deps chromium" in workflow
+    assert "--ignore=netbox_librenms_plugin/tests/browser" in workflow
+    assert "pytest -c netbox_librenms_plugin/tests/browser/pytest.ini" in workflow
+    assert "python -m playwright install --with-deps chromium" in setup
 
 
 def test_test_alias_preserves_the_calling_shell(tmp_path):
@@ -338,6 +355,7 @@ def test_reused_database_restores_inventory_and_serial_seed_rules():
     seed_migration_rows()
     assert InventoryIgnoreRule.objects.filter(**inventory).exists()
     assert NormalizationRule.objects.filter(**serial).exists()
+
 
 def test_isolated_settings_exclude_unrelated_installed_plugins(settings):
     """Do not import sibling worktrees while resolving URLs for this plugin's tests."""

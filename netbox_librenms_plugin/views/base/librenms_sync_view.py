@@ -190,7 +190,22 @@ class BaseLibreNMSSyncView(
                 }
             )
 
-        librenms_info = self.get_librenms_device_info(obj, request)
+        render_server_key = self._scoped_render_server_key or self.active_server_key
+        coordinator = None
+        sync_cache_status = None
+        if render_server_key and render_server_key in mapped_server_keys(obj, render_server_key):
+            coordinator = SyncCacheConsistency(obj, cache_timeout=configured_cache_timeout())
+            sync_cache_status = coordinator.status(render_server_key, actor_id=request.user.pk)
+
+        active_snapshot_missing = bool(
+            sync_cache_status
+            and active_sync_tab in sync_cache_status
+            and not sync_cache_status[active_sync_tab]["snapshot_available"]
+        )
+        if active_snapshot_missing:
+            librenms_info = self.get_librenms_device_info(obj, request, cache_only=True)
+        else:
+            librenms_info = self.get_librenms_device_info(obj, request)
 
         interface_context = self.get_interface_context(request, obj)
         cable_context = self.get_cable_context(request, obj)
@@ -221,6 +236,8 @@ class BaseLibreNMSSyncView(
         librenms_id_serial_confirmed = _lookup_is_vm or bool(
             _librenms_serial and _librenms_serial != "-" and _netbox_serial and _librenms_serial == _netbox_serial
         )
+        device_info_unavailable = librenms_info.get("device_info_unavailable", False)
+        show_add_device = not librenms_info["found_in_librenms"] and not device_info_unavailable
 
         context.update(
             {
@@ -238,11 +255,12 @@ class BaseLibreNMSSyncView(
                 # misconfigured default no client is bound, so the property would reconstruct
                 # LibreNMSAPI() and 500 the degraded render; the render key also keeps the page's
                 # forms scoped to the requested (gone) server so they fail closed server-side.
-                "server_key": self._scoped_render_server_key or self.active_server_key,
-                "v1v2form": AddToLIbreSNMPV1V2(prefix="v1v2"),
-                "v3form": AddToLIbreSNMPV3(prefix="v3"),
+                "server_key": render_server_key,
+                "v1v2form": AddToLIbreSNMPV1V2(prefix="v1v2") if show_add_device else None,
+                "v3form": AddToLIbreSNMPV3(prefix="v3") if show_add_device else None,
                 "librenms_device_id": self.librenms_id,
                 "found_in_librenms": librenms_info.get("found_in_librenms"),
+                "device_info_unavailable": device_info_unavailable,
                 "librenms_device_details": librenms_info.get("librenms_device_details"),
                 "mismatched_device": librenms_info.get("mismatched_device"),
                 **librenms_info["librenms_device_details"],
@@ -275,11 +293,8 @@ class BaseLibreNMSSyncView(
             }
         )
 
-        server_key = context["server_key"]
-        if server_key and server_key in mapped_server_keys(obj, server_key):
+        if coordinator is not None and sync_cache_status is not None:
             object_type = obj._meta.model_name
-            coordinator = SyncCacheConsistency(obj, cache_timeout=configured_cache_timeout())
-            sync_cache_status = coordinator.status(server_key, actor_id=request.user.pk)
             context_names = {
                 SyncTab.INTERFACES: "interface_sync",
                 SyncTab.CABLES: "cable_sync",
@@ -415,10 +430,11 @@ class BaseLibreNMSSyncView(
         result.sort(key=lambda e: 0 if e["is_active"] else (1 if e["is_configured"] else 2))
         return result or None
 
-    def get_librenms_device_info(self, obj, request=None):
+    def get_librenms_device_info(self, obj, request=None, *, cache_only=False):
         """Get the LibreNMS device information for the given object."""
         found_in_librenms = False
         mismatched_device = False
+        device_info_unavailable = False
         librenms_device_details = {
             "librenms_device_url": None,
             "librenms_device_hardware": "-",
@@ -432,7 +448,11 @@ class BaseLibreNMSSyncView(
         }
 
         if self.librenms_id is not None:
-            success, device_info = self.librenms_api.get_device_info(self.librenms_id)
+            if cache_only:
+                success, device_info = self.librenms_api.get_device_info(self.librenms_id, cache_only=True)
+                device_info_unavailable = not success
+            else:
+                success, device_info = self.librenms_api.get_device_info(self.librenms_id)
             # isinstance(dict) guard: a truthy non-dict payload (string/list) would 500 on the
             # device_info.get(...) calls below; fall back to the default details block instead
             # of trusting success=True alone (issue #100).
@@ -560,6 +580,7 @@ class BaseLibreNMSSyncView(
 
         return {
             "found_in_librenms": found_in_librenms,
+            "device_info_unavailable": device_info_unavailable,
             "librenms_device_details": librenms_device_details,
             "mismatched_device": mismatched_device,
         }

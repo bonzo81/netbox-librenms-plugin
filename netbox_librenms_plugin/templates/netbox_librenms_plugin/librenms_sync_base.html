@@ -228,8 +228,10 @@
                         <tr>
                             <th scope="row" style="width: 40%; padding-left: 1rem;">Status</th>
                             <td>
-                                <span class="{% if has_librenms_id %}text-success{% else %}text-danger{% endif %}">
-                                    {% if found_in_librenms %}
+                                <span class="{% if device_info_unavailable %}text-warning{% elif has_librenms_id %}text-success{% else %}text-danger{% endif %}">
+                                    {% if device_info_unavailable %}
+                                    <i class="mdi mdi-alert-circle-outline"></i> Details unavailable
+                                    {% elif found_in_librenms %}
                                     <i class="mdi mdi-check-circle"></i> Found
                                     {% else %}
                                     <i class="mdi mdi-close-circle"></i> Not found
@@ -384,7 +386,7 @@
                                 </a>
                             </td>
                         </tr>
-                        {% else %}
+                        {% elif not device_info_unavailable %}
                         <!-- Add to LibreNMS -->
                         <tr>
                             <th scope="row">Action</th>
@@ -695,7 +697,7 @@ A migrated donor has its active librenms_id cleared (so it is never found_in_lib
 banner above directs the user to the per-row "Move to winner" actions that live in these tabs.
 Render the tabs in migrated mode too, or those interface/IP move controls are unreachable.
 {% endcomment %}
-{% if found_in_librenms or migrated_to_marker %}
+{% if found_in_librenms or migrated_to_marker or device_info_unavailable and has_librenms_id %}
 
 {% if sync_cache_status_url %}
 <div id="librenms-sync-cache-state"
@@ -901,6 +903,7 @@ Render the tabs in migrated mode too, or those interface/IP move controls are un
 {% endif %}
 
 
+{% if not found_in_librenms and not device_info_unavailable %}
 <!-- Add to LibreNMS Modal -->
 <div class="modal fade" id="add-device-modal" tabindex="-1" aria-labelledby="addDeviceModalLabel" aria-hidden="true">
     <div class="modal-dialog modal-lg">
@@ -1028,6 +1031,7 @@ Render the tabs in migrated mode too, or those interface/IP move controls are un
         </div>
     </div>
 </div>
+{% endif %}
 
 {% if object.virtual_chassis and vc_inventory_serials %}
 <!-- VC Member Serials Modal -->

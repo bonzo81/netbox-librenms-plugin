@@ -127,11 +127,21 @@ else
   PIP_CMD="pip"
 fi
 
+# Detect the plugin before installing its development requirements.
+PLUGIN_WS_DIR="$(detect_plugin_workspace)"
+if [ -z "$PLUGIN_WS_DIR" ]; then
+  echo "❌ Could not locate plugin workspace directory (pyproject.toml not found)."
+  echo "   Checked: $PWD and /workspaces/*"
+  exit 1
+fi
+echo "📂 Plugin workspace: $PLUGIN_WS_DIR"
+
 # Install dev tools
 echo "🔧 Installing development dependencies..."
 apt-get update -qq
 apt-get install -y -qq net-tools git
-$PIP_CMD install pytest pytest-cov pytest-django pytest-xdist ruff pre-commit
+$PIP_CMD install -r "$PLUGIN_WS_DIR/requirements_dev.txt" ruff pre-commit
+python -m playwright install --with-deps chromium
 
 # Install GitHub CLI (gh)
 # NOTE: The chained && commands below mean a partial failure (e.g. wget succeeds
@@ -154,15 +164,6 @@ if ! command -v gh >/dev/null 2>&1; then
     && echo "  ✓ GitHub CLI installed: $(gh --version | head -1)" \
     || echo "⚠️  GitHub CLI installation failed (non-fatal)"
 fi
-
-# Detect plugin workspace directory using the shared helper
-PLUGIN_WS_DIR="$(detect_plugin_workspace)"
-if [ -z "$PLUGIN_WS_DIR" ]; then
-  echo "❌ Could not locate plugin workspace directory (pyproject.toml not found)."
-  echo "   Checked: $PWD and /workspaces/*"
-  exit 1
-fi
-echo "📂 Plugin workspace: $PLUGIN_WS_DIR"
 
 # Install this plugin in development mode
 echo "📦 Installing plugin in development mode from: $PLUGIN_WS_DIR"

@@ -418,6 +418,13 @@ function syncCacheUnavailableReason(tab, state) {
     return syncCacheReason(tab, state);
 }
 
+function syncCacheSummary(state) {
+    if (state.same_user) {
+        return 'Some sync data was cleared because you synchronized data from LibreNMS.';
+    }
+    return 'Some sync data was cleared because another user synchronized data from LibreNMS.';
+}
+
 function formatSyncCacheRelativeTime(timestamp) {
     const occurredAt = Date.parse(timestamp || '');
     if (!Number.isFinite(occurredAt)) return '';
@@ -447,6 +454,18 @@ function clearSyncTabContent(tab, message) {
     card.appendChild(body);
     content.replaceChildren(card);
     content.dataset.cacheEmpty = 'true';
+}
+
+function failClosedSyncControls(message) {
+    const controller = syncCacheController();
+    if (!controller) return;
+    Object.keys(SYNC_CACHE_CONTENT_IDS).forEach(tab => {
+        controller.invalidatedLocally.add(tab);
+        clearSyncTabContent(tab, message);
+        updateSyncCacheBadge(tab, { state: 'missing', snapshot_available: false });
+    });
+    document.querySelectorAll('#htmx-modal-content button, #htmx-modal-content input, #htmx-modal-content select, #htmx-modal-content textarea')
+        .forEach(control => { control.disabled = true; });
 }
 
 function expireSyncTabFromElement(element) {
@@ -521,7 +540,12 @@ function reconcileSyncCacheStatus(nextStatus) {
             }
             clearSyncTabContent(tab, reason);
             const marker = refreshChanged ? `refresh:${state.refresh_error_timestamp}` : state.revision;
-            if (!notice && marker) notice = { message: reason, revision: marker };
+            if (!notice && marker) {
+                const message = state.state === 'invalidated' && !state.refresh_error
+                    ? syncCacheSummary(state)
+                    : reason;
+                notice = { message, revision: marker };
+            }
         } else if (
             state.state === 'locally_changed' &&
             state.snapshot_available &&
@@ -578,9 +602,7 @@ function checkSyncCacheStatus() {
         .then(() => { controller.lastCheckFailed = false; })
         .catch(() => {
             controller.lastCheckFailed = true;
-            const tab = activeSyncTab();
-            clearSyncTabContent(tab, 'Cache status could not be verified. Reload this tab before continuing.');
-            updateSyncCacheBadge(tab, { state: 'missing', snapshot_available: false });
+            failClosedSyncControls('Cache status could not be verified. Reload this tab before continuing.');
         })
         .finally(() => { controller.checking = null; });
     return controller.checking;

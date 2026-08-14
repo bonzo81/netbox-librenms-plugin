@@ -3,9 +3,7 @@
 import json
 from pathlib import Path
 
-import pytest
-
-playwright = pytest.importorskip("playwright.sync_api", reason="Playwright is an optional browser-test dependency")
+from playwright import sync_api as playwright
 
 SCRIPT_PATH = Path(__file__).parents[2] / "static" / "netbox_librenms_plugin" / "js" / "librenms_sync.js"
 
@@ -31,6 +29,9 @@ def _page_html(initial_state):
         <div id="ipaddresses" class="tab-pane" data-tab-id="ipaddresses"
              data-fragment-url="https://plugin.example.com/fragment/ipaddresses">
           <div id="ipaddress-sync-content"><button id="ip-action">Sync</button></div>
+        </div>
+        <div id="htmx-modal-content">
+          <form><button id="modal-force-action" type="submit">Force</button></form>
         </div>
     """
 
@@ -89,7 +90,37 @@ def test_focus_check_clears_invalidated_rows_and_reports_anonymous_actor():
 
         assert page.locator("#ip-action").count() == 0
         assert not page.locator("#ipaddresses-cache-badge").evaluate("node => node.classList.contains('d-none')")
-        assert "another user synchronized Interface data" in page.locator("#librenms-sync-cache-notices").inner_text()
+        notice = page.locator("#librenms-sync-cache-notices").inner_text()
+        assert "Some sync data was cleared because another user synchronized data from LibreNMS." in notice
+        assert "Interface data" not in notice
+        assert "another user synchronized Interface data" in page.locator("#ipaddress-sync-content").inner_text()
+        browser.close()
+
+
+def test_cache_status_failure_disables_every_loaded_sync_control():
+    """A failed status check must fail closed across tabs and an open modal."""
+    initial = {
+        "interfaces": _state("before-interfaces"),
+        "ipaddresses": _state("before-ip"),
+    }
+
+    with playwright.sync_playwright() as runtime:
+        browser = runtime.chromium.launch(headless=True)
+        page = browser.new_page()
+        page.set_content(_page_html(initial))
+        page.route(
+            "https://plugin.example.com/status?*",
+            lambda route: route.fulfill(status=503),
+        )
+        page.add_script_tag(path=str(SCRIPT_PATH))
+        page.evaluate("initializeSyncCacheConsistency(); checkSyncCacheStatus()")
+        page.wait_for_function("syncCacheController().lastCheckFailed === true")
+
+        assert page.locator("#interface-action").count() == 0
+        assert page.locator("#ip-action").count() == 0
+        assert page.locator("#modal-force-action").is_disabled()
+        assert "could not be verified" in page.locator("#interface-sync-content").inner_text()
+        assert "could not be verified" in page.locator("#ipaddress-sync-content").inner_text()
         browser.close()
 
 

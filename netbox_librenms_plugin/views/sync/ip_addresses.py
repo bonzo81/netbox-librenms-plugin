@@ -213,7 +213,11 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
         )
 
         if not cached_snapshot or not cached_snapshot["ip_addresses"]:
-            if response := render_sync_cache_miss(request, "IP Addresses"):
+            if response := render_sync_cache_miss(
+                request,
+                "IP Addresses",
+                retarget="#ipaddress-sync-content",
+            ):
                 return response
             messages.error(request, "Cache has expired. Please refresh the IP data.")
             return self.redirect_to_ip_tab(request, obj)

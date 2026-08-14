@@ -105,7 +105,10 @@ jobs:
           PYTHONPATH: ${{ github.workspace }}/netbox/netbox
           TEST_DB_NAME: test_netbox_librenms_ci
           TEST_REDIS_HOST: localhost
-        run: pytest -n 8 --maxschedchunk=1 --disable-warnings --cov-report=html:coverage_html -o pythonpath=../netbox/netbox
+        run: >-
+          pytest -n 8 --maxschedchunk=1 --disable-warnings
+          --ignore=netbox_librenms_plugin/tests/browser
+          --cov-report=html:coverage_html -o pythonpath=../netbox/netbox
 
       - name: Upload coverage report
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -114,3 +117,31 @@ jobs:
         with:
           name: coverage-report
           path: netbox-librenms-plugin/coverage_html/
+
+  browser-tests:
+    runs-on: ubuntu-latest
+    name: Playwright browser state machine
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: netbox-librenms-plugin
+          persist-credentials: false
+
+      - name: Set up Python 3.13
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.13"
+
+      - name: Install Playwright
+        working-directory: netbox-librenms-plugin
+        run: |
+          pip install -r requirements_dev.txt
+          python -m playwright install --with-deps chromium
+
+      - name: Run browser tests
+        working-directory: netbox-librenms-plugin
+        run: >-
+          pytest -c netbox_librenms_plugin/tests/browser/pytest.ini
+          netbox_librenms_plugin/tests/browser/test_sync_cache_browser.py
