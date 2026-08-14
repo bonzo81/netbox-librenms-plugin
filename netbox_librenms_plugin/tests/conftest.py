@@ -630,7 +630,7 @@ def make_recording_api(url, *, server_key="test", token="test-token"):
 
 
 @pytest.fixture
-def recording_server():
+def recording_server(monkeypatch):
     """Yield a loader that starts a mock LibreNMS server for a recording.
 
     The loader takes a parsed recording dict and returns ``(server, api)`` with
@@ -639,6 +639,8 @@ def recording_server():
     """
     from netbox_librenms_plugin.tests.mock_librenms_server import MockLibreNMSServer
 
+    monkeypatch.setenv("NO_PROXY", "127.0.0.1,localhost")
+    monkeypatch.setenv("no_proxy", "127.0.0.1,localhost")
     started = []
 
     def _load(recording, *, server_key="test"):
