@@ -587,32 +587,6 @@ class TestDeleteNetBoxInterfacesPost:
 
 
 # ===========================================================================
-# cables.py lines 147-149: exception path in process_interface_sync
-# ===========================================================================
-
-
-class TestCablesExceptionPath:
-    def test_exception_hits_147_to_149(self):
-        """logger.exception + failed.append when _passthrough_atomic is used."""
-        from netbox_librenms_plugin.views.sync.cables import SyncCablesView
-
-        v = object.__new__(SyncCablesView)
-        v._librenms_api = MagicMock()
-        v.request = MagicMock()
-
-        def raise_err(iface, links):
-            raise RuntimeError("deliberate for coverage")
-
-        v.process_single_interface = raise_err
-
-        with patch("netbox_librenms_plugin.views.sync.cables.transaction") as mt:
-            mt.atomic = _pa
-            results = v.process_interface_sync([{"row_id": "eth_x"}], [])
-
-        assert "eth_x" in results["failed"]
-
-
-# ===========================================================================
 # devices.py lines 77, 81-82: port_association_mode + invalid poller_group
 # ===========================================================================
 

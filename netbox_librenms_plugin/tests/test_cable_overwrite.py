@@ -15,6 +15,7 @@ force.
 """
 
 import pytest
+from django.core.exceptions import PermissionDenied
 
 from netbox_librenms_plugin.tests.conftest import (
     cable_together,
@@ -503,6 +504,71 @@ class TestSerialCableOverwriteBehaviour:
 
         assert result["status"] == "failed"  # an operational failure, not missing link data
         assert Cable.objects.count() == 0  # the cable and its failed tag stamp roll back together
+
+    @pytest.mark.parametrize(
+        ("error_type", "expected_message"),
+        [
+            (RuntimeError, "Failed to sync cables for interfaces"),
+            (PermissionDenied, "You do not have permission"),
+        ],
+        ids=("operational-failure", "permission-denial"),
+    )
+    def test_existing_cable_tag_signal_failure_is_reported_without_mutation(self, error_type, expected_message):
+        """The real request classifies a model-signal failure and leaves the cable unchanged."""
+        from django.contrib.auth import get_user_model
+        from django.contrib.messages import get_messages
+        from django.core.cache import cache
+        from django.db.models.signals import m2m_changed
+        from django.test import Client
+        from django.urls import reverse
+        from extras.models import TaggedItem
+
+        from netbox_librenms_plugin.views.sync.cables import SyncCablesView
+
+        local_device = make_device(f"signal-local-{error_type.__name__}")
+        local = make_interface(local_device, "Ethernet1")
+        remote_device = make_device(f"signal-remote-{error_type.__name__}")
+        remote = make_interface(remote_device, "Ethernet2")
+        cable = cable_together(local, remote)
+        row = {
+            "_source": "main",
+            "local_port_id": 101,
+            "local_port": local.name,
+            "remote_device": remote_device.name,
+            "remote_port": remote.name,
+            "remote_port_id": 202,
+        }
+        cache.set(
+            object.__new__(SyncCablesView).get_cache_key(local_device, "links", SERVER_KEY),
+            {"links": [row], "snapshot_token": f"signal-{error_type.__name__}"},
+            timeout=300,
+        )
+        user = get_user_model().objects.create_superuser(
+            f"signal-user-{error_type.__name__}",
+            password="pw",
+        )
+        client = Client()
+        client.force_login(user)
+        post_data = _rendered_sync_data(client, local_device, row["local_port_id"])
+
+        def reject_tag_update(sender, instance, action, **kwargs):
+            if action == "pre_add" and instance.pk == cable.pk:
+                raise error_type("tag update rejected")
+
+        dispatch_uid = f"cable-sync-tag-failure-{error_type.__name__}"
+        m2m_changed.connect(reject_tag_update, sender=TaggedItem, dispatch_uid=dispatch_uid)
+        try:
+            response = client.post(
+                reverse("plugins:netbox_librenms_plugin:sync_device_cables", args=[local_device.pk]),
+                post_data,
+            )
+        finally:
+            m2m_changed.disconnect(sender=TaggedItem, dispatch_uid=dispatch_uid)
+
+        assert response.status_code == 302
+        assert any(expected_message in str(message) for message in get_messages(response.wsgi_request))
+        cable.refresh_from_db()
+        assert cable.tags.count() == 0
 
     def test_conflict_on_foreign_cable_without_force_leaves_db_untouched(self):
         from dcim.models import Cable

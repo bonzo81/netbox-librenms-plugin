@@ -11,7 +11,7 @@ ports_url, initial_devices (label-matched device prefill, may be empty).
   <h5 class="modal-title" id="htmx-modal-label">
     <i class="mdi mdi-connection me-1"></i>Pick remote end{% if row %} — {{ row.local_port }}{% endif %}
   </h5>
-  <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+  <button type="button" class="btn-close" onclick="closeHtmxModal()" aria-label="Close"></button>
 </div>
 {% if not row %}
 <div class="modal-body">
@@ -20,7 +20,7 @@ ports_url, initial_devices (label-matched device prefill, may be empty).
   </div>
 </div>
 <div class="modal-footer">
-  <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Close</button>
+  <button type="button" class="btn btn-secondary" onclick="closeHtmxModal()">Close</button>
 </div>
 {% else %}
 <form hx-post="{{ post_url }}" hx-target="#cable-sync-content" hx-swap="innerHTML"
@@ -49,7 +49,7 @@ ports_url, initial_devices (label-matched device prefill, may be empty).
     <div id="remote-picker-ports" class="mt-3"></div>
   </div>
   <div class="modal-footer">
-    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+    <button type="button" class="btn btn-secondary" onclick="closeHtmxModal()">Cancel</button>
     <button type="submit" id="remote-picker-save" class="btn btn-primary" disabled>Use selected port</button>
   </div>
 </form>

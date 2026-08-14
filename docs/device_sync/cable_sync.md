@@ -14,7 +14,7 @@ Console servers (e.g. Avocent ACS, Cisco IOS async lines) don't expose their ser
 
 ### Configuring recognized sensor types
 
-Which sensor types are treated as serial ports — and how the local ports are named — is managed under **Plugins > LibreNMS > Rules & Patterns**, on the **Serial Sensor Types** tab. Each entry maps a LibreNMS `sensor_type` to a local port-name pattern, where `{N}` is replaced by the port number (the trailing integer of the sensor index, e.g. `tsLineActive.2` → `2`).
+Open **LibreNMS → Rules & Patterns**, then select the **Serial Sensor Types** tab. Each entry maps a LibreNMS `sensor_type` to a local port-name pattern. `{N}` is replaced by the port number (the trailing integer of the sensor index, e.g. `tsLineActive.2` → `2`).
 
 Two vendors ship pre-seeded:
 

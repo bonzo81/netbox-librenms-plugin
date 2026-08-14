@@ -345,6 +345,8 @@ class TestRemotePickerEndpoint:
         assert "ttyS5" in content  # row context shown
         assert 'name="q"' in content  # device search input
         assert "remote-picker-ports" in content  # port area placeholder
+        assert content.count('onclick="closeHtmxModal()"') == 2
+        assert 'data-bs-dismiss="modal"' not in content
 
     def test_virtual_interfaces_are_not_listed_or_accepted(self):
         """The normal picker must expose only Interfaces that can terminate a Cable."""

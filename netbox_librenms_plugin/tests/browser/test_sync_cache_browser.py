@@ -2649,3 +2649,44 @@ def test_a_single_offered_bay_leaves_next_enabled(page):
     page.add_script_tag(content=_modal_script("add-bay-next"))
 
     assert page.locator("#add-bay-next").is_enabled()
+
+
+def test_failed_cable_verify_restores_controls_without_a_member_baseline(page):
+    """A failed first verification must not leave the row controls disabled."""
+    html = """
+        <input type="hidden" name="csrfmiddlewaretoken" value="test-csrf">
+        <div data-cable-verify-url="https://plugin.example.com/verify-cable/">
+          <table>
+            <tr data-interface="row-1">
+              <td data-col="selection"><input type="checkbox" name="select"></td>
+              <td data-col="device_selection">
+                <select id="member" data-row-id="row-1" data-interface="row-1">
+                  <option value="1">Member one</option>
+                  <option value="2" selected>Member two</option>
+                </select>
+              </td>
+              <td data-col="actions"><button type="button">Sync Cable</button></td>
+            </tr>
+          </table>
+        </div>
+    """
+
+    page.route(
+        "https://plugin.example.com/verify-cable/",
+        lambda route: route.fulfill(status=503, body="verification unavailable"),
+    )
+    page.set_content(html)
+    page.add_script_tag(path=str(SCRIPT_PATH))
+    with page.expect_response("https://plugin.example.com/verify-cable/"):
+        page.evaluate(
+            """
+            () => {
+                const select = document.querySelector('#member');
+                handleCableChange(select, select.value);
+            }
+            """
+        )
+    page.wait_for_timeout(50)
+
+    assert not page.locator('input[name="select"]').is_disabled()
+    assert not page.locator('td[data-col="actions"] button').is_disabled()

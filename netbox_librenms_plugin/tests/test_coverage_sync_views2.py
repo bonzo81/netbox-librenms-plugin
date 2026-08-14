@@ -350,11 +350,13 @@ class TestSyncCablesViewSuccessPath:
             "remote_port": remote.name,
             "remote_port_id": 20,
         }
+        cache_key = object.__new__(SyncCablesView).get_cache_key(dev_local, "links", server_key)
         cache.set(
-            object.__new__(SyncCablesView).get_cache_key(dev_local, "links", server_key),
+            cache_key,
             {"links": [row], "snapshot_token": "interface-provenance"},
             timeout=300,
         )
+        _seeded_cache_keys.add(cache_key)
         user = get_user_model().objects.create_superuser("cable-enrich-user", "", "pw")
         client = Client()
         client.force_login(user)
@@ -878,31 +880,6 @@ class TestSyncCablesViewHelpers:
         )
 
         assert result == {"status": "invalid", "interface": "Gi0/1"}
-
-
-class TestSyncCablesViewProcessInterfaceSyncException:
-    """Lines 147-149: outer except Exception handler in process_interface_sync."""
-
-    def test_process_single_interface_exception_caught(self):
-        from netbox_librenms_plugin.views.sync.cables import SyncCablesView
-
-        view = object.__new__(SyncCablesView)
-        view.request = _make_request()
-
-        interface = {"row_id": "port1"}
-        cached_links = []
-
-        mock_transaction = MagicMock()
-        # Make __exit__ NOT suppress exceptions (return False)
-        mock_transaction.atomic.return_value.__exit__.return_value = False
-
-        with (
-            patch("netbox_librenms_plugin.views.sync.cables.transaction", mock_transaction),
-            patch.object(view, "process_single_interface", side_effect=RuntimeError("test error")),
-        ):
-            results = view.process_interface_sync([interface], cached_links)
-
-        assert "port1" in results["failed"]
 
 
 def _add_device_view(request, *, add_result=(True, "Device added")):
