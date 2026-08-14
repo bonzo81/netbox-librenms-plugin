@@ -6,6 +6,7 @@ from pathlib import Path
 from playwright import sync_api as playwright
 
 SCRIPT_PATH = Path(__file__).parents[2] / "static" / "netbox_librenms_plugin" / "js" / "librenms_sync.js"
+STYLE_PATH = Path(__file__).parents[2] / "static" / "netbox_librenms_plugin" / "css" / "librenms_sync.css"
 
 
 def _page_html(initial_state, contract=None, active_tab="interfaces"):
@@ -25,15 +26,15 @@ def _page_html(initial_state, contract=None, active_tab="interfaces"):
         <script id="librenms-sync-cache-contract" type="application/json">{contract_json}</script>
         <div id="librenms-sync-tabs" data-active-tab="{active_tab}">
           <ul id="librenmsSync">
-            <li><a id="interfaces-tab" class="{"active" if active_tab == "interfaces" else ""}"
+            <li><a id="interfaces-tab" class="nav-link {"active" if active_tab == "interfaces" else ""}"
                    data-tab="interfaces" href="https://plugin.example.com/page?tab=interfaces"
+                   data-tab-label="Interfaces"
                    aria-controls="interfaces">Interfaces</a></li>
-            <li><a id="ipaddresses-tab" class="{"active" if active_tab == "ipaddresses" else ""}"
+            <li><a id="ipaddresses-tab" class="nav-link {"active" if active_tab == "ipaddresses" else ""}"
                    data-tab="ipaddresses" href="https://plugin.example.com/page?tab=ipaddresses"
+                   data-tab-label="IP Addresses"
                    aria-controls="ipaddresses">IP Addresses</a></li>
           </ul>
-        <span id="interfaces-cache-badge" class="d-none"></span>
-        <span id="ipaddresses-cache-badge" class="d-none"></span>
         <div id="interfaces" class="tab-pane{" active" if active_tab == "interfaces" else ""}"
              data-tab-id="interfaces"
              data-fragment-url="https://plugin.example.com/fragment/interfaces">
@@ -96,8 +97,9 @@ def _state(
     reason=None,
     refresh_error=None,
     refresh_error_timestamp=None,
+    attention_required=None,
 ):
-    return {
+    state = {
         "revision": revision,
         "state": state,
         "source_tab": source_tab,
@@ -108,6 +110,9 @@ def _state(
         "same_user": same_user,
         "snapshot_available": available,
     }
+    if attention_required is not None:
+        state["attention_required"] = attention_required
+    return state
 
 
 def test_cold_tab_does_not_show_stale_state_before_first_refresh():
@@ -131,7 +136,7 @@ def test_cold_tab_does_not_show_stale_state_before_first_refresh():
         page.evaluate("initializeSyncCacheConsistency()")
 
         assert page.locator("#interface-refresh").count() == 1
-        assert page.locator("#interfaces-cache-badge").evaluate("node => node.classList.contains('d-none')")
+        assert not page.locator("#interfaces-tab").evaluate("node => node.classList.contains('sync-cache-unavailable')")
         assert "cache is unavailable" not in page.locator("#interface-sync-content").inner_text()
         browser.close()
 
@@ -161,20 +166,22 @@ def test_cold_tab_does_not_flash_stale_during_tab_navigation():
             """
             () => {
                 initializeSyncCacheConsistency();
-                const badge = document.querySelector('#ipaddresses-cache-badge');
+                const tab = document.querySelector('#ipaddresses-tab');
                 new MutationObserver(() => {
-                    if (!badge.classList.contains('d-none')) {
-                        sessionStorage.setItem('ip-badge-flashed', 'true');
+                    if (tab.classList.contains('sync-cache-unavailable')) {
+                        sessionStorage.setItem('ip-state-flashed', 'true');
                     }
-                }).observe(badge, { attributes: true, attributeFilter: ['class'] });
+                }).observe(tab, { attributes: true, attributeFilter: ['class'] });
             }
             """
         )
         page.locator("#ipaddresses-tab").click()
         page.wait_for_url("**/page?tab=ipaddresses")
 
-        assert page.evaluate("sessionStorage.getItem('ip-badge-flashed')") is None
-        assert page.locator("#ipaddresses-cache-badge").evaluate("node => node.classList.contains('d-none')")
+        assert page.evaluate("sessionStorage.getItem('ip-state-flashed')") is None
+        assert not page.locator("#ipaddresses-tab").evaluate(
+            "node => node.classList.contains('sync-cache-unavailable')"
+        )
         browser.close()
 
 
@@ -232,7 +239,126 @@ def test_refreshing_one_tab_does_not_mark_never_refreshed_tabs_stale():
             refreshed,
         )
 
-        assert page.locator("#ipaddresses-cache-badge").evaluate("node => node.classList.contains('d-none')")
+        assert not page.locator("#ipaddresses-tab").evaluate(
+            "node => node.classList.contains('sync-cache-unavailable')"
+        )
+        browser.close()
+
+
+def test_cache_state_uses_theme_rails_without_resizing():
+    """Available and unavailable states must not add text or change tab dimensions."""
+    initial = {
+        "interfaces": _state("interfaces-ready"),
+        "ipaddresses": _state("ipaddresses-ready"),
+    }
+    invalidated = {
+        "interfaces": initial["interfaces"],
+        "ipaddresses": _state(
+            "mutation",
+            state="invalidated",
+            source_tab="interfaces",
+            available=False,
+        ),
+    }
+
+    with playwright.sync_playwright() as runtime:
+        browser = runtime.chromium.launch(headless=True)
+        page = browser.new_page()
+        page.set_content(_page_html(initial))
+        page.add_style_tag(path=str(STYLE_PATH))
+        page.add_script_tag(path=str(SCRIPT_PATH))
+        page.evaluate(
+            """
+            () => {
+                document.documentElement.style.setProperty('--tblr-warning', 'rgb(245, 159, 0)');
+                document.documentElement.style.setProperty('--tblr-success', 'rgb(47, 179, 68)');
+                document.documentElement.style.setProperty('--tblr-border-radius', '4px');
+                initializeSyncCacheConsistency();
+            }
+            """
+        )
+        width_before = page.locator("#ipaddresses-tab").evaluate("node => node.getBoundingClientRect().width")
+        tab = page.locator("#ipaddresses-tab")
+
+        assert tab.evaluate("node => node.classList.contains('sync-cache-ready')")
+        assert tab.evaluate("node => getComputedStyle(node, '::before').backgroundColor") == "rgb(47, 179, 68)"
+
+        page.evaluate("status => reconcileSyncCacheStatus(status)", invalidated)
+        width_after = tab.evaluate("node => node.getBoundingClientRect().width")
+
+        assert width_after == width_before
+        assert tab.inner_text() == "IP Addresses"
+        assert tab.evaluate("node => node.classList.contains('sync-cache-unavailable')")
+        assert tab.get_attribute("title") == "Cached data is unavailable. Refresh this tab."
+        assert tab.get_attribute("aria-label") == "IP Addresses. Cached data is unavailable."
+        assert tab.evaluate("node => getComputedStyle(node, '::before').height") == "3px"
+        assert tab.evaluate("node => getComputedStyle(node, '::before').backgroundColor") == "rgb(245, 159, 0)"
+
+        page.evaluate("document.documentElement.style.setProperty('--tblr-warning', 'rgb(255, 193, 7)')")
+        assert tab.evaluate("node => getComputedStyle(node, '::before').backgroundColor") == "rgb(255, 193, 7)"
+        browser.close()
+
+
+def test_selecting_an_unavailable_tab_acknowledges_its_attention_state():
+    initial = {
+        "interfaces": _state("interfaces-ready"),
+        "ipaddresses": _state(
+            "mutation",
+            state="invalidated",
+            source_tab="interfaces",
+            available=False,
+        ),
+    }
+
+    with playwright.sync_playwright() as runtime:
+        browser = runtime.chromium.launch(headless=True)
+        page = browser.new_page()
+        page.route(
+            "https://plugin.example.com/page*",
+            lambda route: route.fulfill(
+                body=_page_html(
+                    initial,
+                    active_tab="ipaddresses" if "tab=ipaddresses" in route.request.url else "interfaces",
+                )
+            ),
+        )
+        page.goto("https://plugin.example.com/page")
+        page.add_script_tag(path=str(SCRIPT_PATH))
+        page.evaluate("initializeSyncCacheConsistency()")
+        tab = page.locator("#ipaddresses-tab")
+        assert tab.evaluate("node => node.classList.contains('sync-cache-unavailable')")
+
+        tab.click()
+        page.wait_for_url("**/page?tab=ipaddresses")
+        selected_tab = page.locator("#ipaddresses-tab")
+
+        assert not selected_tab.evaluate("node => node.classList.contains('sync-cache-unavailable')")
+        assert selected_tab.get_attribute("title") is None
+        browser.close()
+
+
+def test_acknowledged_status_does_not_restore_unavailable_attention():
+    initial = {
+        "interfaces": _state("interfaces-ready"),
+        "ipaddresses": _state(
+            "mutation",
+            state="invalidated",
+            source_tab="interfaces",
+            available=False,
+            attention_required=False,
+        ),
+    }
+
+    with playwright.sync_playwright() as runtime:
+        browser = runtime.chromium.launch(headless=True)
+        page = browser.new_page()
+        page.set_content(_page_html(initial))
+        page.add_script_tag(path=str(SCRIPT_PATH))
+        page.evaluate("initializeSyncCacheConsistency()")
+
+        assert not page.locator("#ipaddresses-tab").evaluate(
+            "node => node.classList.contains('sync-cache-unavailable')"
+        )
         browser.close()
 
 
@@ -265,7 +391,7 @@ def test_focus_check_clears_invalidated_rows_and_reports_anonymous_actor():
         page.wait_for_function("document.querySelector('#ipaddress-sync-content').dataset.cacheEmpty === 'true'")
 
         assert page.locator("#ip-action").count() == 0
-        assert not page.locator("#ipaddresses-cache-badge").evaluate("node => node.classList.contains('d-none')")
+        assert page.locator("#ipaddresses-tab").evaluate("node => node.classList.contains('sync-cache-unavailable')")
         notice = page.locator("#librenms-sync-cache-notices").inner_text()
         assert "Some sync data was cleared because another user synchronized data from LibreNMS." in notice
         assert "Interface data" not in notice
@@ -376,7 +502,36 @@ def test_countdown_expiry_removes_rows_and_sync_controls():
 
         assert page.locator("#interface-action").count() == 0
         assert "cache expired" in page.locator("#interface-sync-content").inner_text()
-        assert page.locator("#interfaces-cache-badge").inner_text() == "Expired"
+        assert page.locator("#interfaces-tab").evaluate(
+            "node => !node.classList.contains('sync-cache-ready') && !node.classList.contains('sync-cache-unavailable')"
+        )
+        assert page.locator("#interfaces-tab").get_attribute("title") is None
+        browser.close()
+
+
+def test_hidden_tab_countdown_changes_available_rail_to_unavailable_without_interaction():
+    initial = {
+        "interfaces": _state("before"),
+        "ipaddresses": _state("before-ip"),
+    }
+
+    with playwright.sync_playwright() as runtime:
+        browser = runtime.chromium.launch(headless=True)
+        page = browser.new_page()
+        page.set_content(
+            _page_html(initial).replace(
+                '<button id="ip-action">Sync</button>',
+                '<span id="ip-countdown-timer" data-expiry="2000-01-01T00:00:00Z"></span>'
+                '<button id="ip-action">Sync</button>',
+            )
+        )
+        page.add_script_tag(path=str(SCRIPT_PATH))
+        page.evaluate("initializeSyncCacheConsistency(); initializeCountdown('ip-countdown-timer')")
+        tab = page.locator("#ipaddresses-tab")
+
+        assert not tab.evaluate("node => node.classList.contains('sync-cache-ready')")
+        assert tab.evaluate("node => node.classList.contains('sync-cache-unavailable')")
+        assert page.locator("#ip-action").count() == 0
         browser.close()
 
 
@@ -592,7 +747,7 @@ def test_cross_user_refresh_failure_shows_shared_failure_reason():
 
 
 def test_refreshed_hidden_tab_stays_marked_until_server_rendered_navigation():
-    """A hidden tab with replaced rows must retain its refresh-required badge."""
+    """A hidden tab with replaced rows must retain its unavailable state."""
     initial = {
         "interfaces": _state("before"),
         "ipaddresses": _state("before-ip"),
@@ -623,7 +778,7 @@ def test_refreshed_hidden_tab_stays_marked_until_server_rendered_navigation():
             {"invalidated": invalidated, "refreshed": refreshed},
         )
 
-        assert not page.locator("#ipaddresses-cache-badge").evaluate("node => node.classList.contains('d-none')")
+        assert page.locator("#ipaddresses-tab").evaluate("node => node.classList.contains('sync-cache-unavailable')")
         browser.close()
 
 
@@ -699,7 +854,7 @@ def test_cleanup_failure_removes_controls_from_every_planned_tab():
 
         assert page.locator("#ip-action").count() == 0
         assert "cleanup could not be verified" in page.locator("#ipaddress-sync-content").inner_text()
-        assert page.locator("#ipaddresses-cache-badge").inner_text() == "Stale"
+        assert page.locator("#ipaddresses-tab").evaluate("node => node.classList.contains('sync-cache-unavailable')")
         browser.close()
 
 

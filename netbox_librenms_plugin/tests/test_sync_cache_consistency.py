@@ -106,8 +106,9 @@ def test_cold_sync_page_load_fetches_librenms_status(client, settings):
     assert requested_urls == ["https://primary.example.com/api/v0/devices/7401"]
     assert b"Status Hardware 7401" in response.content
     assert b"Details unavailable" not in response.content
-    badge = _opening_tag(response.content.decode(), "interfaces-cache-badge")
-    assert "d-none" in badge.split('class="', 1)[1].split('"', 1)[0].split()
+    tab_link = _opening_tag(response.content.decode(), "interfaces-tab")
+    assert "sync-cache-ready" not in tab_link.split('class="', 1)[1].split('"', 1)[0].split()
+    assert "sync-cache-unavailable" not in tab_link.split('class="', 1)[1].split('"', 1)[0].split()
 
 
 @pytest.mark.django_db
@@ -937,24 +938,80 @@ def test_refresh_failure_reason_is_anonymous_across_users(settings):
 
 
 @pytest.mark.django_db
-def test_refresh_failed_badge_is_visible_in_server_rendered_tab_region(client, settings):
-    """HTMX navigation must receive a visible stale badge without client-side repair."""
+def test_refresh_failure_marks_server_rendered_tab_without_dynamic_content(client, settings):
+    """HTMX navigation must mark the tab itself and must not add variable-width content."""
     _configure_servers(settings)
-    device = make_device("cache-refresh-failed-badge", librenms_cf={"primary": {"id": 655}})
-    user = make_superuser("cache-refresh-failed-badge-user")
+    device = make_device("cache-refresh-failed-tab", librenms_cf={"primary": {"id": 655}})
+    user = make_superuser("cache-refresh-failed-tab-user")
+    _seed_snapshot("ports", device, "primary", {"ports": [], "port_stack_relationships": {}})
     SyncCacheConsistency(device).mark_refresh_failure(SyncTab.IP_ADDRESSES, "primary", actor_id=user.pk)
     client.force_login(user)
     page_url = reverse("plugins:netbox_librenms_plugin:device_librenms_sync", args=[device.pk])
 
     with patch(
         "netbox_librenms_plugin.librenms_api.requests.get",
-        side_effect=AssertionError("Server-rendered cache state contacted LibreNMS"),
+        side_effect=lambda url, **_kwargs: _device_info_response(url, 655, device.name, "Cache rail hardware"),
     ):
-        response = client.get(page_url, {"server_key": "primary", "tab": SyncTab.IP_ADDRESSES.value})
+        response = client.get(page_url, {"server_key": "primary", "tab": SyncTab.INTERFACES.value})
 
     assert response.status_code == 200
-    badge = _opening_tag(response.content.decode(), "ipaddresses-cache-badge")
-    assert "d-none" not in badge.split('class="', 1)[1].split('"', 1)[0].split()
+    html = response.content.decode()
+    tab_link = _opening_tag(html, "ipaddresses-tab")
+    assert "sync-cache-unavailable" in tab_link.split('class="', 1)[1].split('"', 1)[0].split()
+    assert 'title="Cached data is unavailable. Refresh this tab."' in tab_link
+    assert 'aria-label="IP Addresses. Cached data is unavailable."' in tab_link
+    assert "ipaddresses-cache-badge" not in html
+
+
+@pytest.mark.django_db
+def test_opening_unavailable_tab_acknowledges_only_its_current_revision(client, settings):
+    """Opening an unavailable tab must suppress its marker until a new revision appears."""
+    _configure_servers(settings)
+    device = make_device("cache-tab-acknowledgement", librenms_cf={"primary": {"id": 656}})
+    user = make_superuser("cache-tab-acknowledgement-user")
+    _seed_snapshot("ports", device, "primary", {"ports": [], "port_stack_relationships": {}})
+    coordinator = SyncCacheConsistency(device)
+    coordinator.mark_refresh_failure(SyncTab.IP_ADDRESSES, "primary", actor_id=user.pk)
+    client.force_login(user)
+    page_url = reverse("plugins:netbox_librenms_plugin:device_librenms_sync", args=[device.pk])
+    status_url = reverse(
+        "plugins:netbox_librenms_plugin:sync_cache_status",
+        kwargs={"object_type": "device", "pk": device.pk},
+    )
+
+    def get_page(tab):
+        with patch(
+            "netbox_librenms_plugin.librenms_api.requests.get",
+            side_effect=lambda url, **_kwargs: _device_info_response(
+                url,
+                656,
+                device.name,
+                "Cache acknowledgement hardware",
+            ),
+        ):
+            return client.get(page_url, {"server_key": "primary", "tab": tab.value})
+
+    first_page = get_page(SyncTab.INTERFACES)
+    first_ip_tab = _opening_tag(first_page.content.decode(), "ipaddresses-tab")
+    assert "sync-cache-unavailable" in first_ip_tab.split('class="', 1)[1].split('"', 1)[0].split()
+
+    selected_page = get_page(SyncTab.IP_ADDRESSES)
+    selected_ip_tab = _opening_tag(selected_page.content.decode(), "ipaddresses-tab")
+    assert "sync-cache-unavailable" not in selected_ip_tab.split('class="', 1)[1].split('"', 1)[0].split()
+
+    later_page = get_page(SyncTab.INTERFACES)
+    later_ip_tab = _opening_tag(later_page.content.decode(), "ipaddresses-tab")
+    assert "sync-cache-unavailable" not in later_ip_tab.split('class="', 1)[1].split('"', 1)[0].split()
+    acknowledged_status = client.get(status_url, {"server_key": "primary"}).json()["tabs"]
+    assert acknowledged_status[SyncTab.IP_ADDRESSES.value]["attention_required"] is False
+
+    _seed_snapshot("ip_addresses", device, "primary", {"ip_addresses": []})
+    coordinator.mark_refresh_success(SyncTab.IP_ADDRESSES, "primary", actor_id=user.pk)
+    coordinator.mark_refresh_failure(SyncTab.IP_ADDRESSES, "primary", actor_id=user.pk)
+
+    new_revision_page = get_page(SyncTab.INTERFACES)
+    new_revision_ip_tab = _opening_tag(new_revision_page.content.decode(), "ipaddresses-tab")
+    assert "sync-cache-unavailable" in new_revision_ip_tab.split('class="', 1)[1].split('"', 1)[0].split()
 
 
 def test_cleanup_failure_payload_names_tabs_that_must_fail_closed():
@@ -1069,7 +1126,11 @@ def test_status_fragment_and_invalidated_tab_navigation_never_call_librenms(
     assert fragment_response.status_code == 200
     assert b"Ethernet1" in fragment_response.content
     assert page_response.status_code == 200
-    assert b"Stale" in page_response.content
+    page_html = page_response.content.decode()
+    interface_tab = _opening_tag(page_html, "interfaces-tab")
+    ip_tab = _opening_tag(page_html, "ipaddresses-tab")
+    assert "sync-cache-ready" in interface_tab.split('class="', 1)[1].split('"', 1)[0].split()
+    assert "sync-cache-unavailable" not in ip_tab.split('class="', 1)[1].split('"', 1)[0].split()
     assert b"Details unavailable" in page_response.content
     assert b'id="add-device-modal"' not in page_response.content
     assert b'data-bs-target="#add-device-modal"' not in page_response.content

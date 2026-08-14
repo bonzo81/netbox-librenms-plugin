@@ -44,7 +44,7 @@ class SyncCacheStatusView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
                 "object_type": object_type,
                 "object_id": obj.pk,
                 "server_key": server_key,
-                "tabs": coordinator.status(server_key, actor_id=request_actor_id(request)),
+                "tabs": coordinator.status_for_request(request, server_key),
             }
         )
 

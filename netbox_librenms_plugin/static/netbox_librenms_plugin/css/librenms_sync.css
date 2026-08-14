@@ -1,0 +1,23 @@
+#librenmsSync .nav-link.sync-cache-ready,
+#librenmsSync .nav-link.sync-cache-unavailable {
+    position: relative;
+}
+
+#librenmsSync .nav-link.sync-cache-ready::before,
+#librenmsSync .nav-link.sync-cache-unavailable::before {
+    position: absolute;
+    top: 0;
+    inset-inline: 0;
+    height: 3px;
+    border-radius: var(--tblr-border-radius) var(--tblr-border-radius) 0 0;
+    content: "";
+    pointer-events: none;
+}
+
+#librenmsSync .nav-link.sync-cache-ready::before {
+    background-color: var(--tblr-success);
+}
+
+#librenmsSync .nav-link.sync-cache-unavailable::before {
+    background-color: var(--tblr-warning);
+}

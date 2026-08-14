@@ -25,6 +25,8 @@ from netbox_librenms_plugin.utils import (
 
 logger = logging.getLogger(__name__)
 
+_ACKNOWLEDGED_REVISIONS_SESSION_KEY = "librenms_sync_cache_acknowledged_revisions"
+
 
 class SyncTab(StrEnum):
     """The cache-backed tabs on a LibreNMS object sync page."""
@@ -527,6 +529,51 @@ class SyncCacheConsistency:
                 "same_user": same_user,
                 "snapshot_available": snapshot_available,
             }
+        return result
+
+    def status_for_request(self, request, server_key, *, active_tab=None):
+        """Return status with revision-specific attention state for this browser session."""
+        result = self.status(server_key, actor_id=request_actor_id(request))
+        stored = request.session.get(_ACKNOWLEDGED_REVISIONS_SESSION_KEY)
+        acknowledgements = dict(stored) if isinstance(stored, dict) else {}
+        changed = False
+
+        def acknowledgement_key(tab):
+            return ":".join(
+                (
+                    self.page_object._meta.model_name,
+                    str(self.page_object.pk),
+                    server_key,
+                    tab.value,
+                )
+            )
+
+        for tab in self.applicable_tabs():
+            key = acknowledgement_key(tab)
+            if result[tab.value]["snapshot_available"] and key in acknowledgements:
+                acknowledgements.pop(key)
+                changed = True
+
+        if active_tab is not None:
+            active_state = result[active_tab.value]
+            active_revision = active_state.get("revision")
+            if not active_state["snapshot_available"] and active_revision:
+                key = acknowledgement_key(active_tab)
+                if acknowledgements.get(key) != active_revision:
+                    acknowledgements[key] = active_revision
+                    changed = True
+
+        for tab in self.applicable_tabs():
+            state = result[tab.value]
+            revision = state.get("revision")
+            state["attention_required"] = bool(
+                not state["snapshot_available"]
+                and revision
+                and acknowledgements.get(acknowledgement_key(tab)) != revision
+            )
+
+        if changed:
+            request.session[_ACKNOWLEDGED_REVISIONS_SESSION_KEY] = acknowledgements
         return result
 
 

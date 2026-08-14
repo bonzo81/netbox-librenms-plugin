@@ -6,6 +6,11 @@
 {% load i18n %}
 {% load render_table from django_tables2 %}
 
+{% block head %}
+{{ block.super }}
+<link rel="stylesheet" href="{% static 'netbox_librenms_plugin/css/librenms_sync.css' %}">
+{% endblock %}
+
 {% block javascript %}
 {{ block.super }}
 <script src="{% static 'netbox_librenms_plugin/js/librenms_sync.js' %}"></script>

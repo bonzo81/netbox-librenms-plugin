@@ -354,7 +354,7 @@ function syncCacheController() {
             root._controller.invalidatedLocally.add(tab);
             clearSyncTabContent(tab, syncCacheUnavailableReason(tab, state));
         }
-        updateSyncCacheBadge(tab, state);
+        updateSyncCacheTabState(tab, state);
     });
     return root._controller;
 }
@@ -384,16 +384,34 @@ function isColdSyncCacheState(state) {
     );
 }
 
-function updateSyncCacheBadge(tab, state) {
-    const badge = document.getElementById(`${tab}-cache-badge`);
-    if (!badge) return;
-    if (isColdSyncCacheState(state)) {
-        badge.classList.add('d-none');
-        return;
+function updateSyncCacheTabState(tab, state) {
+    const tabLink = document.getElementById(`${tab}-tab`);
+    if (!tabLink) return;
+    const cold = isColdSyncCacheState(state);
+    const cacheUnavailable = !cold && (
+        !state ||
+        !state.snapshot_available ||
+        ['invalidated', 'refresh_failed', 'missing', 'expired'].includes(state.state)
+    );
+    const ready = !cold && !cacheUnavailable && Boolean(state?.snapshot_available);
+    const unavailable = (
+        cacheUnavailable &&
+        !tabLink.classList.contains('active') &&
+        state?.attention_required !== false
+    );
+    const label = tabLink.dataset.tabLabel || syncCacheLabel(tab);
+    tabLink.classList.toggle('sync-cache-ready', ready);
+    tabLink.classList.toggle('sync-cache-unavailable', unavailable);
+    if (unavailable) {
+        tabLink.setAttribute('aria-label', `${label}. Cached data is unavailable.`);
+        tabLink.setAttribute('title', 'Cached data is unavailable. Refresh this tab.');
+    } else if (ready) {
+        tabLink.setAttribute('aria-label', `${label}. Cached data is available.`);
+        tabLink.setAttribute('title', 'Cached data is available.');
+    } else {
+        tabLink.setAttribute('aria-label', label);
+        tabLink.removeAttribute('title');
     }
-    const unavailable = !state || !state.snapshot_available || ['invalidated', 'refresh_failed', 'missing', 'expired'].includes(state.state);
-    badge.classList.toggle('d-none', !unavailable);
-    badge.textContent = state?.state === 'expired' ? 'Expired' : 'Stale';
 }
 
 function showSyncCacheNotice(message, revision, level = 'warning') {
@@ -486,7 +504,7 @@ function failClosedSyncControls(message) {
     Object.keys(controller.contract).forEach(tab => {
         controller.invalidatedLocally.add(tab);
         clearSyncTabContent(tab, message);
-        updateSyncCacheBadge(tab, { state: 'missing', snapshot_available: false });
+        updateSyncCacheTabState(tab, { state: 'invalidated', snapshot_available: false });
     });
     document.querySelectorAll('#htmx-modal-content button, #htmx-modal-content input, #htmx-modal-content select, #htmx-modal-content textarea')
         .forEach(control => { control.disabled = true; });
@@ -500,7 +518,7 @@ function expireSyncTabFromElement(element) {
     if (!controller) return;
     controller.invalidatedLocally.add(tab);
     clearSyncTabContent(tab, `${syncCacheLabel(tab)} cache expired. Refresh this tab to load current data.`);
-    updateSyncCacheBadge(tab, { state: 'expired', snapshot_available: false });
+    updateSyncCacheTabState(tab, { state: 'expired', snapshot_available: false });
 }
 
 function activeSyncTab() {
@@ -548,7 +566,16 @@ function reconcileSyncCacheStatus(nextStatus) {
             state.refresh_error_timestamp !== prior.refresh_error_timestamp
         );
         const unavailable = !state.snapshot_available || ['invalidated', 'refresh_failed', 'missing'].includes(state.state);
-        updateSyncCacheBadge(tab, state);
+        const locallyUnavailable = (
+            controller.invalidatedLocally.has(tab) &&
+            syncCacheContent(tab)?.dataset.cacheEmpty === 'true'
+        );
+        updateSyncCacheTabState(
+            tab,
+            locallyUnavailable && state.snapshot_available && !revisionChanged
+                ? { state: 'invalidated', snapshot_available: false }
+                : state
+        );
 
         if (unavailable && (revisionChanged || prior.snapshot_available || refreshChanged)) {
             controller.invalidatedLocally.add(tab);
@@ -587,7 +614,7 @@ function reconcileSyncCacheStatus(nextStatus) {
                 fragmentLoads.push(loadSyncCacheFragment(tab));
             } else {
                 controller.invalidatedLocally.add(tab);
-                updateSyncCacheBadge(tab, { state: 'invalidated', snapshot_available: false });
+                updateSyncCacheTabState(tab, { state: 'invalidated', snapshot_available: false });
             }
         } else if (
             state.snapshot_available &&
@@ -671,7 +698,7 @@ function initializeSyncCacheConsistency() {
                     tab,
                     'Cache cleanup could not be verified. Refresh this tab before continuing.'
                 );
-                updateSyncCacheBadge(tab, { state: 'missing', snapshot_available: false });
+                updateSyncCacheTabState(tab, { state: 'invalidated', snapshot_available: false });
             });
             showSyncCacheNotice(
                 'Synchronization succeeded, but related cache cleanup failed. Reload this sync page before continuing.',

@@ -204,7 +204,11 @@ class BaseLibreNMSSyncView(
         sync_cache_status = None
         if render_server_key and render_server_key in mapped_server_keys(obj, render_server_key):
             coordinator = SyncCacheConsistency(obj)
-            sync_cache_status = coordinator.status(render_server_key, actor_id=request.user.pk)
+            sync_cache_status = coordinator.status_for_request(
+                request,
+                render_server_key,
+                active_tab=SyncTab(active_sync_tab),
+            )
 
         active_cache_state = sync_cache_status.get(active_sync_tab) if sync_cache_status else None
         cache_only_device_info = bool(
