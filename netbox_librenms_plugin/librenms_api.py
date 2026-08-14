@@ -104,6 +104,22 @@ class LibreNMSUnreachable(Exception):
     """
 
 
+def _get_selected_server_key():
+    """
+    Return the settings row's selected server key, or None when no row exists.
+
+    A module-level seam on purpose: tests that construct ``LibreNMSAPI`` without a
+    database patch THIS function instead of the ``LibreNMSSettings`` model class —
+    patching the model attribute in ``netbox_librenms_plugin.models`` poisons every
+    module that first imports it while the patch is active (the API-test helper
+    fixture is registered session-wide via ``pytest_plugins``).
+    """
+    from netbox_librenms_plugin.models import LibreNMSSettings
+
+    settings = LibreNMSSettings.objects.first()
+    return settings.selected_server if settings else None
+
+
 class LibreNMSAPI:
     """Client to interact with the LibreNMS API and retrieve interface data for devices."""
 
@@ -153,11 +169,7 @@ class LibreNMSAPI:
         # If no server_key is provided, try to get the selected server from settings
         if not server_key:
             try:
-                from netbox_librenms_plugin.models import LibreNMSSettings
-
-                settings = LibreNMSSettings.objects.first()
-                if settings:
-                    server_key = settings.selected_server
+                server_key = _get_selected_server_key()
             except (ImportError, AttributeError):
                 pass
 

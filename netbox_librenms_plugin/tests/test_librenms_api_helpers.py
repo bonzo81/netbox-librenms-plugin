@@ -7,10 +7,10 @@ import pytest
 
 @pytest.fixture
 def mock_librenms_config():
-    """Mock LibreNMS configuration for tests that request this fixture."""
+    """Mock the LibreNMS configuration boundaries for tests that request this fixture."""
     with (
         patch("netbox_librenms_plugin.librenms_api.get_plugin_config") as mock_config,
-        patch("netbox_librenms_plugin.models.LibreNMSSettings") as mock_settings,
+        patch("netbox_librenms_plugin.librenms_api._get_selected_server_key", return_value=None) as mock_settings,
     ):
         # Default config
         mock_config.return_value = {
@@ -21,6 +21,5 @@ def mock_librenms_config():
                 "verify_ssl": True,
             }
         }
-        mock_settings.objects.filter.return_value.first.return_value = None
 
         yield {"mock_config": mock_config, "mock_settings": mock_settings}
