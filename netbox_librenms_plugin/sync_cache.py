@@ -358,19 +358,30 @@ class SyncCacheConsistency:
         return transition
 
     def _delete_pattern(self, pattern):
-        return int(cache.delete_pattern(pattern) or 0)
+        delete_pattern = getattr(cache, "delete_pattern", None)
+        if not callable(delete_pattern):
+            return 0
+        try:
+            return int(delete_pattern(pattern) or 0)
+        except (AttributeError, NotImplementedError):
+            return 0
 
     @staticmethod
     def _pattern_has_values(pattern):
         """Return whether a snapshot-bound wildcard key currently exists."""
         iter_keys = getattr(cache, "iter_keys", None)
         if callable(iter_keys):
-            return next(iter_keys(pattern), None) is not None
+            try:
+                return next(iter_keys(pattern), None) is not None
+            except (AttributeError, NotImplementedError):
+                return False
         keys = getattr(cache, "keys", None)
         if callable(keys):
-            return bool(keys(pattern))
-        # A backend without wildcard inspection must still receive the delete request.
-        return True
+            try:
+                return bool(keys(pattern))
+            except (AttributeError, NotImplementedError):
+                return False
+        return False
 
     def _tab_has_values(self, tab, server_key):
         """Return whether a tab has a snapshot or snapshot-bound temporary state."""

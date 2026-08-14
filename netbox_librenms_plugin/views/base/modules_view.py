@@ -616,7 +616,12 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         # Python, serving a snapshot post() would fail closed on) and rejects a string-backed
         # id ("10" != 10, emptying the table until a manual refresh). None (unlinked or
         # uncoercible) never matches — post() can't cache without a valid id.
-        current_librenms_id = coerce_librenms_id(self.librenms_api.get_librenms_id(sync_device))
+        if getattr(self, "cache_only", False):
+            current_librenms_id = coerce_librenms_id(
+                self.librenms_api.get_stored_librenms_id(sync_device, server_key=scoped_server)
+            )
+        else:
+            current_librenms_id = coerce_librenms_id(self.librenms_api.get_librenms_id(sync_device))
         if current_librenms_id is None or cached_payload.get("librenms_id") != current_librenms_id:
             cache.delete(cache_key)
             return {"table": None, "object": obj, "cache_expiry": None, "server_key": scoped_server}

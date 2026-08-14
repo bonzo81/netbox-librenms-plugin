@@ -154,7 +154,7 @@ def test_cold_tab_does_not_flash_stale_during_tab_navigation():
         page = browser.new_page()
         page.route(
             "https://plugin.example.com/page*",
-            lambda route: route.fulfill(body=_page_html(initial)),
+            lambda route: route.fulfill(body=_page_html(initial), content_type="text/html"),
         )
         page.route(
             "https://plugin.example.com/status?*",
@@ -185,6 +185,50 @@ def test_cold_tab_does_not_flash_stale_during_tab_navigation():
         browser.close()
 
 
+def test_status_check_queues_one_follow_up_while_a_request_is_in_flight():
+    """A second trigger must observe state that changed during the first request."""
+    initial = {
+        "interfaces": _state("interfaces-ready"),
+        "ipaddresses": _state("ipaddresses-ready"),
+    }
+    changed = {
+        **initial,
+        "ipaddresses": _state(
+            "ipaddresses-invalidated",
+            state="invalidated",
+            source_tab="interfaces",
+            available=False,
+        ),
+    }
+    payloads = [initial, changed]
+    requests = []
+
+    def serve_status(route):
+        requests.append(route.request.url)
+        route.fulfill(json={"tabs": payloads[min(len(requests) - 1, 1)]})
+
+    with playwright.sync_playwright() as runtime:
+        browser = runtime.chromium.launch(headless=True)
+        page = browser.new_page()
+        page.set_content(_page_html(initial))
+        page.route("https://plugin.example.com/status?*", serve_status)
+        page.add_script_tag(path=str(SCRIPT_PATH))
+        page.evaluate(
+            """
+            () => {
+                initializeSyncCacheConsistency();
+                checkSyncCacheStatus();
+                checkSyncCacheStatus();
+            }
+            """
+        )
+        page.wait_for_timeout(100)
+
+        assert len(requests) == 2
+        assert page.locator("#ipaddresses-tab").evaluate("node => node.classList.contains('sync-cache-unavailable')")
+        browser.close()
+
+
 def test_healthy_tab_click_navigates_without_bootstrap_global():
     """A ready tab must load when NetBox does not expose Bootstrap as a global."""
     initial = {
@@ -194,7 +238,7 @@ def test_healthy_tab_click_navigates_without_bootstrap_global():
 
     def serve_page(route):
         active_tab = "ipaddresses" if "tab=ipaddresses" in route.request.url else "interfaces"
-        route.fulfill(body=_page_html(initial, active_tab=active_tab))
+        route.fulfill(body=_page_html(initial, active_tab=active_tab), content_type="text/html")
 
     with playwright.sync_playwright() as runtime:
         browser = runtime.chromium.launch(headless=True)
@@ -595,7 +639,7 @@ def test_initiating_mutation_reports_one_toast_even_when_only_another_server_was
         page = browser.new_page()
         page.route(
             "https://plugin.example.com/page",
-            lambda route: route.fulfill(body=_page_html(initial)),
+            lambda route: route.fulfill(body=_page_html(initial), content_type="text/html"),
         )
         page.route(
             "https://plugin.example.com/status?*",
@@ -805,7 +849,10 @@ def test_initiating_inline_mutation_rebuilds_its_source_fragment():
     with playwright.sync_playwright() as runtime:
         browser = runtime.chromium.launch(headless=True)
         page = browser.new_page()
-        page.route("https://plugin.example.com/page", lambda route: route.fulfill(body=_page_html(initial)))
+        page.route(
+            "https://plugin.example.com/page",
+            lambda route: route.fulfill(body=_page_html(initial), content_type="text/html"),
+        )
         page.route("https://plugin.example.com/status?*", lambda route: route.fulfill(json={"tabs": current}))
         page.route(
             "https://plugin.example.com/fragment/interfaces?*",

@@ -345,6 +345,7 @@ function syncCacheController() {
         requiredSourceFragments: new Set(),
         notifiedRevisions: new Set(),
         checking: null,
+        recheckPending: false,
         lastCheckFailed: false,
         lostFocus: false,
     };
@@ -650,7 +651,11 @@ function isValidSyncCacheStatusPayload(payload, expectedTabs) {
 
 function checkSyncCacheStatus() {
     const controller = syncCacheController();
-    if (!controller || controller.checking) return controller?.checking || Promise.resolve();
+    if (!controller) return Promise.resolve();
+    if (controller.checking) {
+        controller.recheckPending = true;
+        return controller.checking;
+    }
     const url = new URL(controller.root.dataset.statusUrl, window.location.href);
     url.searchParams.set('server_key', controller.root.dataset.serverKey);
     controller.checking = fetch(url, { credentials: 'same-origin', headers: { 'Accept': 'application/json' } })
@@ -669,7 +674,13 @@ function checkSyncCacheStatus() {
             controller.lastCheckFailed = true;
             failClosedSyncControls('Cache status could not be verified. Reload this tab before continuing.');
         })
-        .finally(() => { controller.checking = null; });
+        .finally(() => {
+            controller.checking = null;
+            if (controller.recheckPending) {
+                controller.recheckPending = false;
+                checkSyncCacheStatus();
+            }
+        });
     return controller.checking;
 }
 

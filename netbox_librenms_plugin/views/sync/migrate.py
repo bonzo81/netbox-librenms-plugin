@@ -723,6 +723,7 @@ class MoveInterfaceToWinnerView(_BaseMoveToWinnerView):
         if notes:
             message += " " + "; ".join(notes) + "."
         schedule_request_cache_mutation(request, donor, SyncTab.INTERFACES, server_key)
+        schedule_request_cache_mutation(request, winner, SyncTab.INTERFACES, server_key)
         return _hx_response(request, message, fallback_url=self._fallback_url)
 
 
@@ -826,6 +827,7 @@ class MoveIPAddressToWinnerView(_BaseMoveToWinnerView):
         if notes:
             message += " " + "; ".join(notes) + "."
         schedule_request_cache_mutation(request, donor, SyncTab.IP_ADDRESSES, server_key)
+        schedule_request_cache_mutation(request, winner, SyncTab.IP_ADDRESSES, server_key)
         return _hx_response(request, message, fallback_url=self._fallback_url)
 
 
@@ -952,6 +954,7 @@ class TransferDeviceIPView(_BaseMoveToWinnerView):
                 return self._fail(request, f"Cannot transfer {human}: {exc}", status=409)
 
         schedule_request_cache_mutation(request, donor, SyncTab.IP_ADDRESSES, server_key)
+        schedule_request_cache_mutation(request, winner, SyncTab.IP_ADDRESSES, server_key)
         return _hx_response(
             request,
             f"Transferred {human} ({donor_ip}) to {winner.name}.",

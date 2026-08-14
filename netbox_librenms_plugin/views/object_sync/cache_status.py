@@ -102,12 +102,12 @@ class SyncCacheFragmentView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin
             raise Http404("LibreNMS server is not mapped to this object.")
 
         coordinator = SyncCacheConsistency(obj)
-        if not coordinator.status(server_key, actor_id=request_actor_id(request))[sync_tab.value]["snapshot_available"]:
-            raise Http404("The sync snapshot is not available.")
-
         view_class = self._tab_view(object_type, sync_tab)
         if view_class is None:
             raise Http404("This sync tab is not available for the object type.")
+        tab_status = coordinator.status(server_key, actor_id=request_actor_id(request)).get(sync_tab.value)
+        if not tab_status or not tab_status.get("snapshot_available"):
+            raise Http404("The sync snapshot is not available.")
         tab_view = view_class()
         tab_view.request = copy.copy(request)
         tab_view.cache_only = True

@@ -63,7 +63,7 @@ class TestUnresolvedServerKeyVCLeak:
         # Sanity: the header failed closed (unresolved -> librenms_id None).
         assert ctx.get("has_librenms_id") is False
         # The bug: the VC-status block leaks the default server's linkage on an unresolved key.
-        assert ctx.get("sync_device_has_librenms_id") is not True, (
+        assert "sync_device_has_librenms_id" not in ctx, (
             "Unresolved ?server_key leaked the default server's VC sync-device linkage "
             "(get_context_data VC block ran without the unresolved guard)"
         )

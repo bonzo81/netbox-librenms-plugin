@@ -759,7 +759,7 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObject
                     {"links": links_data},
                     timeout=self.librenms_api.cache_timeout,
                 )
-        else:
+        elif not getattr(self, "cache_only", False):
             # Write enriched data back, preserving original TTL
             remaining_ttl = cache_remaining_ttl(cache, cache_key)
             if remaining_ttl and remaining_ttl > 0:

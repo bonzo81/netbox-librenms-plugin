@@ -10,18 +10,21 @@ from django.apps import apps as django_apps
 from django.contrib.auth import get_user_model
 from django.core.cache import cache
 from django.db import transaction
+from django.test import override_settings
 from django.urls import reverse
 from ipam.models import IPAddress, VLAN
 from requests import Response
 
 from netbox_librenms_plugin.sync_cache import CacheMutationTransition, SyncCacheConsistency, SyncTab
 from netbox_librenms_plugin.tests.conftest import (
+    ip_on,
     make_device,
     make_interface,
     make_superuser,
+    make_vm,
     make_virtual_chassis_members,
 )
-from netbox_librenms_plugin.utils import set_librenms_device_id
+from netbox_librenms_plugin.utils import mark_librenms_migrated, set_librenms_device_id
 
 
 def _configure_servers(settings):
@@ -84,6 +87,142 @@ def _opening_tag(html, element_id):
     return html[html.rfind("<", 0, position) : html.index(">", position) + 1]
 
 
+def _tab_classes(html, element_id):
+    """Return the classes from one rendered tab link."""
+    opening_tag = _opening_tag(html, element_id)
+    return opening_tag.split('class="', 1)[1].split('"', 1)[0].split()
+
+
+@pytest.mark.parametrize(
+    "invalid_timeout",
+    [None, True, "600", float("inf"), float("nan"), 0, -1],
+)
+def test_configured_cache_timeout_rejects_invalid_values(settings, invalid_timeout):
+    """Invalid plugin values must fall back to a finite positive cache lifetime."""
+    from netbox_librenms_plugin.librenms_api import DEFAULT_CACHE_TIMEOUT, configured_cache_timeout
+
+    _configure_servers(settings)
+    settings.PLUGINS_CONFIG["netbox_librenms_plugin"]["servers"]["primary"]["cache_timeout"] = invalid_timeout
+
+    assert configured_cache_timeout("primary") == DEFAULT_CACHE_TIMEOUT
+
+
+@pytest.mark.django_db
+@override_settings(
+    CACHES={
+        "default": {
+            "BACKEND": "django.core.cache.backends.locmem.LocMemCache",
+            "LOCATION": "sync-cache-without-wildcard-operations",
+        }
+    }
+)
+def test_mutation_succeeds_when_cache_backend_has_no_wildcard_api(
+    settings,
+    django_capture_on_commit_callbacks,
+):
+    """Exact snapshot cleanup must not fail on a standard cache backend."""
+    _configure_servers(settings)
+    device = make_device("cache-standard-backend", librenms_cf={"primary": {"id": 6401}})
+    coordinator = SyncCacheConsistency(device)
+    _seed_snapshot("ports", device, "primary")
+    _seed_snapshot("links", device, "primary")
+    cache.set(f"{_cache_key('links', device, 'primary')}:manual-remote:row", 1, timeout=300)
+
+    with django_capture_on_commit_callbacks(execute=True):
+        transition = coordinator.schedule_mutation(SyncTab.INTERFACES, "primary", actor_id=1)
+
+    assert transition.error is None
+    assert cache.get(_cache_key("links", device, "primary")) is None
+
+
+@pytest.mark.django_db
+def test_virtual_machine_unsupported_cache_fragment_returns_404(client, settings):
+    """A valid tab name that is unsupported for VMs must fail closed without a key error."""
+    _configure_servers(settings)
+    vm = make_vm("cache-unsupported-fragment")
+    set_librenms_device_id(vm, 6402, "primary")
+    vm.save(update_fields=["custom_field_data"])
+    client.force_login(make_superuser("cache-unsupported-fragment-user"))
+    url = reverse(
+        "plugins:netbox_librenms_plugin:sync_cache_fragment",
+        kwargs={"object_type": "virtualmachine", "pk": vm.pk, "tab": SyncTab.CABLES.value},
+    )
+
+    response = client.get(url, {"server_key": "primary"})
+
+    assert response.status_code == 404
+
+
+@pytest.mark.django_db
+def test_cable_cache_fragment_does_not_rewrite_the_snapshot(client, settings):
+    """A cache-only cable fragment may enrich its response but must not rewrite shared state."""
+    _configure_servers(settings)
+    local_device = make_device("cache-only-cable-local", librenms_cf={"primary": {"id": 6403}})
+    local = make_interface(local_device, "Ethernet1")
+    remote_device = make_device("cache-only-cable-remote", librenms_cf={"primary": {"id": 6404}})
+    remote = make_interface(remote_device, "Ethernet2")
+    set_librenms_device_id(local, 7403, "primary")
+    set_librenms_device_id(remote, 7404, "primary")
+    local.save(update_fields=["custom_field_data"])
+    remote.save(update_fields=["custom_field_data"])
+    payload = {
+        "links": [
+            {
+                "local_port_id": 7403,
+                "local_port": local.name,
+                "remote_port_id": 7404,
+                "remote_port": remote.name,
+                "remote_hostname": remote_device.name,
+                "remote_device_id": 6404,
+            }
+        ]
+    }
+    cache_key = _cache_key("links", local_device, "primary")
+    cache.set(cache_key, payload, timeout=300)
+    client.force_login(make_superuser("cache-only-cable-user"))
+    url = reverse(
+        "plugins:netbox_librenms_plugin:sync_cache_fragment",
+        kwargs={"object_type": "device", "pk": local_device.pk, "tab": SyncTab.CABLES.value},
+    )
+
+    with patch(
+        "netbox_librenms_plugin.librenms_api.requests.get",
+        side_effect=AssertionError("The cable fragment contacted LibreNMS"),
+    ):
+        response = client.get(url, {"server_key": "primary"})
+
+    assert response.status_code == 200
+    assert cache.get(cache_key) == payload
+
+
+@pytest.mark.django_db
+def test_module_cache_fragment_does_not_discover_a_missing_host_id(client, settings):
+    """An OOB-mapped module fragment must not discover a missing host identity."""
+    _configure_servers(settings)
+    device = make_device(
+        "cache-only-module",
+        librenms_cf={"primary": {"oob": {"id": 6405}}},
+    )
+    cache.set(
+        _cache_key("inventory", device, "primary"),
+        {"inventory": [], "librenms_id": 9999, "oob_librenms_id": 6405},
+        timeout=300,
+    )
+    client.force_login(make_superuser("cache-only-module-user"))
+    url = reverse(
+        "plugins:netbox_librenms_plugin:sync_cache_fragment",
+        kwargs={"object_type": "device", "pk": device.pk, "tab": SyncTab.MODULES.value},
+    )
+
+    with patch(
+        "netbox_librenms_plugin.librenms_api.requests.get",
+        side_effect=AssertionError("The module fragment contacted LibreNMS"),
+    ):
+        response = client.get(url, {"server_key": "primary"})
+
+    assert response.status_code == 200
+
+
 @pytest.mark.django_db
 def test_cold_sync_page_load_fetches_librenms_status(client, settings):
     """The status card must load even when the active tab has no snapshot."""
@@ -106,9 +245,9 @@ def test_cold_sync_page_load_fetches_librenms_status(client, settings):
     assert requested_urls == ["https://primary.example.com/api/v0/devices/7401"]
     assert b"Status Hardware 7401" in response.content
     assert b"Details unavailable" not in response.content
-    tab_link = _opening_tag(response.content.decode(), "interfaces-tab")
-    assert "sync-cache-ready" not in tab_link.split('class="', 1)[1].split('"', 1)[0].split()
-    assert "sync-cache-unavailable" not in tab_link.split('class="', 1)[1].split('"', 1)[0].split()
+    tab_classes = _tab_classes(response.content.decode(), "interfaces-tab")
+    assert "sync-cache-ready" not in tab_classes
+    assert "sync-cache-unavailable" not in tab_classes
 
 
 @pytest.mark.django_db
@@ -674,6 +813,116 @@ def test_interface_delete_without_posted_server_uses_active_namespace(
 
 
 @pytest.mark.django_db
+def test_interface_delete_succeeds_without_a_configured_librenms_server(client, settings):
+    """A NetBox-only deletion must not depend on constructing a LibreNMS client."""
+    plugin_config = deepcopy(settings.PLUGINS_CONFIG)
+    plugin_settings = plugin_config["netbox_librenms_plugin"]
+    plugin_settings["servers"] = {}
+    plugin_settings.pop("librenms_url", None)
+    plugin_settings.pop("api_token", None)
+    settings.PLUGINS_CONFIG = plugin_config
+    device = make_device("cache-delete-without-server")
+    interface = make_interface(device, "Ethernet1", iface_type="1000base-t")
+    client.force_login(make_superuser("cache-delete-without-server-user"))
+    url = reverse(
+        "plugins:netbox_librenms_plugin:delete_netbox_interfaces",
+        kwargs={"object_type": "device", "object_id": device.pk},
+    )
+
+    response = client.post(url, {"interface_ids": [str(interface.pk)]})
+
+    assert response.status_code == 200
+    assert not type(interface).objects.filter(pk=interface.pk).exists()
+
+
+def _mark_migrated_donor(donor, winner):
+    """Persist one real server-scoped donor marker for migration endpoint tests."""
+    mark_librenms_migrated(donor, winner.pk, "primary")
+    donor.save(update_fields=["custom_field_data"])
+
+
+@pytest.mark.django_db
+def test_interface_move_invalidates_winner_dependent_snapshots(
+    client,
+    settings,
+    django_capture_on_commit_callbacks,
+):
+    """Moving an interface must publish the cache transition for its new owner too."""
+    _configure_servers(settings)
+    donor = make_device("cache-move-interface-donor", librenms_cf={"primary": {"id": 6410}})
+    winner = make_device("cache-move-interface-winner", librenms_cf={"primary": {"id": 6411}})
+    _mark_migrated_donor(donor, winner)
+    interface = make_interface(donor, "Ethernet1", iface_type="1000base-t")
+    _seed_snapshot("ip_addresses", winner, "primary")
+    client.force_login(make_superuser("cache-move-interface-user"))
+    url = reverse("plugins:netbox_librenms_plugin:interface_move_to_winner", args=[interface.pk])
+
+    with django_capture_on_commit_callbacks(execute=True):
+        response = client.post(url, {"server_key": "primary"}, HTTP_HX_REQUEST="true")
+
+    assert response.status_code == 200
+    interface.refresh_from_db()
+    assert interface.device_id == winner.pk
+    assert cache.get(_cache_key("ip_addresses", winner, "primary")) is None
+
+
+@pytest.mark.django_db
+def test_ip_move_invalidates_winner_dependent_snapshots(
+    client,
+    settings,
+    django_capture_on_commit_callbacks,
+):
+    """Moving an address must publish the cache transition for its new owner too."""
+    _configure_servers(settings)
+    donor = make_device("cache-move-ip-donor", librenms_cf={"primary": {"id": 6412}})
+    winner = make_device("cache-move-ip-winner", librenms_cf={"primary": {"id": 6413}})
+    _mark_migrated_donor(donor, winner)
+    address = ip_on(donor, "198.18.20.10/24", "Ethernet1")
+    make_interface(winner, "Ethernet1", iface_type="1000base-t")
+    _seed_snapshot("ports", winner, "primary")
+    client.force_login(make_superuser("cache-move-ip-user"))
+    url = reverse("plugins:netbox_librenms_plugin:ipaddress_move_to_winner", args=[address.pk])
+
+    with django_capture_on_commit_callbacks(execute=True):
+        response = client.post(url, {"server_key": "primary"}, HTTP_HX_REQUEST="true")
+
+    assert response.status_code == 200
+    address.refresh_from_db()
+    assert address.assigned_object.device_id == winner.pk
+    assert cache.get(_cache_key("ports", winner, "primary")) is None
+
+
+@pytest.mark.django_db
+def test_device_ip_transfer_invalidates_winner_dependent_snapshots(
+    client,
+    settings,
+    django_capture_on_commit_callbacks,
+):
+    """Transferring a device IP role must publish the cache transition for the winner too."""
+    _configure_servers(settings)
+    donor = make_device("cache-transfer-ip-donor", librenms_cf={"primary": {"id": 6414}})
+    winner = make_device("cache-transfer-ip-winner", librenms_cf={"primary": {"id": 6415}})
+    _mark_migrated_donor(donor, winner)
+    address = ip_on(winner, "198.18.21.10/24", "Ethernet1")
+    donor.primary_ip4 = address
+    donor.save(update_fields=["primary_ip4"])
+    _seed_snapshot("ports", winner, "primary")
+    client.force_login(make_superuser("cache-transfer-ip-user"))
+    url = reverse(
+        "plugins:netbox_librenms_plugin:device_transfer_ip",
+        kwargs={"pk": donor.pk, "ip_kind": "primary4"},
+    )
+
+    with django_capture_on_commit_callbacks(execute=True):
+        response = client.post(url, {"server_key": "primary"}, HTTP_HX_REQUEST="true")
+
+    assert response.status_code == 200
+    winner.refresh_from_db()
+    assert winner.primary_ip4_id == address.pk
+    assert cache.get(_cache_key("ports", winner, "primary")) is None
+
+
+@pytest.mark.django_db
 def test_inline_relationship_noop_preserves_other_snapshots(
     client,
     settings,
@@ -840,7 +1089,9 @@ def test_cleanup_failure_invalidates_every_dependent_tab(
         transition = coordinator.schedule_mutation(SyncTab.INTERFACES, "primary", actor_id=1)
 
     assert transition.error is not None
-    assert cache.get(coordinator.state_key(SyncTab.INTERFACES, "primary"))["state"] == "locally_changed"
+    source_state = cache.get(coordinator.state_key(SyncTab.INTERFACES, "primary"))
+    assert source_state is not None
+    assert source_state["state"] == "locally_changed"
     for tab in (SyncTab.CABLES, SyncTab.IP_ADDRESSES, SyncTab.MODULES, SyncTab.VLANS):
         state = cache.get(coordinator.state_key(tab, "primary"))
         assert state["state"] == "invalidated"
@@ -881,7 +1132,9 @@ def test_cleanup_failure_does_not_mark_tabs_without_cache_state(
         transition = coordinator.schedule_mutation(SyncTab.INTERFACES, "primary", actor_id=1)
 
     assert transition.error is not None
-    assert cache.get(coordinator.state_key(SyncTab.CABLES, "primary"))["state"] == "invalidated"
+    cable_state = cache.get(coordinator.state_key(SyncTab.CABLES, "primary"))
+    assert cable_state is not None
+    assert cable_state["state"] == "invalidated"
     for tab in (SyncTab.IP_ADDRESSES, SyncTab.MODULES, SyncTab.VLANS):
         assert cache.get(coordinator.state_key(tab, "primary")) is None
 
@@ -957,7 +1210,7 @@ def test_refresh_failure_marks_server_rendered_tab_without_dynamic_content(clien
     assert response.status_code == 200
     html = response.content.decode()
     tab_link = _opening_tag(html, "ipaddresses-tab")
-    assert "sync-cache-unavailable" in tab_link.split('class="', 1)[1].split('"', 1)[0].split()
+    assert "sync-cache-unavailable" in _tab_classes(html, "ipaddresses-tab")
     assert 'title="Cached data is unavailable. Refresh this tab."' in tab_link
     assert 'aria-label="IP Addresses. Cached data is unavailable."' in tab_link
     assert "ipaddresses-cache-badge" not in html
@@ -992,16 +1245,13 @@ def test_opening_unavailable_tab_acknowledges_only_its_current_revision(client, 
             return client.get(page_url, {"server_key": "primary", "tab": tab.value})
 
     first_page = get_page(SyncTab.INTERFACES)
-    first_ip_tab = _opening_tag(first_page.content.decode(), "ipaddresses-tab")
-    assert "sync-cache-unavailable" in first_ip_tab.split('class="', 1)[1].split('"', 1)[0].split()
+    assert "sync-cache-unavailable" in _tab_classes(first_page.content.decode(), "ipaddresses-tab")
 
     selected_page = get_page(SyncTab.IP_ADDRESSES)
-    selected_ip_tab = _opening_tag(selected_page.content.decode(), "ipaddresses-tab")
-    assert "sync-cache-unavailable" not in selected_ip_tab.split('class="', 1)[1].split('"', 1)[0].split()
+    assert "sync-cache-unavailable" not in _tab_classes(selected_page.content.decode(), "ipaddresses-tab")
 
     later_page = get_page(SyncTab.INTERFACES)
-    later_ip_tab = _opening_tag(later_page.content.decode(), "ipaddresses-tab")
-    assert "sync-cache-unavailable" not in later_ip_tab.split('class="', 1)[1].split('"', 1)[0].split()
+    assert "sync-cache-unavailable" not in _tab_classes(later_page.content.decode(), "ipaddresses-tab")
     acknowledged_status = client.get(status_url, {"server_key": "primary"}).json()["tabs"]
     assert acknowledged_status[SyncTab.IP_ADDRESSES.value]["attention_required"] is False
 
@@ -1010,8 +1260,7 @@ def test_opening_unavailable_tab_acknowledges_only_its_current_revision(client, 
     coordinator.mark_refresh_failure(SyncTab.IP_ADDRESSES, "primary", actor_id=user.pk)
 
     new_revision_page = get_page(SyncTab.INTERFACES)
-    new_revision_ip_tab = _opening_tag(new_revision_page.content.decode(), "ipaddresses-tab")
-    assert "sync-cache-unavailable" in new_revision_ip_tab.split('class="', 1)[1].split('"', 1)[0].split()
+    assert "sync-cache-unavailable" in _tab_classes(new_revision_page.content.decode(), "ipaddresses-tab")
 
 
 def test_cleanup_failure_payload_names_tabs_that_must_fail_closed():
@@ -1127,10 +1376,8 @@ def test_status_fragment_and_invalidated_tab_navigation_never_call_librenms(
     assert b"Ethernet1" in fragment_response.content
     assert page_response.status_code == 200
     page_html = page_response.content.decode()
-    interface_tab = _opening_tag(page_html, "interfaces-tab")
-    ip_tab = _opening_tag(page_html, "ipaddresses-tab")
-    assert "sync-cache-ready" in interface_tab.split('class="', 1)[1].split('"', 1)[0].split()
-    assert "sync-cache-unavailable" not in ip_tab.split('class="', 1)[1].split('"', 1)[0].split()
+    assert "sync-cache-ready" in _tab_classes(page_html, "interfaces-tab")
+    assert "sync-cache-unavailable" not in _tab_classes(page_html, "ipaddresses-tab")
     assert b"Details unavailable" in page_response.content
     assert b'id="add-device-modal"' not in page_response.content
     assert b'data-bs-target="#add-device-modal"' not in page_response.content

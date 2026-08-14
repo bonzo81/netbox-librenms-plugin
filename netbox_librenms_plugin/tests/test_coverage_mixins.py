@@ -1229,8 +1229,8 @@ class TestUpdateInterfaceVlanAssignmentBranches:
         assert result["untagged_set"] is None
         iface.save.assert_called()
 
-    def test_tagged_vlans_cleared_when_no_tagged_vids(self):
-        """tagged_vlans.clear() called when tagged_vlans list is empty."""
+    def test_tagged_vlans_not_cleared_when_no_tagged_vids(self):
+        """Keep existing tagged VLANs when the payload has no tagged VIDs."""
         mixin = self._make_mixin()
         iface = self._make_interface()
 

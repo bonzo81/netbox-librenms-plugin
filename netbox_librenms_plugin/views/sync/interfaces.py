@@ -1202,7 +1202,8 @@ class DeleteNetBoxInterfacesView(
         try:
             server_key = self.resolve_posted_server_key(request.POST)
         except (KeyError, ValueError):
-            return JsonResponse({"error": "No configured LibreNMS server is available."}, status=400)
+            server_key = None
+            logger.warning("Deleting NetBox interfaces without cache cleanup because no LibreNMS server is configured")
 
         interface_ids = request.POST.getlist("interface_ids")
 
@@ -1268,7 +1269,7 @@ class DeleteNetBoxInterfacesView(
             response_data["errors"] = errors
             response_data["message"] += f" with {len(errors)} error(s)"
 
-        if deleted_count:
+        if deleted_count and server_key:
             schedule_request_cache_mutation(
                 request,
                 obj,

@@ -1,4 +1,5 @@
 import logging
+import math
 import urllib.parse
 
 import requests
@@ -22,11 +23,18 @@ logger = logging.getLogger(__name__)
 def configured_cache_timeout(server_key):
     """Return the cache lifetime configured for one LibreNMS server."""
     servers_config = get_plugin_config("netbox_librenms_plugin", "servers")
+    timeout = None
     if isinstance(servers_config, dict):
         server_config = servers_config.get(server_key)
         if isinstance(server_config, dict):
-            return server_config.get("cache_timeout", DEFAULT_CACHE_TIMEOUT)
-    return get_plugin_config("netbox_librenms_plugin", "cache_timeout", DEFAULT_CACHE_TIMEOUT)
+            timeout = server_config.get("cache_timeout")
+    if timeout is None:
+        timeout = get_plugin_config("netbox_librenms_plugin", "cache_timeout", DEFAULT_CACHE_TIMEOUT)
+    if isinstance(timeout, bool) or not isinstance(timeout, (int, float)):
+        return DEFAULT_CACHE_TIMEOUT
+    if not math.isfinite(timeout) or timeout <= 0:
+        return DEFAULT_CACHE_TIMEOUT
+    return int(timeout)
 
 
 def build_librenms_api(server_key):
