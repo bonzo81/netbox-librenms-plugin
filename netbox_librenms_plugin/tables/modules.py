@@ -449,6 +449,7 @@ class LibreNMSModuleTable(tables.Table):
                     "suggested_label": suggestion.get("label", ""),
                     "librenms_name": suggestion.get("librenms_name", ""),
                     "librenms_class": suggestion.get("librenms_class", ""),
+                    "server_key": getattr(self, "server_key", "") or "",
                 }
             )
             return format_html(

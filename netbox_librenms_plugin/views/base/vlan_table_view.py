@@ -5,6 +5,7 @@ from django.views import View
 
 from netbox_librenms_plugin.constants import LIBRENMS_VLAN_STATE_ACTIVE
 from netbox_librenms_plugin.tables.vlans import LibreNMSVLANTable
+from netbox_librenms_plugin.sync_cache import SyncCacheConsistency, SyncTab, request_actor_id
 from netbox_librenms_plugin.utils import (
     cache_remaining_ttl,
     coerce_librenms_id,
@@ -82,6 +83,11 @@ class BaseVLANTableView(
             # cache is scoped by server_key, so evict the same scoped keys.
             cache.delete(self.get_cache_key(obj, "vlans", server_key))
             cache.delete(self.get_last_fetched_key(obj, "vlans", server_key))
+            SyncCacheConsistency(obj, cache_timeout=self.librenms_api.cache_timeout).mark_refresh_failure(
+                SyncTab.VLANS,
+                server_key,
+                actor_id=request_actor_id(request),
+            )
             messages.error(request, "Device not found in LibreNMS.")
             return self.render_sync_partial(
                 request,
@@ -95,12 +101,22 @@ class BaseVLANTableView(
         if not success:
             cache.delete(self.get_cache_key(obj, "vlans", server_key))
             cache.delete(self.get_last_fetched_key(obj, "vlans", server_key))
+            SyncCacheConsistency(obj, cache_timeout=self.librenms_api.cache_timeout).mark_refresh_failure(
+                SyncTab.VLANS,
+                server_key,
+                actor_id=request_actor_id(request),
+            )
             messages.error(request, error_msg)
             return self.render_sync_partial(
                 request, obj, server_key, {"vlan_sync": self._get_error_context(obj, error_msg, server_key=server_key)}
             )
 
         messages.success(request, "VLAN data refreshed successfully.")
+        SyncCacheConsistency(obj, cache_timeout=self.librenms_api.cache_timeout).mark_refresh_success(
+            SyncTab.VLANS,
+            server_key,
+            actor_id=request_actor_id(request),
+        )
 
         return self.render_sync_partial(
             request, obj, server_key, {"vlan_sync": self.get_vlan_context(request, obj, server_key)}

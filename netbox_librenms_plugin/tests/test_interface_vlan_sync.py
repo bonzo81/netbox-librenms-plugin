@@ -331,7 +331,7 @@ class TestInterfaceVlanSync:
 
         assert mock_interface.mode == "access"
         assert mock_interface.untagged_vlan == mock_vlan
-        mock_interface.tagged_vlans.clear.assert_called_once()
+        mock_interface.tagged_vlans.clear.assert_not_called()
 
     def test_update_interface_vlan_assignment_tagged_mode(self, mock_librenms_config):
         """Test that tagged mode is set for trunk ports."""
@@ -397,7 +397,7 @@ class TestInterfaceVlanSync:
 
         assert result["missing_vlans"] == [100, 200, 300]
         assert mock_interface.untagged_vlan is None
-        mock_interface.tagged_vlans.set.assert_called_once_with([])
+        mock_interface.tagged_vlans.set.assert_not_called()
 
     def test_update_interface_vlan_assignment_respects_group_selection(self, mock_librenms_config):
         """Test that VLAN group selection is respected."""

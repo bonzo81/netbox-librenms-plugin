@@ -1243,7 +1243,7 @@ class TestUpdateInterfaceVlanAssignmentBranches:
             lookup_maps,
         )
 
-        iface.tagged_vlans.clear.assert_called_once()
+        iface.tagged_vlans.clear.assert_not_called()
         assert result["tagged_set"] == []
 
     def test_backward_compat_single_group_id_string(self):

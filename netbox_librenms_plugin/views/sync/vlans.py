@@ -12,6 +12,11 @@ from django.views import View
 from ipam.models import VLAN, VLANGroup
 from utilities.exceptions import PermissionsViolation
 
+from netbox_librenms_plugin.sync_cache import (
+    SyncTab,
+    apply_request_cache_transition,
+    schedule_request_cache_mutation,
+)
 from netbox_librenms_plugin.utils import acquire_advisory_transaction_lock
 from netbox_librenms_plugin.views.mixins import (
     CacheMixin,
@@ -316,4 +321,11 @@ class SyncVLANsView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreN
         else:
             messages.warning(request, "No VLANs were created or updated.")
 
-        return self._redirect(object_type, object_id)
+        if created_count or updated_count:
+            schedule_request_cache_mutation(
+                request,
+                obj,
+                SyncTab.VLANS,
+                self._post_server_key,
+            )
+        return apply_request_cache_transition(request, self._redirect(object_type, object_id))

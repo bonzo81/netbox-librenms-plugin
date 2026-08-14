@@ -5730,6 +5730,24 @@ class TestInterfacePortIdActiveServerScope:
     row's interface index then disagrees with the interface match, which uses the active key.
     """
 
+    @pytest.fixture(autouse=True)
+    def _configure_default_server(self, settings):
+        """Configure the bound API key without a suite-wide configuration mock."""
+        from copy import deepcopy
+
+        plugin_config = deepcopy(settings.PLUGINS_CONFIG)
+        plugin_config["netbox_librenms_plugin"]["servers"] = {
+            "default": {
+                "librenms_url": "https://default.example.com",
+                "api_token": "test-token",
+            },
+            "server2": {
+                "librenms_url": "https://server2.example.com",
+                "api_token": "test-token",
+            },
+        }
+        settings.PLUGINS_CONFIG = plugin_config
+
     def _real_default_api(self):
         from netbox_librenms_plugin.librenms_api import LibreNMSAPI
 

@@ -3,11 +3,18 @@ import re
 from django.conf import settings as django_settings
 from django.contrib import messages
 from django.shortcuts import render
+from django.urls import reverse
 from netbox.views import generic
 
 from netbox_librenms_plugin.forms import AddToLIbreSNMPV1V2, AddToLIbreSNMPV3
 from netbox_librenms_plugin.import_utils import _determine_device_name
 from netbox_librenms_plugin.import_utils.virtual_chassis import _generate_vc_member_name
+from netbox_librenms_plugin.sync_cache import (
+    SyncCacheConsistency,
+    SyncTab,
+    configured_cache_timeout,
+    mapped_server_keys,
+)
 from netbox_librenms_plugin.utils import (
     coerce_librenms_id,
     find_matching_platform,
@@ -267,6 +274,46 @@ class BaseLibreNMSSyncView(
                 **self._build_migrated_context(obj, self._scoped_render_server_key or self.active_server_key),
             }
         )
+
+        server_key = context["server_key"]
+        if server_key and server_key in mapped_server_keys(obj, server_key):
+            object_type = obj._meta.model_name
+            coordinator = SyncCacheConsistency(obj, cache_timeout=configured_cache_timeout())
+            sync_cache_status = coordinator.status(server_key, actor_id=request.user.pk)
+            context_names = {
+                SyncTab.INTERFACES: "interface_sync",
+                SyncTab.CABLES: "cable_sync",
+                SyncTab.IP_ADDRESSES: "ip_sync",
+                SyncTab.MODULES: "module_sync",
+                SyncTab.VLANS: "vlan_sync",
+            }
+            for sync_tab in coordinator.applicable_tabs():
+                if sync_cache_status[sync_tab.value]["snapshot_available"]:
+                    continue
+                context_name = context_names[sync_tab]
+                tab_context = context.get(context_name)
+                if isinstance(tab_context, dict):
+                    context[context_name] = {
+                        **tab_context,
+                        "table": None,
+                        "cache_expiry": None,
+                    }
+            context.update(
+                {
+                    "sync_cache_status": sync_cache_status,
+                    "sync_cache_status_url": reverse(
+                        "plugins:netbox_librenms_plugin:sync_cache_status",
+                        kwargs={"object_type": object_type, "pk": obj.pk},
+                    ),
+                    "sync_cache_fragment_urls": {
+                        tab.value: reverse(
+                            "plugins:netbox_librenms_plugin:sync_cache_fragment",
+                            kwargs={"object_type": object_type, "pk": obj.pk, "tab": tab.value},
+                        )
+                        for tab in coordinator.applicable_tabs()
+                    },
+                }
+            )
 
         return context
 

@@ -1,5 +1,6 @@
 """Views backing the LibreNMS sync tabs on Device and VM detail pages."""
 
+from .cache_status import SyncCacheFragmentView, SyncCacheStatusView  # noqa: F401
 from .devices import (  # noqa: F401
     DeviceCableTableView,
     DeviceInterfaceTableView,

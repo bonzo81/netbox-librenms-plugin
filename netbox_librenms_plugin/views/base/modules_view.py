@@ -17,6 +17,7 @@ from netbox_librenms_plugin.utils import (
     normalize_librenms_port_id,
     normalize_serial,
 )
+from netbox_librenms_plugin.sync_cache import SyncCacheConsistency, SyncTab, request_actor_id
 from netbox_librenms_plugin.views.mixins import (
     CacheMixin,
     LibreNMSAPIMixin,
@@ -381,6 +382,11 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         self.librenms_id = coerce_librenms_id(self.librenms_api.get_librenms_id(sync_device))
         if self.librenms_id is None:
             cache.delete(self.get_cache_key(sync_device, "inventory", server_key=server_key))
+            SyncCacheConsistency(obj, cache_timeout=self.librenms_api.cache_timeout).mark_refresh_failure(
+                SyncTab.MODULES,
+                server_key,
+                actor_id=request_actor_id(request),
+            )
             messages.error(request, "Device not found in LibreNMS.")
             return self.render_sync_partial(
                 request,
@@ -401,6 +407,11 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
             or any(not isinstance(item, dict) for item in inventory_data)
         ):
             cache.delete(self.get_cache_key(sync_device, "inventory", server_key=server_key))
+            SyncCacheConsistency(obj, cache_timeout=self.librenms_api.cache_timeout).mark_refresh_failure(
+                SyncTab.MODULES,
+                server_key,
+                actor_id=request_actor_id(request),
+            )
             logger.error("Failed to fetch inventory from LibreNMS for device %s: %s", self.librenms_id, inventory_data)
             messages.error(request, "Failed to fetch inventory from LibreNMS; see server logs for details.")
             return self.render_sync_partial(
@@ -518,7 +529,12 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
                 timeout=self.librenms_api.cache_timeout,
             )
 
-        context = self._build_context(request, obj, inventory_data, server_key=server_key, sync_device=sync_device)
+        refresh_incomplete = bool(oob_failed or txr_error or ports_error)
+        context = (
+            {"object": obj, "table": None, "cache_expiry": None, "server_key": server_key}
+            if refresh_incomplete
+            else self._build_context(request, obj, inventory_data, server_key=server_key, sync_device=sync_device)
+        )
         if ports_error:
             logger.warning("Port metadata fetch failed for device %s: %s", self.librenms_id, ports_error)
             messages.warning(
@@ -537,8 +553,19 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
                 request,
                 "Inventory refreshed, but OOB controller inventory fetch failed; see server logs for details.",
             )
-        if not txr_error and not oob_failed and not ports_error:
+        if not refresh_incomplete:
             messages.success(request, "Inventory data refreshed successfully.")
+            SyncCacheConsistency(obj, cache_timeout=self.librenms_api.cache_timeout).mark_refresh_success(
+                SyncTab.MODULES,
+                server_key,
+                actor_id=request_actor_id(request),
+            )
+        else:
+            SyncCacheConsistency(obj, cache_timeout=self.librenms_api.cache_timeout).mark_refresh_failure(
+                SyncTab.MODULES,
+                server_key,
+                actor_id=request_actor_id(request),
+            )
         return self.render_sync_partial(
             request,
             obj,

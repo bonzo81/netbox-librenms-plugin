@@ -770,21 +770,17 @@ class CacheMixin:
             data_type: Type of data being cached ('ports', 'links', 'inventory', etc.)
             server_key: Optional LibreNMS server key for namespacing per-server data
         """
-        model_name = obj._meta.model_name
-        base = f"librenms_{data_type}_{model_name}_{obj.pk}"
-        if server_key:
-            return f"{base}_{server_key}"
-        return base
+        from netbox_librenms_plugin.sync_cache import sync_snapshot_key
+
+        return sync_snapshot_key(obj, data_type, server_key)
 
     def get_last_fetched_key(self, obj, data_type="ports", server_key=None):
         """
         Get the cache key for the last fetched time of the object.
         """
-        model_name = obj._meta.model_name
-        base = f"librenms_{data_type}_last_fetched_{model_name}_{obj.pk}"
-        if server_key:
-            return f"{base}_{server_key}"
-        return base
+        from netbox_librenms_plugin.sync_cache import sync_last_fetched_key
+
+        return sync_last_fetched_key(obj, data_type, server_key)
 
     def get_vlan_overrides_key(self, obj, server_key=None):
         """
@@ -794,10 +790,9 @@ class CacheMixin:
         group choices persist across table pages. Including server_key scopes
         overrides per-server to avoid leakage when multiple servers are configured.
         """
-        model_name = obj._meta.model_name
-        if server_key:
-            return f"librenms_vlan_group_overrides_{model_name}_{obj.pk}_{server_key}"
-        return f"librenms_vlan_group_overrides_{model_name}_{obj.pk}"
+        from netbox_librenms_plugin.sync_cache import sync_vlan_overrides_key
+
+        return sync_vlan_overrides_key(obj, server_key)
 
 
 class VlanAssignmentMixin:
@@ -1265,6 +1260,9 @@ class VlanAssignmentMixin:
         untagged_vid = vlan_data.get("untagged_vlan")
         tagged_vids = vlan_data.get("tagged_vlans", [])
         missing_vlans = []
+        prior_mode = interface.mode
+        prior_untagged_vlan_id = interface.untagged_vlan_id
+        prior_tagged_vlan_ids = set(interface.tagged_vlans.values_list("pk", flat=True))
 
         def _get_group_id_for_vid(vid):
             """Resolve the VLAN group ID for a specific VID."""
@@ -1297,7 +1295,9 @@ class VlanAssignmentMixin:
         # Save mode + untagged_vlan before M2M operations.
         # tagged_vlans.set() triggers a DB refresh that wipes unsaved
         # in-memory attributes, so we must persist first.
-        interface.save()
+        fields_changed = prior_mode != interface.mode or prior_untagged_vlan_id != interface.untagged_vlan_id
+        if fields_changed:
+            interface.save()
 
         # Set tagged VLANs (M2M - requires the instance to be saved first)
         tagged_set = []
@@ -1308,13 +1308,18 @@ class VlanAssignmentMixin:
                     tagged_set.append(vlan)
                 else:
                     missing_vlans.append(vid)
-            interface.tagged_vlans.set(tagged_set)
+            tagged_vlan_ids = {vlan.pk for vlan in tagged_set}
+            if tagged_vlan_ids != prior_tagged_vlan_ids:
+                interface.tagged_vlans.set(tagged_set)
         else:
-            interface.tagged_vlans.clear()
+            tagged_vlan_ids = set()
+            if prior_tagged_vlan_ids:
+                interface.tagged_vlans.clear()
 
         return {
             "mode_set": interface.mode,
             "untagged_set": untagged_set,
             "tagged_set": tagged_set,
             "missing_vlans": missing_vlans,
+            "changed": fields_changed or tagged_vlan_ids != prior_tagged_vlan_ids,
         }

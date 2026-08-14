@@ -24,6 +24,7 @@ from netbox_librenms_plugin.utils import (
     get_virtual_chassis_member,
     oob_badge_html,
 )
+from netbox_librenms_plugin.sync_cache import SyncCacheConsistency, SyncTab, request_actor_id
 from netbox_librenms_plugin.views.mixins import (
     CacheMixin,
     LibreNMSAPIMixin,
@@ -768,6 +769,14 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObject
         cache_ttl = None if partial_fetch_failed else cache_remaining_ttl(cache, cache_key)
         if cache_ttl is not None and cache_ttl > 0:
             cache_expiry = timezone.now() + timezone.timedelta(seconds=cache_ttl)
+        if partial_fetch_failed:
+            return {
+                "table": None,
+                "object": obj,
+                "cache_expiry": None,
+                "server_key": server_key,
+                "refresh_incomplete": True,
+            }
         # Generate the table
         table = self.get_table(links_data, obj)
         # Build the follow-up HTMX URL (pagination/sorting) on the RESOLVED server scope —
@@ -836,12 +845,29 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObject
                 messages.error(request, f"Failed to fetch links from LibreNMS: {self._links_fetch_error}")
             else:
                 messages.error(request, "No links found in LibreNMS")
+            SyncCacheConsistency(obj, cache_timeout=self.librenms_api.cache_timeout).mark_refresh_failure(
+                SyncTab.CABLES,
+                server_key,
+                actor_id=request_actor_id(request),
+            )
             return self.render_sync_partial(
                 request,
                 obj,
                 server_key,
                 {"cable_sync": {"object": obj, "table": None, "cache_expiry": None, "server_key": server_key}},
             )
+
+        if context.get("refresh_incomplete"):
+            messages.warning(
+                request,
+                "Cable refresh was incomplete. No cable rows were loaded. Refresh Cables to try again.",
+            )
+            SyncCacheConsistency(obj, cache_timeout=self.librenms_api.cache_timeout).mark_refresh_failure(
+                SyncTab.CABLES,
+                server_key,
+                actor_id=request_actor_id(request),
+            )
+            return self.render_sync_partial(request, obj, server_key, {"cable_sync": context})
 
         messages.success(request, "Cable data refreshed successfully.")
         # A host LLDP failure no longer aborts the refresh (OOB/serial rows can still surface it
@@ -865,6 +891,11 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObject
                 "Cables refreshed, but OOB controller links fetch failed; "
                 "showing host cables only. See server logs for details.",
             )
+        coordinator = SyncCacheConsistency(obj, cache_timeout=self.librenms_api.cache_timeout)
+        if cache.has_key(coordinator.snapshot_key(SyncTab.CABLES, server_key)):
+            coordinator.mark_refresh_success(SyncTab.CABLES, server_key, actor_id=request_actor_id(request))
+        else:
+            coordinator.mark_refresh_failure(SyncTab.CABLES, server_key, actor_id=request_actor_id(request))
         return self.render_sync_partial(request, obj, server_key, {"cable_sync": context})
 
 

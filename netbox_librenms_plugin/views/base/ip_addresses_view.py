@@ -16,6 +16,8 @@ from virtualization.models import VirtualMachine
 from netbox_librenms_plugin.constants import is_supported_interface_name_field
 from netbox_librenms_plugin.ip_addressing import parse_address_with_prefix, parse_librenms_ip_entry
 from netbox_librenms_plugin.utils import identify_ip_sync_rows, index_ip_sync_rows, normalize_ip_sync_row_id
+
+from netbox_librenms_plugin.sync_cache import SyncCacheConsistency, SyncTab, request_actor_id
 from netbox_librenms_plugin.tables.ipaddresses import IPAddressTable
 from netbox_librenms_plugin.utils import (
     cache_remaining_ttl,
@@ -451,6 +453,12 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxOb
             ):
                 cache.delete(cache_key)
                 return None
+            if getattr(self, "cache_only", False) and (
+                "mgmt_ip" not in cached_ip_data
+                or not isinstance(cached_ports_by_id, dict)
+                or any(item["port_id"] not in cached_ports_by_id for item in cached_ip_data["ip_addresses"])
+            ):
+                return None
             ip_data = cached_ip_data.get("ip_addresses", [])
             # Pre-upgrade entries cached before mgmt_ip was stored lack the key entirely
             # (distinct from a present-but-empty "" meaning "no mgmt IP"). Resolve it now —
@@ -654,6 +662,11 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxOb
             # LibreNMS fetch failed (a genuine empty result yields a context with an
             # empty table). Report the failure rather than a misleading "no data".
             messages.error(request, "Failed to fetch IP addresses from LibreNMS; see server logs for details.")
+            SyncCacheConsistency(obj, cache_timeout=self.librenms_api.cache_timeout).mark_refresh_failure(
+                SyncTab.IP_ADDRESSES,
+                server_key,
+                actor_id=request_actor_id(request),
+            )
             return self.render_sync_partial(
                 request,
                 obj,
@@ -679,6 +692,11 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxOb
             )
 
         messages.success(request, "IP address data refreshed successfully.")
+        SyncCacheConsistency(obj, cache_timeout=self.librenms_api.cache_timeout).mark_refresh_success(
+            SyncTab.IP_ADDRESSES,
+            server_key,
+            actor_id=request_actor_id(request),
+        )
         return self.render_sync_partial(request, obj, server_key, {"ip_sync": context})
 
 

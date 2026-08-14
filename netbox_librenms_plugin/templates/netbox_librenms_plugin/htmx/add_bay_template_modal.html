@@ -14,6 +14,7 @@
     <input type="hidden" name="target_pk" value="{{ target_pk }}">
     <input type="hidden" name="librenms_name" value="{{ librenms_name }}">
     <input type="hidden" name="librenms_class" value="{{ librenms_class }}">
+    {% include "netbox_librenms_plugin/inc/_hidden_server_key.html" %}
 
     <div class="modal-body">
         <p class="text-muted small mb-3">

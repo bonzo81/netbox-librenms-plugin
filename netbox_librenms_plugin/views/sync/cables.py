@@ -11,6 +11,11 @@ from django.shortcuts import redirect
 from django.urls import reverse
 from django.views import View
 
+from netbox_librenms_plugin.sync_cache import (
+    SyncTab,
+    apply_request_cache_transition,
+    schedule_request_cache_mutation,
+)
 from netbox_librenms_plugin.utils import get_librenms_sync_device
 from netbox_librenms_plugin.views.mixins import (
     CacheMixin,
@@ -262,7 +267,14 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libre
         results = self.process_interface_sync(selected_interfaces, cached_links)
         self.display_sync_results(request, results)
 
-        return redirect(redirect_url)
+        if results["valid"]:
+            schedule_request_cache_mutation(
+                request,
+                initial_device,
+                SyncTab.CABLES,
+                server_key,
+            )
+        return apply_request_cache_transition(request, redirect(redirect_url))
 
     def display_sync_results(self, request, results):
         """Display flash messages summarizing the cable sync results."""

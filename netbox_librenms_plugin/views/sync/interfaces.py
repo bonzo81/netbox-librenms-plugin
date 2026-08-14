@@ -26,6 +26,12 @@ from netbox_librenms_plugin.interface_sync import (
     get_netbox_interface_type,
     update_interface_from_port,
 )
+from netbox_librenms_plugin.sync_cache import (
+    SyncTab,
+    apply_request_cache_transition,
+    apply_transition_to_response,
+    schedule_request_cache_mutation,
+)
 from netbox_librenms_plugin.utils import (
     AmbiguousLibreNMSIdError,
     build_migrated_context,
@@ -171,6 +177,7 @@ class SyncInterfacesView(
         # below so the skip isn't silent — otherwise the user only sees it in the logs.
         self._skipped_conflicts = []
         self._synced_count = 0
+        self._mutated = False
         try:
             with transaction.atomic():
                 try:
@@ -218,7 +225,16 @@ class SyncInterfacesView(
         # source of truth for the success banner.
         if self._synced_count > 0:
             messages.success(request, "Selected interfaces synced successfully.")
-        return redirect(redirect_url)
+        if self._mutated:
+            cache_transition = schedule_request_cache_mutation(
+                request,
+                obj,
+                SyncTab.INTERFACES,
+                server_key,
+            )
+        else:
+            cache_transition = None
+        return apply_transition_to_response(request, redirect(redirect_url), cache_transition)
 
     def get_object(self, object_type, object_id):
         """Return the Device or VirtualMachine for the given type and ID (object-scoped)."""
@@ -526,9 +542,10 @@ class SyncInterfacesView(
                                     agg_iface.name,
                                 )
                             else:
-                                self._apply_relationship_edge(
+                                if self._apply_relationship_edge(
                                     member_iface, "lag", agg_iface, self._prepare_bulk_lag_aggregate, "LAG"
-                                )
+                                ):
+                                    self._mutated = True
 
                     # Sub-interface parent: this interface is a child of a parent interface.
                     raw_parent = sub_interfaces.get(normalize_librenms_port_id(port_id))
@@ -548,7 +565,8 @@ class SyncInterfacesView(
                             "parent",
                         )
                         if child_iface and child_iface.parent_id != parent_iface.pk:
-                            self._apply_relationship_edge(child_iface, "parent", parent_iface, None, "parent")
+                            if self._apply_relationship_edge(child_iface, "parent", parent_iface, None, "parent"):
+                                self._mutated = True
         except IntegrityError:
             # Immediate conflicts (a unique violation, a row already gone at write time) surface
             # here and roll the relationship pass back as a unit. Deferred FK violations do NOT:
@@ -693,7 +711,7 @@ class SyncInterfacesView(
                 related_iface.name,
                 validation_error_detail(exc),
             )
-            return
+            return False
         except IntegrityError as exc:
             # Concurrent DB conflict (e.g. the related interface deleted between clean() and
             # existence check and the FK write): skip this row and keep the batch alive,
@@ -705,8 +723,9 @@ class SyncInterfacesView(
                 related_iface.name,
                 exc,
             )
-            return
+            return False
         logger.info("Bulk sync: set %s.%s = %s", source_iface.name, relation_field, related_iface.name)
+        return True
 
     def sync_selected_interfaces(
         self,
@@ -947,17 +966,23 @@ class SyncInterfacesView(
         if isinstance(obj, Device):
             netbox_type = self.get_netbox_interface_type(librenms_interface)
 
-        self.update_interface_attributes(
-            interface,
-            librenms_interface,
-            netbox_type,
-            exclude_columns,
-            interface_name_field,
+        changed = bool(getattr(interface, "_librenms_sync_created", False))
+        changed = (
+            self.update_interface_attributes(
+                interface,
+                librenms_interface,
+                netbox_type,
+                exclude_columns,
+                interface_name_field,
+            )
+            or changed
         )
 
         # Sync VLANs if not excluded
         if "vlans" not in exclude_columns:
-            self._sync_interface_vlans(interface, librenms_interface)
+            changed = self._sync_interface_vlans(interface, librenms_interface) or changed
+        if changed and getattr(self, "_mutated", None) is not None:
+            self._mutated = True
 
     def _record_skipped_conflict(self, interface_name, reason):
         """Record a row that cannot be synced to its requested target."""
@@ -1001,6 +1026,8 @@ class SyncInterfacesView(
         interface, created = Interface.objects.get_or_create(device=target_device, name=interface_name)
         if not created and port_id and not interface_name_fallback_matches_port(interface, port_id, server_key):
             return None
+        if created:
+            interface._librenms_sync_created = True
         return interface if created or changeable.filter(pk=interface.pk).exists() else None
 
     def _resolve_vm_interface(self, vm, interface_name, port_id, server_key):
@@ -1035,6 +1062,8 @@ class SyncInterfacesView(
         interface, created = VMInterface.objects.get_or_create(virtual_machine=vm, name=interface_name)
         if not created and port_id and not interface_name_fallback_matches_port(interface, port_id, server_key):
             return None
+        if created:
+            interface._librenms_sync_created = True
         return interface if created or changeable.filter(pk=interface.pk).exists() else None
 
     def get_netbox_interface_type(self, librenms_interface):
@@ -1055,7 +1084,7 @@ class SyncInterfacesView(
     ):
         """Update interface fields from LibreNMS data, respecting excluded columns."""
         server_key = getattr(self, "_post_server_key", None) or self.librenms_api.server_key
-        update_interface_from_port(
+        return update_interface_from_port(
             interface,
             librenms_interface,
             server_key=server_key,
@@ -1102,7 +1131,7 @@ class SyncInterfacesView(
             lookup_maps = lookup_maps_by_owner.get(owner_id)
             if lookup_maps is None:
                 logger.warning("Skipping VLAN sync for %s because its locked owner has no VLAN scope map", interface)
-                return
+                return False
         else:
             lookup_maps = self._lookup_maps
         owner = getattr(self, "_vlan_owners_by_id", {}).get(owner_id)
@@ -1128,10 +1157,17 @@ class SyncInterfacesView(
                 vlan_group_map.pop(vid, None)
             else:
                 vlan_group_map[vid] = str(selected_group.pk)
-        self._update_interface_vlan_assignment(interface, vlan_data, vlan_group_map, lookup_maps)
+        result = self._update_interface_vlan_assignment(interface, vlan_data, vlan_group_map, lookup_maps)
+        return bool(result and result.get("changed"))
 
 
-class DeleteNetBoxInterfacesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, CacheMixin, View):
+class DeleteNetBoxInterfacesView(
+    LibreNMSPermissionMixin,
+    NetBoxObjectPermissionMixin,
+    LibreNMSAPIMixin,
+    CacheMixin,
+    View,
+):
     """Delete interfaces that exist only in NetBox."""
 
     def get_required_permissions_for_object_type(self, object_type):
@@ -1162,6 +1198,11 @@ class DeleteNetBoxInterfacesView(LibreNMSPermissionMixin, NetBoxObjectPermission
             obj = self.restrict_object_or_404(VirtualMachine, pk=object_id)
         else:
             return JsonResponse({"error": "Invalid object type"}, status=400)
+
+        try:
+            server_key = self.resolve_posted_server_key(request.POST)
+        except (KeyError, ValueError):
+            return JsonResponse({"error": "No configured LibreNMS server is available."}, status=400)
 
         interface_ids = request.POST.getlist("interface_ids")
 
@@ -1227,7 +1268,15 @@ class DeleteNetBoxInterfacesView(LibreNMSPermissionMixin, NetBoxObjectPermission
             response_data["errors"] = errors
             response_data["message"] += f" with {len(errors)} error(s)"
 
-        return JsonResponse(response_data)
+        if deleted_count:
+            schedule_request_cache_mutation(
+                request,
+                obj,
+                SyncTab.INTERFACES,
+                server_key,
+                source_fragment_required=True,
+            )
+        return apply_request_cache_transition(request, JsonResponse(response_data))
 
 
 def _lock_relationship_scope(obj, owner_queryset=None):
@@ -1617,6 +1666,7 @@ class _BaseRelationshipSyncView(
         # bulk pass (_apply_relationship_edge).
         source_iface = None
         related_iface = None
+        relationship_changed = False
         try:
             with transaction.atomic():
                 obj, locked_device_ids = _lock_relationship_scope(
@@ -1699,9 +1749,11 @@ class _BaseRelationshipSyncView(
                 # _prepare_related (e.g. the aggregate's type=lag, persisted only on success), and
                 # saves with update_fields.
                 try:
-                    _apply_interface_relationship(
-                        source_iface, self.relation_field, related_iface, self._prepare_related
-                    )
+                    if getattr(source_iface, f"{self.relation_field}_id") != related_iface.pk:
+                        _apply_interface_relationship(
+                            source_iface, self.relation_field, related_iface, self._prepare_related
+                        )
+                        relationship_changed = True
                 except ValidationError as exc:
                     # Log the validation detail server-side and return a fixed message — don't echo
                     # exception text to the client (CodeQL py/stack-trace-exposure). The
@@ -1723,7 +1775,8 @@ class _BaseRelationshipSyncView(
                         },
                         status=409,
                     )
-                logger.info("Set %s.%s = %s", source_iface.name, self.relation_field, related_iface.name)
+                if relationship_changed:
+                    logger.info("Set %s.%s = %s", source_iface.name, self.relation_field, related_iface.name)
         except IntegrityError as exc:
             source_name = getattr(source_iface, "name", self.source_label.lower())
             related_name = getattr(related_iface, "name", self.related_label.lower())
@@ -1744,12 +1797,21 @@ class _BaseRelationshipSyncView(
                 status=409,
             )
 
-        return JsonResponse(
+        if relationship_changed:
+            schedule_request_cache_mutation(
+                request,
+                obj,
+                SyncTab.INTERFACES,
+                server_key,
+                source_fragment_required=True,
+            )
+        response = JsonResponse(
             {
                 "status": "success",
                 "message": f"Linked {source_iface.name} to {self.relation_label} {related_iface.name}",
             }
         )
+        return apply_request_cache_transition(request, response)
 
 
 class SyncInterfaceLagView(_BaseRelationshipSyncView):

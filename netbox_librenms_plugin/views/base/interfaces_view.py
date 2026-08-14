@@ -12,6 +12,7 @@ from netbox_librenms_plugin.interface_relationships import (
     filter_interface_index,
     resolve_relationship_row,
 )
+from netbox_librenms_plugin.sync_cache import SyncCacheConsistency, SyncTab, request_actor_id
 from netbox_librenms_plugin.utils import (
     build_migrated_context,
     cache_remaining_ttl,
@@ -94,6 +95,11 @@ class BaseInterfaceTableView(
         Returns:
             HttpResponseRedirect: Redirect to the sync tab (with server_key when it validates).
         """
+        SyncCacheConsistency(obj, cache_timeout=self.librenms_api.cache_timeout).mark_refresh_failure(
+            SyncTab.INTERFACES,
+            server_key,
+            actor_id=request_actor_id(request),
+        )
         url = self.get_redirect_url(obj)
         return redirect_with_server_key(request, url, server_key)
 
@@ -381,6 +387,11 @@ class BaseInterfaceTableView(
             self.get_last_fetched_key(lookup_device, "ports", _server_key),
             timezone.now(),
             timeout=self.librenms_api.cache_timeout,
+        )
+        SyncCacheConsistency(obj, cache_timeout=self.librenms_api.cache_timeout).mark_refresh_success(
+            SyncTab.INTERFACES,
+            _server_key,
+            actor_id=request_actor_id(request),
         )
 
         # On an OOB-fetch failure the warning above already conveys the partial outcome;

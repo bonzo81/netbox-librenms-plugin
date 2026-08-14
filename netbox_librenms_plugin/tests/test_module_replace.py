@@ -1,5 +1,6 @@
 """Tests for ModuleMismatchPreviewView, ReplaceModuleView, and MoveModuleView."""
 
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -650,7 +651,8 @@ class TestMoveModuleView:
     def _view(self):
         from netbox_librenms_plugin.views.sync.modules import MoveModuleView
 
-        v = object.__new__(MoveModuleView)
+        v = MoveModuleView()
+        v._librenms_api = SimpleNamespace(server_key="production")
         v.required_object_permissions = {}
         return v
 

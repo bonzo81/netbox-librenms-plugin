@@ -17,6 +17,20 @@
 
 const TOMSELECT_INIT_DELAY_MS = 100;
 const COUNTDOWN_UPDATE_INTERVAL_MS = 1000;
+const SYNC_CACHE_CONTENT_IDS = {
+    interfaces: 'interface-sync-content',
+    cables: 'cable-sync-content',
+    ipaddresses: 'ipaddress-sync-content',
+    modules: 'module-sync-content',
+    vlans: 'vlan-sync-content',
+};
+const SYNC_CACHE_LABELS = {
+    interfaces: 'Interface',
+    cables: 'Cable',
+    ipaddresses: 'IP address',
+    modules: 'Module',
+    vlans: 'VLAN',
+};
 
 /**
  * Return the CSRF token value, or null when the hidden input is missing/empty.
@@ -295,6 +309,7 @@ function initializeCountdown(elementId) {
         if (distance < 0) {
             clearInterval(countdownInterval);
             countdownElement.innerHTML = "EXPIRED";
+            expireSyncTabFromElement(countdownElement);
             return;
         }
 
@@ -306,6 +321,312 @@ function initializeCountdown(elementId) {
     updateCountdown();
     countdownInterval = setInterval(updateCountdown, COUNTDOWN_UPDATE_INTERVAL_MS);
     return countdownInterval;
+}
+
+// ============================================
+// CROSS-TAB CACHE CONSISTENCY
+// ============================================
+
+function syncCacheController() {
+    const root = document.getElementById('librenms-sync-cache-state');
+    if (!root) return null;
+    if (root._controller) return root._controller;
+
+    let initial = {};
+    const initialElement = document.getElementById('librenms-sync-cache-initial');
+    if (initialElement) {
+        try {
+            initial = JSON.parse(initialElement.textContent) || {};
+        } catch (_) {
+            initial = {};
+        }
+    }
+    root._controller = {
+        root,
+        status: initial,
+        invalidatedLocally: new Set(),
+        reloadTabs: new Set(),
+        ownRevisions: new Set(),
+        requiredSourceFragments: new Set(),
+        notifiedRevisions: new Set(),
+        checking: null,
+        lastCheckFailed: false,
+        lostFocus: false,
+    };
+    Object.entries(initial).forEach(([tab, state]) => {
+        const content = document.getElementById(SYNC_CACHE_CONTENT_IDS[tab]);
+        if (content && !state.snapshot_available) {
+            root._controller.invalidatedLocally.add(tab);
+            clearSyncTabContent(tab, syncCacheUnavailableReason(tab, state));
+        }
+        updateSyncCacheBadge(tab, state);
+    });
+    return root._controller;
+}
+
+function updateSyncCacheBadge(tab, state) {
+    const badge = document.getElementById(`${tab}-cache-badge`);
+    if (!badge) return;
+    const unavailable = !state || !state.snapshot_available || ['invalidated', 'refresh_failed', 'missing', 'expired'].includes(state.state);
+    badge.classList.toggle('d-none', !unavailable);
+    badge.textContent = state?.state === 'expired' ? 'Expired' : 'Refresh required';
+}
+
+function showSyncCacheNotice(message, revision, level = 'warning') {
+    const controller = syncCacheController();
+    if (!controller || (revision && controller.notifiedRevisions.has(revision))) return;
+    if (revision) controller.notifiedRevisions.add(revision);
+
+    let container = document.getElementById('librenms-sync-cache-notices');
+    if (!container) {
+        container = document.createElement('div');
+        container.id = 'librenms-sync-cache-notices';
+        controller.root.insertAdjacentElement('afterend', container);
+    }
+    const alertElement = document.createElement('div');
+    alertElement.className = `alert alert-${level} alert-dismissible`;
+    alertElement.setAttribute('role', 'alert');
+    alertElement.appendChild(document.createTextNode(message));
+    const dismiss = document.createElement('button');
+    dismiss.type = 'button';
+    dismiss.className = 'btn-close';
+    dismiss.setAttribute('aria-label', 'Close');
+    dismiss.addEventListener('click', () => alertElement.remove());
+    alertElement.appendChild(dismiss);
+    container.replaceChildren(alertElement);
+}
+
+function syncCacheReason(tab, state) {
+    const source = SYNC_CACHE_LABELS[state.source_tab] || 'another sync tab';
+    const target = SYNC_CACHE_LABELS[tab] || 'Sync';
+    const relative = formatSyncCacheRelativeTime(state.timestamp);
+    const suffix = relative ? ` ${relative}.` : '';
+    if (state.same_user) {
+        return `${target} data was cleared after you synchronized ${source} data from LibreNMS.${suffix}`;
+    }
+    return `${target} data was cleared because another user synchronized ${source} data from LibreNMS.${suffix}`;
+}
+
+function syncCacheUnavailableReason(tab, state) {
+    if (state.state === 'refresh_failed') {
+        const reason = state.reason || `${SYNC_CACHE_LABELS[tab]} refresh failed.`;
+        return `${reason} Refresh this tab to try again.`;
+    }
+    if (state.state === 'missing' && !state.reason) {
+        return `${SYNC_CACHE_LABELS[tab]} cache is unavailable. Refresh this tab to load current data.`;
+    }
+    return syncCacheReason(tab, state);
+}
+
+function formatSyncCacheRelativeTime(timestamp) {
+    const occurredAt = Date.parse(timestamp || '');
+    if (!Number.isFinite(occurredAt)) return '';
+    const seconds = Math.max(0, Math.floor((Date.now() - occurredAt) / 1000));
+    if (seconds < 60) return 'Less than a minute ago';
+    const minutes = Math.floor(seconds / 60);
+    if (minutes < 60) return `${minutes} minute${minutes === 1 ? '' : 's'} ago`;
+    const hours = Math.floor(minutes / 60);
+    if (hours < 24) return `${hours} hour${hours === 1 ? '' : 's'} ago`;
+    const days = Math.floor(hours / 24);
+    return `${days} day${days === 1 ? '' : 's'} ago`;
+}
+
+function clearSyncTabContent(tab, message) {
+    const content = document.getElementById(SYNC_CACHE_CONTENT_IDS[tab]);
+    if (!content) return;
+    const card = document.createElement('div');
+    card.className = 'card';
+    const body = document.createElement('div');
+    body.className = 'card-body text-center text-muted py-4';
+    const icon = document.createElement('i');
+    icon.className = 'mdi mdi-sync-off mdi-48px';
+    const text = document.createElement('p');
+    text.className = 'mt-2 mb-0';
+    text.textContent = message;
+    body.append(icon, text);
+    card.appendChild(body);
+    content.replaceChildren(card);
+    content.dataset.cacheEmpty = 'true';
+}
+
+function expireSyncTabFromElement(element) {
+    const pane = element.closest('.tab-pane[data-tab-id]');
+    if (!pane) return;
+    const tab = pane.dataset.tabId;
+    const controller = syncCacheController();
+    if (!controller) return;
+    controller.invalidatedLocally.add(tab);
+    clearSyncTabContent(tab, `${SYNC_CACHE_LABELS[tab]} cache expired. Refresh this tab to load current data.`);
+    updateSyncCacheBadge(tab, { state: 'expired', snapshot_available: false });
+}
+
+function syncCacheTabUrl(tab) {
+    const url = new URL(window.location.href);
+    url.searchParams.set('tab', tab);
+    return url.toString();
+}
+
+function activeSyncTab() {
+    const active = document.querySelector('#librenmsSync [data-bs-toggle="tab"].active');
+    return active?.getAttribute('aria-controls') || new URLSearchParams(window.location.search).get('tab') || 'interfaces';
+}
+
+function loadSyncCacheFragment(tab) {
+    const pane = document.getElementById(tab);
+    const content = document.getElementById(SYNC_CACHE_CONTENT_IDS[tab]);
+    const controller = syncCacheController();
+    if (!pane || !content || !controller || !pane.dataset.fragmentUrl) return Promise.resolve();
+    const url = new URL(pane.dataset.fragmentUrl, window.location.href);
+    url.searchParams.set('server_key', controller.root.dataset.serverKey);
+    return fetch(url, { credentials: 'same-origin', headers: { 'X-Requested-With': 'XMLHttpRequest' } })
+        .then(response => {
+            if (!response.ok) throw new Error(`HTTP ${response.status}`);
+            return response.text();
+        })
+        .then(html => {
+            content.innerHTML = html;
+            delete content.dataset.cacheEmpty;
+            controller.invalidatedLocally.delete(tab);
+            if (typeof htmx !== 'undefined') htmx.process(content);
+            initializeScripts();
+        })
+        .catch(() => {
+            clearSyncTabContent(tab, 'Cache state could not be restored. Reload this tab before continuing.');
+        });
+}
+
+function reconcileSyncCacheStatus(nextStatus) {
+    const controller = syncCacheController();
+    if (!controller) return Promise.resolve();
+    const previous = controller.status || {};
+    const activeTab = activeSyncTab();
+    let notice = null;
+    const fragmentLoads = [];
+
+    Object.entries(nextStatus || {}).forEach(([tab, state]) => {
+        const prior = previous[tab] || {};
+        const revisionChanged = Boolean(state.revision && state.revision !== prior.revision);
+        const refreshChanged = Boolean(
+            state.refresh_error_timestamp &&
+            state.refresh_error_timestamp !== prior.refresh_error_timestamp
+        );
+        const unavailable = !state.snapshot_available || ['invalidated', 'refresh_failed', 'missing'].includes(state.state);
+        updateSyncCacheBadge(tab, state);
+
+        if (unavailable && (revisionChanged || prior.snapshot_available || refreshChanged)) {
+            controller.invalidatedLocally.add(tab);
+            let reason = syncCacheUnavailableReason(tab, state);
+            if (state.refresh_error && state.state !== 'refresh_failed') {
+                reason = `${reason} ${state.refresh_error} Refresh this tab to try again.`;
+            }
+            clearSyncTabContent(tab, reason);
+            const marker = refreshChanged ? `refresh:${state.refresh_error_timestamp}` : state.revision;
+            if (!notice && marker) notice = { message: reason, revision: marker };
+        } else if (
+            state.state === 'locally_changed' &&
+            state.snapshot_available &&
+            revisionChanged &&
+            (
+                !controller.ownRevisions.has(state.revision) ||
+                controller.requiredSourceFragments.has(tab)
+            )
+        ) {
+            if (tab === activeTab) {
+                fragmentLoads.push(loadSyncCacheFragment(tab));
+                controller.requiredSourceFragments.delete(tab);
+            } else {
+                controller.reloadTabs.add(tab);
+            }
+        } else if (
+            state.state === 'ready' &&
+            state.snapshot_available &&
+            revisionChanged
+        ) {
+            if (tab === activeTab) {
+                controller.invalidatedLocally.delete(tab);
+                fragmentLoads.push(loadSyncCacheFragment(tab));
+            } else {
+                controller.invalidatedLocally.add(tab);
+                controller.reloadTabs.add(tab);
+                updateSyncCacheBadge(tab, { state: 'invalidated', snapshot_available: false });
+            }
+        } else if (
+            state.snapshot_available &&
+            tab === activeTab &&
+            document.getElementById(SYNC_CACHE_CONTENT_IDS[tab])?.dataset.cacheEmpty === 'true' &&
+            !controller.invalidatedLocally.has(tab)
+        ) {
+            fragmentLoads.push(loadSyncCacheFragment(tab));
+        }
+    });
+    controller.status = nextStatus || {};
+    if (notice) showSyncCacheNotice(notice.message, notice.revision);
+    return Promise.all(fragmentLoads);
+}
+
+function checkSyncCacheStatus() {
+    const controller = syncCacheController();
+    if (!controller || controller.checking) return controller?.checking || Promise.resolve();
+    const url = new URL(controller.root.dataset.statusUrl, window.location.href);
+    url.searchParams.set('server_key', controller.root.dataset.serverKey);
+    controller.checking = fetch(url, { credentials: 'same-origin', headers: { 'Accept': 'application/json' } })
+        .then(response => {
+            if (!response.ok) throw new Error(`HTTP ${response.status}`);
+            return response.json();
+        })
+        .then(payload => reconcileSyncCacheStatus(payload.tabs))
+        .then(() => { controller.lastCheckFailed = false; })
+        .catch(() => {
+            controller.lastCheckFailed = true;
+            const tab = activeSyncTab();
+            clearSyncTabContent(tab, 'Cache status could not be verified. Reload this tab before continuing.');
+            updateSyncCacheBadge(tab, { state: 'missing', snapshot_available: false });
+        })
+        .finally(() => { controller.checking = null; });
+    return controller.checking;
+}
+
+function initializeSyncCacheConsistency() {
+    const controller = syncCacheController();
+    if (!controller || controller.root.dataset.listenersInitialized === 'true') return;
+    controller.root.dataset.listenersInitialized = 'true';
+
+    window.addEventListener('blur', () => { controller.lostFocus = true; });
+    window.addEventListener('focus', () => {
+        if (controller.lostFocus) {
+            controller.lostFocus = false;
+            checkSyncCacheStatus();
+        }
+    });
+    document.addEventListener('librenmsCacheChanged', event => {
+        const payload = event.detail?.value || event.detail || {};
+        Object.values(payload.revisions || {}).forEach(revision => controller.ownRevisions.add(revision));
+        if (payload.source_fragment_required && payload.source_tab) {
+            controller.requiredSourceFragments.add(payload.source_tab);
+        }
+        if (payload.cleanup_failed) {
+            (payload.cleanup_tabs || []).forEach(tab => {
+                controller.invalidatedLocally.add(tab);
+                clearSyncTabContent(
+                    tab,
+                    'Cache cleanup could not be verified. Refresh this tab before continuing.'
+                );
+                updateSyncCacheBadge(tab, { state: 'missing', snapshot_available: false });
+            });
+            showSyncCacheNotice(
+                'Synchronization succeeded, but related cache cleanup failed. Reload this sync page before continuing.',
+                payload.transition_id,
+                'danger'
+            );
+        } else if (payload.removed) {
+            showSyncCacheNotice(
+                'Other sync tabs were cleared because you synchronized data from LibreNMS.',
+                payload.transition_id,
+                'info'
+            );
+        }
+        checkSyncCacheStatus();
+    });
 }
 
 /**
@@ -1790,6 +2111,48 @@ function initializeTabs() {
     // Add event listeners to update URL when tabs are clicked
     const tabs = document.querySelectorAll('[data-bs-toggle="tab"]')
     tabs.forEach(tab => {
+        if (tab.dataset.syncTabInitialized === 'true') return;
+        tab.dataset.syncTabInitialized = 'true';
+        tab.addEventListener('show.bs.tab', function (e) {
+            const tabId = this.getAttribute('aria-controls');
+            const controller = syncCacheController();
+            if (this.dataset.cacheStatusApproved === 'true') {
+                delete this.dataset.cacheStatusApproved;
+                return;
+            }
+            if (controller) {
+                e.preventDefault();
+                checkSyncCacheStatus().then(() => {
+                    const currentState = controller.status?.[tabId];
+                    const unavailable =
+                        controller.lastCheckFailed ||
+                        controller.invalidatedLocally.has(tabId) ||
+                        controller.reloadTabs.has(tabId) ||
+                        (currentState && (
+                            !currentState.snapshot_available ||
+                            ['invalidated', 'refresh_failed', 'missing'].includes(currentState.state)
+                        ));
+                    if (unavailable) {
+                        if (!controller.lastCheckFailed) window.location.assign(syncCacheTabUrl(tabId));
+                        return;
+                    }
+                    if (typeof bootstrap !== 'undefined' && bootstrap.Tab) {
+                        this.dataset.cacheStatusApproved = 'true';
+                        bootstrap.Tab.getOrCreateInstance(this).show();
+                    }
+                });
+                return;
+            }
+            const state = controller?.status?.[tabId];
+            if (
+                controller?.invalidatedLocally.has(tabId) ||
+                controller?.reloadTabs.has(tabId) ||
+                (state && (!state.snapshot_available || ['invalidated', 'refresh_failed', 'missing'].includes(state.state)))
+            ) {
+                e.preventDefault();
+                window.location.assign(syncCacheTabUrl(tabId));
+            }
+        });
         tab.addEventListener('shown.bs.tab', function (e) {
             const tabId = this.getAttribute('aria-controls');
             const url = new URL(window.location);
@@ -1805,6 +2168,7 @@ function initializeTabs() {
 
             // Update the browser history without reloading the page
             window.history.replaceState({}, '', url);
+            checkSyncCacheStatus();
         });
     });
 }
@@ -1994,6 +2358,8 @@ function deleteSelectedInterfaces(selectedCheckboxes) {
     }
 
     formData.append('csrfmiddlewaretoken', csrfToken);
+    const serverKey = document.querySelector('[name="server_key"]')?.value;
+    if (serverKey) formData.append('server_key', serverKey);
 
     // Add interface IDs
     interfaceIds.forEach(id => {
@@ -2030,20 +2396,19 @@ function deleteSelectedInterfaces(selectedCheckboxes) {
                     throw new Error(`HTTP ${response.status} ${response.statusText}: ${msg}`);
                 });
             }
+            const transition = response.headers.get('X-LibreNMS-Cache-Transition');
+            if (transition) {
+                try {
+                    document.dispatchEvent(new CustomEvent('librenmsCacheChanged', { detail: JSON.parse(transition) }));
+                } catch (_) {
+                    document.dispatchEvent(new CustomEvent('librenmsCacheChanged'));
+                }
+            }
             return response.json();
         })
         .then(data => {
             if (data.status === 'success') {
                 hideModal(document.getElementById('netboxOnlyInterfacesModal'));
-
-                // Refresh the interface data by triggering the refresh button
-                const refreshButton = document.querySelector('[hx-post*="interface-sync"]');
-                if (refreshButton) {
-                    refreshButton.click();
-                } else {
-                    // Fallback: reload the page
-                    window.location.reload();
-                }
             } else {
                 const message = data.error || 'Unknown error occurred';
                 console.error('Error deleting interfaces:', message);
@@ -2423,6 +2788,7 @@ function initializeScripts() {
     initializeInstallSelectedForm();
     initializeModuleReplaceButtons();
     initializeVCReportButtons();
+    initializeSyncCacheConsistency();
 }
 
 
@@ -2468,6 +2834,15 @@ document.addEventListener('DOMContentLoaded', function () {
 
 // Initialize scripts after HTMX swaps content
 document.body.addEventListener('htmx:afterSwap', function (event) {
+    const swappedTab = Object.entries(SYNC_CACHE_CONTENT_IDS).find(([, id]) => id === event.target.id)?.[0];
+    if (swappedTab) {
+        const controller = syncCacheController();
+        if (controller) {
+            controller.invalidatedLocally.delete(swappedTab);
+            delete event.target.dataset.cacheEmpty;
+            checkSyncCacheStatus();
+        }
+    }
     initializeScripts();
 });
 
@@ -2572,6 +2947,14 @@ document.addEventListener('click', function (e) {
                 return fetchErrorMessage(r).then(function (msg) {
                     throw new Error(msg);
                 });
+            }
+            const transition = r.headers.get('X-LibreNMS-Cache-Transition');
+            if (transition) {
+                try {
+                    document.dispatchEvent(new CustomEvent('librenmsCacheChanged', { detail: JSON.parse(transition) }));
+                } catch (_) {
+                    document.dispatchEvent(new CustomEvent('librenmsCacheChanged'));
+                }
             }
             return r.json();
         })

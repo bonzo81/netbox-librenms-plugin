@@ -9,10 +9,25 @@ real message framework. The LibreNMS HTTP boundary is never touched (server_key 
 module type carries no interface templates so adoption resolves to a real no-op).
 """
 
+from copy import deepcopy
+
 import pytest
 from django.contrib.auth import get_user_model
 from django.contrib.messages.storage.fallback import FallbackStorage
 from django.test import RequestFactory
+
+
+@pytest.fixture(autouse=True)
+def _configure_default_server(settings):
+    """Configure the server key used by these real request tests."""
+    plugin_config = deepcopy(settings.PLUGINS_CONFIG)
+    plugin_config["netbox_librenms_plugin"]["servers"] = {
+        "default": {
+            "librenms_url": "https://default.example.com",
+            "api_token": "test-token",
+        }
+    }
+    settings.PLUGINS_CONFIG = plugin_config
 
 
 def _seed(name, *, port_id_on_interface):

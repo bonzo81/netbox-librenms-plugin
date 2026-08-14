@@ -7,23 +7,28 @@ No Django database access is used; NetBox model interactions are mocked.
 """
 
 import json
+from copy import deepcopy
+
 import pytest
+from django.conf import settings
+from django.test import override_settings
 
 from netbox_librenms_plugin.tests.mock_librenms_server import librenms_mock_server
 
 
 @pytest.fixture
-def mock_server():
+def mock_server(monkeypatch):
+    monkeypatch.setenv("NO_PROXY", "127.0.0.1,localhost")
+    monkeypatch.setenv("no_proxy", "127.0.0.1,localhost")
     with librenms_mock_server() as server:
         yield server
 
 
 def _make_api(url, token="test-token"):
     """Create a LibreNMSAPI instance pointed at the mock server."""
-    from unittest.mock import patch
-
     from netbox_librenms_plugin.librenms_api import LibreNMSAPI
 
+    plugin_config = deepcopy(settings.PLUGINS_CONFIG)
     servers_config = {
         "test": {
             "librenms_url": url,
@@ -32,9 +37,8 @@ def _make_api(url, token="test-token"):
             "verify_ssl": False,
         }
     }
-
-    with patch("netbox_librenms_plugin.librenms_api.get_plugin_config") as mock_cfg:
-        mock_cfg.side_effect = lambda _plugin, key: servers_config if key == "servers" else None
+    plugin_config["netbox_librenms_plugin"]["servers"] = servers_config
+    with override_settings(PLUGINS_CONFIG=plugin_config):
         api = LibreNMSAPI(server_key="test")
     assert api.server_key == "test"
     return api

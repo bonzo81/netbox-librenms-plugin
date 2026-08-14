@@ -1,6 +1,7 @@
 """Shared LibreNMS port to NetBox interface synchronization."""
 
 import logging
+from copy import deepcopy
 
 from dcim.fields import MACAddressField
 from dcim.models import Device, Interface, MACAddress
@@ -67,8 +68,24 @@ def update_interface_from_port(
     netbox_type=None,
     speed_converter=convert_speed_to_kbps,
 ):
-    """Update one Interface or VMInterface from a LibreNMS port row."""
+    """Update one Interface or VMInterface and return whether NetBox changed."""
     is_device_interface = isinstance(interface, Interface)
+    tracked_fields = (
+        "name",
+        "type",
+        "speed",
+        "description",
+        "mtu",
+        "enabled",
+        "primary_mac_address_id",
+    )
+    before_fields = {
+        field_name: getattr(interface, field_name) for field_name in tracked_fields if hasattr(interface, field_name)
+    }
+    before_custom_fields = deepcopy(interface.custom_field_data)
+    before_mac_ids = (
+        set(interface.mac_addresses.values_list("pk", flat=True)) if hasattr(interface, "mac_addresses") else set()
+    )
     field_mapping = {
         interface_name_field: "name",
         "ifType": "type",
@@ -126,7 +143,15 @@ def update_interface_from_port(
     if "mac_address" not in exclude_columns:
         assign_interface_mac(interface, librenms_interface.get("ifPhysAddress"))
 
-    interface.save()
+    fields_changed = before_custom_fields != interface.custom_field_data or any(
+        getattr(interface, field_name) != value for field_name, value in before_fields.items()
+    )
+    after_mac_ids = (
+        set(interface.mac_addresses.values_list("pk", flat=True)) if hasattr(interface, "mac_addresses") else set()
+    )
+    if fields_changed:
+        interface.save()
+    return fields_changed or before_mac_ids != after_mac_ids
 
 
 @transaction.atomic

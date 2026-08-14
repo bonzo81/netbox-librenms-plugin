@@ -18,6 +18,7 @@ from ipam.models import IPAddress, VRF
 from requests import Response
 
 from netbox_librenms_plugin.constants import INTERFACE_NAME_FIELDS
+from netbox_librenms_plugin.sync_cache import SyncCacheConsistency, SyncTab
 from netbox_librenms_plugin.tests.conftest import (
     make_device,
     make_interface,
@@ -620,6 +621,8 @@ def test_refresh_and_sync_accepts_an_already_prefixed_address(
     cached = cache.get(f"librenms_ip_addresses_device_{device.pk}_default")
     assert cached is not None, refresh_response.content.decode()
     assert cached["ip_addresses"][0]["ip_with_mask"] == expected_address
+    state = cache.get(SyncCacheConsistency(device, cache_timeout=300).state_key(SyncTab.IP_ADDRESSES, "default"))
+    assert state["state"] == "ready"
 
     sync_url = reverse(
         "plugins:netbox_librenms_plugin:sync_device_ip_addresses",
@@ -665,6 +668,8 @@ def test_refresh_rejects_conflicting_embedded_and_separate_prefixes(client, sett
     assert response.status_code == 200
     assert b"Failed to fetch IP addresses from LibreNMS" in response.content
     assert cache.get(f"librenms_ip_addresses_device_{device.pk}_default") is None
+    state = cache.get(SyncCacheConsistency(device, cache_timeout=300).state_key(SyncTab.IP_ADDRESSES, "default"))
+    assert state["state"] == "refresh_failed"
     assert not IPAddress.objects.filter(address="198.18.1.10/25").exists()
 
 
@@ -1457,8 +1462,10 @@ def test_create_missing_interfaces_rejects_ambiguous_cached_port_names(client, s
 
 
 @pytest.mark.django_db
-def test_interface_refresh_and_sync_preserve_the_ip_snapshot(client, settings):
-    """Independent interface cache work must not expire a still-live IP snapshot."""
+def test_interface_sync_keeps_its_source_snapshot_and_clears_the_ip_snapshot(
+    client, settings, django_capture_on_commit_callbacks
+):
+    """A committed Interface sync must clear stale IP data but keep its source data."""
     _configure_test_server(settings)
     device = make_device("ip-cache-survives-interface-sync", librenms_cf={"default": {"id": 42}})
     rows = [
@@ -1493,6 +1500,7 @@ def test_interface_refresh_and_sync_preserve_the_ip_snapshot(client, settings):
     ip_refresh_url = reverse("plugins:netbox_librenms_plugin:device_ipaddress_sync", args=[device.pk])
     interface_refresh_url = reverse("plugins:netbox_librenms_plugin:device_interface_sync", args=[device.pk])
     ip_cache_key = f"librenms_ip_addresses_device_{device.pk}_default"
+    interface_cache_key = f"librenms_ports_device_{device.pk}_default"
     with patch("netbox_librenms_plugin.librenms_api.requests.get", side_effect=librenms_response):
         assert (
             client.post(
@@ -1517,8 +1525,8 @@ def test_interface_refresh_and_sync_preserve_the_ip_snapshot(client, settings):
         "plugins:netbox_librenms_plugin:sync_selected_interfaces",
         kwargs={"object_type": "device", "object_id": device.pk},
     )
-    assert (
-        client.post(
+    with django_capture_on_commit_callbacks(execute=True):
+        response = client.post(
             interface_sync_url,
             {
                 "server_key": "default",
@@ -1526,51 +1534,11 @@ def test_interface_refresh_and_sync_preserve_the_ip_snapshot(client, settings):
                 "select": "7016",
                 "exclude_columns": "vlans",
             },
-        ).status_code
-        == 302
-    )
-    assert cache.get(ip_cache_key) is not None
-
-    ip_sync_url = reverse(
-        "plugins:netbox_librenms_plugin:sync_device_ip_addresses",
-        kwargs={"object_type": "device", "pk": device.pk},
-    )
-    response = client.post(
-        ip_sync_url,
-        {
-            "server_key": "default",
-            "select": "198.18.16.10/24",
-            "vrf_198.18.16.10/24": "",
-        },
-    )
+        )
 
     assert response.status_code == 302
-    assert IPAddress.objects.get(address="198.18.16.10/24", vrf=None).assigned_object.name == "Ethernet1"
-
-
-@pytest.mark.django_db
-def test_expired_ip_snapshot_redirects_the_whole_htmx_page(client, settings):
-    """An expired snapshot must replace the stale tab and countdown, not load a page in the modal."""
-    _configure_test_server(settings)
-    device = make_device("ip-expired-htmx", librenms_cf={"default": {"id": 42}})
-    client.force_login(make_superuser("ip-expired-htmx-user"))
-    sync_url = reverse(
-        "plugins:netbox_librenms_plugin:sync_device_ip_addresses",
-        kwargs={"object_type": "device", "pk": device.pk},
-    )
-
-    response = client.post(
-        sync_url,
-        {"server_key": "default", "select": "198.18.17.10/24"},
-        HTTP_HX_REQUEST="true",
-    )
-
-    assert response.status_code == 200
-    expected_url = (
-        reverse("plugins:netbox_librenms_plugin:device_librenms_sync", args=[device.pk])
-        + "?tab=ipaddresses&server_key=default"
-    )
-    assert response.headers["HX-Redirect"] == expected_url
+    assert cache.get(interface_cache_key) is not None
+    assert cache.get(ip_cache_key) is None
 
 
 @pytest.mark.django_db

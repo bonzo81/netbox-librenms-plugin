@@ -26,6 +26,11 @@ from django.urls import get_script_prefix, reverse
 from django.views import View
 from ipam.models import IPAddress
 
+from netbox_librenms_plugin.sync_cache import (
+    SyncTab,
+    apply_request_cache_transition,
+    schedule_request_cache_mutation,
+)
 from netbox_librenms_plugin.utils import (
     DEVICE_IP_FK_FIELDS,
     DEVICE_IP_FK_LABELS,
@@ -239,8 +244,10 @@ def _hx_response(request, message, level=messages.SUCCESS, *, status=200, fallba
     """
     messages.add_message(request, level, message)
     if request.headers.get("HX-Request"):
-        return HttpResponse(status=status, headers={"HX-Refresh": "true"})
-    return redirect(_safe_referer(request, fallback_url))
+        response = HttpResponse(status=status, headers={"HX-Refresh": "true"})
+    else:
+        response = redirect(_safe_referer(request, fallback_url))
+    return apply_request_cache_transition(request, response)
 
 
 def _reconcile_donor_device_ip_fks(donor, winner):
@@ -715,6 +722,7 @@ class MoveInterfaceToWinnerView(_BaseMoveToWinnerView):
             )
         if notes:
             message += " " + "; ".join(notes) + "."
+        schedule_request_cache_mutation(request, donor, SyncTab.INTERFACES, server_key)
         return _hx_response(request, message, fallback_url=self._fallback_url)
 
 
@@ -817,6 +825,7 @@ class MoveIPAddressToWinnerView(_BaseMoveToWinnerView):
         message = f"Moved IP {ip.address} to {winner.name} interface '{winner_iface.name}'."
         if notes:
             message += " " + "; ".join(notes) + "."
+        schedule_request_cache_mutation(request, donor, SyncTab.IP_ADDRESSES, server_key)
         return _hx_response(request, message, fallback_url=self._fallback_url)
 
 
@@ -942,6 +951,7 @@ class TransferDeviceIPView(_BaseMoveToWinnerView):
                 transaction.set_rollback(True)
                 return self._fail(request, f"Cannot transfer {human}: {exc}", status=409)
 
+        schedule_request_cache_mutation(request, donor, SyncTab.IP_ADDRESSES, server_key)
         return _hx_response(
             request,
             f"Transferred {human} ({donor_ip}) to {winner.name}.",
