@@ -16,6 +16,7 @@ from netbox_librenms_plugin.utils import (
     build_migrated_context,
     cache_remaining_ttl,
     coerce_librenms_id,
+    coerce_model_pk,
     get_interface_name_field,
     get_librenms_oob,
     get_librenms_sync_device,
@@ -892,9 +893,10 @@ class BaseInterfaceTableView(
 
             # Batch-fetch all referenced override group IDs to avoid N+1 queries
             override_group_ids = {
-                vlan_group_overrides[str(vid)]
+                group_id
                 for vid in all_vids
-                if str(vid) in vlan_group_overrides and vlan_group_overrides[str(vid)]
+                if str(vid) in vlan_group_overrides
+                and (group_id := coerce_model_pk(vlan_group_overrides[str(vid)])) is not None
             }
             override_groups_by_id = {}
             if override_group_ids:

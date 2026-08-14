@@ -198,6 +198,19 @@ def test_relationship_handler_reuses_shared_csrf_helper():
     )
 
 
+def test_interface_preference_save_checks_csrf_and_http_status():
+    """Preference persistence must report missing CSRF and rejected HTTP responses."""
+    handler = _js_block(
+        _js_source(),
+        "function updateInterfaceNameField()",
+        "function setInterfaceNameFieldFromURL()",
+    )
+
+    assert "const csrfToken = getCsrfToken();" in handler
+    assert "missing CSRF token" in handler
+    assert "if (!response.ok)" in handler
+
+
 def test_interface_member_verify_rebinds_replaced_vlan_controls():
     """Replacing the VLAN cell must bind the new edit button before the user can click it."""
     handler = _js_block(
@@ -3931,11 +3944,11 @@ class TestSyncInterfacesViewUpdateInterfaceAttributes:
 
     def test_port_id_conflict_does_not_overwrite(self):
         from dcim.models import Interface
-        from netbox_librenms_plugin.utils import get_librenms_device_id
+        from netbox_librenms_plugin.utils import get_librenms_device_id, set_librenms_device_id
 
         view = self._make_view()
         conflicting_owner = make_interface(make_device("port-id-owner"), "Gi0/0")
-        conflicting_owner.custom_field_data["librenms_id"] = {"default": 42}
+        set_librenms_device_id(conflicting_owner, 42, "default")
         conflicting_owner.save(update_fields=["custom_field_data"])
         interface = make_interface(make_device("port-id-target"), "Gi0/0")
         librenms_port = {

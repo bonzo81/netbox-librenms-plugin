@@ -1,3 +1,4 @@
+import hashlib
 import logging
 import re
 import threading
@@ -24,6 +25,21 @@ logger = logging.getLogger(__name__)
 # Bounded at 19 digits, the width of a PostgreSQL bigint. Without the bound an oversized string is
 # rejected only by CPython's int_max_str_digits limit, which a host may raise or disable.
 _ASCII_POSITIVE_INTEGER_RE = re.compile(r"^[ \t\r\n\f\v]*\+?[0-9]{1,19}[ \t\r\n\f\v]*$")
+
+
+def acquire_advisory_transaction_lock(lock_identity: str) -> None:
+    """Acquire one stable PostgreSQL advisory lock for the current transaction."""
+    from django.db import connection
+
+    if not connection.in_atomic_block:
+        raise RuntimeError("acquire_advisory_transaction_lock() requires an open transaction")
+    lock_key = int.from_bytes(
+        hashlib.blake2b(lock_identity.encode(), digest_size=8).digest(),
+        byteorder="big",
+        signed=True,
+    )
+    with connection.cursor() as cursor:
+        cursor.execute("SELECT pg_advisory_xact_lock(%s)", [lock_key])
 
 
 def is_list_of_dicts(value) -> bool:
@@ -996,12 +1012,12 @@ def _remember_interface_name_per_platform(request: HttpRequest) -> bool:
     return enabled
 
 
-def normalize_platform_id(value) -> int | None:
-    """Normalize a platform primary key without allowing PostgreSQL bigint overflow."""
-    platform_id = coerce_positive_int(value)
-    if platform_id is None or platform_id > _POSTGRES_BIGINT_MAX:
+def coerce_model_pk(value) -> int | None:
+    """Normalize a NetBox primary key without allowing PostgreSQL bigint overflow."""
+    model_pk = coerce_positive_int(value)
+    if model_pk is None or model_pk > _POSTGRES_BIGINT_MAX:
         return None
-    return platform_id
+    return model_pk
 
 
 def save_interface_name_preference(
@@ -1010,17 +1026,17 @@ def save_interface_name_preference(
     platform_id: int | None = None,
 ) -> bool:
     """Persist an interface-name choice at the configured user preference scope."""
-    if value not in INTERFACE_NAME_FIELDS:
+    if not isinstance(value, str) or value not in INTERFACE_NAME_FIELDS:
         return False
 
-    normalized_platform_id = normalize_platform_id(platform_id)
+    normalized_platform_id = coerce_model_pk(platform_id)
     if normalized_platform_id is not None and _remember_interface_name_per_platform(request):
         stored = get_user_pref(request, INTERFACE_NAME_PLATFORM_PREFERENCES_PATH, {})
         stored = stored if isinstance(stored, dict) else {}
         preferences = {}
         for key, candidate in stored.items():
-            stored_platform_id = normalize_platform_id(key)
-            if stored_platform_id is not None and candidate in INTERFACE_NAME_FIELDS:
+            stored_platform_id = coerce_model_pk(key)
+            if stored_platform_id is not None and isinstance(candidate, str) and candidate in INTERFACE_NAME_FIELDS:
                 preferences[str(stored_platform_id)] = candidate
         preferences[str(normalized_platform_id)] = value
         save_user_pref(request, INTERFACE_NAME_PLATFORM_PREFERENCES_PATH, preferences)
@@ -1045,11 +1061,11 @@ def get_interface_name_field(request: Optional[HttpRequest] = None, obj=None) ->
     Returns:
         str: Interface name field to use
     """
-    platform_id = normalize_platform_id(getattr(obj, "platform_id", None))
+    platform_id = coerce_model_pk(getattr(obj, "platform_id", None))
     if request:
         # Explicit override from request params
         param_val = request.GET.get("interface_name_field") or request.POST.get("interface_name_field")
-        if param_val in INTERFACE_NAME_FIELDS:
+        if isinstance(param_val, str) and param_val in INTERFACE_NAME_FIELDS:
             save_interface_name_preference(request, param_val, platform_id)
             return param_val
 
@@ -1057,12 +1073,12 @@ def get_interface_name_field(request: Optional[HttpRequest] = None, obj=None) ->
             platform_preferences = get_user_pref(request, INTERFACE_NAME_PLATFORM_PREFERENCES_PATH, {})
             if isinstance(platform_preferences, dict):
                 platform_value = platform_preferences.get(str(platform_id))
-                if platform_value in INTERFACE_NAME_FIELDS:
+                if isinstance(platform_value, str) and platform_value in INTERFACE_NAME_FIELDS:
                     return platform_value
 
         # Check user preference
         pref_val = get_user_pref(request, INTERFACE_NAME_PREFERENCE_PATH)
-        if pref_val in INTERFACE_NAME_FIELDS:
+        if isinstance(pref_val, str) and pref_val in INTERFACE_NAME_FIELDS:
             return pref_val
 
     # Fall back to plugin config

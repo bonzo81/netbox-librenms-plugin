@@ -161,3 +161,30 @@ def test_interface_name_preference_rejects_unknown_values(client):
 
     assert response.status_code == 400
     assert type(user).objects.get(pk=user.pk).config.get(GLOBAL_PREFERENCE) is None
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("value", [["ifName"], {"field": "ifName"}])
+def test_interface_name_preference_rejects_non_string_values(client, value):
+    """The JSON endpoint must reject containers before set membership checks."""
+    user = make_superuser("non-string-interface-name-user")
+    client.force_login(user)
+
+    response = _post_preference(client, value)
+
+    assert response.status_code == 400
+    assert type(user).objects.get(pk=user.pk).config.get(GLOBAL_PREFERENCE) is None
+
+
+@pytest.mark.django_db
+def test_malformed_stored_interface_name_preferences_fall_back_safely():
+    """Malformed user JSON must not break the interface sync page preference reader."""
+    platform = Platform.objects.create(name="Malformed Preference Platform", slug="malformed-preference-platform")
+    device = make_device("malformed-preference-device")
+    device.platform = platform
+    device.save(update_fields=["platform"])
+    user = make_superuser("malformed-interface-name-reader")
+    user.config.set(GLOBAL_PREFERENCE, ["ifName"], commit=False)
+    user.config.set(PLATFORM_PREFERENCES, {str(platform.pk): {"field": "ifDescr"}}, commit=True)
+
+    assert get_interface_name_field(_request_for(user), device) == "ifName"
