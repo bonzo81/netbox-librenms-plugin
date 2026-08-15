@@ -905,12 +905,10 @@ class BaseInterfaceTableView(
             for vid in all_vids:
                 vid_str = str(vid)
                 if vid_str in vlan_group_overrides:
-                    override_group_id = vlan_group_overrides[vid_str]
-                    if override_group_id:
-                        try:
-                            group = override_groups_by_id.get(int(override_group_id))
-                        except (TypeError, ValueError):
-                            group = None
+                    raw_override_group_id = vlan_group_overrides[vid_str]
+                    override_group_id = coerce_model_pk(raw_override_group_id)
+                    if override_group_id is not None:
+                        group = override_groups_by_id.get(override_group_id)
                         # The row's in-scope groups, not only groups that already carry the VID:
                         # "apply to all" exists to put the VLAN into a group that lacks it.
                         allowed_group_ids = {candidate.pk for candidate in port.get("vlan_groups", [])}
@@ -921,7 +919,7 @@ class BaseInterfaceTableView(
                                 "is_ambiguous": False,
                             }
                         # Keep auto-selection when the group was deleted or is out of the row's scope.
-                    elif (vid, None) in lookup_maps.get("vid_group_to_vlan", {}):
+                    elif raw_override_group_id == "" and (vid, None) in lookup_maps.get("vid_group_to_vlan", {}):
                         # User explicitly chose "No Group (Global)"
                         vlan_group_map[vid] = {
                             "group_id": "",

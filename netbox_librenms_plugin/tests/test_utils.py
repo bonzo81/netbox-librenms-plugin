@@ -994,6 +994,9 @@ class TestInterfaceNameField:
         from netbox_librenms_plugin.utils import get_interface_name_field
 
         user_model = get_user_model()
+        pref_path = "plugins.netbox_librenms_plugin.interface_name_field"
+        baseline = user_model.objects.create_user(username="pref-baseline")
+        baseline_value = baseline.config.get(pref_path)
         chooser = user_model.objects.create_user(username="pref-chooser")
         defaults_before = deepcopy(get_config().DEFAULT_USER_PREFERENCES)
         request = RequestFactory().get("/", {"interface_name_field": "ifDescr"})
@@ -1001,12 +1004,11 @@ class TestInterfaceNameField:
 
         assert get_interface_name_field(request) == "ifDescr"
 
-        pref_path = "plugins.netbox_librenms_plugin.interface_name_field"
         stored = user_model.objects.get(pk=chooser.pk)
         assert stored.config.get(pref_path) == "ifDescr"
         assert get_config().DEFAULT_USER_PREFERENCES == defaults_before
         later = user_model.objects.create_user(username="pref-later")
-        assert later.config.get(pref_path) is None
+        assert later.config.get(pref_path) == baseline_value
 
 
 # =============================================================================
