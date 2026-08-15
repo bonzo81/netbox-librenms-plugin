@@ -179,12 +179,13 @@ def test_interface_name_preference_rejects_non_string_values(client, value):
 @pytest.mark.django_db
 def test_malformed_stored_interface_name_preferences_fall_back_safely():
     """Malformed user JSON must not break the interface sync page preference reader."""
+    LibreNMSSettings.objects.create(remember_interface_name_per_platform=True)
     platform = Platform.objects.create(name="Malformed Preference Platform", slug="malformed-preference-platform")
     device = make_device("malformed-preference-device")
     device.platform = platform
     device.save(update_fields=["platform"])
     user = make_superuser("malformed-interface-name-reader")
-    user.config.set(GLOBAL_PREFERENCE, ["ifName"], commit=False)
+    user.config.set(GLOBAL_PREFERENCE, "ifDescr", commit=False)
     user.config.set(PLATFORM_PREFERENCES, {str(platform.pk): {"field": "ifDescr"}}, commit=True)
 
-    assert get_interface_name_field(_request_for(user), device) == "ifName"
+    assert get_interface_name_field(_request_for(user), device) == "ifDescr"
