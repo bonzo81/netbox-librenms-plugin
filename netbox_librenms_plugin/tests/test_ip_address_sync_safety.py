@@ -622,6 +622,7 @@ def test_refresh_and_sync_accepts_an_already_prefixed_address(
     assert cached is not None, refresh_response.content.decode()
     assert cached["ip_addresses"][0]["ip_with_mask"] == expected_address
     state = cache.get(SyncCacheConsistency(device).state_key(SyncTab.IP_ADDRESSES, "default"))
+    assert state is not None
     assert state["state"] == "ready"
 
     sync_url = reverse(
@@ -669,6 +670,7 @@ def test_refresh_rejects_conflicting_embedded_and_separate_prefixes(client, sett
     assert b"Failed to fetch IP addresses from LibreNMS" in response.content
     assert cache.get(f"librenms_ip_addresses_device_{device.pk}_default") is None
     state = cache.get(SyncCacheConsistency(device).state_key(SyncTab.IP_ADDRESSES, "default"))
+    assert state is not None
     assert state["state"] == "refresh_failed"
     assert not IPAddress.objects.filter(address="198.18.1.10/25").exists()
 

@@ -363,7 +363,8 @@ def test_selecting_an_unavailable_tab_acknowledges_its_attention_state():
                 body=_page_html(
                     initial,
                     active_tab="ipaddresses" if "tab=ipaddresses" in route.request.url else "interfaces",
-                )
+                ),
+                content_type="text/html",
             ),
         )
         page.goto("https://plugin.example.com/page")
@@ -453,6 +454,8 @@ def test_cache_status_failure_disables_every_loaded_sync_control():
     with playwright.sync_playwright() as runtime:
         browser = runtime.chromium.launch(headless=True)
         page = browser.new_page()
+        console_errors = []
+        page.on("console", lambda message: console_errors.append(message.text) if message.type == "error" else None)
         page.set_content(_page_html(initial))
         page.route(
             "https://plugin.example.com/status?*",
@@ -467,6 +470,74 @@ def test_cache_status_failure_disables_every_loaded_sync_control():
         assert page.locator("#modal-force-action").is_disabled()
         assert "could not be verified" in page.locator("#interface-sync-content").inner_text()
         assert "could not be verified" in page.locator("#ipaddress-sync-content").inner_text()
+        assert "HTTP 503" in console_errors
+        browser.close()
+
+
+def test_valid_status_recovers_when_the_initial_state_is_malformed():
+    """The stable tab contract must validate status when initial state parsing fails."""
+    current = {
+        "interfaces": _state("current-interfaces"),
+        "ipaddresses": _state("current-ipaddresses"),
+    }
+    html = _page_html(current).replace(
+        f'<script id="librenms-sync-cache-initial" type="application/json">{json.dumps(current)}</script>',
+        '<script id="librenms-sync-cache-initial" type="application/json">{malformed</script>',
+    )
+
+    with playwright.sync_playwright() as runtime:
+        browser = runtime.chromium.launch(headless=True)
+        page = browser.new_page()
+        page.set_content(html)
+        page.route(
+            "https://plugin.example.com/status?*",
+            lambda route: route.fulfill(json={"tabs": current}),
+        )
+        page.route(
+            "https://plugin.example.com/fragment/interfaces?*",
+            lambda route: route.fulfill(body='<button id="interface-action">Sync</button>'),
+        )
+        page.add_script_tag(path=str(SCRIPT_PATH))
+        page.evaluate("initializeSyncCacheConsistency(); checkSyncCacheStatus()")
+        page.wait_for_function("syncCacheController().checking === null")
+
+        assert page.evaluate("syncCacheController().lastCheckFailed") is False
+        assert page.locator("#interface-action").count() == 1
+        assert page.locator("#ip-action").count() == 1
+        browser.close()
+
+
+def test_fragment_failure_logs_the_http_status_and_clears_the_content():
+    """A fragment failure must retain its diagnostic while failing closed."""
+    initial = {
+        "interfaces": _state("before-interfaces"),
+        "ipaddresses": _state("before-ip"),
+    }
+    current = {
+        **initial,
+        "interfaces": _state("after-interfaces", state="locally_changed", source_tab="interfaces"),
+    }
+
+    with playwright.sync_playwright() as runtime:
+        browser = runtime.chromium.launch(headless=True)
+        page = browser.new_page()
+        console_errors = []
+        page.on("console", lambda message: console_errors.append(message.text) if message.type == "error" else None)
+        page.set_content(_page_html(initial))
+        page.route(
+            "https://plugin.example.com/status?*",
+            lambda route: route.fulfill(json={"tabs": current}),
+        )
+        page.route(
+            "https://plugin.example.com/fragment/interfaces?*",
+            lambda route: route.fulfill(status=503),
+        )
+        page.add_script_tag(path=str(SCRIPT_PATH))
+        page.evaluate("initializeSyncCacheConsistency(); checkSyncCacheStatus()")
+        page.wait_for_function("document.querySelector('#interface-sync-content').dataset.cacheEmpty === 'true'")
+
+        assert "HTTP 503" in console_errors
+        assert "could not be restored" in page.locator("#interface-sync-content").inner_text()
         browser.close()
 
 

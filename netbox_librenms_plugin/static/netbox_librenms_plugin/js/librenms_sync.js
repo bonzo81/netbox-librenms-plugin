@@ -546,7 +546,8 @@ function loadSyncCacheFragment(tab) {
             if (typeof htmx !== 'undefined') htmx.process(content);
             initializeScripts();
         })
-        .catch(() => {
+        .catch(error => {
+            console.error(error.message);
             clearSyncTabContent(tab, 'Cache state could not be restored. Reload this tab before continuing.');
         });
 }
@@ -664,13 +665,15 @@ function checkSyncCacheStatus() {
             return response.json();
         })
         .then(payload => {
-            if (!isValidSyncCacheStatusPayload(payload, Object.keys(controller.status || {}))) {
+            const expectedTabs = Object.keys(controller.contract || {});
+            if (!expectedTabs.length || !isValidSyncCacheStatusPayload(payload, expectedTabs)) {
                 throw new Error('Invalid cache status response');
             }
             return reconcileSyncCacheStatus(payload.tabs);
         })
         .then(() => { controller.lastCheckFailed = false; })
-        .catch(() => {
+        .catch(error => {
+            console.error(error.message);
             controller.lastCheckFailed = true;
             failClosedSyncControls('Cache status could not be verified. Reload this tab before continuing.');
         })

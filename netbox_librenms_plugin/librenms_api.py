@@ -34,7 +34,7 @@ def configured_cache_timeout(server_key):
         return DEFAULT_CACHE_TIMEOUT
     if not math.isfinite(timeout) or timeout <= 0:
         return DEFAULT_CACHE_TIMEOUT
-    return int(timeout)
+    return max(1, int(timeout))
 
 
 def build_librenms_api(server_key):

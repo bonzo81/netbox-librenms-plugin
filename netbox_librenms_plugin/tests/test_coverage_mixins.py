@@ -1229,10 +1229,11 @@ class TestUpdateInterfaceVlanAssignmentBranches:
         assert result["untagged_set"] is None
         iface.save.assert_called()
 
-    def test_tagged_vlans_not_cleared_when_no_tagged_vids(self):
-        """Keep existing tagged VLANs when the payload has no tagged VIDs."""
+    def test_existing_tagged_vlans_are_cleared_when_the_payload_has_none(self):
+        """Remove existing tagged VLANs when LibreNMS reports no tagged VIDs."""
         mixin = self._make_mixin()
         iface = self._make_interface()
+        iface.tagged_vlans.values_list.return_value = [101]
 
         lookup_maps = {"vid_group_to_vlan": {}, "vid_to_vlans": {}}
 
@@ -1243,8 +1244,11 @@ class TestUpdateInterfaceVlanAssignmentBranches:
             lookup_maps,
         )
 
-        iface.tagged_vlans.clear.assert_not_called()
+        iface.tagged_vlans.clear.assert_called_once_with()
+        iface.tagged_vlans.set.assert_not_called()
+        iface.tagged_vlans.remove.assert_not_called()
         assert result["tagged_set"] == []
+        assert result["changed"] is True
 
     def test_backward_compat_single_group_id_string(self):
         """Non-dict vlan_group_map (legacy single group ID) is handled correctly."""

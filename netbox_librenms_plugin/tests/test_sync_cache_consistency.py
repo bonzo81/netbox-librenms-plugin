@@ -90,6 +90,7 @@ def _opening_tag(html, element_id):
 def _tab_classes(html, element_id):
     """Return the classes from one rendered tab link."""
     opening_tag = _opening_tag(html, element_id)
+    assert 'class="' in opening_tag, f"{element_id} rendered without a class attribute: {opening_tag}"
     return opening_tag.split('class="', 1)[1].split('"', 1)[0].split()
 
 
@@ -105,6 +106,16 @@ def test_configured_cache_timeout_rejects_invalid_values(settings, invalid_timeo
     settings.PLUGINS_CONFIG["netbox_librenms_plugin"]["servers"]["primary"]["cache_timeout"] = invalid_timeout
 
     assert configured_cache_timeout("primary") == DEFAULT_CACHE_TIMEOUT
+
+
+def test_configured_cache_timeout_clamps_positive_fractions(settings):
+    """A positive fractional timeout must not become immediate expiry."""
+    from netbox_librenms_plugin.librenms_api import configured_cache_timeout
+
+    _configure_servers(settings)
+    settings.PLUGINS_CONFIG["netbox_librenms_plugin"]["servers"]["primary"]["cache_timeout"] = 0.5
+
+    assert configured_cache_timeout("primary") == 1
 
 
 @pytest.mark.django_db
@@ -333,10 +344,12 @@ def test_committed_interface_sync_invalidates_only_mapped_page_and_shared_snapsh
 
     coordinator = SyncCacheConsistency(page_device)
     primary_state = cache.get(coordinator.state_key(SyncTab.INTERFACES, "primary"))
+    assert primary_state is not None
     assert primary_state["state"] == "locally_changed"
     assert primary_state["source_tab"] == "interfaces"
     assert primary_state["actor_id"] is not None
     secondary_state = cache.get(coordinator.state_key(SyncTab.INTERFACES, "secondary"))
+    assert secondary_state is not None
     assert secondary_state["state"] == "invalidated"
     assert secondary_state["revision"] == primary_state["revision"]
     assert 0 < cache.ttl(coordinator.state_key(SyncTab.INTERFACES, "primary")) <= 60
@@ -841,11 +854,13 @@ def _mark_migrated_donor(donor, winner):
     donor.save(update_fields=["custom_field_data"])
 
 
-@pytest.mark.django_db
+@pytest.mark.django_db(
+    transaction=True,
+    available_apps=tuple(app.name for app in django_apps.get_app_configs()),
+)
 def test_interface_move_invalidates_winner_dependent_snapshots(
     client,
     settings,
-    django_capture_on_commit_callbacks,
 ):
     """Moving an interface must publish the cache transition for its new owner too."""
     _configure_servers(settings)
@@ -857,10 +872,10 @@ def test_interface_move_invalidates_winner_dependent_snapshots(
     client.force_login(make_superuser("cache-move-interface-user"))
     url = reverse("plugins:netbox_librenms_plugin:interface_move_to_winner", args=[interface.pk])
 
-    with django_capture_on_commit_callbacks(execute=True):
-        response = client.post(url, {"server_key": "primary"}, HTTP_HX_REQUEST="true")
+    response = client.post(url, {"server_key": "primary"}, HTTP_HX_REQUEST="true")
 
     assert response.status_code == 200
+    assert json.loads(response["X-LibreNMS-Cache-Transition"])["cleanup_failed"] is True
     interface.refresh_from_db()
     assert interface.device_id == winner.pk
     assert cache.get(_cache_key("ip_addresses", winner, "primary")) is None
@@ -1094,6 +1109,7 @@ def test_cleanup_failure_invalidates_every_dependent_tab(
     assert source_state["state"] == "locally_changed"
     for tab in (SyncTab.CABLES, SyncTab.IP_ADDRESSES, SyncTab.MODULES, SyncTab.VLANS):
         state = cache.get(coordinator.state_key(tab, "primary"))
+        assert state is not None
         assert state["state"] == "invalidated"
         assert "cleanup did not complete" in state["reason"]
 
@@ -1471,6 +1487,7 @@ def test_failed_refresh_retains_an_existing_invalidation_reason(
         coordinator.schedule_mutation(SyncTab.INTERFACES, "primary", actor_id=1)
     state_key = coordinator.state_key(SyncTab.IP_ADDRESSES, "primary")
     prior = cache.get(state_key)
+    assert prior is not None
     cache.touch(state_key, timeout=17)
 
     failed = coordinator.mark_refresh_failure(SyncTab.IP_ADDRESSES, "primary", actor_id=2)

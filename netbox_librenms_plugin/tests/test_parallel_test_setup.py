@@ -363,6 +363,14 @@ def test_isolated_settings_exclude_unrelated_installed_plugins(settings):
     assert set(settings.PLUGINS_CONFIG) == {"netbox_librenms_plugin"}
 
 
+def test_isolated_settings_use_the_cross_version_configuration_contract():
+    """Load the configured module without requiring a newer NetBox helper."""
+    source = (REPOSITORY_ROOT / "netbox_librenms_plugin/tests/isolated_settings.py").read_text()
+
+    assert "netbox.settings_utils" not in source
+    assert "importlib.import_module" in source
+
+
 def test_librenms_config_mock_is_not_applied_to_unrelated_tests(settings):
     """A helper plugin must not replace the configured server catalog globally."""
     from copy import deepcopy

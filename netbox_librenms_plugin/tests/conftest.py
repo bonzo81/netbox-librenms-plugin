@@ -139,9 +139,22 @@ def seed_migration_rows():
         model.objects.get_or_create(**lookup, defaults=defaults)
 
 
+_transactional_seed_restore_required = False
+
+
+def _restore_librenms_custom_field():
+    """Recreate the custom field that the plugin's post-migrate hook seeds."""
+    from netbox_librenms_plugin import _ensure_librenms_id_custom_field
+
+    executed_aliases = set(getattr(_ensure_librenms_id_custom_field, "_executed_aliases", set()))
+    executed_aliases.discard("default")
+    _ensure_librenms_id_custom_field._executed_aliases = executed_aliases
+    _ensure_librenms_id_custom_field(sender=None, using="default")
+
+
 @pytest.fixture(autouse=True)
 def _restore_migration_seeded_rows(request):
-    """Re-seed the rows a transactional test's flush removes.
+    """Restore the rows that a transactional test's flush removes.
 
     ``django_db(transaction=True)`` truncates every table, including rows a data migration
     created, so LAG detection loses its per-OS name patterns and every later test in the run
@@ -153,6 +166,8 @@ def _restore_migration_seeded_rows(request):
     """
     # Gate on the marker, not on request.fixturenames: pytest-django pulls "db" in dynamically
     # from its own autouse fixture, so it is still absent from the closure at this point.
+    global _transactional_seed_restore_required
+
     marker = request.node.get_closest_marker("django_db")
     requested = {"db", "transactional_db"} & set(request.fixturenames)
     if marker is None and not requested:
@@ -163,29 +178,20 @@ def _restore_migration_seeded_rows(request):
     # An autouse fixture is set up BEFORE the fixtures it does not request, so ask for the
     # database one here: querying without it raises "Database access not allowed".
     request.getfixturevalue(db_fixture)
-    for model, _lookup_field, _value_field, _rows in _seeded_model_rows():
-        if not model.objects.exists():
-            seed_migration_rows()
-            break
-    _restore_librenms_id_custom_field()
+    if _transactional_seed_restore_required:
+        seed_migration_rows()
+        _restore_librenms_custom_field()
+        _transactional_seed_restore_required = False
+    else:
+        for model, _lookup_field, _value_field, _rows in _seeded_model_rows():
+            if not model.objects.exists():
+                seed_migration_rows()
+                break
+
     yield
 
-
-def _restore_librenms_id_custom_field():
-    """Recreate the librenms_id custom field a transactional flush removed.
-
-    The handler short-circuits on its own ``_executed_aliases`` guard, so after a flush it will
-    not recreate the field by itself. Only act when the field is actually gone, which keeps this
-    to one cheap existence check for the non-transactional majority.
-    """
-    from extras.models import CustomField
-
-    from netbox_librenms_plugin import _ensure_librenms_id_custom_field
-
-    if CustomField.objects.filter(name="librenms_id").exists():
-        return
-    _ensure_librenms_id_custom_field._executed_aliases.discard("default")
-    _ensure_librenms_id_custom_field(sender=None, using="default")
+    if marker and marker.kwargs.get("transaction"):
+        _transactional_seed_restore_required = True
 
 
 @pytest.fixture(scope="session", autouse=True)
@@ -206,11 +212,13 @@ def _reseed_after_transactional_flush(django_db_setup, django_db_blocker):
 
     with django_db_blocker.unblock():
         seed_migration_rows()
+        _restore_librenms_custom_field()
 
     yield
 
     with django_db_blocker.unblock():
         seed_migration_rows()
+        _restore_librenms_custom_field()
 
 
 # =============================================================================
