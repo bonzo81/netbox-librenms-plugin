@@ -1909,7 +1909,10 @@ class LibreNMSAPI:
                     if sensor.get("sensor_type") not in serial_types:
                         continue
                     deleted = sensor.get("sensor_deleted", 0)
-                    if isinstance(deleted, bool) or deleted not in (0, 1, "0", "1"):
+                    valid_deleted = (
+                        isinstance(deleted, int) and not isinstance(deleted, bool) and deleted in (0, 1)
+                    ) or (isinstance(deleted, str) and deleted in ("0", "1"))
+                    if not valid_deleted:
                         logger.warning(
                             "Unexpected sensors response for %s: invalid sensor_deleted",
                             self.server_key,

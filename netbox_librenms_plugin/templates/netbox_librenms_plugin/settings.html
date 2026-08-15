@@ -435,7 +435,9 @@
                 <div class="row justify-content-start">
                     <div class="col-lg-6">
                         <div class="text-end">
-                            <button type="submit" id="save-cable-sync-btn" class="btn btn-primary" disabled>
+                            <button type="submit" id="save-cable-sync-btn" class="btn btn-primary"
+                                    data-force-enabled="{% if cable_sync_form.errors %}true{% else %}false{% endif %}"
+                                    {% if not cable_sync_form.errors %}disabled{% endif %}>
                                 <i class="ti ti-check me-1"></i> Save Cable Sync Settings
                             </button>
                         </div>
@@ -539,7 +541,8 @@ document.addEventListener('DOMContentLoaded', function() {
 
     function updateCableSyncSaveButton() {
         if (!saveCableSyncBtn) return;
-        const hasChanges = cableSyncFields.some((f, i) => f.value !== initialCableSyncValues[i]);
+        const hasChanges = saveCableSyncBtn.dataset.forceEnabled === 'true'
+            || cableSyncFields.some((f, i) => f.value !== initialCableSyncValues[i]);
         saveCableSyncBtn.disabled = !hasChanges;
         saveCableSyncBtn.classList.toggle('btn-primary', hasChanges);
         saveCableSyncBtn.classList.toggle('btn-secondary', !hasChanges);

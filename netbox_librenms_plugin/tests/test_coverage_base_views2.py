@@ -1057,8 +1057,8 @@ class TestPostHandlerVC:
         assert captured["server_key"] == "good"  # "ghost" is unconfigured → session key used
 
     @pytest.mark.django_db
-    def test_vc_member_resolution_calls_get_virtual_chassis_member(self):
-        """VC device → get_virtual_chassis_member called with device and local_port."""
+    def test_vc_member_resolution_uses_the_selected_member(self):
+        """The posted member selection is used without name-based inference."""
         import json
 
         view = self._make_view()

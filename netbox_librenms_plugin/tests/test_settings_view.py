@@ -1,5 +1,7 @@
 """The plugin Settings page: the cable-sync provenance tab (DB/UI-managed, not PLUGINS_CONFIG)."""
 
+import re
+
 import pytest
 from django.urls import reverse
 
@@ -108,7 +110,13 @@ class TestCableSyncSettingsTab:
         form = response.context["cable_sync_form"]
         refusal = "You do not have permission to change the cable provenance tag."
         assert list(form.non_field_errors()) == [refusal]
-        assert refusal in response.content.decode()
+        html = response.content.decode()
+        assert refusal in html
+        save_button_match = re.search(r'<button[^>]*id="save-cable-sync-btn"[^>]*>', html)
+        assert save_button_match is not None
+        save_button = save_button_match.group()
+        assert 'data-force-enabled="true"' in save_button
+        assert " disabled" not in save_button
         assert form["cable_sync_tag"].value() == "renamed-without-tag-permission"
         assert form["cable_sync_tag_color"].value() == "ff5722"
         assert form["cable_sync_description"].value() == "Managed cable"

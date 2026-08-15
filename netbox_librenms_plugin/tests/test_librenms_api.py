@@ -3396,12 +3396,18 @@ class TestGetSerialPortSensors:
         assert success is True
         assert [sensor["sensor_id"] for sensor in data] == [good["sensor_id"]]
 
-    def test_non_boolean_sensor_deleted_on_a_serial_row_fails_closed(self, mock_librenms_api, mock_response_factory):
+    @pytest.mark.parametrize("deleted_value", [True, 1.0], ids=["boolean", "float"])
+    def test_non_integer_sensor_deleted_on_a_serial_row_fails_closed(
+        self,
+        mock_librenms_api,
+        mock_response_factory,
+        deleted_value,
+    ):
         """A serial row with an unreadable sensor_deleted is still a malformed response."""
         import unittest.mock as mock
 
         bad = self._make_sensor(12, port_num=8)
-        bad["sensor_deleted"] = True
+        bad["sensor_deleted"] = deleted_value
         mock_resp = mock_response_factory(status_code=200, json_data={"status": "ok", "sensors": [bad]})
 
         with mock.patch("netbox_librenms_plugin.librenms_api.requests.get", return_value=mock_resp):
