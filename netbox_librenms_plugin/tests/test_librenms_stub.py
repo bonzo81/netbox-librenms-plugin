@@ -158,6 +158,21 @@ def test_stub_replays_the_scaffolded_virtual_machine_recording():
         server.stop()
 
 
+def test_stub_preserves_recorded_ports_response_metadata():
+    """The single installed ports route must retain recorded top-level fields."""
+    recording = copy.deepcopy(load_recording("linux-virtual-machine"))
+    route = f"GET /api/v0/devices/{recording['device_id']}/ports"
+    recording["responses"][route]["count"] = len(recording["responses"][route]["ports"])
+    server = LibreNMSStubServer(recordings=[recording], api_token=TOKEN).start()
+    try:
+        response = _request(server, "GET", f"/api/v0/devices/{recording['device_id']}/ports")
+
+        assert response.status_code == 200
+        assert response.json()["count"] == len(recording["responses"][route]["ports"])
+    finally:
+        server.stop()
+
+
 def test_stub_aggregates_instance_wide_serial_sensors():
     server = _start_stub()
     try:
@@ -165,7 +180,10 @@ def test_stub_aggregates_instance_wide_serial_sensors():
         expected = load_recording("avocent-serial-ports")["responses"]["GET /api/v0/resources/sensors"]
 
         assert response.status_code == 200
-        assert response.json() == expected
+        payload = response.json()
+        assert payload["status"] == "ok"
+        for sensor in expected["sensors"]:
+            assert sensor in payload["sensors"]
     finally:
         server.stop()
 

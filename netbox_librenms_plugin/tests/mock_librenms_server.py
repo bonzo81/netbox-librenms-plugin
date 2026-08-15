@@ -347,6 +347,7 @@ class LibreNMSStubServer(MockLibreNMSServer):
         self._lock = threading.RLock()
         self.devices = {}
         self.ports_by_device = {}
+        self.ports_body_by_device = {}
         self.inventory_by_device = {}
         self.sensors = []
         self.vlans = []
@@ -450,7 +451,7 @@ class LibreNMSStubServer(MockLibreNMSServer):
         normalised_ports_body = copy.deepcopy(ports_body) if isinstance(ports_body, dict) else {"status": "ok"}
         normalised_ports_body["status"] = "ok"
         normalised_ports_body["ports"] = ports
-        self.register(f"/api/v0/devices/{device_id}/ports", normalised_ports_body, method="GET")
+        self.ports_body_by_device[device_id] = normalised_ports_body
 
         inventory = []
         seen_inventory = set()
@@ -586,7 +587,10 @@ class LibreNMSStubServer(MockLibreNMSServer):
         )
         self.register(
             f"/api/v0/devices/{device_id}/ports",
-            {"status": "ok", "ports": self.ports_by_device.get(device_id, [])},
+            self.ports_body_by_device.get(
+                device_id,
+                {"status": "ok", "ports": self.ports_by_device.get(device_id, [])},
+            ),
             method="GET",
         )
         self.register(
