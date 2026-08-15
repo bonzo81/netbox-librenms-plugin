@@ -1,10 +1,8 @@
 """Integration tests for shared interface attribute and MAC synchronization."""
 
 import pytest
-from django.db import DatabaseError, connection
-from django.urls import reverse
 
-from netbox_librenms_plugin.tests.conftest import make_device, make_interface, make_superuser, make_vm
+from netbox_librenms_plugin.tests.conftest import make_device, make_interface, make_vm
 from netbox_librenms_plugin.tests.view_test_helpers import make_view
 
 
@@ -170,6 +168,11 @@ class TestHandleMacAddress:
 @pytest.mark.django_db
 def test_interface_delete_does_not_expose_database_error_details(client):
     """The delete endpoint logs internal failures without returning their details."""
+    from django.db import DatabaseError, connection
+    from django.urls import reverse
+
+    from netbox_librenms_plugin.tests.conftest import make_superuser
+
     device = make_device("interface-delete-error")
     interface = make_interface(device, "Ethernet1")
     client.force_login(make_superuser("interface-delete-error-user"))
