@@ -15,7 +15,14 @@ from django.urls import reverse
 from ipam.models import IPAddress, VLAN
 from requests import Response
 
-from netbox_librenms_plugin.sync_cache import CacheMutationTransition, SyncCacheConsistency, SyncTab
+from netbox_librenms_plugin.sync_cache import (
+    CacheMutationTransition,
+    SyncCacheConsistency,
+    SyncTab,
+    sync_last_fetched_key,
+    sync_snapshot_key,
+    sync_vlan_overrides_key,
+)
 from netbox_librenms_plugin.tests.conftest import (
     ip_on,
     make_device,
@@ -38,15 +45,15 @@ def _configure_servers(settings):
 
 
 def _cache_key(data_type, obj, server_key):
-    return f"librenms_{data_type}_{obj._meta.model_name}_{obj.pk}_{server_key}"
+    return sync_snapshot_key(obj, data_type, server_key)
 
 
 def _last_fetched_key(data_type, obj, server_key):
-    return f"librenms_{data_type}_last_fetched_{obj._meta.model_name}_{obj.pk}_{server_key}"
+    return sync_last_fetched_key(obj, data_type, server_key)
 
 
 def _vlan_overrides_key(obj, server_key):
-    return f"librenms_vlan_group_overrides_{obj._meta.model_name}_{obj.pk}_{server_key}"
+    return sync_vlan_overrides_key(obj, server_key)
 
 
 def _seed_snapshot(data_type, obj, server_key, payload=None):
@@ -861,6 +868,7 @@ def _mark_migrated_donor(donor, winner):
 def test_interface_move_invalidates_winner_dependent_snapshots(
     client,
     settings,
+    django_capture_on_commit_callbacks,
 ):
     """Moving an interface must publish the cache transition for its new owner too."""
     _configure_servers(settings)
@@ -872,10 +880,11 @@ def test_interface_move_invalidates_winner_dependent_snapshots(
     client.force_login(make_superuser("cache-move-interface-user"))
     url = reverse("plugins:netbox_librenms_plugin:interface_move_to_winner", args=[interface.pk])
 
-    response = client.post(url, {"server_key": "primary"}, HTTP_HX_REQUEST="true")
+    with django_capture_on_commit_callbacks(execute=True):
+        response = client.post(url, {"server_key": "primary"}, HTTP_HX_REQUEST="true")
 
     assert response.status_code == 200
-    assert json.loads(response["X-LibreNMS-Cache-Transition"])["cleanup_failed"] is True
+    assert json.loads(response["X-LibreNMS-Cache-Transition"])["cleanup_failed"] is False
     interface.refresh_from_db()
     assert interface.device_id == winner.pk
     assert cache.get(_cache_key("ip_addresses", winner, "primary")) is None

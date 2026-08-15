@@ -20,6 +20,7 @@ from netbox_librenms_plugin.utils import (
     coerce_librenms_id,
     get_librenms_device_id,
     get_librenms_sync_device,
+    get_migrated_to_marker,
     resolve_server_mapping_display_id,
 )
 
@@ -184,7 +185,12 @@ def _explicit_server_keys(obj):
     return {
         str(server_key)
         for server_key, entry in raw_mapping.items()
-        if isinstance(server_key, str) and server_key and resolve_server_mapping_display_id(entry)[0] is not None
+        if isinstance(server_key, str)
+        and server_key
+        and (
+            resolve_server_mapping_display_id(entry)[0] is not None
+            or get_migrated_to_marker(obj, server_key) is not None
+        )
     }
 
 

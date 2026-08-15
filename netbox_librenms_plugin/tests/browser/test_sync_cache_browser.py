@@ -222,7 +222,9 @@ def test_status_check_queues_one_follow_up_while_a_request_is_in_flight():
             }
             """
         )
-        page.wait_for_timeout(100)
+        page.wait_for_function(
+            "document.querySelector('#ipaddresses-tab').classList.contains('sync-cache-unavailable')"
+        )
 
         assert len(requests) == 2
         assert page.locator("#ipaddresses-tab").evaluate("node => node.classList.contains('sync-cache-unavailable')")
@@ -470,7 +472,7 @@ def test_cache_status_failure_disables_every_loaded_sync_control():
         assert page.locator("#modal-force-action").is_disabled()
         assert "could not be verified" in page.locator("#interface-sync-content").inner_text()
         assert "could not be verified" in page.locator("#ipaddress-sync-content").inner_text()
-        assert "HTTP 503" in console_errors
+        assert any("HTTP 503" in message for message in console_errors), console_errors
         browser.close()
 
 
@@ -536,7 +538,7 @@ def test_fragment_failure_logs_the_http_status_and_clears_the_content():
         page.evaluate("initializeSyncCacheConsistency(); checkSyncCacheStatus()")
         page.wait_for_function("document.querySelector('#interface-sync-content').dataset.cacheEmpty === 'true'")
 
-        assert "HTTP 503" in console_errors
+        assert any("HTTP 503" in message for message in console_errors), console_errors
         assert "could not be restored" in page.locator("#interface-sync-content").inner_text()
         browser.close()
 
