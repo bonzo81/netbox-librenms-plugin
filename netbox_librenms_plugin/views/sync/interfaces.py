@@ -1172,31 +1172,32 @@ class DeleteNetBoxInterfacesView(LibreNMSPermissionMixin, NetBoxObjectPermission
                 for interface_id in interface_ids:
                     interface_name = None
                     try:
-                        if object_type == "device":
-                            # Scoped by "delete": the ownership checks below prove where the
-                            # interface sits, not that the grant covers it.
-                            interface = self.restricted_queryset(Interface, "delete").get(id=interface_id)
-                            interface_name = interface.name
-                            if hasattr(obj, "virtual_chassis") and obj.virtual_chassis:
-                                valid_device_ids = [member.id for member in obj.virtual_chassis.members.all()]
-                                if interface.device_id not in valid_device_ids:
-                                    errors.append(
-                                        "Interface {} does not belong to this device or its virtual chassis".format(
-                                            interface.name
+                        with transaction.atomic():
+                            if object_type == "device":
+                                # Scoped by "delete": the ownership checks below prove where the
+                                # interface sits, not that the grant covers it.
+                                interface = self.restricted_queryset(Interface, "delete").get(id=interface_id)
+                                interface_name = interface.name
+                                if hasattr(obj, "virtual_chassis") and obj.virtual_chassis:
+                                    valid_device_ids = [member.id for member in obj.virtual_chassis.members.all()]
+                                    if interface.device_id not in valid_device_ids:
+                                        errors.append(
+                                            "Interface {} does not belong to this device or its virtual chassis".format(
+                                                interface.name
+                                            )
                                         )
-                                    )
+                                        continue
+                                elif interface.device_id != obj.id:
+                                    errors.append(f"Interface {interface.name} does not belong to this device")
                                     continue
-                            elif interface.device_id != obj.id:
-                                errors.append(f"Interface {interface.name} does not belong to this device")
-                                continue
-                        else:
-                            interface = self.restricted_queryset(VMInterface, "delete").get(id=interface_id)
-                            interface_name = interface.name
-                            if interface.virtual_machine_id != obj.id:
-                                errors.append(f"Interface {interface.name} does not belong to this virtual machine")
-                                continue
+                            else:
+                                interface = self.restricted_queryset(VMInterface, "delete").get(id=interface_id)
+                                interface_name = interface.name
+                                if interface.virtual_machine_id != obj.id:
+                                    errors.append(f"Interface {interface.name} does not belong to this virtual machine")
+                                    continue
 
-                        interface.delete()
+                            interface.delete()
                         deleted_count += 1
 
                     except (Interface.DoesNotExist, VMInterface.DoesNotExist):
