@@ -657,10 +657,7 @@ class LibreNMSStubServer(MockLibreNMSServer):
 
         hostname = body["hostname"].strip()
         with self._lock:
-            if hostname in self._aliases:
-                return 409, {"status": "error", "message": "Device already exists"}
             device_id = self._next_device_id
-            self._next_device_id += 1
             device = self._normalise_device(
                 {
                     "hostname": hostname,
@@ -673,6 +670,10 @@ class LibreNMSStubServer(MockLibreNMSServer):
                 },
                 device_id,
             )
+            aliases = (device_id, device.get("hostname"), device.get("sysName"), device.get("ip"))
+            if any(str(alias) in self._aliases for alias in aliases if alias not in (None, "")):
+                return 409, {"status": "error", "message": "Device lookup alias already exists"}
+            self._next_device_id += 1
             self.devices[device_id] = device
             self.ports_by_device[device_id] = []
             self.inventory_by_device[device_id] = []

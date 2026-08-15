@@ -290,6 +290,37 @@ def test_stub_rejects_alias_collision_without_mutating_the_device():
         server.stop()
 
 
+@pytest.mark.parametrize("alias_kind", ["sysName", "ip"])
+def test_stub_rejects_derived_alias_collision_before_creating_device(alias_kind):
+    """A derived lookup alias collision must return 409 without changing stub state."""
+    server = _start_stub()
+    try:
+        existing = server.devices[1]
+        if alias_kind == "sysName":
+            hostname = f"{existing['sysName']}.other.example.test"
+        else:
+            candidate_ip = f"198.51.100.{server._next_device_id % 254 + 1}"
+            update = _request(
+                server,
+                "PATCH",
+                "/api/v0/devices/1",
+                json={"field": ["ip"], "data": [candidate_ip]},
+            )
+            assert update.status_code == 200
+            hostname = "unique-ip-collision.example.test"
+
+        devices_before = copy.deepcopy(server.devices)
+        next_device_id_before = server._next_device_id
+
+        response = _request(server, "POST", "/api/v0/devices", json={"hostname": hostname})
+
+        assert response.status_code == 409
+        assert server.devices == devices_before
+        assert server._next_device_id == next_device_id_before
+    finally:
+        server.stop()
+
+
 def test_constructor_failure_releases_the_bound_port():
     recording = copy.deepcopy(load_recording("linux-host-oob"))
     oob_id = recording["meta"]["oob_id"]
