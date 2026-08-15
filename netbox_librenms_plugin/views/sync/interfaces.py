@@ -1202,8 +1202,9 @@ class DeleteNetBoxInterfacesView(LibreNMSPermissionMixin, NetBoxObjectPermission
                     except (Interface.DoesNotExist, VMInterface.DoesNotExist):
                         errors.append(f"Interface with ID {interface_id} not found")
                         continue
-                    except Exception as exc:  # pragma: no cover - defensive
-                        errors.append(f"Error deleting interface {interface_name or interface_id}: {str(exc)}")
+                    except Exception:  # pragma: no cover - defensive
+                        logger.exception("Failed to delete interface %s", interface_name or interface_id)
+                        errors.append(f"Error deleting interface {interface_name or interface_id}. Check server logs.")
                         continue
 
         except Exception:  # pragma: no cover

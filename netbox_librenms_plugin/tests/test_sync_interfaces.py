@@ -1,8 +1,10 @@
 """Integration tests for shared interface attribute and MAC synchronization."""
 
 import pytest
+from django.db import DatabaseError, connection
+from django.urls import reverse
 
-from netbox_librenms_plugin.tests.conftest import make_device, make_interface, make_vm
+from netbox_librenms_plugin.tests.conftest import make_device, make_interface, make_superuser, make_vm
 from netbox_librenms_plugin.tests.view_test_helpers import make_view
 
 
@@ -163,3 +165,29 @@ class TestHandleMacAddress:
 
         assert not MACAddress.objects.exists()
         assert not iface.mac_addresses.exists()
+
+
+@pytest.mark.django_db
+def test_interface_delete_does_not_expose_database_error_details(client):
+    """The delete endpoint logs internal failures without returning their details."""
+    device = make_device("interface-delete-error")
+    interface = make_interface(device, "Ethernet1")
+    client.force_login(make_superuser("interface-delete-error-user"))
+    url = reverse(
+        "plugins:netbox_librenms_plugin:delete_netbox_interfaces",
+        kwargs={"object_type": "device", "object_id": device.pk},
+    )
+    sensitive_detail = "private database constraint detail"
+
+    def fail_interface_delete(execute, sql, params, many, context):
+        if sql.lstrip().upper().startswith("DELETE") and '"dcim_interface"' in sql:
+            raise DatabaseError(sensitive_detail)
+        return execute(sql, params, many, context)
+
+    with connection.execute_wrapper(fail_interface_delete):
+        response = client.post(url, {"interface_ids": [str(interface.pk)]})
+
+    assert response.status_code == 200
+    assert sensitive_detail.encode() not in response.content
+    assert response.json()["errors"] == ["Error deleting interface Ethernet1. Check server logs."]
+    assert type(interface).objects.filter(pk=interface.pk).exists()
