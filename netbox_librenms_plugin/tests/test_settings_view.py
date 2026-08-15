@@ -1,7 +1,5 @@
 """The plugin Settings page: the cable-sync provenance tab (DB/UI-managed, not PLUGINS_CONFIG)."""
 
-import re
-
 import pytest
 from django.urls import reverse
 
@@ -80,6 +78,8 @@ class TestCableSyncSettingsTab:
 
     def test_tag_rename_requires_permission_for_the_existing_tag(self, client):
         """Plugin settings access must not authorize a global Tag mutation."""
+        import re
+
         from extras.models import Tag
 
         from netbox_librenms_plugin.tests.view_test_helpers import make_user_with_perms
