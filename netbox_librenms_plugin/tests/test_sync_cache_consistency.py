@@ -19,9 +19,6 @@ from netbox_librenms_plugin.sync_cache import (
     CacheMutationTransition,
     SyncCacheConsistency,
     SyncTab,
-    sync_last_fetched_key,
-    sync_snapshot_key,
-    sync_vlan_overrides_key,
 )
 from netbox_librenms_plugin.tests.conftest import (
     ip_on,
@@ -45,14 +42,20 @@ def _configure_servers(settings):
 
 
 def _cache_key(data_type, obj, server_key):
+    from netbox_librenms_plugin.sync_cache import sync_snapshot_key
+
     return sync_snapshot_key(obj, data_type, server_key)
 
 
 def _last_fetched_key(data_type, obj, server_key):
+    from netbox_librenms_plugin.sync_cache import sync_last_fetched_key
+
     return sync_last_fetched_key(obj, data_type, server_key)
 
 
 def _vlan_overrides_key(obj, server_key):
+    from netbox_librenms_plugin.sync_cache import sync_vlan_overrides_key
+
     return sync_vlan_overrides_key(obj, server_key)
 
 
