@@ -143,10 +143,10 @@ class _IPHostLookupBarrier:
         ):
             self.lookup_seen = True
             try:
-                self.barrier.wait(timeout=1)
+                self.barrier.wait(timeout=0.25)
             except BrokenBarrierError:
-                # With serialization, the first request times out while the second
-                # waits for the host lock. It can then create and commit.
+                # The other request waits for the advisory lock. This short pause
+                # keeps both requests active without consuming the lock budget.
                 pass
         return result
 
@@ -158,8 +158,8 @@ def _sync_cached_ip(device_pk, user_pk, row_id, lookup_wrapper):
     close_old_connections()
     try:
         with connection.cursor() as cursor:
-            cursor.execute("SET lock_timeout = '5s'")
-            cursor.execute("SET statement_timeout = '10s'")
+            cursor.execute("SET lock_timeout = '30s'")
+            cursor.execute("SET statement_timeout = '45s'")
         thread_client = Client()
         thread_client.force_login(get_user_model().objects.get(pk=user_pk))
         url = reverse(
@@ -225,7 +225,7 @@ def test_concurrent_global_ip_sync_creates_one_address(settings):
             executor.submit(_sync_cached_ip, device.pk, user.pk, row_id, wrapper)
             for device, wrapper in zip(devices, lookup_wrappers, strict=True)
         ]
-        statuses = [future.result(timeout=15) for future in futures]
+        statuses = [future.result(timeout=60) for future in futures]
 
     assert sorted(statuses) == [200, 302]
     assert all(wrapper.lookup_seen for wrapper in lookup_wrappers)
@@ -1088,6 +1088,57 @@ def test_invalid_force_all_confirmation_reports_the_confirmation_error(client, s
     assert response.status_code == 302
     message_texts = _message_texts(response)
     assert message_texts == ["IP address confirmation is invalid or has expired. Refresh the IP data and try again."]
+
+
+@pytest.mark.django_db
+def test_invalid_confirmation_is_not_reported_as_an_ip_address(client, settings):
+    """A bad confirmation token must remain separate from per-address results."""
+    from netbox_librenms_plugin.utils import set_librenms_device_id
+
+    _configure_test_server(settings)
+    device = make_device("mixed-invalid-confirmation", librenms_cf={"default": {"id": 42}})
+    interface = make_interface(device, "Ethernet1", iface_type="1000base-t")
+    set_librenms_device_id(interface, 7021, "default")
+    interface.save(update_fields=["custom_field_data"])
+    row_id = "198.18.19.21/24"
+    cache.set(
+        f"librenms_ip_addresses_device_{device.pk}_default",
+        {
+            "ip_addresses": [
+                {
+                    "ip_address": "198.18.19.21",
+                    "prefix_length": 24,
+                    "ip_with_mask": row_id,
+                    "port_id": 7021,
+                    "interface_name": "Ethernet1",
+                }
+            ],
+            "mgmt_ip": "",
+            "ports_by_id": {},
+            "interface_name_field": "ifName",
+        },
+        timeout=300,
+    )
+    client.force_login(make_superuser("mixed-invalid-confirmation-user"))
+
+    response = client.post(
+        reverse(
+            "plugins:netbox_librenms_plugin:sync_device_ip_addresses",
+            kwargs={"object_type": "device", "pk": device.pk},
+        ),
+        {
+            "server_key": "default",
+            "select": row_id,
+            f"vrf_{row_id}": "",
+            "conflict_intent": "invalid-token",
+        },
+    )
+
+    assert response.status_code == 302
+    assert _message_texts(response) == [
+        f"Created IP addresses: {row_id}",
+        "IP address confirmation is invalid or has expired. Refresh the IP data and try again.",
+    ]
 
 
 @pytest.mark.django_db

@@ -222,10 +222,9 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
             cached_ports_by_id=cached_snapshot.get("ports_by_id") or {},
             interface_name_field=cached_snapshot.get("interface_name_field"),
         )
-        for row_id, error in intent_errors.items():
-            results["failed"].append(row_id)
-            results["errors"][row_id] = error
         self.display_sync_results(request, results)
+        for error in dict.fromkeys(intent_errors.values()):
+            messages.error(request, error)
 
         if results["conflicts"]:
             conflict_context = {
