@@ -1165,12 +1165,14 @@ class TestInterfaceSyncRefreshButtonServerKey:
 class TestFullPageMigratedContextServerScope:
     """The full-page migrated banner must use the resolved render key, not the global default."""
 
-    def test_stale_server_key_builds_migrated_banner_under_requested_key(self):
-        """A stale ?server_key whose marker lives on a non-default server still shows the banner (scoped to the requested key, not 'default')."""
-        from django.http import HttpResponse
+    def test_stale_server_key_builds_migrated_banner_under_requested_key(self, client, settings):
+        """A marker under a removed server still renders through the real request path."""
+        from copy import deepcopy
+
+        from django.test import override_settings
+        from django.urls import reverse
 
         from netbox_librenms_plugin.tests.conftest import make_device
-        from netbox_librenms_plugin.views.object_sync.devices import DeviceLibreNMSSyncView
 
         winner = make_device("f4-winner")
         donor = make_device("f4-donor")
@@ -1180,43 +1182,20 @@ class TestFullPageMigratedContextServerScope:
         }
         donor.save()
 
-        view = DeviceLibreNMSSyncView()
-        view.has_write_permission = MagicMock(return_value=True)
-        # Sibling context builders are independently tested; null them so this isolates the migrated
-        # banner's server namespace. get_librenms_device_info stays REAL — with librenms_id None
-        # (fail-closed) it returns empty details without touching the API.
-        view.get_interface_context = MagicMock(return_value=None)
-        view.get_cable_context = MagicMock(return_value=None)
-        view.get_ip_context = MagicMock(return_value=None)
-        view.get_vlan_context = MagicMock(return_value=None)
-        view.get_module_context = MagicMock(return_value=None)
-        view._get_platform_info = MagicMock(return_value={})
+        plugin_config = deepcopy(settings.PLUGINS_CONFIG)
+        plugin_config["netbox_librenms_plugin"]["servers"] = {
+            "default": {
+                "librenms_url": "https://default.example.com",
+                "api_token": "test-token",
+            }
+        }
+        user = make_user_with_perms("stale-key-viewer", [("view", Device)])
+        client.force_login(user)
+        url = reverse("plugins:netbox_librenms_plugin:device_librenms_sync", args=[donor.pk])
 
-        request = RequestFactory().get("/?server_key=edgelondon")
-        request.user = make_user_with_perms("stale-key-viewer", [("view", Device)])
-        # Calling get() directly skips View.setup(), and get_object() scopes by request.user.
-        view.request = request
+        with override_settings(PLUGINS_CONFIG=plugin_config):
+            response = client.get(url, {"server_key": "edgelondon"})
 
-        captured = {}
-
-        def _capture(req, template, ctx):
-            captured.update(ctx)
-            return HttpResponse("ok")
-
-        # build_librenms_api → None makes 'edgelondon' unresolvable regardless of test config, so
-        # the rebind declines and get() takes the stale-?server_key (unresolved) path.
-        with (
-            patch("netbox_librenms_plugin.librenms_api.build_librenms_api", return_value=None),
-            patch("netbox_librenms_plugin.views.base.librenms_sync_view.render", side_effect=_capture),
-            patch(
-                "netbox_librenms_plugin.views.base.librenms_sync_view.LibreNMSAPIMixin.get_context_data",
-                return_value={},
-            ),
-        ):
-            view.get(request, pk=donor.pk)
-
-        # Fixed: banner built under 'edgelondon' (the requested/scoped key). The unfixed code used
-        # self.librenms_api.server_key ('default') and looked up no marker → banner silently absent.
-        assert captured.get("migrated_to_marker"), "migration banner missing — marker looked up under the wrong server"
-        assert captured.get("migrated_to_winner") is not None
-        assert captured["migrated_to_winner"].pk == winner.pk
+        assert response.status_code == 200
+        assert response.context["migrated_to_marker"]
+        assert response.context["migrated_to_winner"].pk == winner.pk
