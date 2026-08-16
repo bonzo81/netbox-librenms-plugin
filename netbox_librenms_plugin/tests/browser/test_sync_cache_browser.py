@@ -2671,30 +2671,48 @@ def test_failed_cable_verify_restores_controls_without_a_member_baseline(page):
         </div>
     """
 
-    page.route(
-        "https://plugin.example.com/verify-cable/",
-        lambda route: route.fulfill(status=503, body="verification unavailable"),
-    )
+    pending_route = None
+
+    def hold_verify_route(route):
+        nonlocal pending_route
+        pending_route = route
+
+    page.route("https://plugin.example.com/verify-cable/", hold_verify_route)
     page.set_content(html)
     page.add_script_tag(path=str(SCRIPT_PATH))
-    with page.expect_response("https://plugin.example.com/verify-cable/"):
-        page.evaluate(
-            """
-            () => {
-                const select = document.querySelector('#member');
-                handleCableChange(select, select.value);
-            }
-            """
-        )
+    page.evaluate(
+        """
+        () => {
+            const select = document.querySelector('#member');
+            handleCableChange(select, select.value);
+        }
+        """
+    )
     page.wait_for_function(
         """
         () => {
-            const selection = document.querySelector('input[name="select"]');
-            const action = document.querySelector('td[data-col="actions"] button');
+            const row = document.querySelector('#member')?.closest('tr');
+            const selection = row?.querySelector('input[name="select"]');
+            const action = row?.querySelector('td[data-col="actions"] button');
+            return selection?.disabled && action?.disabled;
+        }
+        """
+    )
+
+    assert pending_route is not None
+    pending_route.fulfill(status=503, body="verification unavailable")
+
+    page.wait_for_function(
+        """
+        () => {
+            const row = document.querySelector('#member')?.closest('tr');
+            const selection = row?.querySelector('input[name="select"]');
+            const action = row?.querySelector('td[data-col="actions"] button');
             return selection && action && !selection.disabled && !action.disabled;
         }
         """
     )
 
-    assert not page.locator('input[name="select"]').is_disabled()
-    assert not page.locator('td[data-col="actions"] button').is_disabled()
+    row = page.locator("#member").locator("xpath=ancestor::tr[1]")
+    assert not row.locator('input[name="select"]').is_disabled()
+    assert not row.locator('td[data-col="actions"] button').is_disabled()
