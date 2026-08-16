@@ -514,6 +514,10 @@ class LibreNMSStubServer(MockLibreNMSServer):
         )
         self.devices[oob_id] = controller
         self.ports_by_device[oob_id] = copy.deepcopy(ports)
+        normalised_ports_body = copy.deepcopy(ports_body)
+        normalised_ports_body["status"] = "ok"
+        normalised_ports_body["ports"] = copy.deepcopy(ports)
+        self.ports_body_by_device[oob_id] = normalised_ports_body
         self.inventory_by_device[oob_id] = []
 
     def _install_instance_routes(self):
@@ -693,6 +697,8 @@ class LibreNMSStubServer(MockLibreNMSServer):
                 return 422, {"status": "error", "message": "field and data must be equal-length lists"}
             if any(not isinstance(field, str) or not field for field in fields):
                 return 422, {"status": "error", "message": "field names must be non-empty strings"}
+            if "device_id" in fields:
+                return 422, {"status": "error", "message": "device_id cannot be updated"}
             with self._lock:
                 updates = dict(zip(fields, values, strict=True))
                 candidate = {**self.devices[device_id], **updates}

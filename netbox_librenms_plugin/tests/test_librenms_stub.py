@@ -173,6 +173,22 @@ def test_stub_preserves_recorded_ports_response_metadata():
         server.stop()
 
 
+def test_stub_preserves_recorded_oob_ports_response_metadata():
+    """The derived OOB ports route must retain recorded top-level fields."""
+    recording = copy.deepcopy(load_recording("linux-host-oob"))
+    oob_id = recording["meta"]["oob_id"]
+    route = f"GET /api/v0/devices/{oob_id}/ports"
+    recording["responses"][route]["count"] = len(recording["responses"][route]["ports"])
+    server = LibreNMSStubServer(recordings=[recording], api_token=TOKEN).start()
+    try:
+        response = _request(server, "GET", f"/api/v0/devices/{oob_id}/ports")
+
+        assert response.status_code == 200
+        assert response.json()["count"] == len(recording["responses"][route]["ports"])
+    finally:
+        server.stop()
+
+
 def test_stub_aggregates_instance_wide_serial_sensors():
     server = _start_stub()
     try:
@@ -304,6 +320,28 @@ def test_stub_rejects_alias_collision_without_mutating_the_device():
         assert server.devices[1]["hostname"] == original_hostname
         assert _request(server, "GET", f"/api/v0/devices/{original_hostname}").status_code == 200
         assert _request(server, "GET", f"/api/v0/devices/{second['hostname']}").json()["devices"][0]["device_id"] == 12
+    finally:
+        server.stop()
+
+
+def test_stub_rejects_device_id_update_without_mutating_the_device():
+    server = _start_stub()
+    try:
+        original = copy.deepcopy(server.devices[1])
+
+        response = _request(
+            server,
+            "PATCH",
+            "/api/v0/devices/1",
+            json={"field": ["location", "device_id"], "data": ["Changed", 9999]},
+        )
+
+        assert response.status_code == 422
+        assert response.json()["status"] == "error"
+        assert server.devices[1] == original
+        current = _request(server, "GET", "/api/v0/devices/1")
+        assert current.status_code == 200
+        assert current.json()["devices"] == [original]
     finally:
         server.stop()
 
