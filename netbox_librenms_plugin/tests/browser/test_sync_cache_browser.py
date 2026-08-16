@@ -2686,7 +2686,15 @@ def test_failed_cable_verify_restores_controls_without_a_member_baseline(page):
             }
             """
         )
-    page.wait_for_timeout(50)
+    page.wait_for_function(
+        """
+        () => {
+            const selection = document.querySelector('input[name="select"]');
+            const action = document.querySelector('td[data-col="actions"] button');
+            return selection && action && !selection.disabled && !action.disabled;
+        }
+        """
+    )
 
     assert not page.locator('input[name="select"]').is_disabled()
     assert not page.locator('td[data-col="actions"] button').is_disabled()
