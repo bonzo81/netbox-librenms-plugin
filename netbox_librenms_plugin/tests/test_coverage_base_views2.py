@@ -1591,6 +1591,36 @@ class TestPrepareContextInterfaceNameFieldNone:
 
         assert result is None
 
+    def test_prepare_context_uses_request_object_interface_name_fallback(self):
+        """A missing explicit name field must use the request and object preference."""
+        view = self._make_view()
+        obj = _mock_obj()
+        request = _mock_request()
+        cached = {
+            "ip_addresses": [],
+            "mgmt_ip": "",
+            "ports_by_id": {},
+            "interface_name_field": "ifDescr",
+        }
+
+        with (
+            patch("netbox_librenms_plugin.views.base.ip_addresses_view.cache") as mock_cache,
+            patch.object(view, "get_cache_key", return_value="test-key"),
+            patch(
+                "netbox_librenms_plugin.views.base.ip_addresses_view.get_interface_name_field",
+                return_value="ifDescr",
+            ) as get_name_field,
+            patch.object(view, "enrich_ip_data", return_value=[]) as enrich,
+            patch.object(view, "get_table", return_value=MagicMock()),
+        ):
+            mock_cache.get.return_value = cached
+            mock_cache.ttl.return_value = None
+            result = view._prepare_context(request, obj, None, fetch_fresh=False, server_key="default")
+
+        assert result is not None
+        get_name_field.assert_called_once_with(request, obj)
+        assert enrich.call_args.args[2] == "ifDescr"
+
     def test_fetch_fresh_malformed_ip_payload_returns_none(self):
         """A success flag with a non-list get_ip_addresses() payload (or a list with non-dict entries) must be treated as a fetch failure — return None before enrichment so post() neither renders an empty table under a success banner nor caches the empty snapshot."""
         view = self._make_view()
