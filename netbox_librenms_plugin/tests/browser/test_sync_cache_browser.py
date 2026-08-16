@@ -116,7 +116,7 @@ def _state(
 
 
 def test_outer_tab_navigation_uses_the_rendered_status_as_the_next_baseline():
-    """A server-rendered tab region must not reload its already-rendered active fragment."""
+    """A status response started before navigation must not overwrite server-rendered state."""
     initial = {
         "interfaces": _state("before-interfaces"),
         "ipaddresses": _state("before-ipaddresses"),
@@ -124,6 +124,14 @@ def test_outer_tab_navigation_uses_the_rendered_status_as_the_next_baseline():
     rendered = {
         "interfaces": _state("before-interfaces"),
         "ipaddresses": _state("rendered-ipaddresses"),
+    }
+    stale = {
+        "interfaces": _state("before-interfaces"),
+        "ipaddresses": _state(
+            "stale-ipaddresses",
+            state="locally_changed",
+            source_tab="ipaddresses",
+        ),
     }
     fragment_requests = []
 
@@ -133,14 +141,37 @@ def test_outer_tab_navigation_uses_the_rendered_status_as_the_next_baseline():
         page.set_content(_page_html(initial))
         page.add_script_tag(path=str(SCRIPT_PATH))
         page.evaluate("document.dispatchEvent(new Event('DOMContentLoaded')); initializeScripts();")
-        page.route(
-            "https://plugin.example.com/status?*",
-            lambda route: route.fulfill(json={"tabs": rendered}),
+        page.evaluate(
+            """() => {
+                const realFetch = window.fetch;
+                window.statusRequestStarted = false;
+                window.releaseStatus = null;
+                window.fetch = (input, init) => {
+                    if (String(input).includes('/status?')) {
+                        window.statusRequestStarted = true;
+                        return new Promise(resolve => {
+                            window.releaseStatus = () => resolve(new Response(
+                                JSON.stringify({tabs: window.staleStatus}),
+                                {status: 200, headers: {'Content-Type': 'application/json'}}
+                            ));
+                        });
+                    }
+                    return realFetch(input, init);
+                };
+            }"""
         )
         page.route(
             "https://plugin.example.com/fragment/ipaddresses?*",
             lambda route: (fragment_requests.append(route.request.url), route.fulfill(body="<p>Reloaded</p>")),
         )
+        page.evaluate(
+            """() => {
+                window.inFlightStatus = checkSyncCacheStatus();
+                window.statusRequestSettled = false;
+                window.inFlightStatus.then(() => { window.statusRequestSettled = true; });
+            }"""
+        )
+        page.wait_for_function("window.statusRequestStarted === true", timeout=1000)
 
         page.evaluate(
             """status => {
@@ -161,13 +192,14 @@ def test_outer_tab_navigation_uses_the_rendered_status_as_the_next_baseline():
             }""",
             rendered,
         )
-        page.wait_for_function(
-            "syncCacheController().checking === null "
-            "&& syncCacheController().status.ipaddresses.revision === 'rendered-ipaddresses'"
-        )
+        assert page.evaluate("syncCacheController().status.ipaddresses.revision") == "rendered-ipaddresses"
+
+        page.evaluate("status => { window.staleStatus = status; window.releaseStatus(); }", stale)
+        page.wait_for_function("window.statusRequestSettled === true", timeout=1000)
 
         assert fragment_requests == []
         assert page.locator("#ipaddress-sync-content").inner_text() == "Server-rendered IP rows"
+        assert page.evaluate("syncCacheController().status.ipaddresses.revision") == "rendered-ipaddresses"
         browser.close()
 
 

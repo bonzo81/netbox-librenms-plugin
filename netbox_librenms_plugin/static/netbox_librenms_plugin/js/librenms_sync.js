@@ -346,6 +346,7 @@ function syncCacheController() {
         notifiedRevisions: new Set(),
         checking: null,
         recheckPending: false,
+        statusGeneration: 0,
         lastCheckFailed: false,
         lostFocus: false,
     };
@@ -538,11 +539,12 @@ function renderedSyncCacheStatus() {
     }
 }
 
-function loadSyncCacheFragment(tab) {
+function loadSyncCacheFragment(tab, statusGeneration = null) {
     const pane = document.getElementById(tab);
     const content = syncCacheContent(tab);
     const controller = syncCacheController();
     if (!pane || !content || !controller || !pane.dataset.fragmentUrl) return Promise.resolve();
+    const requestGeneration = statusGeneration ?? controller.statusGeneration;
     const url = new URL(pane.dataset.fragmentUrl, window.location.href);
     url.searchParams.set('server_key', controller.root.dataset.serverKey);
     return fetch(url, { credentials: 'same-origin', headers: { 'X-Requested-With': 'XMLHttpRequest' } })
@@ -551,6 +553,7 @@ function loadSyncCacheFragment(tab) {
             return response.text();
         })
         .then(html => {
+            if (controller.statusGeneration !== requestGeneration) return;
             content.innerHTML = html;
             delete content.dataset.cacheEmpty;
             controller.invalidatedLocally.delete(tab);
@@ -558,14 +561,17 @@ function loadSyncCacheFragment(tab) {
             initializeScripts();
         })
         .catch(error => {
+            if (controller.statusGeneration !== requestGeneration) return;
             console.error(error.message);
             clearSyncTabContent(tab, 'Cache state could not be restored. Reload this tab before continuing.');
         });
 }
 
-function reconcileSyncCacheStatus(nextStatus) {
+function reconcileSyncCacheStatus(nextStatus, statusGeneration = null) {
     const controller = syncCacheController();
     if (!controller) return Promise.resolve();
+    const requestGeneration = statusGeneration ?? controller.statusGeneration;
+    if (controller.statusGeneration !== requestGeneration) return Promise.resolve();
     const previous = controller.status || {};
     const activeTab = activeSyncTab();
     let notice = null;
@@ -614,7 +620,7 @@ function reconcileSyncCacheStatus(nextStatus) {
             )
         ) {
             if (tab === activeTab) {
-                fragmentLoads.push(loadSyncCacheFragment(tab));
+                fragmentLoads.push(loadSyncCacheFragment(tab, requestGeneration));
                 controller.requiredSourceFragments.delete(tab);
             }
         } else if (
@@ -624,7 +630,7 @@ function reconcileSyncCacheStatus(nextStatus) {
         ) {
             if (tab === activeTab) {
                 controller.invalidatedLocally.delete(tab);
-                fragmentLoads.push(loadSyncCacheFragment(tab));
+                fragmentLoads.push(loadSyncCacheFragment(tab, requestGeneration));
             } else {
                 controller.invalidatedLocally.add(tab);
                 updateSyncCacheTabState(tab, { state: 'invalidated', snapshot_available: false });
@@ -635,9 +641,10 @@ function reconcileSyncCacheStatus(nextStatus) {
             syncCacheContent(tab)?.dataset.cacheEmpty === 'true' &&
             !controller.invalidatedLocally.has(tab)
         ) {
-            fragmentLoads.push(loadSyncCacheFragment(tab));
+            fragmentLoads.push(loadSyncCacheFragment(tab, requestGeneration));
         }
     });
+    if (controller.statusGeneration !== requestGeneration) return Promise.resolve();
     controller.status = nextStatus || {};
     if (notice) showSyncCacheNotice(notice.message, notice.revision);
     return Promise.all(fragmentLoads);
@@ -668,33 +675,42 @@ function checkSyncCacheStatus() {
         controller.recheckPending = true;
         return controller.checking;
     }
+    const requestGeneration = controller.statusGeneration;
     const url = new URL(controller.root.dataset.statusUrl, window.location.href);
     url.searchParams.set('server_key', controller.root.dataset.serverKey);
-    controller.checking = fetch(url, { credentials: 'same-origin', headers: { 'Accept': 'application/json' } })
+    let statusRequest;
+    statusRequest = fetch(url, { credentials: 'same-origin', headers: { 'Accept': 'application/json' } })
         .then(response => {
+            if (controller.statusGeneration !== requestGeneration) return null;
             if (!response.ok) throw new Error(`HTTP ${response.status}`);
             return response.json();
         })
         .then(payload => {
+            if (payload === null || controller.statusGeneration !== requestGeneration) return;
             const expectedTabs = Object.keys(controller.contract || {});
             if (!expectedTabs.length || !isValidSyncCacheStatusPayload(payload, expectedTabs)) {
                 throw new Error('Invalid cache status response');
             }
-            return reconcileSyncCacheStatus(payload.tabs);
+            return reconcileSyncCacheStatus(payload.tabs, requestGeneration);
         })
-        .then(() => { controller.lastCheckFailed = false; })
+        .then(() => {
+            if (controller.statusGeneration === requestGeneration) controller.lastCheckFailed = false;
+        })
         .catch(error => {
+            if (controller.statusGeneration !== requestGeneration) return;
             console.error(error.message);
             controller.lastCheckFailed = true;
             failClosedSyncControls('Cache status could not be verified. Reload this tab before continuing.');
         })
         .finally(() => {
+            if (controller.checking !== statusRequest) return;
             controller.checking = null;
             if (controller.recheckPending) {
                 controller.recheckPending = false;
                 checkSyncCacheStatus();
             }
         });
+    controller.checking = statusRequest;
     return controller.checking;
 }
 
@@ -2851,6 +2867,7 @@ document.addEventListener('DOMContentLoaded', function () {
 document.body.addEventListener('htmx:afterSwap', function (event) {
     const controller = syncCacheController();
     if (controller && event.target.id === 'librenms-sync-tabs') {
+        controller.statusGeneration += 1;
         const renderedStatus = renderedSyncCacheStatus();
         if (renderedStatus) {
             controller.status = renderedStatus;
