@@ -38,10 +38,15 @@ logger = logging.getLogger(__name__)
 IP_CONFLICT_SIGNING_SALT = "netbox_librenms_plugin.ip_address_conflict"
 
 
+def _ip_host_lock_identity(parsed, vrf) -> str:
+    """Return the advisory-lock identity for one canonical host and VRF."""
+    vrf_identity = vrf.pk if vrf is not None else 0
+    return f"netbox-librenms-plugin:ip-host:{parsed.ip}:vrf:{vrf_identity}"
+
+
 def _acquire_ip_host_lock(parsed, vrf) -> None:
     """Serialize writes for one canonical host and VRF."""
-    vrf_identity = vrf.pk if vrf is not None else 0
-    acquire_advisory_transaction_lock(f"netbox-librenms-plugin:ip-host:{parsed.ip}:vrf:{vrf_identity}")
+    acquire_advisory_transaction_lock(_ip_host_lock_identity(parsed, vrf))
 
 
 class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreNMSAPIMixin, CacheMixin, View):
@@ -656,6 +661,37 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
                 index[row_id] = row
         return index, duplicates
 
+    def _prelock_ip_hosts(self, request, selected_ips, cached_index, duplicate_cached_rows, force_intents):
+        """Acquire every valid batch host lock in one deterministic order.
+
+        The transaction remains open across the batch. Acquire host advisory locks before the
+        first Device, virtual-chassis, VM, or interface row lock so opposite row orders cannot
+        hold one host lock while waiting for a shared owner scope.
+        """
+        lock_entries = {}
+        for selected_ip in selected_ips:
+            try:
+                row_id = str(parse_address_with_prefix(selected_ip))
+                if row_id in duplicate_cached_rows or row_id not in cached_index:
+                    continue
+                parsed = parse_address_with_prefix(row_id)
+                force_payload = force_intents.get(row_id)
+                vrf = (
+                    self._resolve_vrf_id(force_payload.get("target_vrf_id"))
+                    if force_payload is not None
+                    else self.get_vrf_selection(request, row_id)
+                )
+            except (TypeError, ValueError):
+                # The row will report its existing per-row validation error in the main loop.
+                continue
+            lock_identity = _ip_host_lock_identity(parsed, vrf)
+            lock_entries[lock_identity] = (parsed, vrf)
+
+        for lock_identity in sorted(lock_entries):
+            parsed, vrf = lock_entries[lock_identity]
+            _acquire_ip_host_lock(parsed, vrf)
+        return set(lock_entries)
+
     @staticmethod
     def _vrf_label(vrf):
         """Return a user-facing VRF label."""
@@ -1001,6 +1037,13 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
         create_missing_interfaces = self._create_missing_interfaces(request)
         cached_ports_by_id = cached_ports_by_id or {}
         interface_creation_state = None
+        prelocked_host_locks = self._prelock_ip_hosts(
+            request,
+            selected_ips,
+            cached_index,
+            duplicate_cached_rows,
+            force_intents,
+        )
 
         for selected_ip in selected_ips:
             row_id = str(selected_ip)
@@ -1036,7 +1079,8 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
                         vrf = self._resolve_vrf_id(force_payload.get("target_vrf_id"))
                     else:
                         vrf = self.get_vrf_selection(request, row_id)
-                    _acquire_ip_host_lock(parsed, vrf)
+                    if _ip_host_lock_identity(parsed, vrf) not in prelocked_host_locks:
+                        _acquire_ip_host_lock(parsed, vrf)
 
                     interface = self._match_interface(
                         ip_data, interfaces_by_librenms_id, interfaces_by_name, interfaces_by_pk

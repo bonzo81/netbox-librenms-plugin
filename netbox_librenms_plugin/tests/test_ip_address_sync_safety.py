@@ -151,6 +151,24 @@ class _IPHostLookupBarrier:
         return result
 
 
+class _FirstHostAdvisoryBarrier:
+    """Release concurrent bulk syncs after each request takes its first host lock."""
+
+    def __init__(self, barrier):
+        self.barrier = barrier
+        self.lock_seen = False
+
+    def __call__(self, execute, sql, params, many, context):
+        result = execute(sql, params, many, context)
+        if not self.lock_seen and "pg_advisory_xact_lock" in sql:
+            self.lock_seen = True
+            try:
+                self.barrier.wait(timeout=1)
+            except BrokenBarrierError:
+                pass
+        return result
+
+
 def _sync_cached_ip(device_pk, user_pk, row_id, lookup_wrapper):
     """Submit one cached IP row through the public sync endpoint."""
     from django.contrib.auth import get_user_model
@@ -176,6 +194,30 @@ def _sync_cached_ip(device_pk, user_pk, row_id, lookup_wrapper):
                 },
             )
         return response.status_code
+    finally:
+        connection.close()
+
+
+def _sync_cached_ips(device_pk, user_pk, row_ids, lock_wrapper):
+    """Submit one bulk cached-IP request through the public sync endpoint."""
+    from django.contrib.auth import get_user_model
+
+    close_old_connections()
+    try:
+        with connection.cursor() as cursor:
+            cursor.execute("SET lock_timeout = '5s'")
+            cursor.execute("SET statement_timeout = '10s'")
+        thread_client = Client()
+        thread_client.force_login(get_user_model().objects.get(pk=user_pk))
+        url = reverse(
+            "plugins:netbox_librenms_plugin:sync_device_ip_addresses",
+            kwargs={"object_type": "device", "pk": device_pk},
+        )
+        data = {"server_key": "default", "select": row_ids}
+        data.update({f"vrf_{row_id}": "" for row_id in row_ids})
+        with connection.execute_wrapper(lock_wrapper):
+            response = thread_client.post(url, data)
+        return response.status_code, _message_texts(response)
     finally:
         connection.close()
 
@@ -230,6 +272,68 @@ def test_concurrent_global_ip_sync_creates_one_address(settings):
     assert sorted(statuses) == [200, 302]
     assert all(wrapper.lookup_seen for wrapper in lookup_wrappers)
     assert IPAddress.objects.filter(address__net_host="198.18.20.10", vrf=None).count() == 1
+
+
+@pytest.mark.django_db(
+    transaction=True,
+    available_apps=[app.name for app in apps.get_app_configs()],
+)
+def test_concurrent_bulk_ip_sync_orders_host_locks_before_interface_scope(settings):
+    """Opposite bulk orders must not deadlock on host and Device locks."""
+    from netbox_librenms_plugin.utils import set_librenms_device_id
+
+    _configure_test_server(settings)
+    user = make_superuser("bulk-ip-lock-order-user")
+    device = make_device("bulk-ip-lock-order-device", librenms_cf={"default": {"id": 42}})
+    interfaces = [
+        make_interface(device, "Ethernet1", iface_type="1000base-t"),
+        make_interface(device, "Ethernet2", iface_type="1000base-t"),
+    ]
+    for port_id, interface in zip((7041, 7042), interfaces, strict=True):
+        set_librenms_device_id(interface, port_id, "default")
+        interface.save(update_fields=["custom_field_data"])
+
+    rows = [
+        {
+            "ip_address": "198.18.22.10",
+            "prefix_length": 24,
+            "ip_with_mask": "198.18.22.10/24",
+            "port_id": 7041,
+            "interface_name": "Ethernet1",
+        },
+        {
+            "ip_address": "198.18.22.11",
+            "prefix_length": 24,
+            "ip_with_mask": "198.18.22.11/24",
+            "port_id": 7042,
+            "interface_name": "Ethernet2",
+        },
+    ]
+    cache.set(
+        f"librenms_ip_addresses_device_{device.pk}_default",
+        {
+            "ip_addresses": rows,
+            "mgmt_ip": "",
+            "ports_by_id": {},
+            "interface_name_field": "ifName",
+        },
+        timeout=300,
+    )
+
+    barrier = Barrier(2)
+    wrappers = [_FirstHostAdvisoryBarrier(barrier) for _ in range(2)]
+    row_ids = [row["ip_with_mask"] for row in rows]
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        futures = [
+            executor.submit(_sync_cached_ips, device.pk, user.pk, selected, wrapper)
+            for selected, wrapper in zip((row_ids, list(reversed(row_ids))), wrappers, strict=True)
+        ]
+        outcomes = [future.result(timeout=20) for future in futures]
+
+    assert [status for status, _messages in outcomes] == [302, 302]
+    assert all(not any("Failed to sync" in message for message in messages) for _, messages in outcomes)
+    assert all(wrapper.lock_seen for wrapper in wrappers)
+    assert IPAddress.objects.filter(address__in=row_ids, vrf=None).count() == 2
 
 
 @pytest.mark.django_db
