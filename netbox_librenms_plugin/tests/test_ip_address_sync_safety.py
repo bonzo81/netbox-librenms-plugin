@@ -23,7 +23,7 @@ from netbox_librenms_plugin.tests.conftest import (
     make_virtual_chassis_members,
     make_vm,
 )
-from netbox_librenms_plugin.tests.view_test_helpers import grant, make_request, make_user_with_perms
+from netbox_librenms_plugin.tests.view_test_helpers import grant, make_request, make_user_with_perms, make_view
 
 
 def _json_response(url, payload, status=200):
@@ -646,6 +646,197 @@ def test_create_missing_interfaces_materializes_one_interface_for_bulk_ip_rows(c
         ("2001:db8:12::10/64", interface.pk),
     }
     assert IPAddress.objects.get(address="198.18.12.10/24", vrf=blue).assigned_object == interface
+
+
+@pytest.mark.django_db
+def test_create_missing_interfaces_rejects_legacy_snapshot_before_processing_rows(client, settings):
+    """Create-missing must reject a legacy snapshot once, before processing its rows."""
+    from dcim.models import Interface
+
+    _configure_test_server(settings)
+    device = make_device("ip-create-missing-legacy", librenms_cf={"default": {"id": 42}})
+    row_id = "198.18.12.20/24"
+    cache.set(
+        f"librenms_ip_addresses_device_{device.pk}_default",
+        {
+            "ip_addresses": [
+                {
+                    "ip_address": "198.18.12.20",
+                    "prefix_length": 24,
+                    "ip_with_mask": row_id,
+                    "port_id": 7020,
+                    "interface_name": "Ethernet20",
+                }
+            ]
+        },
+        timeout=300,
+    )
+    client.force_login(make_superuser("ip-create-missing-legacy-user"))
+
+    response = client.post(
+        reverse(
+            "plugins:netbox_librenms_plugin:sync_device_ip_addresses",
+            kwargs={"object_type": "device", "pk": device.pk},
+        ),
+        {
+            "server_key": "default",
+            "create-missing-interfaces-toggle": "on",
+            "select": row_id,
+            f"vrf_{row_id}": "",
+        },
+    )
+
+    assert response.status_code == 302
+    assert _message_texts(response) == ["Cache has expired. Please refresh the IP data."]
+    assert not Interface.objects.filter(device=device).exists()
+    assert not IPAddress.objects.filter(address=row_id).exists()
+
+
+@pytest.mark.django_db
+def test_create_missing_interfaces_reuses_interface_catalog_for_bulk_rows(client, settings):
+    """Bulk create-missing should materialize different ports with one catalog scan."""
+    from dcim.models import Interface
+
+    _configure_test_server(settings)
+    device = make_device("ip-create-missing-catalog", librenms_cf={"default": {"id": 42}})
+    rows = [
+        {
+            "address": "198.18.12.21",
+            "prefix_length": 24,
+            "port_id": 7021,
+            "interface": "Ethernet21",
+            "port_fields": {"ifType": "ethernetCsmacd"},
+        },
+        {
+            "address": "198.18.12.22",
+            "prefix_length": 24,
+            "port_id": 7022,
+            "interface": "Ethernet22",
+            "port_fields": {"ifType": "ethernetCsmacd"},
+        },
+    ]
+    client.force_login(make_superuser("ip-create-missing-catalog-user"))
+    refresh_url = reverse("plugins:netbox_librenms_plugin:device_ipaddress_sync", args=[device.pk])
+    with patch(
+        "netbox_librenms_plugin.librenms_api.requests.get",
+        side_effect=_librenms_ip_rows_response(rows, device_name=device.name),
+    ):
+        assert (
+            client.post(
+                refresh_url,
+                {"server_key": "default", "interface_name_field": "ifName"},
+                HTTP_HX_REQUEST="true",
+            ).status_code
+            == 200
+        )
+
+    catalog_reads = 0
+
+    class CatalogReadCounter:
+        """Count the full device-interface catalog reads used by create-missing."""
+
+        def __call__(self, execute, sql, params, many, context):
+            nonlocal catalog_reads
+            normalized = " ".join(sql.split())
+            if 'FROM "dcim_interface"' in normalized and '"dcim_interface"."device_id" IN' in normalized:
+                catalog_reads += 1
+            return execute(sql, params, many, context)
+
+    sync_url = reverse(
+        "plugins:netbox_librenms_plugin:sync_device_ip_addresses",
+        kwargs={"object_type": "device", "pk": device.pk},
+    )
+    with connection.execute_wrapper(CatalogReadCounter()):
+        response = client.post(
+            sync_url,
+            {
+                "server_key": "default",
+                "create-missing-interfaces-toggle": "on",
+                "select": ["198.18.12.21/24", "198.18.12.22/24"],
+                "vrf_198.18.12.21/24": "",
+                "vrf_198.18.12.22/24": "",
+            },
+        )
+
+    assert response.status_code == 302
+    assert catalog_reads == 2  # initial matching map plus one reusable creation catalog
+    assert {interface.name for interface in Interface.objects.filter(device=device)} == {"Ethernet21", "Ethernet22"}
+    assert IPAddress.objects.get(address="198.18.12.21/24").assigned_object.name == "Ethernet21"
+    assert IPAddress.objects.get(address="198.18.12.22/24").assigned_object.name == "Ethernet22"
+
+
+@pytest.mark.django_db
+def test_failed_create_missing_row_does_not_leak_interface_catalog(settings):
+    """A failed row must not leave a rolled-back interface in the request catalog."""
+    from netbox_librenms_plugin.views.sync.ip_addresses import SyncIPAddressesView
+
+    _configure_test_server(settings)
+    device = make_device("ip-create-missing-savepoint", librenms_cf={"default": {"id": 42}})
+    first_row = "198.18.12.23/24"
+    second_row = "198.18.12.24/24"
+    cached_ips = [
+        {
+            "ip_address": "198.18.12.23",
+            "prefix_length": 24,
+            "ip_with_mask": first_row,
+            "port_id": 7023,
+            "interface_name": "Ethernet23",
+        },
+        {
+            "ip_address": "198.18.12.24",
+            "prefix_length": 24,
+            "ip_with_mask": second_row,
+            "port_id": 7023,
+            "interface_name": "Ethernet23",
+        },
+    ]
+    cached_ports = {
+        "7023": {
+            "port_id": 7023,
+            "ifName": "Ethernet23",
+            "ifDescr": "Ethernet23",
+            "ifType": "ethernetCsmacd",
+        },
+    }
+    request = make_request(
+        "post",
+        {
+            "create-missing-interfaces-toggle": "on",
+            "select": [first_row, second_row],
+            f"vrf_{first_row}": "",
+            f"vrf_{second_row}": "",
+        },
+    )
+    view = make_view(SyncIPAddressesView, request)
+    view._post_server_key = "default"
+
+    results = view.process_ip_sync(
+        request,
+        [first_row, second_row],
+        cached_ips,
+        device,
+        "device",
+        force_intents={
+            first_row: {
+                "target_interface": {"model": "dcim.interface", "pk": "999999"},
+                "target_vrf_id": None,
+                "ip_pk": "999999",
+                "ip_state": {},
+                "kind": "reassign",
+            }
+        },
+        cached_ports_by_id=cached_ports,
+        interface_name_field="ifName",
+    )
+
+    from dcim.models import Interface
+
+    assert results["failed"] == [first_row]
+    assert results["created"] == [second_row]
+    assert Interface.objects.filter(device=device, name="Ethernet23").count() == 1
+    second_interface = Interface.objects.get(device=device, name="Ethernet23")
+    assert not IPAddress.objects.filter(address=first_row).exists()
+    assert IPAddress.objects.get(address=second_row).assigned_object == second_interface
 
 
 @pytest.mark.django_db

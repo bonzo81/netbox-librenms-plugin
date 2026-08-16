@@ -1709,6 +1709,22 @@ class TestSyncIPAddressesViewInterfaceResolution:
         )
         assert result is None
 
+    def test_match_interface_does_not_use_url_after_ambiguous_stable_matches(self):
+        """An ambiguous stable ID and name must not fall through to a cached interface URL."""
+        dev = make_device("ipres-ambig-url")
+        fallback = make_interface(dev, "cached-target")
+        result = self._view()._match_interface(
+            {
+                "port_id": 7,
+                "interface_name": "eth0",
+                "interface_url": fallback.get_absolute_url(),
+            },
+            {"7": None},
+            {"eth0": None},
+            {str(fallback.pk): fallback},
+        )
+        assert result is None
+
     def test_existing_ip_is_not_rewritten_without_confirmation(self):
         """A first-pass bulk sync reports a conflict and leaves the existing assignment intact."""
         from ipam.models import IPAddress
