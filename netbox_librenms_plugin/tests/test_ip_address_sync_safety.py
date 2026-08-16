@@ -152,21 +152,20 @@ class _IPHostLookupBarrier:
 
 
 class _FirstHostAdvisoryBarrier:
-    """Release concurrent bulk syncs after each request takes its first host lock."""
+    """Rendezvous concurrent bulk syncs before each request's first host lock."""
 
     def __init__(self, barrier):
         self.barrier = barrier
         self.lock_seen = False
 
     def __call__(self, execute, sql, params, many, context):
-        result = execute(sql, params, many, context)
         if not self.lock_seen and "pg_advisory_xact_lock" in sql:
             self.lock_seen = True
             try:
                 self.barrier.wait(timeout=1)
             except BrokenBarrierError:
                 pass
-        return result
+        return execute(sql, params, many, context)
 
 
 def _sync_cached_ip(device_pk, user_pk, row_id, lookup_wrapper):
