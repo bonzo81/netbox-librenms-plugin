@@ -1,8 +1,11 @@
 """Real-HTTP contract tests for the development LibreNMS stub."""
 
 import copy
+import json
 import runpy
+import shutil
 import socket
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -28,6 +31,28 @@ def test_devcontainer_stub_keeps_import_cache_enabled():
     plugin_config = runpy.run_path(config_path)["PLUGINS_CONFIG"]["netbox_librenms_plugin"]
 
     assert plugin_config["servers"]["stub"]["cache_timeout"] > 0
+
+
+def test_devcontainer_stub_command_runs_the_server_as_a_package_module():
+    """Keep the Compose command compatible with imports needed by recordings."""
+    if shutil.which("docker") is None:
+        pytest.skip("Docker Compose is required to validate the devcontainer command")
+
+    compose_path = Path(__file__).resolve().parents[2] / ".devcontainer/docker-compose.yml"
+    result = subprocess.run(
+        ["docker", "compose", "-f", str(compose_path), "config", "--format", "json"],
+        cwd=compose_path.parent.parent,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    service = json.loads(result.stdout)["services"]["librenms-stub"]
+    command = service["command"]
+
+    assert command[:3] == ["python", "-m", "netbox_librenms_plugin.tests.mock_librenms_server"]
+    assert service["image"].startswith("netboxcommunity/netbox:")
+    assert service["environment"]["PYTHONPATH"] == "/opt/netbox/netbox"
+    assert service["healthcheck"]["test"][:3] == ["CMD", "python", "-c"]
 
 
 def _request(server, method, path, **kwargs):

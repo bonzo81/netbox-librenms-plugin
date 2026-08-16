@@ -45,14 +45,16 @@ services:
       - "8000:8000"
 
   librenms-stub:
-    image: python:3.13-alpine
+    image: netboxcommunity/netbox:${NETBOX_VERSION:-latest}
     working_dir: /app
     environment:
       NO_PROXY: 127.0.0.1,localhost
       no_proxy: 127.0.0.1,localhost
+      PYTHONPATH: /opt/netbox/netbox
     command:
       - python
-      - netbox_librenms_plugin/tests/mock_librenms_server.py
+      - -m
+      - netbox_librenms_plugin.tests.mock_librenms_server
       - --host
       - 0.0.0.0
       - --port
@@ -64,7 +66,13 @@ services:
     expose:
       - "8001"
     healthcheck:
-      test: ["CMD", "wget", "-Y", "off", "-q", "-O", "/dev/null", "http://127.0.0.1:8001/healthz"]
+      test:
+        - CMD
+        - python
+        - -c
+        - >-
+          import urllib.request;
+          urllib.request.urlopen("http://127.0.0.1:8001/healthz", timeout=2)
       interval: 5s
       timeout: 3s
       retries: 10
