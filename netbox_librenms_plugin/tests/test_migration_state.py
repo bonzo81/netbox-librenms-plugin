@@ -49,6 +49,7 @@ def test_plugin_migrations_do_not_redeclare_squashed_core_ancestors():
     plugin_migrations = {
         key: migration for key, migration in loader.disk_migrations.items() if key[0] == "netbox_librenms_plugin"
     }
+    assert plugin_migrations, "No plugin migrations were loaded"
 
     for migration_key, migration in plugin_migrations.items():
         plugin_parents = [dependency for dependency in migration.dependencies if dependency[0] == migration_key[0]]
