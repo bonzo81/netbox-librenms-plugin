@@ -118,6 +118,10 @@ def _ensure_librenms_id_custom_field(sender, **kwargs):
         from virtualization.models import VirtualMachine, VMInterface
 
         required_models = [Device, VirtualMachine, Interface, VMInterface]
+        # post_migrate can run in a process that previously used another isolated test
+        # database. Do not reuse a ContentType object cached for that database when rebuilding
+        # this field's object-type relation.
+        ContentType.objects.clear_cache()
         current_types = set(cf.object_types.values_list("pk", flat=True))
 
         for model in required_models:

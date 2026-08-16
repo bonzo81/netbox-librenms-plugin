@@ -59,3 +59,38 @@ def test_local_and_ci_commands_use_eight_workers():
     assert 'local workers="${NETBOX_TEST_WORKERS:-8}"' in aliases
     assert 'parallel_args=(-n "$workers" --maxschedchunk=1)' in aliases
     assert "pytest -n 8 --maxschedchunk=1" in workflow
+
+
+@pytest.mark.django_db(transaction=True)
+def test_custom_field_restore_drops_stale_content_type_cache(caplog):
+    """Repair the custom field after a worker cached a ContentType from another DB state."""
+    import logging
+
+    from dcim.models import Interface
+    from django.contrib.contenttypes.models import ContentType
+
+    from netbox_librenms_plugin import _ensure_librenms_id_custom_field
+
+    db_alias = "default"
+    _ensure_librenms_id_custom_field._executed_aliases.discard(db_alias)
+    ContentType.objects.clear_cache()
+
+    interface_type = ContentType.objects.db_manager(db_alias).get_for_model(Interface)
+    stale_pk = (ContentType.objects.using(db_alias).order_by("-pk").values_list("pk", flat=True).first() or 0) + 10000
+    stale_type = ContentType(
+        pk=stale_pk,
+        app_label=interface_type.app_label,
+        model=interface_type.model,
+    )
+    ContentType.objects._cache.setdefault(db_alias, {})[(stale_type.app_label, stale_type.model)] = stale_type
+
+    assert ContentType.objects.db_manager(db_alias).get_for_model(Interface) is stale_type
+
+    with caplog.at_level(logging.ERROR, logger="netbox_librenms_plugin"):
+        _ensure_librenms_id_custom_field(sender=None, using=db_alias)
+
+    try:
+        assert "Failed to auto-create 'librenms_id' custom field" not in caplog.text
+        assert db_alias in _ensure_librenms_id_custom_field._executed_aliases
+    finally:
+        ContentType.objects.clear_cache()

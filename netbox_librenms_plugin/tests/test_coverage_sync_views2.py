@@ -1256,7 +1256,7 @@ class TestSyncIPAddressesViewIPWrites:
         view.get_cache_key = MagicMock(return_value="k")
         return view
 
-    def _run(self, view, dev, ip_addresses):
+    def _run(self, view, dev, ip_addresses, *, capture_response=False):
         mock_api = MagicMock(server_key="default")
         with (
             patch("netbox_librenms_plugin.views.sync.ip_addresses.cache") as mock_cache,
@@ -1267,7 +1267,9 @@ class TestSyncIPAddressesViewIPWrites:
         ):
             mock_cache.get.return_value = {"ip_addresses": ip_addresses}
             view.request = _make_request(post_data={"select": ["10.0.0.1/24"]})
-            view.post(view.request, object_type="device", pk=dev.pk)
+            response = view.post(view.request, object_type="device", pk=dev.pk)
+        if capture_response:
+            return mock_msgs, response
         return mock_msgs
 
     def test_new_ip_is_created_and_assigned(self):
@@ -1305,14 +1307,18 @@ class TestSyncIPAddressesViewIPWrites:
         eth1 = make_interface(dev, "eth1")
         ip = IPAddress.objects.create(address="10.0.0.1/24", assigned_object=eth1, status="active")
 
-        self._run(
+        _mock_msgs, response = self._run(
             view,
             dev,
             [{"ip_address": "10.0.0.1", "ip_with_mask": "10.0.0.1/24", "port_id": 5, "interface_name": "eth0"}],
+            capture_response=True,
         )
 
         ip.refresh_from_db()
         assert ip.assigned_object_id == eth1.pk
+        assert response.status_code == 200
+        assert b"10.0.0.1/24" in response.content
+        assert b"Reassign the existing IP address to the selected interface." in response.content
 
     def test_unchanged_ip_shows_warning(self):
         from ipam.models import IPAddress
