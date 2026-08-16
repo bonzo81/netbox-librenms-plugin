@@ -106,7 +106,6 @@ class Migration(migrations.Migration):
     atomic = False
 
     dependencies = [
-        ("dcim", "0001_squashed"),
         ("netbox_librenms_plugin", "0011_renormalize_device_type_mappings"),
     ]
 
