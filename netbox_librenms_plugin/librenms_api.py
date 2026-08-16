@@ -505,7 +505,7 @@ class LibreNMSAPI:
             tuple: (success: bool, data: dict)
         """
         cache_key = f"librenms_device_info_{self.server_key}_{device_id}"
-        if use_cache:
+        if use_cache or cache_only:
             cached = cache.get(cache_key)
             if cached is not None:
                 return cached

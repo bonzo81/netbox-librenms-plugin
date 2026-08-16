@@ -115,6 +115,62 @@ def _state(
     return state
 
 
+def test_outer_tab_navigation_uses_the_rendered_status_as_the_next_baseline():
+    """A server-rendered tab region must not reload its already-rendered active fragment."""
+    initial = {
+        "interfaces": _state("before-interfaces"),
+        "ipaddresses": _state("before-ipaddresses"),
+    }
+    rendered = {
+        "interfaces": _state("before-interfaces"),
+        "ipaddresses": _state("rendered-ipaddresses"),
+    }
+    fragment_requests = []
+
+    with playwright.sync_playwright() as runtime:
+        browser = runtime.chromium.launch(headless=True)
+        page = browser.new_page()
+        page.set_content(_page_html(initial))
+        page.add_script_tag(path=str(SCRIPT_PATH))
+        page.evaluate("document.dispatchEvent(new Event('DOMContentLoaded')); initializeScripts();")
+        page.route(
+            "https://plugin.example.com/status?*",
+            lambda route: route.fulfill(json={"tabs": rendered}),
+        )
+        page.route(
+            "https://plugin.example.com/fragment/ipaddresses?*",
+            lambda route: (fragment_requests.append(route.request.url), route.fulfill(body="<p>Reloaded</p>")),
+        )
+
+        page.evaluate(
+            """status => {
+                const region = document.querySelector('#librenms-sync-tabs');
+                region.outerHTML = '<div id="librenms-sync-tabs" data-active-tab="ipaddresses">'
+                    + '<script id="librenms-sync-rendered-status" type="application/json">'
+                    + JSON.stringify(status)
+                    + '</script>'
+                    + '<div id="interfaces" class="tab-pane" data-tab-id="interfaces" '
+                    + 'data-fragment-url="https://plugin.example.com/fragment/interfaces"></div>'
+                    + '<div id="ipaddresses" class="tab-pane active" data-tab-id="ipaddresses" '
+                    + 'data-fragment-url="https://plugin.example.com/fragment/ipaddresses">'
+                    + '<div id="ipaddress-sync-content"><p>Server-rendered IP rows</p></div>'
+                    + '</div></div>';
+                document.querySelector('#librenms-sync-tabs').dispatchEvent(
+                    new CustomEvent('htmx:afterSwap', {bubbles: true})
+                );
+            }""",
+            rendered,
+        )
+        page.wait_for_function(
+            "syncCacheController().checking === null "
+            "&& syncCacheController().status.ipaddresses.revision === 'rendered-ipaddresses'"
+        )
+
+        assert fragment_requests == []
+        assert page.locator("#ipaddress-sync-content").inner_text() == "Server-rendered IP rows"
+        browser.close()
+
+
 def test_cold_tab_does_not_show_stale_state_before_first_refresh():
     """A tab with no snapshot history must retain its initial refresh state."""
     initial = {

@@ -527,6 +527,17 @@ function activeSyncTab() {
     return region?.dataset.activeTab || new URLSearchParams(window.location.search).get('tab') || 'interfaces';
 }
 
+function renderedSyncCacheStatus() {
+    const element = document.getElementById('librenms-sync-rendered-status');
+    if (!element) return null;
+    try {
+        const status = JSON.parse(element.textContent) || null;
+        return status && typeof status === 'object' && !Array.isArray(status) ? status : null;
+    } catch (_) {
+        return null;
+    }
+}
+
 function loadSyncCacheFragment(tab) {
     const pane = document.getElementById(tab);
     const content = syncCacheContent(tab);
@@ -702,8 +713,9 @@ function initializeSyncCacheConsistency() {
     document.addEventListener('librenmsCacheChanged', event => {
         const payload = event.detail?.value || event.detail || {};
         Object.values(payload.revisions || {}).forEach(revision => controller.ownRevisions.add(revision));
-        if (payload.source_fragment_required && payload.source_tab) {
-            controller.requiredSourceFragments.add(payload.source_tab);
+        if (payload.source_fragment_required) {
+            const sourceTabs = payload.source_tabs || (payload.source_tab ? [payload.source_tab] : []);
+            sourceTabs.forEach(tab => controller.requiredSourceFragments.add(tab));
         }
         if (payload.cleanup_failed) {
             (payload.cleanup_tabs || []).forEach(tab => {
@@ -2838,6 +2850,14 @@ document.addEventListener('DOMContentLoaded', function () {
 // Initialize scripts after HTMX swaps content
 document.body.addEventListener('htmx:afterSwap', function (event) {
     const controller = syncCacheController();
+    if (controller && event.target.id === 'librenms-sync-tabs') {
+        const renderedStatus = renderedSyncCacheStatus();
+        if (renderedStatus) {
+            controller.status = renderedStatus;
+            controller.invalidatedLocally.clear();
+            controller.requiredSourceFragments.clear();
+        }
+    }
     const swappedTab = Object.entries(controller?.contract || {})
         .find(([, spec]) => spec.content_id === event.target.id)?.[0];
     if (swappedTab) {

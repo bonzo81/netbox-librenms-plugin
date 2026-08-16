@@ -6,6 +6,7 @@ import sys
 from pathlib import Path
 
 import pytest
+from django.test import override_settings
 
 from netbox_librenms_plugin.tests.isolated_settings import TEST_DB_NAME_PREFIX
 from netbox_librenms_plugin.tests.parallel import (
@@ -377,6 +378,7 @@ def test_librenms_config_mock_is_not_applied_to_unrelated_tests(settings):
 
     from netbox.plugins import get_plugin_config
 
+    original_servers = deepcopy(settings.PLUGINS_CONFIG["netbox_librenms_plugin"]["servers"])
     plugin_config = deepcopy(settings.PLUGINS_CONFIG)
     plugin_config["netbox_librenms_plugin"]["servers"] = {
         "isolated": {
@@ -384,6 +386,9 @@ def test_librenms_config_mock_is_not_applied_to_unrelated_tests(settings):
             "api_token": "test-token",
         }
     }
-    settings.PLUGINS_CONFIG = plugin_config
+    with override_settings(PLUGINS_CONFIG=plugin_config):
+        assert (
+            get_plugin_config("netbox_librenms_plugin", "servers") == plugin_config["netbox_librenms_plugin"]["servers"]
+        )
 
-    assert get_plugin_config("netbox_librenms_plugin", "servers") == plugin_config["netbox_librenms_plugin"]["servers"]
+    assert get_plugin_config("netbox_librenms_plugin", "servers") == original_servers

@@ -124,6 +124,9 @@ class CacheMutationTransition:
     source_fragment_required: bool = False
     error: str | None = None
     completed: bool = False
+    source_tabs: tuple[SyncTab, ...] | None = None
+    transition_ids: tuple[str, ...] | None = None
+    revision_entries: tuple[tuple[str, SyncTab, str], ...] | None = None
 
     @property
     def removed_any(self):
@@ -132,7 +135,26 @@ class CacheMutationTransition:
 
     def browser_payload(self):
         """Serialize only information the initiating browser needs."""
-        return {
+        if self.revision_entries is None:
+            revision_entries = tuple(
+                (server_key, tab, revision) for (server_key, tab), revision in self.revisions.items()
+            )
+        else:
+            revision_entries = self.revision_entries
+        revisions = {}
+        duplicate_indexes = {}
+        for server_key, tab, revision in sorted(
+            revision_entries,
+            key=lambda item: (item[0], item[1].value, item[2]),
+        ):
+            base_key = f"{server_key}:{tab.value}"
+            key = base_key
+            if key in revisions:
+                duplicate_indexes[base_key] = duplicate_indexes.get(base_key, 1) + 1
+                key = f"{base_key}#{duplicate_indexes[base_key]}"
+            revisions[key] = revision
+
+        payload = {
             "transition_id": self.transition_id,
             "removed": self.removed_any,
             "cleanup_failed": self.error is not None,
@@ -140,13 +162,48 @@ class CacheMutationTransition:
             "cleanup_tabs": sorted(tab.value for tab in self.cleanup_tabs),
             "source_tab": self.source_tab.value if self.source_tab is not None else None,
             "source_fragment_required": self.source_fragment_required,
-            "revisions": {
-                f"{server_key}:{tab.value}": revision
-                for (server_key, tab), revision in sorted(
-                    self.revisions.items(), key=lambda item: (item[0][0], item[0][1].value)
-                )
-            },
+            "revisions": revisions,
         }
+        if self.source_tabs is not None:
+            payload["source_tabs"] = sorted(tab.value for tab in self.source_tabs)
+        if self.transition_ids is not None:
+            payload["transition_ids"] = list(self.transition_ids)
+        return payload
+
+
+def merge_cache_transitions(transitions):
+    """Combine cache mutations scheduled by one response into one browser event."""
+    transitions = tuple(transition for transition in transitions if transition is not None)
+    if not transitions:
+        return None
+    if len(transitions) == 1:
+        return transitions[0]
+
+    source_tabs = tuple(
+        sorted(
+            {transition.source_tab for transition in transitions if transition.source_tab is not None},
+            key=lambda tab: tab.value,
+        )
+    )
+    revision_entries = tuple(
+        (server_key, tab, revision)
+        for transition in transitions
+        for (server_key, tab), revision in transition.revisions.items()
+    )
+    errors = tuple(dict.fromkeys(transition.error for transition in transitions if transition.error))
+    return CacheMutationTransition(
+        transition_id="+".join(transition.transition_id for transition in transitions),
+        removed_tabs=set().union(*(transition.removed_tabs for transition in transitions)),
+        affected_tabs=set().union(*(transition.affected_tabs for transition in transitions)),
+        cleanup_tabs=set().union(*(transition.cleanup_tabs for transition in transitions)),
+        source_tab=source_tabs[0] if source_tabs else None,
+        source_fragment_required=any(transition.source_fragment_required for transition in transitions),
+        error="; ".join(errors) if errors else None,
+        completed=all(transition.completed for transition in transitions),
+        source_tabs=source_tabs,
+        transition_ids=tuple(transition.transition_id for transition in transitions),
+        revision_entries=revision_entries,
+    )
 
 
 def request_actor_id(request):
@@ -655,14 +712,22 @@ def schedule_request_cache_mutation(
         actor_id=request_actor_id(request),
         source_fragment_required=source_fragment_required,
     )
-    request._librenms_cache_transition = transition
+    transitions = getattr(request, "_librenms_cache_transitions", None)
+    if not isinstance(transitions, list):
+        transitions = []
+    transitions.append(transition)
+    request._librenms_cache_transitions = transitions
     return transition
 
 
 def apply_request_cache_transition(request, response):
     """Attach the transition scheduled by the current request, when present."""
+    transitions = getattr(request, "_librenms_cache_transitions", None)
+    if not isinstance(transitions, list):
+        transitions = []
+    transition = merge_cache_transitions(transitions)
     return apply_transition_to_response(
         request,
         response,
-        request.__dict__.get("_librenms_cache_transition"),
+        transition,
     )

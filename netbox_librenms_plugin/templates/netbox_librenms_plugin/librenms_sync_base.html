@@ -712,6 +712,7 @@ Render the tabs in migrated mode too, or those interface/IP move controls are un
 {{ sync_cache_contract|json_script:"librenms-sync-cache-contract" }}
 {% endif %}
 <div id="librenms-sync-tabs" data-active-tab="{{ active_sync_tab }}">
+{{ sync_cache_status|json_script:"librenms-sync-rendered-status" }}
 <!-- Tab Navigation -->
 <div class="d-flex justify-content-between align-items-center">
     <ul class="nav nav-tabs mt-3" id="librenmsSync" role="tablist">

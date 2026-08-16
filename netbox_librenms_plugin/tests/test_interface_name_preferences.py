@@ -224,7 +224,7 @@ def test_malformed_stored_interface_name_preferences_fall_back_safely():
     device.platform = platform
     device.save(update_fields=["platform"])
     user = make_superuser("malformed-interface-name-reader")
-    user.config.set(GLOBAL_PREFERENCE, "ifDescr", commit=False)
+    user.config.set(GLOBAL_PREFERENCE, "ifName", commit=False)
     user.config.set(PLATFORM_PREFERENCES, {str(platform.pk): {"field": "ifDescr"}}, commit=True)
 
-    assert get_interface_name_field(_request_for(user), device) == "ifDescr"
+    assert get_interface_name_field(_request_for(user), device) == "ifName"

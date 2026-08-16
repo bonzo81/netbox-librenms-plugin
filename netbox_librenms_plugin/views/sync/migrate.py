@@ -29,7 +29,6 @@ from ipam.models import IPAddress
 from netbox_librenms_plugin.sync_cache import (
     SyncTab,
     apply_request_cache_transition,
-    apply_transition_to_response,
     schedule_request_cache_mutation,
 )
 from netbox_librenms_plugin.utils import (
@@ -723,10 +722,10 @@ class MoveInterfaceToWinnerView(_BaseMoveToWinnerView):
             )
         if notes:
             message += " " + "; ".join(notes) + "."
-        donor_transition = schedule_request_cache_mutation(request, donor, SyncTab.INTERFACES, server_key)
+        schedule_request_cache_mutation(request, donor, SyncTab.INTERFACES, server_key)
         schedule_request_cache_mutation(request, winner, SyncTab.INTERFACES, server_key)
         response = _hx_response(request, message, fallback_url=self._fallback_url)
-        return apply_transition_to_response(request, response, donor_transition)
+        return response
 
 
 class MoveIPAddressToWinnerView(_BaseMoveToWinnerView):
@@ -828,10 +827,10 @@ class MoveIPAddressToWinnerView(_BaseMoveToWinnerView):
         message = f"Moved IP {ip.address} to {winner.name} interface '{winner_iface.name}'."
         if notes:
             message += " " + "; ".join(notes) + "."
-        donor_transition = schedule_request_cache_mutation(request, donor, SyncTab.IP_ADDRESSES, server_key)
+        schedule_request_cache_mutation(request, donor, SyncTab.IP_ADDRESSES, server_key)
         schedule_request_cache_mutation(request, winner, SyncTab.IP_ADDRESSES, server_key)
         response = _hx_response(request, message, fallback_url=self._fallback_url)
-        return apply_transition_to_response(request, response, donor_transition)
+        return response
 
 
 class TransferDeviceIPView(_BaseMoveToWinnerView):
@@ -956,11 +955,11 @@ class TransferDeviceIPView(_BaseMoveToWinnerView):
                 transaction.set_rollback(True)
                 return self._fail(request, f"Cannot transfer {human}: {exc}", status=409)
 
-        donor_transition = schedule_request_cache_mutation(request, donor, SyncTab.IP_ADDRESSES, server_key)
+        schedule_request_cache_mutation(request, donor, SyncTab.IP_ADDRESSES, server_key)
         schedule_request_cache_mutation(request, winner, SyncTab.IP_ADDRESSES, server_key)
         response = _hx_response(
             request,
             f"Transferred {human} ({donor_ip}) to {winner.name}.",
             fallback_url=self._fallback_url,
         )
-        return apply_transition_to_response(request, response, donor_transition)
+        return response

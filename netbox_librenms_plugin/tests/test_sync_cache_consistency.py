@@ -10,7 +10,8 @@ from django.apps import apps as django_apps
 from django.contrib.auth import get_user_model
 from django.core.cache import cache
 from django.db import transaction
-from django.test import override_settings
+from django.http import HttpResponse
+from django.test import RequestFactory, override_settings
 from django.urls import reverse
 from ipam.models import IPAddress, VLAN
 from requests import Response
@@ -19,6 +20,7 @@ from netbox_librenms_plugin.sync_cache import (
     CacheMutationTransition,
     SyncCacheConsistency,
     SyncTab,
+    apply_request_cache_transition,
 )
 from netbox_librenms_plugin.tests.conftest import (
     ip_on,
@@ -126,6 +128,39 @@ def test_configured_cache_timeout_clamps_positive_fractions(settings):
     settings.PLUGINS_CONFIG["netbox_librenms_plugin"]["servers"]["primary"]["cache_timeout"] = 0.5
 
     assert configured_cache_timeout("primary") == 1
+
+
+def test_one_response_preserves_both_cache_mutation_results():
+    """A response event must retain revisions and cleanup failures from both owners."""
+    request = RequestFactory().post("/sync", HTTP_HX_REQUEST="true")
+    donor = CacheMutationTransition(
+        transition_id="donor-transition",
+        removed_tabs={("primary", SyncTab.IP_ADDRESSES)},
+        revisions={("primary", SyncTab.IP_ADDRESSES): "donor-revision"},
+        source_tab=SyncTab.IP_ADDRESSES,
+        completed=True,
+    )
+    winner = CacheMutationTransition(
+        transition_id="winner-transition",
+        removed_tabs={("primary", SyncTab.INTERFACES)},
+        revisions={("primary", SyncTab.IP_ADDRESSES): "winner-revision"},
+        cleanup_tabs={SyncTab.CABLES},
+        source_tab=SyncTab.IP_ADDRESSES,
+        error="winner cleanup failed",
+        completed=True,
+    )
+    request._librenms_cache_transitions = [donor, winner]
+
+    response = apply_request_cache_transition(request, HttpResponse())
+
+    payload = json.loads(response["X-LibreNMS-Cache-Transition"])
+    assert payload["cleanup_failed"] is True
+    assert payload["tabs"] == ["interfaces", "ipaddresses"]
+    assert payload["cleanup_tabs"] == ["cables"]
+    assert payload["source_tabs"] == ["ipaddresses"]
+    assert set(payload["revisions"].values()) == {"donor-revision", "winner-revision"}
+    trigger = json.loads(response["HX-Trigger"])
+    assert trigger["librenmsCacheChanged"]["cleanup_failed"] is True
 
 
 @pytest.mark.django_db
@@ -891,6 +926,37 @@ def test_interface_move_invalidates_winner_dependent_snapshots(
     interface.refresh_from_db()
     assert interface.device_id == winner.pk
     assert cache.get(_cache_key("ip_addresses", winner, "primary")) is None
+
+
+@pytest.mark.django_db(transaction=True)
+def test_interface_move_response_reports_winner_cleanup_failure(
+    client,
+    settings,
+):
+    """A winner cleanup failure must remain visible in the single response event."""
+    _configure_servers(settings)
+    donor = make_device("cache-move-interface-failure-donor", librenms_cf={"primary": {"id": 6416}})
+    winner = make_device("cache-move-interface-failure-winner", librenms_cf={"primary": {"id": 6417}})
+    _mark_migrated_donor(donor, winner)
+    interface = make_interface(donor, "Ethernet1", iface_type="1000base-t")
+    client.force_login(make_superuser("cache-move-interface-failure-user"))
+    url = reverse("plugins:netbox_librenms_plugin:interface_move_to_winner", args=[interface.pk])
+    real_apply_mutation = SyncCacheConsistency._apply_mutation
+
+    def fail_winner_cleanup(coordinator, *args):
+        if coordinator.page_object.pk == winner.pk:
+            raise RuntimeError("winner cache backend failed")
+        return real_apply_mutation(coordinator, *args)
+
+    with patch.object(SyncCacheConsistency, "_apply_mutation", autospec=True) as apply_mutation:
+        apply_mutation.side_effect = fail_winner_cleanup
+        response = client.post(url, {"server_key": "primary"}, HTTP_HX_REQUEST="true")
+
+    assert response.status_code == 200
+    payload = json.loads(response["X-LibreNMS-Cache-Transition"])
+    assert payload["cleanup_failed"] is True
+    assert len(payload["transition_ids"]) == 2
+    assert payload["source_tabs"] == ["interfaces"]
 
 
 @pytest.mark.django_db
