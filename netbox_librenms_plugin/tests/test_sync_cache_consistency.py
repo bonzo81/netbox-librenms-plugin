@@ -27,6 +27,7 @@ from netbox_librenms_plugin.sync_cache import (
     apply_request_cache_transition,
 )
 from netbox_librenms_plugin.tests.conftest import (
+    configure_no_librenms_servers,
     ip_on,
     make_device,
     make_interface,
@@ -45,16 +46,6 @@ def _configure_servers(settings):
         "secondary": {"librenms_url": "https://secondary.example.com", "api_token": "test-token"},
         "unmapped": {"librenms_url": "https://unmapped.example.com", "api_token": "test-token"},
     }
-    settings.PLUGINS_CONFIG = plugin_config
-
-
-def _configure_no_servers(settings):
-    """Leave the plugin without any server the API client can bind."""
-    plugin_config = deepcopy(settings.PLUGINS_CONFIG)
-    plugin_settings = plugin_config["netbox_librenms_plugin"]
-    plugin_settings["servers"] = {}
-    plugin_settings.pop("librenms_url", None)
-    plugin_settings.pop("api_token", None)
     settings.PLUGINS_CONFIG = plugin_config
 
 
@@ -895,7 +886,7 @@ def test_interface_delete_without_posted_server_uses_active_namespace(
 @pytest.mark.django_db
 def test_interface_delete_succeeds_without_a_configured_librenms_server(client, settings):
     """A NetBox-only deletion must not depend on constructing a LibreNMS client."""
-    _configure_no_servers(settings)
+    configure_no_librenms_servers(settings)
     device = make_device("cache-delete-without-server")
     interface = make_interface(device, "Ethernet1", iface_type="1000base-t")
     client.force_login(make_superuser("cache-delete-without-server-user"))
@@ -913,7 +904,7 @@ def test_interface_delete_succeeds_without_a_configured_librenms_server(client, 
 @pytest.mark.django_db
 def test_module_serial_update_succeeds_without_a_configured_librenms_server(client, settings):
     """A NetBox-only serial update must not depend on constructing a LibreNMS client."""
-    _configure_no_servers(settings)
+    configure_no_librenms_servers(settings)
     device = make_device("cache-serial-without-server")
     bay = ModuleBay.objects.create(device=device, name="Slot 1")
     module_type = ModuleType.objects.create(
@@ -934,7 +925,7 @@ def test_module_serial_update_succeeds_without_a_configured_librenms_server(clie
 @pytest.mark.django_db
 def test_module_move_succeeds_without_a_configured_librenms_server(client, settings):
     """A NetBox-only module move must not depend on constructing a LibreNMS client."""
-    _configure_no_servers(settings)
+    configure_no_librenms_servers(settings)
     device = make_device("cache-move-without-server")
     source_bay = ModuleBay.objects.create(device=device, name="Slot 1")
     target_bay = ModuleBay.objects.create(device=device, name="Slot 2")
@@ -956,7 +947,7 @@ def test_module_move_succeeds_without_a_configured_librenms_server(client, setti
 @pytest.mark.django_db
 def test_bay_template_creation_succeeds_without_a_configured_librenms_server(client, settings):
     """A NetBox-only bay template must not depend on constructing a LibreNMS client."""
-    _configure_no_servers(settings)
+    configure_no_librenms_servers(settings)
     device = make_device("cache-bay-template-without-server")
     client.force_login(make_superuser("cache-bay-template-without-server-user"))
     url = reverse("plugins:netbox_librenms_plugin:add_bay_template", kwargs={"pk": device.pk})

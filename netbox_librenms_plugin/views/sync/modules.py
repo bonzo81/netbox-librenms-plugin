@@ -43,6 +43,11 @@ from netbox_librenms_plugin.views.mixins import (
 
 logger = logging.getLogger(__name__)
 
+# Every module action below scopes its cache reads and its LibreNMS id writes by server key.
+NO_LIBRENMS_SERVER_MESSAGE = (
+    "No LibreNMS server is configured. Add a server to the plugin configuration before syncing modules."
+)
+
 
 def _modules_redirect_response(request, sync_url, server_key=None):
     """
@@ -780,12 +785,15 @@ class InstallModuleView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
         changeable_components = _restricted_module_component_querysets(self)
         changeable_interfaces = changeable_components[Interface]
         deletable_interfaces = self.restricted_queryset(Interface, "delete")
-        server_key = self.resolve_posted_server_key(request.POST)
+        server_key = self.resolve_posted_server_key_or_none(request.POST)
+        sync_url = reverse("plugins:netbox_librenms_plugin:device_librenms_sync", kwargs={"pk": pk})
+        if server_key is None:
+            messages.error(request, NO_LIBRENMS_SERVER_MESSAGE)
+            return _modules_redirect_response(request, sync_url)
         bind_item = _resolve_single_install_binding_item(request, target_device, server_key, self.get_cache_key)
         serial = request.POST.get("serial", "").strip()
         if serial.lower() in _PLACEHOLDER_VALUES:
             serial = ""
-        sync_url = reverse("plugins:netbox_librenms_plugin:device_librenms_sync", kwargs={"pk": pk})
 
         try:
             module_bay_id = int(request.POST.get("module_bay_id"))
@@ -919,8 +927,11 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
         changeable_interfaces = changeable_components[Interface]
         deletable_interfaces = self.restricted_queryset(Interface, "delete")
         parent_index = request.POST.get("parent_index")
-        server_key = self.resolve_posted_server_key(request.POST)
+        server_key = self.resolve_posted_server_key_or_none(request.POST)
         sync_url = reverse("plugins:netbox_librenms_plugin:device_librenms_sync", kwargs={"pk": pk})
+        if server_key is None:
+            messages.error(request, NO_LIBRENMS_SERVER_MESSAGE)
+            return _modules_redirect_response(request, sync_url)
 
         if not parent_index:
             messages.error(request, "Missing parent inventory index.")
@@ -1510,8 +1521,11 @@ class InstallSelectedView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
         changeable_components = _restricted_module_component_querysets(self)
         changeable_interfaces = changeable_components[Interface]
         deletable_interfaces = self.restricted_queryset(Interface, "delete")
-        server_key = self.resolve_posted_server_key(request.POST)
+        server_key = self.resolve_posted_server_key_or_none(request.POST)
         sync_url = reverse("plugins:netbox_librenms_plugin:device_librenms_sync", kwargs={"pk": pk})
+        if server_key is None:
+            messages.error(request, NO_LIBRENMS_SERVER_MESSAGE)
+            return _modules_redirect_response(request, sync_url)
 
         selected_indices = request.POST.getlist("select")
         if not selected_indices:
@@ -1721,8 +1735,11 @@ class UpdateModuleInterfaceView(
             return error
 
         # Resolve redirect context and validate the row identifier before any target or cache lookup.
-        server_key = self.resolve_posted_server_key(request.POST)
+        server_key = self.resolve_posted_server_key_or_none(request.POST)
         sync_url = reverse("plugins:netbox_librenms_plugin:device_librenms_sync", kwargs={"pk": pk})
+        if server_key is None:
+            messages.error(request, NO_LIBRENMS_SERVER_MESSAGE)
+            return _modules_redirect_response(request, sync_url)
         try:
             module_id = int(request.POST.get("module_id"))
         except (TypeError, ValueError):
@@ -1876,7 +1893,9 @@ class ModuleMismatchPreviewView(
         )
         if invalid_selected_device:
             _warn_invalid_selected_device(request)
-        server_key = self.resolve_posted_server_key(request.GET)
+        server_key = self.resolve_posted_server_key_or_none(request.GET)
+        if server_key is None:
+            return HttpResponse(NO_LIBRENMS_SERVER_MESSAGE, status=400)
 
         try:
             module_id = int(request.GET.get("module_id"))
@@ -2065,8 +2084,11 @@ class ReplaceModuleView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjectP
         changeable_components = _restricted_module_component_querysets(self)
         changeable_interfaces = changeable_components[Interface]
         deletable_interfaces = self.restricted_queryset(Interface, "delete")
-        server_key = self.resolve_posted_server_key(request.POST)
+        server_key = self.resolve_posted_server_key_or_none(request.POST)
         sync_url = reverse("plugins:netbox_librenms_plugin:device_librenms_sync", kwargs={"pk": pk})
+        if server_key is None:
+            messages.error(request, NO_LIBRENMS_SERVER_MESSAGE)
+            return _modules_redirect_response(request, sync_url)
 
         try:
             module_id = int(request.POST.get("module_id"))

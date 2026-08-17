@@ -558,13 +558,16 @@ class LibreNMSAPIMixin:
         """
         Resolve an ACTION path's server key, degrading to ``None`` on an unusable configuration.
 
-        A NetBox-only write (module serial/move, bay template, interface delete) needs the key only
-        to scope its cache cleanup and its redirect. :meth:`resolve_posted_server_key` raises
-        KeyError/ValueError through the lazy ``librenms_api`` property when no server can be bound,
-        which would turn those writes into a 500. Callers skip the cache cleanup on ``None``.
+        :meth:`resolve_posted_server_key` reaches the lazy ``librenms_api`` property for its
+        fallback, and that property raises KeyError/ValueError when the plugin configuration holds
+        no bindable server. Every action view would then answer a 500. This resolve reports the
+        missing server instead, and the caller decides what that means: a NetBox-only write (module
+        serial/move, bay template, interface delete) continues and skips its cache cleanup, while an
+        action that reads or writes server-scoped data fails closed.
 
         Args:
-            data: A dict-like request payload (``request.POST``) carrying an optional ``server_key``.
+            data: A dict-like request payload (``request.POST`` or ``request.GET``) carrying an
+                optional ``server_key``.
 
         Returns:
             str | None: The validated posted key, the active-server key, or ``None``.
@@ -572,10 +575,7 @@ class LibreNMSAPIMixin:
         try:
             return self.resolve_posted_server_key(data)
         except (KeyError, ValueError):
-            logger.warning(
-                "%s runs without cache cleanup because no LibreNMS server is configured",
-                type(self).__name__,
-            )
+            logger.warning("%s found no usable LibreNMS server configuration", type(self).__name__)
             return None
 
     def get_live_device_info(self, librenms_id):
