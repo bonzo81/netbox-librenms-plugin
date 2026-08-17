@@ -4,6 +4,14 @@ This guide explains how to run the test suite, write new tests, and debug failur
 
 ## Quick Start
 
+Outside the devcontainer and CI, install the browser the Playwright suite drives:
+
+```bash
+python -m playwright install chromium
+```
+
+The devcontainer setup script and the CI browser job install it for you.
+
 Run all tests with a single command:
 
 ```bash

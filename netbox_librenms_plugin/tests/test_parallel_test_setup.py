@@ -277,6 +277,7 @@ def test_playwright_state_machine_has_a_required_separate_ci_job():
     workflow = (REPOSITORY_ROOT / ".github/workflows/test.yaml").read_text()
     requirements = (REPOSITORY_ROOT / "requirements_dev.txt").read_text()
     setup = (REPOSITORY_ROOT / ".devcontainer/scripts/setup.sh").read_text()
+    testing_guide = (REPOSITORY_ROOT / "docs/development/testing.md").read_text()
     browser_tests = (REPOSITORY_ROOT / "netbox_librenms_plugin/tests/browser/test_sync_cache_browser.py").read_text()
 
     assert "playwright>=" in requirements
@@ -287,6 +288,8 @@ def test_playwright_state_machine_has_a_required_separate_ci_job():
     assert "--ignore=netbox_librenms_plugin/tests/browser" in workflow
     assert "pytest -c netbox_librenms_plugin/tests/browser/pytest.ini" in workflow
     assert "python -m playwright install --with-deps chromium" in setup
+    # A developer outside the devcontainer and CI installs the browser from the guide.
+    assert "python -m playwright install chromium" in testing_guide
 
 
 def test_test_alias_preserves_the_calling_shell(tmp_path):

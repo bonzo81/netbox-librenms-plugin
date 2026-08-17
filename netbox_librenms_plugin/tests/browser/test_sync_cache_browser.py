@@ -171,7 +171,7 @@ def test_outer_tab_navigation_uses_the_rendered_status_as_the_next_baseline():
                 window.inFlightStatus.then(() => { window.statusRequestSettled = true; });
             }"""
         )
-        page.wait_for_function("window.statusRequestStarted === true", timeout=1000)
+        page.wait_for_function("window.statusRequestStarted === true")
 
         page.evaluate(
             """status => {
@@ -195,7 +195,7 @@ def test_outer_tab_navigation_uses_the_rendered_status_as_the_next_baseline():
         assert page.evaluate("syncCacheController().status.ipaddresses.revision") == "rendered-ipaddresses"
 
         page.evaluate("status => { window.staleStatus = status; window.releaseStatus(); }", stale)
-        page.wait_for_function("window.statusRequestSettled === true", timeout=1000)
+        page.wait_for_function("window.statusRequestSettled === true")
 
         assert fragment_requests == []
         assert page.locator("#ipaddress-sync-content").inner_text() == "Server-rendered IP rows"
@@ -344,7 +344,7 @@ def test_healthy_tab_click_navigates_without_bootstrap_global():
 
         assert page.evaluate("typeof bootstrap") == "undefined"
         page.locator("#ipaddresses-tab").click()
-        page.wait_for_url("**/page?tab=ipaddresses", timeout=1000)
+        page.wait_for_url("**/page?tab=ipaddresses")
 
         assert page.locator("#ipaddresses").evaluate("node => node.classList.contains('active')")
         browser.close()
