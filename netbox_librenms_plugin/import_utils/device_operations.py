@@ -16,6 +16,7 @@ from ..utils import (
     cached_row_matches,
     coerce_librenms_id,
     find_by_librenms_id,
+    find_matching_location,
     find_matching_platform,
     find_matching_site,
     get_librenms_device_id,
@@ -1703,10 +1704,9 @@ def import_single_device(
             parsed_location = parse_location_for_import(location_name)
             location_token = parsed_location.get("location")
             if location_token and location_token != "-":
-                from dcim.models import Location
-
-                # Try to find matching location within the site, then fall back to a mapping
-                location = Location.objects.filter(site=site, name__iexact=location_token).first()
+                # Try to find matching location within the site, including stacked parent/ancestor
+                # locations, then fall back to a mapping alias.
+                location = find_matching_location(site, location_token)
                 if location is None:
                     location = resolve_location_mapping("location", location_token, parent_site=site)
                 if location:

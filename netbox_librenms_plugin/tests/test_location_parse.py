@@ -158,6 +158,14 @@ class TestParseLocationForImport:
         assert result["site"] == "NYC"
         assert result["rack"] == "R1"
 
+    def test_duplicate_placeholder_names_use_last_occurrence_for_most_specific_location(self):
+        from netbox_librenms_plugin import utils
+
+        with patch.object(utils, "get_location_parse_settings", return_value=("{site}, {location}, {location}", False)):
+            result = utils.parse_location_for_import("NYC, Building A, Hall A")
+        assert result["site"] == "NYC"
+        assert result["location"] == "Hall A"
+
     def test_regex_pattern_applied(self):
         from netbox_librenms_plugin import utils
 
@@ -257,6 +265,10 @@ class TestImportSettingsFormLocationValidation:
 
     def test_valid_placeholder_pattern(self):
         errors = self._run_clean("{site} - {rack}", False)
+        assert errors == {}
+
+    def test_duplicate_placeholder_pattern_is_allowed(self):
+        errors = self._run_clean("{site}, {location}, {location}", False)
         assert errors == {}
 
     def test_invalid_placeholder_rejected(self):

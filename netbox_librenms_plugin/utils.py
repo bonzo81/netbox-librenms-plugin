@@ -1120,6 +1120,32 @@ def match_librenms_hardware_to_device_type(hardware_name: str, *, preloaded_rule
     return {"matched": False, "device_type": None, "match_type": None}
 
 
+def find_matching_location(site, librenms_location: str):
+    """Find a site-scoped NetBox Location, including parent/ancestor locations."""
+    if not site or not librenms_location or librenms_location == "-":
+        return None
+
+    from dcim.models import Location
+
+    normalized = _normalise_location_value(librenms_location).strip()
+    if not normalized:
+        return None
+
+    # Prefer the most specific direct child within the site.
+    direct_match = Location.objects.filter(site=site, name__iexact=normalized).first()
+    if direct_match:
+        return direct_match
+
+    # Fall back to any location in the site's hierarchy whose name or ancestor name matches.
+    for location in Location.objects.filter(site=site).select_related("parent"):
+        current = location
+        while current is not None:
+            if current.name and current.name.strip().casefold() == normalized.casefold():
+                return location
+            current = getattr(current, "parent", None)
+    return None
+
+
 def find_matching_site(librenms_location: str) -> dict:
     """
     Find exact matching NetBox site for a LibreNMS location.
@@ -1238,13 +1264,21 @@ def _placeholder_pattern_to_regex(pattern: str) -> str:
     Convert a placeholder pattern (e.g. '{site} - {rack}') into an anchored regex.
 
     Literal text between placeholders is escaped and treated as a separator.
-    Each placeholder becomes a non-greedy named capture group.
+    Each placeholder becomes a non-greedy capture group. Repeated placeholders are
+    renamed internally to keep the regex valid while still mapping back to the
+    canonical token name (e.g. {location} and {location} both resolve to the
+    'location' field in the result dict).
     """
     regex = ""
     last_end = 0
+    placeholder_counts = {}
     for match in _LOCATION_TOKEN_RE.finditer(pattern):
         regex += re.escape(pattern[last_end : match.start()])
-        regex += f"(?P<{match.group(1)}>.+?)"
+        token = match.group(1)
+        count = placeholder_counts.get(token, 0)
+        placeholder_counts[token] = count + 1
+        group_name = token if count == 0 else f"{token}_{count}"
+        regex += f"(?P<{group_name}>.+?)"
         last_end = match.end()
     regex += re.escape(pattern[last_end:])
     return f"^{regex}$"
@@ -1285,8 +1319,11 @@ def parse_librenms_location(location_string: str, pattern: str, is_regex: bool =
         return result
 
     for name, value in match.groupdict().items():
-        if name in result and value is not None:
-            result[name] = value.strip() or None
+        token = name
+        if "_" in name:
+            token = name.rsplit("_", 1)[0]
+        if token in result and value is not None:
+            result[token] = value.strip() or None
     return result
 
 
