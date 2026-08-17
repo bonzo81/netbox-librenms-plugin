@@ -61,6 +61,8 @@ class SyncTabSpec:
     label: str
     shared_vc_owner: bool
     supports_virtual_machine: bool
+    # The context key the tab's partial reads its table from; VLANs use their own.
+    table_context_key: str = "table"
     has_last_fetched_key: bool = False
     has_vlan_overrides: bool = False
     has_cable_picks: bool = False
@@ -109,6 +111,7 @@ TAB_SPECS = {
         label="VLAN",
         shared_vc_owner=False,
         supports_virtual_machine=False,
+        table_context_key="vlan_table",
         has_last_fetched_key=True,
     ),
 }

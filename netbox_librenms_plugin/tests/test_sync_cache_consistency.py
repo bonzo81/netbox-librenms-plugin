@@ -1776,6 +1776,33 @@ def test_blocked_active_tab_reads_device_info_from_cache_only(
 
 
 @pytest.mark.django_db
+def test_blocked_vlan_tab_does_not_render_its_cached_rows(client, settings):
+    """A blocked tab must lose its rendered rows whatever context key its table uses."""
+    _configure_servers(settings)
+    device = make_device("cache-vlan-blocked", librenms_cf={"primary": {"id": 7802}})
+    _seed_snapshot("vlans", device, "primary", [{"vlan_vlan": 10, "vlan_name": "CACHED-VLAN-10"}])
+    coordinator = SyncCacheConsistency(device)
+    coordinator.mark_refresh_failure(SyncTab.VLANS, "primary", actor_id=1)
+    # Pin the seeding: the blanking only runs while the snapshot counts as unavailable.
+    vlan_status = coordinator.status("primary")[SyncTab.VLANS.value]
+    assert vlan_status["state"] == SyncTabState.REFRESH_FAILED.value
+    assert vlan_status["snapshot_available"] is False
+
+    client.force_login(make_superuser("cache-vlan-blocked-user"))
+    url = reverse("plugins:netbox_librenms_plugin:device_librenms_sync", args=[device.pk])
+    with patch(
+        "netbox_librenms_plugin.librenms_api.requests.get",
+        side_effect=lambda request_url, **_kwargs: _device_info_response(
+            request_url, 7802, device.name, "VLAN Hardware 7802"
+        ),
+    ):
+        response = client.get(url, {"server_key": "primary", "tab": SyncTab.VLANS.value})
+
+    assert response.status_code == 200
+    assert b"CACHED-VLAN-10" not in response.content
+
+
+@pytest.mark.django_db
 def test_failed_duplicate_selection_keeps_the_committed_rows_invalidation(
     client,
     settings,

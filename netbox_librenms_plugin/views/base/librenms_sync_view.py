@@ -313,12 +313,12 @@ class BaseLibreNMSSyncView(
             for sync_tab in coordinator.applicable_tabs():
                 if sync_cache_status[sync_tab.value]["snapshot_available"]:
                     continue
-                context_name = TAB_SPECS[sync_tab].context_name
-                tab_context = context.get(context_name)
+                spec = TAB_SPECS[sync_tab]
+                tab_context = context.get(spec.context_name)
                 if isinstance(tab_context, dict):
-                    context[context_name] = {
+                    context[spec.context_name] = {
                         **tab_context,
-                        "table": None,
+                        spec.table_context_key: None,
                         "cache_expiry": None,
                     }
             context.update(
