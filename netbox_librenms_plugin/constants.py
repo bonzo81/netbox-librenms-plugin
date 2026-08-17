@@ -7,6 +7,12 @@ PERM_CHANGE_PLUGIN = "netbox_librenms_plugin.change_librenmssettings"
 # LibreNMS VLAN state values
 LIBRENMS_VLAN_STATE_ACTIVE = 1
 
+# LibreNMS port fields the plugin can display as the interface name. The preference resolver,
+# the snapshot writers, and the snapshot readers all validate against this one set, so a value
+# one side accepts can never be rejected by the other.
+DEFAULT_INTERFACE_NAME_FIELD = "ifName"
+INTERFACE_NAME_FIELDS = frozenset({DEFAULT_INTERFACE_NAME_FIELD, "ifDescr"})
+
 # OOB management controller detection
 # Trailing \d*\b restricts matches to whole tokens (optionally with a numeric suffix like
 # iDRAC9 / drac9) so a prefix collision inside an unrelated word — e.g. "dracut", "ipmitool"
