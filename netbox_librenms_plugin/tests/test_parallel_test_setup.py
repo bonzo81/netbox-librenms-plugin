@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from netbox_librenms_plugin.tests.isolated_settings import TEST_DB_NAME_PREFIX
 from netbox_librenms_plugin.tests.parallel import (
     MAX_PARALLEL_WORKERS,
     isolated_redis_databases,
@@ -65,7 +66,7 @@ def test_local_and_ci_commands_use_eight_workers():
     assert f"pytest -n {MAX_PARALLEL_WORKERS} --maxschedchunk=1" in workflow
 
 
-def _run_netbox_test_alias(worker_value=None):
+def _run_netbox_test_alias(worker_value=None, *, db_name="test_alias_contract", redis_host="redis-alias-contract"):
     """Run the local test alias with pytest and the venv activation stubbed out."""
     script = "\n".join(
         (
@@ -78,8 +79,8 @@ def _run_netbox_test_alias(worker_value=None):
     )
     environment = {
         **os.environ,
-        "TEST_DB_NAME": "test_alias_contract",
-        "TEST_REDIS_HOST": "redis-alias-contract",
+        "TEST_DB_NAME": db_name,
+        "TEST_REDIS_HOST": redis_host,
     }
     if worker_value is None:
         environment.pop("NETBOX_TEST_WORKERS", None)
@@ -119,6 +120,24 @@ def test_test_alias_treats_an_empty_worker_value_as_unset():
 
     assert "STATUS 0" in result.stdout
     assert f"-n {MAX_PARALLEL_WORKERS} --maxschedchunk=1" in result.stdout
+
+
+def test_test_alias_rejects_a_database_name_the_settings_module_refuses():
+    """Reject the name here instead of failing later while the settings module loads."""
+    result = _run_netbox_test_alias(db_name="netbox_alias_contract")
+
+    assert "STATUS 1" in result.stdout
+    assert "PYTEST" not in result.stdout
+    assert f"TEST_DB_NAME must start with '{TEST_DB_NAME_PREFIX}'." in result.stderr
+
+
+def test_test_alias_rejects_a_blank_redis_host():
+    """A whitespace-only host reaches the settings module as no host at all."""
+    result = _run_netbox_test_alias(redis_host="   ")
+
+    assert "STATUS 1" in result.stdout
+    assert "PYTEST" not in result.stdout
+    assert "TEST_REDIS_HOST must not be empty." in result.stderr
 
 
 @pytest.mark.django_db(transaction=True)

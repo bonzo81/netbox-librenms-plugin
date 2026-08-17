@@ -17,8 +17,10 @@ os.environ["REDIS_CACHE_DATABASE"] = str(_cache_redis_database)
 from netbox.settings import *  # noqa: E402, F403
 
 
+TEST_DB_NAME_PREFIX = "test_"
+
 _test_database_name = os.environ["TEST_DB_NAME"]
-if not _test_database_name.startswith("test_"):
-    raise ValueError("TEST_DB_NAME must start with 'test_'.")
+if not _test_database_name.startswith(TEST_DB_NAME_PREFIX):
+    raise ValueError(f"TEST_DB_NAME must start with '{TEST_DB_NAME_PREFIX}'.")
 
 DATABASES["default"].setdefault("TEST", {})["NAME"] = _test_database_name  # noqa: F405
