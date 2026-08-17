@@ -161,8 +161,21 @@ _netbox-test() {
   if [ "$coverage" != "yes" ]; then
     coverage_args=(--no-cov)
   fi
-  if [ -z "${TEST_DB_NAME:-}" ] || [ -z "${TEST_REDIS_HOST:-}" ]; then
-    echo "Set TEST_DB_NAME and TEST_REDIS_HOST before running tests." >&2
+  # Read the prefix from the settings module that rejects the name, so the two sides cannot drift.
+  local settings_module="$PLUGIN_DIR/netbox_librenms_plugin/tests/isolated_settings.py"
+  local db_prefix
+  db_prefix="$(sed -n 's/^TEST_DB_NAME_PREFIX = "\(.*\)"$/\1/p' "$settings_module")"
+  if [ -z "$db_prefix" ]; then
+    echo "Cannot read TEST_DB_NAME_PREFIX from $settings_module." >&2
+    return 2
+  fi
+  if [[ "${TEST_DB_NAME:-}" != "$db_prefix"* ]]; then
+    echo "TEST_DB_NAME must start with '$db_prefix'." >&2
+    return 1
+  fi
+  local redis_host="${TEST_REDIS_HOST:-}"
+  if [ -z "${redis_host//[[:space:]]/}" ]; then
+    echo "TEST_REDIS_HOST must not be empty." >&2
     return 1
   fi
   cd "$PLUGIN_DIR" && source /opt/netbox/venv/bin/activate && \
