@@ -62,7 +62,9 @@ services:
       - --token
       - ${LIBRENMS_STUB_TOKEN:-dev-stub-token}
     volumes:
-      - ..:/app:ro
+      # Defaults to this checkout. Point LIBRENMS_STUB_SOURCE at a fixed checkout of the stub
+      # branch to keep the stub serving while the working tree moves to another branch.
+      - ${LIBRENMS_STUB_SOURCE:-..}:/app:ro
     expose:
       - "8001"
     healthcheck:
