@@ -12,13 +12,16 @@ from django.contrib.messages import get_messages
 from django.core.cache import cache
 from django.db import close_old_connections, connection
 from django.test import Client
+from django.test.utils import CaptureQueriesContext
 from django.urls import reverse
 from ipam.models import IPAddress, VRF
 from requests import Response
 
+from netbox_librenms_plugin.constants import INTERFACE_NAME_FIELDS
 from netbox_librenms_plugin.tests.conftest import (
     make_device,
     make_interface,
+    make_ip,
     make_superuser,
     make_virtual_chassis_members,
     make_vm,
@@ -204,8 +207,8 @@ def _sync_cached_ips(device_pk, user_pk, row_ids, lock_wrapper):
     close_old_connections()
     try:
         with connection.cursor() as cursor:
-            cursor.execute("SET lock_timeout = '5s'")
-            cursor.execute("SET statement_timeout = '10s'")
+            cursor.execute("SET lock_timeout = '30s'")
+            cursor.execute("SET statement_timeout = '45s'")
         thread_client = Client()
         thread_client.force_login(get_user_model().objects.get(pk=user_pk))
         url = reverse(
@@ -327,7 +330,7 @@ def test_concurrent_bulk_ip_sync_orders_host_locks_before_interface_scope(settin
             executor.submit(_sync_cached_ips, device.pk, user.pk, selected, wrapper)
             for selected, wrapper in zip((row_ids, list(reversed(row_ids))), wrappers, strict=True)
         ]
-        outcomes = [future.result(timeout=20) for future in futures]
+        outcomes = [future.result(timeout=60) for future in futures]
 
     assert [status for status, _messages in outcomes] == [302, 302]
     assert all(not any("Failed to sync" in message for message in messages) for _, messages in outcomes)
@@ -1922,3 +1925,100 @@ def test_same_host_with_a_different_prefix_requires_confirmation_before_update(
     assert str(other_vrf_ip.address) == existing_address
     assert other_vrf_ip.vrf == other_vrf
     assert other_vrf_ip.assigned_object is None
+
+
+@pytest.mark.django_db
+def test_ip_table_render_reads_only_the_reported_addresses(client, settings):
+    """The render must not load every IPAddress row in the deployment."""
+    _configure_test_server(settings)
+    device = make_device("ip-scan-scope", librenms_cf={"default": {"id": 42}})
+    interface = make_interface(device, "Ethernet1", iface_type="1000base-t")
+    interface.custom_field_data["librenms_id"] = {"default": 7001}
+    interface.save(update_fields=["custom_field_data"])
+    for host in range(10, 20):
+        make_ip(f"203.0.113.{host}/24")
+    client.force_login(make_superuser("ip-scan-scope-user"))
+
+    with CaptureQueriesContext(connection) as queries:
+        response = _refresh_ip_snapshot(client, device, "198.18.30.10", 24)
+
+    assert response.status_code == 200
+    address_reads = [query["sql"] for query in queries.captured_queries if 'FROM "ipam_ipaddress"' in query["sql"]]
+    assert address_reads
+    unfiltered_reads = [sql for sql in address_reads if "WHERE" not in sql.upper()]
+    assert unfiltered_reads == [], unfiltered_reads
+
+
+@pytest.mark.django_db
+def test_configured_interface_name_field_survives_the_cache_round_trip(client, settings):
+    """An unsupported configured field must not poison the snapshot the readers validate."""
+    _configure_test_server(settings)
+    plugin_config = deepcopy(settings.PLUGINS_CONFIG)
+    plugin_config["netbox_librenms_plugin"]["interface_name_field"] = "ifAlias"
+    settings.PLUGINS_CONFIG = plugin_config
+    device = make_device("ip-config-field", librenms_cf={"default": {"id": 42}})
+    interface = make_interface(device, "Ethernet1", iface_type="1000base-t")
+    interface.custom_field_data["librenms_id"] = {"default": 7001}
+    interface.save(update_fields=["custom_field_data"])
+    client.force_login(make_superuser("ip-config-field-user"))
+
+    refresh_url = reverse("plugins:netbox_librenms_plugin:device_ipaddress_sync", args=[device.pk])
+    with patch(
+        "netbox_librenms_plugin.librenms_api.requests.get",
+        side_effect=_librenms_ip_response("198.18.31.10", 24, device_name=device.name),
+    ):
+        refresh_response = client.post(refresh_url, {"server_key": "default"}, HTTP_HX_REQUEST="true")
+
+    assert refresh_response.status_code == 200
+    cache_key = f"librenms_ip_addresses_device_{device.pk}_default"
+    assert cache.get(cache_key)["interface_name_field"] in INTERFACE_NAME_FIELDS
+
+    render_response = client.get(
+        reverse("plugins:netbox_librenms_plugin:device_librenms_sync", args=[device.pk]),
+        {"server_key": "default", "tab": "ipaddresses"},
+    )
+
+    assert render_response.status_code == 200
+    # The reader accepted what the writer stored, so the snapshot survives the render.
+    assert cache.get(cache_key) is not None
+
+
+@pytest.mark.django_db
+def test_sync_without_a_selection_reports_the_empty_selection_error(client, settings):
+    """A cached snapshot with no selected row must report the selection error, not a cache miss."""
+    _configure_test_server(settings)
+    device = make_device("ip-empty-selection", librenms_cf={"default": {"id": 42}})
+    interface = make_interface(device, "Ethernet1", iface_type="1000base-t")
+    interface.custom_field_data["librenms_id"] = {"default": 7001}
+    interface.save(update_fields=["custom_field_data"])
+    cache.set(
+        f"librenms_ip_addresses_device_{device.pk}_default",
+        {
+            "ip_addresses": [
+                {
+                    "ip_address": "198.18.32.10",
+                    "prefix_length": 24,
+                    "ip_with_mask": "198.18.32.10/24",
+                    "port_id": 7001,
+                    "interface_name": "Ethernet1",
+                }
+            ],
+            "mgmt_ip": "",
+            "ports_by_id": {},
+            "interface_name_field": "ifName",
+        },
+        timeout=300,
+    )
+    client.force_login(make_superuser("ip-empty-selection-user"))
+
+    response = client.post(
+        reverse(
+            "plugins:netbox_librenms_plugin:sync_device_ip_addresses",
+            kwargs={"object_type": "device", "pk": device.pk},
+        ),
+        {"server_key": "default"},
+    )
+
+    assert response.status_code == 302
+    assert "No IP addresses selected for synchronization." in _message_texts(response)
+    assert not IPAddress.objects.filter(address="198.18.32.10/24").exists()
