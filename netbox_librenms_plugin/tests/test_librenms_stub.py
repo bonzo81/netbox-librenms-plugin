@@ -68,6 +68,44 @@ def test_devcontainer_stub_command_runs_the_server_as_a_package_module():
     assert service["healthcheck"]["test"][:3] == ["CMD", "python", "-c"]
 
 
+def _stub_source_mount(repository_root, env_file):
+    """Return the resolved /app mount of the stub service for one env file."""
+    compose_path = repository_root / ".devcontainer/docker-compose.yml"
+    result = subprocess.run(
+        ["docker", "compose", "-f", str(compose_path), "--env-file", str(env_file), "config", "--format", "json"],
+        cwd=repository_root,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    service = json.loads(result.stdout)["services"]["librenms-stub"]
+    return next(volume for volume in service["volumes"] if volume["target"] == "/app")
+
+
+def test_devcontainer_stub_source_defaults_to_this_checkout_and_follows_the_override(tmp_path):
+    """The stub can serve from a fixed checkout, so a branch switch here cannot stop it."""
+    if not _has_docker_compose():
+        pytest.skip("Docker Compose is required to validate the devcontainer source mount")
+
+    repository_root = Path(__file__).resolve().parents[2]
+    # The developer's own .devcontainer/.env may point the stub elsewhere, so resolve the file
+    # against a controlled environment instead.
+    default_env_file = tmp_path / "default.env"
+    default_env_file.write_text("")
+    override_source = tmp_path / "stub-checkout"
+    override_source.mkdir()
+    override_env_file = tmp_path / "override.env"
+    override_env_file.write_text(f"LIBRENMS_STUB_SOURCE={override_source}\n")
+
+    default_mount = _stub_source_mount(repository_root, default_env_file)
+    override_mount = _stub_source_mount(repository_root, override_env_file)
+
+    assert Path(default_mount["source"]) == repository_root
+    assert Path(override_mount["source"]) == override_source
+    assert default_mount["read_only"] is True
+    assert override_mount["read_only"] is True
+
+
 def _request(server, method, path, **kwargs):
     headers = dict(kwargs.pop("headers", {}))
     headers["X-Auth-Token"] = TOKEN
