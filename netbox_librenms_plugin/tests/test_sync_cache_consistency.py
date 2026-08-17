@@ -48,6 +48,16 @@ def _configure_servers(settings):
     settings.PLUGINS_CONFIG = plugin_config
 
 
+def _configure_no_servers(settings):
+    """Leave the plugin without any server the API client can bind."""
+    plugin_config = deepcopy(settings.PLUGINS_CONFIG)
+    plugin_settings = plugin_config["netbox_librenms_plugin"]
+    plugin_settings["servers"] = {}
+    plugin_settings.pop("librenms_url", None)
+    plugin_settings.pop("api_token", None)
+    settings.PLUGINS_CONFIG = plugin_config
+
+
 def _cache_key(data_type, obj, server_key):
     from netbox_librenms_plugin.sync_cache import sync_snapshot_key
 
@@ -885,12 +895,7 @@ def test_interface_delete_without_posted_server_uses_active_namespace(
 @pytest.mark.django_db
 def test_interface_delete_succeeds_without_a_configured_librenms_server(client, settings):
     """A NetBox-only deletion must not depend on constructing a LibreNMS client."""
-    plugin_config = deepcopy(settings.PLUGINS_CONFIG)
-    plugin_settings = plugin_config["netbox_librenms_plugin"]
-    plugin_settings["servers"] = {}
-    plugin_settings.pop("librenms_url", None)
-    plugin_settings.pop("api_token", None)
-    settings.PLUGINS_CONFIG = plugin_config
+    _configure_no_servers(settings)
     device = make_device("cache-delete-without-server")
     interface = make_interface(device, "Ethernet1", iface_type="1000base-t")
     client.force_login(make_superuser("cache-delete-without-server-user"))
@@ -903,6 +908,70 @@ def test_interface_delete_succeeds_without_a_configured_librenms_server(client, 
 
     assert response.status_code == 200
     assert not type(interface).objects.filter(pk=interface.pk).exists()
+
+
+@pytest.mark.django_db
+def test_module_serial_update_succeeds_without_a_configured_librenms_server(client, settings):
+    """A NetBox-only serial update must not depend on constructing a LibreNMS client."""
+    _configure_no_servers(settings)
+    device = make_device("cache-serial-without-server")
+    bay = ModuleBay.objects.create(device=device, name="Slot 1")
+    module_type = ModuleType.objects.create(
+        manufacturer=device.device_type.manufacturer,
+        model="Serverless Serial Module",
+    )
+    module = Module.objects.create(device=device, module_bay=bay, module_type=module_type, serial="OLD")
+    client.force_login(make_superuser("cache-serial-without-server-user"))
+    url = reverse("plugins:netbox_librenms_plugin:update_module_serial", kwargs={"pk": device.pk})
+
+    response = client.post(url, {"module_id": str(module.pk), "serial": "NEW"})
+
+    assert response.status_code == 302
+    module.refresh_from_db()
+    assert module.serial == "NEW"
+
+
+@pytest.mark.django_db
+def test_module_move_succeeds_without_a_configured_librenms_server(client, settings):
+    """A NetBox-only module move must not depend on constructing a LibreNMS client."""
+    _configure_no_servers(settings)
+    device = make_device("cache-move-without-server")
+    source_bay = ModuleBay.objects.create(device=device, name="Slot 1")
+    target_bay = ModuleBay.objects.create(device=device, name="Slot 2")
+    module_type = ModuleType.objects.create(
+        manufacturer=device.device_type.manufacturer,
+        model="Serverless Movable Module",
+    )
+    module = Module.objects.create(device=device, module_bay=source_bay, module_type=module_type, serial="MOVE-ME")
+    client.force_login(make_superuser("cache-move-without-server-user"))
+    url = reverse("plugins:netbox_librenms_plugin:move_module", kwargs={"pk": device.pk})
+
+    response = client.post(url, {"conflict_module_id": str(module.pk), "target_bay_id": str(target_bay.pk)})
+
+    assert response.status_code == 302
+    module.refresh_from_db()
+    assert module.module_bay == target_bay
+
+
+@pytest.mark.django_db
+def test_bay_template_creation_succeeds_without_a_configured_librenms_server(client, settings):
+    """A NetBox-only bay template must not depend on constructing a LibreNMS client."""
+    _configure_no_servers(settings)
+    device = make_device("cache-bay-template-without-server")
+    client.force_login(make_superuser("cache-bay-template-without-server-user"))
+    url = reverse("plugins:netbox_librenms_plugin:add_bay_template", kwargs={"pk": device.pk})
+
+    response = client.post(
+        url,
+        {
+            "target_kind": "device_type",
+            "target_pk": str(device.device_type.pk),
+            "name": "Serverless Slot",
+        },
+    )
+
+    assert response.status_code == 302
+    assert ModuleBayTemplate.objects.filter(device_type=device.device_type, name="Serverless Slot").exists()
 
 
 def _mark_migrated_donor(donor, winner):

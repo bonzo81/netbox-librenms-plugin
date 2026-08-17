@@ -1,4 +1,5 @@
 import json
+import logging
 from urllib.parse import quote_plus
 
 from django.contrib import messages
@@ -13,6 +14,8 @@ from utilities.permissions import get_permission_for_model
 from netbox_librenms_plugin.constants import PERM_CHANGE_PLUGIN, PERM_VIEW_PLUGIN
 from netbox_librenms_plugin.librenms_api import LibreNMSAPI
 from netbox_librenms_plugin.utils import coerce_model_pk, is_list_of_dicts
+
+logger = logging.getLogger(__name__)
 
 
 def parse_request_json(request):
@@ -550,6 +553,30 @@ class LibreNMSAPIMixin:
         if requested_server_key and requested_server_key in LibreNMSAPI.get_available_servers():
             return requested_server_key
         return self.librenms_api.server_key
+
+    def resolve_posted_server_key_or_none(self, data):
+        """
+        Resolve an ACTION path's server key, degrading to ``None`` on an unusable configuration.
+
+        A NetBox-only write (module serial/move, bay template, interface delete) needs the key only
+        to scope its cache cleanup and its redirect. :meth:`resolve_posted_server_key` raises
+        KeyError/ValueError through the lazy ``librenms_api`` property when no server can be bound,
+        which would turn those writes into a 500. Callers skip the cache cleanup on ``None``.
+
+        Args:
+            data: A dict-like request payload (``request.POST``) carrying an optional ``server_key``.
+
+        Returns:
+            str | None: The validated posted key, the active-server key, or ``None``.
+        """
+        try:
+            return self.resolve_posted_server_key(data)
+        except (KeyError, ValueError):
+            logger.warning(
+                "%s runs without cache cleanup because no LibreNMS server is configured",
+                type(self).__name__,
+            )
+            return None
 
     def get_live_device_info(self, librenms_id):
         """

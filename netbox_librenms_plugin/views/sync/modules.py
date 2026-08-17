@@ -1668,7 +1668,7 @@ class UpdateModuleSerialView(
         if serial.lower() in _PLACEHOLDER_VALUES:
             serial = ""
         sync_url = reverse("plugins:netbox_librenms_plugin:device_librenms_sync", kwargs={"pk": pk})
-        server_key = self.resolve_posted_server_key(request.POST)
+        server_key = self.resolve_posted_server_key_or_none(request.POST)
 
         try:
             module_id = int(request.POST.get("module_id"))
@@ -1698,7 +1698,8 @@ class UpdateModuleSerialView(
                     request,
                     f"Updated serial for {module.module_type.model} in {module.module_bay.name} to '{serial}'.",
                 )
-                _schedule_module_cache_mutation(request, page_device, server_key)
+                if server_key:
+                    _schedule_module_cache_mutation(request, page_device, server_key)
             else:
                 messages.info(request, "The module serial already matches LibreNMS. No change was needed.")
         except (ValidationError, IntegrityError) as e:
@@ -2313,7 +2314,7 @@ class MoveModuleView(
         if invalid_selected_device:
             _warn_invalid_selected_device(request)
         sync_url = reverse("plugins:netbox_librenms_plugin:device_librenms_sync", kwargs={"pk": pk})
-        server_key = self.resolve_posted_server_key(request.POST)
+        server_key = self.resolve_posted_server_key_or_none(request.POST)
 
         try:
             conflict_module_id = int(request.POST.get("conflict_module_id"))
@@ -2389,7 +2390,8 @@ class MoveModuleView(
                 moved_msg += f" from {from_device}"
             moved_msg += f"/{from_bay} to {target_bay.name}."
             messages.success(request, moved_msg)
-            _schedule_module_cache_mutation(request, page_device, server_key)
+            if server_key:
+                _schedule_module_cache_mutation(request, page_device, server_key)
         except (ValidationError, IntegrityError) as e:
             messages.error(request, f"Move failed: {e}")
 
@@ -2703,7 +2705,7 @@ class AddBayTemplateView(
 
         device = self.restrict_object_or_404(Device, pk=pk)
         sync_url = reverse("plugins:netbox_librenms_plugin:device_librenms_sync", kwargs={"pk": pk})
-        server_key = self.resolve_posted_server_key(request.POST)
+        server_key = self.resolve_posted_server_key_or_none(request.POST)
 
         try:
             target_pk = int(request.POST.get("target_pk", ""))
@@ -2805,7 +2807,8 @@ class AddBayTemplateView(
                 )
             else:
                 messages.success(request, f"Added bay template '{name}' to {target}.{instantiate_note}")
-            _schedule_module_cache_mutation(request, device, server_key)
+            if server_key:
+                _schedule_module_cache_mutation(request, device, server_key)
         except (ValidationError, IntegrityError) as e:
             messages.error(request, f"Failed to add bay template: {e}")
 
