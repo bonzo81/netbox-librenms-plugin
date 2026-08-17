@@ -1,0 +1,52 @@
+{% extends 'generic/object_edit.html' %}
+{% load i18n %}
+
+{% comment %}
+Custom edit form for LocationMapping.
+
+The form exposes one NetBox object selector per supported field type
+(region/site/location/rack/tenant). Only the selector matching the chosen
+"Field Type" is relevant, so this script shows that single selector and hides
+the rest, updating live as the field type changes.
+{% endcomment %}
+
+{% block javascript %}
+  {{ block.super }}
+  <script>
+    (function () {
+      const TARGET_FIELDS = ['region', 'site', 'location', 'rack', 'tenant'];
+
+      function rowFor(fieldName) {
+        const input = document.getElementById('id_' + fieldName);
+        return input ? input.closest('.row.mb-3') : null;
+      }
+
+      function applyVisibility(fieldTypeSelect) {
+        const selected = fieldTypeSelect.value;
+        TARGET_FIELDS.forEach(function (fieldName) {
+          const row = rowFor(fieldName);
+          if (row) {
+            row.style.display = fieldName === selected ? '' : 'none';
+          }
+        });
+      }
+
+      function init() {
+        const fieldTypeSelect = document.getElementById('id_field_type');
+        if (!fieldTypeSelect) {
+          return;
+        }
+        applyVisibility(fieldTypeSelect);
+        fieldTypeSelect.addEventListener('change', function () {
+          applyVisibility(fieldTypeSelect);
+        });
+      }
+
+      if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', init);
+      } else {
+        init();
+      }
+    })();
+  </script>
+{% endblock %}

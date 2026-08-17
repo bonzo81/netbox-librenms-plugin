@@ -248,6 +248,74 @@
                                 </div>
                             </div>
                         </div>
+
+                        <!-- Location Parsing Card -->
+                        <div class="card mb-3">
+                            <div class="card-header">
+                                <h3 class="card-title">
+                                    <i class="ti ti-map-pin me-2"></i>
+                                    Location Parsing
+                                </h3>
+                            </div>
+                            <div class="card-body">
+                                <p class="text-muted mb-3">
+                                    Describe the structure of the single LibreNMS <code>location</code> string so it can be split
+                                    into NetBox fields during import. Parsed values are matched exactly by name, then fall back
+                                    to any configured Location Mappings.
+                                </p>
+
+                                <div class="row">
+                                    <div class="col-12">
+                                        <div class="form-group mb-2">
+                                            <label for="{{ import_form.location_parse_pattern.id_for_label }}" class="form-label">
+                                                {{ import_form.location_parse_pattern.label }}
+                                            </label>
+                                            {{ import_form.location_parse_pattern }}
+                                            {% if import_form.location_parse_pattern.errors %}
+                                                <div class="invalid-feedback d-block">
+                                                    {{ import_form.location_parse_pattern.errors }}
+                                                </div>
+                                            {% endif %}
+                                        </div>
+                                        <div class="form-check mb-3">
+                                            {{ import_form.location_parse_is_regex }}
+                                            <label for="{{ import_form.location_parse_is_regex.id_for_label }}" class="form-check-label">
+                                                {{ import_form.location_parse_is_regex.label }}
+                                            </label>
+                                            <span class="text-muted small d-block">{{ import_form.location_parse_is_regex.help_text }}</span>
+                                        </div>
+                                    </div>
+                                </div>
+
+                                <div class="row">
+                                    <div class="col-12">
+                                        <div class="alert alert-info mb-0">
+                                            <p class="small mb-2"><strong>Available placeholders:</strong></p>
+                                            <ul class="mb-3 small" style="padding-left: 1.2rem;">
+                                                <li><code>{region}</code> - NetBox Region name</li>
+                                                <li><code>{site}</code> - NetBox Site name</li>
+                                                <li><code>{location}</code> - NetBox Location name</li>
+                                                <li><code>{rack}</code> - NetBox Rack name</li>
+                                                <li><code>{tenant}</code> - NetBox Tenant name</li>
+                                            </ul>
+                                            <p class="small mb-0"><strong>Note:</strong> Literal text between placeholders is treated as a
+                                            separator. Leave the pattern blank to match the whole location string against both site and location.</p>
+                                        </div>
+                                    </div>
+                                </div>
+
+                                <div class="row mt-3">
+                                    <div class="col-12">
+                                        <p class="small mb-2"><strong>Examples:</strong></p>
+                                        <ul class="mb-0 small" style="padding-left: 1.2rem;">
+                                            <li><code>{site} - {rack}</code> → "NYC - R1" parses site="NYC", rack="R1"</li>
+                                            <li><code>{site}, {location}</code> → "NYC, Hall A" parses site="NYC", location="Hall A"</li>
+                                            <li>Regex: <code>(?P&lt;site&gt;[^-]+)-(?P&lt;rack&gt;.+)</code></li>
+                                        </ul>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
                     </div>
                 </div>
 
@@ -300,12 +368,16 @@ document.addEventListener('DOMContentLoaded', function() {
     const saveImportBtn = document.getElementById('save-import-btn');
     const useSysnameCheckbox = document.getElementById('id_use_sysname_default');
     const stripDomainCheckbox = document.getElementById('id_strip_domain_default');
+    const locationPatternInput = document.getElementById('id_location_parse_pattern');
+    const locationRegexCheckbox = document.getElementById('id_location_parse_is_regex');
 
     // Store the initial values to detect changes
     const initialServerValue = serverSelect.value;
     const initialVcPatternValue = vcPatternInput.value;
     const initialUseSysnameValue = useSysnameCheckbox ? useSysnameCheckbox.checked : true;
     const initialStripDomainValue = stripDomainCheckbox ? stripDomainCheckbox.checked : false;
+    const initialLocationPatternValue = locationPatternInput ? locationPatternInput.value : '';
+    const initialLocationRegexValue = locationRegexCheckbox ? locationRegexCheckbox.checked : false;
 
     // Enable/disable server save button based on changes
     function updateServerSaveButton() {
@@ -320,7 +392,9 @@ document.addEventListener('DOMContentLoaded', function() {
         const vcPatternChanged = vcPatternInput.value !== initialVcPatternValue;
         const useSysnameChanged = useSysnameCheckbox ? (useSysnameCheckbox.checked !== initialUseSysnameValue) : false;
         const stripDomainChanged = stripDomainCheckbox ? (stripDomainCheckbox.checked !== initialStripDomainValue) : false;
-        const hasChanges = vcPatternChanged || useSysnameChanged || stripDomainChanged;
+        const locationPatternChanged = locationPatternInput ? (locationPatternInput.value !== initialLocationPatternValue) : false;
+        const locationRegexChanged = locationRegexCheckbox ? (locationRegexCheckbox.checked !== initialLocationRegexValue) : false;
+        const hasChanges = vcPatternChanged || useSysnameChanged || stripDomainChanged || locationPatternChanged || locationRegexChanged;
         saveImportBtn.disabled = !hasChanges;
         saveImportBtn.classList.toggle('btn-primary', hasChanges);
         saveImportBtn.classList.toggle('btn-secondary', !hasChanges);
@@ -331,6 +405,8 @@ document.addEventListener('DOMContentLoaded', function() {
     vcPatternInput.addEventListener('input', updateImportSaveButton);
     if (useSysnameCheckbox) useSysnameCheckbox.addEventListener('change', updateImportSaveButton);
     if (stripDomainCheckbox) stripDomainCheckbox.addEventListener('change', updateImportSaveButton);
+    if (locationPatternInput) locationPatternInput.addEventListener('input', updateImportSaveButton);
+    if (locationRegexCheckbox) locationRegexCheckbox.addEventListener('change', updateImportSaveButton);
 
     // Initialize button states
     updateServerSaveButton();

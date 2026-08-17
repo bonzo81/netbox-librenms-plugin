@@ -109,6 +109,15 @@ from .mapping_views import (  # noqa: F401
     PlatformMappingEditView,
     PlatformMappingListView,
     PlatformMappingView,
+    LocationMappingBulkDeleteView,
+    LocationMappingBulkExportYAMLView,
+    LocationMappingBulkImportView,
+    LocationMappingChangeLogView,
+    LocationMappingCreateView,
+    LocationMappingDeleteView,
+    LocationMappingEditView,
+    LocationMappingListView,
+    LocationMappingView,
 )
 from .imports.actions import (  # noqa: F401
     AddAsOOBView,

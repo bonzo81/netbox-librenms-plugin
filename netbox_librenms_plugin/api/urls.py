@@ -13,6 +13,7 @@ router.register("module-bay-mappings", views.ModuleBayMappingViewSet)
 router.register("normalization-rules", views.NormalizationRuleViewSet)
 router.register("inventory-ignore-rules", views.InventoryIgnoreRuleViewSet)
 router.register("platform-mappings", views.PlatformMappingViewSet)
+router.register("location-mappings", views.LocationMappingViewSet)
 router.register("carrier-auto-install-rules", views.CarrierAutoInstallRuleViewSet)
 
 urlpatterns = [

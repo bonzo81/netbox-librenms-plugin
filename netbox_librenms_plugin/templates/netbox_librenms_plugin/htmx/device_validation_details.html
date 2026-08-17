@@ -139,12 +139,12 @@
                 <td style="padding-left: 0.75rem;">Site</td>
                 <td>
                   {% if validation.existing_device and validation.existing_device.site %}
-                    {{ validation.existing_device.site }}
+                    <a href="{{ validation.existing_device.site.get_absolute_url }}" target="_blank" rel="noopener noreferrer">{{ validation.existing_device.site }}</a>
                     {% if validation.site.site and validation.existing_device.site.pk == validation.site.site.pk %}
                       <span class="text-success"><i class="mdi mdi-check-circle"></i></span>
                     {% endif %}
                   {% elif validation.site.site %}
-                    {{ validation.site.site.name }}
+                    <a href="{{ validation.site.site.get_absolute_url }}" target="_blank" rel="noopener noreferrer">{{ validation.site.site.name }}</a>
                     <span class="text-success"><i class="mdi mdi-check-circle"></i></span>
                   {% else %}
                     <span class="text-danger"><i class="mdi mdi-close-circle"></i> No matching site</span>

@@ -23,6 +23,7 @@ feature in the NetBox UI.
 | `normalization_rules.yaml` | Regex-based string normalization applied before module type/bay lookups |
 | `inventory_ignore_rules.yaml` | Suppresses phantom ENTITY-MIB entries (e.g. Cisco IOS-XR IDPROM artefacts) |
 | `platform_mappings.yaml` | Maps LibreNMS platform strings to NetBox device platforms |
+| `location_mappings.yaml` | Maps LibreNMS location values to NetBox regions, sites, locations, racks, or tenants |
 
 ## Customisation
 

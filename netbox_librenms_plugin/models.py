@@ -5,8 +5,12 @@ import re
 import yaml
 from dcim.choices import InterfaceTypeChoices
 from dcim.models import DeviceType, Manufacturer, ModuleType, Platform
+from django.contrib.contenttypes.fields import GenericForeignKey
+from django.contrib.contenttypes.models import ContentType
 from django.core.exceptions import ValidationError
 from django.db import models
+from django.db.models import Q
+from django.db.models.functions import Lower
 from django.urls import reverse
 from netbox.models import NetBoxModel
 
@@ -69,6 +73,23 @@ class LibreNMSSettings(models.Model):
         help_text="Pattern for naming virtual chassis member devices. "
         "Available placeholders: {position}, {serial}. "
         "Example: '-M{position}' results in 'switch01-M2'",
+    )
+
+    location_parse_pattern = models.CharField(
+        max_length=255,
+        blank=True,
+        default="",
+        help_text="Pattern describing the structure of the LibreNMS location string. "
+        "Available placeholders: {region}, {site}, {location}, {rack}, {tenant}. "
+        "Literal text between placeholders is treated as a separator. "
+        "Example: '{site} - {rack}' parses 'NYC - R1' into site='NYC', rack='R1'. "
+        "Leave blank to match the whole location string against site and location.",
+    )
+
+    location_parse_is_regex = models.BooleanField(
+        default=False,
+        help_text="Treat the location parse pattern as a raw regular expression with "
+        "named groups (e.g. '(?P<site>[^-]+)-(?P<rack>.+)') instead of placeholders",
     )
 
     use_sysname_default = models.BooleanField(
@@ -740,6 +761,132 @@ class PlatformMapping(FullCleanOnSaveMixin, NetBoxModel):
         data = {
             "librenms_os": self.librenms_os,
             "netbox_platform": str(self.netbox_platform),
+            "description": self.description,
+        }
+        return yaml.dump(data, sort_keys=False)
+
+
+# Maps LocationMapping.field_type -> (app_label, model_name) of the target NetBox object.
+LOCATION_MAPPING_TARGETS = {
+    "site": ("dcim", "site"),
+    "location": ("dcim", "location"),
+    "rack": ("dcim", "rack"),
+    "tenant": ("tenancy", "tenant"),
+}
+
+
+class LocationMapping(FullCleanOnSaveMixin, NetBoxModel):
+    """Map a parsed LibreNMS location value to a NetBox organisation object.
+
+    The LibreNMS ``location`` field is a single free-text string. Users describe
+    its structure with a parse pattern which yields tokens for
+    region/site/location/rack/tenant. When a token does not match a NetBox
+    object's name exactly, a LocationMapping provides an explicit alias from the
+    LibreNMS value to a specific NetBox object (Site, Location, Rack, or Tenant)
+    via a generic foreign key. Region is a parse token only and has no mapping
+    target, because a device inherits its region from its site.
+
+    Site/Tenant values are globally unique, so a single LibreNMS value maps to
+    exactly one object of that type. Location/Rack are scoped to a parent
+    site in NetBox, so the same value may map to different objects under different
+    sites; resolution disambiguates by the parent site parsed from the same
+    location string.
+    """
+
+    FIELD_TYPE_CHOICES = (
+        ("site", "Site"),
+        ("location", "Location"),
+        ("rack", "Rack"),
+        ("tenant", "Tenant"),
+    )
+
+    field_type = models.CharField(
+        max_length=20,
+        choices=FIELD_TYPE_CHOICES,
+        help_text="Which type of NetBox object the LibreNMS value maps to",
+    )
+    librenms_value = models.CharField(
+        max_length=255,
+        help_text="Value parsed from the LibreNMS location string (e.g. 'NYC', 'East')",
+    )
+    content_type = models.ForeignKey(
+        ContentType,
+        on_delete=models.CASCADE,
+        related_name="+",
+    )
+    object_id = models.PositiveBigIntegerField()
+    netbox_object = GenericForeignKey("content_type", "object_id")
+    description = models.TextField(
+        blank=True,
+        help_text="Optional description or notes about this mapping",
+    )
+
+    def clean(self):
+        """Normalize the value, verify the target type, and enforce uniqueness for unscoped types."""
+        super().clean()
+        self.librenms_value = (self.librenms_value or "").strip()
+        if not self.librenms_value:
+            raise ValidationError({"librenms_value": "This field may not be blank after normalization."})
+
+        expected = LOCATION_MAPPING_TARGETS.get(self.field_type)
+        if expected is None:
+            raise ValidationError({"field_type": f"Unknown field type '{self.field_type}'."})
+
+        if self.content_type_id:
+            ct = self.content_type
+            if (ct.app_label, ct.model) != expected:
+                raise ValidationError({"content_type": f"Target object must be a {self.get_field_type_display()}."})
+
+        # site/tenant names are globally unique, so the same LibreNMS value
+        # mapping to two different objects of the same type would be ambiguous.
+        # location/rack are scoped to a parent site, so duplicates are allowed and
+        # disambiguated at resolution time by the parent site.
+        if self.field_type in ("site", "tenant"):
+            qs = LocationMapping.objects.filter(
+                field_type=self.field_type,
+                librenms_value__iexact=self.librenms_value,
+            )
+            if self.pk:
+                qs = qs.exclude(pk=self.pk)
+            if qs.exists():
+                raise ValidationError(
+                    {
+                        "librenms_value": (
+                            f"A {self.get_field_type_display()} mapping for '{self.librenms_value}' already exists."
+                        )
+                    }
+                )
+
+    def get_absolute_url(self):
+        """Return the URL for this mapping's detail page."""
+        return reverse("plugins:netbox_librenms_plugin:locationmapping_detail", args=[self.pk])
+
+    class Meta:
+        """Meta options for LocationMapping."""
+
+        ordering = ["field_type", "librenms_value"]
+        constraints = [
+            # site/tenant values are globally unique, so a case-insensitive
+            # (field_type, librenms_value) pair must be unique to keep resolution
+            # deterministic. location/rack are scoped to a parent site, so they are
+            # intentionally excluded and may legitimately repeat. The partial index
+            # backing this constraint also serves the unscoped resolution lookups.
+            models.UniqueConstraint(
+                models.F("field_type"),
+                Lower("librenms_value"),
+                condition=Q(field_type__in=["site", "tenant"]),
+                name="uniq_locationmapping_unscoped_ci",
+            ),
+        ]
+
+    def __str__(self):
+        return f"{self.get_field_type_display()}: {self.librenms_value} -> {self.netbox_object}"
+
+    def to_yaml(self):
+        data = {
+            "field_type": self.field_type,
+            "librenms_value": self.librenms_value,
+            "netbox_object": str(self.netbox_object) if self.netbox_object else "",
             "description": self.description,
         }
         return yaml.dump(data, sort_keys=False)
