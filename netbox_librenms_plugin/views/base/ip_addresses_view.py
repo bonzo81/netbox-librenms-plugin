@@ -12,6 +12,7 @@ from django.views import View
 from ipam.models import VRF, IPAddress
 from virtualization.models import VirtualMachine
 
+from netbox_librenms_plugin.constants import INTERFACE_NAME_FIELDS
 from netbox_librenms_plugin.ip_addressing import parse_address_with_prefix, parse_librenms_ip_entry
 from netbox_librenms_plugin.tables.ipaddresses import IPAddressTable
 from netbox_librenms_plugin.utils import (
@@ -76,9 +77,20 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxOb
         Returns:
             list: The enriched IP entries.
         """
+        # Only an address LibreNMS reported can match a row, so resolve them first and scope
+        # the NetBox IP scan to them instead of loading every IPAddress in the deployment.
+        candidate_addresses = set()
+        for ip_entry in ip_data:
+            if not isinstance(ip_entry, dict) or "port_id" not in ip_entry:
+                continue
+            try:
+                candidate_addresses.add(str(parse_librenms_ip_entry(ip_entry)))
+            except ValueError:
+                continue
+
         # Prefetch all necessary data (scoped to the POST-resolved server when provided
         # so interface librenms_id matching uses the right per-server mapping).
-        prefetched_data = self._prefetch_netbox_data(obj, server_key=server_key)
+        prefetched_data = self._prefetch_netbox_data(obj, candidate_addresses, server_key=server_key)
         # LibreNMS port data, keyed by port_id. Callers pass a map pre-populated from the
         # cache on warm-cache renders so _get_port_info() reads it instead of making N
         # live get_port_by_id() calls (the cached pipeline must read cache + NetBox only).
@@ -192,8 +204,19 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxOb
                 entry["is_mgmt_ip"] = True
                 break
 
-    def _prefetch_netbox_data(self, obj, server_key=None):
-        """Prefetch all necessary NetBox data to minimize database queries"""
+    def _prefetch_netbox_data(self, obj, candidate_addresses, server_key=None):
+        """
+        Prefetch all necessary NetBox data to minimize database queries.
+
+        Args:
+            obj: The NetBox device or virtual machine the IP rows belong to.
+            candidate_addresses: The ``address/prefix`` strings LibreNMS reported. Only these
+                can match a row, so the IPAddress scan is restricted to them.
+            server_key: The LibreNMS server key scoping per-server interface matching.
+
+        Returns:
+            dict: The interface, IP, and VRF lookup maps used during enrichment.
+        """
         # Get all interfaces for the device
         all_interfaces = list(obj.interfaces.all())
 
@@ -220,10 +243,13 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxOb
 
         interfaces_by_name = {interface.name: interface for interface in all_interfaces}
 
-        # Get all IP addresses
+        # Get the NetBox rows for the reported addresses only
         ip_addresses_map = defaultdict(list)
-        for ip in IPAddress.objects.select_related("assigned_object_type", "vrf"):
-            ip_addresses_map[str(ip.address)].append(ip)
+        if candidate_addresses:
+            for ip in IPAddress.objects.filter(address__in=list(candidate_addresses)).select_related(
+                "assigned_object_type", "vrf"
+            ):
+                ip_addresses_map[str(ip.address)].append(ip)
 
         # Get all VRFs
         vrfs = list(VRF.objects.all())
@@ -404,7 +430,7 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxOb
                 or ("mgmt_ip" in cached_ip_data and not isinstance(cached_ip_data["mgmt_ip"], str))
                 or (cached_ports_by_id is not None and not isinstance(cached_ports_by_id, dict))
                 or (
-                    cached_interface_name_field is not None and cached_interface_name_field not in {"ifName", "ifDescr"}
+                    cached_interface_name_field is not None and cached_interface_name_field not in INTERFACE_NAME_FIELDS
                 )
             ):
                 cache.delete(cache_key)

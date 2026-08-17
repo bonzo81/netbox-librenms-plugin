@@ -1,6 +1,8 @@
 from django.core.exceptions import ImproperlyConfigured
 from netbox.plugins import PluginConfig
 
+from netbox_librenms_plugin.constants import DEFAULT_INTERFACE_NAME_FIELD
+
 __author__ = "Andy Norwood"
 __version__ = "0.4.7"
 
@@ -17,7 +19,7 @@ class LibreNMSSyncConfig(PluginConfig):
     default_settings = {
         "enable_caching": True,
         "verify_ssl": True,
-        "interface_name_field": "ifName",
+        "interface_name_field": DEFAULT_INTERFACE_NAME_FIELD,
     }
 
     def ready(self):

@@ -1596,11 +1596,13 @@ class TestPrepareContextInterfaceNameFieldNone:
         view = self._make_view()
         obj = _mock_obj()
         request = _mock_request()
+        # The cached field differs from the resolver's, so only the resolved value can
+        # satisfy the assertion below.
         cached = {
             "ip_addresses": [],
             "mgmt_ip": "",
             "ports_by_id": {},
-            "interface_name_field": "ifDescr",
+            "interface_name_field": "ifName",
         }
 
         with (

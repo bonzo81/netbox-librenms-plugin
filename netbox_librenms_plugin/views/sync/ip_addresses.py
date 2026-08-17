@@ -13,6 +13,7 @@ from django.views import View
 from ipam.models import VRF, IPAddress
 from virtualization.models import VirtualMachine, VMInterface
 
+from netbox_librenms_plugin.constants import INTERFACE_NAME_FIELDS
 from netbox_librenms_plugin.interface_sync import resolve_or_create_interface_from_port
 from netbox_librenms_plugin.ip_addressing import parse_address_with_prefix
 from netbox_librenms_plugin.utils import (
@@ -130,7 +131,7 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
             return None
         if require_create_metadata and (
             not isinstance(cached_data.get("ports_by_id"), dict)
-            or cached_data.get("interface_name_field") not in {"ifName", "ifDescr"}
+            or cached_data.get("interface_name_field") not in INTERFACE_NAME_FIELDS
         ):
             return None
         return cached_data
@@ -525,7 +526,7 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
         interface_creation_state=None,
     ):
         """Create one missing interface from the cached port that owns an IP row."""
-        if interface_name_field not in {"ifName", "ifDescr"}:
+        if interface_name_field not in INTERFACE_NAME_FIELDS:
             raise ValueError("The cached interface naming field is missing or invalid. Refresh the IP data.")
         port = self._cached_port(cached_ports_by_id, ip_data.get("port_id"))
         if port is None or port.get("_source") == "oob":

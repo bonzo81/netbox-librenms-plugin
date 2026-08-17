@@ -17,7 +17,7 @@ from netbox.config import get_config
 from netbox.plugins import get_plugin_config
 from utilities.paginator import get_paginate_count as netbox_get_paginate_count
 
-from netbox_librenms_plugin.constants import OOB_BADGE_HTML
+from netbox_librenms_plugin.constants import DEFAULT_INTERFACE_NAME_FIELD, INTERFACE_NAME_FIELDS, OOB_BADGE_HTML
 from netbox_librenms_plugin.ip_addressing import parse_host_address
 
 logger = logging.getLogger(__name__)
@@ -989,7 +989,6 @@ def resolve_set_primary_ip(request) -> bool:
     return False
 
 
-INTERFACE_NAME_FIELDS = frozenset({"ifName", "ifDescr"})
 INTERFACE_NAME_PREFERENCE_PATH = "plugins.netbox_librenms_plugin.interface_name_field"
 INTERFACE_NAME_PLATFORM_PREFERENCES_PATH = "plugins.netbox_librenms_plugin.interface_name_fields_by_platform"
 _POSTGRES_BIGINT_MAX = 9_223_372_036_854_775_807
@@ -1081,8 +1080,17 @@ def get_interface_name_field(request: Optional[HttpRequest] = None, obj=None) ->
         if isinstance(pref_val, str) and pref_val in INTERFACE_NAME_FIELDS:
             return pref_val
 
-    # Fall back to plugin config
-    return get_plugin_config("netbox_librenms_plugin", "interface_name_field")
+    # Fall back to plugin config. An unsupported configured value would be written into every
+    # tab snapshot and then rejected by the readers, so refuse it here instead.
+    configured = get_plugin_config("netbox_librenms_plugin", "interface_name_field")
+    if isinstance(configured, str) and configured in INTERFACE_NAME_FIELDS:
+        return configured
+    logger.warning(
+        "Unsupported interface_name_field %r in PLUGINS_CONFIG; using %r.",
+        configured,
+        DEFAULT_INTERFACE_NAME_FIELD,
+    )
+    return DEFAULT_INTERFACE_NAME_FIELD
 
 
 def match_librenms_hardware_to_device_type(hardware_name: str, *, preloaded_rules: dict | None = None) -> dict | None:

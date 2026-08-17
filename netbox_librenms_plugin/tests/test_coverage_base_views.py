@@ -3440,9 +3440,12 @@ class TestBaseIPAddressTableViewPrefetchNetboxData:
         iface.custom_field_data["librenms_id"] = {"default": 10}
         iface.save()
         ip = make_ip("198.51.100.5/24", assigned_object=iface)
+        unreported = make_ip("198.51.100.99/24")
 
-        result = view._prefetch_netbox_data(obj)
+        result = view._prefetch_netbox_data(obj, {"198.51.100.5/24"})
 
+        # Only the reported address is scanned; an unrelated IPAM row stays out of the map.
+        assert str(unreported.address) not in result["ip_addresses_map"]
         assert result["interfaces_by_name"]["Gi0/0"] == iface
         # Per-server id scoping: the librenms_id CF resolves under server_key "default".
         assert result["interfaces_by_librenms_id"]["10"] == iface
@@ -3460,7 +3463,7 @@ class TestBaseIPAddressTableViewPrefetchNetboxData:
         b.custom_field_data["librenms_id"] = {"default": 20}  # same id → ambiguous
         b.save()
 
-        result = view._prefetch_netbox_data(obj)
+        result = view._prefetch_netbox_data(obj, set())
 
         assert "20" not in result["interfaces_by_librenms_id"]
         # Names are still unambiguous and remain usable for the fallback match.

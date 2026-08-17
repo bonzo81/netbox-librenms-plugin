@@ -146,8 +146,10 @@ def test_settings_page_tracks_platform_memory_changes(client):
     html = response.content.decode()
 
     assert response.status_code == 200
-    assert "const rememberInterfaceNameCheckbox" in html
-    assert "rememberInterfaceNameCheckbox.checked !== initialRememberInterfaceNameValue" in html
+    assert 'name="remember_interface_name_per_platform"' in html
+    assert 'id="id_remember_interface_name_per_platform"' in html
+    assert 'id="save-import-btn"' in html
+    # One narrow marker keeps the switch wired to the save-button handler.
     assert "rememberInterfaceNameCheckbox.addEventListener('change', updateImportSaveButton)" in html
 
 
