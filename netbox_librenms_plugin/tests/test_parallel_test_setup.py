@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 from django.test import override_settings
 
+from netbox_librenms_plugin.tests.conftest import pytest_xdist_auto_num_workers
 from netbox_librenms_plugin.tests.isolated_settings import TEST_DB_NAME_PREFIX
 from netbox_librenms_plugin.tests.parallel import (
     MAX_PARALLEL_WORKERS,
@@ -122,13 +123,25 @@ def test_active_worker_uses_its_private_database_targets(settings):
     assert settings.CACHES["default"]["LOCATION"].endswith(f"/{cache_database}")
 
 
-def test_local_and_ci_commands_use_the_supported_worker_count():
-    """Keep local and CI test entry points on the supported worker count."""
+def test_local_and_ci_commands_request_isolated_workers():
+    """Keep the local entry point on the supported count and let CI size itself to the runner."""
     aliases = (REPOSITORY_ROOT / ".devcontainer/scripts/load-aliases.sh").read_text()
     workflow = (REPOSITORY_ROOT / ".github/workflows/test.yaml").read_text()
 
     assert 'parallel_args=(-n "$workers" --maxschedchunk=1)' in aliases
-    assert f"pytest -n {MAX_PARALLEL_WORKERS} --maxschedchunk=1" in workflow
+    assert "pytest -n auto --maxschedchunk=1" in workflow
+
+
+@pytest.mark.parametrize(
+    ("detected_workers", "expected"),
+    [("2", 2), (str(MAX_PARALLEL_WORKERS), MAX_PARALLEL_WORKERS), ("32", MAX_PARALLEL_WORKERS)],
+)
+def test_auto_worker_count_never_exceeds_the_isolated_worker_ceiling(monkeypatch, detected_workers, expected):
+    """`-n auto` on a big machine must stop at the last worker with private Redis databases."""
+    monkeypatch.setenv("PYTEST_XDIST_AUTO_NUM_WORKERS", detected_workers)
+
+    assert pytest_xdist_auto_num_workers(None) == expected
+    isolated_redis_databases(f"gw{expected - 1}")  # the highest worker this count starts
 
 
 def _run_netbox_test_alias(worker_value=None, *, db_name="test_alias_contract", redis_host="redis-alias-contract"):

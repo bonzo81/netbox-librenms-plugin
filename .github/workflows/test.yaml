@@ -105,8 +105,10 @@ jobs:
           PYTHONPATH: ${{ github.workspace }}/netbox/netbox
           TEST_DB_NAME: test_netbox_librenms_ci
           TEST_REDIS_HOST: localhost
+        # -n auto: hosted runners have far fewer cores than MAX_PARALLEL_WORKERS, and one worker
+        # per core beats oversubscribing them with eight test databases to migrate.
         run: >-
-          pytest -n 8 --maxschedchunk=1 --disable-warnings
+          pytest -n auto --maxschedchunk=1 --disable-warnings
           --ignore=netbox_librenms_plugin/tests/browser
           --cov-report=html:coverage_html -o pythonpath=../netbox/netbox
 
