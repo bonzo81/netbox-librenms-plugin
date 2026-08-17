@@ -134,7 +134,20 @@ netbox-shell() {
 _netbox-test() {
   local coverage="$1"
   shift
-  local workers="${NETBOX_TEST_WORKERS:-8}"
+  # Read the ceiling from the module that assigns the per-worker databases, so the
+  # two sides cannot drift.
+  local parallel_module="$PLUGIN_DIR/netbox_librenms_plugin/tests/parallel.py"
+  local max_workers
+  max_workers="$(sed -n 's/^MAX_PARALLEL_WORKERS = \([0-9][0-9]*\)$/\1/p' "$parallel_module")"
+  if ! [[ "$max_workers" =~ ^[1-9][0-9]*$ ]]; then
+    echo "Cannot read MAX_PARALLEL_WORKERS from $parallel_module." >&2
+    return 2
+  fi
+  local workers="${NETBOX_TEST_WORKERS:-$max_workers}"
+  if ! [[ "$workers" =~ ^[1-9][0-9]*$ ]] || [ "$workers" -gt "$max_workers" ]; then
+    echo "NETBOX_TEST_WORKERS must be an integer from 1 through $max_workers." >&2
+    return 2
+  fi
   local target="netbox_librenms_plugin/tests"
   local coverage_args=()
   local parallel_args=()
