@@ -935,6 +935,23 @@ class TestInterfaceNameField:
         """Falls back to plugin config."""
         from netbox_librenms_plugin.utils import get_interface_name_field
 
+        mock_plugin_config.return_value = "ifDescr"
+        mock_request = MagicMock()
+        mock_request.GET = {}
+        mock_request.POST = {}
+        mock_request.user.config.get.return_value = None
+
+        result = get_interface_name_field(mock_request)
+
+        assert result == "ifDescr"
+        mock_plugin_config.assert_called_with("netbox_librenms_plugin", "interface_name_field")
+
+    @patch("netbox_librenms_plugin.utils.get_plugin_config")
+    def test_unsupported_config_value_falls_back_to_the_default(self, mock_plugin_config):
+        """A configured field the readers reject must not reach a cached snapshot."""
+        from netbox_librenms_plugin.constants import DEFAULT_INTERFACE_NAME_FIELD
+        from netbox_librenms_plugin.utils import get_interface_name_field
+
         mock_plugin_config.return_value = "ifAlias"
         mock_request = MagicMock()
         mock_request.GET = {}
@@ -943,8 +960,7 @@ class TestInterfaceNameField:
 
         result = get_interface_name_field(mock_request)
 
-        assert result == "ifAlias"
-        mock_plugin_config.assert_called_with("netbox_librenms_plugin", "interface_name_field")
+        assert result == DEFAULT_INTERFACE_NAME_FIELD
 
     @patch("netbox_librenms_plugin.utils.get_plugin_config")
     def test_get_interface_name_field_from_user_pref(self, mock_plugin_config):
