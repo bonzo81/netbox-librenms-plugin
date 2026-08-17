@@ -33,9 +33,22 @@ def test_devcontainer_stub_keeps_import_cache_enabled():
     assert plugin_config["servers"]["stub"]["cache_timeout"] > 0
 
 
+def _has_docker_compose():
+    """Return whether this host can run `docker compose`."""
+    if shutil.which("docker") is None:
+        return False
+    probe = subprocess.run(
+        ["docker", "compose", "version"],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    return probe.returncode == 0
+
+
 def test_devcontainer_stub_command_runs_the_server_as_a_package_module():
     """Keep the Compose command compatible with imports needed by recordings."""
-    if shutil.which("docker") is None:
+    if not _has_docker_compose():
         pytest.skip("Docker Compose is required to validate the devcontainer command")
 
     compose_path = Path(__file__).resolve().parents[2] / ".devcontainer/docker-compose.yml"
@@ -256,11 +269,18 @@ def test_stub_rejects_wrong_tokens_and_unimplemented_routes():
     try:
         health = requests.get(f"{server.url}/healthz", timeout=5)
         unauthenticated = requests.get(f"{server.url}/api/v0/devices", timeout=5)
+        wrong_token = requests.get(
+            f"{server.url}/api/v0/devices",
+            headers={"X-Auth-Token": f"not-{TOKEN}"},
+            timeout=5,
+        )
         unknown = _request(server, "GET", "/api/v0/unsupported")
 
         assert health.status_code == 200
         assert unauthenticated.status_code == 401
         assert unauthenticated.json()["status"] == "error"
+        assert wrong_token.status_code == 401
+        assert wrong_token.json()["status"] == "error"
         assert unknown.status_code == 404
         assert unknown.json()["status"] == "error"
     finally:
@@ -281,6 +301,7 @@ def test_stub_device_and_location_writes_are_visible_until_restart():
             }
         )
         assert ok is True, message
+        assert message == "Device added successfully."
 
         lookup = _request(server, "GET", "/api/v0/devices/device-new.example.test")
         assert lookup.status_code == 200
@@ -314,6 +335,17 @@ def test_stub_device_and_location_writes_are_visible_until_restart():
         assert any(item["location"] == "Stub Row B" for item in locations)
     finally:
         server.stop()
+
+    # "until restart": a fresh stub rebuilds its state from the recordings alone.
+    restarted = _start_stub()
+    try:
+        assert _request(restarted, "GET", "/api/v0/devices/device-new.example.test").status_code == 404
+        assert _request(restarted, "GET", f"/api/v0/devices/{new_hostname}").status_code == 404
+        ok, locations = make_recording_api(restarted.url, server_key="stub", token=TOKEN).get_locations()
+        assert ok is True
+        assert all(item["location"] != "Stub Row B" for item in locations)
+    finally:
+        restarted.stop()
 
 
 def test_stub_rejects_duplicate_recording_device_ids():
@@ -419,3 +451,24 @@ def test_constructor_failure_releases_the_bound_port():
         port=port,
     )
     replacement._server.server_close()
+
+
+def test_stub_starts_when_a_recording_holds_a_non_dict_port():
+    """A malformed port row must not stop the stub from serving the recording."""
+    recording = copy.deepcopy(load_recording("linux-host"))
+    device_id = recording["device_id"]
+    # The stub loads the first response for this route, so inject the malformed row there.
+    ports_body = LibreNMSStubServer._find_response(recording, f"/api/v0/devices/{device_id}/ports")
+    recorded_port_count = len(ports_body["ports"])
+    ports_body["ports"].append("not-a-port")
+
+    server = LibreNMSStubServer(recordings=[recording], api_token=TOKEN).start()
+    try:
+        response = _request(server, "GET", f"/api/v0/devices/{device_id}/ports")
+
+        assert response.status_code == 200
+        served = response.json()["ports"]
+        assert "not-a-port" in served
+        assert len([port for port in served if isinstance(port, dict)]) == recorded_port_count
+    finally:
+        server.stop()
