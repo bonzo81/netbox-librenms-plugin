@@ -409,7 +409,10 @@ class LibreNMSStubServer(MockLibreNMSServer):
     def _add_approximate_vlans(ports):
         """Add a small VLAN scenario when a recording contains no VLAN data."""
         prepared = copy.deepcopy(ports) if isinstance(ports, list) else []
-        if any(port.get("ifVlan") not in (None, "", 0, "0") or port.get("vlans") for port in prepared):
+        if any(
+            isinstance(port, dict) and (port.get("ifVlan") not in (None, "", 0, "0") or port.get("vlans"))
+            for port in prepared
+        ):
             return prepared
 
         candidates = [
