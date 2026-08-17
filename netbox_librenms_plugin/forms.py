@@ -308,9 +308,9 @@ class ImportSettingsForm(NetBoxModelForm):
                     "The pattern must include at least one placeholder, e.g. {site}.",
                 )
             else:
-                # Detect malformed/unbalanced braces (e.g. "{location" missing
-                # its closing brace) by stripping out valid {token} placeholders
-                # and checking for any leftover brace characters.
+                # Permit repeated placeholders like "{site}, {location}, {location}".
+                # The parser resolves them to the canonical token name while keeping the
+                # regex valid. We only reject malformed braces, not repeated tokens.
                 leftover = re.sub(r"\{(\w+)\}", "", pattern)
                 if "{" in leftover or "}" in leftover:
                     valid_list = ", ".join(f"{{{t}}}" for t in sorted(valid_tokens))
