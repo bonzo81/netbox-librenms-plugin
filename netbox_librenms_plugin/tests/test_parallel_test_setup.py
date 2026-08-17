@@ -288,6 +288,7 @@ def test_settings_module_exports_the_stripped_redis_host():
 def test_playwright_state_machine_has_a_required_separate_ci_job():
     """Run browser behavior independently from the NetBox test matrix."""
     workflow = (REPOSITORY_ROOT / ".github/workflows/test.yaml").read_text()
+    makefile = (REPOSITORY_ROOT / "Makefile").read_text()
     requirements = (REPOSITORY_ROOT / "requirements_dev.txt").read_text()
     setup = (REPOSITORY_ROOT / ".devcontainer/scripts/setup.sh").read_text()
     testing_guide = (REPOSITORY_ROOT / "docs/development/testing.md").read_text()
@@ -300,6 +301,12 @@ def test_playwright_state_machine_has_a_required_separate_ci_job():
     assert "python -m playwright install --with-deps chromium" in workflow
     assert "--ignore=netbox_librenms_plugin/tests/browser" in workflow
     assert "pytest -c netbox_librenms_plugin/tests/browser/pytest.ini" in workflow
+    # Both callers take the directory: a new browser module must run without editing them.
+    assert (
+        "pytest -c netbox_librenms_plugin/tests/browser/pytest.ini netbox_librenms_plugin/tests/browser\n" in makefile
+    )
+    assert "test_sync_cache_browser.py" not in workflow
+    assert "test_sync_cache_browser.py" not in makefile
     assert "python -m playwright install --with-deps chromium" in setup
     # A developer outside the devcontainer and CI installs the browser from the guide.
     assert "python -m playwright install chromium" in testing_guide

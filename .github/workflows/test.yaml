@@ -146,4 +146,4 @@ jobs:
         working-directory: netbox-librenms-plugin
         run: >-
           pytest -c netbox_librenms_plugin/tests/browser/pytest.ini
-          netbox_librenms_plugin/tests/browser/test_sync_cache_browser.py
+          netbox_librenms_plugin/tests/browser

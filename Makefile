@@ -14,7 +14,7 @@ unittest:
 	pytest netbox_librenms_plugin/tests/ -v --ignore=netbox_librenms_plugin/tests/browser
 
 browser:
-	pytest -c netbox_librenms_plugin/tests/browser/pytest.ini netbox_librenms_plugin/tests/browser/test_sync_cache_browser.py
+	pytest -c netbox_librenms_plugin/tests/browser/pytest.ini netbox_librenms_plugin/tests/browser
 
 
 pre-commit:
