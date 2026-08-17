@@ -1,11 +1,16 @@
 """Tests for isolated parallel test workers."""
 
 import os
+import subprocess
 from pathlib import Path
 
 import pytest
 
-from netbox_librenms_plugin.tests.parallel import isolated_redis_databases, isolated_test_database_name
+from netbox_librenms_plugin.tests.parallel import (
+    MAX_PARALLEL_WORKERS,
+    isolated_redis_databases,
+    isolated_test_database_name,
+)
 
 
 REPOSITORY_ROOT = Path(__file__).parents[2]
@@ -56,9 +61,64 @@ def test_local_and_ci_commands_use_eight_workers():
     aliases = (REPOSITORY_ROOT / ".devcontainer/scripts/load-aliases.sh").read_text()
     workflow = (REPOSITORY_ROOT / ".github/workflows/test.yaml").read_text()
 
-    assert 'local workers="${NETBOX_TEST_WORKERS:-8}"' in aliases
     assert 'parallel_args=(-n "$workers" --maxschedchunk=1)' in aliases
-    assert "pytest -n 8 --maxschedchunk=1" in workflow
+    assert f"pytest -n {MAX_PARALLEL_WORKERS} --maxschedchunk=1" in workflow
+
+
+def _run_netbox_test_alias(worker_value=None):
+    """Run the local test alias with pytest and the venv activation stubbed out."""
+    script = "\n".join(
+        (
+            f'source "{REPOSITORY_ROOT}/.devcontainer/scripts/load-aliases.sh"',
+            "source() { :; }",  # skip the venv activation
+            "pytest() { printf 'PYTEST %s\\n' \"$*\"; }",
+            "netbox-test",
+            'printf "STATUS %s\\n" "$?"',
+        )
+    )
+    environment = {
+        **os.environ,
+        "TEST_DB_NAME": "test_alias_contract",
+        "TEST_REDIS_HOST": "redis-alias-contract",
+    }
+    if worker_value is None:
+        environment.pop("NETBOX_TEST_WORKERS", None)
+    else:
+        environment["NETBOX_TEST_WORKERS"] = worker_value
+    return subprocess.run(
+        ["bash", "-c", script],
+        capture_output=True,
+        text=True,
+        env=environment,
+        cwd=REPOSITORY_ROOT,
+        check=False,
+    )
+
+
+def test_test_alias_defaults_to_the_supported_worker_count():
+    """The alias must request exactly the workers the isolation helper can serve."""
+    result = _run_netbox_test_alias()
+
+    assert "STATUS 0" in result.stdout
+    assert f"-n {MAX_PARALLEL_WORKERS} --maxschedchunk=1" in result.stdout
+
+
+@pytest.mark.parametrize("worker_value", [str(MAX_PARALLEL_WORKERS + 1), "0", "two"])
+def test_test_alias_rejects_worker_counts_without_isolated_databases(worker_value):
+    """Reject the value before xdist starts a worker that cannot get its own databases."""
+    result = _run_netbox_test_alias(worker_value)
+
+    assert "STATUS 2" in result.stdout
+    assert "PYTEST" not in result.stdout
+    assert f"NETBOX_TEST_WORKERS must be an integer from 1 through {MAX_PARALLEL_WORKERS}." in result.stderr
+
+
+def test_test_alias_treats_an_empty_worker_value_as_unset():
+    """An empty variable must select the default instead of failing the run."""
+    result = _run_netbox_test_alias("")
+
+    assert "STATUS 0" in result.stdout
+    assert f"-n {MAX_PARALLEL_WORKERS} --maxschedchunk=1" in result.stdout
 
 
 @pytest.mark.django_db(transaction=True)
