@@ -17,6 +17,9 @@ from ipam.models import IPAddress, VLAN
 from requests import Response
 
 from netbox_librenms_plugin.sync_cache import (
+    _ACKNOWLEDGED_REVISIONS_SESSION_KEY as SYNC_CACHE_ACKNOWLEDGED_SESSION_KEY,
+)
+from netbox_librenms_plugin.sync_cache import (
     CacheMutationTransition,
     SyncCacheConsistency,
     SyncTab,
@@ -244,9 +247,10 @@ def test_cable_cache_fragment_does_not_rewrite_the_snapshot(client, settings):
     with patch(
         "netbox_librenms_plugin.librenms_api.requests.get",
         side_effect=AssertionError("The cable fragment contacted LibreNMS"),
-    ):
+    ) as requests_get:
         response = client.get(url, {"server_key": "primary"})
 
+    requests_get.assert_not_called()
     assert response.status_code == 200
     assert cache.get(cache_key) == payload
 
@@ -273,9 +277,10 @@ def test_module_cache_fragment_does_not_discover_a_missing_host_id(client, setti
     with patch(
         "netbox_librenms_plugin.librenms_api.requests.get",
         side_effect=AssertionError("The module fragment contacted LibreNMS"),
-    ):
+    ) as requests_get:
         response = client.get(url, {"server_key": "primary"})
 
+    requests_get.assert_not_called()
     assert response.status_code == 200
 
 
@@ -427,7 +432,7 @@ def test_committed_interface_sync_invalidates_only_mapped_page_and_shared_snapsh
 
 
 @pytest.mark.django_db
-def test_fully_skipped_interface_request_preserves_all_snapshots(client, settings):
+def test_fully_skipped_interface_request_preserves_all_snapshots(client, settings, django_capture_on_commit_callbacks):
     """A request that writes nothing must not invalidate another tab."""
     _configure_servers(settings)
     _chassis, (device, _sibling) = make_virtual_chassis_members("cache-noop", count=2)
@@ -443,13 +448,14 @@ def test_fully_skipped_interface_request_preserves_all_snapshots(client, setting
         "plugins:netbox_librenms_plugin:sync_selected_interfaces",
         kwargs={"object_type": "device", "object_id": device.pk},
     )
-    response = client.post(
-        sync_url,
-        {
-            "server_key": "primary",
-            "interface_name_field": "ifName",
-        },
-    )
+    with django_capture_on_commit_callbacks(execute=True):
+        response = client.post(
+            sync_url,
+            {
+                "server_key": "primary",
+                "interface_name_field": "ifName",
+            },
+        )
 
     assert response.status_code == 302
     assert cache.get(_cache_key("ports", device, "primary")) == source_payload
@@ -459,7 +465,9 @@ def test_fully_skipped_interface_request_preserves_all_snapshots(client, setting
 
 
 @pytest.mark.django_db
-def test_selected_interface_that_already_matches_preserves_other_snapshots(client, settings):
+def test_selected_interface_that_already_matches_preserves_other_snapshots(
+    client, settings, django_capture_on_commit_callbacks
+):
     """A selected row with no semantic change must not clear another tab."""
     _configure_servers(settings)
     device = make_device("cache-interface-unchanged", librenms_cf={"primary": {"id": 52}})
@@ -479,15 +487,16 @@ def test_selected_interface_that_already_matches_preserves_other_snapshots(clien
         "plugins:netbox_librenms_plugin:sync_selected_interfaces",
         kwargs={"object_type": "device", "object_id": device.pk},
     )
-    response = client.post(
-        sync_url,
-        {
-            "server_key": "primary",
-            "interface_name_field": "ifName",
-            "select": "7002",
-            "exclude_columns": ["name", "type", "speed", "description", "mtu", "enabled", "mac_address", "vlans"],
-        },
-    )
+    with django_capture_on_commit_callbacks(execute=True):
+        response = client.post(
+            sync_url,
+            {
+                "server_key": "primary",
+                "interface_name_field": "ifName",
+                "select": "7002",
+                "exclude_columns": ["name", "type", "speed", "description", "mtu", "enabled", "mac_address", "vlans"],
+            },
+        )
 
     assert response.status_code == 302
     assert cache.get(_cache_key("ip_addresses", device, "primary")) == ip_payload
@@ -779,7 +788,7 @@ def test_module_install_invalidates_other_tabs_after_creating_a_module(
 
 
 @pytest.mark.django_db
-def test_unchanged_module_serial_preserves_other_snapshots(client, settings):
+def test_unchanged_module_serial_preserves_other_snapshots(client, settings, django_capture_on_commit_callbacks):
     """Submitting the existing serial must not publish a cache mutation."""
     _configure_servers(settings)
     device = make_device("cache-module-unchanged", librenms_cf={"primary": {"id": 641}})
@@ -800,14 +809,15 @@ def test_unchanged_module_serial_preserves_other_snapshots(client, settings):
     client.force_login(make_superuser("cache-module-unchanged-user"))
     url = reverse("plugins:netbox_librenms_plugin:update_module_serial", kwargs={"pk": device.pk})
 
-    response = client.post(
-        url,
-        {
-            "server_key": "primary",
-            "module_id": str(module.pk),
-            "serial": module.serial,
-        },
-    )
+    with django_capture_on_commit_callbacks(execute=True):
+        response = client.post(
+            url,
+            {
+                "server_key": "primary",
+                "module_id": str(module.pk),
+                "serial": module.serial,
+            },
+        )
 
     assert response.status_code == 302
     assert cache.get(_cache_key("ports", device, "primary")) is not None
@@ -1262,9 +1272,10 @@ def test_legacy_ip_fragment_never_backfills_from_librenms(client, settings):
     with patch(
         "netbox_librenms_plugin.librenms_api.requests.get",
         side_effect=AssertionError("The IP cache fragment contacted LibreNMS"),
-    ):
+    ) as requests_get:
         response = client.get(fragment_url, {"server_key": "primary"})
 
+    requests_get.assert_not_called()
     assert response.status_code == 200
     assert b"No IP address data loaded" in response.content
 
@@ -1622,3 +1633,85 @@ def test_add_bay_template_preserves_server_scope_and_invalidates_other_tabs(
     assert ModuleBayTemplate.objects.filter(device_type=device.device_type, name="Expansion Bay").exists()
     assert cache.get(_cache_key("inventory", device, "secondary")) == inventory_payload
     assert cache.get(_cache_key("ports", device, "secondary")) is None
+
+
+@pytest.mark.django_db
+def test_cache_mutation_resolves_the_shared_owner_once_per_server(
+    client,
+    settings,
+    django_capture_on_commit_callbacks,
+):
+    """The post-commit cleanup must not re-resolve the chassis owner for every tab."""
+    _configure_servers(settings)
+    _chassis, (page_device, _sibling) = make_virtual_chassis_members("cache-owner-resolution", count=2)
+    page_device.custom_field_data["librenms_id"] = {"primary": {"id": 61}}
+    page_device.save(update_fields=["custom_field_data"])
+    interface = make_interface(page_device, "Ethernet1", iface_type="1000base-t")
+    interface.custom_field_data["librenms_id"] = {"primary": 7101}
+    interface.save(update_fields=["custom_field_data"])
+    source_payload = {
+        "ports": [{"port_id": 7101, "ifName": interface.name, "ifDescr": interface.name}],
+        "port_stack_relationships": {},
+    }
+    _seed_snapshot("ports", page_device, "primary", source_payload)
+    for data_type in ("links", "ip_addresses", "inventory", "vlans"):
+        _seed_snapshot(data_type, page_device, "primary")
+
+    client.force_login(make_superuser("cache-owner-resolution-user"))
+    sync_url = reverse(
+        "plugins:netbox_librenms_plugin:sync_selected_interfaces",
+        kwargs={"object_type": "device", "object_id": page_device.pk},
+    )
+
+    from netbox_librenms_plugin import sync_cache
+
+    resolved_server_keys = []
+    real_get_sync_device = sync_cache.get_librenms_sync_device
+
+    def counting_get_sync_device(device, server_key=None):
+        resolved_server_keys.append(server_key)
+        return real_get_sync_device(device, server_key=server_key)
+
+    with patch("netbox_librenms_plugin.sync_cache.get_librenms_sync_device", counting_get_sync_device):
+        with django_capture_on_commit_callbacks(execute=True):
+            response = client.post(
+                sync_url,
+                {
+                    "server_key": "primary",
+                    "interface_name_field": "ifName",
+                    "select": "7101",
+                    "description": "owner resolution",
+                },
+            )
+
+    assert response.status_code == 302
+    assert resolved_server_keys, "the shared owner must still be resolved for the mapped server"
+    assert len(resolved_server_keys) == len(set(resolved_server_keys)), resolved_server_keys
+
+
+@pytest.mark.django_db
+def test_acknowledged_revisions_stay_bounded_across_objects(client, settings):
+    """A user who opens many unavailable tabs must not grow the session without limit."""
+    _configure_servers(settings)
+    client.force_login(make_superuser("cache-acknowledgement-user"))
+    acknowledged_keys = []
+
+    with patch("netbox_librenms_plugin.sync_cache._MAX_ACKNOWLEDGED_REVISIONS", 3):
+        for index in range(5):
+            device = make_device(f"cache-ack-{index}", librenms_cf={"primary": {"id": 6200 + index}})
+            SyncCacheConsistency(device).mark_refresh_failure(SyncTab.INTERFACES, "primary")
+            acknowledged_keys.append(f"device:{device.pk}:primary:interfaces")
+            with patch(
+                "netbox_librenms_plugin.librenms_api.requests.get",
+                side_effect=lambda url, **_kwargs: _device_info_response(url, 6200, device.name, "Hardware"),
+            ):
+                response = client.get(
+                    reverse("plugins:netbox_librenms_plugin:device_librenms_sync", args=[device.pk]),
+                    {"server_key": "primary", "tab": SyncTab.INTERFACES.value},
+                )
+            assert response.status_code == 200
+
+    stored = client.session[SYNC_CACHE_ACKNOWLEDGED_SESSION_KEY]
+    assert len(stored) == 3
+    assert acknowledged_keys[-1] in stored
+    assert acknowledged_keys[0] not in stored

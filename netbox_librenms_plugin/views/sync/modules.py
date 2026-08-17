@@ -739,6 +739,16 @@ def _should_attempt_bind_for_result(result):
     return False
 
 
+def _record_bind_outcome(bind_result, result, skipped):
+    """Report one bind attempt in the install summary, returning whether it changed NetBox."""
+    if not bind_result:
+        return False
+    if bind_result["status"] != "bound":
+        skipped.append(f"{result['name']}: {bind_result['reason']}")
+        return False
+    return _module_bind_result_changed(bind_result)
+
+
 class InstallModuleView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreNMSAPIMixin, CacheMixin, View):
     """Install a NetBox Module into a ModuleBay from LibreNMS inventory data."""
 
@@ -1009,10 +1019,7 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
                             server_key,
                             changeable_interfaces,
                         )
-                        if bind_result and bind_result["status"] != "bound":
-                            skipped.append(f"{result['name']}: {bind_result['reason']}")
-                        elif bind_result and bind_result["status"] == "bound":
-                            bound_any = bound_any or _module_bind_result_changed(bind_result)
+                        bound_any = _record_bind_outcome(bind_result, result, skipped) or bound_any
         except (ValidationError, IntegrityError) as e:
             messages.error(request, f"Branch install failed: {e}")
             return _modules_redirect_response(request, sync_url, server_key)
@@ -1620,10 +1627,7 @@ class InstallSelectedView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
                             server_key,
                             changeable_interfaces,
                         )
-                        if bind_result and bind_result["status"] != "bound":
-                            skipped.append(f"{result['name']}: {bind_result['reason']}")
-                        elif bind_result and bind_result["status"] == "bound":
-                            bound_any = bound_any or _module_bind_result_changed(bind_result)
+                        bound_any = _record_bind_outcome(bind_result, result, skipped) or bound_any
         except (ValidationError, IntegrityError) as e:
             messages.error(request, f"Install failed: {e}")
             return _modules_redirect_response(request, sync_url, server_key)

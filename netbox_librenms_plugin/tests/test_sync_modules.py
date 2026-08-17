@@ -3517,6 +3517,43 @@ class TestInstallViewsPreserveInventoryCache:
     @pytest.mark.parametrize(
         ("view_name", "request_data"),
         [
+            ("branch-bind", {"parent_index": "100", "server_key": "default"}),
+            ("selected-bind", {"select": ["100"], "server_key": "default"}),
+        ],
+    )
+    def test_bulk_install_reports_a_refused_interface_bind(self, view_name, request_data):
+        """Both install views report a refused bind through the same summary."""
+        from types import SimpleNamespace
+
+        from dcim.models import Module
+        from django.core.cache import cache
+
+        from netbox_librenms_plugin.tests.view_test_helpers import make_request, message_texts
+        from netbox_librenms_plugin.views.sync.modules import InstallBranchView, InstallSelectedView
+
+        device, bay, module_type, inventory = self._objects(view_name)
+        # The device has no interface carrying this port, so the bind is refused after the install.
+        inventory[0]["_librenms_port_id"] = 4242
+        request = make_request("post", request_data, user=self._user(view_name))
+        view_class = InstallBranchView if view_name == "branch-bind" else InstallSelectedView
+        view = view_class()
+        view._librenms_api = SimpleNamespace(server_key="default")
+        cache_key = view.get_cache_key(device, "inventory", server_key="default")
+        cache.set(cache_key, {"inventory": inventory}, timeout=300)
+        try:
+            response = _post(view, request, pk=device.pk)
+
+            assert response.status_code == 302
+            assert Module.objects.filter(device=device, module_bay=bay, module_type=module_type).exists()
+            assert any(
+                "no matching interface found for port_id 4242" in text for text in message_texts(request, "info")
+            )
+        finally:
+            cache.delete(cache_key)
+
+    @pytest.mark.parametrize(
+        ("view_name", "request_data"),
+        [
             ("branch-stale", {"parent_index": "100", "server_key": "default"}),
             ("selected-stale", {"select": ["100"], "server_key": "default"}),
         ],

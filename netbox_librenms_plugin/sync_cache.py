@@ -27,6 +27,9 @@ from netbox_librenms_plugin.utils import (
 logger = logging.getLogger(__name__)
 
 _ACKNOWLEDGED_REVISIONS_SESSION_KEY = "librenms_sync_cache_acknowledged_revisions"
+# An entry is dropped when its tab becomes available again, which never happens for a deleted
+# object. Cap the map so the session payload cannot grow without limit.
+_MAX_ACKNOWLEDGED_REVISIONS = 200
 
 
 class SyncTab(StrEnum):
@@ -278,6 +281,9 @@ class SyncCacheConsistency:
 
     def __init__(self, page_object):
         self.page_object = page_object
+        # One instance serves a single request or post-commit callback, so the owner a server
+        # key resolves to cannot change during its lifetime.
+        self._shared_owners = {}
 
     def applicable_tabs(self):
         """Return the tabs supported by this page object's model."""
@@ -287,7 +293,11 @@ class SyncCacheConsistency:
     def _shared_owner(self, server_key):
         if self.page_object._meta.model_name != "device":
             return self.page_object
-        return get_librenms_sync_device(self.page_object, server_key=server_key) or self.page_object
+        if server_key not in self._shared_owners:
+            self._shared_owners[server_key] = (
+                get_librenms_sync_device(self.page_object, server_key=server_key) or self.page_object
+            )
+        return self._shared_owners[server_key]
 
     def _primary_owner(self, tab, server_key):
         return self._shared_owner(server_key) if TAB_SPECS[tab].shared_vc_owner else self.page_object
@@ -634,6 +644,8 @@ class SyncCacheConsistency:
             if not active_state["snapshot_available"] and active_revision:
                 key = acknowledgement_key(active_tab)
                 if acknowledgements.get(key) != active_revision:
+                    # Re-insert so the dictionary order stays newest-last for the cap below.
+                    acknowledgements.pop(key, None)
                     acknowledgements[key] = active_revision
                     changed = True
 
@@ -647,6 +659,11 @@ class SyncCacheConsistency:
             )
 
         if changed:
+            excess = len(acknowledgements) - _MAX_ACKNOWLEDGED_REVISIONS
+            if excess > 0:
+                # Oldest first: the dictionary keeps insertion order and updates re-insert.
+                for stale_key in list(acknowledgements)[:excess]:
+                    acknowledgements.pop(stale_key)
             request.session[_ACKNOWLEDGED_REVISIONS_SESSION_KEY] = acknowledgements
         return result
 
