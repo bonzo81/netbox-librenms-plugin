@@ -9,6 +9,12 @@ SCRIPT_PATH = Path(__file__).parents[2] / "static" / "netbox_librenms_plugin" / 
 STYLE_PATH = Path(__file__).parents[2] / "static" / "netbox_librenms_plugin" / "css" / "librenms_sync.css"
 
 
+def _replace_fixture_markup(html, old, new):
+    """Replace fixture markup, failing when _page_html no longer emits the source markup."""
+    assert old in html, f"fixture markup is gone, so the replacement would be a no-op: {old}"
+    return html.replace(old, new)
+
+
 def _page_html(initial_state, contract=None, active_tab="interfaces"):
     state = json.dumps(initial_state)
     contract = contract or {
@@ -211,7 +217,8 @@ def test_cold_tab_does_not_show_stale_state_before_first_refresh():
     }
     initial["interfaces"]["timestamp"] = None
     initial["ipaddresses"]["timestamp"] = None
-    html = _page_html(initial).replace(
+    html = _replace_fixture_markup(
+        _page_html(initial),
         '<button id="interface-action">Sync</button>',
         '<button id="interface-refresh">Refresh Interfaces</button>',
     )
@@ -570,7 +577,8 @@ def test_valid_status_recovers_when_the_initial_state_is_malformed():
         "interfaces": _state("current-interfaces"),
         "ipaddresses": _state("current-ipaddresses"),
     }
-    html = _page_html(current).replace(
+    html = _replace_fixture_markup(
+        _page_html(current),
         f'<script id="librenms-sync-cache-initial" type="application/json">{json.dumps(current)}</script>',
         '<script id="librenms-sync-cache-initial" type="application/json">{malformed</script>',
     )
@@ -696,7 +704,8 @@ def test_countdown_expiry_removes_rows_and_sync_controls():
         browser = runtime.chromium.launch(headless=True)
         page = browser.new_page()
         page.set_content(
-            _page_html(initial).replace(
+            _replace_fixture_markup(
+                _page_html(initial),
                 '<button id="interface-action">Sync</button>',
                 '<span id="countdown-timer" data-expiry="2000-01-01T00:00:00Z"></span>'
                 '<button id="interface-action">Sync</button>',
@@ -724,7 +733,8 @@ def test_hidden_tab_countdown_changes_available_rail_to_unavailable_without_inte
         browser = runtime.chromium.launch(headless=True)
         page = browser.new_page()
         page.set_content(
-            _page_html(initial).replace(
+            _replace_fixture_markup(
+                _page_html(initial),
                 '<button id="ip-action">Sync</button>',
                 '<span id="ip-countdown-timer" data-expiry="2000-01-01T00:00:00Z"></span>'
                 '<button id="ip-action">Sync</button>',
