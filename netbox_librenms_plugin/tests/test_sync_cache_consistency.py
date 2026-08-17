@@ -23,6 +23,7 @@ from netbox_librenms_plugin.sync_cache import (
     CacheMutationTransition,
     SyncCacheConsistency,
     SyncTab,
+    SyncTabState,
     apply_request_cache_transition,
 )
 from netbox_librenms_plugin.tests.conftest import (
@@ -34,6 +35,7 @@ from netbox_librenms_plugin.tests.conftest import (
     make_virtual_chassis_members,
 )
 from netbox_librenms_plugin.utils import mark_librenms_migrated, set_librenms_device_id
+from netbox_librenms_plugin.views.sync.ip_addresses import SyncIPAddressesView
 
 
 def _configure_servers(settings):
@@ -1416,9 +1418,10 @@ def test_fragment_restores_from_cache_without_calling_librenms(client, settings)
     with patch(
         "netbox_librenms_plugin.librenms_api.requests.get",
         side_effect=AssertionError("The cache fragment contacted LibreNMS"),
-    ):
+    ) as requests_get:
         response = client.get(url, {"server_key": "primary"})
 
+    requests_get.assert_not_called()
     assert response.status_code == 200
     assert b"Ethernet1" in response.content
 
@@ -1715,3 +1718,117 @@ def test_acknowledged_revisions_stay_bounded_across_objects(client, settings):
     assert len(stored) == 3
     assert acknowledged_keys[-1] in stored
     assert acknowledged_keys[0] not in stored
+
+
+@pytest.mark.django_db
+def test_virtual_machine_sync_page_omits_the_cables_pane(client, settings):
+    """A VM has no cable sync, so neither its tab nor its pane may render."""
+    _configure_servers(settings)
+    vm = make_vm("cache-vm-cables")
+    set_librenms_device_id(vm, 7601, "primary")
+    vm.save(update_fields=["custom_field_data"])
+    client.force_login(make_superuser("cache-vm-cables-user"))
+    url = reverse("plugins:netbox_librenms_plugin:vm_librenms_sync", args=[vm.pk])
+
+    with patch(
+        "netbox_librenms_plugin.librenms_api.requests.get",
+        side_effect=lambda url, **_kwargs: _device_info_response(url, 7601, vm.name, "VM Hardware 7601"),
+    ):
+        response = client.get(url, {"server_key": "primary", "tab": SyncTab.INTERFACES.value})
+
+    assert response.status_code == 200
+    page_html = response.content.decode()
+    assert 'id="interfaces"' in page_html
+    assert 'id="cables-tab"' not in page_html
+    assert 'id="cables"' not in page_html
+    assert 'id="cable-sync-content"' not in page_html
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("blocked_state", [SyncTabState.INVALIDATED, SyncTabState.REFRESH_FAILED])
+def test_blocked_active_tab_reads_device_info_from_cache_only(
+    client, settings, django_capture_on_commit_callbacks, blocked_state
+):
+    """Every blocked tab state must render device details without contacting LibreNMS."""
+    _configure_servers(settings)
+    device = make_device(f"cache-blocked-{blocked_state.value}", librenms_cf={"primary": {"id": 7801}})
+    _seed_snapshot("ip_addresses", device, "primary")
+    coordinator = SyncCacheConsistency(device)
+    if blocked_state is SyncTabState.INVALIDATED:
+        with django_capture_on_commit_callbacks(execute=True):
+            coordinator.schedule_mutation(SyncTab.INTERFACES, "primary", actor_id=1)
+    else:
+        coordinator.mark_refresh_failure(SyncTab.IP_ADDRESSES, "primary", actor_id=1)
+    # Pin the seeding: a state that stopped matching would make the assertions below vacuous.
+    assert coordinator.status("primary")[SyncTab.IP_ADDRESSES.value]["state"] == blocked_state.value
+
+    client.force_login(make_superuser(f"cache-blocked-{blocked_state.value}-user"))
+    url = reverse("plugins:netbox_librenms_plugin:device_librenms_sync", args=[device.pk])
+    with patch(
+        "netbox_librenms_plugin.librenms_api.requests.get",
+        side_effect=AssertionError("A blocked tab contacted LibreNMS"),
+    ) as requests_get:
+        response = client.get(url, {"server_key": "primary", "tab": SyncTab.IP_ADDRESSES.value})
+
+    requests_get.assert_not_called()
+    assert response.status_code == 200
+    assert b"Details unavailable" in response.content
+
+
+@pytest.mark.django_db
+def test_failed_duplicate_selection_keeps_the_committed_rows_invalidation(
+    client,
+    settings,
+    django_capture_on_commit_callbacks,
+):
+    """A failing row must not cancel the cache invalidation another row already earned."""
+    _configure_servers(settings)
+    device = make_device("cache-ip-duplicate-rows", librenms_cf={"primary": {"id": 68}})
+    interface = make_interface(device, "Ethernet1", iface_type="1000base-t")
+    set_librenms_device_id(interface, 7801, "primary")
+    interface.save(update_fields=["custom_field_data"])
+    address = "2001:db8:68::10/64"
+    verbose_address = "2001:0DB8:0068:0000:0000:0000:0000:0010/64"
+    ip_payload = {
+        "ip_addresses": [
+            {
+                "ip_with_mask": address,
+                "port_id": 7801,
+                "interface_name": interface.name,
+            }
+        ]
+    }
+    _seed_snapshot("ip_addresses", device, "primary", ip_payload)
+    _seed_snapshot("ports", device, "primary")
+    client.force_login(make_superuser("cache-ip-duplicate-rows-user"))
+    url = reverse(
+        "plugins:netbox_librenms_plugin:sync_device_ip_addresses",
+        kwargs={"object_type": "device", "pk": device.pk},
+    )
+
+    classified_rows = []
+    real_classify_ip_change = SyncIPAddressesView._classify_ip_change
+
+    def fail_after_the_first_row(self, **kwargs):
+        classified_rows.append(kwargs["row_id"])
+        if len(classified_rows) > 1:
+            raise ValueError("Simulated failure on the repeated selection")
+        return real_classify_ip_change(self, **kwargs)
+
+    with patch.object(SyncIPAddressesView, "_classify_ip_change", fail_after_the_first_row):
+        with django_capture_on_commit_callbacks(execute=True):
+            response = client.post(
+                url,
+                {
+                    "server_key": "primary",
+                    "select": [address, verbose_address],
+                    f"vrf_{address}": "",
+                },
+            )
+
+    assert response.status_code == 302
+    # Both selections must reach the same canonical row, or the failure cannot reach another row.
+    assert classified_rows == [address, address]
+    assert IPAddress.objects.filter(address=address, assigned_object_id=interface.pk).exists()
+    assert cache.get(_cache_key("ip_addresses", device, "primary")) == ip_payload
+    assert cache.get(_cache_key("ports", device, "primary")) is None

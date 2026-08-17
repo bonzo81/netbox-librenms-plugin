@@ -9,6 +9,8 @@ Tests cover:
 
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from netbox_librenms_plugin.tests import test_librenms_api_helpers
 
 # Bind the helper's autouse fixture into this module so it patches the config here only.
@@ -331,7 +333,42 @@ class TestInterfaceVlanSync:
 
         assert mock_interface.mode == "access"
         assert mock_interface.untagged_vlan == mock_vlan
-        mock_interface.tagged_vlans.clear.assert_not_called()
+
+    @pytest.mark.django_db
+    def test_update_interface_vlan_assignment_access_mode_clears_tagged_vlans(self):
+        """An access port keeps stale tagged VLANs unless this method clears them itself."""
+        from ipam.models import VLAN
+
+        from netbox_librenms_plugin.tests.conftest import make_device, make_interface
+        from netbox_librenms_plugin.views.mixins import VlanAssignmentMixin
+
+        device = make_device("vlan-access-clear")
+        interface = make_interface(device, "Ethernet1", iface_type="1000base-t")
+        untagged_vlan = VLAN.objects.create(vid=100, name="vlan-access-clear-100")
+        stale_tagged_vlan = VLAN.objects.create(vid=200, name="vlan-access-clear-200")
+        # Mode and untagged VLAN already match the port data, so nothing here re-saves the
+        # interface. NetBox clears tagged VLANs on save(), which is why that path is excluded.
+        interface.mode = "access"
+        interface.untagged_vlan = untagged_vlan
+        interface.save()
+        interface.tagged_vlans.set([stale_tagged_vlan])
+        assert list(interface.tagged_vlans.all()) == [stale_tagged_vlan]
+
+        result = VlanAssignmentMixin()._update_interface_vlan_assignment(
+            interface,
+            {"untagged_vlan": 100, "tagged_vlans": []},
+            None,
+            {
+                "vid_group_to_vlan": {(100, None): untagged_vlan},
+                "vid_to_vlans": {100: [untagged_vlan]},
+            },
+        )
+
+        interface.refresh_from_db()
+        assert interface.mode == "access"
+        assert interface.untagged_vlan == untagged_vlan
+        assert list(interface.tagged_vlans.all()) == []
+        assert result["changed"] is True
 
     def test_update_interface_vlan_assignment_tagged_mode(self, mock_librenms_config):
         """Test that tagged mode is set for trunk ports."""

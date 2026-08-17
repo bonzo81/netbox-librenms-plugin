@@ -1032,6 +1032,9 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
         for selected_ip in selected_ips:
             row_id = str(selected_ip)
             display_address = row_id.partition("@")[0]
+            # Collect this row's mutations separately: two raw selections can canonicalize to the
+            # same row_id, so a failing row must not discard a committed row's key.
+            row_mutations = set()
             interface_creation_state_before_row = interface_creation_state
             interface_maps_before_row = (
                 (
@@ -1084,7 +1087,7 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
                         )
                         interfaces_by_name[interface.name] = interface
                         interfaces_by_pk[str(interface.pk)] = interface
-                        mutated_rows.add(row_id)
+                        row_mutations.add(row_id)
 
                     if interface is not None:
                         locked_interface = self._lock_target_interface(obj, interface, interface_creation_state)
@@ -1130,7 +1133,7 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
                             vrf=vrf,
                         )
                         results["updated"].append(display_address)
-                        mutated_rows.add(row_id)
+                        row_mutations.add(row_id)
                     else:
                         ip_obj, outcome, conflict = self._classify_ip_change(
                             row_id=row_id,
@@ -1153,7 +1156,7 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
                             continue
                         results[outcome].append(display_address)
                         if outcome in {"created", "updated"}:
-                            mutated_rows.add(row_id)
+                            row_mutations.add(row_id)
 
                     # Primary-IP auto-match for the management IP. The no-interface case is
                     # handled above (the row was skipped before any write), so here the IP is
@@ -1180,7 +1183,7 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
                             results["primary_interface_not_eligible"].append(display_address)
                         elif self._set_primary_ip(obj, ip_obj):
                             results["primary_set"].append(display_address)
-                            mutated_rows.add(row_id)
+                            row_mutations.add(row_id)
 
             except Exception as exc:
                 if interface_maps_before_row is not None:
@@ -1202,10 +1205,15 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
                         interface_creation_state["interfaces_by_port_id"].update(
                             {key: list(value) for key, value in interfaces_by_port_id_before.items()}
                         )
-                mutated_rows.discard(row_id)
+                # The row's savepoint rolled back, so drop only this row's keys.
+                row_mutations.clear()
                 logger.warning("IP sync failed for %s: %s", row_id, exc, exc_info=True)
                 results["failed"].append(display_address)
                 results["errors"][display_address] = str(exc) or exc.__class__.__name__
+            finally:
+                # `finally`, not `else`: the conflict and no-interface paths leave the row with
+                # `continue`, which skips an `else` clause but keeps their committed writes.
+                mutated_rows.update(row_mutations)
 
         results["mutated"] = bool(mutated_rows)
         return results

@@ -749,9 +749,9 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObject
         if fetch_fresh:
             if partial_fetch_failed:
                 # Don't just skip writing the partial snapshot — also drop any prior FULL snapshot.
-                # The rendered table is built from the new partial links_data, but verify/sync
-                # actions resolve rows from this cache key, so a leftover full snapshot would let a
-                # user act on cable data the partial refresh just superseded.
+                # This refresh returns no table at all (see the partial_fetch_failed return below),
+                # but verify/sync actions resolve rows from this cache key, so a leftover full
+                # snapshot would let a user act on cable data the partial refresh just superseded.
                 cache.delete(cache_key)
             else:
                 cache.set(

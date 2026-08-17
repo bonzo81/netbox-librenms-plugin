@@ -750,11 +750,13 @@ Render the tabs in migrated mode too, or those interface/IP move controls are un
         {% include 'netbox_librenms_plugin/_interface_sync.html' %}
     </div>
 
+    {% if cable_sync %}
     <div class="tab-pane{% if active_sync_tab == 'cables' %} show active{% endif %}" id="cables"
         role="tabpanel" aria-labelledby="cables-tab" data-tab-id="cables"
         data-fragment-url="{{ sync_cache_fragment_urls.cables }}">
         {% include 'netbox_librenms_plugin/_cable_sync.html' %}
     </div>
+    {% endif %}
 
     <div class="tab-pane{% if active_sync_tab == 'ipaddresses' %} show active{% endif %}" id="ipaddresses"
         role="tabpanel" aria-labelledby="ipaddresses-tab"
