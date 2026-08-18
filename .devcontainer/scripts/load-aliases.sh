@@ -179,7 +179,7 @@ _netbox-test() {
     return 1
   fi
   cd "$PLUGIN_DIR" && source /opt/netbox/venv/bin/activate && \
-    pytest "$target" -q --disable-warnings "${coverage_args[@]}" "${parallel_args[@]}" "$@"
+    pytest "$target" -q --disable-warnings --reuse-db "${coverage_args[@]}" "${parallel_args[@]}" "$@"
 }
 
 netbox-test() {
@@ -260,7 +260,7 @@ dev-help() {
   echo ""
   echo "🛠️  Development Tools:"
   echo "  netbox-shell        : Open NetBox Django shell"
-  echo "  netbox-test         : Run plugin tests (8 workers, no coverage)"
+  echo "  netbox-test         : Run plugin tests (parallel, no coverage; add --create-db after a migration)"
   echo "  netbox-test-coverage: Run plugin tests with coverage"
   echo "  netbox-manage       : Run Django management commands"
   echo "  plugin-install      : Reinstall plugin in development mode"

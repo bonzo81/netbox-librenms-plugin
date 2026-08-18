@@ -16,7 +16,6 @@ from netbox_librenms_plugin.utils import (
     build_migrated_context,
     cache_remaining_ttl,
     coerce_librenms_id,
-    coerce_model_pk,
     get_interface_name_field,
     get_librenms_oob,
     get_librenms_sync_device,
@@ -413,9 +412,11 @@ class BaseInterfaceTableView(
         """Fetch and resolve host port relationships when the snapshot has a relevant signal."""
         from netbox_librenms_plugin.models import PortStackLagPattern
 
-        structural_signal = self._has_structural_relationship_signals(host_ports, interface_name_field)
+        # One pass over the ports feeds all three signal checks below.
+        names_per_port = self._relationship_port_names(host_ports, interface_name_field)
+        structural_signal = self._has_structural_relationship_signals(host_ports, interface_name_field, names_per_port)
         unscoped_patterns = PortStackLagPattern.compiled_patterns_for_os(None)
-        name_signal = self._has_lag_name_signals(host_ports, interface_name_field, unscoped_patterns)
+        name_signal = self._has_lag_name_signals(host_ports, interface_name_field, unscoped_patterns, names_per_port)
 
         device_os = ""
         device_os_known = False
@@ -433,6 +434,7 @@ class BaseInterfaceTableView(
             host_ports,
             interface_name_field,
             scoped_patterns,
+            names_per_port,
         )
         relationship_fetch_failed = False
         if structural_signal or scoped_name_signal:
@@ -838,128 +840,16 @@ class BaseInterfaceTableView(
             "relationship_data_incomplete": relationship_data_incomplete,
         }
 
-    def _add_vlan_group_selection(self, port, lookup_maps, device, vlan_group_overrides=None):
-        """
-        Add per-VLAN group auto-selection data to port record.
-
-        Sets:
-        - vlan_group_map: {vid: {"group_id": str, "group_name": str, "is_ambiguous": bool}}
-          Maps each VID to its auto-selected VLAN group based on scope hierarchy.
-          If vlan_group_overrides contains a user selection for a VID, that takes
-          precedence over auto-selection.
-        """
-        vid_to_groups = lookup_maps.get("vid_to_groups", {})
-        untagged_vid = port.get("untagged_vlan")
-        tagged_vids = port.get("tagged_vlans", [])
-
-        all_vids = []
-        if untagged_vid:
-            all_vids.append(untagged_vid)
-        all_vids.extend(tagged_vids)
-
-        vlan_group_map = {}
-        for vid in all_vids:
-            groups = vid_to_groups.get(vid, [])
-            if len(groups) == 1:
-                vlan_group_map[vid] = {
-                    "group_id": str(groups[0].pk),
-                    "group_name": groups[0].name,
-                    "is_ambiguous": False,
-                }
-            elif len(groups) > 1:
-                most_specific = self._select_most_specific_group(groups, device)
-                if most_specific:
-                    vlan_group_map[vid] = {
-                        "group_id": str(most_specific.pk),
-                        "group_name": most_specific.name,
-                        "is_ambiguous": False,
-                    }
-                else:
-                    vlan_group_map[vid] = {
-                        "group_id": "",
-                        "group_name": "Ambiguous",
-                        "is_ambiguous": True,
-                    }
-            else:
-                vlan_group_map[vid] = {
-                    "group_id": "",
-                    "group_name": "Global",
-                    "is_ambiguous": False,
-                }
-
-        # Apply user overrides from "apply to all" selections (persisted in cache)
-        if vlan_group_overrides:
-            from ipam.models import VLANGroup
-
-            # Batch-fetch all referenced override group IDs to avoid N+1 queries
-            override_group_ids = {
-                group_id
-                for vid in all_vids
-                if str(vid) in vlan_group_overrides
-                and (group_id := coerce_model_pk(vlan_group_overrides[str(vid)])) is not None
-            }
-            override_groups_by_id = {}
-            if override_group_ids:
-                override_groups_by_id = VLANGroup.objects.in_bulk(list(override_group_ids))
-
-            for vid in all_vids:
-                vid_str = str(vid)
-                if vid_str in vlan_group_overrides:
-                    raw_override_group_id = vlan_group_overrides[vid_str]
-                    override_group_id = coerce_model_pk(raw_override_group_id)
-                    if override_group_id is not None:
-                        group = override_groups_by_id.get(override_group_id)
-                        # The row's in-scope groups, not only groups that already carry the VID:
-                        # "apply to all" exists to put the VLAN into a group that lacks it.
-                        allowed_group_ids = {candidate.pk for candidate in port.get("vlan_groups", [])}
-                        if group and group.pk in allowed_group_ids:
-                            vlan_group_map[vid] = {
-                                "group_id": str(group.pk),
-                                "group_name": group.name,
-                                "is_ambiguous": False,
-                            }
-                        # Keep auto-selection when the group was deleted or is out of the row's scope.
-                    elif raw_override_group_id == "" and (vid, None) in lookup_maps.get("vid_group_to_vlan", {}):
-                        # User explicitly chose "No Group (Global)"
-                        vlan_group_map[vid] = {
-                            "group_id": "",
-                            "group_name": "Global",
-                            "is_ambiguous": False,
-                        }
-
-        port["vlan_group_map"] = vlan_group_map
-
-    def _add_missing_vlans_info(self, port, lookup_maps):
-        """
-        Add missing VLANs info to port record for warning display.
-
-        Sets:
-        - missing_vlans: List of VIDs not found in any NetBox VLAN group
-        """
-        vid_to_vlans = lookup_maps.get("vid_to_vlans", {})
-        missing_vlans = []
-
-        untagged_vid = port.get("untagged_vlan")
-        tagged_vids = port.get("tagged_vlans", [])
-
-        if untagged_vid and untagged_vid not in vid_to_vlans:
-            missing_vlans.append(untagged_vid)
-
-        for vid in tagged_vids:
-            if vid not in vid_to_vlans:
-                missing_vlans.append(vid)
-
-        port["missing_vlans"] = missing_vlans
-
     @staticmethod
     def _relationship_port_names(ports, interface_name_field):
         """Return each port's distinct string names from the active and canonical fields."""
         name_fields = {"ifName", "ifDescr", interface_name_field}
         return [[name for field in name_fields if isinstance(name := port.get(field), str) and name] for port in ports]
 
-    def _has_structural_relationship_signals(self, ports, interface_name_field="ifName"):
+    def _has_structural_relationship_signals(self, ports, interface_name_field="ifName", names_per_port=None):
         """Return true for an explicit LAG type or a child name whose parent also exists."""
-        names_per_port = self._relationship_port_names(ports, interface_name_field)
+        if names_per_port is None:
+            names_per_port = self._relationship_port_names(ports, interface_name_field)
         port_names = {name for names in names_per_port for name in names}
         sub_iface_re = re.compile(r"^(.+)\.\d+$")
         return any(
@@ -968,7 +858,8 @@ class BaseInterfaceTableView(
             for port, names in zip(ports, names_per_port)
         )
 
-    def _has_lag_name_signals(self, ports, interface_name_field, lag_patterns):
+    def _has_lag_name_signals(self, ports, interface_name_field, lag_patterns, names_per_port=None):
         """Return true when an interface name matches one of the supplied OS-scoped patterns."""
-        names_per_port = self._relationship_port_names(ports, interface_name_field)
+        if names_per_port is None:
+            names_per_port = self._relationship_port_names(ports, interface_name_field)
         return any(pat.search(name) for names in names_per_port for pat in lag_patterns for name in names)

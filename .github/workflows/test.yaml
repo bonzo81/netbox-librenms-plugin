@@ -87,7 +87,7 @@ jobs:
         working-directory: netbox-librenms-plugin
         run: |
           pip install -e .
-          pip install pytest pytest-django pytest-cov pytest-xdist
+          pip install -r requirements_dev.txt
 
       - name: Set up configuration
         working-directory: netbox

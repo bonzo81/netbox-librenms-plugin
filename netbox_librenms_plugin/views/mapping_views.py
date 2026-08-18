@@ -1,7 +1,6 @@
 from django.http import HttpResponse, HttpResponseBadRequest
 from django.views import View
 from netbox.views import generic
-from utilities.views import register_model_view
 
 from netbox_librenms_plugin.filters import (
     CarrierAutoInstallRuleFilterSet,
@@ -99,7 +98,6 @@ class InterfaceTypeMappingCreateView(LibreNMSWritePermissionMixin, generic.Objec
     form = InterfaceTypeMappingForm
 
 
-@register_model_view(InterfaceTypeMapping, "bulk_import", path="import", detail=False)
 class InterfaceTypeMappingBulkImportView(LibreNMSWritePermissionMixin, generic.BulkImportView):
     """
     Provides a view for bulk importing `InterfaceTypeMapping` objects from CSV, JSON, or YAML.
@@ -172,7 +170,6 @@ class DeviceTypeMappingCreateView(LibreNMSWritePermissionMixin, generic.ObjectEd
     form = DeviceTypeMappingForm
 
 
-@register_model_view(DeviceTypeMapping, "bulk_import", path="import", detail=False)
 class DeviceTypeMappingBulkImportView(LibreNMSWritePermissionMixin, generic.BulkImportView):
     """Provides a view for bulk importing DeviceTypeMapping objects."""
 
@@ -232,7 +229,6 @@ class ModuleTypeMappingCreateView(LibreNMSWritePermissionMixin, generic.ObjectEd
     form = ModuleTypeMappingForm
 
 
-@register_model_view(ModuleTypeMapping, "bulk_import", path="import", detail=False)
 class ModuleTypeMappingBulkImportView(LibreNMSWritePermissionMixin, generic.BulkImportView):
     """Provides a view for bulk importing ModuleTypeMapping objects."""
 
@@ -292,7 +288,6 @@ class ModuleBayMappingCreateView(LibreNMSWritePermissionMixin, generic.ObjectEdi
     form = ModuleBayMappingForm
 
 
-@register_model_view(ModuleBayMapping, "bulk_import", path="import", detail=False)
 class ModuleBayMappingBulkImportView(LibreNMSWritePermissionMixin, generic.BulkImportView):
     """Provides a view for bulk importing ModuleBayMapping objects."""
 
@@ -352,7 +347,6 @@ class NormalizationRuleCreateView(LibreNMSWritePermissionMixin, generic.ObjectEd
     form = NormalizationRuleForm
 
 
-@register_model_view(NormalizationRule, "bulk_import", path="import", detail=False)
 class NormalizationRuleBulkImportView(LibreNMSWritePermissionMixin, generic.BulkImportView):
     """Provides a view for bulk importing NormalizationRule objects."""
 
@@ -412,7 +406,6 @@ class InventoryIgnoreRuleCreateView(LibreNMSWritePermissionMixin, generic.Object
     form = InventoryIgnoreRuleForm
 
 
-@register_model_view(InventoryIgnoreRule, "bulk_import", path="import", detail=False)
 class InventoryIgnoreRuleBulkImportView(LibreNMSWritePermissionMixin, generic.BulkImportView):
     """Provides a view for bulk importing InventoryIgnoreRule objects."""
 
@@ -536,7 +529,6 @@ class PlatformMappingCreateView(LibreNMSWritePermissionMixin, generic.ObjectEdit
     form = PlatformMappingForm
 
 
-@register_model_view(PlatformMapping, "bulk_import", path="import", detail=False)
 class PlatformMappingBulkImportView(LibreNMSWritePermissionMixin, generic.BulkImportView):
     """Provides a view for bulk importing PlatformMapping objects."""
 
@@ -658,7 +650,6 @@ class CarrierAutoInstallRuleCreateView(LibreNMSWritePermissionMixin, generic.Obj
     form = CarrierAutoInstallRuleForm
 
 
-@register_model_view(CarrierAutoInstallRule, "bulk_import", path="import", detail=False)
 class CarrierAutoInstallRuleBulkImportView(LibreNMSWritePermissionMixin, generic.BulkImportView):
     """Provides a view for bulk importing CarrierAutoInstallRule objects."""
 
@@ -722,7 +713,6 @@ class PortStackLagPatternCreateView(LibreNMSWritePermissionMixin, generic.Object
     form = PortStackLagPatternForm
 
 
-@register_model_view(PortStackLagPattern, "bulk_import", path="import", detail=False)
 class PortStackLagPatternBulkImportView(LibreNMSWritePermissionMixin, generic.BulkImportView):
     """Provides a view for bulk importing PortStackLagPattern objects from CSV/JSON/YAML."""
 
