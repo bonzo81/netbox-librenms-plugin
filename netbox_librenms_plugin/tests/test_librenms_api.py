@@ -1089,8 +1089,13 @@ class TestLibreNMSAPIDeviceOperations:
     @patch("netbox_librenms_plugin.librenms_api.requests.get")
     def test_cache_only_reads_a_snapshot_even_when_live_cache_is_disabled(self, mock_get, mock_librenms_config):
         """A cache-only read must use an existing snapshot regardless of the live-read flag."""
+        from django.core.cache import cache
+
         from netbox_librenms_plugin.librenms_api import LibreNMSAPI
 
+        # Start from a cold fixed key, so the cache-only assertion cannot pass on another
+        # test's snapshot instead of the one this test creates.
+        cache.delete("librenms_device_info_default_424243")
         mock_get.return_value.status_code = 200
         mock_get.return_value.json.return_value = {
             "status": "ok",
@@ -1099,6 +1104,7 @@ class TestLibreNMSAPIDeviceOperations:
         api = LibreNMSAPI(server_key="default")
         expected = (True, {"device_id": 424243, "hostname": "cached-device"})
         assert api.get_device_info(device_id=424243) == expected
+        mock_get.assert_called_once()
 
         mock_get.side_effect = AssertionError("cache-only lookup contacted LibreNMS")
         assert api.get_device_info(device_id=424243, use_cache=False, cache_only=True) == expected
