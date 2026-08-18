@@ -529,8 +529,9 @@ class BaseLibreNMSSyncView(
                     }
                 )
 
-                # For Virtual Chassis, fetch inventory
-                if hasattr(obj, "virtual_chassis") and obj.virtual_chassis:
+                # For Virtual Chassis, fetch inventory. Inventory has no snapshot, so a
+                # cache-only render must skip it instead of contacting LibreNMS.
+                if not cache_only and hasattr(obj, "virtual_chassis") and obj.virtual_chassis:
                     vc_serials = self._get_vc_inventory_serials(obj)
                     librenms_device_details["vc_inventory_serials"] = vc_serials
 

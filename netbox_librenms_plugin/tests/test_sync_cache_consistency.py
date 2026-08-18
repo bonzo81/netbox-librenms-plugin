@@ -195,6 +195,30 @@ def test_mutation_succeeds_when_cache_backend_has_no_wildcard_api(
 
     assert transition.error is None
     assert cache.get(_cache_key("links", device, "primary")) is None
+    # Without a wildcard API the snapshot-bound picks cannot be enumerated; they expire on their own.
+    assert cache.get(f"{_cache_key('links', device, 'primary')}:manual-remote:row") == 1
+
+
+@pytest.mark.django_db
+def test_snapshot_cleanup_removes_snapshot_bound_cable_picks(
+    settings,
+    django_capture_on_commit_callbacks,
+):
+    """The configured backend must drop the picks bound to a discarded cable snapshot."""
+    _configure_servers(settings)
+    device = make_device("cache-cable-pick-cleanup", librenms_cf={"primary": {"id": 6406}})
+    coordinator = SyncCacheConsistency(device)
+    _seed_snapshot("ports", device, "primary")
+    _seed_snapshot("links", device, "primary")
+    pick_key = f"{_cache_key('links', device, 'primary')}:manual-remote:row"
+    cache.set(pick_key, 1, timeout=300)
+
+    with django_capture_on_commit_callbacks(execute=True):
+        transition = coordinator.schedule_mutation(SyncTab.INTERFACES, "primary", actor_id=1)
+
+    assert transition.error is None
+    assert cache.get(_cache_key("links", device, "primary")) is None
+    assert cache.get(pick_key) is None
 
 
 @pytest.mark.django_db
@@ -1833,6 +1857,41 @@ def test_blocked_active_tab_reads_device_info_from_cache_only(
     requests_get.assert_not_called()
     assert response.status_code == 200
     assert b"Details unavailable" in response.content
+
+
+@pytest.mark.django_db
+def test_blocked_tab_skips_the_virtual_chassis_inventory_lookup(
+    client,
+    settings,
+    django_capture_on_commit_callbacks,
+):
+    """A cache-only render must not fetch Virtual Chassis inventory, which has no snapshot."""
+    _configure_servers(settings)
+    _virtual_chassis, (member, _second) = make_virtual_chassis_members("cache-blocked-vc")
+    set_librenms_device_id(member, 7803, "primary")
+    member.save(update_fields=["custom_field_data"])
+    cache.set(
+        "librenms_device_info_primary_7803",
+        (True, {"device_id": 7803, "sysName": member.name, "hostname": member.name}),
+        timeout=300,
+    )
+    _seed_snapshot("ip_addresses", member, "primary")
+    coordinator = SyncCacheConsistency(member)
+    with django_capture_on_commit_callbacks(execute=True):
+        coordinator.schedule_mutation(SyncTab.INTERFACES, "primary", actor_id=1)
+    # Pin the seeding: a state that stopped matching would make the assertion below vacuous.
+    assert coordinator.status("primary")[SyncTab.IP_ADDRESSES.value]["state"] == SyncTabState.INVALIDATED.value
+
+    client.force_login(make_superuser("cache-blocked-vc-user"))
+    url = reverse("plugins:netbox_librenms_plugin:device_librenms_sync", args=[member.pk])
+    with patch(
+        "netbox_librenms_plugin.librenms_api.requests.get",
+        side_effect=AssertionError("A blocked tab fetched Virtual Chassis inventory"),
+    ) as requests_get:
+        response = client.get(url, {"server_key": "primary", "tab": SyncTab.IP_ADDRESSES.value})
+
+    requests_get.assert_not_called()
+    assert response.status_code == 200
 
 
 @pytest.mark.django_db
