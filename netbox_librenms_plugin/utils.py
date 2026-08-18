@@ -10,6 +10,7 @@ import netaddr
 from dcim.models import Device, Interface
 from django.core import signing
 from django.core.exceptions import ObjectDoesNotExist, ValidationError
+from django.db import IntegrityError
 from django.db.models import Count, Max, Q
 from django.http import HttpRequest
 from django.utils.functional import SimpleLazyObject
@@ -613,6 +614,28 @@ def normalize_cable_tag_slug(name):
     return slug
 
 
+def _free_cable_tag_slug(slug):
+    """Return the first tag slug derived from *slug* that no Tag currently uses."""
+    from extras.models import Tag
+
+    max_length = Tag._meta.get_field("slug").max_length
+    candidate = slug[:max_length]
+    suffix = 2
+    while Tag.objects.filter(slug=candidate).exists():
+        suffix_text = f"-{suffix}"
+        candidate = f"{slug[: max_length - len(suffix_text)]}{suffix_text}"
+        suffix += 1
+    return candidate
+
+
+def _create_cable_tag(name, slug, color):
+    """Create (or adopt) the provenance tag, letting a taken slug surface."""
+    from extras.models import Tag
+
+    tag, _ = Tag.objects.get_or_create(name=name, defaults={"slug": _free_cable_tag_slug(slug), "color": color})
+    return tag
+
+
 def get_librenms_cable_tag(*, create=True, sync_settings=None):
     """
     Return (creating on first use) the Tag stamped on cables the LibreNMS cable sync creates.
@@ -635,17 +658,15 @@ def get_librenms_cable_tag(*, create=True, sync_settings=None):
     if not create:
         return None
 
-    candidate = slug[: Tag._meta.get_field("slug").max_length]
-    suffix = 2
-    while Tag.objects.filter(slug=candidate).exists():
-        suffix_text = f"-{suffix}"
-        candidate = f"{slug[: Tag._meta.get_field('slug').max_length - len(suffix_text)]}{suffix_text}"
-        suffix += 1
-    tag, _ = Tag.objects.get_or_create(
-        name=name,
-        defaults={"slug": candidate, "color": sync_settings.cable_sync_tag_color},
-    )
-    return tag
+    color = sync_settings.cable_sync_tag_color
+    try:
+        return _create_cable_tag(name, slug, color)
+    except IntegrityError:
+        # get_or_create only re-reads by name, so a concurrent insert that took the candidate slug
+        # reaches here instead. Adopt the tag that name now points at, else search for a free slug once more.
+        if tag := Tag.objects.filter(name=name).first():
+            return tag
+        return _create_cable_tag(name, slug, color)
 
 
 def _cable_tag_ids(cable) -> set:

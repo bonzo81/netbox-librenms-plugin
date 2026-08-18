@@ -1,7 +1,7 @@
 import logging
 
 from django.contrib import messages
-from django.core.exceptions import PermissionDenied
+from django.core.exceptions import PermissionDenied, ValidationError
 from django.http import HttpResponse
 from django.shortcuts import redirect, render
 from django.utils.html import escape
@@ -123,6 +123,9 @@ class LibreNMSSettingsView(LibreNMSPermissionMixin, View):
                     # not imply Tag change permission. Re-render with the input instead of a bare
                     # 403 page that discards it.
                     cable_sync_form.add_error(None, str(exc))
+                except ValidationError as exc:
+                    # The tag name was taken between validation and the locked rename.
+                    cable_sync_form.add_error(None, exc)
                 else:
                     messages.success(
                         request,

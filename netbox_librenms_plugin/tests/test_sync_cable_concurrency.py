@@ -22,6 +22,28 @@ pytestmark = pytest.mark.django_db(
 )
 
 
+def _wait_until_blocked(pid, future, seconds=5):
+    """Block until the worker backend waits on a database lock."""
+    from django.db import connection
+
+    deadline = monotonic() + seconds
+    last_state = None
+    while monotonic() < deadline:
+        if future.done():
+            raise AssertionError(f"settings worker {pid} completed early with status {future.result()}")
+        with connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT state, wait_event_type, wait_event, query FROM pg_stat_activity WHERE pid = %s",
+                [pid],
+            )
+            row = cursor.fetchone()
+        last_state = row
+        if row and row[1] == "Lock":
+            return
+        sleep(0.01)
+    raise AssertionError(f"settings worker {pid} did not wait for a database lock: {last_state!r}")
+
+
 @pytest.fixture(autouse=True)
 def restore_librenms_id_custom_field():
     """Recreate migration-seeded custom-field state after each transaction flush."""
@@ -370,30 +392,12 @@ def test_concurrent_tag_renames_keep_settings_and_provenance_identity_together()
         finally:
             close_old_connections()
 
-    def wait_until_blocked(pid, future):
-        deadline = monotonic() + 5
-        last_state = None
-        while monotonic() < deadline:
-            if future.done():
-                raise AssertionError(f"settings worker {pid} completed early with status {future.result()}")
-            with connection.cursor() as cursor:
-                cursor.execute(
-                    "SELECT state, wait_event_type, wait_event, query FROM pg_stat_activity WHERE pid = %s",
-                    [pid],
-                )
-                row = cursor.fetchone()
-            last_state = row
-            if row and row[1] == "Lock":
-                return
-            sleep(0.01)
-        raise AssertionError(f"settings worker {pid} did not wait for a database lock: {last_state!r}")
-
     with ThreadPoolExecutor(max_workers=2) as executor:
         with transaction.atomic():
             LibreNMSSettings.objects.select_for_update().get(pk=settings.pk)
             first = executor.submit(rename_tag, forms[0])
             first_pid = worker_pids.get(timeout=5)
-            wait_until_blocked(first_pid, first)
+            _wait_until_blocked(first_pid, first)
             second = executor.submit(rename_tag, forms[1])
             worker_pids.get(timeout=5)
 
@@ -404,3 +408,93 @@ def test_concurrent_tag_renames_keep_settings_and_provenance_identity_together()
     tag.refresh_from_db()
     assert settings.cable_sync_tag in {"managed-first", "managed-second"}
     assert tag.name == settings.cable_sync_tag
+
+
+def test_settings_rename_reports_a_tag_name_taken_after_validation():
+    """A target tag name created while the rename waits for its lock must re-render, not 500."""
+    from django.contrib.auth import get_user_model
+    from django.db import close_old_connections, connection, transaction
+    from django.test import Client
+    from django.urls import reverse
+    from extras.models import Tag
+
+    from netbox_librenms_plugin.models import LibreNMSSettings
+    from netbox_librenms_plugin.utils import get_librenms_cable_tag
+
+    settings_row, _ = LibreNMSSettings.objects.get_or_create()
+    tag = get_librenms_cable_tag(sync_settings=settings_row)
+    user = get_user_model().objects.create_superuser("cable-tag-grab", "", "pw")
+    worker_pids = Queue()
+
+    # Log in before the lock is taken: the session row must be committed and out of the timed window.
+    client = Client()
+    client.force_login(user)
+
+    def post_rename():
+        close_old_connections()
+        try:
+            connection.ensure_connection()
+            worker_pids.put(connection.connection.info.backend_pid)
+            return client.post(
+                reverse("plugins:netbox_librenms_plugin:settings"),
+                {
+                    "form_type": "cable_sync_settings",
+                    "cable_sync_tag": "grabbed-name",
+                    "cable_sync_tag_color": "009688",
+                    "cable_sync_description": "Managed cable",
+                },
+            )
+        finally:
+            close_old_connections()
+
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        with transaction.atomic():
+            LibreNMSSettings.objects.select_for_update().get(pk=settings_row.pk)
+            future = executor.submit(post_rename)
+            worker_pid = worker_pids.get(timeout=5)
+            # The form validated before it reached this lock, so the create below is the race.
+            # A whole request runs before the lock, so allow more than the direct-save tests do.
+            _wait_until_blocked(worker_pid, future, seconds=30)
+            Tag.objects.create(name="grabbed-name", slug="grabbed-name-unrelated")
+        response = future.result(timeout=10)
+
+    assert response.status_code == 200
+    assert "A different tag already uses this name." in response.content.decode()
+    settings_row.refresh_from_db()
+    tag.refresh_from_db()
+    assert settings_row.cable_sync_tag == tag.name
+    assert Tag.objects.filter(name="grabbed-name").count() == 1
+
+
+def test_provenance_tag_creation_survives_a_concurrent_slug_grab():
+    """A slug taken between the free-slug search and the create must not surface an IntegrityError."""
+    from django.db import close_old_connections, connection
+    from extras.models import Tag
+
+    from netbox_librenms_plugin.models import LibreNMSSettings
+    from netbox_librenms_plugin.utils import get_librenms_cable_tag
+
+    settings_row, _ = LibreNMSSettings.objects.get_or_create()
+    Tag.objects.filter(slug__startswith="librenms").delete()
+    raced = []
+
+    def grab_slug():
+        close_old_connections()
+        try:
+            Tag.objects.create(name="unrelated-slug-grab", slug="librenms")
+        finally:
+            close_old_connections()
+
+    def race_on_tag_insert(execute, sql, params, many, context):
+        if not raced and 'INSERT INTO "extras_tag"' in sql:
+            raced.append(sql)
+            with ThreadPoolExecutor(max_workers=1) as executor:
+                executor.submit(grab_slug).result(timeout=5)
+        return execute(sql, params, many, context)
+
+    with connection.execute_wrapper(race_on_tag_insert):
+        tag = get_librenms_cable_tag(sync_settings=settings_row)
+
+    assert raced, "the provenance tag insert never ran, so the race was not exercised"
+    assert tag.name == settings_row.cable_sync_tag
+    assert tag.slug == "librenms-2"

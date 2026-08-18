@@ -16,7 +16,7 @@ from dcim.models import (
 )
 from django import forms
 from django.core.exceptions import MultipleObjectsReturned
-from django.db import transaction
+from django.db import IntegrityError, transaction
 from django.db.models import Case, IntegerField, Q, Value, When
 from django.http import QueryDict
 from django.utils.translation import gettext_lazy as _
@@ -430,7 +430,12 @@ class CableSyncSettingsForm(NetBoxModelForm):
             if update_fields:
                 if self.user is not None and not Tag.objects.restrict(self.user, "change").filter(pk=tag.pk).exists():
                     raise PermissionDenied("You do not have permission to change the cable provenance tag.")
-                tag.save(update_fields=update_fields)
+                try:
+                    tag.save(update_fields=update_fields)
+                except IntegrityError as exc:
+                    # select_for_update cannot lock a name that has no row yet, so a concurrent
+                    # create can take the target name between clean_cable_sync_tag and this save.
+                    raise forms.ValidationError({"cable_sync_tag": "A different tag already uses this name."}) from exc
 
         setting_fields = ("cable_sync_tag", "cable_sync_tag_color", "cable_sync_description")
         for field_name in setting_fields:
