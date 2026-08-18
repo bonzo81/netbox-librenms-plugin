@@ -113,7 +113,7 @@ def _report_install_results(request, installed, skipped, failed):
         messages.warning(request, f"Failed {len(failed)}: {'; '.join(failed)}")
 
 
-def _resolve_target_device_with_validation(page_device, selected_device_id):
+def _resolve_target_device_with_validation(page_device, selected_device_id, devices):
     """Resolve a target device and indicate whether selection input was invalid."""
     if not selected_device_id:
         return page_device, False
@@ -129,15 +129,15 @@ def _resolve_target_device_with_validation(page_device, selected_device_id):
     if not getattr(page_device, "virtual_chassis", None):
         return page_device, True
 
-    member = page_device.virtual_chassis.members.filter(pk=selected_device_id).first()
+    member = devices.filter(pk=selected_device_id, virtual_chassis=page_device.virtual_chassis).first()
     if member is None:
         return page_device, True
     return member, False
 
 
-def _resolve_target_device(page_device, selected_device_id):
+def _resolve_target_device(page_device, selected_device_id, devices):
     """Resolve and validate a target device from row-level VC selection."""
-    target_device, _ = _resolve_target_device_with_validation(page_device, selected_device_id)
+    target_device, _ = _resolve_target_device_with_validation(page_device, selected_device_id, devices)
     return target_device
 
 
@@ -165,6 +165,23 @@ class _SerialConflictUnavailable(Exception):
     def __init__(self, serial):
         super().__init__(serial)
         self.serial = serial
+
+
+class _ModuleComponentAdoptionUnavailable(Exception):
+    """
+    Abort a module write that adopted a component outside the caller's change scope.
+
+    Carries the component so the operator is told WHICH of the eight adoptable types they lack
+    ``change`` on; without it all three handlers emitted the same untraceable sentence.
+
+    Args:
+        component_model: The component model that could not be adopted, when known.
+    """
+
+    def __init__(self, component_model=None):
+        self.component_model = component_model
+        self.component_label = str(component_model._meta.verbose_name) if component_model is not None else "component"
+        super().__init__(f"{self.component_label} is not available for module adoption")
 
 
 def _get_sync_device_for_inventory(device, server_key):
@@ -247,21 +264,127 @@ def _select_module_interface_by_coordinates(device, module_interfaces, item):
     return scored[0][2]
 
 
-def _count_adoptable_interfaces(device, module):
-    """Count standalone interfaces that would be adopted during module install."""
-    from dcim.models import Interface
+def _module_component_specs():
+    """Return the template, device relation, and model used by NetBox module replication."""
+    from dcim.models import (
+        ConsolePort,
+        ConsoleServerPort,
+        FrontPort,
+        Interface,
+        ModuleBay,
+        PowerOutlet,
+        PowerPort,
+        RearPort,
+    )
 
-    template_names = get_module_template_interface_names(device, module)
-    if not template_names:
-        return 0
+    return (
+        ("consoleporttemplates", "consoleports", ConsolePort),
+        ("consoleserverporttemplates", "consoleserverports", ConsoleServerPort),
+        ("interfacetemplates", "interfaces", Interface),
+        ("powerporttemplates", "powerports", PowerPort),
+        ("poweroutlettemplates", "poweroutlets", PowerOutlet),
+        ("rearporttemplates", "rearports", RearPort),
+        ("frontporttemplates", "frontports", FrontPort),
+        ("modulebaytemplates", "modulebays", ModuleBay),
+    )
 
-    return Interface.objects.filter(device=device, module__isnull=True, name__in=template_names).count()
+
+def _restricted_module_component_querysets(view):
+    """Return change-scoped querysets for every component NetBox can adopt."""
+    return {model: view.restricted_queryset(model, "change") for _, _, model in _module_component_specs()}
 
 
-def _adopt_existing_template_interfaces(device, module):
+def _module_template_adoption_name(template_attribute, template, module):
+    """Return the exact name that the running NetBox version uses for adoption."""
+    if template_attribute == "modulebaytemplates":
+        # NetBox 4.4.0 through 4.4.7 instantiate module-bay names without resolving
+        # placeholders. This template has no dependent lookup, so it is safe before save.
+        return template.instantiate(device=module.device, module=module).name
+    # NetBox 4.4 and 4.5 accept only the module argument. Newer releases also
+    # resolve the device through module.device, so the compatible call is exact.
+    return template.resolve_name(module)
+
+
+def _authorize_adoptable_module_components(module, component_querysets):
+    """Lock and authorize the exact standalone components NetBox can adopt."""
+    expected_ids = {}
+
+    for template_attribute, component_attribute, component_model in _module_component_specs():
+        names = [
+            _module_template_adoption_name(template_attribute, template, module)
+            for template in getattr(module.module_type, template_attribute).all()
+        ]
+        if not names:
+            continue
+
+        candidates = list(
+            getattr(module.device, component_attribute)
+            .select_for_update(of=("self",))
+            .filter(module__isnull=True, name__in=names)
+        )
+        candidates_by_name = {candidate.name: candidate for candidate in candidates}
+        candidate_ids = {candidates_by_name[name].pk for name in names if name in candidates_by_name}
+        if not candidate_ids:
+            continue
+
+        allowed = component_querysets.get(component_model)
+        if allowed is None or allowed.filter(pk__in=candidate_ids).count() != len(candidate_ids):
+            raise _ModuleComponentAdoptionUnavailable(component_model)
+        expected_ids[component_model] = candidate_ids
+
+    return expected_ids
+
+
+def _save_module_with_expected_component_adoption(module, expected_ids):
+    """Save a module and verify that NetBox adopted only the expected components."""
+    from django.db.models.signals import post_save
+
+    component_models = tuple(spec[2] for spec in _module_component_specs())
+    created_ids = {model: set() for model in component_models}
+    adopted_ids = {model: set() for model in component_models}
+
+    def capture_component_save(sender, instance, created, **kwargs):
+        if instance.module_id != module.pk:
+            return
+        if created:
+            created_ids[sender].add(instance.pk)
+        else:
+            adopted_ids[sender].add(instance.pk)
+
+    with transaction.atomic():
+        module._adopt_components = True
+        module.full_clean()
+        for component_model in component_models:
+            post_save.connect(capture_component_save, sender=component_model, weak=False)
+        try:
+            module.save()
+        finally:
+            for component_model in component_models:
+                post_save.disconnect(capture_component_save, sender=component_model)
+
+        actual_ids = {}
+        for component_model in component_models:
+            ids = adopted_ids[component_model] - created_ids[component_model]
+            if ids:
+                actual_ids[component_model] = ids
+        if actual_ids != expected_ids:
+            diverged = next(
+                (m for m in component_models if actual_ids.get(m) != expected_ids.get(m)),
+                None,
+            )
+            raise _ModuleComponentAdoptionUnavailable(diverged)
+    return sum(len(ids) for ids in actual_ids.values())
+
+
+def _save_module_with_scoped_component_adoption(module, component_querysets):
+    """Authorize, lock, and save every component NetBox can adopt."""
+    with transaction.atomic():
+        expected_ids = _authorize_adoptable_module_components(module, component_querysets)
+        return _save_module_with_expected_component_adoption(module, expected_ids)
+
+
+def _adopt_existing_template_interfaces(device, module, interfaces):
     """Adopt existing standalone interfaces into an already-installed module by template name."""
-    from dcim.models import Interface
-
     template_names = get_module_template_interface_names(device, module)
     if not template_names:
         return {
@@ -269,8 +392,8 @@ def _adopt_existing_template_interfaces(device, module):
             "reason": "this module type has no interface templates to match against",
         }
 
-    interfaces = list(Interface.objects.filter(device=device, module__isnull=True, name__in=template_names))
-    if not interfaces:
+    adoptable = list(interfaces.filter(device=device, module__isnull=True, name__in=template_names))
+    if not adoptable:
         return {
             "status": "skipped",
             "reason": "no matching standalone interfaces found for this module's interface templates",
@@ -278,7 +401,7 @@ def _adopt_existing_template_interfaces(device, module):
 
     adopted_names = []
     with transaction.atomic():
-        for interface in interfaces:
+        for interface in adoptable:
             interface.module = module
             interface.save(update_fields=["module"])
             adopted_names.append(interface.name)
@@ -340,7 +463,12 @@ def _rewrite_interface_name_for_vc_member(interface_name, vc_position, member_po
     )
 
 
-def _normalize_module_interface_names_for_vc_member(device, module):
+def _normalize_module_interface_names_for_vc_member(
+    device,
+    module,
+    changeable_interfaces,
+    deletable_interfaces,
+):
     """
     Normalize module interface names to the selected VC member position.
 
@@ -368,6 +496,9 @@ def _normalize_module_interface_names_for_vc_member(device, module):
     module_interfaces = list(Interface.objects.filter(device=device, module=module).order_by("pk"))
 
     for interface in module_interfaces:
+        if not changeable_interfaces.filter(pk=interface.pk).exists():
+            result["skipped"] += 1
+            continue
         desired_name = _rewrite_interface_name_for_vc_member(
             interface.name,
             vc_position,
@@ -379,6 +510,12 @@ def _normalize_module_interface_names_for_vc_member(device, module):
         conflict = Interface.objects.filter(device=device, name=desired_name).exclude(pk=interface.pk).first()
         if conflict is not None:
             if getattr(conflict, "module_id", None) is None:
+                if not changeable_interfaces.filter(pk=conflict.pk).exists():
+                    result["skipped"] += 1
+                    continue
+                if not deletable_interfaces.filter(pk=interface.pk).exists():
+                    result["skipped"] += 1
+                    continue
                 conflict.module = module
                 conflict.save(update_fields=["module"])
                 result["adopted"] += 1
@@ -420,7 +557,7 @@ def _format_vc_adjustment_summary(adjustments):
     return ", ".join(parts)
 
 
-def _bind_interface_librenms_id(device, item, module_pk, server_key):
+def _bind_interface_librenms_id(device, item, module_pk, server_key, interfaces):
     """
     Bind LibreNMS ``port_id`` to the best matching NetBox interface.
 
@@ -444,6 +581,11 @@ def _bind_interface_librenms_id(device, item, module_pk, server_key):
                 "not reassigning. Resolve the duplicate librenms_id first."
             ),
         }
+    if existing_owner is not None and not interfaces.filter(pk=existing_owner.pk).exists():
+        return {
+            "status": "skipped",
+            "reason": f"matching interface is not available for port_id {port_id}",
+        }
     if existing_owner is not None and existing_owner.device_id != device.pk:
         return {
             "status": "conflict",
@@ -455,10 +597,10 @@ def _bind_interface_librenms_id(device, item, module_pk, server_key):
 
     candidate = existing_owner
     if candidate is None and interface_names:
-        candidate = Interface.objects.filter(device=device, name__in=interface_names).first()
+        candidate = interfaces.filter(device=device, name__in=interface_names).first()
 
     if candidate is None and module_pk:
-        module_interfaces = Interface.objects.filter(device=device, module_id=module_pk)
+        module_interfaces = interfaces.filter(device=device, module_id=module_pk)
         if interface_names:
             candidate = module_interfaces.filter(name__in=interface_names).first()
         if candidate is None:
@@ -577,10 +719,15 @@ class InstallModuleView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
 
         page_device = self.restrict_object_or_404(Device, pk=pk)
         target_device, invalid_selected_device = _resolve_target_device_with_validation(
-            page_device, request.POST.get("selected_device_id")
+            page_device,
+            request.POST.get("selected_device_id"),
+            self.restricted_queryset(Device),
         )
         if invalid_selected_device:
             _warn_invalid_selected_device(request)
+        changeable_components = _restricted_module_component_querysets(self)
+        changeable_interfaces = changeable_components[Interface]
+        deletable_interfaces = self.restricted_queryset(Interface, "delete")
         # Validate the posted server_key against configured servers, else fall back to the active
         # client server (resolve_posted_server_key). A blank key (e.g. a fallback render where
         # module_sync.server_key is empty) OR a forged/unconfigured one must degrade rather than scope
@@ -627,16 +774,24 @@ class InstallModuleView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
                     serial=serial,
                     status="active",
                 )
-                adopted_interfaces = _count_adoptable_interfaces(target_device, module)
-                module._adopt_components = True
-                module.full_clean()
-                module.save()
-                vc_adjustments = _normalize_module_interface_names_for_vc_member(target_device, module)
+                adopted_components = _save_module_with_scoped_component_adoption(module, changeable_components)
+                vc_adjustments = _normalize_module_interface_names_for_vc_member(
+                    target_device,
+                    module,
+                    changeable_interfaces,
+                    deletable_interfaces,
+                )
 
             bind_result = None
             if bind_item and server_key:
                 try:
-                    bind_result = _bind_interface_librenms_id(target_device, bind_item, module.pk, server_key)
+                    bind_result = _bind_interface_librenms_id(
+                        target_device,
+                        bind_item,
+                        module.pk,
+                        server_key,
+                        changeable_interfaces,
+                    )
                 except Exception:
                     bind_result = {
                         "status": "failed",
@@ -646,11 +801,11 @@ class InstallModuleView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
             messages.success(
                 request, f"Installed {module_type.model} in {locked_bay.name} (serial: {serial or 'N/A'})."
             )
-            if adopted_interfaces:
+            if adopted_components:
                 messages.warning(
                     request,
                     "Module sync authority applied: adopted "
-                    f"{adopted_interfaces} existing standalone interface(s) into the module.",
+                    f"{adopted_components} existing standalone component(s) into the module.",
                 )
             vc_summary = _format_vc_adjustment_summary(vc_adjustments)
             if vc_summary:
@@ -675,6 +830,8 @@ class InstallModuleView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
                     "Installed module, but interface binding was skipped: "
                     f"{bind_result.get('reason', 'unknown reason')}",
                 )
+        except _ModuleComponentAdoptionUnavailable as exc:
+            messages.error(request, f"A matching {exc.component_label} is not available for module adoption.")
         except (ValidationError, IntegrityError) as e:
             messages.error(request, f"Failed to install module: {e}")
 
@@ -690,6 +847,8 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
         self.required_object_permissions = {
             "POST": [
                 ("view", Device),
+                ("view", ModuleBay),
+                ("view", ModuleType),
                 ("add", Module),
                 ("add", Interface),
                 ("change", Interface),
@@ -701,10 +860,16 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
 
         page_device = self.restrict_object_or_404(Device, pk=pk)
         target_device, invalid_selected_device = _resolve_target_device_with_validation(
-            page_device, request.POST.get("selected_device_id")
+            page_device,
+            request.POST.get("selected_device_id"),
+            self.restricted_queryset(Device),
         )
         if invalid_selected_device:
             _warn_invalid_selected_device(request)
+        module_bays = self.restricted_queryset(ModuleBay)
+        changeable_components = _restricted_module_component_querysets(self)
+        changeable_interfaces = changeable_components[Interface]
+        deletable_interfaces = self.restricted_queryset(Interface, "delete")
         parent_index = request.POST.get("parent_index")
         server_key = self.resolve_posted_server_key(request.POST)
         sync_url = reverse("plugins:netbox_librenms_plugin:device_librenms_sync", kwargs={"pk": pk})
@@ -742,6 +907,7 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
 
         # Load module types (with mappings)
         module_types = get_module_types_indexed()
+        allowed_module_type_ids = set(self.restricted_queryset(ModuleType).values_list("pk", flat=True))
 
         # Preload all ModuleBayMappings once to avoid N+1 per-item queries.
         # Filter by device manufacturer so vendor-scoped mappings only apply to
@@ -773,13 +939,15 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
                         item,
                         index_map,
                         module_types,
-                        ModuleBay,
-                        ModuleType,
-                        Module,
                         exact_mappings=exact_mappings,
                         regex_mappings=regex_mappings,
                         manufacturer_id=mfr_id,
                         norm_rules_bay=norm_rules_bay,
+                        module_bays=module_bays,
+                        allowed_module_type_ids=allowed_module_type_ids,
+                        changeable_components=changeable_components,
+                        changeable_interfaces=changeable_interfaces,
+                        deletable_interfaces=deletable_interfaces,
                     )
                     should_bind = _should_attempt_bind_for_result(result)
                     if result["status"] == "installed":
@@ -795,6 +963,7 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
                             item,
                             result.get("module_pk"),
                             server_key,
+                            changeable_interfaces,
                         )
                         if bind_result and bind_result["status"] != "bound":
                             skipped.append(f"{result['name']}: {bind_result['reason']}")
@@ -893,9 +1062,12 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
         item,
         index_map,
         module_types,
-        ModuleBay,
-        ModuleType,
-        Module,
+        *,
+        module_bays,
+        allowed_module_type_ids,
+        changeable_components,
+        changeable_interfaces,
+        deletable_interfaces,
         exact_mappings=None,
         regex_mappings=None,
         manufacturer_id=None,
@@ -907,6 +1079,8 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
         Re-fetches module bays each time since parent installs create new ones.
         Scopes bay lookup to the correct parent module to handle duplicate bay names.
         """
+        from dcim.models import Module
+
         from netbox_librenms_plugin.utils import resolve_module_type
 
         model_name = (item.get("entPhysicalModelName") or "").strip()
@@ -927,9 +1101,11 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
         matched_type = resolve_module_type(model_name, module_types, manufacturer=manufacturer)
         if not matched_type:
             return {"status": "skipped", "name": name, "reason": "no matching type"}
+        if matched_type.pk not in allowed_module_type_ids:
+            return {"status": "skipped", "name": name, "reason": "no matching type"}
 
         # Re-fetch module bays (parent install creates new child bays)
-        bays = ModuleBay.objects.filter(device=device).select_related("installed_module__module_type")
+        bays = module_bays.filter(device=device).select_related("installed_module__module_type")
 
         # Use preloaded mappings if provided, otherwise load from DB
         if exact_mappings is None or regex_mappings is None:
@@ -962,7 +1138,7 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
         try:
             with transaction.atomic():  # savepoint: failure here won't abort parent tx
                 locked_bay = (
-                    ModuleBay.objects.select_for_update(of=("self",))
+                    module_bays.select_for_update(of=("self",))
                     .select_related("installed_module")
                     .get(pk=matched_bay.pk)
                 )
@@ -981,11 +1157,19 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
                     serial=serial,
                     status="active",
                 )
-                adopted_interfaces = _count_adoptable_interfaces(device, module)
-                module._adopt_components = True
-                module.full_clean()
-                module.save()
-                vc_adjustments = _normalize_module_interface_names_for_vc_member(device, module)
+                adopted_components = _save_module_with_scoped_component_adoption(module, changeable_components)
+                vc_adjustments = _normalize_module_interface_names_for_vc_member(
+                    device,
+                    module,
+                    changeable_interfaces,
+                    deletable_interfaces,
+                )
+        except _ModuleComponentAdoptionUnavailable as exc:
+            return {
+                "status": "skipped",
+                "name": name,
+                "reason": f"a matching {exc.component_label} is not available for module adoption",
+            }
         except (ValidationError, IntegrityError) as e:
             error_msg = str(e)
             if "dcim_interface_unique_device_name" in error_msg:
@@ -997,8 +1181,8 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
             return {"status": "failed", "name": name, "reason": error_msg}
 
         name = f"{matched_type.model} → {matched_bay.name}"
-        if adopted_interfaces:
-            name += f" (adopted {adopted_interfaces} existing interface(s))"
+        if adopted_components:
+            name += f" (adopted {adopted_components} existing component(s))"
         vc_summary = _format_vc_adjustment_summary(vc_adjustments)
         if vc_summary:
             name += f" (vc normalize: {vc_summary})"
@@ -1007,7 +1191,7 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
             "status": "installed",
             "name": name,
             "module_pk": module.pk,
-            "adopted_interfaces": adopted_interfaces,
+            "adopted_components": adopted_components,
             "vc_adjustments": vc_adjustments,
         }
 
@@ -1248,6 +1432,8 @@ class InstallSelectedView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
         self.required_object_permissions = {
             "POST": [
                 ("view", Device),
+                ("view", ModuleBay),
+                ("view", ModuleType),
                 ("add", Module),
                 ("add", Interface),
                 ("change", Interface),
@@ -1258,6 +1444,10 @@ class InstallSelectedView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
             return error
 
         page_device = self.restrict_object_or_404(Device, pk=pk)
+        module_bays = self.restricted_queryset(ModuleBay)
+        changeable_components = _restricted_module_component_querysets(self)
+        changeable_interfaces = changeable_components[Interface]
+        deletable_interfaces = self.restricted_queryset(Interface, "delete")
         server_key = self.resolve_posted_server_key(request.POST)
         sync_url = reverse("plugins:netbox_librenms_plugin:device_librenms_sync", kwargs={"pk": pk})
 
@@ -1301,6 +1491,7 @@ class InstallSelectedView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
         from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
 
         module_types = get_module_types_indexed()
+        allowed_module_type_ids = set(self.restricted_queryset(ModuleType).values_list("pk", flat=True))
         all_exact, all_regex = load_bay_mappings()
 
         # Preload module_bay normalization rules once so _match_bay considers the
@@ -1318,7 +1509,9 @@ class InstallSelectedView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
                     ent_index = item.get("entPhysicalIndex")
                     selected_device_id = request.POST.get(f"device_selection_{ent_index}")
                     target_device, invalid_selected_device = _resolve_target_device_with_validation(
-                        page_device, selected_device_id
+                        page_device,
+                        selected_device_id,
+                        self.restricted_queryset(Device),
                     )
                     if invalid_selected_device:
                         invalid_selection_seen = True
@@ -1342,13 +1535,15 @@ class InstallSelectedView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
                         item,
                         index_map,
                         module_types,
-                        ModuleBay,
-                        ModuleType,
-                        Module,
                         exact_mappings=exact_mappings,
                         regex_mappings=regex_mappings,
                         manufacturer_id=mfr_id,
                         norm_rules_bay=norm_rules_bay,
+                        module_bays=module_bays,
+                        allowed_module_type_ids=allowed_module_type_ids,
+                        changeable_components=changeable_components,
+                        changeable_interfaces=changeable_interfaces,
+                        deletable_interfaces=deletable_interfaces,
                     )
                     should_bind = _should_attempt_bind_for_result(result)
                     if result["status"] == "installed":
@@ -1364,6 +1559,7 @@ class InstallSelectedView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
                             item,
                             result.get("module_pk"),
                             server_key,
+                            changeable_interfaces,
                         )
                         if bind_result and bind_result["status"] != "bound":
                             skipped.append(f"{result['name']}: {bind_result['reason']}")
@@ -1390,7 +1586,9 @@ class UpdateModuleSerialView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixi
 
         page_device = self.restrict_object_or_404(Device, pk=pk)
         target_device, invalid_selected_device = _resolve_target_device_with_validation(
-            page_device, request.POST.get("selected_device_id")
+            page_device,
+            request.POST.get("selected_device_id"),
+            self.restricted_queryset(Device),
         )
         if invalid_selected_device:
             _warn_invalid_selected_device(request)
@@ -1442,26 +1640,30 @@ class UpdateModuleInterfaceView(
         if error := self.require_all_permissions("POST"):
             return error
 
-        page_device = self.restrict_object_or_404(Device, pk=pk)
-        target_device, invalid_selected_device = _resolve_target_device_with_validation(
-            page_device, request.POST.get("selected_device_id")
-        )
-        if invalid_selected_device:
-            _warn_invalid_selected_device(request)
-        # Validate the posted server_key against configured servers, else fall back to the active
-        # client server (mirrors InstallModuleView via resolve_posted_server_key). A blank key (stale
-        # tab / fallback render) OR a forged/unconfigured one degrades to the active server rather than
-        # scoping under a bogus namespace. Without a usable key the port-bind is skipped AND the
-        # adopt/merge runs without a server scope, so the raw twin's LibreNMS binding can't transfer.
+        # Resolve redirect context and validate the row identifier before any target or cache lookup.
         server_key = self.resolve_posted_server_key(request.POST)
-        bind_item = _resolve_single_install_binding_item(request, target_device, server_key, self.get_cache_key)
         sync_url = reverse("plugins:netbox_librenms_plugin:device_librenms_sync", kwargs={"pk": pk})
-
         try:
             module_id = int(request.POST.get("module_id"))
         except (TypeError, ValueError):
             messages.error(request, "Missing or invalid module ID.")
             return _modules_redirect_response(request, sync_url, server_key)
+
+        page_device = self.restrict_object_or_404(Device, pk=pk)
+        target_device, invalid_selected_device = _resolve_target_device_with_validation(
+            page_device,
+            request.POST.get("selected_device_id"),
+            self.restricted_queryset(Device),
+        )
+        if invalid_selected_device:
+            _warn_invalid_selected_device(request)
+        changeable_interfaces = self.restricted_queryset(Interface, "change")
+        # Validate the posted server_key against configured servers, else fall back to the active
+        # client server (mirrors InstallModuleView via resolve_posted_server_key). A blank key (stale
+        # tab / fallback render) OR a forged/unconfigured one degrades to the active server rather than
+        # scoping under a bogus namespace. Without a usable key the port-bind is skipped AND the
+        # adopt/merge runs without a server scope, so the raw twin's LibreNMS binding can't transfer.
+        bind_item = _resolve_single_install_binding_item(request, target_device, server_key, self.get_cache_key)
 
         module = self.restrict_object_or_404(Module, "view", pk=module_id, device=target_device)
 
@@ -1475,7 +1677,13 @@ class UpdateModuleInterfaceView(
         primary_bind_attempted = bool(bind_item and server_key)
         try:
             if primary_bind_attempted:
-                bind_result = _bind_interface_librenms_id(target_device, bind_item, module.pk, server_key)
+                bind_result = _bind_interface_librenms_id(
+                    target_device,
+                    bind_item,
+                    module.pk,
+                    server_key,
+                    changeable_interfaces,
+                )
         except Exception:
             logger.exception(
                 "Unexpected error binding interface to module (device %s, module %s)",
@@ -1503,7 +1711,11 @@ class UpdateModuleInterfaceView(
                 }
             elif bind_result is None or bind_result.get("status") == "bound":
                 try:
-                    adopt_result = _adopt_existing_template_interfaces(target_device, module)
+                    adopt_result = _adopt_existing_template_interfaces(
+                        target_device,
+                        module,
+                        changeable_interfaces,
+                    )
                 except Exception:
                     logger.exception(
                         "Unexpected error adopting standalone template interfaces (device %s, module %s)",
@@ -1575,7 +1787,9 @@ class ModuleMismatchPreviewView(
 
         page_device = self.restrict_object_or_404(Device, pk=pk)
         target_device, invalid_selected_device = _resolve_target_device_with_validation(
-            page_device, request.GET.get("selected_device_id")
+            page_device,
+            request.GET.get("selected_device_id"),
+            self.restricted_queryset(Device),
         )
         if invalid_selected_device:
             _warn_invalid_selected_device(request)
@@ -1691,17 +1905,19 @@ class VCNormalizationReportView(LibreNMSPermissionMixin, NetBoxObjectPermissionM
         if error := self.require_object_permissions("GET"):
             return error
 
-        page_device = self.restrict_object_or_404(Device, pk=pk)
-        target_device, invalid_selected_device = _resolve_target_device_with_validation(
-            page_device, request.GET.get("selected_device_id")
-        )
-        if invalid_selected_device:
-            _warn_invalid_selected_device(request)
-
         try:
             module_id = int(request.GET.get("module_id"))
         except (TypeError, ValueError):
             return HttpResponse("Missing or invalid module_id.", status=400)
+
+        page_device = self.restrict_object_or_404(Device, pk=pk)
+        target_device, invalid_selected_device = _resolve_target_device_with_validation(
+            page_device,
+            request.GET.get("selected_device_id"),
+            self.restricted_queryset(Device),
+        )
+        if invalid_selected_device:
+            _warn_invalid_selected_device(request)
 
         module = self.restrict_object_or_404(
             Module,
@@ -1741,6 +1957,7 @@ class ReplaceModuleView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjectP
         self.required_object_permissions = {
             "POST": [
                 ("view", Device),
+                ("view", ModuleType),
                 ("add", Module),
                 ("change", Module),
                 ("delete", Module),
@@ -1754,10 +1971,15 @@ class ReplaceModuleView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjectP
 
         page_device = self.restrict_object_or_404(Device, pk=pk)
         target_device, invalid_selected_device = _resolve_target_device_with_validation(
-            page_device, request.POST.get("selected_device_id")
+            page_device,
+            request.POST.get("selected_device_id"),
+            self.restricted_queryset(Device),
         )
         if invalid_selected_device:
             _warn_invalid_selected_device(request)
+        changeable_components = _restricted_module_component_querysets(self)
+        changeable_interfaces = changeable_components[Interface]
+        deletable_interfaces = self.restricted_queryset(Interface, "delete")
         server_key = self.resolve_posted_server_key(request.POST)
         sync_url = reverse("plugins:netbox_librenms_plugin:device_librenms_sync", kwargs={"pk": pk})
 
@@ -1806,11 +2028,14 @@ class ReplaceModuleView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjectP
         if not matched_type:
             messages.error(request, f"No matching module type found for '{model_name}'.")
             return _modules_redirect_response(request, sync_url, server_key)
+        if not self.restricted_queryset(ModuleType).filter(pk=matched_type.pk).exists():
+            messages.error(request, f"No matching module type found for '{model_name}'.")
+            return _modules_redirect_response(request, sync_url, server_key)
 
         try:
             conflict_removed_msg = None
             bind_result = None
-            adopted_interfaces = 0
+            adopted_components = 0
             vc_adjustments = {"renamed": 0, "adopted": 0, "removed": 0, "skipped": 0}
             with transaction.atomic():
                 # Re-fetch with row lock to prevent concurrent modifications
@@ -1833,7 +2058,17 @@ class ReplaceModuleView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjectP
                 target_bay = installed_module.module_bay
                 old_type_name = installed_module.module_type.model
                 old_bay_name = target_bay.name
-
+                new_module = Module(
+                    device=target_device,
+                    module_bay=target_bay,
+                    module_type=matched_type,
+                    serial=serial,
+                    status="active",
+                )
+                expected_component_ids = _authorize_adoptable_module_components(
+                    new_module,
+                    changeable_components,
+                )
                 # Re-derive any serial conflict from the database INSIDE the locked
                 # transaction (and lock those rows too) — checking before the lock
                 # opens a TOCTOU window where a concurrent request could change a
@@ -1872,22 +2107,26 @@ class ReplaceModuleView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjectP
                 installed_module.delete()
 
                 # Install fresh module from LibreNMS data
-                new_module = Module(
-                    device=target_device,
-                    module_bay=target_bay,
-                    module_type=matched_type,
-                    serial=serial,
-                    status="active",
+                adopted_components = _save_module_with_expected_component_adoption(
+                    new_module,
+                    expected_component_ids,
                 )
-                adopted_interfaces = _count_adoptable_interfaces(target_device, new_module)
-                new_module._adopt_components = True
-                new_module.full_clean()
-                new_module.save()
-                vc_adjustments = _normalize_module_interface_names_for_vc_member(target_device, new_module)
+                vc_adjustments = _normalize_module_interface_names_for_vc_member(
+                    target_device,
+                    new_module,
+                    changeable_interfaces,
+                    deletable_interfaces,
+                )
 
             if server_key:
                 try:
-                    bind_result = _bind_interface_librenms_id(target_device, librenms_item, new_module.pk, server_key)
+                    bind_result = _bind_interface_librenms_id(
+                        target_device,
+                        librenms_item,
+                        new_module.pk,
+                        server_key,
+                        changeable_interfaces,
+                    )
                 except Exception:
                     bind_result = {
                         "status": "failed",
@@ -1902,11 +2141,11 @@ class ReplaceModuleView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjectP
                 + (f" (serial: {serial})" if serial else "")
                 + ".",
             )
-            if adopted_interfaces:
+            if adopted_components:
                 messages.warning(
                     request,
                     "Module sync authority applied: adopted "
-                    f"{adopted_interfaces} existing standalone interface(s) into the module.",
+                    f"{adopted_components} existing standalone component(s) into the module.",
                 )
             vc_summary = _format_vc_adjustment_summary(vc_adjustments)
             if vc_summary:
@@ -1925,6 +2164,8 @@ class ReplaceModuleView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjectP
                     "Replaced module, but interface binding was skipped: "
                     f"{bind_result.get('reason', 'unknown reason')}",
                 )
+        except _ModuleComponentAdoptionUnavailable as exc:
+            messages.error(request, f"A matching {exc.component_label} is not available for module adoption.")
         except _SerialConflictAmbiguous as exc:
             messages.error(
                 request,
@@ -1976,7 +2217,9 @@ class MoveModuleView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, View)
 
         page_device = self.restrict_object_or_404(Device, pk=pk)
         target_device, invalid_selected_device = _resolve_target_device_with_validation(
-            page_device, request.POST.get("selected_device_id")
+            page_device,
+            request.POST.get("selected_device_id"),
+            self.restricted_queryset(Device),
         )
         if invalid_selected_device:
             _warn_invalid_selected_device(request)

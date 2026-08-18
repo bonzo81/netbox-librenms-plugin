@@ -11,6 +11,7 @@ import pytest
 
 from netbox_librenms_plugin.tests.conftest import make_device, make_interface, make_vm
 from netbox_librenms_plugin.tests.view_test_helpers import (
+    assert_locked_before_update,
     grant,
     make_request,
     make_user_with_perms,
@@ -1319,6 +1320,37 @@ class TestSyncIPAddressesViewIPWrites:
         ip.refresh_from_db()
         assert ip.assigned_object_id == eth0.pk  # re-homed to the port_id-resolved interface
 
+    def test_existing_ip_outside_the_change_grant_is_not_rehomed(self):
+        """An address matched by natural key must remain outside a constrained change grant."""
+        from dcim.models import Interface
+        from ipam.models import IPAddress
+
+        from netbox_librenms_plugin.utils import set_librenms_device_id
+
+        device = make_device("ip-update-change-scope")
+        target = make_interface(device, "eth0")
+        original = make_interface(device, "eth1")
+        set_librenms_device_id(target, 5, "default")
+        target.save()
+        hidden_ip = IPAddress.objects.create(address="10.0.0.1/24", assigned_object=original, status="active")
+        allowed_ip = IPAddress.objects.create(address="10.0.0.2/24", status="active")
+        user = make_user_with_perms(
+            "ip-update-change-scope",
+            [("view", Interface), ("add", IPAddress)],
+        )
+        user = grant(user, "change", IPAddress, constraints={"pk": allowed_ip.pk})
+        request = _make_request(post_data={"select": ["10.0.0.1"]}, user=user)
+        view = make_view(_sync_ip_view_class(), request)
+        view._post_server_key = "default"
+        cached = [{"ip_address": "10.0.0.1", "ip_with_mask": "10.0.0.1/24", "port_id": 5}]
+
+        with patch("netbox_librenms_plugin.views.sync.ip_addresses.resolve_set_primary_ip", return_value=False):
+            results = view.process_ip_sync(request, ["10.0.0.1"], cached, device, "device")
+
+        hidden_ip.refresh_from_db()
+        assert hidden_ip.assigned_object_id == original.pk
+        assert results["failed"] == ["10.0.0.1"]
+
     def test_unchanged_ip_shows_warning(self):
         from ipam.models import IPAddress
 
@@ -1377,6 +1409,33 @@ class TestSyncIPAddressesViewHelpers:
         second = view._required_permissions("device")
 
         assert second == first
+
+    def test_set_primary_requires_change_scope_on_the_owner(self):
+        """The primary-IP toggle must resolve the owner through its change grant."""
+        from dcim.models import Device, Interface
+        from django.core.cache import cache
+        from django.http import Http404
+        from ipam.models import IPAddress
+
+        target = make_device("primary-owner-hidden")
+        decoy = make_device("primary-owner-allowed")
+        user = make_user_with_perms(
+            "primary-owner-change-scope",
+            [("add", IPAddress), ("change", IPAddress), ("view", Interface)],
+        )
+        user = grant(user, "view", Device, constraints={"pk": target.pk})
+        user = grant(user, "change", Device, constraints={"pk": decoy.pk})
+        request = _make_request(
+            post_data={"select": ["10.0.0.1"], "set-primary-ip-toggle": "on"},
+            user=user,
+        )
+        view = make_view(_sync_ip_view_class(), request)
+        view.rebind_api_for_server = MagicMock(return_value="default")
+        view.get_cache_key = MagicMock(return_value="primary-owner-change-scope")
+        cache.delete("primary-owner-change-scope")
+
+        with pytest.raises(Http404):
+            _post(view, request, object_type="device", pk=target.pk)
 
     def test_get_object_device(self):
         from netbox_librenms_plugin.views.sync.ip_addresses import SyncIPAddressesView
@@ -1687,6 +1746,47 @@ class TestSyncIPAddressesViewInterfaceResolution:
         )
         assert result is None
 
+    def test_existing_ip_is_locked_before_it_is_rewritten(self):
+        """The authorized existing row must be SELECT ... FOR UPDATE before its FK/VRF are rewritten.
+
+        The scope check that authorizes the row takes no lock, so without a re-lock a concurrent
+        assignment or VRF change can commit between the check and the save and be silently
+        overwritten.
+        """
+        from django.db import connection
+        from django.test.utils import CaptureQueriesContext
+        from ipam.models import IPAddress
+
+        from netbox_librenms_plugin.utils import set_librenms_device_id
+
+        view = self._view()
+        view._post_server_key = "default"
+
+        dev = make_device("iplock-existing")
+        iface = make_interface(dev, "eth9")
+        set_librenms_device_id(iface, 91, "default")
+        iface.save()
+        # Pre-existing row for the same address, not yet bound to this interface.
+        existing = IPAddress.objects.create(address="10.9.9.9/24")
+
+        ip_data = {
+            "ip_address": "10.9.9.9",
+            "ip_with_mask": "10.9.9.9/24",
+            "interface_url": None,
+            "port_id": 91,
+            "interface_name": "eth9",
+        }
+        request = _make_request(post_data={"select": ["10.9.9.9"]})
+
+        with CaptureQueriesContext(connection) as ctx:
+            results = view.process_ip_sync(request, ["10.9.9.9"], [ip_data], dev, "device")
+
+        assert_locked_before_update(ctx, "ipam_ipaddress")
+
+        existing.refresh_from_db()
+        assert existing.assigned_object == iface
+        assert results["updated"] == ["10.9.9.9"]
+
     def test_stale_interface_url_still_assigns_after_interface_synced(self):
         """Regression: cached row was enriched before the interface existed (``interface_url`` is None), but the interface has since been synced."""
         from ipam.models import IPAddress
@@ -1925,7 +2025,13 @@ class TestSyncIPAddressesViewInterfaceResolution:
         assert min(device_locks) < min(address_writes), "the device lock must precede the address write"
 
     def test_primary_ip_row_fails_if_owner_disappears_before_lock(self):
-        """A concurrent owner deletion must not write an orphan address or recreate stale owner data."""
+        """A concurrent owner deletion must not write an orphan address or recreate stale owner data.
+
+        The owner is deleted for real, from inside the query wrapper, just before its lock runs. A
+        stubbed ``select_for_update()`` chain would instead pin the exact call shape the code
+        happens to use today and break on any equivalent rewrite.
+        """
+        from django.db import connection
         from ipam.models import IPAddress
 
         from netbox_librenms_plugin.utils import set_librenms_device_id
@@ -1947,16 +2053,31 @@ class TestSyncIPAddressesViewInterfaceResolution:
         }
         request = _make_request(post_data={"select": ["10.0.0.1"]})
 
+        class _DeleteOwnerBeforeItsLock:
+            """Delete the device row as the sync is about to lock it."""
+
+            def __init__(self, device_pk):
+                self.device_pk = device_pk
+                self.fired = False
+
+            def __call__(self, execute, sql, params, many, context):
+                if not self.fired and 'FROM "dcim_device"' in sql and "FOR UPDATE" in sql.upper():
+                    # Set first: the cascade below re-enters this wrapper.
+                    self.fired = True
+                    type(dev).objects.filter(pk=self.device_pk).delete()
+                return execute(sql, params, many, context)
+
+        deleter = _DeleteOwnerBeforeItsLock(dev.pk)
         with (
             patch(
                 "netbox_librenms_plugin.views.sync.ip_addresses.resolve_set_primary_ip",
                 return_value=True,
             ),
-            patch.object(type(dev).objects, "select_for_update") as select_for_update,
+            connection.execute_wrapper(deleter),
         ):
-            select_for_update.return_value.filter.return_value.first.return_value = None
             results = view.process_ip_sync(request, ["10.0.0.1"], [ip_data], dev, "device")
 
+        assert deleter.fired, "the sync never reached the device lock"
         assert results["failed"] == ["10.0.0.1"]
         assert "no longer exists" in results["errors"]["10.0.0.1"]
         assert not IPAddress.objects.filter(address="10.0.0.1/24").exists()
@@ -2238,6 +2359,19 @@ class TestSyncVLANsViewWithGroup:
         assert vlan.name == "Production"
         assert vlan.status == "active"
 
+    def test_leading_zero_selection_uses_the_canonical_cached_vid(self):
+        """A canonical group field must sync a leading-zero selection."""
+        from ipam.models import VLAN
+
+        dev = make_device("vlan-group-canonical")
+        group = _vlan_group("Canonical Group")
+        req = _make_request(post_data={"action": "create_vlans", "select": ["0200"], "vlan_group_200": str(group.pk)})
+        view = _vlan_view(req, dev, [{"vlan_vlan": 200, "vlan_name": "Canonical"}])
+
+        _post(view, req, object_type="device", object_id=dev.pk)
+
+        assert VLAN.objects.filter(vid=200, group=group, name="Canonical").exists()
+
     def test_invalid_vlan_group_id_is_rejected(self):
         """A requested-but-missing VLAN group fails closed: no VLAN is created (not even a global one) and an error is surfaced."""
         from ipam.models import VLAN, VLANGroup
@@ -2403,6 +2537,28 @@ class TestSyncVLANsViewWithGroup:
         assert VLAN.objects.filter(vid=401, name="Valid name").exists()
         assert any("name is invalid" in text for text in message_texts(req, "error"))
         assert any("1 skipped (invalid VLAN name)" in text for text in message_texts(req, "success"))
+
+    def test_invalid_vlan_vid_does_not_abort_the_batch(self):
+        """An out-of-range LibreNMS VID is skipped while the next valid VLAN is created."""
+        from ipam.models import VLAN
+
+        dev = make_device("vlan-invalid-vid")
+        req = _make_request(post_data={"action": "create_vlans", "select": ["0", "401"]})
+        view = _vlan_view(
+            req,
+            dev,
+            [
+                {"vlan_vlan": 0, "vlan_name": "Invalid VID"},
+                {"vlan_vlan": 401, "vlan_name": "Valid VID"},
+            ],
+        )
+
+        _post(view, req, object_type="device", object_id=dev.pk)
+
+        assert not VLAN.objects.filter(vid=0).exists()
+        assert VLAN.objects.filter(vid=401, name="Valid VID").exists()
+        assert any("VID is invalid" in text for text in message_texts(req, "error"))
+        assert any("1 skipped (invalid VLAN VID)" in text for text in message_texts(req, "success"))
 
 
 class TestSyncVLANsViewGroupedUpdateSkip:

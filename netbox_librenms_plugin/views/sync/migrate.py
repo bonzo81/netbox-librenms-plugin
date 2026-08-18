@@ -38,6 +38,7 @@ from netbox_librenms_plugin.views.mixins import (
     LibreNMSAPIMixin,
     LibreNMSPermissionMixin,
     NetBoxObjectPermissionMixin,
+    relock_scoped_row,
     resolve_configured_server_key,
     validated_referer,
 )
@@ -293,7 +294,7 @@ def _reconcile_donor_device_ip_fks(donor, winner):
         # could flip device_id between this check and winner.save(). Lock the owning Interface
         # and re-read device_id from the locked row so the winner can't end up owning an address
         # that has since moved away.
-        locked_iface = Interface.objects.select_for_update().filter(pk=assigned.pk).first()
+        locked_iface = relock_scoped_row(Interface, pk=assigned.pk)
         if locked_iface is None or locked_iface.device_id != winner.pk:
             continue
         # Refresh the cached GenericForeignKey on `ip` to the freshly locked interface:
@@ -789,7 +790,7 @@ class MoveIPAddressToWinnerView(_BaseMoveToWinnerView):
             # Lock the donor interface row too and re-read it: its name is used
             # below to find the winner-side interface, so a concurrent rename
             # would otherwise send the IP to the wrong interface (TOCTOU).
-            assigned = Interface.objects.select_for_update().filter(pk=assigned.pk, device=donor).first()
+            assigned = self.relock_scoped_row(Interface, pk=assigned.pk, device=donor)
             if assigned is None:
                 return self._fail(request, "IP is no longer assigned to the donor interface.", status=409)
             # Re-fetch the winner interface under the lock to close the TOCTOU window.
@@ -886,7 +887,7 @@ class TransferDeviceIPView(_BaseMoveToWinnerView):
             # device FKs are locked but the address is not, so a concurrent reassignment
             # could otherwise change assigned_object between this check and the FK update,
             # leaving winner.primary_ip*/oob_ip pointing at an address it no longer owns.
-            donor_ip = IPAddress.objects.select_for_update().filter(pk=donor_ip.pk).first()
+            donor_ip = self.relock_scoped_row(IPAddress, pk=donor_ip.pk)
             if donor_ip is None:
                 return self._fail(request, f"Donor's {human} no longer exists.", status=410)
             if getattr(winner, field, None) is not None:
@@ -912,7 +913,7 @@ class TransferDeviceIPView(_BaseMoveToWinnerView):
             # check validate the wrong row. A non-Interface assignment fails closed (None).
             if isinstance(assigned, Interface):
                 # Lock the owning interface row (this transfer is device-scoped).
-                assigned = Interface.objects.select_for_update().filter(pk=assigned.pk).first()
+                assigned = self.relock_scoped_row(Interface, pk=assigned.pk)
                 if assigned is not None:
                     # Freshen the cached GFK to the locked row: set_device_ip_fk() re-reads
                     # donor_ip.assigned_object for its ownership check, and the pre-lock snapshot

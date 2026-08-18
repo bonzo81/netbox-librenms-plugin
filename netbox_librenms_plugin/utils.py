@@ -1,6 +1,7 @@
 import logging
 import re
 import threading
+from copy import deepcopy
 from typing import Optional
 
 import netaddr
@@ -677,10 +678,20 @@ def get_user_pref(request, path, default=None):
 
 
 def save_user_pref(request, path, value):
-    """Save a user preference value via request.user.config."""
+    """
+    Save a user preference value via request.user.config.
+
+    NetBox seeds a new UserConfig with ``settings.DEFAULT_USER_PREFERENCES`` **by reference**
+    (users/signals.py) and ``UserConfig.set()`` edits ``data`` in place, so writing straight
+    through would mutate that process-wide dict: this user's choice would then become the
+    default every later-created user inherits, and the fallback every preference-less user
+    reads. Copy the row's data first so the write stays with this user.
+    """
     if hasattr(request, "user") and hasattr(request.user, "config"):
+        user_config = request.user.config
+        user_config.data = deepcopy(user_config.data)
         try:
-            request.user.config.set(path, value, commit=True)
+            user_config.set(path, value, commit=True)
         except (TypeError, ValueError):
             pass
 

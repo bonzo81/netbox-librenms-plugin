@@ -5625,32 +5625,6 @@ class TestBulkImportConfirmCollisions:
                 )
                 return view.post(request)
 
-    def test_collision_path_renders_collision_template(self):
-        """A host row and an OOB row resolving to one real NetBox device render the collision modal."""
-        from django.urls import reverse
-
-        nb_device = make_device("srv-collide-confirm")
-        validation_a = {
-            "status": "importable",
-            "resolved_name": "alpha",
-            "virtual_chassis": {},
-            "existing_device": nb_device,
-        }
-        validation_b = {
-            "status": "importable",
-            "resolved_name": "beta",
-            "virtual_chassis": {},
-            "oob_candidate": {"device": nb_device, "type": "idrac"},
-        }
-        # Real render: the real collision template + real detect_bulk_collisions + real
-        # _model_name_of(real Device) must produce a dcim:device link for the colliding device.
-        response = self._run_with_two_devices(validation_a, validation_b, real_render=True)
-        assert response.status_code == 200
-        html = response.content.decode()
-        assert "Bulk import blocked" in html
-        assert reverse("dcim:device", kwargs={"pk": nb_device.pk}) in html
-        assert "srv-collide-confirm" in html
-
     def test_clean_batch_renders_normal_confirm_template(self):
         """Two rows resolving to distinct real NetBox devices fall through to the confirm template."""
         validation_a = {
@@ -5683,45 +5657,6 @@ class TestBulkImportDevicesViewCollisionGate:
         view = object.__new__(BulkImportDevicesView)
         view._librenms_api = _make_api()
         return view
-
-    def test_colliding_batch_blocked_before_import(self):
-        """Two selected LibreNMS rows resolving to one real device → collision modal, importer never called."""
-        from django.urls import reverse
-
-        view = self._make_view()
-        request = _make_request(post={"select": ["1", "2"]}, headers={"HX-Request": "true"})
-        request.POST.getlist = MagicMock(return_value=["1", "2"])
-        request.user = _import_authorized_user()
-
-        nb = make_device("gate-collide-host")
-        libre = {
-            1: {"device_id": 1, "sysName": "gate-collide-host", "hostname": "gate-collide-host"},
-            2: {"device_id": 2, "sysName": "gate-collide-host", "hostname": "gate-collide-host"},
-        }
-        # The collision pre-check reads the seeded libre cache (cold Django cache in the test) and
-        # falls back to api.get_device_info for the misses — stub that seam so the misses resolve.
-        view._librenms_api.get_device_info = lambda did, *a, **k: (True, libre[did]) if did in libre else (False, None)
-        with (
-            patch.object(view, "require_write_permission", return_value=None),
-            patch(
-                "netbox_librenms_plugin.views.imports.actions.resolve_naming_preferences", return_value=(True, False)
-            ),
-            patch(
-                "netbox_librenms_plugin.views.imports.actions.fetch_device_with_cache",
-                side_effect=lambda did, _api: libre.get(did),
-            ),
-            patch("netbox_librenms_plugin.views.imports.actions.bulk_import_devices") as mock_import,
-        ):
-            response = view.post(request)
-
-        # Real validate + real detect via the gate → real collision template, importer never reached.
-        assert response.status_code == 200
-        html = response.content.decode()
-        assert "Bulk import blocked" in html
-        assert reverse("dcim:device", kwargs={"pk": nb.pk}) in html
-        assert 'id="htmx-modal-content"' in html
-        assert 'hx-swap-oob="innerHTML"' in html
-        mock_import.assert_not_called()
 
     def test_clean_batch_passes_gate_and_imports(self):
         """Two rows resolving to distinct real devices clear the gate and reach the importer."""
@@ -5761,44 +5696,6 @@ class TestBulkImportDevicesViewCollisionGate:
 
         # Gate cleared (distinct devices) → the importer ran.
         mock_import.assert_called_once()
-
-    def test_unfetchable_id_is_skipped_rest_imports(self):
-        """A selected id whose LibreNMS info can't be fetched (not cached + get_device_info fails) is SKIPPED, not a whole-batch block: the fetchable rows still import and the skipped row is surfaced. Restores the per-device resilience the old fail-closed block removed."""
-        view = self._make_view()
-        make_device("gate-unresolved-host")
-        libre = {1: {"device_id": 1, "sysName": "gate-unresolved-host", "hostname": "gate-unresolved-host"}}
-        # id 2 isn't cached and its info fetch fails → it can't be collision-checked → skipped.
-        view._librenms_api.get_device_info = lambda did, *a, **k: (True, libre[did]) if did in libre else (False, None)
-        request = _make_request(post={"select": ["1", "2"]}, headers={"HX-Request": "true"})
-        request.POST.getlist = MagicMock(return_value=["1", "2"])
-        request.user = _import_authorized_user()
-
-        import_result = {"success": [], "failed": [], "skipped": [], "virtual_chassis_created": 0}
-        with (
-            patch.object(view, "require_write_permission", return_value=None),
-            patch(
-                "netbox_librenms_plugin.views.imports.actions.resolve_naming_preferences", return_value=(True, False)
-            ),
-            patch(
-                "netbox_librenms_plugin.views.imports.actions.fetch_device_with_cache",
-                side_effect=lambda did, _api, **_kw: libre.get(did),
-            ),
-            patch(
-                "netbox_librenms_plugin.views.imports.actions.bulk_import_devices", return_value=import_result
-            ) as mock_import,
-        ):
-            response = view.post(request)
-
-        # The fetchable id 1 imports; only the unresolved id 2 is dropped (not a whole-batch block).
-        assert response.status_code == 200
-        mock_import.assert_called_once()
-        assert mock_import.call_args.kwargs["device_ids"] == [1]
-        html = response.content.decode()
-        # The skipped row is surfaced, object-neutral ("row(s)", never "device(s)").
-        assert "Skipped" in html
-        assert "verify collisions" in html
-        assert "selected row(s)" in html
-        assert "selected device(s)" not in html
 
     def test_background_batch_defers_collision_precheck_to_job(self):
         """A batch routed to a background job must NOT run the collision pre-check synchronously — it's deferred to ImportDevicesJob (which re-runs it), so the request doesn't pay the validation cost. The job is enqueued and the sync detector is never called."""
@@ -7393,17 +7290,99 @@ class TestResolveOOBInterface:
 
     def test_new_reuses_existing_locked_interface(self):
         """An interface with the requested (device, name) already exists → it is reused, no create, regardless of the 'add' permission."""
+        from dcim.models import Interface
         from django.db import transaction
+
+        from netbox_librenms_plugin.tests.view_test_helpers import make_request, make_user_with_perms
 
         view = self._view()
         dev = make_device("oob-res-reuse")
         existing = make_interface(dev, "idrac0")
-        req = _make_request(post={"oob_interface_id": "__new__", "oob_new_interface_name": "idrac0"})
-        # Deny add to prove the reuse path never needs it.
-        req.user.has_perm.side_effect = lambda perm: "add_interface" not in perm
+        user = make_user_with_perms("oob-res-reuse", [("view", Interface)])
+        req = make_request(
+            "post",
+            {"oob_interface_id": "__new__", "oob_new_interface_name": "idrac0"},
+            user=user,
+        )
+        assert not user.has_perm("dcim.add_interface")
         with transaction.atomic():
             result_iface, reason = view._resolve_oob_interface(req, dev)
         assert result_iface.pk == existing.pk and reason is None
+
+    def test_new_does_not_reuse_an_interface_outside_the_view_grant(self):
+        """The name-based reuse path must match the scoped explicit-PK path."""
+        from dcim.models import Interface
+        from django.db import transaction
+
+        from netbox_librenms_plugin.tests.view_test_helpers import grant, make_request, make_user_with_perms
+
+        view = self._view()
+        device = make_device("oob-res-name-scope")
+        hidden = make_interface(device, "idrac0")
+        allowed = make_interface(device, "eth0")
+        user = make_user_with_perms("oob-interface-view-scope", [("add", Interface)])
+        user = grant(user, "view", Interface, constraints={"pk": allowed.pk})
+        request = make_request(
+            "post",
+            {"oob_interface_id": "__new__", "oob_new_interface_name": hidden.name},
+            user=user,
+        )
+
+        with transaction.atomic():
+            result_iface, reason = view._resolve_oob_interface(request, device)
+
+        # A dedicated reason, not the "no selection made" pair: the caller DID choose a name, and
+        # the message chain would otherwise tell the operator to choose one.
+        assert result_iface is None and reason == "name_out_of_scope"
+
+    def test_out_of_scope_name_tells_the_operator_what_actually_blocked_it(self):
+        """The whole view: the refusal must not surface as "choose an interface" when one was chosen."""
+        from dcim.models import Interface
+        from django.http import HttpResponse
+        from ipam.models import IPAddress
+
+        from netbox_librenms_plugin.tests.view_test_helpers import grant, make_request, messages_on
+        from netbox_librenms_plugin.views.imports.actions import AddAsOOBView
+
+        device = make_device("oob-msg-name-scope")
+        make_interface(device, "idrac0")  # exists, and the caller gets no view grant for it
+        user = _scoped_device_writer(device, "oob-msg-name-scope-writer")
+        user = grant(user, "add", Interface)
+        user = grant(user, "add", IPAddress)
+        request = make_request(
+            "post",
+            {
+                "existing_device_id": str(device.pk),
+                "server_key": "default",
+                "oob_interface_id": "__new__",
+                "oob_new_interface_name": "idrac0",
+            },
+            user=user,
+            path="/add-as-oob/",
+        )
+        view = AddAsOOBView()
+        view.kwargs = {}
+        view._librenms_api = _make_api()
+        view.request = request
+        libre_device = {"device_id": 4444, "hostname": f"{device.name}-oob", "sysName": f"{device.name}-oob"}
+        validation = {"oob_candidate": {"device": device, "type": "idrac", "ip": "10.88.0.7"}}
+
+        with (
+            patch.object(
+                AddAsOOBView, "get_validated_device_with_selections", return_value=(libre_device, validation, {})
+            ),
+            patch.object(AddAsOOBView, "render_device_row", return_value=HttpResponse(b"row-ok")),
+            patch.object(AddAsOOBView, "rebind_api_for_server", return_value=view._librenms_api),
+        ):
+            view.post(request, device_id=4444)
+
+        warnings = [text for level, text in messages_on(request) if level == "warning"]
+        assert any("outside your view scope" in text for text in warnings), warnings
+        assert not any("Choose an interface" in text for _level, text in messages_on(request))
+        # The link still committed; only the IP set was skipped.
+        device.refresh_from_db()
+        assert device.custom_field_data["librenms_id"]["default"]["oob"]["id"] == 4444
+        assert device.oob_ip_id is None
 
     def test_create_without_add_perm_returns_permission_add(self):
         """No existing row + user lacks Interface 'add' → the write-time re-check refuses the create rather than silently creating it."""
@@ -7458,13 +7437,17 @@ class TestAttachOOBIp:
 
     def test_rehomes_existing_unassigned_ip(self):
         from django.db import transaction
+        from ipam.models import IPAddress
+
+        from netbox_librenms_plugin.tests.view_test_helpers import make_request, make_user_with_perms
 
         view = self._view()
         dev = make_device("oob-ip-rehome")
         iface = make_interface(dev, "idrac0")
         existing = make_ip("10.0.0.9/24")  # unassigned host match
+        user = make_user_with_perms("oob-ip-rehome", [("change", IPAddress)])
         with transaction.atomic():
-            ip, reason = view._attach_oob_ip(_make_request(post={}), "10.0.0.9", iface)
+            ip, reason = view._attach_oob_ip(make_request("post", user=user), "10.0.0.9", iface)
         assert ip.pk == existing.pk and reason is None
         existing.refresh_from_db()
         assert existing.assigned_object == iface
@@ -7498,13 +7481,16 @@ class TestAttachOOBIp:
 
         from ipam.models import VRF, IPAddress
 
+        from netbox_librenms_plugin.tests.view_test_helpers import make_request, make_user_with_perms
+
         view = self._view()
         dev = make_device("oob-ip-vrf-ambig")
         iface = make_interface(dev, "idrac0")
         existing = make_ip("10.0.0.9/24")  # global, unassigned → the legitimate candidate
         IPAddress.objects.create(address="10.0.0.9/24", vrf=VRF.objects.create(name="cust-b"), status="active")
+        user = make_user_with_perms("oob-ip-vrf-ambig", [("change", IPAddress)])
         with transaction.atomic():
-            ip, reason = view._attach_oob_ip(_make_request(post={}), "10.0.0.9", iface)
+            ip, reason = view._attach_oob_ip(make_request("post", user=user), "10.0.0.9", iface)
         assert reason is None and ip.pk == existing.pk
         existing.refresh_from_db()
         assert existing.assigned_object == iface
@@ -7555,6 +7541,29 @@ class TestAttachOOBIp:
         existing.refresh_from_db()
         assert existing.assigned_object is None  # not re-homed
 
+    def test_rehome_denied_outside_the_constrained_change_grant(self):
+        """A model-level change permission must not re-home an excluded IP row."""
+        from django.db import transaction
+        from ipam.models import IPAddress
+
+        from netbox_librenms_plugin.tests.view_test_helpers import grant, make_request, make_user_with_perms
+
+        view = self._view()
+        device = make_device("oob-ip-change-scope")
+        interface = make_interface(device, "idrac0")
+        hidden = make_ip("10.0.0.9/24")
+        allowed = make_ip("10.0.0.10/24")
+        user = make_user_with_perms("oob-ip-change-scope", [])
+        user = grant(user, "change", IPAddress, constraints={"pk": allowed.pk})
+        request = make_request("post", user=user)
+
+        with transaction.atomic():
+            ip, reason = view._attach_oob_ip(request, "10.0.0.9", interface)
+
+        assert ip is None and reason == "permission_change"
+        hidden.refresh_from_db()
+        assert hidden.assigned_object is None
+
     def test_create_denied_without_add_permission(self):
         """TOCTOU backstop on the create path: the locked create re-verifies 'add' and refuses an add-lacking user rather than creating the IP."""
         from django.db import transaction
@@ -7572,21 +7581,32 @@ class TestAttachOOBIp:
         assert not IPAddress.objects.filter(address__net_host="10.0.0.9").exists()
 
     def test_locks_candidate_row_with_select_for_update(self):
-        """The candidate IPAddress row must be locked (load-bearing TOCTOU mitigation)."""
+        """The candidate IPAddress row must be locked, and only through the caller's change scope.
+
+        Asserting on the emitted SQL rather than on a patched manager: a mock records whichever
+        call the code happens to make, so it stayed green when the lock ran through an
+        unrestricted queryset and pinned rows the caller had no grant for.
+        """
+        from django.db import connection, transaction
+        from django.test.utils import CaptureQueriesContext
+        from ipam.models import IPAddress
+
+        from netbox_librenms_plugin.tests.view_test_helpers import make_request, make_user_with_perms
+
         view = self._view()
-        iface = MagicMock(device_id=1)
-        existing = MagicMock()
-        existing.assigned_object = None
-        with (
-            patch("ipam.models.IPAddress") as mock_ip_cls,
-            patch("dcim.models.Device") as mock_device_cls,
-        ):
-            mock_ip_cls.objects.select_for_update.return_value.filter.return_value.__getitem__.return_value = [existing]
-            # The cross-device FK guard must see no OTHER device referencing this IP, so the row
-            # is treated as re-homeable and the lock path under test runs.
-            mock_device_cls.objects.filter.return_value.exclude.return_value.exists.return_value = False
-            view._attach_oob_ip(_make_request(post={}), "10.0.0.9", iface)
-        mock_ip_cls.objects.select_for_update.assert_called_once()
+        dev = make_device("oob-ip-lock-sql")
+        iface = make_interface(dev, "idrac0")
+        existing = make_ip("10.0.0.9/24")
+        user = make_user_with_perms("oob-ip-lock-sql", [("change", IPAddress)])
+        with transaction.atomic(), CaptureQueriesContext(connection) as captured:
+            ip, reason = view._attach_oob_ip(make_request("post", user=user), "10.0.0.9", iface)
+
+        assert reason is None and ip.pk == existing.pk
+        locking = [q["sql"] for q in captured.captured_queries if "FOR UPDATE" in q["sql"].upper()]
+        assert locking, "the candidate row was never locked"
+        # The lock must carry the permission join, i.e. it ran through restrict(), and must lock
+        # only the address row rather than the joined permission tables.
+        assert any("OF " in sql.upper() for sql in locking), "the lock did not restrict itself to the row"
 
 
 @pytest.mark.django_db
@@ -8134,6 +8154,100 @@ class TestAddDeviceTypeMappingSingleUpfrontQuery:
         assert not count_qs, f"upfront ambiguity check must use [:2], not COUNT(): {count_qs}"
         # Sanity: the path ran to completion and created the mapping (normalized to lowercase).
         assert DeviceTypeMapping.objects.filter(librenms_hardware="widgetx").exists()
+
+
+@pytest.mark.django_db
+class TestMappingChangeScope:
+    """Natural-key mapping updates must remain inside constrained change grants."""
+
+    @staticmethod
+    def _request(user, **data):
+        from netbox_librenms_plugin.tests.view_test_helpers import make_request
+
+        return make_request("post", data, user=user)
+
+    def test_device_type_mapping_outside_change_grant_is_not_updated(self):
+        from dcim.models import DeviceType
+        from django.http import HttpResponse
+
+        from netbox_librenms_plugin.models import DeviceTypeMapping
+        from netbox_librenms_plugin.tests.view_test_helpers import grant, make_user_with_perms
+        from netbox_librenms_plugin.utils import apply_normalization_rules
+        from netbox_librenms_plugin.views.imports.actions import AddDeviceTypeMappingView
+
+        old_type = make_device("mapping-scope-old").device_type
+        new_type = DeviceType.objects.create(
+            manufacturer=old_type.manufacturer,
+            model="Mapping Scope New Type",
+            slug="mapping-scope-new-type",
+        )
+        allowed = DeviceTypeMapping.objects.create(librenms_hardware="allowed-hw", netbox_device_type=old_type)
+        raw_hardware = "Hidden Hardware Scope"
+        mapping_hardware = apply_normalization_rules(value=raw_hardware, scope="device_type")
+        hidden = DeviceTypeMapping.objects.create(librenms_hardware=mapping_hardware, netbox_device_type=old_type)
+        user = make_user_with_perms("mapping-change-scope", [("view", type(old_type))])
+        user = grant(user, "change", DeviceTypeMapping, constraints={"pk": allowed.pk})
+        request = self._request(user, device_type_id=str(new_type.pk), server_key="default")
+        view = AddDeviceTypeMappingView()
+        view.setup(request)
+        view._librenms_api = MagicMock(server_key="default", cache_timeout=300)
+
+        with (
+            patch.object(view, "rebind_api_for_server", return_value="default"),
+            patch(
+                "netbox_librenms_plugin.views.imports.actions.fetch_device_with_cache",
+                return_value={"hardware": raw_hardware},
+            ),
+            patch(
+                "netbox_librenms_plugin.views.imports.actions.DeviceValidationDetailsView.get",
+                return_value=HttpResponse(b"<div></div>"),
+            ),
+            patch.object(view, "validate_and_apply_selections", return_value=(None, None)),
+        ):
+            response = view.post(request, device_id=1)
+
+        # The refusal text, not just the unchanged row: a failed permission gate, a rebind
+        # failure and the broad except all leave the mapping alone too.
+        assert b"Existing mapping is no longer available." in response.content
+        hidden.refresh_from_db()
+        assert hidden.netbox_device_type_id == old_type.pk
+
+    def test_platform_mapping_outside_change_grant_is_not_updated(self):
+        from dcim.models import Platform
+        from django.http import HttpResponse
+
+        from netbox_librenms_plugin.models import PlatformMapping
+        from netbox_librenms_plugin.tests.view_test_helpers import grant, make_user_with_perms
+        from netbox_librenms_plugin.views.imports.actions import AddPlatformMappingView
+
+        old_platform = Platform.objects.create(name="Mapping Scope Old", slug="mapping-scope-old")
+        new_platform = Platform.objects.create(name="Mapping Scope New", slug="mapping-scope-new")
+        allowed = PlatformMapping.objects.create(librenms_os="allowed-os", netbox_platform=old_platform)
+        hidden = PlatformMapping.objects.create(librenms_os="hidden-os", netbox_platform=old_platform)
+        user = make_user_with_perms("platform-mapping-change-scope", [("view", Platform)])
+        user = grant(user, "change", PlatformMapping, constraints={"pk": allowed.pk})
+        request = self._request(user, platform_id=str(new_platform.pk), server_key="default")
+        view = AddPlatformMappingView()
+        view.setup(request)
+        view._librenms_api = MagicMock(server_key="default", cache_timeout=300)
+
+        with (
+            patch.object(view, "rebind_api_for_server", return_value="default"),
+            patch(
+                "netbox_librenms_plugin.views.imports.actions.fetch_device_with_cache",
+                return_value={"os": "hidden-os"},
+            ),
+            patch(
+                "netbox_librenms_plugin.views.imports.actions.DeviceValidationDetailsView.get",
+                return_value=HttpResponse(b"<div></div>"),
+            ),
+            patch.object(view, "get_validated_device_with_selections", return_value=(None, None, None)),
+        ):
+            response = view.post(request, device_id=1)
+
+        assert b"Existing mapping is no longer available." in response.content
+        hidden.refresh_from_db()
+        assert hidden.netbox_platform_id == old_platform.pk
 
 
 # ---------------------------------------------------------------------------

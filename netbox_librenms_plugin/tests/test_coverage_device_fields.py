@@ -1090,6 +1090,27 @@ class TestCreateAndAssignPlatformView:
         mock_msg.success.assert_called_once()
         assert "already existed" in mock_msg.success.call_args[0][1].lower()
 
+    def test_existing_platform_outside_the_view_grant_is_not_assigned(self):
+        """Name-based reuse must not expose and assign a hidden Platform."""
+        from dcim.models import Device, Platform
+
+        hidden = Platform.objects.create(name="Hidden Reuse Platform", slug="hidden-reuse-platform")
+        allowed = Platform.objects.create(name="Allowed Reuse Platform", slug="allowed-reuse-platform")
+        device = make_device("platform-reuse-view-scope")
+        user = make_user_with_perms("platform-reuse-view-scope", [("change", Device)])
+        user = grant(user, "view", Platform, constraints={"pk": allowed.pk})
+        request = _make_request(
+            {"platform_name": hidden.name, "manufacturer": "", "create_mapping": ""},
+            user=user,
+        )
+        view = self._view(request)
+
+        _post(view, request, pk=device.pk)
+
+        device.refresh_from_db()
+        assert device.platform_id is None
+        assert message_texts(request, "error") == ["Selected platform is not available."]
+
     def test_platform_already_exists_creates_missing_mapping(self):
         """When the platform exists and create_mapping is on, the missing mapping is added (real)."""
         from dcim.models import Device, Platform
@@ -1454,7 +1475,7 @@ class TestCreateAndAssignPlatformView:
 
         platform = Platform.objects.create(name="Cisco IOS", slug="cisco-ios")
         PlatformMapping.objects.create(librenms_os="ios", netbox_platform=platform)
-        user = make_user_with_perms("perms-mapexists", [("change", Device)])
+        user = make_user_with_perms("perms-mapexists", [("change", Device), ("view", Platform)])
         view, req, dev = self._success_setup(
             platform_name="Cisco IOS", librenms_os="ios", create_mapping="1", user=user
         )

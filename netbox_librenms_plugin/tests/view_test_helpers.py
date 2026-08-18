@@ -179,6 +179,28 @@ def missing_pk(model, offset=1000):
     return (highest_pk or 0) + offset
 
 
+def assert_locked_before_update(captured, table):
+    """Assert *table* was locked with ``SELECT ... FOR UPDATE`` before it was updated.
+
+    Asserting only that a lock exists passes even when the lock runs after the write, which is
+    the ordering the lock is there to guarantee.
+
+    Args:
+        captured: A ``CaptureQueriesContext`` that wrapped the code under test.
+        table: Database table name, for example ``"ipam_ipaddress"``.
+    """
+    statements = [q["sql"] for q in captured.captured_queries]
+    quoted_table = f'"{table.lower()}"'
+    locks = [i for i, sql in enumerate(statements) if quoted_table in sql.lower() and "for update" in sql.lower()]
+    updates = [i for i, sql in enumerate(statements) if sql.lower().lstrip().startswith(f"update {quoted_table}")]
+    assert locks, f"{table} was never locked with SELECT ... FOR UPDATE"
+    assert updates, f"{table} was never updated, so the lock ordering is untested"
+    assert len(locks) == len(updates) == 1, (
+        f"{table} must have exactly one lock/update pair: locks={locks} updates={updates}"
+    )
+    assert locks[0] < updates[0], f"{table} was updated before it was locked: locks={locks} updates={updates}"
+
+
 # =============================================================================
 # Real views
 # =============================================================================

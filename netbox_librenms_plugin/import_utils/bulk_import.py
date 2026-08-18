@@ -25,7 +25,7 @@ from ..utils import (
     row_identity_matches,
 )
 from .cache import get_cache_metadata_key, get_import_device_cache_key, get_validated_device_cache_key
-from .collisions import detect_bulk_collisions
+from .collisions import detect_bulk_collisions, scope_bulk_collisions
 from .device_operations import (
     VALIDATION_ERROR_ISSUE_PREFIX,
     _describe_existing_librenms_link,
@@ -91,7 +91,13 @@ def _is_job_cancelled(job) -> bool:
 
 
 def detect_collisions_for_device_ids(
-    device_ids, api, libre_devices_cache=None, sync_options=None, job=None, vm_device_ids=None
+    device_ids,
+    api,
+    libre_devices_cache=None,
+    sync_options=None,
+    job=None,
+    vm_device_ids=None,
+    user=None,
 ) -> tuple[list[dict], list]:
     """
     Detect same-NetBox-device collisions for a batch of LibreNMS device ids.
@@ -120,6 +126,8 @@ def detect_collisions_for_device_ids(
             the Device-only serial/IP matching that ``bulk_import_vms`` intentionally skips,
             and could fabricate a collision (blocking a valid batch) against a Device it
             will never touch.
+        user: Optional requesting user. Production callers pass this so collision targets outside
+            the user's view scope are redacted before the result reaches a template or job log.
 
     Returns:
         tuple[list[dict], list]: ``(collisions, unresolved_ids)`` — the collision groups from
@@ -205,6 +213,7 @@ def detect_collisions_for_device_ids(
             strip_domain=strip_domain,
             server_key=api.server_key,
             include_vc_detection=False,
+            collision_only=True,
         )
         if any(str(issue).startswith(VALIDATION_ERROR_ISSUE_PREFIX) for issue in validation.get("issues", [])):
             # validate_device_for_import() caught an exception and returned only a partial result
@@ -222,7 +231,10 @@ def detect_collisions_for_device_ids(
                 "validation": validation,
             }
         )
-    return detect_bulk_collisions(devices), unresolved_ids
+    collisions = detect_bulk_collisions(devices)
+    if user is not None:
+        collisions = scope_bulk_collisions(collisions, user)
+    return collisions, unresolved_ids
 
 
 @dataclass
@@ -289,15 +301,23 @@ def classify_bulk_precheck(collisions, unresolved, device_ids, vm_imports) -> Bu
         skip_message = (
             f"Skipped {len(unresolved)} selected row(s) (id(s): {ids}): their LibreNMS device info "
             f"couldn't be fetched to verify collisions, so they were not imported. The remaining "
-            f"rows were imported; retry those rows individually."
+            f"selected rows continue through normal import checks; review the final result for "
+            f"their outcome, then retry the skipped rows individually."
         )
 
     block_message = ""
     if collisions:
-        pks = ", ".join(str(group["nb_device_pk"]) for group in collisions)
+        scoped = any("target_visible" in group for group in collisions)
+        visible_pks = [group["nb_device_pk"] for group in collisions if group.get("target_visible") is True]
+        if visible_pks:
+            target_detail = f" Visible pk(s): {', '.join(str(pk) for pk in visible_pks)}."
+        elif scoped:
+            target_detail = " Target details are omitted when they are outside your view scope."
+        else:
+            target_detail = ""
         block_message = (
-            f"Bulk import blocked: {len(collisions)} NetBox object collision(s) in this batch "
-            f"(pk(s): {pks}). Two or more selected LibreNMS devices resolve to the same NetBox "
+            f"Bulk import blocked: {len(collisions)} NetBox object collision(s) in this batch."
+            f"{target_detail} Two or more selected LibreNMS devices resolve to the same NetBox "
             f"object; resolve each individually, or deselect the duplicates."
         )
 

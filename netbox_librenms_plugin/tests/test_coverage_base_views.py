@@ -16,7 +16,10 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from dcim.models import Device
+
 from netbox_librenms_plugin.tests.conftest import make_device, make_interface, make_ip
+from netbox_librenms_plugin.tests.view_test_helpers import make_user_with_perms
 
 # =============================================================================
 # Helpers
@@ -2097,6 +2100,8 @@ class TestBaseInterfaceTablePostCoercesLibreNMSId:
             api.get_ports = MagicMock(name="get_ports", return_value=(False, "should-not-be-called"))
 
             request = RequestFactory().post(f"/plugins/librenms/devices/{device.pk}/interface-sync/", data={})
+            # get_object now scopes by request.user, so the request needs a real permitted user.
+            request.user = make_user_with_perms("coerce-iface-viewer", [("view", Device)])
             view.request = request
 
             with patch("netbox_librenms_plugin.views.base.interfaces_view.messages") as mock_messages:
@@ -2152,6 +2157,8 @@ class TestBaseVLANTablePostCoercesLibreNMSId:
             api.get_device_vlans = MagicMock(name="get_device_vlans", return_value=(False, "should-not-be-called"))
 
             request = RequestFactory().post(f"/plugins/librenms/devices/{device.pk}/vlan-sync/", data={})
+            # get_object now scopes by request.user, so the request needs a real permitted user.
+            request.user = make_user_with_perms("coerce-vlan-viewer", [("view", Device)])
             view.request = request
             # The error-path render moves up the stack: this branch returns render(...), but a
             # higher branch routes the same exit through self.render_sync_partial(). Patch BOTH with
@@ -2200,6 +2207,8 @@ class TestBaseModuleTablePostCoercesLibreNMSId:
             )
 
             request = RequestFactory().post(f"/plugins/librenms/devices/{device.pk}/module-sync/", data={})
+            # get_object now scopes by request.user, so the request needs a real permitted user.
+            request.user = make_user_with_perms("coerce-module-viewer", [("view", Device)])
             view.request = request
             # The error-path render moves up the stack (return render(...) here vs
             # self.render_sync_partial() on a higher branch); patch BOTH with create=True so the
@@ -3446,21 +3455,29 @@ class TestBaseInterfaceTableViewMissingLines:
         view.interface_name_field = None
         return view
 
-    def test_get_object_calls_get_object_or_404(self):
-        """get_object delegates to get_object_or_404(self.model, pk=pk)."""
-        from unittest.mock import MagicMock, patch
+    @pytest.mark.django_db
+    def test_get_object_resolves_through_a_restricted_queryset(self):
+        """get_object returns a permitted object and 404s on one outside the caller's grant."""
+        from dcim.models import Device
+        from django.http import Http404
 
-        view = self._make_view()
-        mock_obj = MagicMock()
+        from netbox_librenms_plugin.tests.conftest import make_device
+        from netbox_librenms_plugin.tests.view_test_helpers import (
+            make_request,
+            make_user_with_perms,
+            make_view,
+        )
+        from netbox_librenms_plugin.views.base.interfaces_view import BaseInterfaceTableView
 
-        with patch(
-            "netbox_librenms_plugin.views.base.interfaces_view.get_object_or_404",
-            return_value=mock_obj,
-        ) as mock_404:
-            result = view.get_object(42)
+        allowed = make_device("getobj-allowed-iface")
+        hidden = make_device("getobj-hidden-iface")
+        user = make_user_with_perms("getobj-viewer-iface", [("view", Device)], constraints={"name": allowed.name})
+        view = make_view(BaseInterfaceTableView, make_request("get", user=user))
+        view.model = Device
 
-        mock_404.assert_called_once_with(view.model, pk=42)
-        assert result is mock_obj
+        assert view.get_object(allowed.pk).pk == allowed.pk
+        with pytest.raises(Http404):
+            view.get_object(hidden.pk)
 
     def test_get_interfaces_raises_not_implemented(self):
         """get_interfaces raises NotImplementedError — must be overridden."""
@@ -3726,11 +3743,13 @@ class TestSingleCableVerifyViewPermissionGate:
         request.user.has_perm.return_value = False  # unauthorized → real gate returns 403
         view.request = request  # check_object_permissions reads self.request.user
 
-        with patch("netbox_librenms_plugin.views.base.cables_view.get_object_or_404") as mock_get_obj:
+        # post() resolves through restrict_object_or_404, not get_object: patching the latter
+        # made this assertion vacuous.
+        with patch.object(view, "restrict_object_or_404") as mock_resolve:
             response = view.post(request)
 
         assert response.status_code == 403
-        mock_get_obj.assert_not_called()  # device never resolved → no arbitrary-ID probing
+        mock_resolve.assert_not_called()  # device never resolved → no arbitrary-ID probing
 
 
 # ---------------------------------------------------------------------------

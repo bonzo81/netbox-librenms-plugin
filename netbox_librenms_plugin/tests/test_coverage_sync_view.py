@@ -3,6 +3,9 @@
 from unittest.mock import MagicMock, patch
 
 import pytest
+from dcim.models import Device
+
+from netbox_librenms_plugin.tests.view_test_helpers import make_user_with_perms
 from django.test import RequestFactory
 
 
@@ -27,7 +30,7 @@ class TestBaseLibreNMSSyncViewGet:
     """Tests for get() method (lines 29-53)."""
 
     @patch("netbox_librenms_plugin.views.base.librenms_sync_view.render")
-    @patch("netbox_librenms_plugin.views.base.librenms_sync_view.get_object_or_404")
+    @patch("netbox_librenms_plugin.views.base.librenms_sync_view.BaseLibreNMSSyncView.get_object")
     def test_get_non_vc_device(self, mock_get_obj, mock_render):
         """Non-VC device: librenms_lookup_device stays as obj."""
         view = _make_view()
@@ -50,7 +53,7 @@ class TestBaseLibreNMSSyncViewGet:
         assert view._librenms_lookup_device is obj
 
     @patch("netbox_librenms_plugin.views.base.librenms_sync_view.render")
-    @patch("netbox_librenms_plugin.views.base.librenms_sync_view.get_object_or_404")
+    @patch("netbox_librenms_plugin.views.base.librenms_sync_view.BaseLibreNMSSyncView.get_object")
     def test_get_rebinds_header_to_request_server_key(self, mock_get_obj, mock_render, mock_multi_server_config):
         """The page header must rebind to ?server_key so it matches the server the tabs render for."""
         view = _make_view()
@@ -72,7 +75,7 @@ class TestBaseLibreNMSSyncViewGet:
         assert view._librenms_api.server_key == "secondary"
 
     @patch("netbox_librenms_plugin.views.base.librenms_sync_view.render")
-    @patch("netbox_librenms_plugin.views.base.librenms_sync_view.get_object_or_404")
+    @patch("netbox_librenms_plugin.views.base.librenms_sync_view.BaseLibreNMSSyncView.get_object")
     @patch("netbox_librenms_plugin.views.base.librenms_sync_view.get_librenms_sync_device")
     def test_get_unresolved_server_key_fails_closed(self, mock_get_sync, mock_get_obj, mock_render):
         """Stale ?server_key fails closed: no default-server librenms_id, VC delegation skipped."""
@@ -100,7 +103,7 @@ class TestBaseLibreNMSSyncViewGet:
         assert view.librenms_id is None  # no default-server mapping attributed to the gone server
 
     @patch("netbox_librenms_plugin.views.base.librenms_sync_view.render")
-    @patch("netbox_librenms_plugin.views.base.librenms_sync_view.get_object_or_404")
+    @patch("netbox_librenms_plugin.views.base.librenms_sync_view.BaseLibreNMSSyncView.get_object")
     @patch("netbox_librenms_plugin.views.base.librenms_sync_view.get_librenms_sync_device")
     def test_get_vc_member_always_delegates_to_sync_device(self, mock_get_sync, mock_get_obj, mock_render):
         """VC member: no own librenms_id - get_librenms_sync_device returns VC primary."""
@@ -129,7 +132,7 @@ class TestBaseLibreNMSSyncViewGet:
         assert view._librenms_lookup_device is vc_primary
 
     @patch("netbox_librenms_plugin.views.base.librenms_sync_view.render")
-    @patch("netbox_librenms_plugin.views.base.librenms_sync_view.get_object_or_404")
+    @patch("netbox_librenms_plugin.views.base.librenms_sync_view.BaseLibreNMSSyncView.get_object")
     @patch("netbox_librenms_plugin.views.base.librenms_sync_view.get_librenms_sync_device")
     def test_get_vc_member_with_own_librenms_id_uses_itself(self, mock_get_sync, mock_get_obj, mock_render):
         """VC member: has own librenms_id - get_librenms_sync_device still called, returns member itself."""
@@ -157,7 +160,7 @@ class TestBaseLibreNMSSyncViewGet:
         assert view._librenms_lookup_device is obj
 
     @patch("netbox_librenms_plugin.views.base.librenms_sync_view.render")
-    @patch("netbox_librenms_plugin.views.base.librenms_sync_view.get_object_or_404")
+    @patch("netbox_librenms_plugin.views.base.librenms_sync_view.BaseLibreNMSSyncView.get_object")
     @patch("netbox_librenms_plugin.views.base.librenms_sync_view.get_librenms_sync_device")
     def test_get_vc_member_no_sync_device_falls_back_to_obj(self, mock_get_sync, mock_get_obj, mock_render):
         """VC member: when get_librenms_sync_device returns None, keeps obj."""
@@ -1187,7 +1190,9 @@ class TestFullPageMigratedContextServerScope:
         view._get_platform_info = MagicMock(return_value={})
 
         request = RequestFactory().get("/?server_key=edgelondon")
-        request.user = MagicMock(is_superuser=True)
+        request.user = make_user_with_perms("stale-key-viewer", [("view", Device)])
+        # Calling get() directly skips View.setup(), and get_object() scopes by request.user.
+        view.request = request
 
         captured = {}
 

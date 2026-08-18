@@ -3,7 +3,6 @@ import re
 
 from django.contrib import messages
 from django.core.cache import cache
-from django.shortcuts import get_object_or_404
 from django.utils import timezone
 from django.views import View
 
@@ -22,6 +21,7 @@ from netbox_librenms_plugin.views.mixins import (
     CacheMixin,
     LibreNMSAPIMixin,
     LibreNMSPermissionMixin,
+    NetBoxObjectPermissionMixin,
 )
 
 logger = logging.getLogger(__name__)
@@ -193,7 +193,7 @@ def _check_ignore_rules(
     return None
 
 
-class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin, View):
+class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjectPermissionMixin, CacheMixin, View):
     """
     Base view for synchronizing module/inventory data from LibreNMS.
     Fetches inventory, matches against NetBox module bays and module types,
@@ -205,7 +205,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
 
     def get_object(self, pk):
         """Retrieve the object (Device)."""
-        return get_object_or_404(self.model, pk=pk)
+        return self.restrict_object_or_404(self.model, pk=pk)
 
     def get_table(self, data, obj):
         """Returns the table class. Subclasses should override."""

@@ -18,8 +18,10 @@ import copy
 from unittest.mock import MagicMock, patch
 
 import pytest
+from dcim.models import Device
+
+from netbox_librenms_plugin.tests.view_test_helpers import make_user_with_perms
 from django.conf import settings
-from django.contrib.auth.models import AnonymousUser
 from django.test import RequestFactory, override_settings
 
 from netbox_librenms_plugin.tests.conftest import make_device
@@ -79,7 +81,9 @@ class TestUnresolvedServerKeyVCLeak:
         member.save()
 
         request = RequestFactory().get("/x/?server_key=ghost")  # non-blank, not configured -> unresolved
-        request.user = AnonymousUser()
+        # A real permitted user: the scoped lookup would 404 for AnonymousUser, and this
+        # test is about server-key resolution, not authorization.
+        request.user = make_user_with_perms("unresolved-vc-viewer", [("view", Device)])
         view = self._make_view(request)
 
         captured = {}

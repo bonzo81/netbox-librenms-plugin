@@ -239,19 +239,29 @@ class TestGetObjectAndIpAddress:
         view.model = MagicMock()
         return view
 
-    def test_get_object_calls_get_object_or_404(self):
-        """get_object calls get_object_or_404 with view.model and given pk."""
-        view = self._make_view()
-        mock_device = MagicMock()
+    @pytest.mark.django_db
+    def test_get_object_resolves_through_a_restricted_queryset(self):
+        """get_object returns a permitted object and 404s on one outside the caller's grant."""
+        from dcim.models import Device
+        from django.http import Http404
 
-        with patch(
-            "netbox_librenms_plugin.views.base.cables_view.get_object_or_404",
-            return_value=mock_device,
-        ) as mock_get:
-            result = view.get_object(42)
+        from netbox_librenms_plugin.tests.conftest import make_device
+        from netbox_librenms_plugin.tests.view_test_helpers import (
+            make_request,
+            make_user_with_perms,
+            make_view,
+        )
+        from netbox_librenms_plugin.views.base.cables_view import BaseCableTableView
 
-        mock_get.assert_called_once_with(view.model, pk=42)
-        assert result is mock_device
+        allowed = make_device("getobj-allowed-cable")
+        hidden = make_device("getobj-hidden-cable")
+        user = make_user_with_perms("getobj-viewer-cable", [("view", Device)], constraints={"name": allowed.name})
+        view = make_view(BaseCableTableView, make_request("get", user=user))
+        view.model = Device
+
+        assert view.get_object(allowed.pk).pk == allowed.pk
+        with pytest.raises(Http404):
+            view.get_object(hidden.pk)
 
     def test_get_ip_address_with_primary_ip(self):
         """get_ip_address returns the string representation of primary_ip when present."""
@@ -1378,19 +1388,29 @@ class TestIpAddressViewMethods:
         assert view._get_port_info(7, cache, "ifName") == row
         assert cache[7] == row
 
-    def test_get_object_calls_get_object_or_404(self):
-        """get_object delegates to get_object_or_404 with the view's model."""
-        view = self._make_view()
-        mock_device = MagicMock()
+    @pytest.mark.django_db
+    def test_get_object_resolves_through_a_restricted_queryset(self):
+        """get_object returns a permitted object and 404s on one outside the caller's grant."""
+        from dcim.models import Device
+        from django.http import Http404
 
-        with patch(
-            "netbox_librenms_plugin.views.base.ip_addresses_view.get_object_or_404",
-            return_value=mock_device,
-        ) as mock_get:
-            result = view.get_object(42)
+        from netbox_librenms_plugin.tests.conftest import make_device
+        from netbox_librenms_plugin.tests.view_test_helpers import (
+            make_request,
+            make_user_with_perms,
+            make_view,
+        )
+        from netbox_librenms_plugin.views.base.ip_addresses_view import BaseIPAddressTableView
 
-        mock_get.assert_called_once_with(view.model, pk=42)
-        assert result is mock_device
+        allowed = make_device("getobj-allowed-ip")
+        hidden = make_device("getobj-hidden-ip")
+        user = make_user_with_perms("getobj-viewer-ip", [("view", Device)], constraints={"name": allowed.name})
+        view = make_view(BaseIPAddressTableView, make_request("get", user=user))
+        view.model = Device
+
+        assert view.get_object(allowed.pk).pk == allowed.pk
+        with pytest.raises(Http404):
+            view.get_object(hidden.pk)
 
     def test_get_ip_addresses_calls_api(self):
         """get_ip_addresses calls get_librenms_id then get_device_ips; stores librenms_id."""

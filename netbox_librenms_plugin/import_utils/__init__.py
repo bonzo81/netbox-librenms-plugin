@@ -36,7 +36,7 @@ from .device_operations import (  # noqa: F401
     import_single_device,
     validate_device_for_import,
 )
-from .collisions import detect_bulk_collisions  # noqa: F401
+from .collisions import detect_bulk_collisions, scope_bulk_collisions  # noqa: F401
 from .filters import (  # noqa: F401
     _apply_client_filters,
     get_device_count_for_filters,

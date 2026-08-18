@@ -8,7 +8,6 @@ from django.core.exceptions import MultipleObjectsReturned
 from django.db.models import Q
 from django.http import JsonResponse
 from django.middleware.csrf import get_token
-from django.shortcuts import get_object_or_404
 from django.urls import reverse
 from django.utils import timezone
 from django.utils.html import escape
@@ -159,7 +158,7 @@ _RAW_LINK_KEYS = frozenset(
 )
 
 
-class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin, View):
+class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjectPermissionMixin, CacheMixin, View):
     """
     Base view for synchronizing cable information from LibreNMS.
     """
@@ -169,7 +168,7 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin, 
 
     def get_object(self, pk):
         """Retrieve the object (Device or VirtualMachine)."""
-        return get_object_or_404(self.model, pk=pk)
+        return self.restrict_object_or_404(self.model, pk=pk)
 
     def get_ip_address(self, obj):
         """Get the primary IP address for the object."""
@@ -811,7 +810,7 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin, 
         return self.render_sync_partial(request, obj, server_key, {"cable_sync": context})
 
 
-class SingleCableVerifyView(NetBoxObjectPermissionMixin, BaseCableTableView):
+class SingleCableVerifyView(BaseCableTableView):
     """
     View to verify a single cable link between two devices.
     """

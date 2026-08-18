@@ -67,6 +67,8 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
             ("view", interface_model),
             *type(self).required_object_permissions["POST"],
         ]
+        if resolve_set_primary_ip(self.request):
+            perms.append(("change", owner_model))
         # A per-row VRF is resolved by client-supplied id through a restricted queryset. Only
         # demand its view permission when one is actually posted, so the common no-VRF sync
         # is not gated on a permission it never uses.
@@ -98,12 +100,12 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
             return None
         return cached_data.get("ip_addresses", [])
 
-    def get_object(self, object_type, pk):
+    def get_object(self, object_type, pk, action="view"):
         """Return the Device or VirtualMachine instance for the given type and pk (object-scoped)."""
         if object_type == "device":
-            return self.restrict_object_or_404(Device, pk=pk)
+            return self.restrict_object_or_404(Device, action, pk=pk)
         if object_type == "virtualmachine":
-            return self.restrict_object_or_404(VirtualMachine, pk=pk)
+            return self.restrict_object_or_404(VirtualMachine, action, pk=pk)
         raise Http404("Invalid object type.")
 
     def get_ip_tab_url(self, obj):
@@ -141,7 +143,8 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
         if error := self.require_all_permissions("POST"):
             return error
 
-        obj = self.get_object(object_type, pk)
+        owner_action = "change" if resolve_set_primary_ip(request) else "view"
+        obj = self.get_object(object_type, pk, owner_action)
 
         # Rebind the cached API client to the POSTed server so live lookups (e.g. the
         # management-IP fetch for Set-Primary-IP) hit the same LibreNMS instance the cached
@@ -401,7 +404,7 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
                         # Lock obj's row BEFORE the address write, so this path takes the same
                         # Device -> IPAddress lock order as the migrate move views. The reverse
                         # order closes a deadlock cycle with a concurrent donor move.
-                        if type(obj).objects.select_for_update().filter(pk=obj.pk).first() is None:
+                        if self.relock_scoped_row(type(obj), pk=obj.pk) is None:
                             raise type(obj).DoesNotExist(f"{type(obj).__name__} {obj.pk} no longer exists")
                         # Re-read the primary_ip ids from the locked row. A stale in-memory value
                         # would make _set_primary_ip skip a set it must perform.
@@ -415,6 +418,18 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
                     existing_ip = IPAddress.objects.filter(address=ip_with_mask, vrf=vrf).first()
 
                     if existing_ip:
+                        if not self.restricted_queryset(IPAddress, "change").filter(pk=existing_ip.pk).exists():
+                            raise ValueError(
+                                "Existing IP address is no longer available or you do not have permission to change it."
+                            )
+                        # The scope check does not lock, so a concurrent assignment or VRF change
+                        # could commit between it and the save below and be overwritten. Re-read
+                        # the authorized row under a lock and decide from that.
+                        existing_ip = self.relock_scoped_row(IPAddress, pk=existing_ip.pk)
+                        if existing_ip is None:
+                            raise ValueError(
+                                "Existing IP address is no longer available or you do not have permission to change it."
+                            )
                         if existing_ip.assigned_object != interface or existing_ip.vrf != vrf:
                             existing_ip.assigned_object = interface
                             existing_ip.vrf = vrf

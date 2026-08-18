@@ -2,7 +2,6 @@ import logging
 
 from django.contrib import messages
 from django.core.cache import cache
-from django.shortcuts import get_object_or_404
 from django.utils import timezone
 from django.views import View
 
@@ -21,6 +20,7 @@ from netbox_librenms_plugin.views.mixins import (
     CacheMixin,
     LibreNMSAPIMixin,
     LibreNMSPermissionMixin,
+    NetBoxObjectPermissionMixin,
     VlanAssignmentMixin,
     redirect_with_server_key,
 )
@@ -28,7 +28,9 @@ from netbox_librenms_plugin.views.mixins import (
 logger = logging.getLogger(__name__)
 
 
-class BaseInterfaceTableView(VlanAssignmentMixin, LibreNMSAPIMixin, LibreNMSPermissionMixin, CacheMixin, View):
+class BaseInterfaceTableView(
+    VlanAssignmentMixin, LibreNMSAPIMixin, LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, CacheMixin, View
+):
     """
     Base view for fetching interface data from LibreNMS and generating table data.
     Includes VLAN enrichment for interface VLAN sync functionality.
@@ -39,8 +41,9 @@ class BaseInterfaceTableView(VlanAssignmentMixin, LibreNMSAPIMixin, LibreNMSPerm
     interface_name_field = None
 
     def get_object(self, pk):
-        """Retrieve the object (Device or VirtualMachine)."""
-        return get_object_or_404(self.model, pk=pk)
+        """Retrieve the object (Device or VirtualMachine) the user may view."""
+        # The plugin gate is model-level only, so scope the lookup or any pk is reachable.
+        return self.restrict_object_or_404(self.model, pk=pk)
 
     def get_ip_address(self, obj):
         """Get the primary IP address for the object."""

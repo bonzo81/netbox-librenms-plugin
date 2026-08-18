@@ -454,17 +454,26 @@ class TestGatedViewsResolveThroughRestrictedQuerysets:
     defect kept reappearing after the primary lookups were scoped — on the module move/serial
     endpoints, the interface delete targets and the OOB interface reuse.
 
-    What counts is where the id came from. A bare name, ``int(...)`` or a subscript is a CLIENT id
-    and must be scoped. A re-lock keyed by an already-resolved object (``pk=device.pk``,
-    ``pk=donor.oob_ip_id``) is exempt: the scoping happened where that object was resolved, and
-    restricting the re-read would instead demand a permission the view's gate never required —
-    ``restrict()`` returns ``none()`` for a user who lacks the model-level grant, so a change-only
-    caller would silently lose rows out of a lock set and be told the object "no longer exists".
+    What counts is where the id came from, and a deliberate re-lock must SAY so: call
+    ``relock_scoped_row(Model, pk=donor.oob_ip_id)``. That is not a ``<Model>.objects`` chain, so it
+    never reaches this rule, and every call is greppable. Scoping happened where the source object
+    was resolved, and restricting the re-read would instead demand a permission the view's gate
+    never required: ``restrict()`` returns ``none()`` for a user who lacks the model-level grant, so
+    a change-only caller would silently lose rows out of a lock set and be told the object "no
+    longer exists".
 
-    Scope and limits: a raw lookup inherited from an ungated base class is NOT seen; bulk
-    ``pk__in=<collection>`` locks are not covered (each is built in-function from rows already
-    resolved); and a ``.filter(pk=...).exists()`` probe is exempt — it reads no object data and is how
-    ``_required_perms_for_object`` decides WHICH permission to demand, before any gate has run.
+    Until 2026-08 the rule instead exempted any ``pk=<expr>.<name>_id``. That read a SPELLING as
+    provenance: it silenced a legitimate re-lock keyed by a local, while waving through
+    ``Device.objects.get(pk=payload.device_id)`` on a request-derived object. Both directions were
+    wrong, so the heuristic is gone.
+
+    Scope and limits, stated because this rule is a lint and not a proof: a class gated only
+    through an INHERITED base is not seen (that is how the routed sync pages resolved any device by
+    pk; :class:`TestRoutedSyncPagesScopeTheirObject` now covers them behaviourally); module-level
+    helpers are not seen at all; a manager reached through an alias or ``_default_manager``, a
+    ``**kwargs``/``Q()`` lookup, or a natural-key lookup all pass; bulk ``pk__in=<collection>``
+    locks are not covered; and a ``.filter(pk=...).exists()`` probe is exempt because it reads no
+    object data and is how ``_required_perms_for_object`` decides WHICH permission to demand.
     """
 
     GATE_CALLS = frozenset(
@@ -572,11 +581,11 @@ class TestGatedViewsResolveThroughRestrictedQuerysets:
                 if sub in exempt:
                     continue
                 pk_kwargs = [kw for kw in sub.keywords if kw.arg in cls.PK_LOOKUP_KEYS]
-                # `pk=obj.pk` / `pk=obj.foo_id` is a re-lock, not a client id — see the docstring.
-                if not pk_kwargs or all(
-                    isinstance(kw.value, ast.Attribute) and (kw.value.attr == "pk" or kw.value.attr.endswith("_id"))
-                    for kw in pk_kwargs
-                ):
+                # A deliberate re-lock declares itself by calling relock_scoped_row, which is not a
+                # `<Model>.objects` chain and so never reaches here. The old exemption instead
+                # accepted any `pk=<expr>.<name>_id`, which a request-derived attribute satisfied
+                # by accident (`pk=payload.device_id`) — see test_the_scan_flags_a_tainted_attribute.
+                if not pk_kwargs:
                     continue
                 # A scoped queryset can also arrive as an ARGUMENT rather than the receiver:
                 # `Port.objects.filter(pk=..., device__in=self.restricted_queryset(Device))`
@@ -604,12 +613,18 @@ class TestGatedViewsResolveThroughRestrictedQuerysets:
             offenders |= cls._scan_tree(tree, str(path.relative_to(views_root)))
         return offenders
 
-    def test_no_gated_view_resolves_an_object_by_raw_pk(self):
-        """Every gated view resolves through restrict_object_or_404 / restricted_queryset, never a raw pk lookup."""
+    def test_no_lexically_gated_view_resolves_an_object_by_raw_pk(self):
+        """No class declaring a gate in its own body resolves an object by raw pk.
+
+        This is a lint over one spelling, NOT proof that every view is scoped: a class gated only
+        through an inherited base is invisible here (see TestRoutedSyncPagesScopeTheirObject, which
+        covers the routed pages behaviourally), and so are module-level helpers.
+        """
         offenders = sorted(self._scan())
         assert not offenders, (
-            "gated view(s) resolving an object by raw pk — a constrained grant clears the gate and "
-            f"then reaches objects outside it; use restrict_object_or_404: {offenders}"
+            "view(s) resolving an object by raw pk — a constrained grant clears the gate and then "
+            "reaches objects outside it; use restrict_object_or_404, or relock_scoped_row when the "
+            f"id came from an already-resolved object: {offenders}"
         )
 
     def test_the_scan_flags_a_raw_lookup(self):
@@ -623,6 +638,26 @@ class TestGatedViewsResolveThroughRestrictedQuerysets:
             "        return get_object_or_404(Device, pk=pk)\n"
         )
         assert self._scan_tree(ast.parse(source), "<fixture>"), "the scan no longer flags a raw pk lookup"
+
+    def test_the_scan_flags_a_tainted_attribute(self):
+        """Guard the guard: an `*_id` ATTRIBUTE is not proof of provenance.
+
+        The retired exemption accepted any ``pk=<expr>.<name>_id``, so a request-derived attribute
+        passed silently. Only relock_scoped_row marks a lookup as a deliberate re-lock now.
+        """
+        import ast
+
+        source = (
+            "class V:\n"
+            "    required_object_permissions = {'POST': []}\n"
+            "    def post(self, request):\n"
+            "        payload = json.loads(request.body)\n"
+            "        return Device.objects.get(pk=payload.device_id)\n"
+        )
+        assert self._scan_tree(ast.parse(source), "<fixture>"), (
+            "the scan exempts a client-derived `*_id` attribute again — provenance must come from "
+            "relock_scoped_row, not from how the expression is spelled"
+        )
 
     def test_the_scan_flags_a_view_gated_only_by_the_write_permission(self):
         """A view gated by require_write_permission alone reaches objects by raw pk just as easily."""
@@ -753,18 +788,30 @@ class TestGatedViewsResolveThroughRestrictedQuerysets:
         )
         assert self._scan_tree(ast.parse(source), "<fixture>"), "an unrelated scope call must not hide a raw lookup"
 
-    def test_the_scan_exempts_a_relock_of_an_already_resolved_object(self):
-        """Re-locking a row already resolved through a scoped queryset must not demand a new permission."""
+    def test_the_scan_exempts_a_relock_that_declares_itself(self):
+        """A re-lock routed through relock_scoped_row must not demand a new permission."""
         import ast
 
         source = (
             "class V:\n"
             "    required_object_permissions = {'POST': []}\n"
             "    def post(self, request, pk):\n"
-            "        a = Device.objects.select_for_update().get(pk=existing_device.pk)\n"
-            "        return IPAddress.objects.select_for_update().filter(pk=donor.oob_ip_id).first()\n"
+            "        a = self.relock_scoped_row(Device, pk=existing_device.pk)\n"
+            "        return relock_scoped_row(IPAddress, pk=donor.oob_ip_id)\n"
         )
         assert not self._scan_tree(ast.parse(source), "<fixture>")
+
+    def test_the_scan_still_flags_a_relock_that_does_not(self):
+        """The same re-lock spelled as a raw manager chain is reported: provenance must be declared."""
+        import ast
+
+        source = (
+            "class V:\n"
+            "    required_object_permissions = {'POST': []}\n"
+            "    def post(self, request, pk):\n"
+            "        return IPAddress.objects.select_for_update().filter(pk=donor.oob_ip_id).first()\n"
+        )
+        assert self._scan_tree(ast.parse(source), "<fixture>"), "use relock_scoped_row to declare a re-lock"
 
     def test_the_scan_exempts_an_exists_probe(self):
         """A .exists() probe reads no object data and picks WHICH permission to demand."""
@@ -1463,7 +1510,7 @@ class TestGatedViewsRefuseOutOfScopeObjects:
 
     def test_module_replace_refuses_to_delete_the_target_outside_the_delete_grant(self):
         """Replace deletes its target, so change access alone must not authorize the operation."""
-        from dcim.models import Device, Interface, Module
+        from dcim.models import Device, Interface, Module, ModuleType
         from django.core.cache import cache
         from django.http import Http404
 
@@ -1487,6 +1534,7 @@ class TestGatedViewsRefuseOutOfScopeObjects:
             "scope-replace-target",
             [
                 (Device, "view", {"pk": device.pk}),
+                (ModuleType, "view", {"pk": module_type.pk}),
                 (Module, "add", None),
                 (Module, "change", {"pk": target.pk}),
                 (Module, "delete", {"pk": decoy.pk}),
@@ -1528,7 +1576,7 @@ class TestGatedViewsRefuseOutOfScopeObjects:
 
     def test_module_replace_fails_closed_on_a_hidden_serial_conflict(self):
         """An existing serial outside delete scope must block replacement, not become a duplicate."""
-        from dcim.models import Device, Interface, Module
+        from dcim.models import Device, Interface, Module, ModuleType
         from django.core.cache import cache
 
         from netbox_librenms_plugin.tests.conftest import make_device, make_module_bay, make_module_type
@@ -1554,6 +1602,7 @@ class TestGatedViewsRefuseOutOfScopeObjects:
             "scope-replace-conflict",
             [
                 (Device, "view", {"pk": device.pk}),
+                (ModuleType, "view", {"pk": module_type.pk}),
                 (Module, "add", None),
                 (Module, "change", {"pk": target.pk}),
                 (Module, "delete", {"pk": target.pk}),
@@ -1911,3 +1960,57 @@ class TestCacheKeysAreServerScoped:
             assert params[-1] == "server_key", f"{helper} no longer takes server_key last: {params}"
             # params includes self, so the positional count to reach server_key is len(params) - 1.
             assert len(params) - 1 == position, f"{helper} arity changed — update HELPERS: {params}"
+
+
+class TestRoutedSyncPagesScopeTheirObject:
+    """A routed sync page must not resolve an object the caller's grant excludes.
+
+    ``LibreNMSPermissionMixin`` extends Django's ``PermissionRequiredMixin``, which only checks the
+    model-level plugin permission and never evaluates NetBox object-permission constraints. The base
+    table views then resolve the URL pk with a raw ``get_object_or_404``, so a CONSTRAINED
+    ``dcim.view_device`` grant never narrows the lookup and the page renders any device by pk.
+
+    The static scan in :class:`TestGatedViewsResolveThroughRestrictedQuerysets` cannot see this: it
+    only considers classes that declare a gate lexically, and these classes declare none.
+    """
+
+    ROUTED_DEVICE_PAGES = (
+        ("object_sync.devices", "DeviceInterfaceTableView"),
+        ("object_sync.devices", "DeviceCableTableView"),
+        ("object_sync.devices", "DeviceIPAddressTableView"),
+        ("object_sync.devices", "DeviceVLANTableView"),
+        ("object_sync.devices", "DeviceModuleTableView"),
+    )
+
+    @pytest.mark.django_db
+    @pytest.mark.parametrize("module_path,class_name", ROUTED_DEVICE_PAGES)
+    def test_a_constrained_grant_cannot_reach_a_hidden_device(self, module_path, class_name):
+        """A user granted view_device only for device A must not resolve device B."""
+        import importlib
+
+        from dcim.models import Device
+        from django.http import Http404
+
+        from netbox_librenms_plugin.tests.conftest import make_device
+        from netbox_librenms_plugin.tests.view_test_helpers import (
+            make_request,
+            make_user_with_perms,
+            make_view,
+        )
+
+        allowed = make_device(f"scoped-allowed-{class_name.lower()}")
+        hidden = make_device(f"scoped-hidden-{class_name.lower()}")
+        user = make_user_with_perms(
+            f"scoped-viewer-{class_name.lower()}",
+            [("view", Device)],
+            constraints={"name": allowed.name},
+        )
+        request = make_request("get", user=user, path=f"/plugins/librenms/devices/{hidden.pk}/sync/")
+        view_class = getattr(importlib.import_module(f"netbox_librenms_plugin.views.{module_path}"), class_name)
+        view = make_view(view_class, request)
+
+        # Sanity: the grant really is constrained — the allowed device stays reachable.
+        assert view.get_object(allowed.pk).pk == allowed.pk
+
+        with pytest.raises(Http404):
+            view.get_object(hidden.pk)

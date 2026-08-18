@@ -6,7 +6,6 @@ from dcim.models import Device
 from django.contrib import messages
 from django.core.cache import cache
 from django.http import Http404, JsonResponse
-from django.shortcuts import get_object_or_404
 from django.utils import timezone
 from django.views import View
 from ipam.models import VRF, IPAddress
@@ -31,7 +30,7 @@ from netbox_librenms_plugin.views.mixins import (
 logger = logging.getLogger(__name__)
 
 
-class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin, View):
+class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjectPermissionMixin, CacheMixin, View):
     """
     Base view for synchronizing IP address information from LibreNMS.
     """
@@ -40,7 +39,7 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMix
     interface_name_field = None
 
     def get_object(self, pk):
-        return get_object_or_404(self.model, pk=pk)
+        return self.restrict_object_or_404(self.model, pk=pk)
 
     def get_ip_addresses(self, obj):
         """Fetch IP address data from LibreNMS for the given object."""
