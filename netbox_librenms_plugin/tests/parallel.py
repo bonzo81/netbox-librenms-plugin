@@ -8,6 +8,13 @@ _POSTGRES_NAME_LIMIT = 63
 _WORKER_ID_PATTERN = re.compile(r"gw(?P<number>\d+)")
 
 
+def pytest_xdist_auto_num_workers(config):
+    """Cap `-n auto` at the worker count that still gets private Redis databases."""
+    from xdist.plugin import pytest_xdist_auto_num_workers as detected_num_workers
+
+    return min(detected_num_workers(config), MAX_PARALLEL_WORKERS)
+
+
 def isolated_test_database_name(base_name: str, worker_id: str | None) -> str:
     """Return a PostgreSQL-safe database name for one pytest worker."""
     suffix = f"_{worker_id}" if worker_id else ""

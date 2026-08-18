@@ -7,17 +7,10 @@ from uuid import uuid4
 
 import pytest
 
-from netbox_librenms_plugin.tests.parallel import MAX_PARALLEL_WORKERS, isolated_test_database_name
+from netbox_librenms_plugin.tests.parallel import isolated_test_database_name
 
 
 _TEST_DATABASE_BASE_NAME = os.environ["TEST_DB_NAME"]
-
-
-def pytest_xdist_auto_num_workers(config):
-    """Cap `-n auto` at the worker count that still gets private Redis databases."""
-    from xdist.plugin import pytest_xdist_auto_num_workers as detected_num_workers
-
-    return min(detected_num_workers(config), MAX_PARALLEL_WORKERS)
 
 
 def clear_test_cache(cache_backend):

@@ -10,7 +10,6 @@ from django.test import override_settings
 
 from netbox_librenms_plugin.tests.conftest import (
     _seeded_model_rows,
-    pytest_xdist_auto_num_workers,
     restore_seeded_state,
 )
 from netbox_librenms_plugin.tests.isolated_settings import TEST_DB_NAME_PREFIX
@@ -18,6 +17,7 @@ from netbox_librenms_plugin.tests.parallel import (
     MAX_PARALLEL_WORKERS,
     isolated_redis_databases,
     isolated_test_database_name,
+    pytest_xdist_auto_num_workers,
 )
 
 
@@ -155,6 +155,48 @@ def test_auto_worker_count_stays_capped_without_the_environment_override(pytestc
     monkeypatch.delenv("PYTEST_XDIST_AUTO_NUM_WORKERS", raising=False)
 
     assert 1 <= pytest_xdist_auto_num_workers(pytestconfig) <= MAX_PARALLEL_WORKERS
+
+
+def _resolve_auto_worker_count(tmp_path, *path_args):
+    """Run `pytest -n auto` over the given paths and report the worker count it resolved to."""
+    resolved = tmp_path / "resolved-workers.txt"
+    (tmp_path / "auto_worker_probe.py").write_text(
+        "import os\n"
+        "from pathlib import Path\n"
+        "\n"
+        "import pytest\n"
+        "\n"
+        "\n"
+        "def pytest_configure(config):\n"
+        '    Path(os.environ["AUTO_WORKER_PROBE_OUTPUT"]).write_text(str(config.option.numprocesses))\n'
+        '    pytest.exit("worker count probed")\n'
+    )
+    environment = {name: value for name, value in os.environ.items() if not name.startswith("PYTEST_")}
+    environment["PYTHONPATH"] = os.pathsep.join(filter(None, (str(tmp_path), os.environ.get("PYTHONPATH", ""))))
+    environment["AUTO_WORKER_PROBE_OUTPUT"] = str(resolved)
+    # Report more workers than the cap allows, so the assertion holds on a small CI runner too.
+    environment["PYTEST_XDIST_AUTO_NUM_WORKERS"] = str(MAX_PARALLEL_WORKERS * 4)
+    result = subprocess.run(
+        [sys.executable, "-m", "pytest", *path_args, "-n", "auto", "--no-cov", "-p", "auto_worker_probe"],
+        capture_output=True,
+        text=True,
+        cwd=REPOSITORY_ROOT,
+        env=environment,
+        check=False,
+    )
+
+    assert resolved.exists(), f"stdout={result.stdout}\nstderr={result.stderr}"
+    return int(resolved.read_text())
+
+
+@pytest.mark.parametrize(
+    "path_args",
+    [(), ("netbox_librenms_plugin",), ("netbox_librenms_plugin/tests",), (".",)],
+    ids=["testpaths", "package", "test-package", "repository-root"],
+)
+def test_the_auto_worker_cap_applies_to_every_repository_anchor(tmp_path, path_args):
+    """`-n auto` must stay capped whichever path the invocation points pytest at."""
+    assert _resolve_auto_worker_count(tmp_path, *path_args) == MAX_PARALLEL_WORKERS
 
 
 @pytest.mark.django_db
