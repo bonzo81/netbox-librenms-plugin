@@ -26,7 +26,7 @@ from netbox_librenms_plugin.tables.modules import LibreNMSModuleTable, VCModuleT
 from netbox_librenms_plugin.utils import (
     build_migrated_context,
     cache_remaining_ttl,
-    coerce_positive_int,
+    coerce_model_pk,
     get_interface_name_field,
     get_librenms_sync_device,
     get_missing_vlan_warning,
@@ -158,7 +158,7 @@ class SingleInterfaceVerifyView(
         data, err = parse_request_json(request)
         if err:
             return err
-        selected_device_id = coerce_positive_int(data.get("device_id"))
+        selected_device_id = coerce_model_pk(data.get("device_id"))
         posted_name_field = data.get("interface_name_field")
 
         if selected_device_id is None:
@@ -184,7 +184,7 @@ class SingleInterfaceVerifyView(
         origin_device = selected_device
         raw_origin_device_id = data.get("origin_device_id")
         if raw_origin_device_id is not None:
-            origin_device_id = coerce_positive_int(raw_origin_device_id)
+            origin_device_id = coerce_model_pk(raw_origin_device_id)
             if origin_device_id is None:
                 return JsonResponse({"status": "error", "message": "A valid origin device ID is required."}, status=400)
             origin_device = self.restrict_object_or_404(Device, pk=origin_device_id)

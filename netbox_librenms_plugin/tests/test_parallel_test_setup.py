@@ -2,6 +2,7 @@
 
 import os
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -176,3 +177,32 @@ def test_custom_field_restore_drops_stale_content_type_cache(caplog):
         assert db_alias in _ensure_librenms_id_custom_field._executed_aliases
     finally:
         ContentType.objects.clear_cache()
+
+
+def test_settings_module_exports_the_stripped_redis_host():
+    """A padded host must reach the Redis client cleaned, not fail later at connect time."""
+    script = (
+        "import os, importlib; "
+        "os.environ['DJANGO_SETTINGS_MODULE'] = 'netbox_librenms_plugin.tests.isolated_settings'; "
+        "importlib.import_module('netbox_librenms_plugin.tests.isolated_settings'); "
+        "print('HOST=' + repr(os.environ['REDIS_HOST'])); "
+        "print('CACHE_HOST=' + repr(os.environ['REDIS_CACHE_HOST']))"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        capture_output=True,
+        text=True,
+        env={
+            **os.environ,
+            # pytest injects the NetBox source path from pyproject; a bare subprocess does not.
+            "PYTHONPATH": os.pathsep.join(path for path in sys.path if path),
+            "TEST_DB_NAME": "test_netbox_librenms",
+            "TEST_REDIS_HOST": "  redis  ",
+        },
+        cwd=REPOSITORY_ROOT,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "HOST='redis'" in result.stdout, result.stdout
+    assert "CACHE_HOST='redis'" in result.stdout, result.stdout

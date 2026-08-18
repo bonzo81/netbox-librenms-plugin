@@ -5,8 +5,10 @@ import os
 from netbox_librenms_plugin.tests.parallel import isolated_redis_databases
 
 
-_test_redis_host = os.environ["TEST_REDIS_HOST"]
-if not _test_redis_host.strip():
+# Strip once and export the cleaned value: exporting the raw one let a padded host pass this
+# check and then fail later at connection time instead of here.
+_test_redis_host = os.environ["TEST_REDIS_HOST"].strip()
+if not _test_redis_host:
     raise ValueError("TEST_REDIS_HOST must not be empty.")
 _tasks_redis_database, _cache_redis_database = isolated_redis_databases(os.environ.get("PYTEST_XDIST_WORKER"))
 os.environ["REDIS_HOST"] = _test_redis_host
