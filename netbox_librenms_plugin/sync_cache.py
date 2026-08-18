@@ -318,8 +318,9 @@ class SyncCacheConsistency:
         return sync_snapshot_key(self._primary_owner(tab, server_key), spec.data_type, server_key)
 
     def state_key(self, tab, server_key):
-        """Return the page-scoped state key for one tab and server."""
-        return _state_key(self.page_object, server_key, tab)
+        """Return the state key for one tab and server, scoped like its snapshot."""
+        # A shared snapshot needs a shared state, else a sibling stays blocked after a refresh.
+        return _state_key(self._primary_owner(tab, server_key), server_key, tab)
 
     def _state_record(self, state, tab, source_tab, actor_id, reason, revision=None):
         stored_actor_id = actor_id if isinstance(actor_id, int) and not isinstance(actor_id, bool) else None

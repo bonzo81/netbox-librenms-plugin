@@ -114,14 +114,39 @@ def _tab_classes(html, element_id):
 
 @pytest.mark.parametrize(
     "invalid_timeout",
-    [None, True, "600", float("inf"), float("nan"), 0, -1],
+    [True, "600", float("inf"), float("nan"), 0, -1],
 )
 def test_configured_cache_timeout_rejects_invalid_values(settings, invalid_timeout):
     """Invalid plugin values must fall back to a finite positive cache lifetime."""
     from netbox_librenms_plugin.librenms_api import DEFAULT_CACHE_TIMEOUT, configured_cache_timeout
 
     _configure_servers(settings)
+    # Pin a valid global so only the rejected per-server value can produce the default.
+    settings.PLUGINS_CONFIG["netbox_librenms_plugin"]["cache_timeout"] = 999
     settings.PLUGINS_CONFIG["netbox_librenms_plugin"]["servers"]["primary"]["cache_timeout"] = invalid_timeout
+
+    assert configured_cache_timeout("primary") == DEFAULT_CACHE_TIMEOUT
+
+
+def test_configured_cache_timeout_inherits_the_global_value(settings):
+    """A server that omits the timeout must read the global plugin value."""
+    from netbox_librenms_plugin.librenms_api import configured_cache_timeout
+
+    _configure_servers(settings)
+    settings.PLUGINS_CONFIG["netbox_librenms_plugin"]["cache_timeout"] = 123
+    settings.PLUGINS_CONFIG["netbox_librenms_plugin"]["servers"]["primary"]["cache_timeout"] = None
+
+    assert configured_cache_timeout("primary") == 123
+
+
+@pytest.mark.parametrize("invalid_global", [True, "600", float("nan"), 0, -1])
+def test_configured_cache_timeout_rejects_an_invalid_global_value(settings, invalid_global):
+    """An omitted server timeout must still reject an unusable global value."""
+    from netbox_librenms_plugin.librenms_api import DEFAULT_CACHE_TIMEOUT, configured_cache_timeout
+
+    _configure_servers(settings)
+    settings.PLUGINS_CONFIG["netbox_librenms_plugin"]["cache_timeout"] = invalid_global
+    settings.PLUGINS_CONFIG["netbox_librenms_plugin"]["servers"]["primary"]["cache_timeout"] = None
 
     assert configured_cache_timeout("primary") == DEFAULT_CACHE_TIMEOUT
 
@@ -456,6 +481,101 @@ def test_committed_interface_sync_invalidates_only_mapped_page_and_shared_snapsh
     other_user_status = client.get(status_url, {"server_key": "primary"})
     assert other_user_status.status_code == 200
     assert other_user_status.json()["tabs"]["ipaddresses"]["same_user"] is False
+
+
+@pytest.mark.django_db
+def test_a_sibling_refresh_clears_the_shared_tab_block_on_every_member(
+    client,
+    settings,
+    django_capture_on_commit_callbacks,
+):
+    """A shared-tab refresh on one VC member must unblock that tab on its siblings."""
+    _configure_servers(settings)
+    _chassis, (owner, sibling) = make_virtual_chassis_members("cache-shared-state")
+    owner.custom_field_data["librenms_id"] = {"primary": {"id": 61}}
+    owner.save(update_fields=["custom_field_data"])
+    remote_device = make_device("cache-shared-state-remote", librenms_cf={"primary": {"id": 62}})
+    local = make_interface(sibling, "Ethernet1", iface_type="1000base-t")
+    remote = make_interface(remote_device, "Ethernet2", iface_type="1000base-t")
+    set_librenms_device_id(local, 7481, "primary")
+    set_librenms_device_id(remote, 7482, "primary")
+    local.save(update_fields=["custom_field_data"])
+    remote.save(update_fields=["custom_field_data"])
+
+    ports_payload = {
+        "ports": [
+            {
+                "port_id": 7481,
+                "ifName": local.name,
+                "ifDescr": local.name,
+                "ifType": "ethernetCsmacd",
+                "ifAdminStatus": "up",
+            }
+        ],
+        "port_stack_relationships": {},
+    }
+    _seed_snapshot("ports", owner, "primary", ports_payload)
+    _seed_snapshot("links", owner, "primary")
+    client.force_login(make_superuser("cache-shared-state-user"))
+
+    # The sibling's own sync clears the shared cable snapshot and blocks its cable tab.
+    sync_url = reverse(
+        "plugins:netbox_librenms_plugin:sync_selected_interfaces",
+        kwargs={"object_type": "device", "object_id": sibling.pk},
+    )
+    with django_capture_on_commit_callbacks(execute=True):
+        assert (
+            client.post(
+                sync_url,
+                {
+                    "server_key": "primary",
+                    "interface_name_field": "ifName",
+                    "select": "7481",
+                    "exclude_columns": "vlans",
+                },
+            ).status_code
+            == 302
+        )
+    assert cache.get(_cache_key("links", owner, "primary")) is None
+
+    status_url = reverse(
+        "plugins:netbox_librenms_plugin:sync_cache_status",
+        kwargs={"object_type": "device", "pk": sibling.pk},
+    )
+    blocked = client.get(status_url, {"server_key": "primary"}).json()["tabs"]["cables"]
+    assert blocked["state"] == "invalidated"
+
+    def librenms_response(url, **_kwargs):
+        if url.endswith("/api/v0/devices/61/links"):
+            return _json_response(
+                url,
+                {
+                    "status": "ok",
+                    "links": [
+                        {
+                            "local_port_id": 7481,
+                            "local_port": local.name,
+                            "remote_port_id": 7482,
+                            "remote_port": remote.name,
+                            "remote_hostname": remote_device.name,
+                            "remote_device_id": 62,
+                        }
+                    ],
+                },
+            )
+        if url.endswith("/api/v0/devices/61/ports"):
+            return _json_response(url, {"status": "ok", "ports": ports_payload["ports"]})
+        raise AssertionError(f"Unexpected LibreNMS request: {url}")
+
+    # The owner refreshes the shared snapshot both members read.
+    refresh_url = reverse("plugins:netbox_librenms_plugin:device_cable_sync", kwargs={"pk": owner.pk})
+    with patch("netbox_librenms_plugin.librenms_api.requests.get", side_effect=librenms_response):
+        assert client.post(refresh_url, {"server_key": "primary"}, HTTP_HX_REQUEST="true").status_code == 200
+    assert cache.get(_cache_key("links", owner, "primary")) is not None
+
+    unblocked = client.get(status_url, {"server_key": "primary"}).json()["tabs"]["cables"]
+    assert unblocked["state"] == "ready"
+    assert unblocked["snapshot_available"] is True
 
 
 @pytest.mark.django_db
@@ -1255,6 +1375,50 @@ def test_partial_cable_refresh_renders_no_syncable_rows(client, settings):
     assert b"Sync Selected Cables" not in response.content
     assert b'name="select"' not in response.content
     assert cache.get(_cache_key("links", device, "primary")) is None
+
+
+@pytest.mark.django_db
+def test_partial_module_refresh_renders_no_inventory_rows(client, settings):
+    """An incomplete module refresh must render the empty state instead of a degraded table."""
+    _configure_servers(settings)
+    device = make_device("cache-module-partial", librenms_cf={"primary": {"id": 651}})
+    client.force_login(make_superuser("cache-module-partial-user"))
+    _seed_snapshot("inventory", device, "primary")
+
+    def librenms_response(url, **_kwargs):
+        if url.endswith("/api/v0/inventory/651/all"):
+            return _json_response(
+                url,
+                {
+                    "status": "ok",
+                    "inventory": [
+                        {
+                            "entPhysicalIndex": 1,
+                            "entPhysicalName": "Slot 1",
+                            "entPhysicalModelName": "MOD-1",
+                            "entPhysicalSerialNum": "SER1",
+                            "entPhysicalDescr": "module",
+                        }
+                    ],
+                },
+            )
+        if url.endswith("/api/v0/devices/651/transceivers"):
+            return _json_response(url, {"status": "ok", "transceivers": []})
+        if "/api/v0/devices/651/ports" in url:
+            return _json_response(url, {"message": "Unavailable"}, status=503)
+        raise AssertionError(f"Unexpected LibreNMS request: {url}")
+
+    url = reverse("plugins:netbox_librenms_plugin:device_module_sync", kwargs={"pk": device.pk})
+    with patch("netbox_librenms_plugin.librenms_api.requests.get", side_effect=librenms_response):
+        response = client.post(url, {"server_key": "primary"}, HTTP_HX_REQUEST="true")
+
+    assert response.status_code == 200
+    html = response.content.decode()
+    assert "port metadata fetch failed" in html
+    assert "No inventory data loaded" in html
+    assert "install-selected-form" not in html
+    # The degraded snapshot must not survive as a complete one for the next render.
+    assert cache.get(_cache_key("inventory", device, "primary")) is None
 
 
 @pytest.mark.django_db
