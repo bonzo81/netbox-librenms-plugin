@@ -595,10 +595,19 @@ class BaseInterfaceTableView(
         vlan_groups_by_device = {
             device.pk: self.filter_vlan_groups_for_device(vlan_groups, device) for device in vlan_scope_devices
         }
-        vlan_lookup_maps_by_device = {
-            device_id: self.restrict_vlan_lookup_maps(lookup_maps, device_vlan_groups)
-            for device_id, device_vlan_groups in vlan_groups_by_device.items()
-        }
+        # Restrict a member's maps on first use. Most rows resolve to one member, so rebuilding
+        # every lookup dictionary for each member of a large chassis repeated the same indexing.
+        restricted_lookup_maps = {}
+
+        def member_lookup_maps(device_id):
+            if device_id not in restricted_lookup_maps:
+                device_vlan_groups = vlan_groups_by_device.get(device_id)
+                restricted_lookup_maps[device_id] = (
+                    self.restrict_vlan_lookup_maps(lookup_maps, device_vlan_groups)
+                    if device_vlan_groups is not None
+                    else {}
+                )
+            return restricted_lookup_maps[device_id]
 
         # Load any user VLAN group overrides from cache (set by "apply to all")
         # Read overrides under the same VC-scoped key SaveVlanGroupOverridesView writes
@@ -757,7 +766,7 @@ class BaseInterfaceTableView(
                 # Add VLAN group auto-selection data to port, applying any user overrides
                 if chassis_member.pk in actionable_owner_ids:
                     row_vlan_groups = vlan_groups_by_device.get(chassis_member.pk, [])
-                    row_lookup_maps = vlan_lookup_maps_by_device.get(chassis_member.pk, {})
+                    row_lookup_maps = member_lookup_maps(chassis_member.pk)
                 else:
                     row_vlan_groups = []
                     row_lookup_maps = {}
