@@ -2084,7 +2084,88 @@ def test_create_missing_interfaces_requires_change_scope_for_the_new_interface(c
     assert response.status_code == 302
     # The row runs inside transaction.atomic(), so failing closed rolls the creation back.
     assert not Interface.objects.filter(device=device, name="Ethernet1").exists()
-    assert not IPAddress.objects.filter(address="198.18.30.10/24", assigned_object_id__isnull=False).exists()
+    # No assigned_object filter: an unassigned orphan would also mean the rollback was partial.
+    assert not IPAddress.objects.filter(address="198.18.30.10/24").exists()
+
+
+@pytest.mark.django_db
+def test_create_missing_interfaces_is_refused_without_add_and_change_grants(client, settings):
+    """A view-only caller must not reach interface creation, at the gate or the writer."""
+    from dcim.models import Device, Interface
+
+    _configure_test_server(settings)
+    device = make_device("ip-view-only", librenms_cf={"default": {"id": 42}})
+    # Deliberately view-only on both models, plus the IP grants the row would otherwise need.
+    user = make_user_with_perms("ip-view-only-user", [])
+    user = grant(user, "view", Device, constraints={"pk": device.pk})
+    user = grant(user, "view", Interface)
+    user = grant(user, "add", IPAddress)
+    user = grant(user, "change", IPAddress)
+    client.force_login(user)
+    cache.set(
+        f"librenms_ip_addresses_device_{device.pk}_default",
+        {
+            "ip_addresses": [
+                {
+                    "ip_address": "198.18.32.10",
+                    "prefix_length": 24,
+                    "ip_with_mask": "198.18.32.10/24",
+                    "port_id": 7032,
+                    "interface_name": "Ethernet1",
+                }
+            ],
+            "mgmt_ip": "",
+            "ports_by_id": {
+                7032: {
+                    "port_id": 7032,
+                    "ifName": "Ethernet1",
+                    "ifDescr": "Ethernet1",
+                    "ifType": "ethernetCsmacd",
+                }
+            },
+            "interface_name_field": "ifName",
+        },
+        timeout=300,
+    )
+
+    response = client.post(
+        reverse(
+            "plugins:netbox_librenms_plugin:sync_device_ip_addresses",
+            kwargs={"object_type": "device", "pk": device.pk},
+        ),
+        {
+            "server_key": "default",
+            "create-missing-interfaces-toggle": "on",
+            "select": "198.18.32.10/24",
+            "vrf_198.18.32.10/24": "",
+        },
+    )
+
+    assert response.status_code in (302, 403)
+    assert not Interface.objects.filter(device=device, name="Ethernet1").exists()
+    assert not IPAddress.objects.filter(address="198.18.32.10/24").exists()
+
+    # Positive control: the identical request succeeds once the caller holds add and change, so
+    # the refusal above is the permission gate and not an unrelated failure earlier in the flow.
+    user = grant(user, "add", Interface)
+    user = grant(user, "change", Interface)
+    client.force_login(user)
+
+    allowed = client.post(
+        reverse(
+            "plugins:netbox_librenms_plugin:sync_device_ip_addresses",
+            kwargs={"object_type": "device", "pk": device.pk},
+        ),
+        {
+            "server_key": "default",
+            "create-missing-interfaces-toggle": "on",
+            "select": "198.18.32.10/24",
+            "vrf_198.18.32.10/24": "",
+        },
+    )
+
+    assert allowed.status_code == 302
+    assert Interface.objects.filter(device=device, name="Ethernet1").exists()
 
 
 @pytest.mark.django_db
