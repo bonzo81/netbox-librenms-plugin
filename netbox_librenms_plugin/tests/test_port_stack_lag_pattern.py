@@ -529,3 +529,31 @@ class TestLagPatternSharedLoad:
         # The sentinel entry created no relationship at all (nothing references the phantom port 0).
         assert result["lag_members"] == {}
         assert result["sub_interfaces"] == {}
+
+
+@pytest.mark.django_db
+def test_mapping_bulk_import_routes_resolve_without_the_model_view_registry():
+    """urls.py owns every mapping bulk-import route, so no register_model_view is needed.
+
+    The decorators added no URL because urls.py never includes get_model_urls(). This pins the
+    explicit routes, so removing them cannot silently take the Import views offline.
+    """
+    from django.urls import resolve, reverse
+
+    from netbox_librenms_plugin.views import mapping_views
+
+    expected = {
+        "interfacetypemapping_bulk_import": mapping_views.InterfaceTypeMappingBulkImportView,
+        "devicetypemapping_bulk_import": mapping_views.DeviceTypeMappingBulkImportView,
+        "moduletypemapping_bulk_import": mapping_views.ModuleTypeMappingBulkImportView,
+        "modulebaymapping_bulk_import": mapping_views.ModuleBayMappingBulkImportView,
+        "normalizationrule_bulk_import": mapping_views.NormalizationRuleBulkImportView,
+        "inventoryignorerule_bulk_import": mapping_views.InventoryIgnoreRuleBulkImportView,
+        "platformmapping_bulk_import": mapping_views.PlatformMappingBulkImportView,
+        "carrierautoinstallrule_bulk_import": mapping_views.CarrierAutoInstallRuleBulkImportView,
+        "portstacklagpattern_bulk_import": mapping_views.PortStackLagPatternBulkImportView,
+    }
+
+    for route, view_class in expected.items():
+        url = reverse(f"plugins:netbox_librenms_plugin:{route}")
+        assert resolve(url).func.view_class is view_class, route

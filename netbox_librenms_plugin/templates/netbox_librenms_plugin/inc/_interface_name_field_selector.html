@@ -8,10 +8,10 @@
      data-platform-id="{{ object.platform_id|default:'' }}"
      data-save-pref-url="{% url 'plugins:netbox_librenms_plugin:save_user_pref' %}">
     <input type="radio" class="btn-check interface-name-field" name="interface_name_field" value="ifDescr"
-        id="ifDescr" {% if interface_name_field == 'ifDescr' %}checked{% endif %}>
-    <label class="btn btn-outline-primary" for="ifDescr">ifDescr</label>
+        id="interface-name-field-ifdescr" {% if interface_name_field == 'ifDescr' %}checked{% endif %}>
+    <label class="btn btn-outline-primary" for="interface-name-field-ifdescr">ifDescr</label>
 
     <input type="radio" class="btn-check interface-name-field" name="interface_name_field" value="ifName"
-        id="ifName" {% if interface_name_field == 'ifName' %}checked{% endif %}>
-    <label class="btn btn-outline-primary" for="ifName">ifName</label>
+        id="interface-name-field-ifname" {% if interface_name_field == 'ifName' %}checked{% endif %}>
+    <label class="btn btn-outline-primary" for="interface-name-field-ifname">ifName</label>
 </div>

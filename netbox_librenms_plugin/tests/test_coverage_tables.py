@@ -1825,6 +1825,9 @@ class TestInterfaceTableLibreNMSIdColumnAndBadgeContrast:
                 record={},
                 btn_class="lag-sync-btn",
                 data_related_key="data-lag-port-id",
+                # render_parent always passes a label; without it the guard inspects markup
+                # and title text the application never renders.
+                type_label="LAG",
             )
         )
         m = re.search(r'class="badge ([^"]*)"', html)

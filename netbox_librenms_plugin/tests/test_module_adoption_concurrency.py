@@ -89,9 +89,11 @@ def test_concurrent_hidden_interface_is_not_adopted(monkeypatch):
         future = executor.submit(install_module)
         assert install_ready.wait(5), "module install did not reach the adoption race window"
         # The worker holds an open transaction while it waits. Bound the competing write too, so a
-        # conflicting row lock fails with a readable error instead of hanging the run.
+        # conflicting row lock fails with a readable error instead of hanging the run. SET LOCAL
+        # reverts with pytest-django's per-test transaction; a session SET would leak the timeout
+        # into every later test sharing this connection.
         with connection.cursor() as cursor:
-            cursor.execute("SET lock_timeout = '5s'")
+            cursor.execute("SET LOCAL lock_timeout = '5s'")
         winner = Interface.objects.create(device=device, name="Te1/1/1", type="10gbase-x-sfpp")
         winner_committed.set()
         future.result(timeout=10)
