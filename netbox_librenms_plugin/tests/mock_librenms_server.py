@@ -106,7 +106,14 @@ class _LibreNMSHandler(BaseHTTPRequestHandler):
         self._handle_request("GET")
 
     def _handle_request_with_body(self, method):
-        length = int(self.headers.get("Content-Length", 0))
+        try:
+            length = int(self.headers.get("Content-Length", 0))
+        except (TypeError, ValueError):
+            length = -1
+        if length < 0:
+            # A negative length is truthy, so read() would block until the client disconnects.
+            self._send_json(400, {"status": "error", "message": "Invalid Content-Length"})
+            return
         raw_body = self.rfile.read(length) if length else b""
         try:
             body = json.loads(raw_body) if raw_body else None
@@ -369,12 +376,12 @@ class LibreNMSStubServer(MockLibreNMSServer):
 
             if not self.devices:
                 raise ValueError("At least one recording with a device response is required")
+
+            self._next_device_id = max(self.devices) + 1
+            self._install_instance_routes()
         except BaseException:
             self._server.server_close()
             raise
-
-        self._next_device_id = max(self.devices) + 1
-        self._install_instance_routes()
 
     @staticmethod
     def _find_response(recording, route):
