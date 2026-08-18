@@ -8,7 +8,11 @@ from pathlib import Path
 import pytest
 from django.test import override_settings
 
-from netbox_librenms_plugin.tests.conftest import pytest_xdist_auto_num_workers
+from netbox_librenms_plugin.tests.conftest import (
+    _seeded_model_rows,
+    pytest_xdist_auto_num_workers,
+    restore_seeded_state,
+)
 from netbox_librenms_plugin.tests.isolated_settings import TEST_DB_NAME_PREFIX
 from netbox_librenms_plugin.tests.parallel import (
     MAX_PARALLEL_WORKERS,
@@ -136,12 +140,44 @@ def test_local_and_ci_commands_request_isolated_workers():
     ("detected_workers", "expected"),
     [("2", 2), (str(MAX_PARALLEL_WORKERS), MAX_PARALLEL_WORKERS), ("32", MAX_PARALLEL_WORKERS)],
 )
-def test_auto_worker_count_never_exceeds_the_isolated_worker_ceiling(monkeypatch, detected_workers, expected):
+def test_auto_worker_count_never_exceeds_the_isolated_worker_ceiling(
+    pytestconfig, monkeypatch, detected_workers, expected
+):
     """`-n auto` on a big machine must stop at the last worker with private Redis databases."""
     monkeypatch.setenv("PYTEST_XDIST_AUTO_NUM_WORKERS", detected_workers)
 
-    assert pytest_xdist_auto_num_workers(None) == expected
+    assert pytest_xdist_auto_num_workers(pytestconfig) == expected
     isolated_redis_databases(f"gw{expected - 1}")  # the highest worker this count starts
+
+
+def test_auto_worker_count_stays_capped_without_the_environment_override(pytestconfig, monkeypatch):
+    """Without the environment override the hook must still cap the detected CPU count."""
+    monkeypatch.delenv("PYTEST_XDIST_AUTO_NUM_WORKERS", raising=False)
+
+    assert 1 <= pytest_xdist_auto_num_workers(pytestconfig) <= MAX_PARALLEL_WORKERS
+
+
+@pytest.mark.django_db
+def test_a_detected_flush_restores_the_custom_field_with_the_seeded_rows():
+    """The probe path must restore everything a flush removes, not only the seeded rows."""
+    from extras.models import CustomField
+
+    seeded_models = [model for model, _lookup, _value, _rows in _seeded_model_rows()]
+    for model in seeded_models:
+        model.objects.all().delete()
+    CustomField.objects.filter(name="librenms_id").delete()
+
+    assert restore_seeded_state(force=False) is True
+
+    for model in seeded_models:
+        assert model.objects.exists()
+    assert CustomField.objects.filter(name="librenms_id").exists()
+
+
+@pytest.mark.django_db
+def test_intact_seeds_are_left_alone_when_no_flush_is_detected():
+    """A probe that finds the seeds intact must not rewrite them."""
+    assert restore_seeded_state(force=False) is False
 
 
 def _run_netbox_test_alias(worker_value=None, *, db_name="test_alias_contract", redis_host="redis-alias-contract"):

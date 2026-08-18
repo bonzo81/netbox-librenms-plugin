@@ -159,6 +159,15 @@ def _restore_librenms_custom_field():
     _ensure_librenms_id_custom_field(sender=None, using="default")
 
 
+def restore_seeded_state(*, force):
+    """Recreate every row and custom field a flush removed, unless the seeds are intact."""
+    if not force and all(model.objects.exists() for model, _lookup, _value, _rows in _seeded_model_rows()):
+        return False
+    seed_migration_rows()
+    _restore_librenms_custom_field()
+    return True
+
+
 @pytest.fixture(autouse=True)
 def _restore_migration_seeded_rows(request):
     """Restore the rows that a transactional test's flush removes.
@@ -185,15 +194,8 @@ def _restore_migration_seeded_rows(request):
     # An autouse fixture is set up BEFORE the fixtures it does not request, so ask for the
     # database one here: querying without it raises "Database access not allowed".
     request.getfixturevalue(db_fixture)
-    if _transactional_seed_restore_required:
-        seed_migration_rows()
-        _restore_librenms_custom_field()
-        _transactional_seed_restore_required = False
-    else:
-        for model, _lookup_field, _value_field, _rows in _seeded_model_rows():
-            if not model.objects.exists():
-                seed_migration_rows()
-                break
+    restore_seeded_state(force=_transactional_seed_restore_required)
+    _transactional_seed_restore_required = False
 
     yield
 
@@ -218,8 +220,7 @@ def _reseed_after_transactional_flush(django_db_setup, django_db_blocker):
         return
 
     with django_db_blocker.unblock():
-        seed_migration_rows()
-        _restore_librenms_custom_field()
+        restore_seeded_state(force=True)
 
     yield
 
