@@ -48,7 +48,7 @@ testpaths = ["netbox_librenms_plugin/tests"]
 python_files = "test_*.py"
 python_classes = "Test*"
 python_functions = "test_*"
-addopts = "-v --tb=short --cov=netbox_librenms_plugin --cov-report=term-missing --reuse-db"
+addopts = "-v --tb=short --cov=netbox_librenms_plugin --cov-report=term-missing"
 
 [tool.ruff]
 line-length = 120

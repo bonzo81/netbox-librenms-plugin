@@ -252,14 +252,13 @@ class SingleInterfaceVerifyView(
                 vlan_group_overrides = cache.get(self.get_vlan_overrides_key(primary_device, server_key)) or {}
                 # Set before the selection call: it validates overrides against this row's groups.
                 port_data["vlan_groups"] = vlan_groups
-                BaseInterfaceTableView._add_vlan_group_selection(
-                    self,
+                self._add_vlan_group_selection(
                     port_data,
                     vlan_lookup_maps,
                     selected_device,
                     vlan_group_overrides,
                 )
-                BaseInterfaceTableView._add_missing_vlans_info(self, port_data, vlan_lookup_maps)
+                self._add_missing_vlans_info(port_data, vlan_lookup_maps)
                 # The caller keeps its existing VC member selector. The verify response only
                 # repaints comparison and relationship cells, so it does not need another
                 # member dropdown in the JSON payload.

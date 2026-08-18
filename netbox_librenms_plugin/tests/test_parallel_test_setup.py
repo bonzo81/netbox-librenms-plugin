@@ -161,6 +161,9 @@ def test_custom_field_restore_drops_stale_content_type_cache(caplog):
         app_label=interface_type.app_label,
         model=interface_type.model,
     )
+    # Couples to Django's private ContentTypeManager._cache layout ({alias: {(app_label, model)}}),
+    # which the test matrix pins to Django 5.1 and 6.0. If a later release reshapes it, seed the
+    # cache through ContentType.objects._add_to_cache(db_alias, stale_type) instead.
     ContentType.objects._cache.setdefault(db_alias, {})[(stale_type.app_label, stale_type.model)] = stale_type
 
     assert ContentType.objects.db_manager(db_alias).get_for_model(Interface) is stale_type
