@@ -7,7 +7,11 @@ from threading import Event
 import pytest
 from django.apps import apps
 
-from netbox_librenms_plugin.tests.conftest import configure_default_librenms_server, make_virtual_chassis_members
+from netbox_librenms_plugin.tests.conftest import (
+    configure_default_librenms_server,
+    configured_server_key,
+    make_virtual_chassis_members,
+)
 
 # Window a competing thread must NOT get through while the row lock is held. A negative wait
 # proves only that nothing happened inside it, so keep the four sites on one name and raise it
@@ -44,6 +48,8 @@ def test_selected_vc_target_is_locked_through_interface_sync():
     from netbox_librenms_plugin.tests.view_test_helpers import make_request, make_superuser, make_view
     from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
 
+    server_key = configured_server_key()
+
     _vc, (page_device, target_device) = make_virtual_chassis_members("sync-target-lock")
     user = make_superuser("sync-target-lock-user")
     validation_done = Event()
@@ -73,7 +79,7 @@ def test_selected_vc_target_is_locked_through_interface_sync():
                 user=thread_user,
             )
             view = make_view(SyncInterfacesView, request)
-            view._post_server_key = "default"
+            view._post_server_key = server_key
             view._selected_port_ids = {101}
             view._auto_selected_port_ids = set()
             real_resolve = view._resolve_device_interface
@@ -259,6 +265,8 @@ def test_auto_selected_owner_is_revalidated_after_vc_position_changes():
     from netbox_librenms_plugin.tests.view_test_helpers import make_request, make_superuser, make_view
     from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
 
+    server_key = configured_server_key()
+
     _vc, (page_device, old_position_two, new_position_two) = make_virtual_chassis_members(
         "sync-auto-position",
         count=3,
@@ -274,7 +282,7 @@ def test_auto_selected_owner_is_revalidated_after_vc_position_changes():
     }
     request = make_request("post", user=make_superuser("sync-auto-position-user"))
     view = make_view(SyncInterfacesView, request)
-    view._post_server_key = "default"
+    view._post_server_key = server_key
     view._selected_port_ids = {10}
     view._auto_selected_port_ids = {10}
     view._auto_selected_target_ids = {10: old_position_two.pk}
@@ -299,6 +307,8 @@ def test_inaccessible_selected_target_is_not_locked():
     from netbox_librenms_plugin.tests.view_test_helpers import grant, make_request, make_user_with_perms, make_view
     from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
 
+    server_key = configured_server_key()
+
     page_device = make_device("restricted-target-page")
     inaccessible_target = make_device("restricted-target-hidden")
     user = make_user_with_perms("restricted-target-user", [])
@@ -321,7 +331,7 @@ def test_inaccessible_selected_target_is_not_locked():
                 user=thread_user,
             )
             view = make_view(SyncInterfacesView, request)
-            view._post_server_key = "default"
+            view._post_server_key = server_key
             view._selected_port_ids = {10}
             view._auto_selected_port_ids = set()
             view._auto_selected_target_ids = {}
@@ -356,6 +366,8 @@ def test_viewable_outside_selected_target_is_not_locked():
     from netbox_librenms_plugin.tests.view_test_helpers import make_request, make_superuser, make_view
     from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
 
+    server_key = configured_server_key()
+
     page_device = make_device("outside-target-page")
     outside_target = make_device("outside-target-device")
     user = make_superuser("outside-target-user")
@@ -375,7 +387,7 @@ def test_viewable_outside_selected_target_is_not_locked():
                 user=thread_user,
             )
             view = make_view(SyncInterfacesView, request)
-            view._post_server_key = "default"
+            view._post_server_key = server_key
             view._selected_port_ids = {10}
             view._auto_selected_port_ids = set()
             view._auto_selected_target_ids = {}
@@ -440,6 +452,8 @@ def test_vm_sync_serializes_duplicate_display_name_resolution():
     from netbox_librenms_plugin.utils import get_librenms_device_id
     from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
 
+    server_key = configured_server_key()
+
     vm = make_vm("vm-duplicate-name-lock")
     VMInterface.objects.create(virtual_machine=vm, name="Ethernet")
     user = make_superuser("vm-duplicate-name-lock-user")
@@ -457,7 +471,7 @@ def test_vm_sync_serializes_duplicate_display_name_resolution():
             thread_user = get_user_model().objects.get(pk=user.pk)
             request = make_request("post", {}, user=thread_user)
             view = make_view(SyncInterfacesView, request)
-            view._post_server_key = "default"
+            view._post_server_key = server_key
             view._selected_port_ids = {port_id}
             view._skipped_conflicts = []
             real_resolve = view._resolve_vm_interface
@@ -497,7 +511,7 @@ def test_vm_sync_serializes_duplicate_display_name_resolution():
 
     interface = VMInterface.objects.get(virtual_machine=vm, name="Ethernet")
     assert not resolved_during_first
-    assert get_librenms_device_id(interface, "default") == 10, (
+    assert get_librenms_device_id(interface, server_key) == 10, (
         interface.custom_field_data,
         first_skips,
         second_skips,
@@ -518,15 +532,17 @@ def test_relationship_write_locks_virtual_chassis_members_through_validation():
     from netbox_librenms_plugin.utils import set_librenms_device_id
     from netbox_librenms_plugin.views.sync.interfaces import SyncInterfaceLagView
 
+    server_key = configured_server_key()
+
     _vc, (aggregate_device, member_device) = make_virtual_chassis_members("relationship-scope-lock")
     aggregate = make_interface(aggregate_device, "Port-Channel1", iface_type="lag")
     member = make_interface(member_device, "Ethernet2")
-    set_librenms_device_id(aggregate, 20, "default")
-    set_librenms_device_id(member, 10, "default")
+    set_librenms_device_id(aggregate, 20, server_key)
+    set_librenms_device_id(member, 10, server_key)
     aggregate.save()
     member.save()
     user = make_superuser("relationship-scope-lock-user")
-    cache_key = SyncInterfaceLagView().get_cache_key(aggregate_device, "ports", "default")
+    cache_key = SyncInterfaceLagView().get_cache_key(aggregate_device, "ports", server_key)
     cache.set(
         cache_key,
         {
@@ -554,7 +570,7 @@ def test_relationship_write_locks_virtual_chassis_members_through_validation():
                 user=thread_user,
             )
             view = SyncInterfaceLagView()
-            view._librenms_api = SimpleNamespace(server_key="default")
+            view._librenms_api = SimpleNamespace(server_key=server_key)
             prepare_related = view._prepare_related
 
             def pause_before_validation(related_interface):
@@ -618,17 +634,19 @@ def test_inline_relationship_rechecks_migrated_donor_after_lock():
     from netbox_librenms_plugin.utils import mark_librenms_migrated, set_librenms_device_id
     from netbox_librenms_plugin.views.sync.interfaces import SyncInterfaceParentView
 
+    server_key = configured_server_key()
+
     donor = make_device("relationship-migrated-donor")
     winner = make_device("relationship-migrated-winner")
     child = make_interface(donor, "Ethernet1.100", iface_type="virtual")
     parent = make_interface(donor, "Ethernet1")
-    set_librenms_device_id(child, 10, "default")
-    set_librenms_device_id(parent, 20, "default")
+    set_librenms_device_id(child, 10, server_key)
+    set_librenms_device_id(parent, 20, server_key)
     child.save()
     parent.save()
     user = make_superuser("relationship-migrated-user")
     view_template = SyncInterfaceParentView()
-    cache_key = view_template.get_cache_key(donor, "ports", "default")
+    cache_key = view_template.get_cache_key(donor, "ports", server_key)
     cache.set(
         cache_key,
         {
@@ -655,7 +673,7 @@ def test_inline_relationship_rechecks_migrated_donor_after_lock():
                 locked_donor = Device.objects.select_for_update().get(pk=donor.pk)
                 donor_locked.set()
                 assert request_checked_cache.wait(5), "relationship request did not reach cache validation"
-                mark_librenms_migrated(locked_donor, winner.pk, "default")
+                mark_librenms_migrated(locked_donor, winner.pk, server_key)
                 locked_donor.save()
         finally:
             close_old_connections()
@@ -673,7 +691,7 @@ def test_inline_relationship_rechecks_migrated_donor_after_lock():
                 user=thread_user,
             )
             view = PausingSyncInterfaceParentView()
-            view._librenms_api = SimpleNamespace(server_key="default")
+            view._librenms_api = SimpleNamespace(server_key=server_key)
             return post(view, request, object_type="device", object_id=donor.pk)
         finally:
             close_old_connections()
@@ -706,17 +724,19 @@ def test_inline_relationship_does_not_lock_unrelated_interfaces():
     from netbox_librenms_plugin.utils import set_librenms_device_id
     from netbox_librenms_plugin.views.sync.interfaces import SyncInterfaceParentView
 
+    server_key = configured_server_key()
+
     device = make_device("targeted-inline-lock")
     child = make_interface(device, "Ethernet1.100", iface_type="virtual")
     parent = make_interface(device, "Ethernet1")
     unrelated = make_interface(device, "Ethernet99")
-    set_librenms_device_id(child, 10, "default")
-    set_librenms_device_id(parent, 20, "default")
+    set_librenms_device_id(child, 10, server_key)
+    set_librenms_device_id(parent, 20, server_key)
     child.save()
     parent.save()
     user = make_superuser("targeted-inline-lock-user")
     view_template = SyncInterfaceParentView()
-    cache_key = view_template.get_cache_key(device, "ports", "default")
+    cache_key = view_template.get_cache_key(device, "ports", server_key)
     cache.set(
         cache_key,
         {
@@ -744,7 +764,7 @@ def test_inline_relationship_does_not_lock_unrelated_interfaces():
                 user=thread_user,
             )
             view = SyncInterfaceParentView()
-            view._librenms_api = SimpleNamespace(server_key="default")
+            view._librenms_api = SimpleNamespace(server_key=server_key)
 
             def pause_before_validation(_related_interface):
                 validation_reached.set()
@@ -797,12 +817,14 @@ def test_bulk_relationship_pass_skips_scope_locks_without_selected_edges():
     from netbox_librenms_plugin.utils import set_librenms_device_id
     from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
 
+    server_key = configured_server_key()
+
     device = make_device("bulk-unrelated-edge")
     selected = make_interface(device, "Ethernet1")
     child = make_interface(device, "Ethernet2.100", iface_type="virtual")
     parent = make_interface(device, "Ethernet2")
     for interface, port_id in ((selected, 10), (child, 20), (parent, 30)):
-        set_librenms_device_id(interface, port_id, "default")
+        set_librenms_device_id(interface, port_id, server_key)
         interface.save()
     user = make_superuser("bulk-unrelated-edge-user")
     relationship_finished = Event()
@@ -829,7 +851,7 @@ def test_bulk_relationship_pass_skips_scope_locks_without_selected_edges():
                 thread_device,
                 ports,
                 {"lag_members": {}, "sub_interfaces": {20: 30}},
-                "default",
+                server_key,
             )
             relationship_finished.set()
         finally:
@@ -854,12 +876,14 @@ def test_bulk_relationship_pass_does_not_lock_unrelated_interfaces():
     from netbox_librenms_plugin.utils import set_librenms_device_id
     from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
 
+    server_key = configured_server_key()
+
     device = make_device("bulk-targeted-edge")
     child = make_interface(device, "Ethernet1.100", iface_type="virtual")
     parent = make_interface(device, "Ethernet1")
     unrelated = make_interface(device, "Ethernet99")
     for interface, port_id in ((child, 10), (parent, 20), (unrelated, 30)):
-        set_librenms_device_id(interface, port_id, "default")
+        set_librenms_device_id(interface, port_id, server_key)
         interface.save()
     user = make_superuser("bulk-targeted-edge-user")
     relationship_finished = Event()
@@ -887,7 +911,7 @@ def test_bulk_relationship_pass_does_not_lock_unrelated_interfaces():
                 thread_device,
                 ports,
                 {"lag_members": {}, "sub_interfaces": {10: 20}},
-                "default",
+                server_key,
             )
             relationship_finished.set()
         finally:

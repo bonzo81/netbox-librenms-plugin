@@ -503,6 +503,8 @@ def test_verify_rejects_serial_row_with_fixed_owner():
     )
 
     assert response.status_code == 400
+    # Pin the reason: the endpoint answers 400 for a malformed payload and an unknown row too.
+    assert response.json()["message"] == "Serial cable rows have a fixed device owner."
 
 
 # ---------------------------------------------------------------------------
