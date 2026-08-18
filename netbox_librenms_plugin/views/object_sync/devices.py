@@ -176,7 +176,9 @@ class SingleInterfaceVerifyView(
         selected_device = self.restrict_object_or_404(Device, pk=selected_device_id)
         interface_name_field = (
             posted_name_field
-            if posted_name_field in INTERFACE_NAME_FIELDS
+            # INTERFACE_NAME_FIELDS is a frozenset, so an unhashable posted value (a JSON list)
+            # would raise here; the tuple this replaced compared by equality instead.
+            if isinstance(posted_name_field, str) and posted_name_field in INTERFACE_NAME_FIELDS
             else get_interface_name_field(request, selected_device)
         )
         origin_device = selected_device
