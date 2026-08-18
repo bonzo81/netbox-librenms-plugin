@@ -4278,20 +4278,45 @@ class TestSyncLagAndParentRelationships:
     _CORE_VC_BUG = AttributeError("'Interface' object has no attribute 'virtual_chassis'", name="virtual_chassis")
 
     def test_cross_member_parent_survives_a_netbox_that_cannot_validate_it(self, db):
-        """The edge NetBox 4.4.x cannot validate is the one it exists to allow: same chassis."""
+        """The edge NetBox 4.4.0 cannot validate is the one it exists to allow: same chassis."""
         from dcim.models import Interface
 
+        from netbox_librenms_plugin import utils
         from netbox_librenms_plugin.views.sync.interfaces import _apply_interface_relationship
 
         _vc, (member1, member2) = make_virtual_chassis_members("relationship-vc-clean-bug")
         child = make_interface(member2, "Ethernet4.100", iface_type="virtual")
         parent = make_interface(member1, "Ethernet4")
 
-        with patch.object(Interface, "clean", side_effect=self._CORE_VC_BUG):
+        with (
+            patch.object(utils, "_get_netbox_version_tuple", return_value=(4, 4, 0)),
+            patch.object(Interface, "clean", side_effect=self._CORE_VC_BUG),
+        ):
             _apply_interface_relationship(child, "parent", parent)
 
         child.refresh_from_db()
         assert child.parent_id == parent.pk
+
+    def test_cross_member_parent_error_propagates_once_netbox_fixed_it(self, db):
+        """The tolerance is scoped to 4.4.0: a later release must not hide the same failure."""
+        from dcim.models import Interface
+
+        from netbox_librenms_plugin import utils
+        from netbox_librenms_plugin.views.sync.interfaces import _apply_interface_relationship
+
+        _vc, (member1, member2) = make_virtual_chassis_members("relationship-vc-clean-fixed")
+        child = make_interface(member2, "Ethernet7.100", iface_type="virtual")
+        parent = make_interface(member1, "Ethernet7")
+
+        with (
+            patch.object(utils, "_get_netbox_version_tuple", return_value=(4, 4, 1)),
+            patch.object(Interface, "clean", side_effect=self._CORE_VC_BUG),
+            pytest.raises(AttributeError),
+        ):
+            _apply_interface_relationship(child, "parent", parent)
+
+        child.refresh_from_db()
+        assert child.parent_id is None
 
     def test_same_device_parent_does_not_swallow_the_attribute_error(self, db):
         """Only the cross-chassis edge is tolerated: NetBox never reaches that branch otherwise."""
