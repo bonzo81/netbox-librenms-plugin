@@ -2165,7 +2165,9 @@ def test_create_missing_interfaces_is_refused_without_add_and_change_grants(clie
     )
 
     assert allowed.status_code == 302
-    assert Interface.objects.filter(device=device, name="Ethernet1").exists()
+    created = Interface.objects.get(device=device, name="Ethernet1")
+    # The interface alone does not prove the row completed: assert the address the sync exists for.
+    assert IPAddress.objects.get(address="198.18.32.10/24").assigned_object == created
 
 
 @pytest.mark.django_db
