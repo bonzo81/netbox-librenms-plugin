@@ -2716,3 +2716,96 @@ def test_failed_cable_verify_restores_controls_without_a_member_baseline(page):
     row = page.locator("#member").locator("xpath=ancestor::tr[1]")
     assert not row.locator('input[name="select"]').is_disabled()
     assert not row.locator('td[data-col="actions"] button').is_disabled()
+
+
+def _cable_row_html(*, with_actions_cell):
+    """Return one cable row, optionally rendered without its actions cell."""
+    actions_cell = '<td data-col="actions"><button id="row-action">Sync</button></td>' if with_actions_cell else ""
+    return f"""
+        <input type="hidden" name="csrfmiddlewaretoken" value="token">
+        <div data-cable-verify-url="https://plugin.example.com/verify" data-cable-origin-device-id="7">
+          <table id="librenms-cable-table"><tbody>
+            <tr data-interface="row-1">
+              <td data-col="selection"><input type="checkbox" name="select"></td>
+              <td data-col="local_port">Ethernet1</td>
+              <td data-col="remote_port">Ethernet2</td>
+              <td data-col="remote_device">remote</td>
+              <td data-col="cable_status">Not connected</td>
+              {actions_cell}
+            </tr>
+          </tbody></table>
+        </div>
+        <select id="member-select" data-row-id="row-1" data-interface="row-1">
+          <option value="7" selected>Member 7</option>
+        </select>
+    """
+
+
+def test_cable_verify_completes_for_a_row_rendered_without_its_actions_cell(page):
+    """A row missing the actions cell must still complete the verify instead of erroring out."""
+    page.set_content(_cable_row_html(with_actions_cell=False))
+    page.add_script_tag(path=str(SCRIPT_PATH))
+    page.evaluate(
+        """() => {
+            window.warnings = [];
+            window.errors = [];
+            console.warn = (message) => window.warnings.push(String(message));
+            console.error = (message) => window.errors.push(String(message));
+            window.fetch = () => Promise.resolve({
+                ok: true,
+                json: () => Promise.resolve({
+                    status: 'success',
+                    formatted_row: {
+                        local_port: 'Ethernet1',
+                        remote_port: 'Ethernet2',
+                        remote_device: 'remote',
+                        cable_status: 'Connected',
+                        actions: '<button>Sync</button>',
+                        can_create_cable: true
+                    }
+                })
+            });
+            handleCableChange(document.getElementById('member-select'), '7');
+        }"""
+    )
+
+    page.wait_for_function("document.getElementById('member-select')._lastVerifiedMember !== undefined")
+    assert page.evaluate("document.getElementById('member-select')._lastVerifiedMember") == "7"
+    assert page.locator('td[data-col="cable_status"]').inner_text() == "Connected"
+    assert page.evaluate("window.errors") == []
+    assert any('data-col="actions"' in warning for warning in page.evaluate("window.warnings"))
+    assert page.evaluate("document.querySelector('input[name=\"select\"]').disabled") is False
+
+
+
+def test_cable_verify_updates_every_cell_of_a_complete_row(page):
+    """The guarded update must still replace each cell a rendered row carries."""
+    page.set_content(_cable_row_html(with_actions_cell=True))
+    page.add_script_tag(path=str(SCRIPT_PATH))
+    page.evaluate(
+        """() => {
+            window.warnings = [];
+            console.warn = (message) => window.warnings.push(String(message));
+            window.fetch = () => Promise.resolve({
+                ok: true,
+                json: () => Promise.resolve({
+                    status: 'success',
+                    formatted_row: {
+                        local_port: 'Ethernet9',
+                        remote_port: 'Ethernet8',
+                        remote_device: 'other-remote',
+                        cable_status: 'Connected',
+                        actions: '<button id="new-action">Resync</button>',
+                        can_create_cable: true
+                    }
+                })
+            });
+            handleCableChange(document.getElementById('member-select'), '7');
+        }"""
+    )
+
+    page.wait_for_selector("#new-action")
+    assert page.locator('td[data-col="local_port"]').inner_text() == "Ethernet9"
+    assert page.locator('td[data-col="remote_device"]').inner_text() == "other-remote"
+    assert page.evaluate("window.warnings") == []
+

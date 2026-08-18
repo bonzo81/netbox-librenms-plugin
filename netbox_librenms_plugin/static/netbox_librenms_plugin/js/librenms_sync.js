@@ -2753,12 +2753,24 @@ function handleCableChange(select, value) {
         .then(data => {
             if (data.status === 'success' && row) {
                 const formattedRow = data.formatted_row;
-                row.querySelector('td[data-col="local_port"]').innerHTML = formattedRow.local_port;
-                row.querySelector('td[data-col="remote_port"]').innerHTML = formattedRow.remote_port;
-                row.querySelector('td[data-col="remote_device"]').innerHTML = formattedRow.remote_device;
-                row.querySelector('td[data-col="cable_status"]').innerHTML = formattedRow.cable_status;
+                // Replace each cell content if present. A missing cell must not throw here: the
+                // success branch still has to restore the row controls below.
+                const cellMap = {
+                    local_port: formattedRow.local_port,
+                    remote_port: formattedRow.remote_port,
+                    remote_device: formattedRow.remote_device,
+                    cable_status: formattedRow.cable_status,
+                    actions: formattedRow.actions
+                };
+                for (const [col, html] of Object.entries(cellMap)) {
+                    const cell = row.querySelector(`td[data-col="${col}"]`);
+                    if (cell) {
+                        cell.innerHTML = html;
+                    } else {
+                        console.warn(`Cable row missing data-col="${col}" cell — skipping update`);
+                    }
+                }
                 const actionsCell = row.querySelector('td[data-col="actions"]');
-                actionsCell.innerHTML = formattedRow.actions;
                 if (selection) {
                     delete selection.dataset.verifyLocked;
                     delete selection.dataset.wasDisabled;
@@ -2783,7 +2795,7 @@ function handleCableChange(select, value) {
                     });
                     updateBulkActionButton();
                 }
-                if (typeof htmx !== 'undefined') {
+                if (typeof htmx !== 'undefined' && actionsCell) {
                     htmx.process(actionsCell);
                 }
                 select._lastVerifiedMember = value;
