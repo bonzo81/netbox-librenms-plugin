@@ -2061,55 +2061,6 @@ class TestSingleInstallInterfaceBinding:
         standalone.refresh_from_db()
         assert standalone.module_id == module.pk
 
-    def test_update_module_interface_view_no_server_key_does_not_fake_adoption_success(self):
-        """bind_item resolves but server_key degrades to blank (no active server), so the bind is skipped."""
-        from netbox_librenms_plugin.views.sync.modules import UpdateModuleInterfaceView
-
-        view = object.__new__(UpdateModuleInterfaceView)
-        view.required_object_permissions = {}
-        view._librenms_api = MagicMock(server_key="")
-        device = _make_device()
-
-        module = MagicMock()
-        module.pk = 321
-        module.module_type.model = "SFP-10G-SR"
-        module.module_bay.name = "SFP 1"
-
-        # No server_key posted AND the active server resolves to blank → bind cannot be attempted
-        # (post-fix, a blank posted key alone falls back to the active server; only a blank active
-        # server leaves server_key empty and reaches this fail-closed "no server context" branch).
-        request = _make_request("POST", data={"module_id": "321", "ent_index": "77"})
-
-        with (
-            patch.object(view, "require_all_permissions", return_value=None),
-            patch(
-                "netbox_librenms_plugin.views.mixins.NetBoxObjectPermissionMixin.restrict_object_or_404",
-                side_effect=[device, module],
-            ),
-            patch("netbox_librenms_plugin.views.sync.modules.reverse", return_value="/sync/"),
-            patch.object(view, "get_cache_key", return_value="inv-key"),
-            patch("netbox_librenms_plugin.views.sync.modules.cache") as mock_cache,
-            # bind_item resolves (a primary identity exists) even though server_key is blank.
-            patch(
-                "netbox_librenms_plugin.views.sync.modules._resolve_single_install_binding_item",
-                return_value={"entPhysicalName": "Te1/1/1", "_librenms_port_id": 42},
-            ),
-            patch("netbox_librenms_plugin.views.sync.modules._bind_interface_librenms_id") as mock_bind,
-            patch("netbox_librenms_plugin.views.sync.modules._adopt_existing_template_interfaces") as mock_adopt,
-            patch("netbox_librenms_plugin.views.sync.modules.messages") as mock_messages,
-            patch("netbox_librenms_plugin.views.sync.modules._modules_redirect_response", return_value="redirected"),
-        ):
-            mock_cache.get.return_value = {"inventory": [], "librenms_id": 999}
-            view.request = request
-            response = view.post(request, pk=24)
-
-        mock_bind.assert_not_called()  # no server context → bind never attempted
-        mock_adopt.assert_not_called()  # and we must NOT adopt-and-succeed instead
-        mock_messages.success.assert_not_called()
-        mock_messages.warning.assert_called_once()
-        assert "server context" in mock_messages.warning.call_args[0][1].lower()
-        assert response is not None
-
     @pytest.mark.django_db
     def test_update_module_interface_view_adopts_templates_after_a_real_bind_noop(self):
         from dcim.models import Device, Interface, InterfaceTemplate, Module, ModuleBay, ModuleType

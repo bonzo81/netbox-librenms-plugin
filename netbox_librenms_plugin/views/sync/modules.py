@@ -1755,25 +1755,16 @@ class UpdateModuleInterfaceView(
         if invalid_selected_device:
             _warn_invalid_selected_device(request)
         changeable_interfaces = self.restricted_queryset(Interface, "change")
-        # Validate the posted server_key against configured servers, else fall back to the active
-        # client server (mirrors InstallModuleView via resolve_posted_server_key). A blank key (stale
-        # tab / fallback render) OR a forged/unconfigured one degrades to the active server rather than
-        # scoping under a bogus namespace. Without a usable key the port-bind is skipped AND the
-        # adopt/merge runs without a server scope, so the raw twin's LibreNMS binding can't transfer.
+        # A blank or forged key degrades to the active server rather than scoping the bind under a
+        # bogus namespace; see resolve_posted_server_key.
         bind_item = _resolve_single_install_binding_item(request, target_device, server_key, self.get_cache_key)
 
         module = self.restrict_object_or_404(Module, "view", pk=module_id, device=target_device)
 
         bind_result = None
-        # A primary interface is bindable only with both a cache-resolved item AND a server
-        # context. Distinguish "there is no primary to bind" (bind_item falsy) from "a primary
-        # exists but we never attempted the bind" (bind_item set, server_key blank): the latter
-        # must not fall through to the adoption-only success path below, or we'd report success
-        # while the row's primary port_id was never associated.
-        primary_bindable = bool(bind_item)
-        primary_bind_attempted = bool(bind_item and server_key)
+        # The missing-server guard above already returned, so a resolved primary is always bound.
         try:
-            if primary_bind_attempted:
+            if bind_item:
                 bind_result = _bind_interface_librenms_id(
                     target_device,
                     bind_item,
@@ -1799,14 +1790,7 @@ class UpdateModuleInterfaceView(
             # nothing to do (None) or succeeded (bound) — otherwise an already-bound interface
             # makes the bind a no-op, the adoption is skipped, and the button never clears.
             # A hard conflict/skip is left untouched so we don't mutate past an unresolved issue.
-            if primary_bindable and not primary_bind_attempted:
-                # Primary identity exists but there was no server context to bind it; don't
-                # adopt-and-succeed as if the row were fully handled.
-                bind_result = {
-                    "status": "failed",
-                    "reason": "no LibreNMS server context to associate the interface",
-                }
-            elif bind_result is None or bind_result.get("status") == "bound":
+            if bind_result is None or bind_result.get("status") == "bound":
                 try:
                     adopt_result = _adopt_existing_template_interfaces(
                         target_device,

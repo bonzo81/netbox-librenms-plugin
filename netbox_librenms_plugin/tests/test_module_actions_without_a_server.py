@@ -12,9 +12,7 @@ from netbox_librenms_plugin.tests.conftest import (
     make_module_type,
     make_superuser,
 )
-
-
-NO_SERVER_TEXT = "No LibreNMS server is configured"
+from netbox_librenms_plugin.views.sync.modules import NO_LIBRENMS_SERVER_MESSAGE
 
 
 def _seed_device_with_installed_module(name):
@@ -68,12 +66,26 @@ def test_module_action_reports_the_missing_server_instead_of_failing(client, set
 
     if method == "get":
         assert response.status_code == 400
-        assert NO_SERVER_TEXT in response.content.decode()
+        assert NO_LIBRENMS_SERVER_MESSAGE in response.content.decode()
     else:
         assert response.status_code == 302
-        assert any(NO_SERVER_TEXT in str(message) for message in get_messages(response.wsgi_request))
+        assert any(NO_LIBRENMS_SERVER_MESSAGE in str(message) for message in get_messages(response.wsgi_request))
     # Fail closed: these actions scope their cache reads and LibreNMS id writes by server key,
     # so none of them may touch NetBox without one.
     assert list(Module.objects.filter(device=device)) == [module]
     module.refresh_from_db()
     assert module.serial == "SEEDED"
+
+
+@pytest.mark.django_db
+def test_a_resolved_action_server_key_is_never_blank(settings):
+    """The missing-server guard is the only no-server path, so a resolved key always scopes a bind."""
+    from netbox_librenms_plugin.views.object_sync.devices import DeviceInterfaceTableView
+
+    view = DeviceInterfaceTableView()
+
+    assert view.resolve_posted_server_key_or_none({"server_key": ""})
+    assert view.resolve_posted_server_key_or_none({"server_key": "forged"})
+
+    configure_no_librenms_servers(settings)
+    assert DeviceInterfaceTableView().resolve_posted_server_key_or_none({"server_key": ""}) is None
