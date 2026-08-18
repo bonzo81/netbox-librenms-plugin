@@ -2718,6 +2718,71 @@ def test_failed_cable_verify_restores_controls_without_a_member_baseline(page):
     assert not row.locator('td[data-col="actions"] button').is_disabled()
 
 
+def _cable_row_sharing_its_identity_html():
+    """Return one cable row whose row identity is also carried by an earlier loaded table."""
+    return """
+        <input type="hidden" name="csrfmiddlewaretoken" value="token">
+        <table id="librenms-interface-table"><tbody>
+          <tr data-interface="7018">
+            <td data-col="selection"><input type="checkbox" name="select"></td>
+            <td data-col="cable_status">interface row</td>
+          </tr>
+        </tbody></table>
+        <div data-cable-verify-url="https://plugin.example.com/verify" data-cable-origin-device-id="7">
+          <table id="librenms-cable-table-vc"><tbody>
+            <tr data-interface="7018">
+              <td data-col="selection"><input type="checkbox" name="select"></td>
+              <td data-col="device_selection">
+                <select id="device_selection_7018" data-row-id="7018" data-interface="7018">
+                  <option value="7" selected>Member 7</option>
+                </select>
+              </td>
+              <td data-col="local_port">Ethernet1</td>
+              <td data-col="remote_port">Ethernet2</td>
+              <td data-col="remote_device">remote</td>
+              <td data-col="cable_status">Not connected</td>
+              <td data-col="actions"><button id="row-action">Sync</button></td>
+            </tr>
+          </tbody></table>
+        </div>
+    """
+
+
+def test_cable_verify_updates_the_row_that_owns_the_changed_select():
+    """A row identity another loaded table also carries must not divert the verify."""
+    with playwright.sync_playwright() as runtime:
+        browser = runtime.chromium.launch(headless=True)
+        page = browser.new_page()
+        page.set_content(_cable_row_sharing_its_identity_html())
+        page.add_script_tag(path=str(SCRIPT_PATH))
+        page.evaluate(
+            """() => {
+                window.fetch = () => Promise.resolve({
+                    ok: true,
+                    json: () => Promise.resolve({
+                        status: 'success',
+                        formatted_row: {
+                            local_port: 'Ethernet1',
+                            remote_port: 'Ethernet2',
+                            remote_device: 'remote',
+                            cable_status: 'Connected',
+                            actions: '<button id="new-action">Resync</button>',
+                            can_create_cable: true
+                        }
+                    })
+                });
+                handleCableChange(document.getElementById('device_selection_7018'), '7');
+            }"""
+        )
+
+        page.wait_for_selector("#new-action", timeout=5000)
+        cable_row = page.locator("#librenms-cable-table-vc tr")
+        assert cable_row.locator('td[data-col="cable_status"]').inner_text() == "Connected"
+        interface_row = page.locator("#librenms-interface-table tr")
+        assert interface_row.locator('td[data-col="cable_status"]').inner_text() == "interface row"
+        browser.close()
+
+
 def _cable_row_html(*, with_actions_cell):
     """Return one cable row, optionally rendered without its actions cell."""
     actions_cell = '<td data-col="actions"><button id="row-action">Sync</button></td>' if with_actions_cell else ""
@@ -2727,6 +2792,11 @@ def _cable_row_html(*, with_actions_cell):
           <table id="librenms-cable-table"><tbody>
             <tr data-interface="row-1">
               <td data-col="selection"><input type="checkbox" name="select"></td>
+              <td data-col="device_selection">
+                <select id="member-select" data-row-id="row-1" data-interface="row-1">
+                  <option value="7" selected>Member 7</option>
+                </select>
+              </td>
               <td data-col="local_port">Ethernet1</td>
               <td data-col="remote_port">Ethernet2</td>
               <td data-col="remote_device">remote</td>
@@ -2735,9 +2805,6 @@ def _cable_row_html(*, with_actions_cell):
             </tr>
           </tbody></table>
         </div>
-        <select id="member-select" data-row-id="row-1" data-interface="row-1">
-          <option value="7" selected>Member 7</option>
-        </select>
     """
 
 

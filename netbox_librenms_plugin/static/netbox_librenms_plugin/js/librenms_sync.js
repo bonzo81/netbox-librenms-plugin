@@ -2684,7 +2684,9 @@ function handleInterfaceChange(select, value) {
  * @param {string} value - Selected device ID
  */
 function handleCableChange(select, value) {
-    const row = document.querySelector(`tr[data-interface="${select.dataset.rowId}"]`);
+    // Resolve the row from the changed <select> itself: other loaded tabs carry their own
+    // tr[data-interface] rows, so a document-wide lookup can land on one of theirs.
+    const row = select.closest('tr');
     const verifyContext = row?.closest('[data-cable-verify-url]');
     const verifyUrl = verifyContext?.dataset.cableVerifyUrl;
     const csrfToken = getCsrfToken();
