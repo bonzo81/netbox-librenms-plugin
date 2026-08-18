@@ -20,6 +20,7 @@ from netbox_librenms_plugin.utils import (
     coerce_librenms_id,
     get_interface_name_field,
     get_librenms_device_id,
+    resolve_create_missing_interfaces,
     resolve_set_primary_ip,
     same_host,
 )
@@ -518,6 +519,7 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxOb
             "cache_expiry": cache_expiry,
             "server_key": server_key,
             "set_primary_ip": resolve_set_primary_ip(request),
+            "create_missing_interfaces": resolve_create_missing_interfaces(request),
             # Donor "Move IP to winner" candidates (empty unless this device carries a
             # _migrated_to marker for server_key); drives the migrated-mode action card.
             "movable_ips": self._movable_ips_for_migration(obj, server_key),
@@ -571,6 +573,7 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxOb
                 "cache_expiry": None,
                 "server_key": scoped,
                 "set_primary_ip": resolve_set_primary_ip(request),
+                "create_missing_interfaces": resolve_create_missing_interfaces(request),
                 "movable_ips": self._movable_ips_for_migration(obj, scoped),
             }
         context = self._prepare_context(request, obj, interface_name_field, fetch_fresh=False, server_key=scoped)
@@ -582,6 +585,7 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxOb
                 "cache_expiry": None,
                 "server_key": scoped,
                 "set_primary_ip": resolve_set_primary_ip(request),
+                "create_missing_interfaces": resolve_create_missing_interfaces(request),
                 "movable_ips": self._movable_ips_for_migration(obj, scoped),
             }
         return context
@@ -617,6 +621,7 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxOb
                         # checkbox to ip_sync.set_primary_ip, so omitting it silently unchecks it
                         # on this error re-render.
                         "set_primary_ip": resolve_set_primary_ip(request),
+                        "create_missing_interfaces": resolve_create_missing_interfaces(request),
                         # Keep the "Move IP addresses to <winner>" card on this error re-render too:
                         # the per-row moves are pure NetBox operations, and the template gates the
                         # card on ip_sync.movable_ips — omitting it (as the fetch-failure and success
@@ -647,6 +652,7 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxOb
                         # Preserve the set-primary-IP checkbox state across a failed refresh
                         # (the template binds it to ip_sync.set_primary_ip).
                         "set_primary_ip": resolve_set_primary_ip(request),
+                        "create_missing_interfaces": resolve_create_missing_interfaces(request),
                         # Keep the "Move IP addresses to <winner>" card available on a LibreNMS
                         # fetch failure: the per-row moves (MoveIPAddressToWinnerView) are pure
                         # NetBox operations that don't touch LibreNMS, and every other exit surfaces
