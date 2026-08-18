@@ -24,6 +24,7 @@ from netbox_librenms_plugin.utils import (
     ip_family,
     normalize_librenms_port_id,
     resolve_interface_row_device,
+    resolve_create_missing_interfaces,
     resolve_set_primary_ip,
     same_host,
 )
@@ -63,7 +64,7 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
     @staticmethod
     def _create_missing_interfaces(request):
         """Return true when this request may materialize missing interfaces."""
-        return request.POST.get("create-missing-interfaces-toggle", "").lower() in {"on", "true", "1"}
+        return resolve_create_missing_interfaces(request)
 
     def _required_permissions(self, object_type):
         """
@@ -248,6 +249,7 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
                 "object": obj,
                 "server_key": post_server_key,
                 "set_primary_ip": resolve_set_primary_ip(request),
+                "create_missing_interfaces": resolve_create_missing_interfaces(request),
                 "cancel_url": self.get_ip_tab_url(obj),
             }
             if request.headers.get("HX-Request") != "true":

@@ -687,7 +687,9 @@ class BaseInterfaceTableView(
                 "by_lnms_id": catalog_interfaces_by_port_id,
                 "by_name": catalog_interfaces_by_name,
             }
-            display_index = catalog_index
+            # The table reads netbox_interface from this index for VLAN, status and field
+            # comparisons, so it must not expose an interface outside the caller's view scope.
+            display_index = filter_interface_index(catalog_index, viewable_interface_ids)
             related_index = {
                 "by_lnms_id": related_interfaces_by_port_id,
                 "by_name": related_interfaces_by_name,

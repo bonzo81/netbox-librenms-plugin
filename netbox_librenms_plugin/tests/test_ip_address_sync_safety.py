@@ -2022,3 +2022,93 @@ def test_sync_without_a_selection_reports_the_empty_selection_error(client, sett
     assert response.status_code == 302
     assert "No IP addresses selected for synchronization." in _message_texts(response)
     assert not IPAddress.objects.filter(address="198.18.32.10/24").exists()
+
+
+@pytest.mark.django_db
+def test_create_missing_interfaces_requires_change_scope_for_the_new_interface(client, settings):
+    """A constrained change grant must fail the row closed instead of populating the new row."""
+    from dcim.models import Device, Interface
+
+    _configure_test_server(settings)
+    device = make_device("ip-create-scope", librenms_cf={"default": {"id": 42}})
+    user = make_user_with_perms("ip-create-scope-user", [])
+    user = grant(user, "view", Device, constraints={"pk": device.pk})
+    user = grant(user, "view", Interface)
+    user = grant(user, "add", Interface)
+    # The add grant is unconstrained, the change grant excludes the row this sync creates.
+    user = grant(user, "change", Interface, constraints={"name": "another-interface"})
+    user = grant(user, "add", IPAddress)
+    user = grant(user, "change", IPAddress)
+    client.force_login(user)
+    cache.set(
+        f"librenms_ip_addresses_device_{device.pk}_default",
+        {
+            "ip_addresses": [
+                {
+                    "ip_address": "198.18.30.10",
+                    "prefix_length": 24,
+                    "ip_with_mask": "198.18.30.10/24",
+                    "port_id": 7030,
+                    "interface_name": "Ethernet1",
+                }
+            ],
+            "mgmt_ip": "",
+            "ports_by_id": {
+                7030: {
+                    "port_id": 7030,
+                    "ifName": "Ethernet1",
+                    "ifDescr": "Ethernet1",
+                    "ifType": "ethernetCsmacd",
+                    "ifAlias": "Populated by the unscoped writer",
+                }
+            },
+            "interface_name_field": "ifName",
+        },
+        timeout=300,
+    )
+    sync_url = reverse(
+        "plugins:netbox_librenms_plugin:sync_device_ip_addresses",
+        kwargs={"object_type": "device", "pk": device.pk},
+    )
+
+    response = client.post(
+        sync_url,
+        {
+            "server_key": "default",
+            "create-missing-interfaces-toggle": "on",
+            "select": "198.18.30.10/24",
+            "vrf_198.18.30.10/24": "",
+        },
+    )
+
+    assert response.status_code == 302
+    # The row runs inside transaction.atomic(), so failing closed rolls the creation back.
+    assert not Interface.objects.filter(device=device, name="Ethernet1").exists()
+    assert not IPAddress.objects.filter(address="198.18.30.10/24", assigned_object_id__isnull=False).exists()
+
+
+@pytest.mark.django_db
+def test_create_missing_interfaces_toggle_survives_a_table_refresh(client, settings):
+    """The refreshed fragment must re-check the toggle the user posted, not silently drop it."""
+    _configure_test_server(settings)
+    device = make_device("ip-toggle-state", librenms_cf={"default": {"id": 42}})
+    client.force_login(make_superuser("ip-toggle-state-user"))
+    refresh_url = reverse("plugins:netbox_librenms_plugin:device_ipaddress_sync", args=[device.pk])
+    rows = [{"address": "198.18.31.10", "prefix_length": 24, "port_id": 7031, "interface": "Ethernet1"}]
+
+    def _refresh(payload):
+        with patch(
+            "netbox_librenms_plugin.librenms_api.requests.get",
+            side_effect=_librenms_ip_rows_response(rows, device_name=device.name),
+        ):
+            response = client.post(refresh_url, payload, HTTP_HX_REQUEST="true")
+        assert response.status_code == 200
+        html = response.content.decode()
+        assert 'id="create-missing-interfaces-toggle-cb"' in html
+        return html.split('id="create-missing-interfaces-toggle-cb"', 1)[1].split(">", 1)[0]
+
+    base = {"server_key": "default", "interface_name_field": "ifName"}
+    # Positive control: without the toggle the box must stay clear, so the assertion below
+    # cannot pass just because "checked" appears somewhere in the element.
+    assert "checked" not in _refresh(base)
+    assert "checked" in _refresh({**base, "create-missing-interfaces-toggle": "on"})
