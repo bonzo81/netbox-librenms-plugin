@@ -491,6 +491,59 @@ def test_constructor_failure_releases_the_bound_port():
     replacement._server.server_close()
 
 
+def test_constructor_failure_on_a_derived_alias_collision_releases_the_bound_port():
+    """A collision raised while installing routes must not leave the listening socket bound."""
+    first = copy.deepcopy(load_recording("linux-host"))
+    second = copy.deepcopy(load_recording("linux-host-oob"))
+    shared_name = "collision-stub.example.test"
+    for recording in (first, second):
+        device = LibreNMSStubServer._find_response(recording, f"/api/v0/devices/{recording['device_id']}")
+        device["devices"][0]["sysName"] = shared_name
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+
+    with pytest.raises(ValueError, match="Duplicate device lookup alias"):
+        LibreNMSStubServer(recordings=[first, second], api_token=TOKEN, port=port)
+
+    replacement = LibreNMSStubServer(
+        recordings=[load_recording("linux-host")],
+        api_token=TOKEN,
+        port=port,
+    )
+    replacement._server.server_close()
+
+
+def _raw_post(server, content_length, *, timeout=5):
+    """Send one POST with a chosen Content-Length header and return the status line."""
+    host, _, port = server.url.removeprefix("http://").partition(":")
+    request = (
+        "POST /api/v0/devices HTTP/1.1\r\n"
+        f"Host: {host}:{port}\r\n"
+        f"X-Auth-Token: {TOKEN}\r\n"
+        f"Content-Length: {content_length}\r\n"
+        "Connection: close\r\n\r\n"
+    ).encode()
+    with socket.create_connection((host, int(port)), timeout=timeout) as client:
+        client.settimeout(timeout)
+        client.sendall(request)
+        received = b""
+        while chunk := client.recv(4096):
+            received += chunk
+    lines = received.decode(errors="replace").splitlines()
+    return lines[0] if lines else ""
+
+
+@pytest.mark.parametrize("content_length", ["not-a-number", "-1"])
+def test_stub_answers_an_unusable_content_length(content_length):
+    """A malformed length must get a response instead of aborting or blocking the handler."""
+    server = _start_stub()
+    try:
+        assert "400" in _raw_post(server, content_length)
+    finally:
+        server.stop()
+
+
 def test_stub_starts_when_a_recording_holds_a_non_dict_port():
     """A malformed port row must not stop the stub from serving the recording."""
     recording = copy.deepcopy(load_recording("linux-host"))
