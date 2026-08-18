@@ -38,6 +38,7 @@ from netbox_librenms_plugin.utils import (
     interface_name_fallback_matches_port,
     is_list_of_dicts,
     normalize_librenms_port_id,
+    netbox_clean_reads_parent_virtual_chassis,
     normalize_relationship_maps,
     resolve_interface_row_device,
 )
@@ -1383,6 +1384,7 @@ def _validate_relationship(source_iface, relation_field, related_iface):
             and getattr(exc, "name", None) == "virtual_chassis"
             and source_chassis is not None
             and source_chassis == related_chassis
+            and netbox_clean_reads_parent_virtual_chassis()
         ):
             raise
         logger.debug(

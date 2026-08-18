@@ -39,7 +39,7 @@
             <div class="form-check form-switch mb-0">
                 <input type="hidden" name="create-missing-interfaces-toggle" value="off">
                 <input class="form-check-input" type="checkbox" id="create-missing-interfaces-toggle-cb"
-                       name="create-missing-interfaces-toggle" value="on"
+                       name="create-missing-interfaces-toggle" value="on" {% if ip_sync.create_missing_interfaces %}checked{% endif %}
                        data-bs-toggle="tooltip"
                        title="Create a missing NetBox interface from the cached LibreNMS port before assigning the selected IP address.">
                 <label class="form-check-label small" for="create-missing-interfaces-toggle-cb">

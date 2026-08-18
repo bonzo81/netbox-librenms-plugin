@@ -8,7 +8,7 @@ from django.views import View
 from ipam.models import VLAN, VLANGroup
 from utilities.views import ViewTab, register_model_view
 
-from netbox_librenms_plugin.constants import PERM_VIEW_PLUGIN
+from netbox_librenms_plugin.constants import INTERFACE_NAME_FIELDS, PERM_VIEW_PLUGIN
 from netbox_librenms_plugin.interface_relationships import (
     build_candidate_relationship_context,
     build_relationship_maps,
@@ -176,7 +176,7 @@ class SingleInterfaceVerifyView(
         selected_device = self.restrict_object_or_404(Device, pk=selected_device_id)
         interface_name_field = (
             posted_name_field
-            if posted_name_field in ("ifName", "ifDescr")
+            if posted_name_field in INTERFACE_NAME_FIELDS
             else get_interface_name_field(request, selected_device)
         )
         origin_device = selected_device

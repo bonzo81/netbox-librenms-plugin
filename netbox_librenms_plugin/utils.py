@@ -27,9 +27,18 @@ logger = logging.getLogger(__name__)
 _ASCII_POSITIVE_INTEGER_RE = re.compile(r"^[ \t\r\n\f\v]*\+?[0-9]{1,19}[ \t\r\n\f\v]*$")
 
 
-def acquire_advisory_transaction_lock(lock_identity: str) -> None:
-    """Acquire one stable PostgreSQL advisory lock for the current transaction."""
-    from django.db import connection
+def acquire_advisory_transaction_lock(lock_identity: str, *, using: str | None = None) -> None:
+    """Acquire one stable PostgreSQL advisory lock for the current transaction.
+
+    Args:
+        lock_identity: Stable string hashed into the advisory lock key.
+        using: Database alias that owns the transaction. Defaults to the default alias.
+    """
+    # Resolve the alias the caller's transaction.atomic(using=...) opened; the default
+    # connection can be in autocommit, where the lock would release immediately.
+    from django.db import DEFAULT_DB_ALIAS, connections
+
+    connection = connections[using or DEFAULT_DB_ALIAS]
 
     if not connection.in_atomic_block:
         raise RuntimeError("acquire_advisory_transaction_lock() requires an open transaction")
@@ -143,17 +152,14 @@ def interface_name_fallback_matches_port(interface, port_id, server_key) -> bool
         return False
 
     raw_mapping = interface.custom_field_data.get("librenms_id")
+    # Only the "no binding recorded" rules stay local; get_librenms_device_id owns every
+    # stored shape, so the two readers cannot drift on which ones resolve.
     if raw_mapping is None:
         return True
-    if isinstance(raw_mapping, dict):
-        if server_key not in raw_mapping:
-            return True
-        raw_entry = raw_mapping[server_key]
-        raw_id = raw_entry.get("id") if isinstance(raw_entry, dict) else raw_entry
-    else:
-        raw_id = raw_mapping
+    if isinstance(raw_mapping, dict) and server_key not in raw_mapping:
+        return True
 
-    return normalize_librenms_port_id(raw_id) == requested_id
+    return get_librenms_device_id(interface, server_key, auto_save=False) == requested_id
 
 
 def get_interface_port_identity_sets(ports, interface_name_field) -> tuple[set[int], set[int]]:
@@ -952,6 +958,28 @@ def same_host(a, b) -> bool:
         return False
 
 
+def resolve_create_missing_interfaces(request) -> bool:
+    """Resolve the "create a missing NetBox interface before assigning the IP" flag.
+
+    POST wins, then GET, then ``False`` (opt-in). The IP-sync template renders the toggle
+    from this value, so a table refresh restores what the user selected instead of
+    silently reverting to off.
+    """
+    _TRUTHY = frozenset({"on", "true", "1"})
+    _KEYS = ("create-missing-interfaces-toggle", "create_missing_interfaces")
+
+    def _is_truthy(val):
+        return val.lower() in _TRUTHY if val is not None else False
+
+    post_val = next((request.POST.get(k) for k in _KEYS if k in request.POST), None)
+    if post_val is not None:
+        return _is_truthy(post_val)
+    get_val = next((request.GET.get(k) for k in _KEYS if k in request.GET), None)
+    if get_val is not None:
+        return _is_truthy(get_val)
+    return False
+
+
 def resolve_set_primary_ip(request) -> bool:
     """Resolve the "set Primary IP from the LibreNMS management IP" flag.
 
@@ -997,7 +1025,7 @@ _POSTGRES_BIGINT_MAX = 9_223_372_036_854_775_807
 def _remember_interface_name_per_platform(request: HttpRequest) -> bool:
     """Return the installation setting, cached for the lifetime of this request."""
     cache_attribute = "_librenms_remember_interface_name_per_platform"
-    request_state = getattr(request, "__dict__", {})
+    request_state = request.__dict__
     if cache_attribute in request_state:
         return request_state[cache_attribute]
 
@@ -2243,6 +2271,7 @@ def migrate_legacy_librenms_id(obj, server_key: str = "default") -> bool:
 
 
 _MODULE_TOKEN_LEAF_FIX_VERSION = (4, 5, 6)
+_PARENT_CHASSIS_CLEAN_BUG_VERSION = (4, 4, 0)
 _NETBOX_VERSION_PREFIX_RE = re.compile(r"^(\d+)\.(\d+)\.(\d+)")
 
 
@@ -2264,6 +2293,20 @@ def _get_netbox_version_tuple():
     if not match:
         return None
     return tuple(int(part) for part in match.groups())
+
+
+def netbox_clean_reads_parent_virtual_chassis():
+    """Return True when the running NetBox raises ``AttributeError`` while validating a
+    parent interface on another virtual chassis member.
+
+    NetBox 4.4.0 (issue #20197) dereferences ``self.parent.virtual_chassis`` in
+    ``Interface.clean()``; 4.4.1 fixed it. When the version cannot be detected we keep the
+    tolerance, so an undetectable release cannot turn a known core defect into a 500.
+    """
+    version = _get_netbox_version_tuple()
+    if version is None:
+        return True
+    return version == _PARENT_CHASSIS_CLEAN_BUG_VERSION
 
 
 def netbox_resolves_module_token_per_leaf():

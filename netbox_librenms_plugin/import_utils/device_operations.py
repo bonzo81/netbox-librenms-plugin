@@ -155,6 +155,10 @@ def resolve_device_by_host_ip(primary_ip):
             match; ``ambiguous`` is ``True`` only when >1 distinct device shares the address
             (the caller must block the import); ``matching_ips`` is the net_host queryset so
             callers can reuse it (e.g. for the ``oob_ip`` membership check).
+
+    Raises:
+        ValueError: When *primary_ip* is not a parseable host address. Callers catch it and
+            fail closed for that device.
     """
     from dcim.models import Device
     from ipam.models import IPAddress

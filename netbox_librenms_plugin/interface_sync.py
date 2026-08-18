@@ -169,6 +169,11 @@ def resolve_or_create_interface_from_port(
                     raise ValueError("The matching NetBox interface is outside your view scope.")
                 if not changeable_queryset.filter(pk=interface.pk).exists():
                     raise ValueError("The matching NetBox interface is outside your change scope.")
+            # A model-level add grant does not imply a constrained change grant, so the row
+            # this call just created still has to fall inside the caller's change scope
+            # before update_interface_from_port() populates it.
+            elif not changeable_queryset.filter(pk=interface.pk).exists():
+                raise ValueError("The new NetBox interface is outside your change scope.")
 
     netbox_type = get_netbox_interface_type(librenms_interface, speed_converter=speed_converter)
     update_interface_from_port(
