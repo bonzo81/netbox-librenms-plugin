@@ -722,7 +722,10 @@ class LibreNMSStubServer(MockLibreNMSServer):
         def _handler(method, path, query, headers, body):
             device = self.devices[device_id]
             ports = self.ports_by_device.get(device_id, [])
-            first_port = next((port for port in ports if port.get("port_id") is not None), None)
+            first_port = next(
+                (port for port in ports if isinstance(port, dict) and port.get("port_id") is not None),
+                None,
+            )
             addresses = []
             if first_port and device.get("ip"):
                 addresses.append(

@@ -498,7 +498,15 @@ def test_stub_starts_when_a_recording_holds_a_non_dict_port():
     # The stub loads the first response for this route, so inject the malformed row there.
     ports_body = LibreNMSStubServer._find_response(recording, f"/api/v0/devices/{device_id}/ports")
     recorded_port_count = len(ports_body["ports"])
-    ports_body["ports"].append("not-a-port")
+    # First in the list: a candidate search that stops at the first usable row never reads it.
+    ports_body["ports"].insert(0, "not-a-port")
+
+    # Pin what the same recording serves without the malformed row, so the check below is not vacuous.
+    clean = LibreNMSStubServer(recordings=[copy.deepcopy(load_recording("linux-host"))], api_token=TOKEN).start()
+    try:
+        expected_addresses = _request(clean, "GET", f"/api/v0/devices/{device_id}/ip").json()
+    finally:
+        clean.stop()
 
     server = LibreNMSStubServer(recordings=[recording], api_token=TOKEN).start()
     try:
@@ -508,5 +516,10 @@ def test_stub_starts_when_a_recording_holds_a_non_dict_port():
         served = response.json()["ports"]
         assert "not-a-port" in served
         assert len([port for port in served if isinstance(port, dict)]) == recorded_port_count
+
+        # The derived endpoints read the same port list, so they must tolerate the row too.
+        ip_response = _request(server, "GET", f"/api/v0/devices/{device_id}/ip")
+        assert ip_response.status_code == 200
+        assert ip_response.json() == expected_addresses
     finally:
         server.stop()
