@@ -29,6 +29,7 @@ from ipam.models import IPAddress
 from netbox_librenms_plugin.sync_cache import (
     SyncTab,
     apply_request_cache_transition,
+    mapped_server_keys,
     schedule_request_cache_mutation,
 )
 from netbox_librenms_plugin.utils import (
@@ -220,6 +221,14 @@ def _safe_referer(request, fallback=None):
     if referer := validated_referer(request):
         return referer
     return fallback or get_script_prefix()
+
+
+def _schedule_winner_cache_mutation(request, winner, source_tab, server_key):
+    """Clean the winner's tabs only when it holds a mapping for this server."""
+    # An unmapped winner caches nothing for this server, and scheduling it anyway fails the
+    # whole cleanup after the move already committed.
+    if server_key in mapped_server_keys(winner, server_key):
+        schedule_request_cache_mutation(request, winner, source_tab, server_key)
 
 
 def _hx_response(request, message, level=messages.SUCCESS, *, status=200, fallback_url=None):
@@ -723,7 +732,7 @@ class MoveInterfaceToWinnerView(_BaseMoveToWinnerView):
         if notes:
             message += " " + "; ".join(notes) + "."
         schedule_request_cache_mutation(request, donor, SyncTab.INTERFACES, server_key)
-        schedule_request_cache_mutation(request, winner, SyncTab.INTERFACES, server_key)
+        _schedule_winner_cache_mutation(request, winner, SyncTab.INTERFACES, server_key)
         response = _hx_response(request, message, fallback_url=self._fallback_url)
         return response
 
@@ -828,7 +837,7 @@ class MoveIPAddressToWinnerView(_BaseMoveToWinnerView):
         if notes:
             message += " " + "; ".join(notes) + "."
         schedule_request_cache_mutation(request, donor, SyncTab.IP_ADDRESSES, server_key)
-        schedule_request_cache_mutation(request, winner, SyncTab.IP_ADDRESSES, server_key)
+        _schedule_winner_cache_mutation(request, winner, SyncTab.IP_ADDRESSES, server_key)
         response = _hx_response(request, message, fallback_url=self._fallback_url)
         return response
 
@@ -956,7 +965,7 @@ class TransferDeviceIPView(_BaseMoveToWinnerView):
                 return self._fail(request, f"Cannot transfer {human}: {exc}", status=409)
 
         schedule_request_cache_mutation(request, donor, SyncTab.IP_ADDRESSES, server_key)
-        schedule_request_cache_mutation(request, winner, SyncTab.IP_ADDRESSES, server_key)
+        _schedule_winner_cache_mutation(request, winner, SyncTab.IP_ADDRESSES, server_key)
         response = _hx_response(
             request,
             f"Transferred {human} ({donor_ip}) to {winner.name}.",

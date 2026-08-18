@@ -2228,3 +2228,32 @@ class TestMoveEndpointsObjectScope:
         winner.refresh_from_db()
         assert donor.primary_ip4_id is None
         assert winner.primary_ip4_id == ip.pk
+
+
+# transaction=True: the view schedules the winner cleanup after its atomic block, so only a real
+# commit runs it inline the way production does.
+@pytest.mark.django_db(transaction=True)
+def test_moving_an_ip_to_an_unmapped_winner_reports_no_cleanup_failure(client):
+    """A winner with no mapping for this server has nothing cached, so cleanup must be a no-op."""
+    import json
+
+    from django.urls import reverse
+
+    from netbox_librenms_plugin.utils import mark_librenms_migrated
+
+    winner = make_device("mtw-unmapped-winner")
+    donor = make_device("mtw-unmapped-donor")
+    make_interface(winner, "eth0")
+    ip = ip_on(donor, "10.51.0.5/24", "eth0")
+    mark_librenms_migrated(donor, winner.pk, "default")
+    donor.save()
+    client.force_login(make_superuser("mtw-unmapped-user"))
+
+    move_url = reverse("plugins:netbox_librenms_plugin:ipaddress_move_to_winner", kwargs={"pk": ip.pk})
+    response = client.post(move_url, {"server_key": "default"}, HTTP_HX_REQUEST="true")
+
+    assert response.status_code == 200
+    ip.refresh_from_db()
+    assert ip.assigned_object.device_id == winner.pk
+    transition = json.loads(response["X-LibreNMS-Cache-Transition"])
+    assert transition["cleanup_failed"] is False
