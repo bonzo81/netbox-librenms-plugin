@@ -11,6 +11,11 @@ import pytest
 import requests
 
 
+# pytest only honours this at module scope; a class-scope declaration is ignored, which left
+# `mock_librenms_config` visible only when another module registered the helper first.
+pytest_plugins = ["netbox_librenms_plugin.tests.test_librenms_api_helpers"]
+
+
 # =============================================================================
 # Test Class 1: Initialization (3 tests)
 # =============================================================================
@@ -852,8 +857,6 @@ class TestLibreNMSAPIDeviceLookup:
 class TestLibreNMSAPIDeviceOperations:
     """Test device CRUD operations."""
 
-    pytest_plugins = ["netbox_librenms_plugin.tests.test_librenms_api_helpers"]
-
     @patch("netbox_librenms_plugin.librenms_api.requests.post")
     def test_add_device_success(self, mock_post, mock_librenms_config):
         """Verify successful device addition."""
@@ -1105,8 +1108,6 @@ class TestLibreNMSAPIDeviceOperations:
 class TestLibreNMSAPILocationOperations:
     """Test location CRUD operations."""
 
-    pytest_plugins = ["netbox_librenms_plugin.tests.test_librenms_api_helpers"]
-
     @patch("netbox_librenms_plugin.librenms_api.requests.get")
     def test_get_locations_success(self, mock_get, mock_librenms_config):
         """Verify retrieving all locations."""
@@ -1199,8 +1200,6 @@ class TestLibreNMSAPILocationOperations:
 
 class TestLibreNMSAPIPortsAndInventory:
     """Test ports and inventory operations."""
-
-    pytest_plugins = ["netbox_librenms_plugin.tests.test_librenms_api_helpers"]
 
     @patch("netbox_librenms_plugin.librenms_api.requests.get")
     def test_get_ports_all(self, mock_get, mock_librenms_config):
@@ -1423,8 +1422,6 @@ class TestLibreNMSAPIPortsAndInventory:
 class TestLibreNMSAPIPollerAndDevices:
     """Test poller groups and device listing operations."""
 
-    pytest_plugins = ["netbox_librenms_plugin.tests.test_librenms_api_helpers"]
-
     @patch("netbox_librenms_plugin.librenms_api.requests.get")
     def test_get_poller_groups_success(self, mock_get, mock_librenms_config):
         """Verify retrieving poller groups."""
@@ -1498,8 +1495,6 @@ class TestLibreNMSAPIPollerAndDevices:
 
 class TestLibreNMSAPIErrorHandling:
     """Test error handling and edge cases."""
-
-    pytest_plugins = ["netbox_librenms_plugin.tests.test_librenms_api_helpers"]
 
     @patch("netbox_librenms_plugin.librenms_api.requests.get")
     def test_network_error_handling(self, mock_get, mock_librenms_config):
@@ -1716,8 +1711,6 @@ class TestVlanEntryDictGuard:
 class TestGetDeviceInfoResponseShape:
     """Cover response-shape branches in get_device_info()."""
 
-    pytest_plugins = ["netbox_librenms_plugin.tests.test_librenms_api_helpers"]
-
     @patch("netbox_librenms_plugin.librenms_api.requests.get")
     def test_non_dict_device_entry_returns_failure(self, mock_get, mock_librenms_config):
         """A non-dict entry in the devices list must not propagate as truthy data."""
@@ -1749,8 +1742,6 @@ class TestGetDeviceInfoResponseShape:
 
 class TestGetDeviceTransceiversResponseShape:
     """Cover response-shape branches in get_device_transceivers()."""
-
-    pytest_plugins = ["netbox_librenms_plugin.tests.test_librenms_api_helpers"]
 
     @patch("netbox_librenms_plugin.librenms_api.requests.get")
     def test_success_returns_transceiver_list(self, mock_get, mock_librenms_config):
@@ -1876,8 +1867,6 @@ class TestGetDeviceTransceiversResponseShape:
 class TestGetDeviceVlansResponseShape:
     """Cover response-shape branches in get_device_vlans()."""
 
-    pytest_plugins = ["netbox_librenms_plugin.tests.test_librenms_api_helpers"]
-
     @patch("netbox_librenms_plugin.librenms_api.requests.get")
     def test_success_filters_by_device_id(self, mock_get, mock_librenms_config):
         mock_get.return_value.status_code = 200
@@ -1986,8 +1975,6 @@ class TestGetDeviceVlansResponseShape:
 
 class TestGetPortVlanDetailsResponseShape:
     """Cover response-shape branches in get_port_vlan_details()."""
-
-    pytest_plugins = ["netbox_librenms_plugin.tests.test_librenms_api_helpers"]
 
     @patch("netbox_librenms_plugin.librenms_api.requests.get")
     def test_success_returns_port_dict(self, mock_get, mock_librenms_config):
