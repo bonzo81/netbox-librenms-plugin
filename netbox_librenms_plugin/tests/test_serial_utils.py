@@ -276,6 +276,40 @@ class TestMapSensorsToSerialLinks:
 
         assert links == []
 
+    def test_conflicting_sensors_are_named_in_a_warning(self, caplog):
+        import logging
+
+        from netbox_librenms_plugin.serial_utils import map_sensors_to_serial_links
+
+        sensors = [
+            {
+                "sensor_id": 202,
+                "sensor_type": "vendorPortState",
+                "sensor_index": "vendorPortState.2",
+                "sensor_descr": "router-a Status",
+            },
+            {
+                "sensor_id": 302,
+                "sensor_type": "vendorPortLabel",
+                "sensor_index": "vendorPortLabel.2",
+                "sensor_descr": "router-b Status",
+            },
+        ]
+
+        with caplog.at_level(logging.WARNING, logger="netbox_librenms_plugin.serial_utils"):
+            links = map_sensors_to_serial_links(
+                sensors,
+                device_id=42,
+                sensor_types={
+                    "vendorPortState": "ttyS{N}",
+                    "vendorPortLabel": "ttyS{N}",
+                },
+            )
+
+        assert links == []
+        assert "ttyS2" in caplog.text
+        assert "42" in caplog.text
+
     def test_empty_input(self):
         from netbox_librenms_plugin.serial_utils import map_sensors_to_serial_links
 

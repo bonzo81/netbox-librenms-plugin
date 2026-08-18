@@ -217,6 +217,14 @@ def map_sensors_to_serial_links(
     for link in links:
         local_port = link["local_port"]
         local_port_counts[local_port] = local_port_counts.get(local_port, 0) + 1
+    ambiguous_ports = sorted(port for port, count in local_port_counts.items() if count > 1)
+    if ambiguous_ports:
+        # Two recognized types can name the same port; cabling an ambiguous name is unsafe.
+        logger.warning(
+            "Dropping serial rows for device %s with an ambiguous local port name: %s",
+            device_id,
+            ", ".join(ambiguous_ports),
+        )
     links = [link for link in links if local_port_counts[link["local_port"]] == 1]
     links.sort(key=lambda r: r["sensor_index_int"])
     return links
