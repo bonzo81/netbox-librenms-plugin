@@ -15,7 +15,18 @@ from netbox_librenms_plugin.tests.view_test_helpers import make_request, message
 from netbox_librenms_plugin.tests.view_test_helpers import post as _post
 
 
-SERVER_KEY = "production"  # the first server the test settings configure
+def _configured_server_key():
+    """Return a server key this deployment actually configures.
+
+    The names differ between the repository test configuration and a local devcontainer, so
+    hardcoding one passes in one place and fails in the other.
+    """
+    from django.conf import settings
+
+    servers = (settings.PLUGINS_CONFIG.get("netbox_librenms_plugin") or {}).get("servers") or {}
+    return next(iter(servers), "default")
+
+
 INVENTORY = [
     {
         "entPhysicalIndex": 1,
@@ -53,7 +64,8 @@ def _refresh(device, **failure):
         captured["context"] = context
         return original(self, request, obj, server_key, context, **kwargs)
 
-    request = make_request("post", {"server_key": SERVER_KEY}, HTTP_HX_REQUEST="true")
+    server_key = _configured_server_key()
+    request = make_request("post", {"server_key": server_key}, HTTP_HX_REQUEST="true")
     # The concrete subclass, so a complete refresh can actually build its table.
     view = DeviceModuleTableView()
 
@@ -78,7 +90,7 @@ class TestPartialModuleRefreshRendersEmpty:
     def _device(name):
         from netbox_librenms_plugin.tests.conftest import make_device, make_module_bay
 
-        device = make_device(name, librenms_cf={SERVER_KEY: 42})
+        device = make_device(name, librenms_cf={_configured_server_key(): 42})
         make_module_bay(device, "Bay 1")
         return device
 
@@ -103,7 +115,7 @@ class TestPartialModuleRefreshRendersEmpty:
         from django.core.cache import cache
 
         device = self._device(f"partial-refresh-{'-'.join(failure)}")
-        cache_key = f"librenms_inventory_device_{device.pk}_{SERVER_KEY}"
+        cache_key = f"librenms_inventory_device_{device.pk}_{_configured_server_key()}"
         cache.set(cache_key, {"inventory": INVENTORY, "librenms_id": 42, "oob_librenms_id": None}, timeout=300)
 
         try:
