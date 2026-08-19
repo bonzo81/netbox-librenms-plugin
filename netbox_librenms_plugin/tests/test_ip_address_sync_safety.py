@@ -1469,7 +1469,7 @@ def test_interface_sync_keeps_its_source_snapshot_and_clears_the_ip_snapshot(
 ):
     """A committed Interface sync must clear stale IP data but keep its source data."""
     _configure_test_server(settings)
-    device = make_device("ip-cache-survives-interface-sync", librenms_cf={"default": {"id": 42}})
+    device = make_device("ip-cache-cleared-by-interface-sync", librenms_cf={"default": {"id": 42}})
     rows = [
         {
             "address": "198.18.16.10",
@@ -1498,7 +1498,7 @@ def test_interface_sync_keeps_its_source_snapshot_and_clears_the_ip_snapshot(
             return _json_response(url, {"status": "ok", "ports": [port]})
         return ip_dispatcher(url, **kwargs)
 
-    client.force_login(make_superuser("ip-cache-survival-user"))
+    client.force_login(make_superuser("ip-cache-cleared-user"))
     ip_refresh_url = reverse("plugins:netbox_librenms_plugin:device_ipaddress_sync", args=[device.pk])
     interface_refresh_url = reverse("plugins:netbox_librenms_plugin:device_interface_sync", args=[device.pk])
     ip_cache_key = f"librenms_ip_addresses_device_{device.pk}_default"
