@@ -1,6 +1,7 @@
 import json
 import logging
 from collections import defaultdict
+from ipaddress import ip_interface
 from urllib.parse import quote_plus
 
 from dcim.models import Device
@@ -250,7 +251,10 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxOb
             for ip in IPAddress.objects.filter(address__in=list(candidate_addresses)).select_related(
                 "assigned_object_type", "vrf"
             ):
-                ip_addresses_map[str(ip.address)].append(ip)
+                # NetBox renders through netaddr ("::192.0.2.1/128") while the candidate keys come
+                # from the ipaddress module ("::c000:201/128"). Normalise with the same parser so
+                # an IPv4-compatible IPv6 row still matches.
+                ip_addresses_map[str(ip_interface(str(ip.address)))].append(ip)
 
         # Get all VRFs
         vrfs = list(VRF.objects.all())

@@ -896,6 +896,26 @@ def save_user_pref(request, path, value):
             pass
 
 
+_TRUTHY_PARAMETER_VALUES = frozenset({"on", "true", "1"})
+
+
+def is_truthy_parameter(value) -> bool:
+    """Return True when a request parameter carries one of the accepted truthy spellings."""
+    return value.lower() in _TRUTHY_PARAMETER_VALUES if isinstance(value, str) else False
+
+
+def read_request_toggle(request, keys):
+    """Return the first key's POST value, else its GET value, else None.
+
+    One reader for every POST-then-GET toggle in this module, so the accepted vocabulary
+    cannot drift between them.
+    """
+    post_value = next((request.POST.get(key) for key in keys if key in request.POST), None)
+    if post_value is not None:
+        return post_value
+    return next((request.GET.get(key) for key in keys if key in request.GET), None)
+
+
 def resolve_naming_preferences(request) -> tuple[bool, bool]:
     """Resolve use_sysname/strip_domain: POST/GET toggle → user pref → plugin settings.
 
@@ -908,21 +928,13 @@ def resolve_naming_preferences(request) -> tuple[bool, bool]:
     from netbox_librenms_plugin.models import LibreNMSSettings
 
     settings = None
-    _TRUTHY = frozenset({"on", "true", "1"})
     _USE_SYSNAME_KEYS = ("use-sysname-toggle", "use_sysname-toggle", "use_sysname")
     _STRIP_DOMAIN_KEYS = ("strip-domain-toggle", "strip_domain-toggle", "strip_domain")
 
-    def _is_truthy(val):
-        return val.lower() in _TRUTHY if val is not None else False
-
-    # Check POST first (import form submissions), then GET (HTMX hx-include)
-    _use_sysname_post = next((request.POST.get(k) for k in _USE_SYSNAME_KEYS if k in request.POST), None)
-    _use_sysname_get = next((request.GET.get(k) for k in _USE_SYSNAME_KEYS if k in request.GET), None)
-
-    if _use_sysname_post is not None:
-        use_sysname = _is_truthy(_use_sysname_post)
-    elif _use_sysname_get is not None:
-        use_sysname = _is_truthy(_use_sysname_get)
+    # POST first (import form submissions), then GET (HTMX hx-include)
+    _use_sysname_value = read_request_toggle(request, _USE_SYSNAME_KEYS)
+    if _use_sysname_value is not None:
+        use_sysname = is_truthy_parameter(_use_sysname_value)
     else:
         pref = get_user_pref(request, "plugins.netbox_librenms_plugin.use_sysname")
         if pref is not None:
@@ -931,13 +943,9 @@ def resolve_naming_preferences(request) -> tuple[bool, bool]:
             settings = LibreNMSSettings.objects.first()
             use_sysname = getattr(settings, "use_sysname_default", True) if settings else True
 
-    _strip_domain_post = next((request.POST.get(k) for k in _STRIP_DOMAIN_KEYS if k in request.POST), None)
-    _strip_domain_get = next((request.GET.get(k) for k in _STRIP_DOMAIN_KEYS if k in request.GET), None)
-
-    if _strip_domain_post is not None:
-        strip_domain = _is_truthy(_strip_domain_post)
-    elif _strip_domain_get is not None:
-        strip_domain = _is_truthy(_strip_domain_get)
+    _strip_domain_value = read_request_toggle(request, _STRIP_DOMAIN_KEYS)
+    if _strip_domain_value is not None:
+        strip_domain = is_truthy_parameter(_strip_domain_value)
     else:
         pref = get_user_pref(request, "plugins.netbox_librenms_plugin.strip_domain")
         if pref is not None:
@@ -965,19 +973,8 @@ def resolve_create_missing_interfaces(request) -> bool:
     from this value, so a table refresh restores what the user selected instead of
     silently reverting to off.
     """
-    _TRUTHY = frozenset({"on", "true", "1"})
-    _KEYS = ("create-missing-interfaces-toggle", "create_missing_interfaces")
-
-    def _is_truthy(val):
-        return val.lower() in _TRUTHY if val is not None else False
-
-    post_val = next((request.POST.get(k) for k in _KEYS if k in request.POST), None)
-    if post_val is not None:
-        return _is_truthy(post_val)
-    get_val = next((request.GET.get(k) for k in _KEYS if k in request.GET), None)
-    if get_val is not None:
-        return _is_truthy(get_val)
-    return False
+    value = read_request_toggle(request, ("create-missing-interfaces-toggle", "create_missing_interfaces"))
+    return is_truthy_parameter(value) if value is not None else False
 
 
 def resolve_set_primary_ip(request) -> bool:
@@ -996,23 +993,13 @@ def resolve_set_primary_ip(request) -> bool:
     on the device/VM for the synced IP that matches the LibreNMS management IP,
     provided that IP ends up assigned to one of the object's interfaces.
     """
-    _TRUTHY = frozenset({"on", "true", "1"})
-    _KEYS = ("set-primary-ip-toggle", "set_primary_ip-toggle", "set_primary_ip")
-
-    def _is_truthy(val):
-        return val.lower() in _TRUTHY if val is not None else False
-
-    post_val = next((request.POST.get(k) for k in _KEYS if k in request.POST), None)
-    get_val = next((request.GET.get(k) for k in _KEYS if k in request.GET), None)
-
-    if post_val is not None:
-        return _is_truthy(post_val)
-    if get_val is not None:
-        return _is_truthy(get_val)
+    value = read_request_toggle(request, ("set-primary-ip-toggle", "set_primary_ip-toggle", "set_primary_ip"))
+    if value is not None:
+        return is_truthy_parameter(value)
 
     pref = get_user_pref(request, "plugins.netbox_librenms_plugin.set_primary_ip")
     if pref is not None:
-        return _is_truthy(pref) if isinstance(pref, str) else bool(pref)
+        return is_truthy_parameter(pref) if isinstance(pref, str) else bool(pref)
 
     return False
 
@@ -1037,6 +1024,31 @@ def _remember_interface_name_per_platform(request: HttpRequest) -> bool:
     enabled = bool(configured)
     setattr(request, cache_attribute, enabled)
     return enabled
+
+
+def coerce_interface_mtu(value) -> int | None:
+    """Return an MTU inside NetBox's accepted range, or None.
+
+    ``save()`` does not run field validators, so an out-of-range or non-numeric ``ifMtu`` from
+    LibreNMS would otherwise reach the column unchecked. NetBox pins the bounds in
+    ``dcim.constants``; they are read from there so the two cannot drift.
+    """
+    from dcim.constants import INTERFACE_MTU_MAX, INTERFACE_MTU_MIN
+
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        mtu = value
+    elif isinstance(value, str):
+        if not _ASCII_POSITIVE_INTEGER_RE.fullmatch(value):
+            return None
+        try:
+            mtu = int(value)
+        except ValueError:
+            return None
+    else:
+        return None
+    return mtu if INTERFACE_MTU_MIN <= mtu <= INTERFACE_MTU_MAX else None
 
 
 def coerce_model_pk(value) -> int | None:
@@ -1093,7 +1105,8 @@ def get_interface_name_field(request: Optional[HttpRequest] = None, obj=None) ->
         # Explicit override from request params
         param_val = request.GET.get("interface_name_field") or request.POST.get("interface_name_field")
         if isinstance(param_val, str) and param_val in INTERFACE_NAME_FIELDS:
-            save_interface_name_preference(request, param_val, platform_id)
+            # Read only. The selector posts to the save_user_pref endpoint, so persisting here
+            # made every GET render mutate stored user state and add a write per render.
             return param_val
 
         if platform_id is not None and _remember_interface_name_per_platform(request):

@@ -38,10 +38,12 @@ def test_database_name_stays_within_postgresql_limit():
     assert database_name.endswith("_gw7")
 
 
-def test_more_than_eight_workers_is_rejected():
+def test_more_than_the_supported_workers_is_rejected():
     """Reject workers that cannot receive a private Redis database pair."""
-    with pytest.raises(ValueError, match="At most 8 pytest workers are supported"):
-        isolated_redis_databases("gw8")
+    # Derived from the cap: a hardcoded id becomes a valid worker the moment the cap is raised.
+    first_unsupported = f"gw{MAX_PARALLEL_WORKERS}"
+    with pytest.raises(ValueError, match=f"At most {MAX_PARALLEL_WORKERS} pytest workers are supported"):
+        isolated_redis_databases(first_unsupported)
 
 
 @pytest.mark.django_db

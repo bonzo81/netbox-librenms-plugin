@@ -14,6 +14,9 @@ from netbox_librenms_plugin.tests.conftest import make_virtual_chassis_members
 # proves only that nothing happened inside it, so keep the four sites on one name and raise it
 # here (or via the environment) when a loaded runner needs more headroom.
 BLOCKED_WAIT_SECONDS = float(os.environ.get("NBLP_BLOCKED_WAIT_SECONDS", "0.75"))
+# Raising BLOCKED_WAIT_SECONDS makes a negative assertion stricter but would make a positive one
+# weaker, so the "this must happen" wait gets its own, generous budget.
+ALLOWED_WAIT_SECONDS = float(os.environ.get("NBLP_ALLOWED_WAIT_SECONDS", "5"))
 
 pytestmark = pytest.mark.django_db(
     transaction=True,

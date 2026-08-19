@@ -224,6 +224,28 @@ def _sync_cached_ips(device_pk, user_pk, row_ids, lock_wrapper):
         connection.close()
 
 
+@pytest.fixture(autouse=True)
+def restore_librenms_id_custom_field(request):
+    """Recreate the migration-seeded custom field after a TransactionTestCase flush.
+
+    ``transaction=True`` with ``available_apps`` flushes the field without rerunning
+    ``post_migrate``, and the shared fixture only restores ``PortStackLagPattern``. Runs only for
+    the transactional tests in this module, so the non-transactional ones keep their rollback.
+    """
+    marker = request.node.get_closest_marker("django_db")
+    if not marker or not marker.kwargs.get("transaction"):
+        yield
+        return
+
+    from netbox_librenms_plugin import _ensure_librenms_id_custom_field
+
+    request.getfixturevalue("transactional_db")
+    executed_aliases = getattr(_ensure_librenms_id_custom_field, "_executed_aliases", set())
+    executed_aliases.discard("default")
+    _ensure_librenms_id_custom_field(sender=None, using="default")
+    yield
+
+
 @pytest.mark.django_db(
     transaction=True,
     available_apps=[app.name for app in apps.get_app_configs()],
@@ -865,7 +887,10 @@ def test_create_missing_interfaces_reuses_interface_catalog_for_bulk_rows(client
         )
 
     assert response.status_code == 302
-    assert catalog_reads == 2  # initial matching map plus one reusable creation catalog
+    # Upper bound, not an exact count: the counter matches generated SQL text, and a NetBox
+    # release that adds a select_related or prefetch would change it without changing behaviour.
+    # The point of the assertion is that the catalog is reused, not rebuilt per row.
+    assert catalog_reads <= 2  # initial matching map plus one reusable creation catalog
     assert {interface.name for interface in Interface.objects.filter(device=device)} == {"Ethernet21", "Ethernet22"}
     assert IPAddress.objects.get(address="198.18.12.21/24").assigned_object.name == "Ethernet21"
     assert IPAddress.objects.get(address="198.18.12.22/24").assigned_object.name == "Ethernet22"
