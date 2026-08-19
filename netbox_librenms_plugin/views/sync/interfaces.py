@@ -41,6 +41,8 @@ from netbox_librenms_plugin.utils import (
     netbox_clean_reads_parent_virtual_chassis,
     normalize_relationship_maps,
     resolve_interface_row_device,
+    interface_name_rejection_reason,
+    syncable_interface_name,
 )
 from netbox_librenms_plugin.views.mixins import (
     CacheMixin,
@@ -52,14 +54,6 @@ from netbox_librenms_plugin.views.mixins import (
 )
 
 logger = logging.getLogger(__name__)
-
-
-def _get_syncable_interface_name(port, interface_name_field):
-    """Return the active interface name, or ``None`` when the row cannot be synced."""
-    interface_name = port.get(interface_name_field)
-    if not isinstance(interface_name, str) or not interface_name.strip():
-        return None
-    return interface_name
 
 
 class SyncInterfacesView(
@@ -416,7 +410,7 @@ class SyncInterfacesView(
         valid_name_port_ids = {
             normalize_librenms_port_id(port.get("port_id"))
             for port in ports_data
-            if port.get("_source") != "oob" and _get_syncable_interface_name(port, interface_name_field) is not None
+            if port.get("_source") != "oob" and syncable_interface_name(port, interface_name_field) is not None
         }
         selected_edge_source_ids &= {str(port_id) for port_id in valid_name_port_ids if port_id is not None}
         if not selected_edge_source_ids:
@@ -791,7 +785,7 @@ class SyncInterfacesView(
             if (
                 port_id not in selected_port_ids
                 or port_id in auto_selected_port_ids
-                or _get_syncable_interface_name(port, interface_name_field) is None
+                or syncable_interface_name(port, interface_name_field) is None
             ):
                 continue
             owner = self._resolve_row_target_device(obj, port_id=port_id)
@@ -899,12 +893,15 @@ class SyncInterfacesView(
     def sync_interface(self, obj, librenms_interface, exclude_columns, interface_name_field):
         """Create or update a single NetBox interface from LibreNMS data."""
         raw_interface_name = librenms_interface.get(interface_name_field)
-        interface_name = _get_syncable_interface_name(librenms_interface, interface_name_field)
+        interface_name = syncable_interface_name(librenms_interface, interface_name_field)
         raw_port_id = librenms_interface.get("port_id")
         port_id = normalize_librenms_port_id(raw_port_id)
         lookup_port_id = raw_port_id if port_id is not None else None
         if interface_name is None:
-            self._record_skipped_conflict(raw_interface_name, "interface name is blank")
+            self._record_skipped_conflict(
+                raw_interface_name,
+                interface_name_rejection_reason(librenms_interface, interface_name_field),
+            )
             return
 
         if isinstance(obj, Device):

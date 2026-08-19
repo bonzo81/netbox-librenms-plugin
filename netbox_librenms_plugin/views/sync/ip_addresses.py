@@ -13,7 +13,7 @@ from django.views import View
 from ipam.models import VRF, IPAddress
 from virtualization.models import VirtualMachine, VMInterface
 
-from netbox_librenms_plugin.constants import INTERFACE_NAME_FIELDS
+from netbox_librenms_plugin.constants import is_supported_interface_name_field
 from netbox_librenms_plugin.interface_sync import resolve_or_create_interface_from_port
 from netbox_librenms_plugin.ip_addressing import parse_address_with_prefix
 from netbox_librenms_plugin.utils import (
@@ -27,6 +27,7 @@ from netbox_librenms_plugin.utils import (
     resolve_create_missing_interfaces,
     resolve_set_primary_ip,
     same_host,
+    syncable_interface_name,
 )
 from netbox_librenms_plugin.views.mixins import (
     CacheMixin,
@@ -132,7 +133,7 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
             return None
         if require_create_metadata and (
             not isinstance(cached_data.get("ports_by_id"), dict)
-            or cached_data.get("interface_name_field") not in INTERFACE_NAME_FIELDS
+            or not is_supported_interface_name_field(cached_data.get("interface_name_field"))
         ):
             return None
         return cached_data
@@ -528,7 +529,7 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
         interface_creation_state=None,
     ):
         """Create one missing interface from the cached port that owns an IP row."""
-        if interface_name_field not in INTERFACE_NAME_FIELDS:
+        if not is_supported_interface_name_field(interface_name_field):
             raise ValueError("The cached interface naming field is missing or invalid. Refresh the IP data.")
         port = self._cached_port(cached_ports_by_id, ip_data.get("port_id"))
         if port is None or port.get("_source") == "oob":
@@ -542,7 +543,9 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
             if isinstance(candidate, dict) and candidate.get(interface_name_field) == interface_name
         }
         same_name_port_ids.discard(None)
-        if not isinstance(interface_name, str) or not interface_name.strip() or len(same_name_port_ids) != 1:
+        # The name rule lives in one helper, so this reader cannot drift from the writer that
+        # created the row; ambiguity stays a separate concern.
+        if syncable_interface_name(port, interface_name_field) is None or len(same_name_port_ids) != 1:
             raise ValueError("The cached LibreNMS interface name is missing or ambiguous. Refresh the IP data.")
 
         if interface_creation_state is None:
