@@ -434,6 +434,49 @@ class SyncCacheConsistency:
             apply_transition()
         return transition
 
+    def schedule_collateral_invalidation(self, source_tab, *, actor_id=None, preserve_key=None):
+        """Drop every cached tab of a page object a mutation changed from another page.
+
+        The page the user acted on keeps its own transition, which preserves its source tab and
+        reports the cleanup to the browser. A collaterally changed object has no fresh rendering
+        and no source tab, so every tab it owns is invalidated instead. *preserve_key* is that
+        page's preserved source snapshot: a VC sibling resolves to the same shared key, and
+        deleting it here would undo the preservation the acting page just decided on.
+        """
+
+        def apply_invalidation():
+            try:
+                self._apply_collateral_invalidation(source_tab, actor_id, preserve_key)
+            except Exception:
+                logger.exception("Committed sync mutation could not clean caches for a changed object")
+
+        connection = transaction.get_connection()
+        if connection.in_atomic_block:
+            transaction.on_commit(apply_invalidation)
+        else:
+            apply_invalidation()
+
+    def _apply_collateral_invalidation(self, source_tab, actor_id, preserve_key):
+        revision = uuid4().hex
+        # Every server this object is mapped to, not the acting page's server: the NetBox change
+        # is server-independent, so a snapshot under any of its namespaces is equally stale.
+        for server_key in mapped_server_keys(self.page_object):
+            for tab in self.applicable_tabs():
+                if not self._delete_tab_values(tab, server_key, preserve_key=preserve_key):
+                    continue
+                self._set_state(
+                    tab,
+                    server_key,
+                    SyncTabState.INVALIDATED,
+                    source_tab=source_tab,
+                    actor_id=actor_id,
+                    reason=(
+                        f"Cached {TAB_SPECS[tab].label} data was cleared because a "
+                        f"{TAB_SPECS[source_tab].label} action on another page changed this object."
+                    ),
+                    revision=revision,
+                )
+
     def _delete_pattern(self, pattern):
         delete_pattern = getattr(cache, "delete_pattern", None)
         if not callable(delete_pattern):
@@ -739,6 +782,28 @@ def schedule_request_cache_mutation(
     transitions.append(transition)
     request._librenms_cache_transitions = transitions
     return transition
+
+
+def schedule_collateral_cache_invalidation(request, page_object, changed_objects, source_tab, server_key):
+    """Invalidate every object a mutation changed besides the page the user acted on.
+
+    Returns nothing to merge into the response: only ``page_object`` has a rendering in this
+    request, so the other objects need their stale snapshots dropped and nothing more.
+    """
+    if page_object is None:
+        return
+    preserve_key = SyncCacheConsistency(page_object).snapshot_key(source_tab, server_key)
+    seen = {page_object.pk}
+    actor_id = request_actor_id(request)
+    for changed in changed_objects:
+        if changed is None or changed.pk in seen:
+            continue
+        seen.add(changed.pk)
+        SyncCacheConsistency(changed).schedule_collateral_invalidation(
+            source_tab,
+            actor_id=actor_id,
+            preserve_key=preserve_key,
+        )
 
 
 def apply_request_cache_transition(request, response):
