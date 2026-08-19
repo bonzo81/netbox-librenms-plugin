@@ -25,6 +25,7 @@ from netbox_librenms_plugin.tests.conftest import (
     make_patch_panel,
     make_serial_device,
     make_serial_row,
+    make_superuser,
 )
 
 SERVER_KEY = configured_server_key()
@@ -373,7 +374,8 @@ class TestRenderCableTrace:
         # Re-fetch fresh so a_terminations + CablePath resolve (production passes freshly-loaded
         # cables from the termination FKs); the in-memory cable_together return is stale.
         first = Cable.objects.get(pk=first.pk)
-        hops = render_cable_trace(first)
+        # Production always passes the request's user; without one the renderer fails closed.
+        hops = render_cable_trace(first, user=make_superuser("cable-trace-user"))
         flat = " ".join(str(hop) for hop in hops)
         # The trace must run all the way through the panel to the end device's console port.
         assert "end-trace" in flat
@@ -381,6 +383,27 @@ class TestRenderCableTrace:
         assert "ttyS1" in flat
         # More than one segment (through the panel), i.e. not a single point-to-point hop.
         assert len(hops) >= 2
+
+    def test_trace_without_a_user_labels_every_hop_restricted(self):
+        """Fail closed: no identity means no labels, not unrestricted ones."""
+        from dcim.models import Cable
+
+        from netbox_librenms_plugin.utils import render_cable_trace
+
+        _acs, csps, _ = make_serial_device("acs-nouser", csp_names=["ttyS1"])
+        _panel_dev, fp, rp = make_patch_panel("panel-nouser")
+        _end, _, cps = make_serial_device("end-nouser", cp_names=["console"])
+        first = cable_together(csps[0], fp)
+        cable_together(rp, cps[0])
+        first = Cable.objects.get(pk=first.pk)
+
+        hops = render_cable_trace(first)
+
+        assert hops, "the trace itself must still resolve"
+        flat = " ".join(str(hop) for hop in hops)
+        assert "Restricted" in flat
+        assert "end-nouser" not in flat
+        assert "ttyS1" not in flat
 
 
 # ---------------------------------------------------------------------------

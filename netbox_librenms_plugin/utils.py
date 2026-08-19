@@ -829,27 +829,46 @@ def cable_path_reaches(
     return False
 
 
-def _object_is_visible(obj, user) -> bool:
-    """Return whether *user* may view one concrete NetBox object."""
+def _object_is_visible(obj, user, cache=None) -> bool:
+    """Return whether *user* may view one concrete NetBox object.
+
+    Fails closed without a user: the production caller always supplies the request's user, so a
+    missing one means the caller could not establish an identity, not that everything is public.
+
+    Args:
+        obj: The NetBox object whose visibility is checked.
+        user: The user the labels are rendered for.
+        cache: Optional dict memoising the answer per object for one render, so a long trace does
+            not repeat the same restricted lookup at every hop.
+    """
     if user is None:
-        return True
+        return False
     if not getattr(user, "is_authenticated", False):
         return False
     if getattr(user, "is_superuser", False):
         return True
     model = type(obj)
+    key = (model._meta.label_lower, obj.pk)
+    if cache is not None and key in cache:
+        return cache[key]
     permission = f"{model._meta.app_label}.view_{model._meta.model_name}"
     if not user.has_perm(permission):
-        return False
-    return model.objects.restrict(user, "view").filter(pk=obj.pk).exists()
+        visible = False
+    else:
+        visible = model.objects.restrict(user, "view").filter(pk=obj.pk).exists()
+    if cache is not None:
+        cache[key] = visible
+    return visible
 
 
-def _termination_label(terminations, user=None) -> str:
+def _termination_label(terminations, user=None, cache=None) -> str:
     """Render a trace node's terminations as ``Device: Port`` (comma-joined), or a dash if empty."""
     labels = []
     for term in terminations or []:
         device = getattr(term, "device", None)
-        if not _object_is_visible(term, user) or (device is not None and not _object_is_visible(device, user)):
+        if not _object_is_visible(term, user, cache) or (
+            device is not None and not _object_is_visible(device, user, cache)
+        ):
             labels.append("Restricted")
             continue
         device_name = getattr(device, "name", None)
@@ -857,16 +876,16 @@ def _termination_label(terminations, user=None) -> str:
     return ", ".join(labels) if labels else "—"
 
 
-def _cable_label(segment_cable, user=None) -> Optional[str]:
+def _cable_label(segment_cable, user=None, cache=None) -> Optional[str]:
     """Render a trace segment's cable (or list of cables) as ``#pk``; None for a passthrough gap."""
     if segment_cable is None:
         return None
     if isinstance(segment_cable, (list, tuple)):
         joined = ", ".join(
-            f"#{c.pk}" if _object_is_visible(c, user) else "Restricted" for c in segment_cable if c is not None
+            f"#{c.pk}" if _object_is_visible(c, user, cache) else "Restricted" for c in segment_cable if c is not None
         )
         return joined or None
-    return f"#{segment_cable.pk}" if _object_is_visible(segment_cable, user) else "Restricted"
+    return f"#{segment_cable.pk}" if _object_is_visible(segment_cable, user, cache) else "Restricted"
 
 
 def render_cable_trace(cable, user=None) -> list:
@@ -890,12 +909,13 @@ def render_cable_trace(cable, user=None) -> list:
     if origin is None:
         return []
     hops = []
+    visibility_cache = {}
     for near, segment_cable, far in origin.trace():
         hops.append(
             {
-                "near": _termination_label(near, user),
-                "cable": _cable_label(segment_cable, user),
-                "far": _termination_label(far, user),
+                "near": _termination_label(near, user, visibility_cache),
+                "cable": _cable_label(segment_cable, user, visibility_cache),
+                "far": _termination_label(far, user, visibility_cache),
             }
         )
     return hops
