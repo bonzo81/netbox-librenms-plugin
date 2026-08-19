@@ -109,6 +109,15 @@ from .mapping_views import (  # noqa: F401
     PlatformMappingEditView,
     PlatformMappingListView,
     PlatformMappingView,
+    PortStackLagPatternBulkDeleteView,
+    PortStackLagPatternBulkExportYAMLView,
+    PortStackLagPatternBulkImportView,
+    PortStackLagPatternChangeLogView,
+    PortStackLagPatternCreateView,
+    PortStackLagPatternDeleteView,
+    PortStackLagPatternEditView,
+    PortStackLagPatternListView,
+    PortStackLagPatternView,
 )
 from .imports.actions import (  # noqa: F401
     AddAsOOBView,
@@ -147,7 +156,12 @@ from .sync.device_fields import (  # noqa: F401
     UpdateDeviceTypeView,
 )
 from .sync.devices import AddDeviceToLibreNMSView, UpdateDeviceLocationView  # noqa: F401
-from .sync.interfaces import DeleteNetBoxInterfacesView, SyncInterfacesView  # noqa: F401
+from .sync.interfaces import (  # noqa: F401
+    DeleteNetBoxInterfacesView,
+    SyncInterfacesView,
+    SyncInterfaceLagView,
+    SyncInterfaceParentView,
+)
 from .sync.ip_addresses import SyncIPAddressesView  # noqa: F401
 from .sync.locations import SyncSiteLocationView  # noqa: F401
 from .sync.migrate import (  # noqa: F401

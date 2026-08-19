@@ -212,7 +212,7 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
         ``interface_url`` (see ``_match_interface``).
 
         For a Device in a Virtual Chassis, authorized member interfaces are indexed (not just the
-        viewed member's), mirroring ``_resolve_interface_by_port_id`` in ``views/sync/interfaces``:
+        viewed member's), matching the shared stable-ID interface resolver:
         LibreNMS treats a VC as one logical device, so a VC member IP can legitimately resolve to an
         interface on another member by stable port id. For the name fallback the viewed object's own
         interface wins. A name shared only by sibling members (none on the viewed object) stays

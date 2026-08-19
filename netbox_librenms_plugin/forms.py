@@ -32,6 +32,7 @@ from .models import (
     ModuleTypeMapping,
     NormalizationRule,
     PlatformMapping,
+    PortStackLagPattern,
 )
 
 logger = logging.getLogger(__name__)
@@ -703,6 +704,36 @@ class PlatformMappingFilterForm(NetBoxModelFilterSetForm):
     )
 
     model = PlatformMapping
+
+
+class PortStackLagPatternForm(NetBoxModelForm):
+    """Form for creating and editing PortStackLagPattern objects."""
+
+    class Meta:
+        """Meta options."""
+
+        model = PortStackLagPattern
+        fields = ["librenms_os", "lag_name_pattern", "description"]
+
+
+class PortStackLagPatternImportForm(NetBoxModelImportForm):
+    """Form for bulk importing PortStackLagPattern objects from CSV/JSON/YAML."""
+
+    class Meta:
+        """Meta options."""
+
+        model = PortStackLagPattern
+        fields = ["librenms_os", "lag_name_pattern", "description"]
+
+
+class PortStackLagPatternFilterForm(NetBoxModelFilterSetForm):
+    """Form for filtering PortStackLagPattern objects."""
+
+    librenms_os = forms.CharField(required=False, label="LibreNMS OS")
+    lag_name_pattern = forms.CharField(required=False, label="LAG Name Pattern")
+    description = forms.CharField(required=False, label="Description")
+
+    model = PortStackLagPattern
 
 
 class BaseSNMPForm(forms.Form):

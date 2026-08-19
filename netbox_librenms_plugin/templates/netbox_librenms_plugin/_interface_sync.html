@@ -15,20 +15,21 @@
             {% include "netbox_librenms_plugin/inc/_hidden_server_key.html" %}
             {% if has_librenms_id %}
                 {% with model_name=object|meta:"model_name" %}
+                    {% comment %}
+                    Resolve the refresh URL per object type, then render ONE button so the shared
+                    hx-vals (pagination + server_key forwarding) lives in a single place.
+                    {% endcomment %}
                     {% if model_name == "device" %}
-                        {# type="button": HTMX drives the POST via hx-post; the default type="submit" would also fire a native form submit. #}
-                        <button type="button"
-                                hx-post="{% url 'plugins:netbox_librenms_plugin:device_interface_sync' pk=object.pk %}"
-                                hx-target="#interface-sync-content"
-                                hx-include="[name='interface_name_field'], [name='server_key']"
-                                class="btn btn-outline-primary">
-                            Refresh Interfaces
-                        </button>
+                        {% url 'plugins:netbox_librenms_plugin:device_interface_sync' pk=object.pk as interface_sync_url %}
                     {% elif model_name == "virtualmachine" %}
+                        {% url 'plugins:netbox_librenms_plugin:vm_interface_sync' pk=object.pk as interface_sync_url %}
+                    {% endif %}
+                    {% if interface_sync_url %}
                         <button type="button"
-                                hx-post="{% url 'plugins:netbox_librenms_plugin:vm_interface_sync' pk=object.pk %}"
+                                hx-post="{{ interface_sync_url }}"
                                 hx-target="#interface-sync-content"
-                                hx-include="[name='interface_name_field'], [name='server_key']"
+                                hx-include="[name='interface_name_field']"
+                                hx-vals="js:{interfaces_per_page: new URLSearchParams(window.location.search).get('interfaces_per_page') || '', server_key: new URLSearchParams(window.location.search).get('server_key') || '{{ librenms_server_info.server_key|default:''|escapejs }}'}"
                                 class="btn btn-outline-primary">
                             Refresh Interfaces
                         </button>

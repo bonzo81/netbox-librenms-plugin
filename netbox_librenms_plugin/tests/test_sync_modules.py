@@ -4468,7 +4468,7 @@ class TestInstallModuleViewBehavior:
             patch.object(ModuleBay, "objects") as mock_objects,
         ):
             mock_tx.atomic = noop_atomic
-            # The module is read through restrict(user, "change"), so hand back the same manager.
+            # Both reads go through restrict(user, ...), so hand back the same manager.
             mock_objects.restrict.return_value = mock_objects
             mock_objects.select_for_update.return_value = mock_qs
             view.request = request
@@ -4645,7 +4645,7 @@ class TestUpdateModuleSerialViewBehavior:
             patch.object(Module, "objects") as mock_objects,
         ):
             mock_tx.atomic = noop_atomic
-            # The module is read through restrict(user, "change"), so hand back the same manager.
+            # Both reads go through restrict(user, ...), so hand back the same manager.
             mock_objects.restrict.return_value = mock_objects
             mock_objects.select_for_update.return_value = mock_qs
             view.request = request

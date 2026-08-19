@@ -1488,6 +1488,7 @@ class TestBaseInterfaceTableViewBasics:
         assert view._librenms_api.parse_port_vlan_data.call_count == 2
 
 
+@pytest.mark.django_db
 class TestBaseInterfaceTableViewPost:
     """Tests for BaseInterfaceTableView.post."""
 
@@ -1800,10 +1801,6 @@ class TestBaseInterfaceTableViewPost:
             patch.object(view, "get_object", return_value=obj),
             patch.object(view, "get_redirect_url", return_value="/device/1/"),
             patch.object(view, "_enrich_ports_with_vlan_data", side_effect=lambda ports, field: ports),
-            # create=True: downstream branches add a _has_lag_signals() port_stack probe (DB-backed
-            # PortStackLagPattern). Short-circuit it so this non-DB test stays isolated; harmless
-            # where the method doesn't exist yet.
-            patch.object(view, "_has_lag_signals", return_value=False, create=True),
             patch.object(view, "get_context_data", return_value={}),
             patch.object(view, "get_cache_key", return_value="cache-key"),
             patch.object(view, "get_last_fetched_key", return_value="last-key"),
@@ -1841,7 +1838,6 @@ class TestBaseInterfaceTableViewPost:
             patch.object(view, "get_object", return_value=obj),
             patch.object(view, "get_redirect_url", return_value="/device/1/"),
             patch.object(view, "_enrich_ports_with_vlan_data", side_effect=lambda ports, field: ports),
-            patch.object(view, "_has_lag_signals", return_value=False, create=True),
             patch.object(view, "get_context_data", return_value={}),
             patch.object(view, "get_cache_key", return_value="cache-key"),
             patch.object(view, "get_last_fetched_key", return_value="last-key"),
@@ -1897,7 +1893,6 @@ class TestBaseInterfaceTableViewPost:
             patch.object(view, "get_object", return_value=obj),
             patch.object(view, "get_redirect_url", return_value="/device/1/"),
             patch.object(view, "_enrich_ports_with_vlan_data", side_effect=lambda ports, field: ports),
-            patch.object(view, "_has_lag_signals", return_value=False, create=True),
             patch.object(view, "get_context_data", return_value={}),
             patch.object(view, "get_cache_key", return_value="cache-key"),
             patch.object(view, "get_last_fetched_key", return_value="last-key"),
@@ -1939,7 +1934,6 @@ class TestBaseInterfaceTableViewPost:
             patch.object(view, "get_object", return_value=obj),
             patch.object(view, "get_redirect_url", return_value="/device/1/"),
             patch.object(view, "_enrich_ports_with_vlan_data", side_effect=lambda ports, field: ports),
-            patch.object(view, "_has_lag_signals", return_value=False, create=True),
             patch.object(view, "get_context_data", return_value={}),
             patch.object(view, "get_cache_key", return_value="cache-key"),
             patch.object(view, "get_last_fetched_key", return_value="last-key"),
@@ -1977,7 +1971,6 @@ class TestBaseInterfaceTableViewPost:
             patch.object(view, "get_object", return_value=obj),
             patch.object(view, "get_redirect_url", return_value="/device/1/"),
             patch.object(view, "_enrich_ports_with_vlan_data", side_effect=lambda ports, field: ports),
-            patch.object(view, "_has_lag_signals", return_value=False, create=True),
             patch.object(view, "get_context_data", return_value={}),
             patch.object(view, "get_cache_key", return_value="cache-key"),
             patch.object(view, "get_last_fetched_key", return_value="last-key"),
@@ -2028,6 +2021,7 @@ class TestBaseInterfaceTableViewPost:
             # Ports cache scopes to the VC sync device; pin it to obj so this caching test
             # isn't entangled with VC-routing (cache_device == obj for non-VC anyway).
             patch("netbox_librenms_plugin.views.base.interfaces_view.get_librenms_sync_device", return_value=obj),
+            patch("netbox_librenms_plugin.views.base.interfaces_view.get_librenms_oob", return_value=None),
             patch("netbox_librenms_plugin.views.base.interfaces_view.messages") as mock_messages,
             patch("netbox_librenms_plugin.views.mixins.render") as mock_render,
             patch("netbox_librenms_plugin.views.base.interfaces_view.cache") as mock_cache,
@@ -2042,6 +2036,51 @@ class TestBaseInterfaceTableViewPost:
         # Verify server_key is forwarded to cache key helpers (server-specific namespacing)
         mock_get_cache_key.assert_called_with(obj, "ports", "default")
         mock_get_last_fetched_key.assert_called_with(obj, "ports", "default")
+
+    def test_post_lag_inference_excludes_oob_ports(self):
+        """port_stack is scoped to the main device, so its lazy-fetch trigger must ignore OOB rows."""
+        view = self._make_view()
+        obj = _mock_obj()
+        request = _mock_request()
+
+        view._librenms_api.get_librenms_id.return_value = 42
+        # Host ports carry no LAG signal; the OOB controller exposes a LAG-typed port.
+        view._librenms_api.get_ports.side_effect = [
+            (True, {"ports": [{"port_id": 1, "ifName": "Gi0/0", "ifType": "ethernetCsmacd"}]}),
+            (True, {"ports": [{"port_id": 2, "ifName": "Po1", "ifType": "ieee8023adLag"}]}),
+        ]
+
+        with (
+            patch.object(view, "get_object", return_value=obj),
+            patch.object(view, "get_redirect_url", return_value="/device/1/"),
+            patch.object(view, "_enrich_ports_with_vlan_data", side_effect=lambda ports, field: ports),
+            patch.object(view, "get_context_data", return_value={}),
+            patch.object(view, "get_cache_key", return_value="cache-key"),
+            patch.object(view, "get_last_fetched_key", return_value="last-key"),
+            patch("netbox_librenms_plugin.views.base.interfaces_view.get_interface_name_field", return_value="ifName"),
+            patch("netbox_librenms_plugin.views.base.interfaces_view.get_librenms_sync_device", return_value=obj),
+            patch("netbox_librenms_plugin.views.base.interfaces_view.get_librenms_oob", return_value={"id": 99}),
+            patch("netbox_librenms_plugin.views.base.interfaces_view.messages"),
+            patch("netbox_librenms_plugin.views.mixins.render") as mock_render,
+            patch("netbox_librenms_plugin.views.base.interfaces_view.cache") as mock_cache,
+            patch("netbox_librenms_plugin.views.base.interfaces_view.timezone"),
+        ):
+            mock_render.return_value = MagicMock()
+            view.post(request, pk=1)
+
+        # Prove the OOB path actually ran end-to-end first — otherwise the assertions below
+        # would also pass if OOB ports were never fetched or merged (the whole point of the
+        # filter being that there *was* an OOB LAG row to exclude).
+        view._librenms_api.get_ports.assert_any_call(99)  # OOB controller ports fetched
+        cached_snapshot = next(
+            call.args[1] for call in mock_cache.set.call_args_list if call.args and call.args[0] == "cache-key"
+        )
+        assert any(p.get("_source") == "oob" for p in cached_snapshot["ports"]), (
+            "OOB row was never merged into the snapshot — the test would pass vacuously"
+        )
+
+        # The OOB LAG row does not trigger the main-device port_stack fetch.
+        view._librenms_api.get_port_stack.assert_not_called()
 
 
 @pytest.mark.django_db
@@ -2234,286 +2273,194 @@ class TestBaseModuleTablePostCoercesLibreNMSId:
 class TestBaseInterfaceTableViewGetContextData:
     """Tests for BaseInterfaceTableView.get_context_data."""
 
-    def _make_view(self):
-        from netbox_librenms_plugin.views.base.interfaces_view import BaseInterfaceTableView
+    @staticmethod
+    def _make_real_device_view(device):
+        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+        from netbox_librenms_plugin.tests.view_test_helpers import make_request
+        from netbox_librenms_plugin.views.object_sync.devices import DeviceInterfaceTableView
 
-        view = object.__new__(BaseInterfaceTableView)
-        view._librenms_api = MagicMock()
-        view._librenms_api.server_key = "default"
-        view.model = MagicMock()
-        view.model.__name__ = "device"
-        view.interface_name_field = None
-        return view
+        request = make_request("get", path=f"/plugins/librenms/device/{device.pk}/interfaces/")
+        view = DeviceInterfaceTableView()
+        view.setup(request)
+        api = object.__new__(LibreNMSAPI)
+        api.server_key = "default"
+        view._librenms_api = api
+        return view, request
 
-    def test_cache_miss_returns_empty_table(self):
+    def _cached_device_context(self, device, snapshot):
+        from django.core.cache import cache
+
+        view, request = self._make_real_device_view(device)
+        cache_key = view.get_cache_key(device, "ports", "default")
+        cache.set(cache_key, snapshot)
+        try:
+            return view.get_context_data(request, device, "ifName", "default")
+        finally:
+            cache.delete(cache_key)
+
+    def test_vm_interface_lookup_selects_parent(self, db, django_assert_num_queries):
+        """VM relationship rendering must not fetch each parent in a separate query."""
+        from virtualization.models import VMInterface
+
+        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+        from netbox_librenms_plugin.tests.conftest import make_vm
+        from netbox_librenms_plugin.tests.view_test_helpers import make_request
+        from netbox_librenms_plugin.views.object_sync.vms import VMInterfaceTableView
+
+        vm = make_vm("interface-context-parent-prefetch")
+        parent = VMInterface.objects.create(virtual_machine=vm, name="eth0")
+        VMInterface.objects.create(virtual_machine=vm, name="eth0.100", parent=parent)
+        view = VMInterfaceTableView()
+        view.setup(make_request("get"))
+        api = object.__new__(LibreNMSAPI)
+        api.server_key = "default"
+        view._librenms_api = api
+
+        maps = view._build_interface_lookup_maps(vm)
+
+        with django_assert_num_queries(0):
+            assert maps["by_name"]["eth0.100"].parent.pk == parent.pk
+
+    def test_cache_miss_returns_empty_table(self, db):
         """When no cached data, table is None."""
-        view = self._make_view()
-        obj = _mock_obj()
-        request = _mock_request()
+        from django.core.cache import cache
 
-        with (
-            patch.object(view, "get_cache_key", return_value="key"),
-            patch.object(view, "get_last_fetched_key", return_value="last-key"),
-            patch.object(view, "get_vlan_overrides_key", return_value="overrides-key"),
-            patch.object(view, "get_vlan_groups_for_device", return_value=[]),
-            patch.object(view, "_build_vlan_lookup_maps", return_value={}),
-            patch("netbox_librenms_plugin.views.base.interfaces_view.get_interface_name_field", return_value="ifName"),
-            patch("netbox_librenms_plugin.views.base.interfaces_view.cache") as mock_cache,
-            patch("netbox_librenms_plugin.views.base.interfaces_view.timezone"),
-        ):
-            mock_cache.get.return_value = None
-            mock_cache.ttl.return_value = None
-            ctx = view.get_context_data(request, obj, "ifName")
+        device = make_device("interface-context-cache-miss")
+        view, request = self._make_real_device_view(device)
+        cache_key = view.get_cache_key(device, "ports", "default")
+        last_fetched_key = view.get_last_fetched_key(device, "ports", "default")
+        overrides_key = view.get_vlan_overrides_key(device, "default")
+        cache.delete_many((cache_key, last_fetched_key, overrides_key))
+
+        ctx = view.get_context_data(request, device, "ifName", "default")
 
         assert ctx["table"] is None
 
-    def test_malformed_non_dict_cache_degrades_to_empty_table(self):
+    def test_malformed_non_dict_cache_degrades_to_empty_table(self, db):
         """A truthy but non-dict ports cache entry (legacy/older-shape or corrupt) must degrade to an empty table, not AttributeError-500 on .get('ports')."""
-        view = self._make_view()
-        obj = _mock_obj()
-        request = _mock_request()
+        from django.core.cache import cache
 
-        with (
-            patch.object(view, "get_cache_key", return_value="key"),
-            patch.object(view, "get_last_fetched_key", return_value="last-key"),
-            patch.object(view, "get_vlan_overrides_key", return_value="overrides-key"),
-            patch.object(view, "get_vlan_groups_for_device", return_value=[]),
-            patch.object(view, "_build_vlan_lookup_maps", return_value={}),
-            patch("netbox_librenms_plugin.views.base.interfaces_view.get_interface_name_field", return_value="ifName"),
-            patch("netbox_librenms_plugin.views.base.interfaces_view.cache") as mock_cache,
-            patch("netbox_librenms_plugin.views.base.interfaces_view.timezone"),
-        ):
-            # Truthy but wrong shape (a stale list-shaped snapshot). Unfixed `if cached_data:` calls
-            # .get("ports") on the list → AttributeError-500. Fixed isinstance(dict) guard skips it.
-            mock_cache.get.side_effect = lambda key: [{"ports": []}] if key == "key" else None
-            mock_cache.ttl.return_value = None
-            ctx = view.get_context_data(request, obj, "ifName")
+        device = make_device("interface-context-malformed-cache")
+        view, request = self._make_real_device_view(device)
+        cache_key = view.get_cache_key(device, "ports", "default")
+        cache.set(cache_key, [{"ports": []}])
+        try:
+            ctx = view.get_context_data(request, device, "ifName", "default")
+        finally:
+            cache.delete(cache_key)
 
         assert ctx["table"] is None
 
-    def test_cache_hit_non_vc_builds_table(self):
+    def test_cache_hit_non_vc_builds_table(self, db):
         """Cached data without VC produces table."""
-        view = self._make_view()
-        obj = _mock_obj()
-        obj.virtual_chassis = None
-        request = _mock_request()
+        from django.core.cache import cache
 
-        cached_data = {
+        device = make_device("interface-context-cache-hit")
+        make_interface(device, "Gi0/0")
+        view, request = self._make_real_device_view(device)
+        snapshot = {
             "ports": [{"port_id": 1, "ifName": "Gi0/0", "ifAdminStatus": "up", "ifAlias": None, "ifDescr": "Gi0/0"}]
         }
+        cache_key = view.get_cache_key(device, "ports", "default")
+        cache.set(cache_key, snapshot)
+        try:
+            ctx = view.get_context_data(request, device, "ifName", "default")
+        finally:
+            cache.delete(cache_key)
 
-        mock_iface = MagicMock()
-        mock_iface.name = "Gi0/0"
-        mock_ifaces_qs = MagicMock()
-        mock_ifaces_qs.select_related.return_value.prefetch_related.return_value = [mock_iface]
-
-        mock_table = MagicMock()
-        mock_table.configure = MagicMock()
-
-        with (
-            patch.object(view, "get_cache_key", return_value="key"),
-            patch.object(view, "get_last_fetched_key", return_value="last-key"),
-            patch.object(view, "get_vlan_overrides_key", return_value="overrides-key"),
-            patch.object(view, "get_vlan_groups_for_device", return_value=[]),
-            patch.object(view, "_build_vlan_lookup_maps", return_value={"vid_to_groups": {}, "vid_to_vlans": {}}),
-            patch.object(view, "get_interfaces", return_value=mock_ifaces_qs),
-            patch.object(view, "_add_vlan_group_selection"),
-            patch.object(view, "_add_missing_vlans_info"),
-            patch.object(view, "get_table", return_value=mock_table),
-            patch("netbox_librenms_plugin.views.base.interfaces_view.get_interface_name_field", return_value="ifName"),
-            patch("netbox_librenms_plugin.views.base.interfaces_view.cache") as mock_cache,
-            patch("netbox_librenms_plugin.views.base.interfaces_view.timezone") as mock_tz,
-        ):
-            mock_cache.get.side_effect = lambda key: cached_data if key == "key" else None
-            mock_cache.ttl.return_value = 300
-            mock_tz.now.return_value = MagicMock()
-            mock_tz.timedelta.return_value = MagicMock()
-            ctx = view.get_context_data(request, obj, "ifName")
-
-        assert ctx["table"] is mock_table
+        assert ctx["table"] is not None
+        assert len(ctx["table"].data) == 1
         # A complete snapshot is not flagged incomplete.
         assert ctx["oob_incomplete"] is False
 
-    def test_get_context_data_survives_cache_backend_without_ttl(self):
+    def test_get_context_data_survives_cache_backend_without_ttl(self, db):
         """cache.ttl() is Redis-specific and not part of the Django cache API."""
-        view = self._make_view()
-        obj = _mock_obj()
-        obj.virtual_chassis = None
-        request = _mock_request()
+        device = make_device("interface-context-cache-without-ttl")
+        view, request = self._make_real_device_view(device)
+        snapshot = {"ports": [{"port_id": 1, "ifName": "Gi0/0", "ifAdminStatus": "up", "ifDescr": "Gi0/0"}]}
+        cache_key = view.get_cache_key(device, "ports", "default")
 
-        cached_data = {"ports": [{"port_id": 1, "ifName": "Gi0/0", "ifAdminStatus": "up", "ifDescr": "Gi0/0"}]}
+        class CacheWithoutTTL:
+            def get(self, key, default=None):
+                return snapshot if key == cache_key else default
 
-        mock_iface = MagicMock()
-        mock_iface.name = "Gi0/0"
-        mock_ifaces_qs = MagicMock()
-        mock_ifaces_qs.select_related.return_value.prefetch_related.return_value = [mock_iface]
-        mock_table = MagicMock()
+            def delete(self, _key):
+                return True
 
-        # spec without "ttl" → getattr(cache, "ttl", ...) must take the fallback; a direct
-        # cache.ttl() call (the pre-fix code) would raise AttributeError here.
-        mock_cache = MagicMock(spec=["get", "set", "delete"])
-        mock_cache.get.side_effect = lambda key: cached_data if key == "key" else None
+        with patch("netbox_librenms_plugin.views.base.interfaces_view.cache", CacheWithoutTTL()):
+            ctx = view.get_context_data(request, device, "ifName", "default")
 
-        with (
-            patch.object(view, "get_cache_key", return_value="key"),
-            patch.object(view, "get_last_fetched_key", return_value="last-key"),
-            patch.object(view, "get_vlan_overrides_key", return_value="overrides-key"),
-            patch.object(view, "get_vlan_groups_for_device", return_value=[]),
-            patch.object(view, "_build_vlan_lookup_maps", return_value={"vid_to_groups": {}, "vid_to_vlans": {}}),
-            patch.object(view, "get_interfaces", return_value=mock_ifaces_qs),
-            patch.object(view, "_add_vlan_group_selection"),
-            patch.object(view, "_add_missing_vlans_info"),
-            patch.object(view, "get_table", return_value=mock_table),
-            patch("netbox_librenms_plugin.views.base.interfaces_view.get_interface_name_field", return_value="ifName"),
-            patch("netbox_librenms_plugin.views.base.interfaces_view.cache", mock_cache),
-        ):
-            ctx = view.get_context_data(request, obj, "ifName")  # must not raise
-
-        assert ctx["table"] is mock_table
+        assert ctx["table"] is not None
         assert ctx["cache_expiry"] is None
 
-    def test_oob_incomplete_flag_surfaced_from_cache(self):
+    def test_oob_incomplete_flag_surfaced_from_cache(self, db):
         """A cached snapshot tagged oob_incomplete surfaces the flag in context so the template can warn that OOB rows are missing."""
-        view = self._make_view()
-        obj = _mock_obj()
-        obj.virtual_chassis = None
-        request = _mock_request()
-
-        cached_data = {
+        device = make_device("interface-context-oob-incomplete")
+        snapshot = {
             "ports": [{"port_id": 1, "ifName": "Gi0/0", "ifAdminStatus": "up", "ifAlias": None, "ifDescr": "Gi0/0"}],
             "oob_incomplete": True,
         }
-
-        mock_iface = MagicMock()
-        mock_iface.name = "Gi0/0"
-        mock_ifaces_qs = MagicMock()
-        mock_ifaces_qs.select_related.return_value.prefetch_related.return_value = [mock_iface]
-
-        with (
-            patch.object(view, "get_cache_key", return_value="key"),
-            patch.object(view, "get_last_fetched_key", return_value="last-key"),
-            patch.object(view, "get_vlan_overrides_key", return_value="overrides-key"),
-            patch.object(view, "get_vlan_groups_for_device", return_value=[]),
-            patch.object(view, "_build_vlan_lookup_maps", return_value={"vid_to_groups": {}, "vid_to_vlans": {}}),
-            patch.object(view, "get_interfaces", return_value=mock_ifaces_qs),
-            patch.object(view, "_add_vlan_group_selection"),
-            patch.object(view, "_add_missing_vlans_info"),
-            patch.object(view, "get_table", return_value=MagicMock()),
-            patch("netbox_librenms_plugin.views.base.interfaces_view.get_interface_name_field", return_value="ifName"),
-            patch("netbox_librenms_plugin.views.base.interfaces_view.cache") as mock_cache,
-            patch("netbox_librenms_plugin.views.base.interfaces_view.timezone") as mock_tz,
-        ):
-            mock_cache.get.side_effect = lambda key: cached_data if key == "key" else None
-            mock_cache.ttl.return_value = 300
-            mock_tz.now.return_value = MagicMock()
-            mock_tz.timedelta.return_value = MagicMock()
-            ctx = view.get_context_data(request, obj, "ifName")
+        ctx = self._cached_device_context(device, snapshot)
 
         assert ctx["oob_incomplete"] is True
 
-    def test_unowned_relationship_cache_metadata_is_not_surfaced(self):
-        """PR 315 must not expose warning state owned by the later parent/LAG feature."""
-        view = self._make_view()
-        obj = _mock_obj()
-        obj.virtual_chassis = None
-        request = _mock_request()
-
-        cached_data = {
+    def test_relationship_data_incomplete_flag_surfaced_from_cache(self, db):
+        """A failed relationship fetch remains visible on every cached render."""
+        device = make_device("interface-context-relationships-incomplete")
+        snapshot = {
             "ports": [{"port_id": 1, "ifName": "Gi0/0", "ifAdminStatus": "up", "ifAlias": None, "ifDescr": "Gi0/0"}],
             "relationship_data_incomplete": True,
         }
+        ctx = self._cached_device_context(device, snapshot)
 
-        mock_iface = MagicMock()
-        mock_iface.name = "Gi0/0"
-        mock_ifaces_qs = MagicMock()
-        mock_ifaces_qs.select_related.return_value.prefetch_related.return_value = [mock_iface]
+        assert ctx["relationship_data_incomplete"] is True
 
-        with (
-            patch.object(view, "get_cache_key", return_value="key"),
-            patch.object(view, "get_last_fetched_key", return_value="last-key"),
-            patch.object(view, "get_vlan_overrides_key", return_value="overrides-key"),
-            patch.object(view, "get_vlan_groups_for_device", return_value=[]),
-            patch.object(view, "_build_vlan_lookup_maps", return_value={"vid_to_groups": {}, "vid_to_vlans": {}}),
-            patch.object(view, "get_interfaces", return_value=mock_ifaces_qs),
-            patch.object(view, "_add_vlan_group_selection"),
-            patch.object(view, "_add_missing_vlans_info"),
-            patch.object(view, "get_table", return_value=MagicMock()),
-            patch("netbox_librenms_plugin.views.base.interfaces_view.get_interface_name_field", return_value="ifName"),
-            patch("netbox_librenms_plugin.views.base.interfaces_view.cache") as mock_cache,
-            patch("netbox_librenms_plugin.views.base.interfaces_view.timezone") as mock_tz,
-        ):
-            mock_cache.get.side_effect = lambda key: cached_data if key == "key" else None
-            mock_cache.ttl.return_value = 300
-            mock_tz.now.return_value = MagicMock()
-            mock_tz.timedelta.return_value = MagicMock()
-            ctx = view.get_context_data(request, obj, "ifName")
+    def test_relationship_data_incomplete_defaults_false(self, db):
+        """A snapshot without the flag does not show a spurious relationship warning."""
+        device = make_device("interface-context-relationships-complete")
+        snapshot = {
+            "ports": [{"port_id": 1, "ifName": "Gi0/0", "ifAdminStatus": "up", "ifAlias": None, "ifDescr": "Gi0/0"}],
+        }
+        ctx = self._cached_device_context(device, snapshot)
 
-        assert "relationship_data_incomplete" not in ctx
+        assert ctx["relationship_data_incomplete"] is False
 
-    def test_cache_hit_with_vc_uses_vc_members(self):
-        """Cached data with VC queries each chassis member's interfaces."""
-        view = self._make_view()
+    def test_cache_hit_with_vc_uses_vc_members(self, db):
+        """Cached VC rows resolve against real chassis members."""
+        from netbox_librenms_plugin.tests.conftest import make_virtual_chassis_members
+        from netbox_librenms_plugin.utils import set_librenms_device_id
 
-        vc = MagicMock()
-        member1 = MagicMock()
-        member1.id = 10
-        member2 = MagicMock()
-        member2.id = 11
-        vc.members.all.return_value = [member1, member2]
-
-        obj = _mock_obj()
-        obj.virtual_chassis = vc
-        obj.id = 9999  # distinct from all member IDs so VC path is unambiguous
-        request = _mock_request()
-
-        cached_data = {
-            "ports": [{"port_id": 1, "ifName": "Gi0/0", "ifAdminStatus": "up", "ifAlias": "test", "ifDescr": "Gi0/0"}]
+        _virtual_chassis, (member1, member2) = make_virtual_chassis_members("interface-context-vc")
+        interface = make_interface(member2, "Ethernet2")
+        set_librenms_device_id(interface, 1, "default")
+        interface.save()
+        snapshot = {
+            "ports": [
+                {
+                    "port_id": 1,
+                    "ifName": "Ethernet2",
+                    "ifType": "ethernetCsmacd",
+                    "ifAdminStatus": "up",
+                }
+            ]
         }
 
-        mock_iface_qs = MagicMock()
-        mock_iface_qs.select_related.return_value.prefetch_related.return_value = []
+        ctx = self._cached_device_context(member1, snapshot)
 
-        mock_table = MagicMock()
-        mock_table.configure = MagicMock()
+        assert {member.pk for member in ctx["virtual_chassis_members"]} == {member1.pk, member2.pk}
+        assert next(iter(ctx["table"].data))["selected_object_id"] == member2.pk
 
-        with (
-            patch.object(view, "get_cache_key", return_value="key"),
-            patch.object(view, "get_last_fetched_key", return_value="last-key"),
-            patch.object(view, "get_vlan_overrides_key", return_value="overrides-key"),
-            patch.object(view, "get_vlan_groups_for_device", return_value=[]),
-            patch.object(view, "_build_vlan_lookup_maps", return_value={"vid_to_groups": {}, "vid_to_vlans": {}}),
-            patch.object(view, "get_interfaces", return_value=mock_iface_qs),
-            patch.object(view, "_add_vlan_group_selection"),
-            patch.object(view, "_add_missing_vlans_info"),
-            patch.object(view, "get_table", return_value=mock_table),
-            patch(
-                "netbox_librenms_plugin.views.base.interfaces_view.get_virtual_chassis_member",
-                return_value=member1,
-            ) as mock_get_vc_member,
-            patch("netbox_librenms_plugin.views.base.interfaces_view.get_interface_name_field", return_value="ifName"),
-            patch("netbox_librenms_plugin.views.base.interfaces_view.cache") as mock_cache,
-            patch("netbox_librenms_plugin.views.base.interfaces_view.timezone") as mock_tz,
-        ):
-            mock_cache.get.side_effect = lambda key: cached_data if key == "key" else None
-            mock_cache.ttl.return_value = 300
-            mock_tz.now.return_value = MagicMock()
-            mock_tz.timedelta.return_value = MagicMock()
-            ctx = view.get_context_data(request, obj, "ifName")
-
-        # VC members should be included
-        assert ctx["virtual_chassis_members"] is not None
-        # get_virtual_chassis_member should have been called with obj and the port name
-        mock_get_vc_member.assert_called_once_with(obj, "Gi0/0")
-
-    def test_cache_hit_non_vc_ignores_duplicate_librenms_ids(self):
+    def test_cache_hit_non_vc_ignores_duplicate_librenms_ids(self, db):
         """Conflicting interface librenms_id values must not create an arbitrary port-id match."""
-        view = self._make_view()
-        obj = _mock_obj()
-        obj.virtual_chassis = None
-        obj.id = 1
-        request = _mock_request()
+        from netbox_librenms_plugin.utils import set_librenms_device_id
 
-        cached_data = {
+        device = make_device("interface-context-duplicate-id")
+        interface_a = make_interface(device, "Gi0/0")
+        interface_b = make_interface(device, "Gi0/1")
+        for interface in (interface_a, interface_b):
+            set_librenms_device_id(interface, 101, "default")
+            interface.save()
+        snapshot = {
             "ports": [
                 {
                     "port_id": 101,
@@ -2524,52 +2471,64 @@ class TestBaseInterfaceTableViewGetContextData:
                 }
             ]
         }
+        ctx = self._cached_device_context(device, snapshot)
+        row = next(iter(ctx["table"].data))
 
-        interface_a = MagicMock()
-        interface_a.id = 10
-        interface_a.name = "Gi0/0"
-        interface_b = MagicMock()
-        interface_b.id = 11
-        interface_b.name = "Gi0/1"
+        assert row["exists_in_netbox"] is False
+        assert row["netbox_interface"] is None
 
-        mock_ifaces_qs = MagicMock()
-        mock_ifaces_qs.select_related.return_value.prefetch_related.return_value = [interface_a, interface_b]
 
-        rows_store = {}
+@pytest.mark.django_db
+class TestVlanGroupOverrideScope:
+    """Overrides must be validated against the row's in-scope groups, with real ORM objects."""
 
-        def capture_table(rows, *_args, **_kwargs):
-            rows_store["rows"] = rows
-            table = MagicMock()
-            table.configure = MagicMock()
-            return table
+    def _view(self):
+        from netbox_librenms_plugin.views.base.interfaces_view import BaseInterfaceTableView
 
-        with (
-            patch.object(view, "get_cache_key", return_value="key"),
-            patch.object(view, "get_last_fetched_key", return_value="last-key"),
-            patch.object(view, "get_vlan_overrides_key", return_value="overrides-key"),
-            patch.object(view, "get_vlan_groups_for_device", return_value=[]),
-            patch.object(view, "_build_vlan_lookup_maps", return_value={"vid_to_groups": {}, "vid_to_vlans": {}}),
-            patch.object(view, "get_interfaces", return_value=mock_ifaces_qs),
-            patch.object(view, "_add_vlan_group_selection"),
-            patch.object(view, "_add_missing_vlans_info"),
-            patch.object(view, "get_table", side_effect=capture_table),
-            patch("netbox_librenms_plugin.views.base.interfaces_view.get_interface_name_field", return_value="ifName"),
-            patch("netbox_librenms_plugin.views.base.interfaces_view.cache") as mock_cache,
-            patch("netbox_librenms_plugin.views.base.interfaces_view.timezone") as mock_tz,
-        ):
-            view._librenms_api.get_stored_librenms_id.side_effect = lambda interface: 101
-            mock_cache.get.side_effect = lambda key: cached_data if key == "key" else None
-            mock_cache.ttl.return_value = 300
-            mock_tz.now.return_value = MagicMock()
-            mock_tz.timedelta.return_value = MagicMock()
-            view.get_context_data(request, obj, "ifName")
+        return object.__new__(BaseInterfaceTableView)
 
-        assert "rows" in rows_store
-        assert len(rows_store["rows"]) == 1
-        assert rows_store["rows"][0]["exists_in_netbox"] is False
-        assert rows_store["rows"][0]["netbox_interface"] is None
-        assert view._librenms_api.get_stored_librenms_id.call_count == 2
-        view._librenms_api.get_librenms_id.assert_not_called()
+    def _fixtures(self, slug):
+        from dcim.models import Site
+        from django.contrib.contenttypes.models import ContentType
+        from ipam.models import VLANGroup
+
+        site = Site.objects.create(name=f"Override {slug}", slug=f"override-{slug}", status="active")
+        site_type = ContentType.objects.get_for_model(Site)
+        in_scope = VLANGroup.objects.create(
+            name=f"In scope {slug}", slug=f"in-scope-{slug}", scope_type=site_type, scope_id=site.pk
+        )
+        other_site = Site.objects.create(name=f"Other {slug}", slug=f"other-{slug}", status="active")
+        out_of_scope = VLANGroup.objects.create(
+            name=f"Out of scope {slug}", slug=f"out-of-scope-{slug}", scope_type=site_type, scope_id=other_site.pk
+        )
+        return site, in_scope, out_of_scope
+
+    def test_override_to_an_in_scope_group_missing_the_vid_is_kept(self):
+        """The group need not already contain the VLAN: that is what "apply to all" is for."""
+        from dcim.models import Device
+
+        _site, in_scope, _out = self._fixtures("keep")
+        port = {"untagged_vlan": 100, "tagged_vlans": [], "vlan_groups": [in_scope]}
+        # vid_to_groups is empty: no existing group carries VID 100 yet.
+        lookup_maps = {"vid_to_groups": {}, "vid_group_to_vlan": {}}
+
+        self._view()._add_vlan_group_selection(port, lookup_maps, Device(), {"100": str(in_scope.pk)})
+
+        assert port["vlan_group_map"][100]["group_id"] == str(in_scope.pk)
+        assert port["vlan_group_map"][100]["group_name"] == in_scope.name
+
+    def test_override_to_a_group_outside_the_row_scope_is_rejected(self):
+        """Negative control: an out-of-scope group must not be honoured."""
+        from dcim.models import Device
+
+        _site, in_scope, out_of_scope = self._fixtures("reject")
+        port = {"untagged_vlan": 100, "tagged_vlans": [], "vlan_groups": [in_scope]}
+        lookup_maps = {"vid_to_groups": {}, "vid_group_to_vlan": {}}
+
+        self._view()._add_vlan_group_selection(port, lookup_maps, Device(), {"100": str(out_of_scope.pk)})
+
+        assert port["vlan_group_map"][100]["group_id"] == ""
+        assert port["vlan_group_map"][100]["group_name"] == "Global"
 
 
 class TestBaseInterfaceTableViewAddVlanGroupSelection:
@@ -2666,9 +2625,12 @@ class TestBaseInterfaceTableViewAddVlanGroupSelection:
         from ipam.models import VLANGroup
 
         view = self._make_view()
+        default_group = VLANGroup.objects.create(name="Default-Group", slug="default-group")
         override_group = VLANGroup.objects.create(name="Override-Group", slug="override-group")
-        port = {"untagged_vlan": 100, "tagged_vlans": []}
-        lookup_maps = {"vid_to_groups": {}}
+        # Production always sets vlan_groups on the row before calling; without it the helper
+        # would be validating overrides against a scope the caller never supplied.
+        port = {"untagged_vlan": 100, "tagged_vlans": [], "vlan_groups": [default_group, override_group]}
+        lookup_maps = {"vid_to_groups": {100: [default_group, override_group]}}
         device = make_device("vlan-ovr-dev")
 
         view._add_vlan_group_selection(port, lookup_maps, device, vlan_group_overrides={"100": str(override_group.pk)})
@@ -3512,34 +3474,27 @@ class TestBaseInterfaceTableViewMissingLines:
         except NotImplementedError:
             pass
 
-    def test_get_context_data_with_none_interface_name_field_calls_helper(self):
-        """When interface_name_field=None, get_interface_name_field(request) is called."""
-        from unittest.mock import MagicMock, patch
+    def test_get_context_data_with_none_interface_name_field_uses_request_preference(self, db):
+        """A missing explicit field uses the real request preference."""
+        from django.core.cache import cache
 
-        view = self._make_view()
-        obj = MagicMock()
-        obj.virtual_chassis = None
-        obj.id = 1
-        request = _mock_request()
+        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+        from netbox_librenms_plugin.tests.view_test_helpers import make_request
+        from netbox_librenms_plugin.views.object_sync.devices import DeviceInterfaceTableView
 
-        with (
-            patch.object(view, "get_cache_key", return_value="k"),
-            patch.object(view, "get_last_fetched_key", return_value="lk"),
-            patch.object(view, "get_vlan_overrides_key", return_value="vk"),
-            patch.object(view, "get_vlan_groups_for_device", return_value=[]),
-            patch.object(view, "_build_vlan_lookup_maps", return_value={}),
-            patch(
-                "netbox_librenms_plugin.views.base.interfaces_view.get_interface_name_field",
-                return_value="ifDescr",
-            ) as mock_gnf,
-            patch("netbox_librenms_plugin.views.base.interfaces_view.cache") as mock_cache,
-            patch("netbox_librenms_plugin.views.base.interfaces_view.timezone"),
-        ):
-            mock_cache.get.return_value = None
-            mock_cache.ttl.return_value = None
-            view.get_context_data(request, obj, interface_name_field=None)
+        device = make_device("interface-context-name-preference")
+        request = make_request("get", {"interface_name_field": "ifDescr"})
+        view = DeviceInterfaceTableView()
+        view.setup(request)
+        api = object.__new__(LibreNMSAPI)
+        api.server_key = "default"
+        view._librenms_api = api
+        cache_key = view.get_cache_key(device, "ports", "default")
+        cache.delete(cache_key)
 
-        mock_gnf.assert_called_once_with(request)
+        ctx = view.get_context_data(request, device, interface_name_field=None, server_key="default")
+
+        assert ctx["interface_name_field"] == "ifDescr"
 
     # ---- Real-DB coverage for get_context_data (concrete DeviceInterfaceTableView) ----
     # These replace the prior MagicMock-only versions, which fed a bare MagicMock request into the
@@ -4017,3 +3972,184 @@ class TestRenderSyncPartialInjectsWritePermission:
         # A genuine view-only plugin user gets muted text, not a live mutating button.
         assert "read-only" in html
         assert move_url not in html
+
+
+@pytest.mark.django_db
+class TestVCInterfaceRenderMemberResolutionNotPerPort:
+    """The VC interface render resolves the owning member from a prebuilt map, not a query per port."""
+
+    def _view(self):
+        from netbox_librenms_plugin.views.object_sync.devices import DeviceInterfaceTableView
+
+        view = object.__new__(DeviceInterfaceTableView)
+        view._librenms_api = MagicMock(server_key="default", cache_timeout=300)
+        return view
+
+    def test_render_query_count_invariant_to_port_count(self):
+        """Rendering 2 vs 8 cached ports issues the SAME number of queries (no per-port member lookup).
+
+        get_virtual_chassis_member was the only per-port DB query in the cached-render loop; passing
+        the prebuilt {vc_position: member} map makes it O(1), so the query count no longer scales
+        with the number of ports.
+        """
+        from dcim.models import Interface
+        from django.core.cache import cache as dj_cache
+        from django.db import connection
+        from django.test import RequestFactory
+        from django.test.utils import CaptureQueriesContext
+
+        from netbox_librenms_plugin.tests.conftest import make_device, make_interface, make_virtual_chassis
+
+        m1 = make_device("vc-if-m1")
+        m2 = make_device("vc-if-m2")
+        make_virtual_chassis("vc-if-render", m1, m2)
+        make_interface(m1, "Gi1/0/1")
+        make_interface(m2, "Gi2/0/1")
+        obj = m1  # viewed member; obj.virtual_chassis is the VC
+
+        view = self._view()
+        request = RequestFactory().get("/x/")
+        request.user = make_user_with_perms(
+            "vc-if-render-viewer",
+            [("view", Device), ("view", Interface)],
+        )
+        view.request = request
+        cache_key = view.get_cache_key(obj, "ports", "default")
+
+        def render(nports):
+            ports = [{"port_id": i, "ifName": f"Gi1/0/{i}", "ifType": "ethernetCsmacd"} for i in range(1, nports + 1)]
+            dj_cache.set(cache_key, {"ports": ports})
+            with CaptureQueriesContext(connection) as ctx:
+                context = view.get_context_data(request, obj, "ifName", server_key="default", sync_device=obj)
+            return len(ctx.captured_queries), list(context["table"].data)
+
+        try:
+            # Warm process-level caches (ContentType etc.) first so the two measured renders differ
+            # ONLY by port count, not by cold-cache one-time queries on the first call.
+            render(3)
+            q_small, small_rows = render(2)
+            q_large, large_rows = render(8)
+            assert any(row.get("netbox_interface") is not None for row in small_rows)
+            assert any(row.get("netbox_interface") is not None for row in large_rows)
+            assert q_large == q_small, f"query count scaled with ports: {q_small} -> {q_large} (per-port N+1)"
+        finally:
+            # Django's cache isn't wrapped in the test's DB-transaction rollback, so delete the
+            # entry (like the sibling cache-based tests) to avoid leaking it into later runs.
+            dj_cache.delete(cache_key)
+
+
+@pytest.mark.django_db
+class TestEnrichPortLagParentNameFallback:
+    """Relationship name fallback must honor the user-selected name field.
+
+    The displayed LAG/parent name comes from port.get(interface_name_field) and
+    The relationship signal already scans {ifName, ifDescr, interface_name_field}; the
+    match fallback (no stored librenms_id on either side) compared ifName/ifDescr
+    only, so an ifAlias-driven deployment misreported a genuine match as mismatch.
+    """
+
+    def test_lag_match_via_interface_name_field_alias(self):
+        from netbox_librenms_plugin.interface_relationships import RelationshipMaps, enrich_port_relationships
+
+        dev = make_device("lag-alias-host")
+        agg = make_interface(dev, "CUSTOMER-UPLINK-A", iface_type="lag")  # named from ifAlias
+        member = make_interface(dev, "Gi0/1")
+        member.lag = agg
+        member.save()
+
+        agg_port = {"port_id": 10, "ifName": "Po1", "ifDescr": "Port-channel1", "ifAlias": "CUSTOMER-UPLINK-A"}
+        port = {"port_id": 1, "netbox_interface": member}
+
+        enrich_port_relationships(
+            port,
+            RelationshipMaps({1: 10}, {}, {10: agg_port}),
+            interface_name_field="ifAlias",
+        )
+
+        assert port["librenms_lag_name"] == "CUSTOMER-UPLINK-A"
+        assert port["lag_sync_status"] == "match"
+
+    def test_parent_match_via_interface_name_field_alias(self):
+        from netbox_librenms_plugin.interface_relationships import RelationshipMaps, enrich_port_relationships
+
+        dev = make_device("parent-alias-host")
+        parent = make_interface(dev, "CORE-TRUNK-B")  # named from ifAlias
+        child = make_interface(dev, "Gi0/2.100")
+        child.parent = parent
+        child.save()
+
+        parent_port = {"port_id": 20, "ifName": "Gi0/2", "ifDescr": "GigabitEthernet0/2", "ifAlias": "CORE-TRUNK-B"}
+        port = {"port_id": 2, "netbox_interface": child}
+
+        enrich_port_relationships(
+            port,
+            RelationshipMaps({}, {2: 20}, {20: parent_port}),
+            interface_name_field="ifAlias",
+        )
+
+        assert port["librenms_parent_name"] == "CORE-TRUNK-B"
+        assert port["parent_sync_status"] == "match"
+
+
+@pytest.mark.django_db
+class TestEnrichPortLagParentStatusSymmetry:
+    """LAG and parent must classify sync status identically across all 5 branches (the invariant the shared helper guarantees)."""
+
+    def _status(self, kind, *, lnms_has_rel, nb_related, n):
+        """Enrich a fresh port for ONE relationship kind and return its sync status.
+
+        kind: "lag" | "parent". nb_related: None | "matching" | "nonmatching".
+        """
+        from netbox_librenms_plugin.interface_relationships import RelationshipMaps, enrich_port_relationships
+        from netbox_librenms_plugin.utils import set_librenms_device_id
+
+        dev = make_device(f"rel-sym-{kind}-{n}")
+        child = make_interface(dev, f"child-{kind}-{n}")
+        child_pid = 1000 + n
+        set_librenms_device_id(child, child_pid, "default")
+        rel_lnms_port_id = 500 + n
+
+        by_id = {}
+        if nb_related is not None:
+            related = make_interface(dev, f"rel-{kind}-{n}", iface_type="lag" if kind == "lag" else "other")
+            if nb_related == "matching":
+                set_librenms_device_id(related, rel_lnms_port_id, "default")
+                related.save()
+            setattr(child, "lag" if kind == "lag" else "parent", related)
+        child.save()
+
+        rel_map = {}
+        if lnms_has_rel:
+            # ifName intentionally "rel-<kind>-<n>" so a "matching" related iface (same name) matches
+            # by name too, and a "nonmatching" one (named "other-...") fails both id and name.
+            by_id[rel_lnms_port_id] = {"port_id": rel_lnms_port_id, "ifName": f"rel-{kind}-{n}"}
+            rel_map = {child_pid: rel_lnms_port_id}
+            if nb_related == "nonmatching":
+                related.name = f"other-{kind}-{n}"
+                related.save()
+
+        port = {"port_id": child_pid, "netbox_interface": child}
+        enrich_port_relationships(
+            port,
+            RelationshipMaps(
+                rel_map if kind == "lag" else {},
+                rel_map if kind == "parent" else {},
+                by_id,
+            ),
+            interface_name_field="ifName",
+        )
+        return port["lag_sync_status" if kind == "lag" else "parent_sync_status"]
+
+    def test_all_status_branches_are_symmetric(self):
+        # (lnms_has_rel, nb_related) -> expected status; run through BOTH relationship kinds.
+        scenarios = [
+            (True, "matching", "match"),
+            (True, "nonmatching", "mismatch"),
+            (True, None, "missing_nb"),
+            (False, "matching", "missing_lnms"),  # NetBox has the related iface, LibreNMS doesn't
+            (False, None, None),
+        ]
+        for i, (has_rel, nb_rel, expected) in enumerate(scenarios):
+            lag = self._status("lag", lnms_has_rel=has_rel, nb_related=nb_rel, n=i)
+            parent = self._status("parent", lnms_has_rel=has_rel, nb_related=nb_rel, n=100 + i)
+            assert lag == parent == expected, f"{(has_rel, nb_rel)}: lag={lag} parent={parent} expected={expected}"

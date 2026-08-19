@@ -791,15 +791,19 @@ class VlanAssignmentMixin:
     """
 
     def get_vlan_groups_for_device(self, device):
+        """Get all VLAN groups relevant to one device."""
+        return self.get_vlan_groups_for_devices([device])
+
+    def get_vlan_groups_for_devices(self, devices):
         """
-        Get all VLAN groups relevant to this device.
+        Get all VLAN groups relevant to a set of devices.
 
         Searches for VLAN groups scoped to:
-        - Site: The device's assigned site
-        - Location: The device's location and all parent locations
-        - Region: The device's site's region and all parent regions
-        - Site Group: The device's site's group and all parent site groups
-        - Rack: The device's rack
+        - Site: Each device's assigned site
+        - Location: Each device's location and all parent locations
+        - Region: Each device site's region and all parent regions
+        - Site Group: Each device site's group and all parent site groups
+        - Rack: Each device's rack
         - Global: VLAN groups with no scope
 
         Returns:
@@ -808,35 +812,32 @@ class VlanAssignmentMixin:
         from dcim.models import Location, Rack, Region, Site, SiteGroup
         from ipam.models import VLANGroup
 
+        sites = set()
+        locations = set()
+        regions = set()
+        site_groups = set()
+        racks = set()
+        for device in devices:
+            site = getattr(device, "site", None)
+            if site is not None:
+                sites.add(site)
+                if site.region:
+                    regions.update(self._get_ancestors(site.region))
+                if site.group:
+                    site_groups.update(self._get_ancestors(site.group))
+            location = getattr(device, "location", None)
+            if location is not None:
+                locations.update(self._get_ancestors(location))
+            rack = getattr(device, "rack", None)
+            if rack is not None:
+                racks.add(rack)
+
         groups = set()
-
-        # Site-scoped VLAN groups
-        if hasattr(device, "site") and device.site:
-            site_groups = self._get_vlan_groups_for_scope(Site, [device.site])
-            groups.update(site_groups)
-
-            # Region-scoped VLAN groups (site's region and ancestors)
-            if device.site.region:
-                region_ancestors = self._get_ancestors(device.site.region)
-                region_groups = self._get_vlan_groups_for_scope(Region, region_ancestors)
-                groups.update(region_groups)
-
-            # Site Group-scoped VLAN groups (site's group and ancestors)
-            if device.site.group:
-                site_group_ancestors = self._get_ancestors(device.site.group)
-                site_group_groups = self._get_vlan_groups_for_scope(SiteGroup, site_group_ancestors)
-                groups.update(site_group_groups)
-
-        # Location-scoped VLAN groups (device's location and ancestors)
-        if hasattr(device, "location") and device.location:
-            location_ancestors = self._get_ancestors(device.location)
-            location_groups = self._get_vlan_groups_for_scope(Location, location_ancestors)
-            groups.update(location_groups)
-
-        # Rack-scoped VLAN groups
-        if hasattr(device, "rack") and device.rack:
-            rack_groups = self._get_vlan_groups_for_scope(Rack, [device.rack])
-            groups.update(rack_groups)
+        groups.update(self._get_vlan_groups_for_scope(Site, sites))
+        groups.update(self._get_vlan_groups_for_scope(Location, locations))
+        groups.update(self._get_vlan_groups_for_scope(Region, regions))
+        groups.update(self._get_vlan_groups_for_scope(SiteGroup, site_groups))
+        groups.update(self._get_vlan_groups_for_scope(Rack, racks))
 
         # Global VLAN groups (no scope)
         global_groups = VLANGroup.objects.filter(scope_type__isnull=True)
@@ -844,6 +845,31 @@ class VlanAssignmentMixin:
 
         # Return sorted by name for consistent display
         return sorted(groups, key=lambda g: g.name.lower())
+
+    def filter_vlan_groups_for_device(self, vlan_groups, device):
+        """Restrict a preloaded VLAN group union to the scopes relevant to one device."""
+        from dcim.models import Location, Rack, Region, Site, SiteGroup
+        from django.contrib.contenttypes.models import ContentType
+
+        scope_keys = set()
+
+        def add_scope(model, objects):
+            content_type_id = ContentType.objects.get_for_model(model).pk
+            scope_keys.update((content_type_id, obj.pk) for obj in objects if obj is not None)
+
+        site = getattr(device, "site", None)
+        add_scope(Site, [site])
+        add_scope(Region, self._get_ancestors(site.region) if site and site.region else [])
+        add_scope(SiteGroup, self._get_ancestors(site.group) if site and site.group else [])
+        location = getattr(device, "location", None)
+        add_scope(Location, self._get_ancestors(location) if location else [])
+        add_scope(Rack, [getattr(device, "rack", None)])
+
+        return [
+            group
+            for group in vlan_groups
+            if group.scope_type_id is None or (group.scope_type_id, group.scope_id) in scope_keys
+        ]
 
     def _build_vlan_lookup_maps(self, vlan_groups):
         """
@@ -857,18 +883,22 @@ class VlanAssignmentMixin:
         """
         from ipam.models import VLAN
 
-        vid_to_groups = {}
-        vid_group_to_vlan = {}
-        vid_to_vlans = {}
-        vid_name_to_vlan = {}
-
         # Get all VLANs from relevant groups and global VLANs
         group_pks = [g.pk for g in vlan_groups]
         vlans = VLAN.objects.filter(group__pk__in=group_pks).select_related("group")
         # Also get global VLANs (no group)
         global_vlans = VLAN.objects.filter(group__isnull=True)
+        return self._index_vlans([*vlans, *global_vlans])
 
-        for vlan in list(vlans) + list(global_vlans):
+    @staticmethod
+    def _index_vlans(vlans):
+        """Build VLAN lookup dictionaries from an already loaded VLAN iterable."""
+        vid_to_groups = {}
+        vid_group_to_vlan = {}
+        vid_to_vlans = {}
+        vid_name_to_vlan = {}
+
+        for vlan in vlans:
             vid = vlan.vid
             group = vlan.group
             group_id = group.pk if group else None
@@ -898,6 +928,17 @@ class VlanAssignmentMixin:
             "vid_to_vlans": vid_to_vlans,
             "vid_name_to_vlan": vid_name_to_vlan,
         }
+
+    def restrict_vlan_lookup_maps(self, lookup_maps, vlan_groups):
+        """Restrict union lookup maps to the supplied device-relevant groups and globals."""
+        group_ids = {group.pk for group in vlan_groups}
+        vlans = {
+            vlan.pk: vlan
+            for candidates in lookup_maps.get("vid_to_vlans", {}).values()
+            for vlan in candidates
+            if vlan.group_id is None or vlan.group_id in group_ids
+        }
+        return self._index_vlans(vlans.values())
 
     def _select_most_specific_group(self, groups, device):
         """

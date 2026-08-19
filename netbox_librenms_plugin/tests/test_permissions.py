@@ -1096,7 +1096,7 @@ class TestObjectTypeValidation:
 class TestRemoveServerMappingViewErrorHandling:
     """Test RemoveServerMappingView handles full_clean/save failures gracefully."""
 
-    def _make_view(self, device, server_key, post_extra=None):
+    def _make_view(self, server_key, post_extra=None):
         """Return a (view, request) pair with permissions satisfied."""
         from netbox_librenms_plugin.tests.view_test_helpers import make_request, make_view
         from netbox_librenms_plugin.views.sync.device_fields import RemoveServerMappingView
@@ -1119,7 +1119,7 @@ class TestRemoveServerMappingViewErrorHandling:
         from netbox_librenms_plugin.tests.view_test_helpers import message_texts, post as _post
 
         dev = make_device("perm-rm-validation", librenms_cf={"orphan-server": 99})
-        view, request = self._make_view(dev, "orphan-server")
+        view, request = self._make_view("orphan-server")
 
         # The custom field accepts any dict, so the rejection has to be injected; the manager,
         # the lock and the transaction all stay real.
@@ -1143,7 +1143,7 @@ class TestRemoveServerMappingViewErrorHandling:
         from netbox_librenms_plugin.tests.view_test_helpers import message_texts, post as _post
 
         dev = make_device("perm-rm-configured", librenms_cf={"active-server": 5})
-        view, request = self._make_view(dev, "active-server")
+        view, request = self._make_view("active-server")
 
         with self._plugins_config({"active-server": {"librenms_url": "http://x"}}):
             _post(view, request, pk=dev.pk)
@@ -1161,7 +1161,7 @@ class TestRemoveServerMappingViewErrorHandling:
         from netbox_librenms_plugin.tests.view_test_helpers import message_texts, post as _post
 
         dev = make_device("perm-rm-ok", librenms_cf={"orphan-server": 42, "other-server": 7})
-        view, request = self._make_view(dev, "orphan-server")
+        view, request = self._make_view("orphan-server")
 
         with self._plugins_config({}):  # orphan-server NOT configured
             _post(view, request, pk=dev.pk)
