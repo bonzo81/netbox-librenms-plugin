@@ -82,6 +82,9 @@ def _clear_device_info_cache(_isolate_test_cache):
 
     clear_test_cache(cache)
     yield
+    # Each test gets a fresh KEY_PREFIX, so without this the namespace it filled stays in Redis
+    # until its TTL expires and a long parallel run accumulates dead keys in every worker.
+    clear_test_cache(cache)
 
 
 def _seeded_model_rows():

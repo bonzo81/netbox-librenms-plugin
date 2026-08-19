@@ -328,7 +328,9 @@ class TestSingleInterfaceVerifyView:
             return_value=JsonResponse({"error": "Missing permissions: dcim.view_device"}, status=403)
         )
         request = MagicMock()
-        request.body = json.dumps({"device_id": 1, "interface_name": "eth0"}).encode()
+        # port_id is supplied so the 404 can only come from the malformed-payload guard, not
+        # from the missing-port_id guard that also returns 404.
+        request.body = json.dumps({"device_id": 1, "interface_name": "eth0", "port_id": 10}).encode()
 
         mock_device = MagicMock()
         mock_device.virtual_chassis = None

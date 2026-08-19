@@ -2478,6 +2478,59 @@ class TestBaseInterfaceTableViewGetContextData:
         assert row["netbox_interface"] is None
 
 
+@pytest.mark.django_db
+class TestVlanGroupOverrideScope:
+    """Overrides must be validated against the row's in-scope groups, with real ORM objects."""
+
+    def _view(self):
+        from netbox_librenms_plugin.views.base.interfaces_view import BaseInterfaceTableView
+
+        return object.__new__(BaseInterfaceTableView)
+
+    def _fixtures(self, slug):
+        from dcim.models import Site
+        from django.contrib.contenttypes.models import ContentType
+        from ipam.models import VLANGroup
+
+        site = Site.objects.create(name=f"Override {slug}", slug=f"override-{slug}", status="active")
+        site_type = ContentType.objects.get_for_model(Site)
+        in_scope = VLANGroup.objects.create(
+            name=f"In scope {slug}", slug=f"in-scope-{slug}", scope_type=site_type, scope_id=site.pk
+        )
+        other_site = Site.objects.create(name=f"Other {slug}", slug=f"other-{slug}", status="active")
+        out_of_scope = VLANGroup.objects.create(
+            name=f"Out of scope {slug}", slug=f"out-of-scope-{slug}", scope_type=site_type, scope_id=other_site.pk
+        )
+        return site, in_scope, out_of_scope
+
+    def test_override_to_an_in_scope_group_missing_the_vid_is_kept(self):
+        """The group need not already contain the VLAN: that is what "apply to all" is for."""
+        from dcim.models import Device
+
+        _site, in_scope, _out = self._fixtures("keep")
+        port = {"untagged_vlan": 100, "tagged_vlans": [], "vlan_groups": [in_scope]}
+        # vid_to_groups is empty: no existing group carries VID 100 yet.
+        lookup_maps = {"vid_to_groups": {}, "vid_group_to_vlan": {}}
+
+        self._view()._add_vlan_group_selection(port, lookup_maps, Device(), {"100": str(in_scope.pk)})
+
+        assert port["vlan_group_map"][100]["group_id"] == str(in_scope.pk)
+        assert port["vlan_group_map"][100]["group_name"] == in_scope.name
+
+    def test_override_to_a_group_outside_the_row_scope_is_rejected(self):
+        """Negative control: an out-of-scope group must not be honoured."""
+        from dcim.models import Device
+
+        _site, in_scope, out_of_scope = self._fixtures("reject")
+        port = {"untagged_vlan": 100, "tagged_vlans": [], "vlan_groups": [in_scope]}
+        lookup_maps = {"vid_to_groups": {}, "vid_group_to_vlan": {}}
+
+        self._view()._add_vlan_group_selection(port, lookup_maps, Device(), {"100": str(out_of_scope.pk)})
+
+        assert port["vlan_group_map"][100]["group_id"] == ""
+        assert port["vlan_group_map"][100]["group_name"] == "Global"
+
+
 class TestBaseInterfaceTableViewAddVlanGroupSelection:
     """Tests for BaseInterfaceTableView._add_vlan_group_selection."""
 
@@ -2574,7 +2627,9 @@ class TestBaseInterfaceTableViewAddVlanGroupSelection:
         view = self._make_view()
         default_group = VLANGroup.objects.create(name="Default-Group", slug="default-group")
         override_group = VLANGroup.objects.create(name="Override-Group", slug="override-group")
-        port = {"untagged_vlan": 100, "tagged_vlans": []}
+        # Production always sets vlan_groups on the row before calling; without it the helper
+        # would be validating overrides against a scope the caller never supplied.
+        port = {"untagged_vlan": 100, "tagged_vlans": [], "vlan_groups": [default_group, override_group]}
         lookup_maps = {"vid_to_groups": {100: [default_group, override_group]}}
         device = make_device("vlan-ovr-dev")
 

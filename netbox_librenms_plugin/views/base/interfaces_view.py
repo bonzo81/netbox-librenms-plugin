@@ -909,14 +909,16 @@ class BaseInterfaceTableView(
                             group = override_groups_by_id.get(int(override_group_id))
                         except (TypeError, ValueError):
                             group = None
-                        allowed_group_ids = {candidate.pk for candidate in vid_to_groups.get(vid, [])}
+                        # The row's in-scope groups, not only groups that already carry the VID:
+                        # "apply to all" exists to put the VLAN into a group that lacks it.
+                        allowed_group_ids = {candidate.pk for candidate in port.get("vlan_groups", [])}
                         if group and group.pk in allowed_group_ids:
                             vlan_group_map[vid] = {
                                 "group_id": str(group.pk),
                                 "group_name": group.name,
                                 "is_ambiguous": False,
                             }
-                        # else: Override references deleted group; keep auto-selection
+                        # Keep auto-selection when the group was deleted or is out of the row's scope.
                     elif (vid, None) in lookup_maps.get("vid_group_to_vlan", {}):
                         # User explicitly chose "No Group (Global)"
                         vlan_group_map[vid] = {
