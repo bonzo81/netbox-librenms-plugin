@@ -8,7 +8,7 @@ from django.views import View
 from ipam.models import VLAN, VLANGroup
 from utilities.views import ViewTab, register_model_view
 
-from netbox_librenms_plugin.constants import INTERFACE_NAME_FIELDS, PERM_VIEW_PLUGIN
+from netbox_librenms_plugin.constants import PERM_VIEW_PLUGIN, is_supported_interface_name_field
 from netbox_librenms_plugin.interface_relationships import (
     build_candidate_relationship_context,
     build_relationship_maps,
@@ -176,9 +176,7 @@ class SingleInterfaceVerifyView(
         selected_device = self.restrict_object_or_404(Device, pk=selected_device_id)
         interface_name_field = (
             posted_name_field
-            # INTERFACE_NAME_FIELDS is a frozenset, so an unhashable posted value (a JSON list)
-            # would raise here; the tuple this replaced compared by equality instead.
-            if isinstance(posted_name_field, str) and posted_name_field in INTERFACE_NAME_FIELDS
+            if is_supported_interface_name_field(posted_name_field)
             else get_interface_name_field(request, selected_device)
         )
         origin_device = selected_device

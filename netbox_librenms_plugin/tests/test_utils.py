@@ -1896,3 +1896,23 @@ class TestGetVirtualChassisMemberNoneName:
         assert get_virtual_chassis_member(dev, None) is dev
         # The prefetched-map variant must survive the same input.
         assert get_virtual_chassis_member(dev, None, members_by_position={2: member}) is dev
+
+
+def test_whitespace_only_names_do_not_count_as_unambiguous():
+    """A blank-after-strip name is not a name, the same rule the sync path applies.
+
+    ``get_interface_port_identity_sets`` used a bare truthiness test while every other site
+    stripped first, so "   " counted as a distinct interface name here and as unsyncable
+    there. Two readers of one rule cannot disagree.
+    """
+    from netbox_librenms_plugin.utils import get_interface_port_identity_sets
+
+    ports = [
+        {"port_id": 10, "ifDescr": "   "},
+        {"port_id": 20, "ifDescr": "Unique"},
+    ]
+
+    unique_port_ids, unambiguous_name_port_ids = get_interface_port_identity_sets(ports, "ifDescr")
+
+    assert unique_port_ids == {10, 20}
+    assert unambiguous_name_port_ids == {20}
