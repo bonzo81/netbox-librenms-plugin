@@ -783,7 +783,66 @@ class LibreNMSAPIMixin:
         return context
 
 
-class CacheMixin:
+class SyncPageClaimMixin:
+    """
+    Claim the page object a sync view acts on, so the write signals leave it alone.
+
+    Every other object a NetBox write touches is invalidated from the signals in
+    ``cache_signals``, which is what stops a view from forgetting a device it changed. The page
+    being rendered is the one object whose cleanup its view still owns, because only the
+    request knows which tab is the source and only the response can report the result.
+    """
+
+    # The page object's model, by the object_type its URL carries.
+    SYNC_PAGE_LABELS = {"device": "dcim.device", "virtualmachine": "virtualization.virtualmachine"}
+
+    def sync_page_claim(self, **kwargs):
+        """
+        Return the identity of the object this request's sync page is acting on.
+
+        Args:
+            **kwargs: The URL kwargs, carrying ``object_type`` plus ``object_id``, or ``pk``.
+
+        Returns:
+            The key from :func:`sync_page_key`, or None when the URL names no page object.
+        """
+        from netbox_librenms_plugin.sync_cache import sync_page_key
+
+        pk = kwargs.get("object_id", kwargs.get("pk"))
+        if pk is None:
+            return None
+        # The view's own model is authoritative. The VM pages carry no object_type in the URL,
+        # so defaulting those to a device would claim whichever device shares the pk.
+        model = getattr(self, "model", None)
+        if model is not None:
+            return sync_page_key(model._meta.label_lower, pk)
+        if "object_type" in kwargs:
+            # The URL converter accepts any string and the view rejects a bad one inside post(),
+            # so an unrecognised type claims nothing rather than guessing a device.
+            label = self.SYNC_PAGE_LABELS.get(kwargs["object_type"])
+            return sync_page_key(label, pk) if label else None
+        # The remaining sync routes take a device pk directly.
+        return sync_page_key("dcim.device", pk)
+
+    def dispatch(self, request, *args, **kwargs):
+        """
+        Claim this request's page object, so the write signals leave its transition alone.
+
+        Every other object a write touches is invalidated from the signals, which is what
+        stops a view from forgetting a device it changed. The page being rendered is the one
+        object whose cleanup the view still owns, because only it knows the source tab.
+
+        The claim is taken here rather than where the transition is scheduled, because NetBox
+        leaves ATOMIC_REQUESTS off: a view's own atomic block commits, and the write-driven
+        cleanup runs, before the view reaches its scheduling call.
+        """
+        from netbox_librenms_plugin.sync_cache import claim_sync_page
+
+        with claim_sync_page(self.sync_page_claim(**kwargs)):
+            return super().dispatch(request, *args, **kwargs)
+
+
+class CacheMixin(SyncPageClaimMixin):
     """
     A mixin class that provides caching functionality.
     """

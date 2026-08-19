@@ -4,7 +4,6 @@ from types import SimpleNamespace
 
 import pytest
 
-from netbox_librenms_plugin.sync_cache import schedule_collateral_cache_invalidation
 from netbox_librenms_plugin.tests.view_test_helpers import make_request, make_view
 from netbox_librenms_plugin.tests.view_test_helpers import post as _post
 
@@ -41,6 +40,7 @@ class TestModuleActionsInvalidateEveryChangedDevice:
     def _seed_every_tab(cls, device, server_key="default"):
         """Give *device* a snapshot on every applicable tab so invalidation is observable."""
         from django.core.cache import cache
+        from django.db import transaction
 
         from netbox_librenms_plugin.sync_cache import SyncCacheConsistency
 
@@ -50,6 +50,9 @@ class TestModuleActionsInvalidateEveryChangedDevice:
             key = coordinator.snapshot_key(tab, server_key)
             cache.set(key, [{"seeded": tab.value}], timeout=300)
             keys.append(key)
+        # Building the fixtures is itself a tracked write, so a cleanup for these devices is
+        # already queued; dropping it makes the capture below observe only the action's own.
+        transaction.get_connection().run_on_commit.clear()
         return keys
 
     def test_replace_invalidates_the_device_that_lost_the_serial_conflicting_module(
@@ -226,41 +229,48 @@ class TestModuleActionsInvalidateEveryChangedDevice:
 
         assert all(remaining.values()), f"an untouched device lost its snapshots: {remaining}"
 
-    def test_a_vc_sibling_keeps_the_shared_snapshot_the_page_transition_preserved(
-        self, django_capture_on_commit_callbacks
-    ):
-        """The acting page's preserved source snapshot survives a sibling's invalidation.
+    def test_a_vc_sibling_keeps_the_shared_snapshot_the_acting_page_claimed(self, django_capture_on_commit_callbacks):
+        """The acting page's claim covers the snapshot its VC siblings share with it.
 
-        ``target_device`` is always the page device or a VC member of it, and the modules tab is
-        VC-shared. Invalidating the sibling without honouring the preserved key would delete the
-        very snapshot ``schedule_mutation`` just kept for the page being rendered.
+        The modules tab is VC-shared, and a target device is always the page device or one of
+        its VC members, so a write-driven cleanup on the sibling would delete the very snapshot
+        the page transition keeps for the response being rendered.
         """
         from django.core.cache import cache
+        from django.db import transaction
 
-        from netbox_librenms_plugin.sync_cache import SyncCacheConsistency, SyncTab
-        from netbox_librenms_plugin.tests.conftest import make_virtual_chassis_members
+        from netbox_librenms_plugin.sync_cache import SyncCacheConsistency, SyncTab, claim_sync_page, sync_page_key
+        from netbox_librenms_plugin.tests.conftest import (
+            install_module,
+            make_module_bay,
+            make_virtual_chassis_members,
+        )
         from netbox_librenms_plugin.utils import set_librenms_device_id
 
         _vc, (page_device, sibling) = make_virtual_chassis_members("collateral-vc")
         for member in (page_device, sibling):
             set_librenms_device_id(member, 11, "default")
             member.save()
+        make_module_bay(sibling, "Bay 1")
 
-        page_coordinator = SyncCacheConsistency(page_device)
-        preserved_key = page_coordinator.snapshot_key(SyncTab.MODULES, "default")
+        shared_key = SyncCacheConsistency(page_device).snapshot_key(SyncTab.MODULES, "default")
         sibling_only_key = SyncCacheConsistency(sibling).snapshot_key(SyncTab.IP_ADDRESSES, "default")
-        cache.set(preserved_key, [{"seeded": "modules"}], timeout=300)
+        cache.set(shared_key, [{"seeded": "modules"}], timeout=300)
         cache.set(sibling_only_key, [{"seeded": "ipaddresses"}], timeout=300)
+        transaction.get_connection().run_on_commit.clear()
 
-        request = make_request("post", {}, user=None)
         try:
-            with django_capture_on_commit_callbacks(execute=True):
-                schedule_collateral_cache_invalidation(request, page_device, [sibling], SyncTab.MODULES, "default")
-            survived = cache.get(preserved_key) is not None
+            # The claim has to outlive the flush, exactly as CacheMixin.dispatch holds it for
+            # the whole request while the view's transaction commits inside it.
+            with claim_sync_page(sync_page_key(page_device)):
+                with django_capture_on_commit_callbacks(execute=True):
+                    with transaction.atomic():
+                        install_module(sibling, "Bay 1", "Sibling Model", serial="VC-SHARED")
+            survived = cache.get(shared_key) is not None
             sibling_cleared = cache.get(sibling_only_key) is None
         finally:
-            cache.delete(preserved_key)
+            cache.delete(shared_key)
             cache.delete(sibling_only_key)
 
-        assert survived, "collateral invalidation deleted the snapshot the page transition preserved"
+        assert survived, "the claimed page's shared snapshot was dropped by the write-driven cleanup"
         assert sibling_cleared, "the sibling's own non-shared snapshot was left stale"

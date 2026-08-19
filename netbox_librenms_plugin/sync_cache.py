@@ -3,6 +3,8 @@
 import json
 import logging
 import math
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from enum import StrEnum
 from uuid import uuid4
@@ -210,6 +212,52 @@ def merge_cache_transitions(transitions):
         transition_ids=tuple(transition.transition_id for transition in transitions),
         revision_entries=revision_entries,
     )
+
+
+_ACTIVE_SYNC_PAGE = ContextVar("librenms_active_sync_page", default=frozenset())
+
+
+def sync_page_key(obj_or_label, pk=None):
+    """
+    Return the identity the claim and the write signals compare on.
+
+    Args:
+        obj_or_label: A model instance, or its ``app_label.modelname`` string.
+        pk: The primary key, when a label was given instead of an instance.
+
+    Returns:
+        tuple[str, int]: The lowercase model label and the primary key.
+    """
+    if pk is None:
+        return (obj_or_label._meta.label_lower, obj_or_label.pk)
+    return (str(obj_or_label).lower(), pk)
+
+
+def active_sync_page_keys():
+    """Return the identities whose sync pages are mid-action."""
+    return _ACTIVE_SYNC_PAGE.get()
+
+
+@contextmanager
+def claim_sync_page(*keys):
+    """
+    Exclude these objects from write-driven invalidation for the duration of an action.
+
+    The signals invalidate every object a NetBox write touches. The page being acted on is the
+    exception: its view schedules a transition that preserves the source tab and reports the
+    cleanup to the browser, and a blanket invalidation would delete the snapshot the response
+    is about to render. Claiming is the view's opt-out, so forgetting it over-invalidates
+    rather than leaving stale data behind. Claims nest, because one action can own two pages.
+
+    Args:
+        *keys: Identities from :func:`sync_page_key`; ``None`` entries are ignored.
+    """
+    claimed = frozenset(key for key in keys if key is not None)
+    token = _ACTIVE_SYNC_PAGE.set(_ACTIVE_SYNC_PAGE.get() | claimed)
+    try:
+        yield
+    finally:
+        _ACTIVE_SYNC_PAGE.reset(token)
 
 
 def request_actor_id(request):
@@ -434,46 +482,55 @@ class SyncCacheConsistency:
             apply_transition()
         return transition
 
-    def schedule_collateral_invalidation(self, source_tab, *, actor_id=None, preserve_key=None):
-        """Drop every cached tab of a page object a mutation changed from another page.
-
-        The page the user acted on keeps its own transition, which preserves its source tab and
-        reports the cleanup to the browser. A collaterally changed object has no fresh rendering
-        and no source tab, so every tab it owns is invalidated instead. *preserve_key* is that
-        page's preserved source snapshot: a VC sibling resolves to the same shared key, and
-        deleting it here would undo the preservation the acting page just decided on.
+    def _claimed_owner_keys(self, tab, server_key):
         """
+        Return every identity that can hold a claim over one tab's snapshot.
 
-        def apply_invalidation():
-            try:
-                self._apply_collateral_invalidation(source_tab, actor_id, preserve_key)
-            except Exception:
-                logger.exception("Committed sync mutation could not clean caches for a changed object")
+        Args:
+            tab: The tab whose snapshot is about to be dropped.
+            server_key: The server namespace being cleaned.
 
-        connection = transaction.get_connection()
-        if connection.in_atomic_block:
-            transaction.on_commit(apply_invalidation)
-        else:
-            apply_invalidation()
+        Returns:
+            set: The owner identity, plus its virtual-chassis members for a shared tab.
+        """
+        owner = self._primary_owner(tab, server_key)
+        keys = {sync_page_key(owner)}
+        if not TAB_SPECS[tab].shared_vc_owner:
+            return keys
+        virtual_chassis = getattr(owner, "virtual_chassis", None)
+        if virtual_chassis is not None:
+            keys |= {sync_page_key(member) for member in virtual_chassis.members.all()}
+        return keys
 
-    def _apply_collateral_invalidation(self, source_tab, actor_id, preserve_key):
+    def invalidate_every_tab(self):
+        """
+        Drop every cached tab this object owns, across every server it is mapped to.
+
+        Called from the write-driven signals, where there is no request, no source tab and
+        nothing to report: the object's NetBox data changed, so each snapshot it held is stale.
+        Runs inline, because the caller has already deferred it to commit.
+        """
         revision = uuid4().hex
-        # Every server this object is mapped to, not the acting page's server: the NetBox change
-        # is server-independent, so a snapshot under any of its namespaces is equally stale.
+        claimed = active_sync_page_keys()
+        # Every server this object is mapped to, not one acting server: the NetBox change is
+        # server-independent, so a snapshot under any of its namespaces is equally stale.
         for server_key in mapped_server_keys(self.page_object):
             for tab in self.applicable_tabs():
-                if not self._delete_tab_values(tab, server_key, preserve_key=preserve_key):
+                # A VC-shared tab resolves to one snapshot for the whole chassis, and the page
+                # holding the claim need not be the member that snapshot is keyed on. Compare
+                # against every member, so a write through any sibling leaves the claimed
+                # snapshot alone; the sibling's own unshared tabs are still cleared.
+                if self._claimed_owner_keys(tab, server_key) & claimed:
+                    continue
+                if not self._delete_tab_values(tab, server_key):
                     continue
                 self._set_state(
                     tab,
                     server_key,
                     SyncTabState.INVALIDATED,
-                    source_tab=source_tab,
-                    actor_id=actor_id,
-                    reason=(
-                        f"Cached {TAB_SPECS[tab].label} data was cleared because a "
-                        f"{TAB_SPECS[source_tab].label} action on another page changed this object."
-                    ),
+                    source_tab=None,
+                    actor_id=None,
+                    reason=f"Cached {TAB_SPECS[tab].label} data was cleared because this object changed in NetBox.",
                     revision=revision,
                 )
 
@@ -786,28 +843,6 @@ def schedule_request_cache_mutation(
     transitions.append(transition)
     request._librenms_cache_transitions = transitions
     return transition
-
-
-def schedule_collateral_cache_invalidation(request, page_object, changed_objects, source_tab, server_key):
-    """Invalidate every object a mutation changed besides the page the user acted on.
-
-    Returns nothing to merge into the response: only ``page_object`` has a rendering in this
-    request, so the other objects need their stale snapshots dropped and nothing more.
-    """
-    if page_object is None:
-        return
-    preserve_key = SyncCacheConsistency(page_object).snapshot_key(source_tab, server_key)
-    seen = {page_object.pk}
-    actor_id = request_actor_id(request)
-    for changed in changed_objects:
-        if changed is None or changed.pk in seen:
-            continue
-        seen.add(changed.pk)
-        SyncCacheConsistency(changed).schedule_collateral_invalidation(
-            source_tab,
-            actor_id=actor_id,
-            preserve_key=preserve_key,
-        )
 
 
 def apply_request_cache_transition(request, response):

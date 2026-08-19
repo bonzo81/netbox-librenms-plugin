@@ -46,6 +46,11 @@ class LibreNMSSyncConfig(PluginConfig):
             dispatch_uid="netbox_librenms_plugin_ensure_cf",
         )
 
+        # Sync-tab caches follow the NetBox writes, so no view has to name the objects it changed.
+        from netbox_librenms_plugin import cache_signals
+
+        cache_signals.connect()
+
     def _validate_multi_server_config(self, servers_config):
         """Validate multi-server configuration."""
         if not servers_config or not isinstance(servers_config, dict):
