@@ -40,6 +40,9 @@ class TestInterfaceMtuContract:
             interface_name_field="ifName",
             netbox_type="1000base-t",
         )
+        # The contract is about what reaches the column, so read the row back rather than
+        # asserting on the attribute the writer just assigned in memory.
+        interface.refresh_from_db()
         return interface
 
     def test_a_valid_mtu_is_written(self):
@@ -69,6 +72,9 @@ class TestInterfaceAliasContract:
             interface_name_field="ifName",
             netbox_type="1000base-t",
         )
+        # The contract is about what reaches the column, so read the row back rather than
+        # asserting on the attribute the writer just assigned in memory.
+        interface.refresh_from_db()
         return interface
 
     def test_a_real_alias_is_written(self):
