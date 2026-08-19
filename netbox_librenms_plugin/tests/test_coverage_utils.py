@@ -873,6 +873,13 @@ class TestNetboxCleanReadsParentVirtualChassis:
         with patch.object(utils, "_get_netbox_version_tuple", return_value=(4, 6, 5)):
             assert utils.netbox_clean_reads_parent_virtual_chassis() is False
 
+    def test_false_for_a_release_older_than_the_defect(self):
+        """Pins the equality: widening the gate to <= would silently pass every other case."""
+        from netbox_librenms_plugin import utils
+
+        with patch.object(utils, "_get_netbox_version_tuple", return_value=(4, 3, 9)):
+            assert utils.netbox_clean_reads_parent_virtual_chassis() is False
+
     def test_true_when_version_undetectable(self):
         """Keep the tolerance rather than turn a known core defect into a 500."""
         from netbox_librenms_plugin import utils

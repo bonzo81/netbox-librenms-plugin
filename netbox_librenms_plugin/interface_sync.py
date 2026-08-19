@@ -8,6 +8,7 @@ from virtualization.models import VirtualMachine, VMInterface
 
 from netbox_librenms_plugin.models import InterfaceTypeMapping
 from netbox_librenms_plugin.utils import (
+    coerce_interface_mtu,
     AmbiguousLibreNMSIdError,
     convert_speed_to_kbps,
     find_by_librenms_id,
@@ -73,10 +74,14 @@ def update_interface_from_port(
             if is_device_interface and hasattr(interface, netbox_key):
                 setattr(interface, netbox_key, netbox_type)
         elif librenms_key == "ifAlias":
-            interface_name = librenms_interface.get(interface_name_field)
+            # Same rule the interface table renders: an alias echoing either canonical name is
+            # not a description. Writing "" rather than skipping keeps the row and the table
+            # agreeing after a sync.
             alias = librenms_interface.get("ifAlias")
-            if alias != interface_name:
-                setattr(interface, netbox_key, alias if isinstance(alias, str) else "")
+            echoes_name = alias in (librenms_interface.get("ifDescr"), librenms_interface.get("ifName"))
+            setattr(interface, netbox_key, alias if isinstance(alias, str) and not echoes_name else "")
+        elif librenms_key == "ifMtu":
+            setattr(interface, netbox_key, coerce_interface_mtu(librenms_interface.get(librenms_key)))
         else:
             setattr(interface, netbox_key, librenms_interface.get(librenms_key))
 
