@@ -127,7 +127,25 @@ def _restore_migration_seeded_rows(request):
         if not model.objects.exists():
             seed_migration_rows()
             break
+    _restore_librenms_id_custom_field()
     yield
+
+
+def _restore_librenms_id_custom_field():
+    """Recreate the librenms_id custom field a transactional flush removed.
+
+    The handler short-circuits on its own ``_executed_aliases`` guard, so after a flush it will
+    not recreate the field by itself. Only act when the field is actually gone, which keeps this
+    to one cheap existence check for the non-transactional majority.
+    """
+    from extras.models import CustomField
+
+    from netbox_librenms_plugin import _ensure_librenms_id_custom_field
+
+    if CustomField.objects.filter(name="librenms_id").exists():
+        return
+    _ensure_librenms_id_custom_field._executed_aliases.discard("default")
+    _ensure_librenms_id_custom_field(sender=None, using="default")
 
 
 @pytest.fixture(scope="session", autouse=True)
