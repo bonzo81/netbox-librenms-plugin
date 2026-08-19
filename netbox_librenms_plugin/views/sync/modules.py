@@ -109,33 +109,39 @@ def _module_bind_result_changed(bind_result):
 
 
 def _extract_inventory_list(cached_payload):
-    """Extract the inventory row list from a cached payload.
+    """Return the inventory row list from a cached payload, or ``None`` when it is unusable.
 
-    The cache stores ``{"inventory": [...], "librenms_id": ...}``; anything
-    else is treated as a cache miss to match BaseModuleTableView.get_context_data.
+    The cache stores ``{"inventory": [...], "librenms_id": ...}``. A refreshed device whose
+    LibreNMS inventory is empty caches ``[]``, which is data rather than a miss, so callers
+    must test ``is None``. The list-of-dicts guard mirrors
+    BaseModuleTableView.get_context_data so both readers of this entry reject the same payloads.
     """
-    if isinstance(cached_payload, dict):
-        return cached_payload.get("inventory") or []
-    return []
+    if not isinstance(cached_payload, dict):
+        return None
+    inventory = cached_payload.get("inventory")
+    if not isinstance(inventory, list) or any(not isinstance(item, dict) for item in inventory):
+        return None
+    return inventory
 
 
 def _get_cached_inventory_for_device(sync_device, server_key, get_cache_key):
-    """Return cached inventory for ``sync_device`` validated against device librenms_id.
+    """Return cached inventory for ``sync_device``, or ``None`` when it is absent or stale.
 
     Cache entries are namespaced by server key and include ``librenms_id``.
     When both current and cached IDs are valid positive integers, they must
     match; otherwise cached data is treated as stale.
     """
     cached_payload = cache.get(get_cache_key(sync_device, "inventory", server_key=server_key))
-    if not isinstance(cached_payload, dict):
-        return []
+    inventory = _extract_inventory_list(cached_payload)
+    if inventory is None:
+        return None
 
     current_librenms_id = _coerce_positive_int(get_librenms_device_id(sync_device, server_key, auto_save=False))
     cached_librenms_id = _coerce_positive_int(cached_payload.get("librenms_id"))
     if current_librenms_id and cached_librenms_id and current_librenms_id != cached_librenms_id:
-        return []
+        return None
 
-    return _extract_inventory_list(cached_payload)
+    return inventory
 
 
 def _report_install_results(request, installed, skipped, failed):
@@ -705,7 +711,7 @@ def _resolve_single_install_binding_item(request, target_device, server_key, get
 
     if ent_index and server_key:
         sync_device = _get_sync_device_for_inventory(target_device, server_key)
-        for item in _get_cached_inventory_for_device(sync_device, server_key, get_cache_key):
+        for item in _get_cached_inventory_for_device(sync_device, server_key, get_cache_key) or []:
             item_index = _coerce_positive_int(item.get("entPhysicalIndex"))
             if item_index == ent_index:
                 resolved = dict(item)
@@ -946,7 +952,7 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
         # Get cached inventory data
         sync_device = _get_sync_device_for_inventory(target_device, server_key)
         cached_data = _get_cached_inventory_for_device(sync_device, server_key, self.get_cache_key)
-        if not cached_data:
+        if cached_data is None:
             return _modules_cache_missing_response(request, sync_url, server_key)
 
         # Load ignore rules so the branch respects the same filters shown in the table
@@ -1534,7 +1540,7 @@ class InstallSelectedView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
 
         sync_device = _get_sync_device_for_inventory(page_device, server_key)
         cached_data = _get_cached_inventory_for_device(sync_device, server_key, self.get_cache_key)
-        if not cached_data:
+        if cached_data is None:
             return _modules_cache_missing_response(request, sync_url, server_key)
 
         try:
@@ -1895,9 +1901,8 @@ class ModuleMismatchPreviewView(
         )
 
         sync_device = _get_sync_device_for_inventory(target_device, server_key)
-        cached_payload = cache.get(self.get_cache_key(sync_device, "inventory", server_key=server_key))
-        cached_data = _extract_inventory_list(cached_payload)
-        if not cached_data:
+        cached_data = _get_cached_inventory_for_device(sync_device, server_key, self.get_cache_key)
+        if cached_data is None:
             return HttpResponse("No cached inventory data. Please refresh modules first.", status=400)
 
         librenms_item = next(
@@ -2091,9 +2096,8 @@ class ReplaceModuleView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjectP
         )
 
         sync_device = _get_sync_device_for_inventory(target_device, server_key)
-        cached_payload = cache.get(self.get_cache_key(sync_device, "inventory", server_key=server_key))
-        cached_data = _extract_inventory_list(cached_payload)
-        if not cached_data:
+        cached_data = _get_cached_inventory_for_device(sync_device, server_key, self.get_cache_key)
+        if cached_data is None:
             return _modules_cache_missing_response(request, sync_url, server_key)
 
         librenms_item = next(
