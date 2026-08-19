@@ -1,0 +1,102 @@
+"""The unhashable-membership check must flag the real class and stay quiet otherwise.
+
+A lint nobody trusts gets disabled, so the negative cases matter as much as the positive
+ones. Each sample is written to a temporary file and scanned exactly as CI scans the package.
+"""
+
+import sys
+from pathlib import Path
+
+import pytest
+
+
+REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(REPOSITORY_ROOT / "tools"))
+
+from lint_unhashable_membership import check_file, collect_container_names  # noqa: E402
+
+
+def _scan(tmp_path, source, extra_sources=()):
+    """Write *source* to a module and return its findings, resolving cross-module constants."""
+    paths = []
+    for index, extra in enumerate(extra_sources):
+        extra_path = tmp_path / f"extra_{index}.py"
+        extra_path.write_text(extra)
+        paths.append(extra_path)
+    target = tmp_path / "sample.py"
+    target.write_text(source)
+    paths.append(target)
+    return check_file(target, collect_container_names(paths))
+
+
+CONSTANTS = 'NAMES = frozenset({"ifName", "ifDescr"})\nPREFS = {"a": 1}\n'
+
+
+FLAGGED = {
+    "cache read straight into a frozenset": 'def f(cached):\n    return cached.get("x") in NAMES\n',
+    "json body value into a dict": 'def f(data):\n    key = data.get("key")\n    return key in PREFS\n',
+    "subscript read into a frozenset": 'def f(cached):\n    return cached["x"] not in NAMES\n',
+    "value carried through a local name": 'def f(cached):\n    v = cached.get("x")\n    return v in NAMES\n',
+}
+
+CLEAN = {
+    "isinstance narrowing in the same and-chain": (
+        'def f(cached):\n    v = cached.get("x")\n    return isinstance(v, str) and v in NAMES\n'
+    ),
+    "fail-closed or-chain": (
+        'def f(cached):\n    v = cached.get("x")\n    return not isinstance(v, str) or v not in NAMES\n'
+    ),
+    "isinstance in a dominating if": (
+        'def f(cached):\n    v = cached.get("x")\n    if isinstance(v, str):\n        return v in NAMES\n    return False\n'
+    ),
+    "value passed through a coercer": 'def f(cached):\n    return int(cached.get("x")) in PREFS\n',
+    "django querydict always yields str": 'def f(request):\n    return request.POST.get("k") in PREFS\n',
+    "literal left operand": 'def f():\n    return "ifName" in NAMES\n',
+    "locally built working dict, not a constant": (
+        "def f(rows):\n"
+        '    index_map = {r.get("i"): r for r in rows}\n'
+        "    for r in rows:\n"
+        '        if r.get("parent") in index_map:\n'
+        "            pass\n"
+    ),
+    "membership against a tuple never raises": (
+        'CHOICES = ("a", "b")\ndef f(cached):\n    return cached.get("x") in CHOICES\n'
+    ),
+    "explicitly reviewed and suppressed": (
+        'def f(cached):\n    # unhashable-ok: validated at the snapshot boundary\n    return cached.get("x") in NAMES\n'
+    ),
+}
+
+
+@pytest.mark.parametrize("case", sorted(FLAGGED), ids=sorted(FLAGGED))
+def test_the_unsafe_shapes_are_flagged(tmp_path, case):
+    findings = _scan(tmp_path, CONSTANTS + FLAGGED[case])
+    assert findings, f"{case!r} should be reported"
+
+
+@pytest.mark.parametrize("case", sorted(CLEAN), ids=sorted(CLEAN))
+def test_the_safe_shapes_are_not_flagged(tmp_path, case):
+    findings = _scan(tmp_path, CONSTANTS + CLEAN[case])
+    assert not findings, f"{case!r} should not be reported, got {findings}"
+
+
+def test_a_constant_imported_from_another_module_is_still_resolved(tmp_path):
+    """The constant lives in constants.py; the unsafe read lives somewhere else."""
+    findings = _scan(
+        tmp_path,
+        'from extra_0 import NAMES\n\n\ndef f(cached):\n    return cached.get("x") in NAMES\n',
+        extra_sources=[CONSTANTS],
+    )
+    assert findings, "a cross-module constant must not hide the finding"
+
+
+def test_the_plugin_package_is_clean():
+    """The whole point of the sweep: no unguarded site is left behind."""
+    from lint_unhashable_membership import iter_python_files, main
+
+    package = REPOSITORY_ROOT / "netbox_librenms_plugin"
+    paths = list(iter_python_files([package]))
+    containers = collect_container_names(paths)
+    findings = [f for path in paths for f in check_file(path, containers)]
+    assert not findings, "\n".join(f"{p}:{ln}: {msg}" for p, ln, _col, msg in findings)
+    assert main([str(package)]) == 0

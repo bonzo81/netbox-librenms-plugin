@@ -43,6 +43,12 @@ jobs:
           ruff format --check .
           echo "::endgroup::"
 
+      - name: Check for unhashable membership tests
+        run: |
+          echo "::group::Unhashable membership"
+          python tools/lint_unhashable_membership.py netbox_librenms_plugin --github
+          echo "::endgroup::"
+
       - name: Report formatting issues
         if: failure()
         run: |
