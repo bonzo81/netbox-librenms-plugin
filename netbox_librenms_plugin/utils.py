@@ -6,7 +6,7 @@ from copy import deepcopy
 from typing import Optional
 
 import netaddr
-from dcim.models import Device
+from dcim.models import Device, Interface
 from django.core.exceptions import ObjectDoesNotExist, ValidationError
 from django.db.models import Count, Max, Q
 from django.http import HttpRequest
@@ -17,7 +17,11 @@ from netbox.config import get_config
 from netbox.plugins import get_plugin_config
 from utilities.paginator import get_paginate_count as netbox_get_paginate_count
 
-from netbox_librenms_plugin.constants import DEFAULT_INTERFACE_NAME_FIELD, INTERFACE_NAME_FIELDS, OOB_BADGE_HTML
+from netbox_librenms_plugin.constants import (
+    DEFAULT_INTERFACE_NAME_FIELD,
+    OOB_BADGE_HTML,
+    is_supported_interface_name_field,
+)
 from netbox_librenms_plugin.ip_addressing import parse_host_address
 
 logger = logging.getLogger(__name__)
@@ -179,14 +183,16 @@ def get_interface_port_identity_sets(ports, interface_name_field) -> tuple[set[i
             continue
         port_id_counts[port_id] = port_id_counts.get(port_id, 0) + 1
         port_names[port_id] = interface_name
-        if isinstance(interface_name, str) and interface_name:
+        if isinstance(interface_name, str) and interface_name.strip():
             name_counts[interface_name] = name_counts.get(interface_name, 0) + 1
 
     unique_port_ids = {port_id for port_id, count in port_id_counts.items() if count == 1}
     unambiguous_name_port_ids = {
         port_id
         for port_id in unique_port_ids
-        if isinstance(port_names[port_id], str) and port_names[port_id] and name_counts.get(port_names[port_id]) == 1
+        if isinstance(port_names[port_id], str)
+        and port_names[port_id].strip()
+        and name_counts.get(port_names[port_id]) == 1
     }
     return unique_port_ids, unambiguous_name_port_ids
 
@@ -1026,6 +1032,58 @@ def _remember_interface_name_per_platform(request: HttpRequest) -> bool:
     return enabled
 
 
+def interface_field_limit(field_name, model=None):
+    """Return the column length NetBox declares for one interface field.
+
+    Read from the model's own field so the bound cannot drift, the same way
+    :func:`coerce_interface_mtu` reads ``INTERFACE_MTU_MIN``/``MAX``. Pass the concrete
+    writer model rather than trusting Interface and VMInterface to stay equal.
+    """
+    return (model or Interface)._meta.get_field(field_name).max_length
+
+
+def syncable_interface_name(port, interface_name_field, model=None):
+    """Return the LibreNMS name usable as a NetBox interface name, or ``None``.
+
+    ``save()`` runs no validators and Django never truncates a CharField, so an over-long name
+    reaches Postgres as a ``DataError``. Truncating instead would collide on the
+    ``(device, name)`` unique constraint, so an unstorable name makes the row unsyncable.
+    """
+    name = port.get(interface_name_field)
+    if not isinstance(name, str) or not name.strip():
+        return None
+    if len(name) > interface_field_limit("name", model):
+        return None
+    return name
+
+
+def interface_name_rejection_reason(port, interface_name_field, model=None):
+    """Return why the LibreNMS name cannot be synced, or ``None`` when it can.
+
+    The two cases read very differently to a user, so the caller reports them apart rather
+    than telling someone their 80-character interface name is blank.
+    """
+    name = port.get(interface_name_field)
+    if not isinstance(name, str) or not name.strip():
+        return "interface name is blank"
+    limit = interface_field_limit("name", model)
+    if len(name) > limit:
+        return f"interface name is longer than the {limit} characters NetBox stores"
+    return None
+
+
+def bounded_interface_text(field_name, value, model=None):
+    """Return *value* clipped to the column NetBox declares for *field_name*.
+
+    Refuses ``name``: an over-long name has to make the row unsyncable, because a truncated
+    one collides with its siblings on the ``(device, name)`` unique constraint.
+    """
+    if field_name == "name":
+        raise ValueError("An interface name must not be truncated; use syncable_interface_name().")
+    limit = interface_field_limit(field_name, model)
+    return value[:limit] if limit is not None and len(value) > limit else value
+
+
 def coerce_interface_mtu(value) -> int | None:
     """Return an MTU inside NetBox's accepted range, or None.
 
@@ -1065,7 +1123,7 @@ def save_interface_name_preference(
     platform_id: int | None = None,
 ) -> bool:
     """Persist an interface-name choice at the configured user preference scope."""
-    if not isinstance(value, str) or value not in INTERFACE_NAME_FIELDS:
+    if not is_supported_interface_name_field(value):
         return False
 
     normalized_platform_id = coerce_model_pk(platform_id)
@@ -1075,7 +1133,7 @@ def save_interface_name_preference(
         preferences = {}
         for key, candidate in stored.items():
             stored_platform_id = coerce_model_pk(key)
-            if stored_platform_id is not None and isinstance(candidate, str) and candidate in INTERFACE_NAME_FIELDS:
+            if stored_platform_id is not None and is_supported_interface_name_field(candidate):
                 preferences[str(stored_platform_id)] = candidate
         preferences[str(normalized_platform_id)] = value
         save_user_pref(request, INTERFACE_NAME_PLATFORM_PREFERENCES_PATH, preferences)
@@ -1104,7 +1162,7 @@ def get_interface_name_field(request: Optional[HttpRequest] = None, obj=None) ->
     if request:
         # Explicit override from request params
         param_val = request.GET.get("interface_name_field") or request.POST.get("interface_name_field")
-        if isinstance(param_val, str) and param_val in INTERFACE_NAME_FIELDS:
+        if is_supported_interface_name_field(param_val):
             # Read only. The selector posts to the save_user_pref endpoint, so persisting here
             # made every GET render mutate stored user state and add a write per render.
             return param_val
@@ -1113,18 +1171,18 @@ def get_interface_name_field(request: Optional[HttpRequest] = None, obj=None) ->
             platform_preferences = get_user_pref(request, INTERFACE_NAME_PLATFORM_PREFERENCES_PATH, {})
             if isinstance(platform_preferences, dict):
                 platform_value = platform_preferences.get(str(platform_id))
-                if isinstance(platform_value, str) and platform_value in INTERFACE_NAME_FIELDS:
+                if is_supported_interface_name_field(platform_value):
                     return platform_value
 
         # Check user preference
         pref_val = get_user_pref(request, INTERFACE_NAME_PREFERENCE_PATH)
-        if isinstance(pref_val, str) and pref_val in INTERFACE_NAME_FIELDS:
+        if is_supported_interface_name_field(pref_val):
             return pref_val
 
     # Fall back to plugin config. An unsupported configured value would be written into every
     # tab snapshot and then rejected by the readers, so refuse it here instead.
     configured = get_plugin_config("netbox_librenms_plugin", "interface_name_field")
-    if isinstance(configured, str) and configured in INTERFACE_NAME_FIELDS:
+    if is_supported_interface_name_field(configured):
         return configured
     logger.warning(
         "Unsupported interface_name_field %r in PLUGINS_CONFIG; using %r.",

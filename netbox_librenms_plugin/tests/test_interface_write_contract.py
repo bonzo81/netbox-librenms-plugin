@@ -87,3 +87,87 @@ class TestInterfaceAliasContract:
         """The table blanks an alias matching ifDescr too, so the writer must agree."""
         interface = self._sync("echo-descr", ifName="Gi0/1", ifDescr="Ethernet1", ifAlias="Ethernet1")
         assert interface.description == ""
+
+
+@pytest.mark.django_db
+class TestInterfaceStringLengthContract:
+    """LibreNMS free text must be bounded to the column it is written to.
+
+    ``save()`` runs no validators and Django never truncates a CharField, so an over-long
+    value reaches Postgres and raises SQLSTATE 22001. Django surfaces that as ``DataError``,
+    which is NOT a subclass of ``IntegrityError``, so the bulk-sync handler does not catch it
+    and the whole sync 500s and rolls back.
+    """
+
+    @staticmethod
+    def _max_length(field_name):
+        from dcim.models import Interface
+
+        return Interface._meta.get_field(field_name).max_length
+
+    def _sync(self, name, **overrides):
+        from netbox_librenms_plugin.interface_sync import update_interface_from_port
+
+        device = make_device(f"len-{name}")
+        interface = make_interface(device, "Ethernet1", iface_type="1000base-t")
+        update_interface_from_port(
+            interface,
+            _port(**overrides),
+            server_key="default",
+            interface_name_field="ifName",
+            netbox_type="1000base-t",
+        )
+        interface.refresh_from_db()
+        return interface
+
+    def test_an_over_length_alias_is_bounded_to_the_column(self):
+        limit = self._max_length("description")
+        alias = "A" * (limit + 50)
+
+        interface = self._sync("alias", ifAlias=alias)
+
+        assert len(interface.description) <= limit
+        assert interface.description == alias[:limit]
+
+    def test_an_alias_that_fits_is_written_whole(self):
+        """Positive control: bounding must not truncate ordinary descriptions."""
+        alias = "Uplink to core switch"
+
+        assert self._sync("alias-fits", ifAlias=alias).description == alias
+
+    def test_an_over_length_name_is_not_syncable(self):
+        """An over-long name cannot be truncated: it would collide on (device, name)."""
+        from netbox_librenms_plugin.utils import syncable_interface_name
+
+        too_long = "E" * (self._max_length("name") + 1)
+
+        assert syncable_interface_name({"ifName": too_long}, "ifName") is None
+
+    def test_a_name_that_fits_is_syncable(self):
+        """Positive control, including a name of exactly the column length."""
+        from netbox_librenms_plugin.utils import syncable_interface_name
+
+        for value in ("Ethernet1", "E" * self._max_length("name")):
+            assert syncable_interface_name({"ifName": value}, "ifName") == value
+
+    @pytest.mark.parametrize("value", [None, 5, ["Ethernet1"], "", "   "])
+    def test_a_blank_or_non_string_name_is_not_syncable(self, value):
+        from netbox_librenms_plugin.utils import syncable_interface_name
+
+        assert syncable_interface_name({"ifName": value}, "ifName") is None
+
+    def test_the_writer_refuses_a_name_it_cannot_store(self):
+        """The writer is the last boundary before save(); it must not hand Postgres a 22001."""
+        from netbox_librenms_plugin.interface_sync import update_interface_from_port
+
+        device = make_device("len-writer-name")
+        interface = make_interface(device, "Ethernet1", iface_type="1000base-t")
+
+        with pytest.raises(ValueError, match="interface name"):
+            update_interface_from_port(
+                interface,
+                _port(ifName="E" * (self._max_length("name") + 1)),
+                server_key="default",
+                interface_name_field="ifName",
+                netbox_type="1000base-t",
+            )

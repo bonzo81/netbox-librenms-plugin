@@ -13,7 +13,7 @@ from django.views import View
 from ipam.models import VRF, IPAddress
 from virtualization.models import VirtualMachine
 
-from netbox_librenms_plugin.constants import INTERFACE_NAME_FIELDS
+from netbox_librenms_plugin.constants import is_supported_interface_name_field
 from netbox_librenms_plugin.ip_addressing import parse_address_with_prefix, parse_librenms_ip_entry
 from netbox_librenms_plugin.tables.ipaddresses import IPAddressTable
 from netbox_librenms_plugin.utils import (
@@ -435,7 +435,8 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxOb
                 or ("mgmt_ip" in cached_ip_data and not isinstance(cached_ip_data["mgmt_ip"], str))
                 or (cached_ports_by_id is not None and not isinstance(cached_ports_by_id, dict))
                 or (
-                    cached_interface_name_field is not None and cached_interface_name_field not in INTERFACE_NAME_FIELDS
+                    cached_interface_name_field is not None
+                    and not is_supported_interface_name_field(cached_interface_name_field)
                 )
             ):
                 cache.delete(cache_key)
