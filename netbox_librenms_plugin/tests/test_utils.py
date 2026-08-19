@@ -978,8 +978,12 @@ class TestInterfaceNameField:
         mock_plugin_config.assert_not_called()
 
     @patch("netbox_librenms_plugin.utils.get_plugin_config")
-    def test_get_interface_name_field_persists_to_user_pref(self, mock_plugin_config):
-        """Explicit GET param should be persisted to user preferences."""
+    def test_get_interface_name_field_does_not_persist_the_param(self, mock_plugin_config):
+        """The read path honours the parameter without writing it.
+
+        get_context_data() calls this on every GET render, so persisting here made a read mutate
+        stored user state. The selector posts to the save_user_pref endpoint instead.
+        """
         from netbox_librenms_plugin.utils import get_interface_name_field
 
         mock_request = MagicMock()
@@ -989,9 +993,7 @@ class TestInterfaceNameField:
         result = get_interface_name_field(mock_request)
 
         assert result == "ifDescr"
-        mock_request.user.config.set.assert_called_once_with(
-            "plugins.netbox_librenms_plugin.interface_name_field", "ifDescr", commit=True
-        )
+        mock_request.user.config.set.assert_not_called()
 
     @pytest.mark.django_db
     def test_persisting_the_preference_does_not_leak_to_other_users(self):
@@ -1007,7 +1009,7 @@ class TestInterfaceNameField:
         from django.test import RequestFactory
         from netbox.config import get_config
 
-        from netbox_librenms_plugin.utils import get_interface_name_field
+        from netbox_librenms_plugin.utils import save_interface_name_preference
 
         user_model = get_user_model()
         pref_path = "plugins.netbox_librenms_plugin.interface_name_field"
@@ -1015,10 +1017,11 @@ class TestInterfaceNameField:
         baseline_value = baseline.config.get(pref_path)
         chooser = user_model.objects.create_user(username="pref-chooser")
         defaults_before = deepcopy(get_config().DEFAULT_USER_PREFERENCES)
+        # The writer, not the reader: get_interface_name_field no longer persists.
         request = RequestFactory().get("/", {"interface_name_field": "ifDescr"})
         request.user = chooser
 
-        assert get_interface_name_field(request) == "ifDescr"
+        assert save_interface_name_preference(request, "ifDescr") is True
 
         stored = user_model.objects.get(pk=chooser.pk)
         assert stored.config.get(pref_path) == "ifDescr"
