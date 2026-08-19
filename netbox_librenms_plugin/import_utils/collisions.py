@@ -128,10 +128,11 @@ def _candidate_pks_for_row(validation: dict) -> list[tuple[int, str | None, str,
         candidates.append((pk_int, name, role, normalized_model))
 
     existing = validation.get("existing_device")
+    existing_match_type = validation.get("existing_match_type")
     if (
         existing is not None
         and getattr(existing, "pk", None) is not None
-        and validation.get("existing_match_type") not in _TERMINAL_AMBIGUOUS_MATCH_TYPES
+        and not (isinstance(existing_match_type, str) and existing_match_type in _TERMINAL_AMBIGUOUS_MATCH_TYPES)
     ):
         _add(existing.pk, getattr(existing, "name", None), "host", _model_name_of(existing))
 

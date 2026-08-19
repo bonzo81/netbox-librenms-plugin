@@ -3820,7 +3820,9 @@ class SaveUserPrefView(LibreNMSPermissionMixin, View):
         key = data.get("key")
         value = data.get("value")
 
-        if key not in self.ALLOWED_PREFS:
+        # ALLOWED_PREFS is a dict, so an unhashable key from the JSON body raises rather than
+        # missing; the envelope check above stops one level short of this.
+        if not isinstance(key, str) or key not in self.ALLOWED_PREFS:
             return JsonResponse({"error": "Invalid preference key"}, status=400)
 
         if key == "interface_name_field":

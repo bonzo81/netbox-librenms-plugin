@@ -633,21 +633,25 @@ class SyncCacheConsistency:
             if not isinstance(record, dict):
                 record = {}
             timestamp = record.get("timestamp")
+            # A corrupt entry must not leak a non-string state into the browser payload, and a
+            # set membership on an unhashable one would raise rather than fall through.
             state = record.get("state")
+            if not isinstance(state, str):
+                state = None
             same_user = bool(actor_id is not None and record.get("actor_id") == actor_id)
             reason = record.get("reason")
             if state == SyncTabState.REFRESH_FAILED.value and same_user:
                 reason = (
                     f"Cached {TAB_SPECS[tab].label} data is unavailable because your latest LibreNMS refresh failed."
                 )
-            snapshot_available = snapshot_exists and state not in {
+            snapshot_available = snapshot_exists and state not in (
                 SyncTabState.INVALIDATED.value,
                 SyncTabState.REFRESH_FAILED.value,
-            }
-            if not snapshot_exists and state in {
+            )
+            if not snapshot_exists and state in (
                 SyncTabState.READY.value,
                 SyncTabState.LOCALLY_CHANGED.value,
-            }:
+            ):
                 state = "missing"
             result[tab.value] = {
                 "revision": record.get("revision"),

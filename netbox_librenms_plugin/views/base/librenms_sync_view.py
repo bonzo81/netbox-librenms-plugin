@@ -214,7 +214,7 @@ class BaseLibreNMSSyncView(
         active_cache_state = sync_cache_status.get(active_sync_tab) if sync_cache_status else None
         cache_only_device_info = bool(
             active_cache_state
-            and active_cache_state["state"] in {SyncTabState.INVALIDATED.value, SyncTabState.REFRESH_FAILED.value}
+            and active_cache_state["state"] in (SyncTabState.INVALIDATED.value, SyncTabState.REFRESH_FAILED.value)
         )
         librenms_info = self.get_librenms_device_info(
             obj,
