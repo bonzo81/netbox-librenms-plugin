@@ -20,7 +20,8 @@ class InterfaceTypeMappingSerializer(NetBoxModelSerializer):
         """Meta options for InterfaceTypeMappingSerializer."""
 
         model = InterfaceTypeMapping
-        fields = ["id", "librenms_type", "librenms_speed", "netbox_type", "description"]
+        fields = ["id", "url", "display", "librenms_type", "librenms_speed", "netbox_type", "description"]
+        brief_fields = ("id", "url", "display", "librenms_type", "netbox_type", "description")
 
 
 class DeviceTypeMappingSerializer(NetBoxModelSerializer):
@@ -30,7 +31,8 @@ class DeviceTypeMappingSerializer(NetBoxModelSerializer):
         """Meta options for DeviceTypeMappingSerializer."""
 
         model = DeviceTypeMapping
-        fields = ["id", "librenms_hardware", "netbox_device_type", "description"]
+        fields = ["id", "url", "display", "librenms_hardware", "netbox_device_type", "description"]
+        brief_fields = ("id", "url", "display", "librenms_hardware", "netbox_device_type", "description")
 
 
 class ModuleTypeMappingSerializer(NetBoxModelSerializer):
@@ -40,7 +42,8 @@ class ModuleTypeMappingSerializer(NetBoxModelSerializer):
         """Meta options for ModuleTypeMappingSerializer."""
 
         model = ModuleTypeMapping
-        fields = ["id", "librenms_model", "manufacturer", "netbox_module_type", "description"]
+        fields = ["id", "url", "display", "librenms_model", "manufacturer", "netbox_module_type", "description"]
+        brief_fields = ("id", "url", "display", "librenms_model", "netbox_module_type", "description")
 
 
 class ModuleBayMappingSerializer(NetBoxModelSerializer):
@@ -52,6 +55,8 @@ class ModuleBayMappingSerializer(NetBoxModelSerializer):
         model = ModuleBayMapping
         fields = [
             "id",
+            "url",
+            "display",
             "librenms_name",
             "librenms_class",
             "netbox_bay_name",
@@ -59,6 +64,7 @@ class ModuleBayMappingSerializer(NetBoxModelSerializer):
             "manufacturer",
             "description",
         ]
+        brief_fields = ("id", "url", "display", "librenms_name", "netbox_bay_name", "description")
 
 
 class NormalizationRuleSerializer(NetBoxModelSerializer):
@@ -70,6 +76,8 @@ class NormalizationRuleSerializer(NetBoxModelSerializer):
         model = NormalizationRule
         fields = [
             "id",
+            "url",
+            "display",
             "scope",
             "manufacturer",
             "match_pattern",
@@ -77,6 +85,7 @@ class NormalizationRuleSerializer(NetBoxModelSerializer):
             "priority",
             "description",
         ]
+        brief_fields = ("id", "url", "display", "scope", "match_pattern", "description")
 
 
 class InventoryIgnoreRuleSerializer(NetBoxModelSerializer):
@@ -88,6 +97,8 @@ class InventoryIgnoreRuleSerializer(NetBoxModelSerializer):
         model = InventoryIgnoreRule
         fields = [
             "id",
+            "url",
+            "display",
             "name",
             "match_type",
             "pattern",
@@ -96,6 +107,7 @@ class InventoryIgnoreRuleSerializer(NetBoxModelSerializer):
             "enabled",
             "description",
         ]
+        brief_fields = ("id", "url", "display", "name", "description")
 
 
 class PlatformMappingSerializer(NetBoxModelSerializer):
@@ -105,12 +117,8 @@ class PlatformMappingSerializer(NetBoxModelSerializer):
         """Meta options for PlatformMappingSerializer."""
 
         model = PlatformMapping
-        fields = [
-            "id",
-            "librenms_os",
-            "netbox_platform",
-            "description",
-        ]
+        fields = ["id", "url", "display", "librenms_os", "netbox_platform", "description"]
+        brief_fields = ("id", "url", "display", "librenms_os", "netbox_platform", "description")
 
 
 class CarrierAutoInstallRuleSerializer(NetBoxModelSerializer):
@@ -122,6 +130,8 @@ class CarrierAutoInstallRuleSerializer(NetBoxModelSerializer):
         model = CarrierAutoInstallRule
         fields = [
             "id",
+            "url",
+            "display",
             "manufacturer",
             "device_type_pattern",
             "librenms_child_class",
@@ -130,6 +140,7 @@ class CarrierAutoInstallRuleSerializer(NetBoxModelSerializer):
             "carrier_module_type",
             "description",
         ]
+        brief_fields = ("id", "url", "display", "device_type_pattern", "description")
 
 
 class PortStackLagPatternSerializer(NetBoxModelSerializer):
@@ -139,4 +150,5 @@ class PortStackLagPatternSerializer(NetBoxModelSerializer):
         """Meta options for PortStackLagPatternSerializer."""
 
         model = PortStackLagPattern
-        fields = ["id", "librenms_os", "lag_name_pattern", "description"]
+        fields = ["id", "url", "display", "librenms_os", "lag_name_pattern", "description"]
+        brief_fields = ("id", "url", "display", "librenms_os", "lag_name_pattern", "description")
