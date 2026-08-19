@@ -204,7 +204,8 @@ class SerialSensorTypePatternSerializer(NetBoxModelSerializer):
         """Meta options for SerialSensorTypePatternSerializer."""
 
         model = SerialSensorTypePattern
-        fields = ["id", "sensor_type", "port_name_pattern", "description"]
+        fields = ["id", "url", "display", "sensor_type", "port_name_pattern", "description"]
+        brief_fields = ("id", "url", "display", "sensor_type", "port_name_pattern", "description")
 
 
 @extend_schema_serializer(component_name="LibreNMSSyncJobStatus")
