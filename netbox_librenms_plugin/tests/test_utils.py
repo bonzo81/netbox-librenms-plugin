@@ -395,7 +395,90 @@ class TestConversionHelpers:
         assert normalize_librenms_port_id(0) is None
         assert normalize_librenms_port_id(-1) is None
         assert normalize_librenms_port_id("abc") is None
+        assert normalize_librenms_port_id("2_0") is None
+        assert normalize_librenms_port_id("２０") is None
+        assert normalize_librenms_port_id("٢٠") is None
+        assert normalize_librenms_port_id("1" * 5000) is None
         assert normalize_librenms_port_id(1.5) is None
+
+    def test_oversized_digit_string_is_rejected_by_the_helper_not_the_interpreter(self):
+        """The length cap must hold with CPython's int_max_str_digits limit disabled."""
+        import sys
+
+        from netbox_librenms_plugin.utils import normalize_librenms_port_id
+
+        previous = sys.get_int_max_str_digits()
+        sys.set_int_max_str_digits(0)
+        try:
+            assert normalize_librenms_port_id("1" * 5000) is None
+            # 19 digits is the bigint width and stays acceptable.
+            assert normalize_librenms_port_id("9" * 19) == int("9" * 19)
+            assert normalize_librenms_port_id("9" * 20) is None
+        finally:
+            sys.set_int_max_str_digits(previous)
+
+    def test_unambiguous_interface_name_index_rejects_duplicate_ids_and_names(self):
+        from netbox_librenms_plugin.utils import get_interface_port_identity_sets
+
+        ports = [
+            {"port_id": 10, "ifDescr": "Ethernet"},
+            {"port_id": 11, "ifDescr": "Ethernet"},
+            {"port_id": 20, "ifDescr": "Parent"},
+            {"port_id": 20, "ifDescr": "Duplicate ID"},
+            {"port_id": 30, "ifDescr": "Unique"},
+            {"port_id": 40, "ifDescr": "Unique", "_source": "oob"},
+        ]
+
+        assert get_interface_port_identity_sets(ports, "ifDescr") == ({10, 11, 30}, {30})
+
+    def test_normalize_relationship_maps_normalizes_and_guards(self):
+        from netbox_librenms_plugin.utils import normalize_relationship_maps
+
+        # JSON-round-tripped string keys are normalized to int; both maps returned.
+        lag, sub = normalize_relationship_maps({"lag_members": {"10": 100}, "sub_interfaces": {"5": 7}})
+        assert lag == {10: 100}
+        assert sub == {5: 7}
+
+    def test_normalize_relationship_maps_drops_unresolvable_keys(self):
+        from netbox_librenms_plugin.utils import normalize_relationship_maps
+
+        relationships = {
+            "lag_members": {"bad": 100, "": 101, None: 102, "10": 103},
+            "sub_interfaces": {"0": 7, False: 8, "5": 9},
+        }
+
+        lag, sub = normalize_relationship_maps(relationships)
+
+        assert lag == {10: 103}
+        assert sub == {5: 9}
+
+    def test_normalize_relationship_maps_normalizes_values_and_drops_invalid_edges(self):
+        from netbox_librenms_plugin.utils import normalize_relationship_maps
+
+        relationships = {
+            "lag_members": {"10": "100", "11": [], "12": 0},
+            "sub_interfaces": {"20": "21", "22": None, "23": False},
+        }
+
+        assert normalize_relationship_maps(relationships) == ({10: 100}, {20: 21})
+
+    def test_normalize_relationship_maps_drops_conflicting_canonical_sources(self):
+        from netbox_librenms_plugin.utils import normalize_relationship_maps
+
+        first = {"lag_members": {"10": 20, "010": 30}, "sub_interfaces": {}}
+        reversed_order = {"lag_members": {"010": 30, "10": 20}, "sub_interfaces": {}}
+
+        assert normalize_relationship_maps(first) == ({}, {})
+        assert normalize_relationship_maps(reversed_order) == ({}, {})
+
+    def test_normalize_relationship_maps_coerces_corrupt_shapes_to_empty(self):
+        from netbox_librenms_plugin.utils import normalize_relationship_maps
+
+        # A non-dict relationships (corrupt / partial-write cache) must not raise.
+        assert normalize_relationship_maps(["garbage"]) == ({}, {})
+        assert normalize_relationship_maps(None) == ({}, {})
+        # Present-but-non-dict nested maps collapse to {} instead of AttributeError on .items().
+        assert normalize_relationship_maps({"lag_members": None, "sub_interfaces": [1, 2]}) == ({}, {})
 
 
 # =============================================================================
@@ -805,6 +888,7 @@ class TestPaginationHelpers:
         mock_netbox_paginate.return_value = 25
         mock_request = MagicMock()
         mock_request.GET = {}
+        mock_request.POST = {}
 
         result = get_table_paginate_count(mock_request, "table1_")
 
@@ -851,6 +935,23 @@ class TestInterfaceNameField:
         """Falls back to plugin config."""
         from netbox_librenms_plugin.utils import get_interface_name_field
 
+        mock_plugin_config.return_value = "ifDescr"
+        mock_request = MagicMock()
+        mock_request.GET = {}
+        mock_request.POST = {}
+        mock_request.user.config.get.return_value = None
+
+        result = get_interface_name_field(mock_request)
+
+        assert result == "ifDescr"
+        mock_plugin_config.assert_called_with("netbox_librenms_plugin", "interface_name_field")
+
+    @patch("netbox_librenms_plugin.utils.get_plugin_config")
+    def test_unsupported_config_value_falls_back_to_the_default(self, mock_plugin_config):
+        """A configured field the readers reject must not reach a cached snapshot."""
+        from netbox_librenms_plugin.constants import DEFAULT_INTERFACE_NAME_FIELD
+        from netbox_librenms_plugin.utils import get_interface_name_field
+
         mock_plugin_config.return_value = "ifAlias"
         mock_request = MagicMock()
         mock_request.GET = {}
@@ -859,8 +960,7 @@ class TestInterfaceNameField:
 
         result = get_interface_name_field(mock_request)
 
-        assert result == "ifAlias"
-        mock_plugin_config.assert_called_with("netbox_librenms_plugin", "interface_name_field")
+        assert result == DEFAULT_INTERFACE_NAME_FIELD
 
     @patch("netbox_librenms_plugin.utils.get_plugin_config")
     def test_get_interface_name_field_from_user_pref(self, mock_plugin_config):
@@ -878,8 +978,12 @@ class TestInterfaceNameField:
         mock_plugin_config.assert_not_called()
 
     @patch("netbox_librenms_plugin.utils.get_plugin_config")
-    def test_get_interface_name_field_persists_to_user_pref(self, mock_plugin_config):
-        """Explicit GET param should be persisted to user preferences."""
+    def test_get_interface_name_field_does_not_persist_the_param(self, mock_plugin_config):
+        """The read path honours the parameter without writing it.
+
+        get_context_data() calls this on every GET render, so persisting here made a read mutate
+        stored user state. The selector posts to the save_user_pref endpoint instead.
+        """
         from netbox_librenms_plugin.utils import get_interface_name_field
 
         mock_request = MagicMock()
@@ -889,9 +993,7 @@ class TestInterfaceNameField:
         result = get_interface_name_field(mock_request)
 
         assert result == "ifDescr"
-        mock_request.user.config.set.assert_called_once_with(
-            "plugins.netbox_librenms_plugin.interface_name_field", "ifDescr", commit=True
-        )
+        mock_request.user.config.set.assert_not_called()
 
     @pytest.mark.django_db
     def test_persisting_the_preference_does_not_leak_to_other_users(self):
@@ -907,22 +1009,25 @@ class TestInterfaceNameField:
         from django.test import RequestFactory
         from netbox.config import get_config
 
-        from netbox_librenms_plugin.utils import get_interface_name_field
+        from netbox_librenms_plugin.utils import save_interface_name_preference
 
         user_model = get_user_model()
+        pref_path = "plugins.netbox_librenms_plugin.interface_name_field"
+        baseline = user_model.objects.create_user(username="pref-baseline")
+        baseline_value = baseline.config.get(pref_path)
         chooser = user_model.objects.create_user(username="pref-chooser")
         defaults_before = deepcopy(get_config().DEFAULT_USER_PREFERENCES)
+        # The writer, not the reader: get_interface_name_field no longer persists.
         request = RequestFactory().get("/", {"interface_name_field": "ifDescr"})
         request.user = chooser
 
-        assert get_interface_name_field(request) == "ifDescr"
+        assert save_interface_name_preference(request, "ifDescr") is True
 
-        pref_path = "plugins.netbox_librenms_plugin.interface_name_field"
         stored = user_model.objects.get(pk=chooser.pk)
         assert stored.config.get(pref_path) == "ifDescr"
         assert get_config().DEFAULT_USER_PREFERENCES == defaults_before
         later = user_model.objects.create_user(username="pref-later")
-        assert later.config.get(pref_path) is None
+        assert later.config.get(pref_path) == baseline_value
 
 
 # =============================================================================
@@ -1745,28 +1850,6 @@ class TestIpFamily:
         assert ip_family(IPAddress()) is None
 
 
-@pytest.mark.django_db
-class TestGetVirtualChassisMemberNoneName:
-    """A LibreNMS port row can lack the selected name field entirely (port.get(...) -> None)."""
-
-    def test_none_port_name_returns_device_instead_of_typeerror(self):
-        """A None port name falls back to the viewed device instead of raising TypeError (was a 500)."""
-        from dcim.models import Device, DeviceRole, DeviceType, Manufacturer, Site, VirtualChassis
-
-        from netbox_librenms_plugin.utils import get_virtual_chassis_member
-
-        site = Site.objects.create(name="vc-none-site", slug="vc-none-site")
-        mfr = Manufacturer.objects.create(name="vc-none-mfr", slug="vc-none-mfr")
-        dtype = DeviceType.objects.create(manufacturer=mfr, model="vc-none-dt", slug="vc-none-dt")
-        role = DeviceRole.objects.create(name="vc-none-role", slug="vc-none-role")
-        dev = Device.objects.create(name="vc-none-dev", site=site, device_type=dtype, role=role)
-        vc = VirtualChassis.objects.create(name="vc-none", master=dev)
-        Device.objects.filter(pk=dev.pk).update(virtual_chassis=vc, vc_position=1)
-        dev.refresh_from_db()
-
-        assert get_virtual_chassis_member(dev, None) is dev
-
-
 class TestCoercePositiveInt:
     """coerce_positive_int accepts only positive int / int-string and rejects non-integer types (no float truncation)."""
 
@@ -1795,3 +1878,41 @@ class TestCoercePositiveInt:
         from netbox_librenms_plugin.utils import coerce_positive_int
 
         assert coerce_positive_int(value) == expected
+
+
+@pytest.mark.django_db
+class TestGetVirtualChassisMemberNoneName:
+    """A LibreNMS port row can lack the selected name field entirely (port.get(...) -> None)."""
+
+    def test_none_port_name_returns_device_instead_of_typeerror(self):
+        """A None port name falls back to the viewed device instead of raising TypeError (was a 500)."""
+        from netbox_librenms_plugin.tests.conftest import make_device, make_virtual_chassis
+        from netbox_librenms_plugin.utils import get_virtual_chassis_member
+
+        dev = make_device("vc-none-name-dev")
+        member = make_device("vc-none-name-m2")
+        make_virtual_chassis("vc-none-name", dev, member)
+
+        assert get_virtual_chassis_member(dev, None) is dev
+        # The prefetched-map variant must survive the same input.
+        assert get_virtual_chassis_member(dev, None, members_by_position={2: member}) is dev
+
+
+def test_whitespace_only_names_do_not_count_as_unambiguous():
+    """A blank-after-strip name is not a name, the same rule the sync path applies.
+
+    ``get_interface_port_identity_sets`` used a bare truthiness test while every other site
+    stripped first, so "   " counted as a distinct interface name here and as unsyncable
+    there. Two readers of one rule cannot disagree.
+    """
+    from netbox_librenms_plugin.utils import get_interface_port_identity_sets
+
+    ports = [
+        {"port_id": 10, "ifDescr": "   "},
+        {"port_id": 20, "ifDescr": "Unique"},
+    ]
+
+    unique_port_ids, unambiguous_name_port_ids = get_interface_port_identity_sets(ports, "ifDescr")
+
+    assert unique_port_ids == {10, 20}
+    assert unambiguous_name_port_ids == {20}

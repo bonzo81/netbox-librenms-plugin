@@ -510,13 +510,11 @@ class CreateAndAssignPlatformView(LibreNMSPermissionMixin, NetBoxObjectPermissio
                         return self._sync_redirect(
                             request, pk, getattr(getattr(self, "_librenms_api", None), "server_key", None)
                         )
-                    platform = self.restricted_queryset(Platform).filter(pk=winner.pk).first()
-                    if platform is None:
-                        transaction.set_rollback(True)
-                        messages.error(request, "Selected platform is not available.")
-                        return self._sync_redirect(
-                            request, pk, getattr(getattr(self, "_librenms_api", None), "server_key", None)
-                        )
+                    # Reuse the winner directly. This branch runs only when no platform existed at
+                    # preflight, so the gate asked for ("add", Platform) and never ("view",
+                    # Platform); a restricted_queryset() read here returns none() for an add-only
+                    # user and aborts an assign they are authorized to perform.
+                    platform = winner
             else:
                 # Reuse the existing platform unchanged — do not touch its
                 # manufacturer/vendor scoping; we only assign it and add the mapping.

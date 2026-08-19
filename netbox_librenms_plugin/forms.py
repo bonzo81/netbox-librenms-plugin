@@ -32,6 +32,7 @@ from .models import (
     ModuleTypeMapping,
     NormalizationRule,
     PlatformMapping,
+    PortStackLagPattern,
 )
 
 logger = logging.getLogger(__name__)
@@ -162,12 +163,20 @@ class ImportSettingsForm(NetBoxModelForm):
         help_text="Remove domain suffix from device names during import",
     )
 
+    remember_interface_name_per_platform = forms.BooleanField(
+        label="Remember interface naming per platform",
+        required=False,
+        widget=forms.CheckboxInput(attrs={"class": "form-check-input"}),
+        help_text="Store each user's ifName or ifDescr choice separately for each device platform",
+    )
+
     class Meta:
         model = LibreNMSSettings
         fields = [
             "vc_member_name_pattern",
             "use_sysname_default",
             "strip_domain_default",
+            "remember_interface_name_per_platform",
         ]
 
     def clean_vc_member_name_pattern(self):
@@ -705,6 +714,36 @@ class PlatformMappingFilterForm(NetBoxModelFilterSetForm):
     model = PlatformMapping
 
 
+class PortStackLagPatternForm(NetBoxModelForm):
+    """Form for creating and editing PortStackLagPattern objects."""
+
+    class Meta:
+        """Meta options."""
+
+        model = PortStackLagPattern
+        fields = ["librenms_os", "lag_name_pattern", "description"]
+
+
+class PortStackLagPatternImportForm(NetBoxModelImportForm):
+    """Form for bulk importing PortStackLagPattern objects from CSV/JSON/YAML."""
+
+    class Meta:
+        """Meta options."""
+
+        model = PortStackLagPattern
+        fields = ["librenms_os", "lag_name_pattern", "description"]
+
+
+class PortStackLagPatternFilterForm(NetBoxModelFilterSetForm):
+    """Form for filtering PortStackLagPattern objects."""
+
+    librenms_os = forms.CharField(required=False, label="LibreNMS OS")
+    lag_name_pattern = forms.CharField(required=False, label="LAG Name Pattern")
+    description = forms.CharField(required=False, label="Description")
+
+    model = PortStackLagPattern
+
+
 class BaseSNMPForm(forms.Form):
     """
     Base form with fields shared by both SNMPv1/v2c and SNMPv3 LibreNMS device forms.
@@ -1145,12 +1184,6 @@ class DeviceImportConfigForm(forms.Form):
         required=False,
         label="Sync Cables",
         help_text="Automatically sync cable connections from LibreNMS after import",
-    )
-    sync_ips = forms.BooleanField(
-        initial=True,
-        required=False,
-        label="Sync IP Addresses",
-        help_text="Automatically sync IP addresses from LibreNMS after import",
     )
 
     def __init__(self, *args, **kwargs):

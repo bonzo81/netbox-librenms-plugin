@@ -3,13 +3,15 @@
 In migrated mode the POST form is replaced by a plain <div> (a migrated donor must not be
 able to POST an interface sync). The CSRF token AND the server_key hidden input must still be
 emitted in migrated mode — not because of the (absent) form, but because the interface table
-still renders interactive relationship/VC-member dropdowns whose verify-interface POSTs read
-document.querySelector('[name=csrfmiddlewaretoken]').value and
+still renders interactive relationship/VC-member dropdowns whose verify-interface / LAG-sync
+POSTs read document.querySelector('[name=csrfmiddlewaretoken]').value and
 document.querySelector('input[name="server_key"]').value. Dropping either breaks those
 JS-driven requests: a null token → TypeError/403, a null server_key → the wrong LibreNMS
 server/cache on non-default servers. A bare hidden input never auto-submits, so emitting them
 doesn't reintroduce the live-form problem migrated mode exists to avoid.
 """
+
+import re
 
 import pytest
 
@@ -24,6 +26,7 @@ class TestInterfaceSyncContentTemplateMigratedMode:
         netbox_only=(),
         winner=None,
         has_write=False,
+        relationship_incomplete=False,
     ):
         from django.contrib.auth.models import AnonymousUser
         from django.template.loader import render_to_string
@@ -49,6 +52,7 @@ class TestInterfaceSyncContentTemplateMigratedMode:
             "virtual_chassis_members": [],
             "cache_expiry": None,
             "oob_incomplete": False,
+            "relationship_data_incomplete": relationship_incomplete,
         }
         ctx = {
             "interface_sync": interface_sync,
@@ -69,8 +73,8 @@ class TestInterfaceSyncContentTemplateMigratedMode:
         # The live POST form must be gone in migrated mode (a donor must not POST a sync).
         assert "<form" not in html
         # ...but BOTH the CSRF token and the server_key input must remain so JS-driven
-        # verify-interface POSTs still target the right server.
-        assert "csrfmiddlewaretoken" in html
+        # verify-interface / LAG-sync POSTs still target the right server.
+        assert re.search(r'name="csrfmiddlewaretoken" value="[^"]+"', html)
         assert 'name="server_key"' in html
         assert 'value="prod"' in html
 
@@ -88,7 +92,7 @@ class TestInterfaceSyncContentTemplateMigratedMode:
     def test_normal_mode_emits_form_with_csrf_and_server_key(self):
         html = self._render(migrated=None)
         assert "<form" in html
-        assert "csrfmiddlewaretoken" in html
+        assert re.search(r'name="csrfmiddlewaretoken" value="[^"]+"', html)
         assert 'name="server_key"' in html
 
     def test_netbox_only_link_title_is_move_in_migrated_mode(self):
@@ -105,6 +109,14 @@ class TestInterfaceSyncContentTemplateMigratedMode:
         html = self._render(migrated=None, netbox_only=[{"id": 1, "name": "eth-only"}])
         assert "Click to view and delete NetBox-only interfaces" in html
         assert "Click to view and move NetBox-only interfaces" not in html
+
+    def test_relationship_incomplete_renders_persistent_banner(self):
+        html = self._render(migrated=None, relationship_incomplete=True)
+        assert "LAG / sub-interface relationship data could not be fetched" in html
+
+    def test_no_relationship_banner_when_complete(self):
+        html = self._render(migrated=None, relationship_incomplete=False)
+        assert "LAG / sub-interface relationship data could not be fetched" not in html
 
     def test_migrated_mode_hides_destructive_delete_controls(self):
         # Migrated mode is move-only: the donor-side bulk-delete UI (select-all + per-row
@@ -126,7 +138,8 @@ class TestInterfaceSyncContentTemplateMigratedMode:
         assert "Delete Selected Interfaces" in html
 
     def test_migrated_warning_describes_move_not_delete(self):
-        # In migrated (move) mode WITH a resolved winner, the modal warning must not threaten deletion.
+        # In migrated (move) mode WITH a resolved winner, the modal warning must describe transferring
+        # interfaces to the winner, not permanently deleting them.
         from netbox_librenms_plugin.tests.conftest import make_device
 
         html = self._render(
@@ -134,7 +147,7 @@ class TestInterfaceSyncContentTemplateMigratedMode:
             netbox_only=[{"id": 1, "name": "eth-only"}],
             winner=make_device("iface-warn-winner"),
         )
-        assert "Moving an interface reassigns it" in html
+        assert "to transfer that interface" in html
         assert "permanently remove them from NetBox" not in html
 
     def test_migrated_warning_handles_missing_winner(self):
@@ -150,7 +163,7 @@ class TestInterfaceSyncContentTemplateMigratedMode:
     def test_normal_warning_describes_delete(self):
         html = self._render(migrated=None, netbox_only=[{"id": 1, "name": "eth-only"}])
         assert "permanently remove them from NetBox" in html
-        assert "Moving an interface reassigns it" not in html
+        assert "to transfer that interface" not in html
 
     def test_delete_checkboxes_have_accessible_names(self):
         # The select-all and per-row checkboxes must carry aria-labels for screen-reader users.
@@ -291,3 +304,31 @@ class TestInterfaceSyncContentTemplateMigratedMode:
 
         move_button_tag = extract_enclosing_tag(html, "mdi-transfer-right")
         assert 'hx-vals=\'{"server_key": "default"}\'' in move_button_tag
+
+
+@pytest.mark.django_db
+class TestInterfaceSyncRefreshButtonServerKey:
+    """The outer _interface_sync.html Refresh button must not POST a blank server_key on initial load."""
+
+    def test_refresh_button_falls_back_to_context_server_key_not_blank(self):
+        # On initial page load window.location.search has no server_key, so the Refresh button's
+        # hx-vals must fall back to the active server from context (librenms_server_info.server_key)
+        # rather than '' — a blank key would POST to the default/wrong LibreNMS server.
+        from django.contrib.auth.models import AnonymousUser
+        from django.template.loader import render_to_string
+        from django.test import RequestFactory
+
+        from netbox_librenms_plugin.tests.conftest import make_device
+
+        device = make_device("iface-refresh-dev")
+        request = RequestFactory().get("/")
+        request.user = AnonymousUser()  # NetBox context processors read request.user
+        html = render_to_string(
+            "netbox_librenms_plugin/_interface_sync.html",
+            {"object": device, "has_librenms_id": True, "librenms_server_info": {"server_key": "prod"}},
+            request=request,
+        )
+
+        # The URL-empty fallback now resolves to the active server, not a blank string.
+        assert "get('server_key') || 'prod'" in html
+        assert "get('server_key') || ''" not in html

@@ -1,5 +1,7 @@
 import json
 import logging
+from collections import defaultdict
+from ipaddress import ip_interface
 from urllib.parse import quote_plus
 
 from dcim.models import Device
@@ -11,12 +13,15 @@ from django.views import View
 from ipam.models import VRF, IPAddress
 from virtualization.models import VirtualMachine
 
+from netbox_librenms_plugin.constants import is_supported_interface_name_field
+from netbox_librenms_plugin.ip_addressing import parse_address_with_prefix, parse_librenms_ip_entry
 from netbox_librenms_plugin.tables.ipaddresses import IPAddressTable
 from netbox_librenms_plugin.utils import (
     cache_remaining_ttl,
     coerce_librenms_id,
     get_interface_name_field,
     get_librenms_device_id,
+    resolve_create_missing_interfaces,
     resolve_set_primary_ip,
     same_host,
 )
@@ -74,9 +79,20 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxOb
         Returns:
             list: The enriched IP entries.
         """
+        # Only an address LibreNMS reported can match a row, so resolve them first and scope
+        # the NetBox IP scan to them instead of loading every IPAddress in the deployment.
+        candidate_addresses = set()
+        for ip_entry in ip_data:
+            if not isinstance(ip_entry, dict) or "port_id" not in ip_entry:
+                continue
+            try:
+                candidate_addresses.add(str(parse_librenms_ip_entry(ip_entry)))
+            except ValueError:
+                continue
+
         # Prefetch all necessary data (scoped to the POST-resolved server when provided
         # so interface librenms_id matching uses the right per-server mapping).
-        prefetched_data = self._prefetch_netbox_data(obj, server_key=server_key)
+        prefetched_data = self._prefetch_netbox_data(obj, candidate_addresses, server_key=server_key)
         # LibreNMS port data, keyed by port_id. Callers pass a map pre-populated from the
         # cache on warm-cache renders so _get_port_info() reads it instead of making N
         # live get_port_by_id() calls (the cached pipeline must read cache + NetBox only).
@@ -109,7 +125,11 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxOb
 
             # IP with mask is already calculated in _create_base_ip_entry
             ip_with_mask = enriched_ip["ip_with_mask"]
-            ip_address = prefetched_data["ip_addresses_map"].get(ip_with_mask)
+            ip_matches = prefetched_data["ip_addresses_map"].get(ip_with_mask, [])
+            global_matches = [ip for ip in ip_matches if ip.vrf_id is None]
+            ip_address = global_matches[0] if len(global_matches) == 1 else None
+            if ip_address is None and len(ip_matches) == 1:
+                ip_address = ip_matches[0]
 
             if ip_address:
                 # Process existing IP
@@ -122,8 +142,8 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxOb
                 )
             else:
                 # New IP that doesn't exist in NetBox
-                enriched_ip["exists"] = False
-                enriched_ip["status"] = "sync"
+                enriched_ip["exists"] = bool(ip_matches)
+                enriched_ip["status"] = "update" if ip_matches else "sync"
 
             # Add interface information (regardless of IP status)
             self._add_interface_info_to_ip(
@@ -186,8 +206,19 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxOb
                 entry["is_mgmt_ip"] = True
                 break
 
-    def _prefetch_netbox_data(self, obj, server_key=None):
-        """Prefetch all necessary NetBox data to minimize database queries"""
+    def _prefetch_netbox_data(self, obj, candidate_addresses, server_key=None):
+        """
+        Prefetch all necessary NetBox data to minimize database queries.
+
+        Args:
+            obj: The NetBox device or virtual machine the IP rows belong to.
+            candidate_addresses: The ``address/prefix`` strings LibreNMS reported. Only these
+                can match a row, so the IPAddress scan is restricted to them.
+            server_key: The LibreNMS server key scoping per-server interface matching.
+
+        Returns:
+            dict: The interface, IP, and VRF lookup maps used during enrichment.
+        """
         # Get all interfaces for the device
         all_interfaces = list(obj.interfaces.all())
 
@@ -214,10 +245,16 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxOb
 
         interfaces_by_name = {interface.name: interface for interface in all_interfaces}
 
-        # Get all IP addresses
-        ip_addresses_map = {
-            str(ip.address): ip for ip in IPAddress.objects.select_related("assigned_object_type", "vrf")
-        }
+        # Get the NetBox rows for the reported addresses only
+        ip_addresses_map = defaultdict(list)
+        if candidate_addresses:
+            for ip in IPAddress.objects.filter(address__in=list(candidate_addresses)).select_related(
+                "assigned_object_type", "vrf"
+            ):
+                # NetBox renders through netaddr ("::192.0.2.1/128") while the candidate keys come
+                # from the ipaddress module ("::c000:201/128"). Normalise with the same parser so
+                # an IPv4-compatible IPv6 row still matches.
+                ip_addresses_map[str(ip_interface(str(ip.address)))].append(ip)
 
         # Get all VRFs
         vrfs = list(VRF.objects.all())
@@ -247,23 +284,10 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxOb
 
     def _create_base_ip_entry(self, ip_entry, obj, vrfs):
         """Create the base data structure for an IP entry"""
-        # Determine if this is an IPv4 or IPv6 address and create unified fields
-        if "ip_address" in ip_entry and "prefix_length" in ip_entry:
-            # Use unified format directly if available
-            ip_address = ip_entry["ip_address"]
-            prefix_length = ip_entry["prefix_length"]
-        else:
-            # Legacy format handling
-            if "ipv6_compressed" in ip_entry:
-                ip_address = ip_entry["ipv6_compressed"]
-                prefix_length = ip_entry["ipv6_prefixlen"]
-            elif "ipv4_address" in ip_entry:
-                ip_address = ip_entry["ipv4_address"]
-                prefix_length = ip_entry["ipv4_prefixlen"]
-            else:
-                raise KeyError("No valid IP address format found in LibreNMS data")
-
-        ip_with_mask = f"{ip_address}/{prefix_length}"
+        parsed = parse_librenms_ip_entry(ip_entry)
+        ip_address = str(parsed.ip)
+        prefix_length = parsed.network.prefixlen
+        ip_with_mask = str(parsed)
 
         return {
             "ip_address": ip_address,
@@ -279,6 +303,8 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxOb
     def _enrich_existing_ip(self, enriched_ip, ip_address, port_id, librenms_interface_name, prefetched_data):
         """Add information for IP addresses that exist in NetBox"""
         enriched_ip["ip_url"] = ip_address.get_absolute_url()
+        enriched_ip["netbox_ip_id"] = ip_address.pk
+        enriched_ip["original_vrf_id"] = ip_address.vrf_id
         enriched_ip["exists"] = True
 
         # Add VRF info if available
@@ -343,7 +369,7 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxOb
         server_key = server_key or self._render_server_key()
 
         if interface_name_field is None:
-            interface_name_field = get_interface_name_field(request)
+            interface_name_field = get_interface_name_field(request, obj)
 
         # Validate the per-row schema, not just the container shape: a dict row missing
         # port_id or any supported address/prefix pair would KeyError inside
@@ -359,11 +385,11 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxOb
             port_id = item.get("port_id")
             if isinstance(port_id, bool) or not isinstance(port_id, (int, str)):
                 return False
-            return (
-                {"ip_address", "prefix_length"} <= item.keys()
-                or {"ipv6_compressed", "ipv6_prefixlen"} <= item.keys()
-                or {"ipv4_address", "ipv4_prefixlen"} <= item.keys()
-            )
+            try:
+                parse_librenms_ip_entry(item)
+            except ValueError:
+                return False
+            return True
 
         if fetch_fresh:
             success, ip_data = self.get_ip_addresses(obj)
@@ -403,10 +429,15 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxOb
             # (e.g. a list) would raise in dict(...) below; a non-str mgmt_ip would break the
             # cached["mgmt_ip"] deref. Purge and treat as a miss instead of 500-ing the tab.
             cached_ports_by_id = cached_ip_data.get("ports_by_id")
+            cached_interface_name_field = cached_ip_data.get("interface_name_field")
             if (
                 any(not _valid_ip_row(item) for item in cached_ip_data["ip_addresses"])
                 or ("mgmt_ip" in cached_ip_data and not isinstance(cached_ip_data["mgmt_ip"], str))
                 or (cached_ports_by_id is not None and not isinstance(cached_ports_by_id, dict))
+                or (
+                    cached_interface_name_field is not None
+                    and not is_supported_interface_name_field(cached_interface_name_field)
+                )
             ):
                 cache.delete(cache_key)
                 return None
@@ -429,6 +460,7 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxOb
             port_data_cache = dict(cached_ip_data.get("ports_by_id") or {})
             # Pre-upgrade entries lack ports_by_id; remember so we can backfill below.
             cached_had_ports_by_id = bool(cached_ip_data.get("ports_by_id"))
+            cached_had_interface_name_field = cached_interface_name_field is not None
 
         cache_key = self.get_cache_key(obj, "ip_addresses", server_key)
 
@@ -442,10 +474,19 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxOb
             # during enrichment so cached renders don't re-fetch ports.
             cache.set(
                 cache_key,
-                {"ip_addresses": ip_data, "mgmt_ip": mgmt_ip, "ports_by_id": port_data_cache},
+                {
+                    "ip_addresses": ip_data,
+                    "mgmt_ip": mgmt_ip,
+                    "ports_by_id": port_data_cache,
+                    "interface_name_field": interface_name_field,
+                },
                 timeout=self.librenms_api.cache_timeout,
             )
-        elif (not cached_had_ports_by_id and port_data_cache) or cached_mgmt_ip_missing:
+        elif (
+            (not cached_had_ports_by_id and port_data_cache)
+            or cached_mgmt_ip_missing
+            or not cached_had_interface_name_field
+        ):
             # Backfill: a pre-upgrade cache entry had no ports_by_id and/or no mgmt_ip, so they
             # were rebuilt above via live calls. Persist them under the
             # *remaining* TTL (don't extend the entry's lifetime) so subsequent cached
@@ -457,7 +498,12 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxOb
             if remaining_ttl and remaining_ttl > 0:
                 cache.set(
                     cache_key,
-                    {"ip_addresses": ip_data, "mgmt_ip": mgmt_ip, "ports_by_id": port_data_cache},
+                    {
+                        "ip_addresses": ip_data,
+                        "mgmt_ip": mgmt_ip,
+                        "ports_by_id": port_data_cache,
+                        "interface_name_field": interface_name_field,
+                    },
                     timeout=remaining_ttl,
                 )
 
@@ -478,6 +524,7 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxOb
             "cache_expiry": cache_expiry,
             "server_key": server_key,
             "set_primary_ip": resolve_set_primary_ip(request),
+            "create_missing_interfaces": resolve_create_missing_interfaces(request),
             # Donor "Move IP to winner" candidates (empty unless this device carries a
             # _migrated_to marker for server_key); drives the migrated-mode action card.
             "movable_ips": self._movable_ips_for_migration(obj, server_key),
@@ -513,7 +560,7 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxOb
 
     def get_context_data(self, request, obj):
         """Get the context data for the IP address sync view."""
-        interface_name_field = get_interface_name_field(request)
+        interface_name_field = get_interface_name_field(request, obj)
         # GET render: scope the cache read to ?server_key (mirrors the interfaces/cables/VLAN/
         # module tabs) so a non-default-server tab reads that server's IP cache, not the
         # default's — without this the IP tab renders empty after a successful refresh on a
@@ -531,6 +578,7 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxOb
                 "cache_expiry": None,
                 "server_key": scoped,
                 "set_primary_ip": resolve_set_primary_ip(request),
+                "create_missing_interfaces": resolve_create_missing_interfaces(request),
                 "movable_ips": self._movable_ips_for_migration(obj, scoped),
             }
         context = self._prepare_context(request, obj, interface_name_field, fetch_fresh=False, server_key=scoped)
@@ -542,6 +590,7 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxOb
                 "cache_expiry": None,
                 "server_key": scoped,
                 "set_primary_ip": resolve_set_primary_ip(request),
+                "create_missing_interfaces": resolve_create_missing_interfaces(request),
                 "movable_ips": self._movable_ips_for_migration(obj, scoped),
             }
         return context
@@ -549,7 +598,7 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxOb
     def post(self, request, pk):
         """Handle POST request for IP address sync view."""
         obj = self.get_object(pk)
-        interface_name_field = get_interface_name_field(request)
+        interface_name_field = get_interface_name_field(request, obj)
         # Rebind the API to the POSTed server so the live IP/management-IP fetches hit the
         # same LibreNMS instance the cached rows are namespaced under (multi-server tabs).
         posted_server_key = request.POST.get("server_key")
@@ -577,6 +626,7 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxOb
                         # checkbox to ip_sync.set_primary_ip, so omitting it silently unchecks it
                         # on this error re-render.
                         "set_primary_ip": resolve_set_primary_ip(request),
+                        "create_missing_interfaces": resolve_create_missing_interfaces(request),
                         # Keep the "Move IP addresses to <winner>" card on this error re-render too:
                         # the per-row moves are pure NetBox operations, and the template gates the
                         # card on ip_sync.movable_ips — omitting it (as the fetch-failure and success
@@ -607,6 +657,7 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxOb
                         # Preserve the set-primary-IP checkbox state across a failed refresh
                         # (the template binds it to ip_sync.set_primary_ip).
                         "set_primary_ip": resolve_set_primary_ip(request),
+                        "create_missing_interfaces": resolve_create_missing_interfaces(request),
                         # Keep the "Move IP addresses to <winner>" card available on a LibreNMS
                         # fetch failure: the per-row moves (MoveIPAddressToWinnerView) are pure
                         # NetBox operations that don't touch LibreNMS, and every other exit surfaces
@@ -707,17 +758,8 @@ class SingleIPAddressVerifyView(NetBoxObjectPermissionMixin, LibreNMSPermissionM
         Parse IP address string into address and prefix length.
         Works with both IPv4 and IPv6 addresses.
         """
-        ip_address_parts = ip_address.split("/")
-        address_no_mask = ip_address_parts[0].strip()
-
-        if len(ip_address_parts) > 1:
-            try:
-                prefix_len = int(ip_address_parts[1])
-                return address_no_mask, prefix_len
-            except ValueError:
-                raise ValueError(f"Invalid prefix length: {ip_address_parts[1]}")
-        else:
-            raise ValueError("Prefix length is missing from the IP address")
+        parsed = parse_address_with_prefix(ip_address)
+        return str(parsed.ip), parsed.network.prefixlen
 
     def _find_in_cache(self, cached_data, address, prefix_len):
         """Find IP address in cache data using unified fields only."""
@@ -729,6 +771,7 @@ class SingleIPAddressVerifyView(NetBoxObjectPermissionMixin, LibreNMSPermissionM
         if not isinstance(cached_data, dict):
             return None, None, None
 
+        target = str(parse_address_with_prefix(address, prefix_len))
         for ip_entry in cached_data.get("ip_addresses", []):
             # Per-item shape guard: a non-dict row (or one missing the unified fields) in a
             # corrupt/legacy snapshot would otherwise TypeError/KeyError here and be swallowed by
@@ -736,7 +779,11 @@ class SingleIPAddressVerifyView(NetBoxObjectPermissionMixin, LibreNMSPermissionM
             # extract_cached_ports which validate each row.
             if not isinstance(ip_entry, dict):
                 continue
-            if ip_entry.get("ip_address") == address and str(ip_entry.get("prefix_length")) == str(prefix_len):
+            try:
+                cached_address = str(parse_address_with_prefix(ip_entry.get("ip_with_mask")))
+            except (TypeError, ValueError):
+                continue
+            if cached_address == target:
                 return (ip_entry, ip_entry.get("vrf_id"), ip_entry.get("port_id"))
 
         return None, None, None
@@ -745,21 +792,20 @@ class SingleIPAddressVerifyView(NetBoxObjectPermissionMixin, LibreNMSPermissionM
         """
         Find existing IP address in NetBox, optionally with specific VRF.
         """
-        ip_with_mask = f"{address_no_mask}/{prefix_len}"
+        ip_with_mask = str(parse_address_with_prefix(address_no_mask, prefix_len))
 
-        # Check if IP exists in any VRF
-        existing_ip = IPAddress.objects.filter(address=ip_with_mask).first()
-        if not existing_ip:
+        matches = list(IPAddress.objects.filter(address=ip_with_mask).order_by("pk"))
+        if not matches:
             return False, False, None
 
-        # IP exists in some VRF, check if it exists in the specified VRF
         if vrf_id is not None:
-            existing_in_vrf = IPAddress.objects.filter(address=ip_with_mask, vrf__id=vrf_id).exists()
+            matching_vrf_rows = [row for row in matches if row.vrf_id == vrf_id]
         else:
-            # Check for global VRF (None)
-            existing_in_vrf = IPAddress.objects.filter(address=ip_with_mask, vrf__isnull=True).exists()
+            matching_vrf_rows = [row for row in matches if row.vrf_id is None]
 
-        return True, existing_in_vrf, existing_ip.get_absolute_url()
+        if len(matching_vrf_rows) == 1:
+            return True, True, matching_vrf_rows[0].get_absolute_url()
+        return True, False, matches[0].get_absolute_url() if len(matches) == 1 else None
 
     def _determine_status(self, exists_any_vrf, exists_specific_vrf, original_vrf_id, vrf_id):
         """
@@ -871,7 +917,7 @@ class SingleIPAddressVerifyView(NetBoxObjectPermissionMixin, LibreNMSPermissionM
             updated_record = {
                 "ip_address": address_no_mask,
                 "prefix_length": prefix_len,
-                "ip_with_mask": f"{address_no_mask}/{prefix_len}",
+                "ip_with_mask": str(parse_address_with_prefix(address_no_mask, prefix_len)),
                 "device": obj.name,
                 "device_url": obj.get_absolute_url(),
                 "vrf_id": vrf_id,

@@ -136,6 +136,24 @@ class TestFindByLibreNMSId:
         legacy_str = _dev("42")
         assert find_by_librenms_id(Device, 42, "anyserver") == legacy_str
 
+    @pytest.mark.parametrize(
+        ("shape", "server_key"),
+        [
+            ({"default": "0042"}, "default"),
+            ({"default": {"id": " +42 "}}, "default"),
+            ({"default": {"id": 1, "oob": {"id": "0042"}}}, "default"),
+            (" 0042 ", "anyserver"),
+        ],
+    )
+    def test_integer_lookup_finds_every_accepted_numeric_string(self, shape, server_key):
+        from dcim.models import Device
+
+        from netbox_librenms_plugin.utils import find_by_librenms_id
+
+        device = _dev(shape)
+
+        assert find_by_librenms_id(Device, 42, server_key) == device
+
     def test_librenms_id_q_resolves_each_storage_shape(self):
         """cables_view._librenms_id_q (sharing build_librenms_id_qs with find_by_librenms_id) must resolve the same storage shapes — including the OOB sub-id — so the two can't drift apart."""
         from dcim.models import Device

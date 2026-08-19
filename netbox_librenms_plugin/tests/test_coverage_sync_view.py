@@ -1110,7 +1110,7 @@ class TestGetPlatformInfo:
 
 @pytest.mark.django_db
 class TestInterfaceSyncRefreshButtonServerKey:
-    """The 'Refresh Interfaces' buttons must carry the active server_key (hidden input + hx-include) so a non-default server tab refreshes from the right LibreNMS server/cache, not the fallback."""
+    """The 'Refresh Interfaces' button must carry the active server_key — via the hidden input the enclosing form emits (htmx includes form values on non-GET) plus the button's own hx-vals context fallback — so a non-default server tab refreshes from the right LibreNMS server/cache, not the fallback."""
 
     def _render(self, *, server_key="prod"):
         from dcim.models import Device, DeviceRole, DeviceType, Manufacturer, Site
@@ -1134,6 +1134,7 @@ class TestInterfaceSyncRefreshButtonServerKey:
             "object": device,
             "has_librenms_id": True,
             "server_key": server_key,
+            "librenms_server_info": {"server_key": server_key},
             "interface_name_field": "ifName",
             "migrated_to_marker": None,
             "migrated_to_winner": None,
@@ -1152,10 +1153,12 @@ class TestInterfaceSyncRefreshButtonServerKey:
 
     def test_refresh_button_includes_server_key(self):
         html = self._render(server_key="prod")
-        # Hidden input carries the active server key...
+        # The refresh POST carries the active server key two ways: the hidden input the enclosing
+        # form emits (htmx includes form values on non-GET requests) and the button's own hx-vals
+        # context fallback. parent-child moved server_key OUT of the button's hx-include into hx-vals,
+        # but the hidden input the form relies on stays.
         assert '<input type="hidden" name="server_key" value="prod">' in html
-        # ...and the refresh button posts it alongside interface_name_field.
-        assert "[name='interface_name_field'], [name='server_key']" in html
+        assert "get('server_key') || 'prod'" in html
 
 
 @pytest.mark.django_db

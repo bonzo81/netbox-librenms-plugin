@@ -32,6 +32,7 @@ from netbox_librenms_plugin.utils import (
     coerce_librenms_id,
     get_migrated_to_marker,
     set_device_ip_fk,
+    validation_error_detail,
 )
 from netbox_librenms_plugin.views.imports.actions import _htmx_error_response
 from netbox_librenms_plugin.views.mixins import (
@@ -635,11 +636,7 @@ class MoveInterfaceToWinnerView(_BaseMoveToWinnerView):
             try:
                 interface.full_clean()
             except ValidationError as exc:
-                detail = (
-                    "; ".join(f"{field}: {' '.join(str(m) for m in msgs)}" for field, msgs in exc.message_dict.items())
-                    if hasattr(exc, "message_dict")
-                    else str(exc)
-                )
+                detail = validation_error_detail(exc)
                 return self._fail(
                     request,
                     f"Cannot move interface '{interface.name}' to '{winner.name}': {detail}",

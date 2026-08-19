@@ -1,17 +1,17 @@
-import hashlib
 from urllib.parse import quote_plus
 
 from dcim.models import Device
 from django.contrib import messages
 from django.core.cache import cache
 from django.core.exceptions import ValidationError
-from django.db import IntegrityError, connection, transaction
+from django.db import IntegrityError, transaction
 from django.http import Http404
 from django.shortcuts import redirect
 from django.urls import reverse
 from django.views import View
 from ipam.models import VLAN, VLANGroup
 
+from netbox_librenms_plugin.utils import acquire_advisory_transaction_lock
 from netbox_librenms_plugin.views.mixins import (
     CacheMixin,
     LibreNMSAPIMixin,
@@ -22,20 +22,8 @@ from netbox_librenms_plugin.views.mixins import (
 
 def _acquire_global_vlan_locks(vids):
     """Lock global VLAN VIDs in stable order for the current transaction."""
-    if not connection.in_atomic_block:
-        raise RuntimeError("_acquire_global_vlan_locks() requires an open transaction")
-
-    with connection.cursor() as cursor:
-        for vid in sorted(set(vids)):
-            lock_key = int.from_bytes(
-                hashlib.blake2b(
-                    f"netbox-librenms-plugin:global-vlan:{vid}".encode(),
-                    digest_size=8,
-                ).digest(),
-                byteorder="big",
-                signed=True,
-            )
-            cursor.execute("SELECT pg_advisory_xact_lock(%s)", [lock_key])
+    for vid in sorted(set(vids)):
+        acquire_advisory_transaction_lock(f"netbox-librenms-plugin:global-vlan:{vid}")
 
 
 class SyncVLANsView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreNMSAPIMixin, CacheMixin, View):
@@ -48,11 +36,24 @@ class SyncVLANsView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreN
             # The owner device is resolved through a restricted queryset (see get_object), so
             # state that read here: a missing grant is an explicit 403, not a 404 at the lookup.
             ("view", Device),
-            ("view", VLANGroup),
             ("add", VLAN),
             ("change", VLAN),
         ],
     }
+
+    def _required_post_permissions(self, request):
+        """Require VLANGroup access only when a selected row names a group."""
+        permissions = list(type(self).required_object_permissions["POST"])
+        selected_vids = request.POST.getlist("select")
+        for vid_str in selected_vids:
+            try:
+                vid = int(vid_str)
+            except ValueError:
+                continue
+            if request.POST.get(f"vlan_group_{vid}"):
+                permissions.append(("view", VLANGroup))
+                break
+        return permissions
 
     def post(self, request, object_type: str, object_id: int):
         """
@@ -63,6 +64,8 @@ class SyncVLANsView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreN
         - select: List of VLAN IDs to create
         - vlan_group_{vid}: Per-row VLAN group selection
         """
+        self.required_object_permissions = {"POST": self._required_post_permissions(request)}
+
         # Check both plugin write and NetBox object permissions
         if error := self.require_all_permissions("POST"):
             return error

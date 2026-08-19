@@ -131,8 +131,63 @@ netbox-shell() {
   cd /opt/netbox/netbox && source /opt/netbox/venv/bin/activate && python manage.py shell
 }
 
+_netbox-test() {
+  local coverage="$1"
+  shift
+  # Read the ceiling from the module that assigns the per-worker databases, so the
+  # two sides cannot drift.
+  local parallel_module="$PLUGIN_DIR/netbox_librenms_plugin/tests/parallel.py"
+  local max_workers
+  max_workers="$(sed -n 's/^MAX_PARALLEL_WORKERS = \([0-9][0-9]*\)$/\1/p' "$parallel_module")"
+  if ! [[ "$max_workers" =~ ^[1-9][0-9]*$ ]]; then
+    echo "Cannot read MAX_PARALLEL_WORKERS from $parallel_module." >&2
+    return 2
+  fi
+  local workers="${NETBOX_TEST_WORKERS:-$max_workers}"
+  if ! [[ "$workers" =~ ^[1-9][0-9]*$ ]] || [ "$workers" -gt "$max_workers" ]; then
+    echo "NETBOX_TEST_WORKERS must be an integer from 1 through $max_workers." >&2
+    return 2
+  fi
+  local target="netbox_librenms_plugin/tests"
+  local coverage_args=()
+  local parallel_args=()
+  if [ "$#" -gt 0 ] && [[ "$1" != -* ]]; then
+    target="$1"
+    shift
+  fi
+  if [ "$workers" -gt 1 ]; then
+    parallel_args=(-n "$workers" --maxschedchunk=1)
+  fi
+  if [ "$coverage" != "yes" ]; then
+    coverage_args=(--no-cov)
+  fi
+  # Read the prefix from the settings module that rejects the name, so the two sides cannot drift.
+  local settings_module="$PLUGIN_DIR/netbox_librenms_plugin/tests/isolated_settings.py"
+  local db_prefix
+  db_prefix="$(sed -n 's/^TEST_DB_NAME_PREFIX = "\(.*\)"$/\1/p' "$settings_module")"
+  if [ -z "$db_prefix" ]; then
+    echo "Cannot read TEST_DB_NAME_PREFIX from $settings_module." >&2
+    return 2
+  fi
+  if [[ "${TEST_DB_NAME:-}" != "$db_prefix"* ]]; then
+    echo "TEST_DB_NAME must start with '$db_prefix'." >&2
+    return 1
+  fi
+  local redis_host="${TEST_REDIS_HOST:-}"
+  if [ -z "${redis_host//[[:space:]]/}" ]; then
+    echo "TEST_REDIS_HOST must not be empty." >&2
+    return 1
+  fi
+  cd "$PLUGIN_DIR" && source /opt/netbox/venv/bin/activate && \
+    pytest "$target" -q --disable-warnings --reuse-db "${coverage_args[@]}" "${parallel_args[@]}" "$@"
+}
+
 netbox-test() {
-  cd "$PLUGIN_DIR" && source /opt/netbox/venv/bin/activate && python -m pytest "$@"
+  _netbox-test no "$@"
+}
+
+netbox-test-coverage() {
+  _netbox-test yes "$@"
 }
 
 netbox-manage() {
@@ -205,7 +260,8 @@ dev-help() {
   echo ""
   echo "🛠️  Development Tools:"
   echo "  netbox-shell        : Open NetBox Django shell"
-  echo "  netbox-test         : Run plugin tests"
+  echo "  netbox-test         : Run plugin tests (parallel, no coverage; add --create-db after a migration)"
+  echo "  netbox-test-coverage: Run plugin tests with coverage"
   echo "  netbox-manage       : Run Django management commands"
   echo "  plugin-install      : Reinstall plugin in development mode"
   echo ""

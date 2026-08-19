@@ -75,6 +75,29 @@ class TestGetVirtualChassisMemberException:
         assert result is device
 
 
+@pytest.mark.django_db
+class TestGetVirtualChassisMemberEmptyPrefetchMap:
+    """An empty prefetched members_by_position map must not silently disable member resolution."""
+
+    def test_empty_map_falls_back_to_the_db_lookup(self):
+        from dcim.models import VirtualChassis
+
+        from netbox_librenms_plugin.tests.conftest import make_device
+        from netbox_librenms_plugin.utils import get_virtual_chassis_member
+
+        master = make_device("vc-empty-map-1")
+        member2 = make_device("vc-empty-map-2")
+        vc = VirtualChassis.objects.create(name="vc-empty-map", master=master)
+        for dev, pos in ((master, 1), (member2, 2)):
+            dev.virtual_chassis = vc
+            dev.vc_position = pos
+            dev.save()
+
+        # A caller forwarding a raw-but-empty map must still resolve via the per-call query,
+        # not short-circuit every row to the fallback device.
+        assert get_virtual_chassis_member(master, "Ethernet2", members_by_position={}) == member2
+
+
 class TestGetLibreNMSSyncDeviceServerKey:
     """Tests for get_librenms_sync_device with server_key (lines 113-125)."""
 
@@ -265,7 +288,7 @@ class TestGetLibreNMSSyncDeviceFallbacks:
 
 
 class TestGetTablePaginateCountValueError:
-    """Tests for get_table_paginate_count ValueError path (lines 169-170)."""
+    """Tests for get_table_paginate_count fallback paths: a non-integer per_page hits the ValueError handler, and a zero/negative per_page hits the `< 1` guard — both fall back to the NetBox default rather than propagating to the paginator."""
 
     def test_invalid_per_page_falls_back_to_default(self):
         from netbox_librenms_plugin.utils import get_table_paginate_count
@@ -278,6 +301,19 @@ class TestGetTablePaginateCountValueError:
                 mock_paginate.return_value = 50
                 result = get_table_paginate_count(request, "table_")
         assert result == 50
+
+    def test_non_positive_per_page_falls_back_to_default(self):
+        """0 or negative input must not propagate to the paginator."""
+        from netbox_librenms_plugin.utils import get_table_paginate_count
+
+        for raw in ("0", "-5"):
+            request = MagicMock()
+            request.GET = {"table_per_page": raw}
+            with patch("netbox_librenms_plugin.utils.get_config"):
+                with patch("netbox_librenms_plugin.utils.netbox_get_paginate_count") as mock_paginate:
+                    mock_paginate.return_value = 50
+                    result = get_table_paginate_count(request, "table_")
+            assert result == 50, f"per_page={raw!r} should fall back to default"
 
 
 class TestGetUserPrefNoConfig:
@@ -816,6 +852,42 @@ class TestNetboxResolvesModuleTokenPerLeaf:
             assert utils.netbox_resolves_module_token_per_leaf() is True
 
 
+class TestNetboxCleanReadsParentVirtualChassis:
+    """Version gate for the NetBox 4.4.0 Interface.clean() parent dereference (issue #20197)."""
+
+    def test_true_for_the_affected_release(self):
+        from netbox_librenms_plugin import utils
+
+        with patch.object(utils, "_get_netbox_version_tuple", return_value=(4, 4, 0)):
+            assert utils.netbox_clean_reads_parent_virtual_chassis() is True
+
+    def test_false_once_the_fix_shipped(self):
+        from netbox_librenms_plugin import utils
+
+        with patch.object(utils, "_get_netbox_version_tuple", return_value=(4, 4, 1)):
+            assert utils.netbox_clean_reads_parent_virtual_chassis() is False
+
+    def test_false_for_a_later_release(self):
+        from netbox_librenms_plugin import utils
+
+        with patch.object(utils, "_get_netbox_version_tuple", return_value=(4, 6, 5)):
+            assert utils.netbox_clean_reads_parent_virtual_chassis() is False
+
+    def test_false_for_a_release_older_than_the_defect(self):
+        """Pins the equality: widening the gate to <= would silently pass every other case."""
+        from netbox_librenms_plugin import utils
+
+        with patch.object(utils, "_get_netbox_version_tuple", return_value=(4, 3, 9)):
+            assert utils.netbox_clean_reads_parent_virtual_chassis() is False
+
+    def test_true_when_version_undetectable(self):
+        """Keep the tolerance rather than turn a known core defect into a 500."""
+        from netbox_librenms_plugin import utils
+
+        with patch.object(utils, "_get_netbox_version_tuple", return_value=None):
+            assert utils.netbox_clean_reads_parent_virtual_chassis() is True
+
+
 class TestHasNestedNameConflictVersionGating:
     """has_nested_name_conflict() must short-circuit on NetBox >= 4.5.6 (issue #20467)."""
 
@@ -981,3 +1053,84 @@ class TestValidateRegexField:
                 mapping.clean()
         assert "librenms_name" in exc_info.value.message_dict
         assert "Invalid regex" in exc_info.value.message_dict["librenms_name"][0]
+
+
+@pytest.mark.django_db
+class TestInterfaceNameFallbackMatchesPort:
+    """The fallback reader must agree with get_librenms_device_id on every stored shape.
+
+    The two used to walk custom_field_data separately, so they could drift on which shapes
+    resolve. Only the "no binding recorded" rules stay local to the fallback.
+    """
+
+    def _interface(self, stored):
+        from netbox_librenms_plugin.tests.conftest import make_device, make_interface
+
+        device = make_device("iface-fallback-shapes")
+        interface = make_interface(device, "Ethernet1", iface_type="1000base-t")
+        if stored is not None:
+            interface.custom_field_data["librenms_id"] = stored
+            interface.save(update_fields=["custom_field_data"])
+        return interface
+
+    @pytest.mark.parametrize(
+        "stored",
+        [
+            {"default": 42},
+            {"default": "42"},
+            {"default": {"id": 42}},
+            {"default": {"id": "42"}},
+            42,
+            "42",
+        ],
+    )
+    def test_agrees_with_the_shared_reader(self, stored):
+        from netbox_librenms_plugin.utils import get_librenms_device_id, interface_name_fallback_matches_port
+
+        interface = self._interface(stored)
+        assert get_librenms_device_id(interface, "default", auto_save=False) == 42
+        assert interface_name_fallback_matches_port(interface, 42, "default") is True
+        assert interface_name_fallback_matches_port(interface, 43, "default") is False
+
+    def test_absent_field_counts_as_unbound(self):
+        from netbox_librenms_plugin.utils import interface_name_fallback_matches_port
+
+        interface = self._interface(None)
+        assert interface_name_fallback_matches_port(interface, 42, "default") is True
+
+    def test_other_server_key_counts_as_unbound(self):
+        from netbox_librenms_plugin.utils import interface_name_fallback_matches_port
+
+        interface = self._interface({"other": 42})
+        assert interface_name_fallback_matches_port(interface, 42, "default") is True
+
+    def test_unusable_entry_for_this_server_is_not_a_match(self):
+        from netbox_librenms_plugin.utils import interface_name_fallback_matches_port
+
+        interface = self._interface({"default": {"no_id": 42}})
+        assert interface_name_fallback_matches_port(interface, 42, "default") is False
+
+
+@pytest.mark.django_db(transaction=True)
+class TestAcquireAdvisoryTransactionLock:
+    """The lock must bind to the connection that owns the caller's transaction."""
+
+    def test_requires_an_open_transaction(self):
+        from netbox_librenms_plugin.utils import acquire_advisory_transaction_lock
+
+        with pytest.raises(RuntimeError, match="requires an open transaction"):
+            acquire_advisory_transaction_lock("nblp-test:no-transaction")
+
+    def test_takes_the_lock_on_the_named_alias(self):
+        from django.db import transaction
+
+        from netbox_librenms_plugin.utils import acquire_advisory_transaction_lock
+
+        with transaction.atomic(using="default"):
+            acquire_advisory_transaction_lock("nblp-test:aliased", using="default")
+
+    def test_named_alias_outside_a_transaction_still_refuses(self):
+        from netbox_librenms_plugin.utils import acquire_advisory_transaction_lock
+
+        with pytest.raises(RuntimeError, match="requires an open transaction"):
+            acquire_advisory_transaction_lock("nblp-test:aliased-no-transaction", using="default")

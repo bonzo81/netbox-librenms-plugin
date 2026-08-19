@@ -384,7 +384,7 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObject
             # post() can surface the actual LibreNMS error instead of a generic "No links found".
             self._links_fetch_error = self._classify_links_fetch_error(success, data)
 
-        interface_name_field = get_interface_name_field(getattr(self, "request", None))
+        interface_name_field = get_interface_name_field(getattr(self, "request", None), obj)
         # The alternate LibreNMS name field: when the user displays ifName, a NetBox
         # interface may still be named from ifDescr (and vice versa). Carrying the alternate
         # name lets enrich_local_port fall back to either field (issue #88).
@@ -496,11 +496,11 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObject
                 server_key = self._render_server_key()
 
             # Name fallback is field-agnostic: a NetBox interface may be named from the
-            # LibreNMS field the user is *not* currently displaying (issue #88 — e.g. the
+            # LibreNMS field the user is not currently displaying. For example, the
             # interface carries the ifDescr value while interface_name_field selects ifName).
             # Match the displayed name plus the alternate field captured at fetch time,
             # mirroring the dual ifName/ifDescr fallback in
-            # interfaces_view._enrich_port_with_lag_parent. The stable librenms_id match below
+            # interface relationship enrichment. The stable librenms_id match below
             # still wins when present; this only widens the fragile name fallback.
             name_candidates = [n for n in (local_port, link.get("local_port_alt")) if n]
 

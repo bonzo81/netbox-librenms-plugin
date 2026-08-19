@@ -14,6 +14,7 @@ router.register("normalization-rules", views.NormalizationRuleViewSet)
 router.register("inventory-ignore-rules", views.InventoryIgnoreRuleViewSet)
 router.register("platform-mappings", views.PlatformMappingViewSet)
 router.register("carrier-auto-install-rules", views.CarrierAutoInstallRuleViewSet)
+router.register("port-stack-lag-patterns", views.PortStackLagPatternViewSet)
 
 urlpatterns = [
     path("jobs/<int:job_pk>/sync-status/", views.sync_job_status, name="sync_job_status"),

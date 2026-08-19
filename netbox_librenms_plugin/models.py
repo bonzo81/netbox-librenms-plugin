@@ -7,12 +7,26 @@ from dcim.choices import InterfaceTypeChoices
 from dcim.models import DeviceType, Manufacturer, ModuleType, Platform
 from django.core.exceptions import ValidationError
 from django.db import models
+from django.db.models.functions import Lower
 from django.urls import reverse
 from netbox.models import NetBoxModel
 
 from netbox_librenms_plugin.utils import validate_regex_field
 
 logger = logging.getLogger(__name__)
+
+# Characters removed by Python's no-argument str.strip(). PostgreSQL BTRIM removes only ASCII
+# spaces when its second argument is absent, so pass this set explicitly wherever the database
+# must enforce the same normalization as PortStackLagPattern.clean().
+_PYTHON_STRIP_WHITESPACE = (
+    "\t\n\v\f\r\x1c\x1d\x1e\x1f \x85\xa0"
+    "\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a\u2028\u2029\u202f\u205f\u3000"
+)
+
+
+def _trim_python_whitespace(expression):
+    """Return a PostgreSQL expression with Python ``str.strip()`` semantics."""
+    return models.Func(expression, models.Value(_PYTHON_STRIP_WHITESPACE), function="BTRIM")
 
 
 def _validate_replacement_template(compiled: re.Pattern, replacement: str) -> None:
@@ -79,6 +93,11 @@ class LibreNMSSettings(models.Model):
     strip_domain_default = models.BooleanField(
         default=False,
         help_text="Remove domain suffix from device names during import",
+    )
+
+    remember_interface_name_per_platform = models.BooleanField(
+        default=False,
+        help_text="Remember each user's ifName or ifDescr choice separately for each device platform",
     )
 
     def save(self, *args, **kwargs):
@@ -916,3 +935,129 @@ class CarrierAutoInstallRule(FullCleanOnSaveMixin, NetBoxModel):
             "description": self.description,
         }
         return yaml.dump(data, sort_keys=False)
+
+
+class PortStackLagPattern(FullCleanOnSaveMixin, NetBoxModel):
+    """
+    Maps a LibreNMS OS name to the regex identifying LAG aggregate interfaces.
+
+    Used as fallback when a port's ifType is not 'ieee8023adLag'.
+    Example: Cisco IOS port-channels have ifType='propVirtual' and need name-based
+    identification via pattern '^Po\\d+$'.
+
+    Universal rules (hardcoded, vendor-agnostic):
+      - LAG aggregate is normally the 'low' entry in a port_stack pair, but the
+        aggregate side is determined authoritatively by ifType or this pattern, so a
+        pair whose aggregate is on the 'high' side is still mapped member->aggregate.
+      - Pairs where either name contains ':' are skipped (Nokia SAP entries).
+      - .N suffix is stripped for name resolution (handles Junos sub-unit pairing).
+    """
+
+    librenms_os = models.CharField(
+        max_length=50,
+        help_text="LibreNMS OS identifier (e.g. 'ios', 'timos', 'junos')",
+    )
+    lag_name_pattern = models.CharField(
+        max_length=200,
+        help_text=(
+            "Regular expression matching LAG aggregate interface names. "
+            "Used as fallback when ifType is not 'ieee8023adLag'. "
+            r"Example: ^Po\d+$"
+        ),
+    )
+    description = models.TextField(blank=True)
+
+    @functools.cached_property
+    def _compiled_pattern(self):
+        """Compiled lag_name_pattern regex, or None when it doesn't compile (skipped, not fatal)."""
+        try:
+            return re.compile(self.lag_name_pattern)
+        except re.error:
+            return None
+
+    @classmethod
+    def compiled_patterns_for_os(cls, device_os):
+        """
+        Return the compiled lag_name_pattern regexes scoped to *device_os*.
+
+        Single home for the OS-scoping + compile-with-skip used by both the relationship
+        resolver and the lazy port_stack-fetch trigger, so the two can't
+        disagree on which patterns apply. ``device_os=None`` loads every stored pattern (legacy
+        unscoped behaviour); a present-but-blank/non-string OS returns none (an unknown OS must
+        not re-globalize every vendor's regex); otherwise the patterns whose ``librenms_os``
+        matches after the same trim/lower normalization as the database constraint. Patterns
+        that fail to compile are skipped and logged.
+        """
+        if device_os is None:
+            queryset = cls.objects.all()
+        else:
+            os_filter = device_os.strip() if isinstance(device_os, str) else ""
+            if not os_filter:
+                return []
+            queryset = cls.objects.annotate(
+                normalized_librenms_os=Lower(_trim_python_whitespace("librenms_os"))
+            ).filter(normalized_librenms_os=os_filter.lower())
+        compiled = []
+        for pattern in queryset:
+            regex = pattern._compiled_pattern
+            if regex is None:
+                logger.warning(
+                    "Skipping invalid LAG name pattern for OS %r: %r",
+                    pattern.librenms_os,
+                    pattern.lag_name_pattern,
+                )
+                continue
+            compiled.append(regex)
+        return compiled
+
+    def clean(self):
+        """Validate OS name is non-blank and lag_name_pattern is a valid regex."""
+        super().clean()
+        # Invalidate the cached compiled pattern so it recompiles from the edited value.
+        self.__dict__.pop("_compiled_pattern", None)
+        os_name = (self.librenms_os or "").strip().lower()
+        if not os_name:
+            raise ValidationError({"librenms_os": "OS name must not be blank."})
+        self.librenms_os = os_name
+        lag_pattern = (self.lag_name_pattern or "").strip()
+        if not lag_pattern:
+            raise ValidationError({"lag_name_pattern": "Pattern must not be blank."})
+        self.lag_name_pattern = lag_pattern
+        # ReDoS note (low severity, accepted): see validate_regex_field, which documents
+        # the admin-supplied-pattern risk and centralizes the compile/validation path.
+        validate_regex_field(self.lag_name_pattern, "lag_name_pattern")
+
+    def get_absolute_url(self):
+        """Return URL for this pattern's detail page."""
+        return reverse("plugins:netbox_librenms_plugin:portstacklagpattern_detail", args=[self.pk])
+
+    def to_yaml(self):
+        data = {
+            "librenms_os": self.librenms_os,
+            "lag_name_pattern": self.lag_name_pattern,
+            "description": self.description,
+        }
+        return yaml.dump(data, sort_keys=False)
+
+    class Meta:
+        """Meta options for PortStackLagPattern."""
+
+        ordering = ["librenms_os"]
+        verbose_name = "Port Stack LAG Pattern"
+        verbose_name_plural = "Port Stack LAG Patterns"
+        constraints = [
+            # Enforce the same trimmed, case-insensitive key that the OS-scoped pattern lookup
+            # reads. A plain unique=True is case-sensitive, so at the DB level "ios" and "IOS"
+            # could coexist and both apply to one device, making the per-OS fallback ambiguous.
+            # clean() already normalizes with .strip().lower() on every save. BTRIM with Python's
+            # full whitespace set makes the database enforce the same canonical form for paths
+            # that skip full_clean, such as bulk_create, raw SQL, or loaddata. Lower() alone would
+            # let " ios " coexist with "ios".
+            models.UniqueConstraint(
+                Lower(_trim_python_whitespace("librenms_os")),
+                name="unique_portstacklagpattern_librenms_os_ci",
+            ),
+        ]
+
+    def __str__(self):
+        return f"{self.librenms_os} -> {self.lag_name_pattern}"

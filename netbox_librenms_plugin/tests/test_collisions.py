@@ -405,6 +405,33 @@ def test_collision_template_renders_correct_link_targets_and_escapes():
     ), "collision badge must pair bg-danger with text-white on one element"
 
 
+def test_collision_template_hides_a_restricted_target_link_and_pk():
+    """A restricted collision shows its safe name without exposing an object URL or pk."""
+    from django.template.loader import render_to_string
+
+    html = render_to_string(
+        "netbox_librenms_plugin/htmx/bulk_import_collision.html",
+        {
+            "collisions": [
+                {
+                    "nb_device_pk": None,
+                    "nb_device_name": "restricted NetBox object",
+                    "nb_model_name": None,
+                    "nb_kind": "object",
+                    "target_visible": False,
+                    "librenms_rows": [{"device_id": 1, "hostname": "restricted-row", "role": "host"}],
+                }
+            ]
+        },
+    )
+
+    assert "restricted NetBox object" in html
+    assert "restricted-row" in html
+    assert "/dcim/devices/" not in html
+    assert "/virtualization/virtual-machines/" not in html
+    assert "(pk " not in html
+
+
 def test_non_string_merge_model_name_is_normalized():
     """A corrupt/foreign merge_candidates model_name (non-string) must not crash the dict-key bucketing — it's normalized to the 'device' default and still collides correctly."""
     bad = {"merge_candidates": {"host_named": {"pk": 88, "name": "shared", "model_name": ["not-a-str"]}}}

@@ -1,4 +1,6 @@
 ###################################################################
+
+import os
 #  This file serves as a base configuration for testing purposes  #
 #  only. It is not intended for production use.                   #
 ###################################################################
@@ -31,17 +33,17 @@ PLUGINS_CONFIG = {
 
 REDIS = {
     "tasks": {
-        "HOST": "localhost",
+        "HOST": os.environ.get("REDIS_HOST", "localhost"),
         "PORT": 6379,
         "PASSWORD": "",
-        "DATABASE": 0,
+        "DATABASE": int(os.environ.get("REDIS_DATABASE", "0")),
         "SSL": False,
     },
     "caching": {
-        "HOST": "localhost",
+        "HOST": os.environ.get("REDIS_CACHE_HOST", "localhost"),
         "PORT": 6379,
         "PASSWORD": "",
-        "DATABASE": 1,
+        "DATABASE": int(os.environ.get("REDIS_CACHE_DATABASE", "1")),
         "SSL": False,
     },
 }

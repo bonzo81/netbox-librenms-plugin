@@ -1,6 +1,5 @@
 """HTMX endpoints and POST handlers for importing LibreNMS devices."""
 
-import hashlib
 import json
 import logging
 import re
@@ -45,15 +44,19 @@ from netbox_librenms_plugin.import_validation_helpers import (
     fetch_model_by_id,
     merge_candidate_pks,
 )
+from netbox_librenms_plugin.ip_addressing import parse_host_address
 from netbox_librenms_plugin.tables.device_status import DeviceImportTable
 from netbox_librenms_plugin.utils import (
+    acquire_advisory_transaction_lock,
     coerce_librenms_id,
+    coerce_model_pk,
     get_librenms_sync_device,
     is_legacy_librenms_id,
     normalize_serial,
     resolve_naming_preferences,
     resolve_server_mapping_display_id,
     same_host,
+    save_interface_name_preference,
     save_user_pref,
     set_device_ip_fk,
     set_librenms_device_id,
@@ -90,14 +93,17 @@ def _attach_messages_oob(response, request):
         return response
     # Skip the OOB swap when nothing is queued: an empty #django-messages container
     # would replace (and wipe) toasts already visible on the page from an earlier action.
+    # Iterating the storage marks it consumed; restore used=False after peeking so the
+    # toast render below (or the page's own renderer) still emits the messages.
     storage = messages.get_messages(request)
-    if not list(storage):
-        return response
+    pending = list(storage)
     # ``get_messages`` returns a bare ``list`` (no ``.used``) when no message-storage
     # middleware ran (e.g. RequestFactory requests); a real request always has a storage
     # backend. Guard so re-marking the storage unconsumed can't AttributeError.
     if hasattr(storage, "used"):
         storage.used = False
+    if not pending:
+        return response
     try:
         rendered = render_to_string("inc/messages.html", request=request)
     except Exception:  # pragma: no cover - defensive: don't break HTMX response on render error
@@ -245,6 +251,37 @@ def _mapping_change_is_allowed(view, model, pk) -> bool:
     return view.restricted_queryset(model, "change").filter(pk=pk).exists()
 
 
+def _lock_mapping_in_scope(view, model, lookup, duplicate_message):
+    """
+    Read the candidate mapping pks unlocked, then lock the first one inside the change scope.
+
+    Shared by the device-type and platform mapping views so the permission guarantee cannot drift
+    between two copies. Scope BEFORE locking: locking first lets a caller pin a row it cannot see
+    and stall concurrent work on it. The duplicate check still has to see every row, so it reads
+    unlocked and by pk only, materialised in one query (count() would drop the FOR UPDATE clause).
+
+    Args:
+        view: The calling view, used for ``restricted_queryset``.
+        model: The mapping model to lock.
+        lookup: Filter kwargs identifying the mapping's natural key.
+        duplicate_message: Error text shown when more than one row matches.
+
+    Returns:
+        tuple: ``(locked, None)`` on success, where *locked* is None when no row exists, or
+        ``(None, error_response)`` when the caller must stop.
+    """
+    present_pks = list(model.objects.filter(**lookup).values_list("pk", flat=True)[:2])
+    if len(present_pks) > 1:
+        return None, _htmx_error_response(duplicate_message)
+    if not present_pks:
+        return None, None
+    locked = view.restricted_queryset(model, "change").select_for_update(of=("self",)).filter(pk=present_pks[0]).first()
+    # A row appeared (or left this caller's scope) after the upfront check.
+    if locked is None:
+        return None, _htmx_error_response("Existing mapping is no longer available.")
+    return locked, None
+
+
 def _oob_ip_is_reassignable(candidate, interface) -> bool:
     """
     Return whether *candidate* may be re-homed to *interface* without taking another device's IP.
@@ -292,20 +329,7 @@ def _acquire_serial_assignment_lock(serial: str) -> None:
     Raises:
         RuntimeError: When called in autocommit — the lock would release immediately.
     """
-    from django.db import connection
-
-    if not connection.in_atomic_block:
-        raise RuntimeError("_acquire_serial_assignment_lock() requires an open transaction")
-    lock_key = int.from_bytes(
-        hashlib.blake2b(
-            f"netbox-librenms-plugin:device-serial:{serial}".encode(),
-            digest_size=8,
-        ).digest(),
-        byteorder="big",
-        signed=True,
-    )
-    with connection.cursor() as cursor:
-        cursor.execute("SELECT pg_advisory_xact_lock(%s)", [lock_key])
+    acquire_advisory_transaction_lock(f"netbox-librenms-plugin:device-serial:{serial}")
 
 
 def _apply_conflict_checked_serial(device, incoming_serial: str) -> HttpResponse | None:
@@ -1019,7 +1043,6 @@ class BulkImportDevicesView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
         sync_options = {
             "sync_interfaces": request.POST.get("sync_interfaces") == "on",
             "sync_cables": request.POST.get("sync_cables") == "on",
-            "sync_ips": request.POST.get("sync_ips") == "on",
             "vc_detection_enabled": vc_detection_enabled,
             "use_sysname": use_sysname,
             "strip_domain": strip_domain,
@@ -2170,29 +2193,14 @@ class AddDeviceTypeMappingView(
                 # created duplicate rather than mutating an arbitrary row. Key on the
                 # NORMALISED hardware string (mapping_hardware) so the lock matches
                 # the existing_mapping lookup and create() below.
-                # Scope BEFORE locking: locking first lets a caller hold a row it cannot even see
-                # and stall concurrent work on it. The duplicate check still has to see every
-                # row, so it reads unlocked and by pk only.
-                present_pks = list(
-                    DeviceTypeMapping.objects.filter(librenms_hardware__iexact=mapping_hardware).values_list(
-                        "pk", flat=True
-                    )[:2]
+                locked, lock_error = _lock_mapping_in_scope(
+                    self,
+                    DeviceTypeMapping,
+                    {"librenms_hardware__iexact": mapping_hardware},
+                    "Multiple mappings exist for this hardware string. Remove duplicates before updating.",
                 )
-                if len(present_pks) > 1:
-                    return _htmx_error_response(
-                        "Multiple mappings exist for this hardware string. Remove duplicates before updating."
-                    )
-                locked = None
-                if present_pks:
-                    locked = (
-                        self.restricted_queryset(DeviceTypeMapping, "change")
-                        .select_for_update(of=("self",))
-                        .filter(pk=present_pks[0])
-                        .first()
-                    )
-                    # A row appeared (or left this caller's scope) after the upfront check.
-                    if locked is None:
-                        return _htmx_error_response("Existing mapping is no longer available.")
+                if lock_error is not None:
+                    return lock_error
                 if locked and not existing_mapping:
                     # A concurrent request created the mapping after our upfront read.
                     # Only escalate to change permission if we would actually mutate the row;
@@ -2896,7 +2904,7 @@ class AddAsOOBView(
                 # clobber an operator-set address — but don't let the user believe the controller's
                 # IP was applied either. Surface that the existing OOB IP was kept when it differs
                 # from the LibreNMS controller's IP (an equal one needs no message; it's correct).
-                existing_oob_host = str(sync_device.oob_ip).split("/")[0]
+                existing_oob_host = str(parse_host_address(str(sync_device.oob_ip)))
                 # Compare version-aware (same_host parses both sides) so an equal address in a
                 # different textual form — expanded vs compressed IPv6, or hex case — isn't reported
                 # as "a different OOB IP". A raw != would warn on 2001:db8::1 vs 2001:0db8:...:0001.
@@ -2979,14 +2987,12 @@ class AddAsOOBView(
             str | None: A warning naming the missing permission(s) or invalid IP, or
                 None when no extra permission is needed.
         """
-        from ipaddress import ip_address as _ip
-
         from dcim.models import Interface
         from ipam.models import IPAddress
         from utilities.permissions import get_permission_for_model
 
         try:
-            _ip(ip_str)
+            canonical_host = str(parse_host_address(ip_str))
         except ValueError:
             return f"OOB linked, but OOB IP {ip_str} not set — the IP address is invalid."
 
@@ -3023,7 +3029,7 @@ class AddAsOOBView(
         # Global table only (vrf__isnull) — the write path never touches VRF rows: it
         # creates a global /32, so a same-host address in a tenant VRF must demand 'add',
         # not 'change'.
-        matches = list(IPAddress.objects.filter(address__net_host=ip_str, vrf__isnull=True)[:2])
+        matches = list(IPAddress.objects.filter(address__net_host=canonical_host, vrf__isnull=True)[:2])
         ambiguous = len(matches) > 1
         existing = matches[0] if matches else None
         if existing is None:
@@ -3183,13 +3189,11 @@ class AddAsOOBView(
                 ``"invalid"``, ``"conflict"`` (already on another device / create
                 race), or ``"permission"``.
         """
-        from ipaddress import ip_address as _ip
-
         from ipam.models import IPAddress
         from utilities.permissions import get_permission_for_model
 
         try:
-            parsed = _ip(ip_str)
+            parsed = parse_host_address(ip_str)
         except ValueError:
             return None, "invalid"
 
@@ -3205,7 +3209,7 @@ class AddAsOOBView(
         # Scope BEFORE locking: locking first lets a caller hold a row it cannot even see and
         # stall concurrent work on it. The ambiguity check still has to see every row, so it
         # reads unlocked and by pk only, then the lock is taken inside the caller's change scope.
-        host_rows = list(IPAddress.objects.filter(address__net_host=ip_str, vrf__isnull=True)[:2])
+        host_rows = list(IPAddress.objects.filter(address__net_host=str(parsed), vrf__isnull=True)[:2])
         if len(host_rows) > 1:
             return None, "conflict"
         existing = None
@@ -3255,7 +3259,7 @@ class AddAsOOBView(
         try:
             with transaction.atomic():
                 return (
-                    IPAddress.objects.create(address=f"{ip_str}{mask}", assigned_object=interface, status="active"),
+                    IPAddress.objects.create(address=f"{parsed}{mask}", assigned_object=interface, status="active"),
                     None,
                 )
         except IntegrityError:
@@ -3813,6 +3817,15 @@ class SaveUserPrefView(LibreNMSPermissionMixin, View):
         if key not in self.ALLOWED_PREFS:
             return JsonResponse({"error": "Invalid preference key"}, status=400)
 
+        if key == "interface_name_field":
+            raw_platform_id = data.get("platform_id")
+            platform_id = coerce_model_pk(raw_platform_id)
+            if raw_platform_id is not None and platform_id is None:
+                return JsonResponse({"error": "Invalid platform ID"}, status=400)
+            if not save_interface_name_preference(request, value, platform_id):
+                return JsonResponse({"error": "Invalid interface name field"}, status=400)
+            return JsonResponse({"status": "ok"})
+
         save_user_pref(request, self.ALLOWED_PREFS[key], value)
         return JsonResponse({"status": "ok"})
 
@@ -3884,27 +3897,14 @@ class AddPlatformMappingView(
                 # lock absent rows, so the create branch handles IntegrityError.
                 # Materialise the locked rows in one query — count() would drop
                 # the FOR UPDATE clause, leaving the rows unlocked.
-                # Scope BEFORE locking: locking first lets a caller hold a row it cannot even see
-                # and stall concurrent work on it. The duplicate check still has to see every
-                # row, so it reads unlocked and by pk only.
-                present_pks = list(
-                    PlatformMapping.objects.filter(librenms_os__iexact=librenms_os).values_list("pk", flat=True)[:2]
+                locked, lock_error = _lock_mapping_in_scope(
+                    self,
+                    PlatformMapping,
+                    {"librenms_os__iexact": librenms_os},
+                    "Multiple mappings exist for this OS string. Remove duplicates before updating.",
                 )
-                if len(present_pks) > 1:
-                    return _htmx_error_response(
-                        "Multiple mappings exist for this OS string. Remove duplicates before updating."
-                    )
-                locked = None
-                if present_pks:
-                    locked = (
-                        self.restricted_queryset(PlatformMapping, "change")
-                        .select_for_update(of=("self",))
-                        .filter(pk=present_pks[0])
-                        .first()
-                    )
-                    # A row appeared (or left this caller's scope) after the upfront check.
-                    if locked is None:
-                        return _htmx_error_response("Existing mapping is no longer available.")
+                if lock_error is not None:
+                    return lock_error
                 if locked and not existing_mapping:
                     # Concurrent request created the mapping after our upfront read.
                     # Only escalate to change permission if we would actually mutate.

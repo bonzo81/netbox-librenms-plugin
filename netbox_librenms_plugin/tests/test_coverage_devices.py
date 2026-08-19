@@ -50,6 +50,7 @@ def _configured_default():
 def _real_port(**overrides):
     """A LibreNMS-shaped port dict with every field LibreNMSInterfaceTable.format_interface_data reads."""
     port = {
+        "port_id": 4001,
         "ifName": "eth0",
         "ifDescr": "eth0",
         "ifAlias": "",
@@ -315,6 +316,33 @@ class TestSingleInterfaceVerifyView:
         view.require_object_permissions_json = MagicMock(return_value=None)
         return view
 
+    def test_denied_without_view_device_permission(self):
+        """The verify endpoint must reject a user lacking dcim.view_device (no probing arbitrary device IDs for cached interface data)."""
+        import json
+
+        from django.http import JsonResponse
+
+        view = self._make_view()
+        # Simulate the real object-permission gate denying access.
+        view.require_object_permissions_json = MagicMock(
+            return_value=JsonResponse({"error": "Missing permissions: dcim.view_device"}, status=403)
+        )
+        request = MagicMock()
+        # port_id is supplied so the 404 can only come from the malformed-payload guard, not
+        # from the missing-port_id guard that also returns 404.
+        request.body = json.dumps({"device_id": 1, "interface_name": "eth0", "port_id": 10}).encode()
+
+        mock_device = MagicMock()
+        mock_device.virtual_chassis = None
+        with patch.object(view, "restrict_object_or_404", return_value=mock_device) as mock_get_obj:
+            with patch("netbox_librenms_plugin.views.object_sync.devices.cache") as mock_cache:
+                response = view.post(request)
+
+        assert response.status_code == 403
+        # Must deny before resolving the device (no ID probing) and before the cache.
+        mock_get_obj.assert_not_called()
+        mock_cache.get.assert_not_called()
+
     def test_returns_400_when_no_device_id(self):
         """Returns 400 JSON error when no device_id in request body."""
         import json
@@ -328,6 +356,7 @@ class TestSingleInterfaceVerifyView:
         response = view.post(request)
         assert isinstance(response, JsonResponse)
         assert response.status_code == 400
+        view.require_object_permissions_json.assert_called_once_with("POST")
 
     def test_checks_permission_before_resolving_device(self):
         """The object-view gate must run BEFORE restrict_object_or_404 so an unauthorized caller can't probe arbitrary device IDs (existence via 404). Exercises the REAL require_object_permissions_json (only request.user.has_perm is mocked) — mocking the gate itself would mask a missing NetBoxObjectPermissionMixin base (AttributeError/500 in production)."""
@@ -366,6 +395,33 @@ class TestSingleInterfaceVerifyView:
         real_cache.delete(view.get_cache_key(device, "ports", "default"))
         with _configured_default():
             response = view.post(request)
+
+        assert isinstance(response, JsonResponse)
+        assert response.status_code == 404
+
+    def test_returns_404_when_cached_data_malformed(self):
+        """A truthy but malformed cache value (non-dict) is treated as a miss (404), not a 500 — reading .get() on it would raise AttributeError."""
+        import json
+
+        from django.http import JsonResponse
+
+        view = self._make_view()
+        request = MagicMock()
+        request.body = json.dumps({"device_id": 1, "interface_name": "eth0"}).encode()
+
+        mock_device = MagicMock()
+        mock_device.virtual_chassis = None
+
+        with patch.object(view, "restrict_object_or_404", return_value=mock_device):
+            with patch(
+                "netbox_librenms_plugin.views.object_sync.devices.get_librenms_sync_device", return_value=mock_device
+            ):
+                with patch("netbox_librenms_plugin.views.object_sync.devices.cache") as mock_cache:
+                    # A truthy non-dict snapshot: the old `if cached_data:` guard would enter and
+                    # raise on `cached_data.get("ports", [])`.
+                    mock_cache.get.return_value = ["not", "a", "dict"]
+                    with patch.object(view, "get_cache_key", return_value="test_key"):
+                        response = view.post(request)
 
         assert isinstance(response, JsonResponse)
         assert response.status_code == 404
@@ -418,6 +474,7 @@ class TestSingleInterfaceVerifyView:
             {
                 "device_id": device.pk,
                 "interface_name": "eth0",
+                "port_id": 4001,
                 "interface_name_field": "ifName",
                 "server_key": "default",
             },
@@ -455,6 +512,7 @@ class TestSingleInterfaceVerifyView:
             {
                 "device_id": device.pk,
                 "interface_name": "eth0",
+                "port_id": 4001,
                 "interface_name_field": "ifName",
                 "server_key": "default",
             },
@@ -478,6 +536,211 @@ class TestSingleInterfaceVerifyView:
 
         assert isinstance(response, JsonResponse)
         assert response.status_code == 200  # cache hit under the device's OWN key proves it was used directly
+
+    @pytest.mark.django_db
+    def test_resolves_netbox_interface_by_stable_port_id_not_name(self):
+        """The NetBox interface is matched by its stored LibreNMS port_id, not the display name — a naming-mode mismatch (synced under ifName, viewed under ifDescr) must not mis-resolve onto a same-display-named decoy. Driven through the real view/DB/render so the assertion is on rendered behaviour, not mock call patterns."""
+        import json
+
+        from django.core.cache import cache
+        from django.test import RequestFactory
+
+        from netbox_librenms_plugin.tests.conftest import make_device, make_interface
+        from netbox_librenms_plugin.utils import set_librenms_device_id
+
+        device = make_device("verify-portid-host")
+        # Decoy: its NetBox name equals the ifDescr display the client posts, but it carries the
+        # WRONG LibreNMS port_id and is DISABLED — a name-based lookup would wrongly land here.
+        decoy = make_interface(device, "GigabitEthernet0/1")
+        decoy.enabled = False
+        set_librenms_device_id(decoy, 7, "default")  # mutates custom_field_data in memory only
+        decoy.save()
+        # Correct: stored LibreNMS port_id 42 identifies it, though its NetBox name ("Gi0/1")
+        # differs from the current ifDescr display. ENABLED, matching the port's up state.
+        correct = make_interface(device, "Gi0/1")
+        correct.enabled = True
+        set_librenms_device_id(correct, 42, "default")
+        correct.save()
+
+        port_data = {
+            "ifDescr": "GigabitEthernet0/1",
+            "ifName": "Gi0/1",
+            "port_id": 42,
+            "ifSpeed": 1000,
+            "ifType": "ethernetCsmacd",
+            "ifAlias": "",
+            "ifPhysAddress": "",
+            "ifMtu": 1500,
+            "ifAdminStatus": "up",
+            "_source": "host",
+        }
+
+        view = self._make_view()
+        # cache.set() writes the real cache backend (NOT rolled back with the test DB); clean
+        # the key up even on assertion failure so a reused device PK cannot read stale ports.
+        cache_key = view.get_cache_key(device, "ports", "default")
+        cache.set(cache_key, {"ports": [port_data]})
+        try:
+            request = RequestFactory().post(
+                "/plugins/librenms_plugin/verify-interface/",
+                data=json.dumps(
+                    {
+                        "device_id": device.pk,
+                        "interface_name": "GigabitEthernet0/1",
+                        "interface_name_field": "ifDescr",
+                        "port_id": 42,
+                        "server_key": "default",
+                    }
+                ),
+                content_type="application/json",
+            )
+            request.user = _make_verify_superuser("verify-portid")
+            response = view.post(request)
+
+            assert response.status_code == 200
+            formatted = json.loads(response.content)["formatted_row"]
+            # The 'enabled' badge compares the RESOLVED interface's enabled flag against the port's
+            # up state. Resolving by stable port_id picks the enabled id-42 interface → green match;
+            # a display-name fallback would pick the disabled decoy → an orange mismatch. So a green
+            # badge proves port_id precedence over the name lookup — asserted on real rendered output.
+            assert "text-success" in formatted["enabled"]
+            assert "text-warning" not in formatted["enabled"]
+        finally:
+            cache.delete(cache_key)
+
+    @pytest.mark.django_db
+    def test_verify_repaint_payload_includes_member_specific_librenms_id_cell(self):
+        """The verify response's formatted_row must carry a librenms_id cell so a VC member switch can repaint the (member-specific) badge — its colour compares this port_id against the resolved member's stored librenms_id, so omitting it strands the previous member's match/mismatch state on screen."""
+        import json
+
+        from django.core.cache import cache
+        from django.test import RequestFactory
+
+        from netbox_librenms_plugin.tests.conftest import make_device, make_interface
+        from netbox_librenms_plugin.utils import set_librenms_device_id
+
+        device = make_device("verify-badge-host")
+        iface = make_interface(device, "Gi0/1")
+        set_librenms_device_id(iface, 42, "default")  # mutates custom_field_data in memory only
+        iface.save()
+
+        port_data = {
+            "ifDescr": "Gi0/1",
+            "ifName": "Gi0/1",
+            "port_id": 42,
+            "ifSpeed": 1000,
+            "ifType": "ethernetCsmacd",
+            "ifAlias": "",
+            "ifPhysAddress": "",
+            "ifMtu": 1500,
+            "ifAdminStatus": "up",
+            "_source": "host",
+        }
+
+        view = self._make_view()
+        # cache.set() writes the real cache backend (NOT rolled back with the test DB); clean
+        # the key up even on assertion failure so a reused device PK cannot read stale ports.
+        cache_key = view.get_cache_key(device, "ports", "default")
+        cache.set(cache_key, {"ports": [port_data]})
+        try:
+            request = RequestFactory().post(
+                "/plugins/librenms_plugin/verify-interface/",
+                data=json.dumps(
+                    {
+                        "device_id": device.pk,
+                        "interface_name": "Gi0/1",
+                        "interface_name_field": "ifName",
+                        "port_id": 42,
+                        "server_key": "default",
+                    }
+                ),
+                content_type="application/json",
+            )
+            request.user = _make_verify_superuser("verify-badge")
+            response = view.post(request)
+
+            assert response.status_code == 200
+            formatted = json.loads(response.content)["formatted_row"]
+            # The cell must be present (it was previously dropped from the repaint payload) and
+            # reflect THIS member: port_id 42 matches the resolved interface's stored librenms_id 42,
+            # so the badge is the green "match".
+            assert "librenms_id" in formatted, "verify repaint payload dropped the librenms_id cell"
+            assert "text-success" in formatted["librenms_id"]
+        finally:
+            cache.delete(cache_key)
+
+    @pytest.mark.django_db
+    def test_verify_repaint_resolves_the_selected_vc_members_librenms_id(self):
+        """Through a REAL virtual chassis: the repaint badge must reflect the SELECTED member's interface (owner-pinned resolution), while the cache key normalizes to the VC sync device. A decoy same-named interface on the sync master carries a DIFFERENT stored librenms_id, so any regression that resolves against the sync device instead of the member renders the orange mismatch, not the green match asserted here."""
+        import json
+
+        from django.core.cache import cache
+        from django.test import RequestFactory
+
+        from netbox_librenms_plugin.tests.conftest import make_device, make_interface, make_virtual_chassis
+        from netbox_librenms_plugin.utils import set_librenms_device_id
+
+        master = make_device("verify-vc-master")
+        member = make_device("verify-vc-member")
+        make_virtual_chassis("verify-vc", master, member)
+        # Device-level librenms_id makes the MASTER the VC sync device (priority 1 in
+        # get_librenms_sync_device), so the ports cache lives under the master's key.
+        set_librenms_device_id(master, 4242, "default")  # in-memory CF mutation...
+        master.save()  # ...must be persisted for the sync-device lookup to see it
+
+        # Decoy on the sync master: same display name, DIFFERENT stored port id. Resolving
+        # against the master would match this row and paint the mismatch badge.
+        decoy = make_interface(master, "Gi0/1")
+        set_librenms_device_id(decoy, 99, "default")
+        decoy.save()
+
+        iface = make_interface(member, "Gi0/1")
+        set_librenms_device_id(iface, 42, "default")
+        iface.save()
+
+        port_data = {
+            "ifDescr": "Gi0/1",
+            "ifName": "Gi0/1",
+            "port_id": 42,
+            "ifSpeed": 1000,
+            "ifType": "ethernetCsmacd",
+            "ifAlias": "",
+            "ifPhysAddress": "",
+            "ifMtu": 1500,
+            "ifAdminStatus": "up",
+            "_source": "host",
+        }
+
+        view = self._make_view()
+        # Cache under the SYNC device (master) — the view normalizes the selected member to it.
+        cache_key = view.get_cache_key(master, "ports", "default")
+        cache.set(cache_key, {"ports": [port_data]})
+        try:
+            request = RequestFactory().post(
+                "/plugins/librenms_plugin/verify-interface/",
+                data=json.dumps(
+                    {
+                        "device_id": member.pk,
+                        "interface_name": "Gi0/1",
+                        "interface_name_field": "ifName",
+                        "port_id": 42,
+                        "server_key": "default",
+                    }
+                ),
+                content_type="application/json",
+            )
+            request.user = _make_verify_superuser("verify-vc")
+            response = view.post(request)
+
+            assert response.status_code == 200
+            formatted = json.loads(response.content)["formatted_row"]
+            assert "librenms_id" in formatted, "verify repaint payload dropped the librenms_id cell"
+            # Green = matched the MEMBER's stored id (42). The master's decoy stores 99, so a
+            # sync-device-resolved badge would be the orange mismatch instead.
+            assert "text-success" in formatted["librenms_id"]
+            assert "text-warning" not in formatted["librenms_id"]
+        finally:
+            cache.delete(cache_key)
 
 
 class TestSingleModuleVerifyView:
@@ -867,6 +1130,26 @@ class TestSingleVlanGroupVerifyView:
         assert response.status_code == 400
 
     @pytest.mark.django_db
+    def test_returns_400_when_vlan_group_id_is_not_an_integer(self):
+        """Reject a malformed group ID before it reaches the restricted ORM lookup."""
+        import json
+
+        from netbox_librenms_plugin.views.object_sync.devices import SingleVlanGroupVerifyView
+
+        device = _make_real_device("vg-invalid-group")
+        request = _real_verify_request(
+            {"device_id": device.pk, "vid": "100", "vlan_group_id": "not-an-id"},
+            "vg-invalid-group",
+        )
+        view = SingleVlanGroupVerifyView()
+        view.setup(request)
+
+        response = view.post(request)
+
+        assert response.status_code == 400
+        assert json.loads(response.content)["message"] == "Invalid VLAN group ID"
+
+    @pytest.mark.django_db
     def test_returns_success_with_vlan_group(self):
         """A VID present in the selected group is reported not-missing — real Device/Interface/VLAN/VLANGroup, no mocks."""
         import json
@@ -1028,6 +1311,25 @@ class TestVerifyVlanSyncGroupView:
         response = view.post(request)
         assert isinstance(response, JsonResponse)
         assert response.status_code == 400
+
+    @pytest.mark.django_db
+    def test_returns_400_when_vlan_group_id_is_not_an_integer(self):
+        """Reject a malformed group ID before it reaches the restricted ORM lookup."""
+        import json
+
+        from netbox_librenms_plugin.views.object_sync.devices import VerifyVlanSyncGroupView
+
+        request = _real_verify_request(
+            {"vid": "100", "vlan_group_id": "not-an-id"},
+            "sync-invalid-group",
+        )
+        view = VerifyVlanSyncGroupView()
+        view.setup(request)
+
+        response = view.post(request)
+
+        assert response.status_code == 400
+        assert json.loads(response.content)["message"] == "Invalid VLAN group ID"
 
     @pytest.mark.django_db
     def test_returns_success_with_vlan_group(self):

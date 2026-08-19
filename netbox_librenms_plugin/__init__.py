@@ -1,6 +1,8 @@
 from django.core.exceptions import ImproperlyConfigured
 from netbox.plugins import PluginConfig
 
+from netbox_librenms_plugin.constants import DEFAULT_INTERFACE_NAME_FIELD
+
 __author__ = "Andy Norwood"
 __version__ = "0.4.7"
 
@@ -17,7 +19,7 @@ class LibreNMSSyncConfig(PluginConfig):
     default_settings = {
         "enable_caching": True,
         "verify_ssl": True,
-        "interface_name_field": "ifName",
+        "interface_name_field": DEFAULT_INTERFACE_NAME_FIELD,
     }
 
     def ready(self):
@@ -118,6 +120,10 @@ def _ensure_librenms_id_custom_field(sender, **kwargs):
         from virtualization.models import VirtualMachine, VMInterface
 
         required_models = [Device, VirtualMachine, Interface, VMInterface]
+        # post_migrate can run in a process that previously used another isolated test
+        # database. Do not reuse a ContentType object cached for that database when rebuilding
+        # this field's object-type relation.
+        ContentType.objects.clear_cache()
         current_types = set(cf.object_types.values_list("pk", flat=True))
 
         for model in required_models:

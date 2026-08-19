@@ -1354,6 +1354,39 @@ class TestCreateAndAssignPlatformView:
         assert not message_texts(req, "error")
         assert message_texts(req, "success")
 
+    def test_integrity_error_reuse_succeeds_for_an_add_only_user(self):
+        """The race winner must be reused by a user who may create but not view platforms.
+
+        This branch runs only when no platform existed at preflight, so the gate asked for
+        ("add", Platform) and never ("view", Platform). Re-reading the winner through a
+        view-restricted queryset returns none() for such a user and aborts an assign they were
+        authorized to perform.
+        """
+        from dcim.models import Device, Platform
+
+        device = make_device("plat-race-add-only")
+        user = make_user_with_perms("plat-race-add-only", [("change", Device), ("add", Platform)])
+        request = _make_request(
+            {"platform_name": "AddOnlyRacePlatform", "manufacturer": "", "create_mapping": ""},
+            user=user,
+        )
+        view = self._view(request)
+
+        def _rival_commits_first():
+            Platform.objects.create(name="AddOnlyRacePlatform", slug="addonlyraceplatform")
+
+        with (
+            _before_restricted_read(view, _rival_commits_first, on_call=1),
+            patch.object(Platform, "full_clean", _skip_once(Platform.full_clean)),
+        ):
+            _post(view, request, pk=device.pk)
+
+        winner = Platform.objects.get(name__iexact="AddOnlyRacePlatform")
+        assert Platform.objects.filter(name__iexact="AddOnlyRacePlatform").count() == 1
+        device.refresh_from_db()
+        assert device.platform_id == winner.pk
+        assert message_texts(request, "error") == []
+
     def _success_setup(self, platform_name="ios", librenms_os="ios", create_mapping="1", user=None):
         """Return ``(view, request, device)`` for a run that reaches the mapping block."""
         from django.utils.text import slugify

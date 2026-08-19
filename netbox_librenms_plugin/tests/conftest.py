@@ -1,35 +1,165 @@
 """Shared pytest fixtures for NetBox LibreNMS Plugin tests."""
 
+import os
+from copy import deepcopy
 from unittest.mock import MagicMock, patch
+from uuid import uuid4
 
 import pytest
 
+from netbox_librenms_plugin.tests.parallel import isolated_test_database_name
+
+
+_TEST_DATABASE_BASE_NAME = os.environ["TEST_DB_NAME"]
+
+
+def clear_test_cache(cache_backend):
+    """Clear only the active test namespace when the backend supports patterns."""
+    try:
+        cache_backend.delete_pattern("*")
+    except (AttributeError, NotImplementedError):
+        cache_backend.clear()
+
+
+def _isolated_cache_config(caches_config):
+    """Return the worker cache config with a unique per-test namespace."""
+    isolated = deepcopy(caches_config)
+    default = isolated.setdefault("default", {})
+    unique_prefix = f"nblp-test-{uuid4().hex}"
+    configured_prefix = default.get("KEY_PREFIX")
+    default["KEY_PREFIX"] = f"{configured_prefix}:{unique_prefix}" if configured_prefix else unique_prefix
+    return isolated
+
 
 @pytest.fixture(autouse=True)
-def _clear_device_info_cache():
+def _isolate_test_cache(settings):
+    """Run every test in a unique namespace inside its worker cache database.
+
+    The isolated settings assign each pytest worker its own Redis database. A unique key
+    prefix then isolates individual tests without changing that worker assignment or clearing
+    another test process's cache.
+    """
+    settings.CACHES = _isolated_cache_config(settings.CACHES)
+    yield
+
+
+@pytest.fixture(scope="session")
+def django_db_modify_db_settings(django_db_modify_db_settings):
+    """Give each pytest worker a private PostgreSQL database."""
+    from django.conf import settings
+
+    test_config = dict(settings.DATABASES["default"].get("TEST") or {})
+    test_config["NAME"] = isolated_test_database_name(
+        _TEST_DATABASE_BASE_NAME,
+        os.environ.get("PYTEST_XDIST_WORKER"),
+    )
+    settings.DATABASES["default"]["TEST"] = test_config
+
+
+@pytest.fixture(autouse=True)
+def _clear_device_info_cache(_isolate_test_cache):
     """Flush the plugin's caches between tests.
 
     NetBox uses Redis, which (unlike the test DB) is NOT rolled back between tests, while
     primary keys ARE reused after each rollback. Every plugin cache key is built from a model
     name and a pk (``CacheMixin.get_cache_key`` → ``librenms_links_device_7_default``), so a
     value cached by one test is read by the next test that draws the same pk, with entirely
-    different data behind it. ``librenms_*`` covers the per-object render caches (ports, links,
-    vlans, ip_addresses, inventory, last-fetched stamps, VLAN group overrides), ``get_device_info()``'s
-    short-lived lookup cache and the cached import search results. ``import_device_data_*`` sits
-    outside that prefix: the bulk-import collision gate reads it via ``cache.get_many``
-    (actions.py) BEFORE falling back to the stubbed ``get_device_info``, so a leaked entry for a
-    selected id silently bypasses the stub and defeats the collision check.
+    different data behind it.
+
+    ``_isolate_test_cache`` already gives this test its own key prefix, so clearing the whole
+    namespace is exact: it cannot reach another test or the dev server. That covers the
+    ``librenms_*`` render caches, ``get_device_info()``'s short-lived lookup cache and the
+    ``import_device_data_*`` keys the bulk-import collision gate reads through
+    ``cache.get_many`` before it falls back to the stubbed ``get_device_info``.
     """
     from django.core.cache import cache
 
-    for pattern in ("librenms_*", "import_device_data_*"):
-        try:
-            cache.delete_pattern(pattern)
-        except (AttributeError, NotImplementedError):
-            # No django-redis delete_pattern (e.g. LocMemCache): a single clear() covers all.
-            cache.clear()
-            break
+    clear_test_cache(cache)
     yield
+    # Each test gets a fresh KEY_PREFIX, so without this the namespace it filled stays in Redis
+    # until its TTL expires and a long parallel run accumulates dead keys in every worker.
+    clear_test_cache(cache)
+
+
+def _seeded_model_rows():
+    """Yield ``(model, lookup_field, value_field, rows)`` for every data-migration seed."""
+    import importlib
+
+    from netbox_librenms_plugin.models import PortStackLagPattern
+
+    # The migration module name starts with a digit, so import syntax cannot reach it.
+    lag = importlib.import_module("netbox_librenms_plugin.migrations.0013_portstacklagpattern")
+    yield PortStackLagPattern, "librenms_os", "lag_name_pattern", lag.INITIAL_LAG_PATTERNS
+
+
+def seed_migration_rows():
+    """Recreate every row the plugin's data migrations seed."""
+    for model, lookup_field, value_field, rows in _seeded_model_rows():
+        for lookup, value in rows:
+            model.objects.get_or_create(**{lookup_field: lookup}, defaults={value_field: value})
+
+
+@pytest.fixture(autouse=True)
+def _restore_migration_seeded_rows(request):
+    """Re-seed the rows a transactional test's flush removes.
+
+    ``django_db(transaction=True)`` truncates every table, including rows a data migration
+    created, so LAG detection loses its per-OS name patterns and every later test in the run
+    sees an empty recognition table.
+
+    The flush runs in the ``transactional_db`` teardown, which finalizes AFTER this fixture, so
+    the restore has to happen on the way in. A non-transactional test runs inside a transaction
+    that is rolled back, so seeding here is visible to it and leaves nothing behind.
+    """
+    # Gate on the marker, not on request.fixturenames: pytest-django pulls "db" in dynamically
+    # from its own autouse fixture, so it is still absent from the closure at this point.
+    marker = request.node.get_closest_marker("django_db")
+    requested = {"db", "transactional_db"} & set(request.fixturenames)
+    if marker is None and not requested:
+        yield
+        return
+
+    db_fixture = "transactional_db" if (marker and marker.kwargs.get("transaction")) else "db"
+    # An autouse fixture is set up BEFORE the fixtures it does not request, so ask for the
+    # database one here: querying without it raises "Database access not allowed".
+    request.getfixturevalue(db_fixture)
+    for model, _lookup_field, _value_field, _rows in _seeded_model_rows():
+        if not model.objects.exists():
+            seed_migration_rows()
+            break
+    _restore_librenms_id_custom_field()
+    yield
+
+
+def _restore_librenms_id_custom_field():
+    """Recreate the librenms_id custom field a transactional flush removed.
+
+    The handler short-circuits on its own ``_executed_aliases`` guard, so after a flush it will
+    not recreate the field by itself. Only act when the field is actually gone, which keeps this
+    to one cheap existence check for the non-transactional majority.
+    """
+    from extras.models import CustomField
+
+    from netbox_librenms_plugin import _ensure_librenms_id_custom_field
+
+    if CustomField.objects.filter(name="librenms_id").exists():
+        return
+    _ensure_librenms_id_custom_field._executed_aliases.discard("default")
+    _ensure_librenms_id_custom_field(sender=None, using="default")
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _reseed_after_transactional_flush(django_db_setup, django_db_blocker):
+    """Leave the reused database seeded for the next run.
+
+    The last transactional test flushes on its way out, after every function-scoped fixture has
+    finalized. Without this the seeded rows stay missing in the reused database and the next run
+    starts with LAG pattern detection silently disabled.
+    """
+    yield
+
+    with django_db_blocker.unblock():
+        seed_migration_rows()
 
 
 # =============================================================================
@@ -108,6 +238,18 @@ def make_serial_device(name, *, csp_names=(), cp_names=()):
     csps = [ConsoleServerPort.objects.create(device=dev, name=n) for n in csp_names]
     cps = [ConsolePort.objects.create(device=dev, name=n) for n in cp_names]
     return dev, csps, cps
+
+
+def make_virtual_chassis(name, *devices):
+    """Create a VirtualChassis and enroll *devices* as members (vc_position by order)."""
+    from dcim.models import VirtualChassis
+
+    vc = VirtualChassis.objects.create(name=name)
+    for position, dev in enumerate(devices, start=1):
+        dev.virtual_chassis = vc
+        dev.vc_position = position
+        dev.save()
+    return vc
 
 
 def cable_together(term_a, term_b):
