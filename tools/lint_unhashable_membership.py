@@ -68,12 +68,50 @@ def _isinstance_narrows(node, target_fingerprint):
     return bool(names) and all(isinstance(n, ast.Name) and n.id in HASHABLE_NARROWING_TYPES for n in names)
 
 
-def _guards_in(node, target_fingerprint):
-    """Return whether *node* contains an ``isinstance`` narrowing of the target expression."""
-    for sub in ast.walk(node):
-        if _isinstance_narrows(sub, target_fingerprint):
-            return True
+def _guards_in(node, target_fingerprint, membership_node=None):
+    """
+    Return whether *node* narrows the target before the membership test can run.
+
+    Position and polarity both matter. ``x in S and isinstance(x, str)`` never protects the
+    membership test, and ``not isinstance(x, str) or x not in S`` protects it only because the
+    negated form short-circuits first. Walking for any nested ``isinstance`` would call both
+    of those guarded.
+
+    Args:
+        node: The enclosing guard expression or ``if`` test.
+        target_fingerprint: The left operand being tested for membership.
+        membership_node: The membership test, when it lives inside *node*.
+
+    Returns:
+        bool: Whether the target is provably hashable where the membership test runs.
+    """
+    if isinstance(node, ast.BoolOp):
+        for value in node.values:
+            # Only operands evaluated BEFORE the membership test can guard it.
+            if membership_node is not None and _contains(value, membership_node):
+                return False
+            if isinstance(node.op, ast.And) and _guards_in(value, target_fingerprint):
+                return True
+            if isinstance(node.op, ast.Or) and _negated_isinstance(value, target_fingerprint):
+                return True
+        return False
+    if _isinstance_narrows(node, target_fingerprint):
+        return True
     return False
+
+
+def _negated_isinstance(node, target_fingerprint):
+    """Return whether *node* is ``not isinstance(target, ...)``, the fail-closed ``or`` form."""
+    return (
+        isinstance(node, ast.UnaryOp)
+        and isinstance(node.op, ast.Not)
+        and _isinstance_narrows(node.operand, target_fingerprint)
+    )
+
+
+def _contains(node, needle):
+    """Return whether *needle* appears anywhere inside *node*."""
+    return any(sub is needle for sub in ast.walk(node))
 
 
 class _Scope:
@@ -201,7 +239,7 @@ class MembershipChecker(ast.NodeVisitor):
 
         fingerprint = _fingerprint(left)
         for guard in self._guard_stack:
-            if _guards_in(guard, fingerprint):
+            if _guards_in(guard, fingerprint, node):
                 return
 
         if self._suppressed(node.lineno):

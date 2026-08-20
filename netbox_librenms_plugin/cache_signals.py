@@ -67,29 +67,43 @@ class _Batch:
                 logger.exception("Could not clear sync caches for %s %s after a NetBox change", label, pk)
 
 
-def _batch(connection):
+def _record(connection, key):
     """
-    Return this transaction's batch, registering its commit hook the first time.
+    Record one owner against this transaction's batch, registering its hook once.
 
-    A savepoint rollback removes only the callbacks registered inside it and leaves the rest of
-    the queue in place, so an empty queue is not a reliable signal that a batch is finished. The
-    batch is therefore reused only while its own hook is still queued; once that hook has been
-    rolled back or has already fired, the next write starts a fresh batch.
+    Batches are kept per savepoint scope. A savepoint rollback removes only the callbacks
+    registered inside it, so an owner recorded in an inner block has to ride that block's own
+    hook: adding it to an enclosing batch would clear its caches even though its write never
+    committed. An empty commit queue is likewise no signal that a batch is finished, so a
+    batch is reused only while its own hook is still queued.
+
+    The owner is recorded before the hook is registered, because outside an atomic block
+    ``on_commit`` runs the hook inline: registering first would flush an empty batch and lose
+    the write entirely.
 
     Args:
         connection: The database connection the write went through.
-
-    Returns:
-        _Batch: The batch to record this write against.
+        key: The owner identity to clean up.
     """
-    batch = getattr(connection, "_librenms_invalidation_batch", None)
-    if batch is not None and any(func is batch.hook for _sids, func, *_rest in connection.run_on_commit):
-        return batch
+    batches = getattr(connection, "_librenms_invalidation_batches", None)
+    if batches is None:
+        batches = connection._librenms_invalidation_batches = {}
+
+    queued = {id(func) for _sids, func, *_rest in connection.run_on_commit}
+    # Drop batches whose hook has fired or been rolled back, so the map cannot grow unbounded.
+    for scope in [scope for scope, batch in batches.items() if id(batch.hook) not in queued]:
+        del batches[scope]
+
+    scope = tuple(connection.savepoint_ids)
+    batch = batches.get(scope)
+    if batch is not None:
+        batch.add(key)
+        return
 
     batch = _Batch()
-    connection._librenms_invalidation_batch = batch
+    batch.add(key)
+    batches[scope] = batch
     transaction.on_commit(batch.hook, using=connection.alias)
-    return batch
 
 
 def _owner_key_from_columns(label, values):
@@ -170,7 +184,7 @@ def _schedule(key, using):
     if key is None or key in active_sync_page_keys():
         # The acting page keeps its own transition, which preserves its source tab.
         return
-    _batch(transaction.get_connection(using)).add(key)
+    _record(transaction.get_connection(using), key)
 
 
 def _owner_columns_now(instance):

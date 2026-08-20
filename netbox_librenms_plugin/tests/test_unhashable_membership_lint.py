@@ -67,6 +67,26 @@ CLEAN = {
     ),
 }
 
+# Guards that do not actually protect the membership test: the check must still report these.
+LATE_OR_NEGATED_GUARDS = {
+    "isinstance after the membership test in an and-chain": (
+        'def f(cached):\n    v = cached.get("x")\n    return v in NAMES and isinstance(v, str)\n'
+    ),
+    "isinstance after the membership test in an or-chain": (
+        'def f(cached):\n    v = cached.get("x")\n    return v in NAMES or isinstance(v, str)\n'
+    ),
+    "negated isinstance guarding the wrong branch": (
+        "def f(cached):\n"
+        '    v = cached.get("x")\n'
+        "    if not isinstance(v, str):\n"
+        "        return v in NAMES\n"
+        "    return False\n"
+    ),
+    "isinstance narrowing a different name": (
+        'def f(cached, other):\n    v = cached.get("x")\n    return isinstance(other, str) and v in NAMES\n'
+    ),
+}
+
 
 @pytest.mark.parametrize("case", sorted(FLAGGED), ids=sorted(FLAGGED))
 def test_the_unsafe_shapes_are_flagged(tmp_path, case):
@@ -78,6 +98,13 @@ def test_the_unsafe_shapes_are_flagged(tmp_path, case):
 def test_the_safe_shapes_are_not_flagged(tmp_path, case):
     findings = _scan(tmp_path, CONSTANTS + CLEAN[case])
     assert not findings, f"{case!r} should not be reported, got {findings}"
+
+
+@pytest.mark.parametrize("case", sorted(LATE_OR_NEGATED_GUARDS), ids=sorted(LATE_OR_NEGATED_GUARDS))
+def test_a_guard_that_cannot_protect_the_test_is_still_flagged(tmp_path, case):
+    """An isinstance that runs after, or narrows something else, is not a guard."""
+    findings = _scan(tmp_path, CONSTANTS + LATE_OR_NEGATED_GUARDS[case])
+    assert findings, f"{case!r} should still be reported"
 
 
 def test_a_constant_imported_from_another_module_is_still_resolved(tmp_path):

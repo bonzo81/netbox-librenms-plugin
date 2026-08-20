@@ -796,6 +796,12 @@ class SyncPageClaimMixin:
     # The page object's model, by the object_type its URL carries.
     SYNC_PAGE_LABELS = {"device": "dcim.device", "virtualmachine": "virtualization.virtualmachine"}
 
+    # Set by a view whose bare ``pk`` names the sync page object. Left unset no claim is taken
+    # from the URL, because a pk is not self-describing: the move-to-winner endpoints carry an
+    # Interface or IPAddress pk, and guessing "device" there would claim an unrelated device
+    # that happens to share the number while leaving the real pages unprotected.
+    SYNC_PAGE_MODEL_LABEL = None
+
     def sync_page_claim(self, **kwargs):
         """
         Return the identity of the object this request's sync page is acting on.
@@ -821,8 +827,9 @@ class SyncPageClaimMixin:
             # so an unrecognised type claims nothing rather than guessing a device.
             label = self.SYNC_PAGE_LABELS.get(kwargs["object_type"])
             return sync_page_key(label, pk) if label else None
-        # The remaining sync routes take a device pk directly.
-        return sync_page_key("dcim.device", pk)
+        if self.SYNC_PAGE_MODEL_LABEL:
+            return sync_page_key(self.SYNC_PAGE_MODEL_LABEL, pk)
+        return None
 
     def dispatch(self, request, *args, **kwargs):
         """
@@ -846,6 +853,9 @@ class CacheMixin(SyncPageClaimMixin):
     """
     A mixin class that provides caching functionality.
     """
+
+    # Every routed cache view is a device sync page unless it declares its own model.
+    SYNC_PAGE_MODEL_LABEL = "dcim.device"
 
     def get_cache_key(self, obj, data_type="ports", server_key=None):
         """

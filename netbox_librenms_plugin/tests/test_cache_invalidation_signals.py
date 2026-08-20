@@ -363,6 +363,48 @@ class TestABatchSurvivesASavepointRollback:
 
 
 @pytest.mark.django_db
+class TestARolledBackInnerWriteIsNotFlushed:
+    """An uncommitted write must not clear anybody's cache."""
+
+    def test_an_inner_rollback_does_not_invalidate_its_own_device(self, django_capture_on_commit_callbacks):
+        """A batch belongs to the savepoint scope that opened it.
+
+        Django removes only the callbacks registered inside a rolled-back savepoint. An owner
+        recorded there has to ride that block's own hook, or an enclosing batch would carry it
+        to commit and clear the caches of a device whose write never landed.
+        """
+        from django.db import transaction
+
+        from netbox_librenms_plugin.tests.conftest import install_module, make_device, make_module_bay
+
+        outer = make_device("savepoint-outer", librenms_cf={SERVER_KEY: 7})
+        inner = make_device("savepoint-inner", librenms_cf={SERVER_KEY: 8})
+        make_module_bay(outer, "Bay 1")
+        make_module_bay(inner, "Bay 1")
+        keys = _seed_every_tab(inner) + _seed_every_tab(outer)
+
+        class _Rollback(Exception):
+            pass
+
+        try:
+            with django_capture_on_commit_callbacks(execute=True):
+                with transaction.atomic():
+                    # Opens the outer batch.
+                    install_module(outer, "Bay 1", "Signal Model", serial="SPI-1")
+                    with pytest.raises(_Rollback):
+                        with transaction.atomic():
+                            install_module(inner, "Bay 1", "Signal Model", serial="SPI-2")
+                            raise _Rollback
+            inner_state = _snapshot_state(inner)
+            outer_state = _snapshot_state(outer)
+        finally:
+            _clear(keys)
+
+        assert all(inner_state.values()), f"a rolled-back write cleared its device: {inner_state}"
+        assert not any(outer_state.values()), f"the committed write was not cleaned up: {outer_state}"
+
+
+@pytest.mark.django_db
 class TestSharedSnapshotsFollowTheWholeChassis:
     """A claim covers the shared snapshot whichever member the write came through."""
 
@@ -413,24 +455,138 @@ class TestSharedSnapshotsFollowTheWholeChassis:
 class TestAReassignedRowInvalidatesBothSides:
     """Moving a row between owners leaves neither side serving a stale snapshot."""
 
-    def test_moving_an_ip_between_devices_invalidates_the_donor(self, django_capture_on_commit_callbacks):
+    def test_moving_an_ip_between_devices_invalidates_both_devices(self, django_capture_on_commit_callbacks):
         from django.db import transaction
 
         from netbox_librenms_plugin.tests.conftest import ip_on, make_device, make_interface
 
         donor = make_device("ip-move-donor", librenms_cf={SERVER_KEY: 7})
         winner = make_device("ip-move-winner", librenms_cf={SERVER_KEY: 8})
+        bystander = make_device("ip-move-bystander", librenms_cf={SERVER_KEY: 9})
         ip = ip_on(donor, "198.18.30.10/24", "Ethernet1")
         winner_interface = make_interface(winner, "Ethernet1")
-        keys = _seed_every_tab(donor)
+        keys = _seed_every_tab(winner) + _seed_every_tab(bystander) + _seed_every_tab(donor)
 
         try:
             with django_capture_on_commit_callbacks(execute=True):
                 with transaction.atomic():
                     ip.assigned_object = winner_interface
                     ip.save()
-            remaining = _snapshot_state(donor)
+            ip.refresh_from_db()
+            assert ip.assigned_object_id == winner_interface.pk, "the IP never moved"
+            donor_state = _snapshot_state(donor)
+            winner_state = _snapshot_state(winner)
+            bystander_state = _snapshot_state(bystander)
         finally:
             _clear(keys)
 
-        assert not any(remaining.values()), f"the device the IP left kept stale snapshots: {remaining}"
+        assert not any(donor_state.values()), f"the device the IP left kept stale snapshots: {donor_state}"
+        assert not any(winner_state.values()), f"the device the IP joined kept stale snapshots: {winner_state}"
+        assert all(bystander_state.values()), f"an untouched device lost its snapshots: {bystander_state}"
+
+
+@pytest.mark.django_db(transaction=True)
+class TestAWriteOutsideATransactionStillInvalidates:
+    """Autocommit runs the commit hook immediately, so the batch must be filled first."""
+
+    def test_an_autocommit_write_invalidates_its_owner(self):
+        """Outside an atomic block Django runs on_commit inline, not at some later commit.
+
+        Registering the hook before recording the owner therefore flushes an empty batch and
+        the write is never cleaned up. Every other test here wraps its writes in
+        transaction.atomic(), which is exactly why none of them can see this.
+        """
+        from netbox_librenms_plugin.tests.conftest import install_module, make_device, make_module_bay
+
+        device = make_device("autocommit-write", librenms_cf={SERVER_KEY: 7})
+        make_module_bay(device, "Bay 1")
+        keys = _seed_every_tab(device)
+
+        try:
+            # No atomic block: this is how a management command, a script or an rq job writes.
+            install_module(device, "Bay 1", "Signal Model", serial="AC-1")
+            remaining = _snapshot_state(device)
+        finally:
+            _clear(keys)
+            device.delete()
+
+        assert not any(remaining.values()), f"an autocommit write left stale snapshots: {remaining}"
+
+
+class TestEverySchedulingViewTakesTheClaim:
+    """A view that schedules a transition must also claim its page.
+
+    Without the claim the write signals invalidate the page object for the view's own write,
+    deleting the source snapshot the transition preserves and the response is about to render.
+    Missing the mixin is silent, so it is checked rather than remembered.
+    """
+
+    SCHEDULERS = frozenset({"schedule_request_cache_mutation", "_schedule_module_cache_mutation"})
+    CLAIM_BASES = frozenset({"CacheMixin", "SyncPageClaimMixin"})
+
+    def _class_defs(self):
+        """Return every class in the views package, by name."""
+        import ast
+        from pathlib import Path
+
+        views_root = Path(__file__).resolve().parents[1] / "views"
+        classes = {}
+        for path in sorted(views_root.rglob("*.py")):
+            for node in ast.walk(ast.parse(path.read_text())):
+                if isinstance(node, ast.ClassDef):
+                    classes[node.name] = (path.name, node)
+        return classes
+
+    def _schedules(self, node):
+        import ast
+
+        return any(
+            isinstance(call, ast.Call)
+            and (
+                (isinstance(call.func, ast.Name) and call.func.id in self.SCHEDULERS)
+                or (isinstance(call.func, ast.Attribute) and call.func.attr in self.SCHEDULERS)
+            )
+            for call in ast.walk(node)
+        )
+
+    def _claims(self, node, classes, seen=None):
+        """Return whether *node* takes the claim, directly or through a local base class."""
+        import ast
+
+        seen = seen if seen is not None else set()
+        if node.name in seen:
+            return False
+        seen.add(node.name)
+        # A base can be written dotted (``mixins.CacheMixin``); compare the final segment.
+        bases = {ast.unparse(base).rsplit(".", 1)[-1] for base in node.bases}
+        if bases & self.CLAIM_BASES:
+            return True
+        return any(name in classes and self._claims(classes[name][1], classes, seen) for name in bases)
+
+    def _unclaimed_scheduling_views(self):
+        classes = self._class_defs()
+        return [
+            f"{filename}:{node.name}"
+            for filename, node in classes.values()
+            if self._schedules(node) and not self._claims(node, classes)
+        ]
+
+    def test_no_scheduling_view_is_missing_the_claim(self):
+        unclaimed = self._unclaimed_scheduling_views()
+        assert not unclaimed, "these views schedule a transition without claiming their page: " + ", ".join(unclaimed)
+
+    def test_the_check_can_actually_find_a_scheduling_view(self):
+        """Positive control, so an import or parse change cannot make the check vacuous."""
+        classes = self._class_defs()
+        scheduling = [node.name for _filename, node in classes.values() if self._schedules(node)]
+        assert len(scheduling) > 10, f"expected the sync views to be found, got {scheduling}"
+
+    def test_a_view_without_the_claim_is_reported(self):
+        """Positive control on the inheritance walk: a bare scheduling class must be flagged."""
+        import ast
+
+        classes = self._class_defs()
+        bare = ast.parse("class _Probe(View):\n    def post(self):\n        schedule_request_cache_mutation()\n")
+        probe = bare.body[0]
+        assert self._schedules(probe)
+        assert not self._claims(probe, classes)

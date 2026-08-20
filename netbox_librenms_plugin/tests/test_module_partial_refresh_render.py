@@ -114,9 +114,14 @@ class TestPartialModuleRefreshRendersEmpty:
     def test_a_partial_refresh_renders_no_table(self, failure, expected):
         from django.core.cache import cache
 
+        from netbox_librenms_plugin.sync_cache import sync_snapshot_key
+
         device = self._device(f"partial-refresh-{'-'.join(failure)}")
-        cache_key = f"librenms_inventory_device_{device.pk}_{_configured_server_key()}"
+        # Built by the production helper, so a change to the key scheme cannot silently make
+        # the assertion below vacuous.
+        cache_key = sync_snapshot_key(device, "inventory", _configured_server_key())
         cache.set(cache_key, {"inventory": INVENTORY, "librenms_id": 42, "oob_librenms_id": None}, timeout=300)
+        assert cache.get(cache_key) is not None, "the seed never landed, so the drop assertion proves nothing"
 
         try:
             _response, context, request = _refresh(device, **failure)

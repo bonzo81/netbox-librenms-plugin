@@ -50,6 +50,7 @@ class TestModuleActionsInvalidateEveryChangedDevice:
             key = coordinator.snapshot_key(tab, server_key)
             cache.set(key, [{"seeded": tab.value}], timeout=300)
             keys.append(key)
+        assert all(cache.get(key) is not None for key in keys), "the seed never landed"
         # Building the fixtures is itself a tracked write, so a cleanup for these devices is
         # already queued; dropping it makes the capture below observe only the action's own.
         transaction.get_connection().run_on_commit.clear()
