@@ -525,17 +525,27 @@ class TestEverySchedulingViewTakesTheClaim:
     CLAIM_BASES = frozenset({"CacheMixin", "SyncPageClaimMixin"})
 
     def _class_defs(self):
-        """Return every class in the views package, by name."""
+        """Return every class in the views package.
+
+        Keyed by (path, name) for the scan, because two modules can define the same class name
+        and a name-keyed index would silently drop one of them from the check. A separate
+        name map is kept only for resolving base classes.
+
+        Returns:
+            tuple: The (path, name) -> node index, and a name -> node map for base lookup.
+        """
         import ast
         from pathlib import Path
 
         views_root = Path(__file__).resolve().parents[1] / "views"
-        classes = {}
+        by_location = {}
+        by_name = {}
         for path in sorted(views_root.rglob("*.py")):
             for node in ast.walk(ast.parse(path.read_text())):
                 if isinstance(node, ast.ClassDef):
-                    classes[node.name] = (path.name, node)
-        return classes
+                    by_location[(path.name, node.name)] = node
+                    by_name.setdefault(node.name, node)
+        return by_location, by_name
 
     def _schedules(self, node):
         import ast
@@ -561,14 +571,14 @@ class TestEverySchedulingViewTakesTheClaim:
         bases = {ast.unparse(base).rsplit(".", 1)[-1] for base in node.bases}
         if bases & self.CLAIM_BASES:
             return True
-        return any(name in classes and self._claims(classes[name][1], classes, seen) for name in bases)
+        return any(name in classes and self._claims(classes[name], classes, seen) for name in bases)
 
     def _unclaimed_scheduling_views(self):
-        classes = self._class_defs()
+        by_location, by_name = self._class_defs()
         return [
-            f"{filename}:{node.name}"
-            for filename, node in classes.values()
-            if self._schedules(node) and not self._claims(node, classes)
+            f"{filename}:{name}"
+            for (filename, name), node in by_location.items()
+            if self._schedules(node) and not self._claims(node, by_name)
         ]
 
     def test_no_scheduling_view_is_missing_the_claim(self):
@@ -577,15 +587,15 @@ class TestEverySchedulingViewTakesTheClaim:
 
     def test_the_check_can_actually_find_a_scheduling_view(self):
         """Positive control, so an import or parse change cannot make the check vacuous."""
-        classes = self._class_defs()
-        scheduling = [node.name for _filename, node in classes.values() if self._schedules(node)]
+        by_location, _by_name = self._class_defs()
+        scheduling = [name for (_filename, name), node in by_location.items() if self._schedules(node)]
         assert len(scheduling) > 10, f"expected the sync views to be found, got {scheduling}"
 
     def test_a_view_without_the_claim_is_reported(self):
         """Positive control on the inheritance walk: a bare scheduling class must be flagged."""
         import ast
 
-        classes = self._class_defs()
+        _by_location, classes = self._class_defs()
         bare = ast.parse("class _Probe(View):\n    def post(self):\n        schedule_request_cache_mutation()\n")
         probe = bare.body[0]
         assert self._schedules(probe)

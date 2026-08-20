@@ -86,13 +86,16 @@ def _guards_in(node, target_fingerprint, membership_node=None):
         bool: Whether the target is provably hashable where the membership test runs.
     """
     if isinstance(node, ast.BoolOp):
+        # A negated guard protects only what short-circuits behind it in the SAME or-chain.
+        # In an if-test it protects nothing: the body runs whichever operand was true.
+        guards_this_chain = membership_node is not None and _contains(node, membership_node)
         for value in node.values:
             # Only operands evaluated BEFORE the membership test can guard it.
             if membership_node is not None and _contains(value, membership_node):
                 return False
-            if isinstance(node.op, ast.And) and _guards_in(value, target_fingerprint):
+            if isinstance(node.op, ast.And) and _guards_in(value, target_fingerprint, membership_node):
                 return True
-            if isinstance(node.op, ast.Or) and _negated_isinstance(value, target_fingerprint):
+            if isinstance(node.op, ast.Or) and guards_this_chain and _negated_isinstance(value, target_fingerprint):
                 return True
         return False
     if _isinstance_narrows(node, target_fingerprint):

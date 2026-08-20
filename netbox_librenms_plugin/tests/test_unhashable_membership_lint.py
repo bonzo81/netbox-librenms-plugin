@@ -75,6 +75,13 @@ LATE_OR_NEGATED_GUARDS = {
     "isinstance after the membership test in an or-chain": (
         'def f(cached):\n    v = cached.get("x")\n    return v in NAMES or isinstance(v, str)\n'
     ),
+    "negated isinstance in an if-test with another operand": (
+        "def f(cached, allow):\n"
+        '    v = cached.get("x")\n'
+        "    if not isinstance(v, str) or allow:\n"
+        "        return v in NAMES\n"
+        "    return False\n"
+    ),
     "negated isinstance guarding the wrong branch": (
         "def f(cached):\n"
         '    v = cached.get("x")\n'
