@@ -540,6 +540,16 @@ class TestEverySchedulingViewTakesTheClaim:
             for info in pkgutil.walk_packages(views.__path__, prefix=f"{views.__name__}.")
         ]
 
+    def _module_source(self, module):
+        """Return a module's source, read from its file.
+
+        Not inspect.getsource: an empty file has no lines, and on Python 3.12 that is an
+        OSError rather than an empty string. views/sync/__init__.py is empty.
+        """
+        from pathlib import Path
+
+        return Path(module.__file__).read_text()
+
     def _view_classes(self):
         """Return every class the views package defines, nested ones included.
 
@@ -572,13 +582,12 @@ class TestEverySchedulingViewTakesTheClaim:
         assignment cannot fall outside a set it builds itself.
         """
         import ast
-        import inspect
 
         if trees is None:
             from netbox_librenms_plugin import sync_cache
 
             # The scheduler's own module counts: it is the natural home for a shared wrapper.
-            trees = [ast.parse(inspect.getsource(module)) for module in [*self._view_modules(), sync_cache]]
+            trees = [ast.parse(self._module_source(module)) for module in [*self._view_modules(), sync_cache]]
         refers = {}
         for tree in trees:
             for node in ast.walk(tree):
@@ -654,7 +663,6 @@ class TestEverySchedulingViewTakesTheClaim:
     def test_the_scan_reaches_every_class_the_views_package_defines(self):
         """Cross-check against the source: a class the scan never reaches is never checked."""
         import ast
-        import inspect
         from collections import Counter
 
         # Counted, not just present: a second class of the same name would replace the first.
@@ -662,13 +670,23 @@ class TestEverySchedulingViewTakesTheClaim:
         for module in self._view_modules():
             defined = Counter(
                 (module.__name__, node.name)
-                for node in ast.walk(ast.parse(inspect.getsource(module)))
+                for node in ast.walk(ast.parse(self._module_source(module)))
                 if isinstance(node, ast.ClassDef)
             )
             mine = Counter({key: reached[key] for key in defined})
             assert defined == mine, (
                 f"the scan never sees {sorted(name for _module, name in (defined - mine).elements())}"
             )
+
+    def test_every_module_source_is_readable(self):
+        """An empty file is valid source, and the views package has one."""
+        import ast
+
+        for module in self._view_modules():
+            ast.parse(self._module_source(module))
+        assert any(not self._module_source(module) for module in self._view_modules()), (
+            "expected the views package to still contain an empty module"
+        )
 
     def test_the_check_can_actually_find_a_scheduling_view(self):
         """Positive control, so an import or parse change cannot make the check vacuous."""
