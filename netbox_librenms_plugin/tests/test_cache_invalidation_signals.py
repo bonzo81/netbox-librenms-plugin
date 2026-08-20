@@ -519,84 +519,229 @@ class TestEverySchedulingViewTakesTheClaim:
     Without the claim the write signals invalidate the page object for the view's own write,
     deleting the source snapshot the transition preserves and the response is about to render.
     Missing the mixin is silent, so it is checked rather than remembered.
+
+    The claim is read from the imported class, because issubclass answers it the way Python
+    does: an alias, a dotted base, a shadowed import or a repeated class name cannot hide it.
+    Only the call is read from the source, because a call site is a source-level fact. The
+    names that count as a call are derived from the one real scheduler rather than listed.
     """
 
-    SCHEDULERS = frozenset({"schedule_request_cache_mutation", "_schedule_module_cache_mutation"})
-    CLAIM_BASES = frozenset({"CacheMixin", "SyncPageClaimMixin"})
+    SCHEDULER = "schedule_request_cache_mutation"
 
-    def _class_defs(self):
-        """Return every class in the views package.
+    def _view_modules(self):
+        """Return every module in the views package, imported."""
+        import importlib
+        import pkgutil
 
-        Keyed by (path, name) for the scan, because two modules can define the same class name
-        and a name-keyed index would silently drop one of them from the check. A separate
-        name map is kept only for resolving base classes.
+        from netbox_librenms_plugin import views
 
-        Returns:
-            tuple: The (path, name) -> node index, and a name -> node map for base lookup.
+        return [views] + [
+            importlib.import_module(info.name)
+            for info in pkgutil.walk_packages(views.__path__, prefix=f"{views.__name__}.")
+        ]
+
+    def _view_classes(self):
+        """Return every class the views package defines, nested ones included.
+
+        A class is taken from the module that defines it, so a re-export is not a second entry.
+        """
+        import inspect
+
+        found = set()
+        for module in self._view_modules():
+            for _name, obj in inspect.getmembers(module, inspect.isclass):
+                if obj.__module__ == module.__name__:
+                    found.add(obj)
+                    found.update(self._nested_classes(obj))
+        return found
+
+    def _nested_classes(self, cls):
+        """Yield the classes *cls* nests, at any depth, but not the ones merely assigned to it."""
+        import inspect
+
+        for obj in vars(cls).values():
+            if inspect.isclass(obj) and obj.__qualname__.startswith(f"{cls.__qualname__}."):
+                yield obj
+                yield from self._nested_classes(obj)
+
+    def _scheduler_names(self, trees=None):
+        """Return the scheduler and every name in the views package that reaches it.
+
+        Wrapping the scheduler in a helper is an established pattern here, so the set is derived
+        from the one real scheduler instead of listed: a new wrapper, an import alias or an
+        assignment cannot fall outside a set it builds itself.
         """
         import ast
-        from pathlib import Path
+        import inspect
 
-        views_root = Path(__file__).resolve().parents[1] / "views"
-        by_location = {}
-        by_name = {}
-        for path in sorted(views_root.rglob("*.py")):
-            for node in ast.walk(ast.parse(path.read_text())):
-                if isinstance(node, ast.ClassDef):
-                    by_location[(path.name, node.name)] = node
-                    by_name.setdefault(node.name, node)
-        return by_location, by_name
+        if trees is None:
+            from netbox_librenms_plugin import sync_cache
 
-    def _schedules(self, node):
+            # The scheduler's own module counts: it is the natural home for a shared wrapper.
+            trees = [ast.parse(inspect.getsource(module)) for module in [*self._view_modules(), sync_cache]]
+        refers = {}
+        for tree in trees:
+            for node in ast.walk(tree):
+                if isinstance(node, (ast.Import, ast.ImportFrom)):
+                    for alias in node.names:
+                        if alias.asname:
+                            refers.setdefault(alias.asname, set()).add(alias.name.rsplit(".", 1)[-1])
+                elif isinstance(node, ast.Assign):
+                    # Covers a plain alias and a wrapped one such as functools.partial(...).
+                    mentioned = {name.id for name in ast.walk(node.value) if isinstance(name, ast.Name)}
+                    for target in node.targets:
+                        if isinstance(target, ast.Name):
+                            refers.setdefault(target.id, set()).update(mentioned)
+            for node in tree.body:
+                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    refers.setdefault(node.name, set()).update(self._called_names(node))
+
+        names = {self.SCHEDULER}
+        while True:
+            grown = names | {name for name, refs in refers.items() if refs & names}
+            if grown == names:
+                return names
+            names = grown
+
+    def _called_names(self, node):
+        """Return the names *node* calls in its own body, ignoring classes nested inside it."""
         import ast
 
-        return any(
-            isinstance(call, ast.Call)
-            and (
-                (isinstance(call.func, ast.Name) and call.func.id in self.SCHEDULERS)
-                or (isinstance(call.func, ast.Attribute) and call.func.attr in self.SCHEDULERS)
-            )
-            for call in ast.walk(node)
-        )
+        return {
+            call.func.id if isinstance(call.func, ast.Name) else call.func.attr
+            for call in self._own_nodes(node)
+            if isinstance(call, ast.Call) and isinstance(call.func, (ast.Name, ast.Attribute))
+        }
 
-    def _claims(self, node, classes, seen=None):
-        """Return whether *node* takes the claim, directly or through a local base class."""
+    def _schedules(self, cls, names=None):
+        """Return whether *cls* calls a scheduler, read from its own source."""
+        import ast
+        import inspect
+        import textwrap
+
+        definition = ast.parse(textwrap.dedent(inspect.getsource(cls))).body[0]
+        names = names if names is not None else self._scheduler_names()
+        return bool(self._called_names(definition) & names)
+
+    def _own_nodes(self, node):
+        """Yield every node under *node* except the body of a class nested inside it."""
         import ast
 
-        seen = seen if seen is not None else set()
-        if node.name in seen:
-            return False
-        seen.add(node.name)
-        # A base can be written dotted (``mixins.CacheMixin``); compare the final segment.
-        bases = {ast.unparse(base).rsplit(".", 1)[-1] for base in node.bases}
-        if bases & self.CLAIM_BASES:
-            return True
-        return any(name in classes and self._claims(classes[name], classes, seen) for name in bases)
+        for child in ast.iter_child_nodes(node):
+            if isinstance(child, ast.ClassDef):
+                continue
+            yield child
+            yield from self._own_nodes(child)
+
+    def _claims(self, cls):
+        """Return whether *cls* takes the claim, as Python resolves it."""
+        from netbox_librenms_plugin.views.mixins import CacheMixin, SyncPageClaimMixin
+
+        return issubclass(cls, (CacheMixin, SyncPageClaimMixin))
 
     def _unclaimed_scheduling_views(self):
-        by_location, by_name = self._class_defs()
-        return [
-            f"{filename}:{name}"
-            for (filename, name), node in by_location.items()
-            if self._schedules(node) and not self._claims(node, by_name)
-        ]
+        names = self._scheduler_names()
+        return sorted(
+            f"{cls.__module__}.{cls.__qualname__}"
+            for cls in self._view_classes()
+            if self._schedules(cls, names) and not self._claims(cls)
+        )
 
     def test_no_scheduling_view_is_missing_the_claim(self):
         unclaimed = self._unclaimed_scheduling_views()
         assert not unclaimed, "these views schedule a transition without claiming their page: " + ", ".join(unclaimed)
 
+    def test_the_scan_reaches_every_class_the_views_package_defines(self):
+        """Cross-check against the source: a class the scan never reaches is never checked."""
+        import ast
+        import inspect
+        from collections import Counter
+
+        # Counted, not just present: a second class of the same name would replace the first.
+        reached = Counter((cls.__module__, cls.__qualname__.rsplit(".", 1)[-1]) for cls in self._view_classes())
+        for module in self._view_modules():
+            defined = Counter(
+                (module.__name__, node.name)
+                for node in ast.walk(ast.parse(inspect.getsource(module)))
+                if isinstance(node, ast.ClassDef)
+            )
+            mine = Counter({key: reached[key] for key in defined})
+            assert defined == mine, (
+                f"the scan never sees {sorted(name for _module, name in (defined - mine).elements())}"
+            )
+
     def test_the_check_can_actually_find_a_scheduling_view(self):
         """Positive control, so an import or parse change cannot make the check vacuous."""
-        by_location, _by_name = self._class_defs()
-        scheduling = [name for (_filename, name), node in by_location.items() if self._schedules(node)]
+        names = self._scheduler_names()
+        scheduling = [cls.__qualname__ for cls in self._view_classes() if self._schedules(cls, names)]
         assert len(scheduling) > 10, f"expected the sync views to be found, got {scheduling}"
 
     def test_a_view_without_the_claim_is_reported(self):
-        """Positive control on the inheritance walk: a bare scheduling class must be flagged."""
+        """Positive control on both predicates, against real classes rather than parsed names."""
+        from django.views import View
+
+        from netbox_librenms_plugin.sync_cache import schedule_request_cache_mutation
+        from netbox_librenms_plugin.views.mixins import CacheMixin
+
+        class Bare(View):
+            def post(self, request):
+                schedule_request_cache_mutation(request, None)
+
+        class Claiming(CacheMixin, View):
+            def post(self, request):
+                schedule_request_cache_mutation(request, None)
+
+        assert self._schedules(Bare) and not self._claims(Bare)
+        assert self._schedules(Claiming) and self._claims(Claiming)
+
+    def test_a_nested_class_is_checked_on_its_own(self):
+        """A class nested in a view is a separate class, so its call is not the view's call."""
+        from django.views import View
+
+        from netbox_librenms_plugin.sync_cache import schedule_request_cache_mutation
+        from netbox_librenms_plugin.views.mixins import CacheMixin
+
+        class Outer(CacheMixin, View):
+            class Inner(View):
+                def post(self, request):
+                    schedule_request_cache_mutation(request, None)
+
+        assert not self._schedules(Outer), "the enclosing class schedules nothing itself"
+        assert self._schedules(Outer.Inner) and not self._claims(Outer.Inner)
+
+    def test_the_scheduler_names_are_derived_from_the_one_real_scheduler(self):
+        """A helper that calls the scheduler schedules too, so the wrappers must be found."""
+        assert self._scheduler_names() >= {
+            "schedule_request_cache_mutation",
+            "_schedule_module_cache_mutation",
+            "_schedule_winner_cache_mutation",
+        }
+
+    def test_a_wrapper_an_import_alias_and_an_assignment_all_reach_the_scheduler(self):
+        """Positive control on each shape the derivation has to close."""
         import ast
 
-        _by_location, classes = self._class_defs()
-        bare = ast.parse("class _Probe(View):\n    def post(self):\n        schedule_request_cache_mutation()\n")
-        probe = bare.body[0]
-        assert self._schedules(probe)
-        assert not self._claims(probe, classes)
+        tree = ast.parse(
+            "from netbox_librenms_plugin.sync_cache import schedule_request_cache_mutation as run\n"
+            "\n"
+            "def helper(request):\n"
+            "    run(request)\n"
+            "\n"
+            "shortcut = helper\n"
+        )
+
+        assert self._scheduler_names([tree]) == {"schedule_request_cache_mutation", "run", "helper", "shortcut"}
+
+    def test_a_scheduler_wrapped_in_a_partial_still_counts(self):
+        """An alias is what the value refers to, not how it is written, so a partial is one too."""
+        import ast
+
+        tree = ast.parse(
+            "import functools\n"
+            "\n"
+            "from netbox_librenms_plugin.sync_cache import schedule_request_cache_mutation\n"
+            "\n"
+            "run = functools.partial(schedule_request_cache_mutation)\n"
+        )
+
+        assert "run" in self._scheduler_names([tree])
