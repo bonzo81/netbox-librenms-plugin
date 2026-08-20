@@ -689,10 +689,22 @@ class TestEverySchedulingViewTakesTheClaim:
         )
 
     def test_the_check_can_actually_find_a_scheduling_view(self):
-        """Positive control, so an import or parse change cannot make the check vacuous."""
+        """Positive control, so an import or parse change cannot make the check vacuous.
+
+        These six name the views themselves rather than a count, and between them they reach the
+        scheduler directly, through the module wrapper and through the winner wrapper.
+        """
         names = self._scheduler_names()
-        scheduling = [cls.__qualname__ for cls in self._view_classes() if self._schedules(cls, names)]
-        assert len(scheduling) > 10, f"expected the sync views to be found, got {scheduling}"
+        scheduling = {cls.__qualname__ for cls in self._view_classes() if self._schedules(cls, names)}
+        expected = {
+            "SyncCablesView",
+            "SyncIPAddressesView",
+            "SyncInterfacesView",
+            "SyncVLANsView",
+            "InstallModuleView",
+            "MoveInterfaceToWinnerView",
+        }
+        assert expected <= scheduling, f"the check no longer finds {sorted(expected - scheduling)}"
 
     def test_a_view_without_the_claim_is_reported(self):
         """Positive control on both predicates, against real classes rather than parsed names."""
@@ -703,11 +715,11 @@ class TestEverySchedulingViewTakesTheClaim:
 
         class Bare(View):
             def post(self, request):
-                schedule_request_cache_mutation(request, None)
+                schedule_request_cache_mutation(request, None, None, None)
 
         class Claiming(CacheMixin, View):
             def post(self, request):
-                schedule_request_cache_mutation(request, None)
+                schedule_request_cache_mutation(request, None, None, None)
 
         assert self._schedules(Bare) and not self._claims(Bare)
         assert self._schedules(Claiming) and self._claims(Claiming)
@@ -722,7 +734,7 @@ class TestEverySchedulingViewTakesTheClaim:
         class Outer(CacheMixin, View):
             class Inner(View):
                 def post(self, request):
-                    schedule_request_cache_mutation(request, None)
+                    schedule_request_cache_mutation(request, None, None, None)
 
         assert not self._schedules(Outer), "the enclosing class schedules nothing itself"
         assert self._schedules(Outer.Inner) and not self._claims(Outer.Inner)
