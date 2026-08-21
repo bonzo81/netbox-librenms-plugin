@@ -1,5 +1,6 @@
 """Isolation helpers for parallel pytest workers."""
 
+import os
 import re
 
 
@@ -10,9 +11,23 @@ _WORKER_ID_PATTERN = re.compile(r"gw(?P<number>\d+)")
 
 def pytest_xdist_auto_num_workers(config):
     """Cap `-n auto` at the worker count that still gets private Redis databases."""
-    from xdist.plugin import pytest_xdist_auto_num_workers as detected_num_workers
+    try:
+        from xdist.plugin import pytest_xdist_auto_num_workers as detected_num_workers
 
-    return min(detected_num_workers(config), MAX_PARALLEL_WORKERS)
+        workers = detected_num_workers(config)
+    except ImportError:
+        override = os.environ.get("PYTEST_XDIST_AUTO_NUM_WORKERS")
+        workers = None
+        if override is not None:
+            try:
+                parsed_override = int(override)
+            except ValueError:
+                pass
+            else:
+                if parsed_override > 0:
+                    workers = parsed_override
+        workers = workers or os.cpu_count() or 1
+    return min(workers, MAX_PARALLEL_WORKERS)
 
 
 def isolated_test_database_name(base_name: str, worker_id: str | None) -> str:

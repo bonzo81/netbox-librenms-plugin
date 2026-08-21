@@ -1,11 +1,14 @@
 """Tests for isolated parallel test workers."""
 
 import os
+import re
 import subprocess
 import sys
+import tomllib
 from pathlib import Path
 
 import pytest
+import yaml
 from django.test import override_settings
 
 from netbox_librenms_plugin.tests.conftest import (
@@ -136,6 +139,27 @@ def test_local_and_ci_commands_request_isolated_workers():
     assert "pytest -n auto --maxschedchunk=1" in workflow
 
 
+def test_lint_workflow_python_meets_the_project_minimum():
+    """Run the lint workflow on a Python version supported by the project."""
+    pyproject = tomllib.loads((REPOSITORY_ROOT / "pyproject.toml").read_text())
+    requires_python = pyproject["project"]["requires-python"]
+    floor_match = re.search(r"(?:^|,)\s*>=\s*(\d+(?:\.\d+)*)", requires_python)
+    assert floor_match is not None, f"requires-python has no inclusive floor: {requires_python!r}"
+
+    workflow = yaml.safe_load((REPOSITORY_ROOT / ".github/workflows/lint-format.yaml").read_text())
+    setup_python_steps = [
+        step
+        for step in workflow["jobs"]["format-and-lint"]["steps"]
+        if str(step.get("uses", "")).startswith("actions/setup-python@")
+    ]
+    assert len(setup_python_steps) == 1
+
+    floor = tuple(int(part) for part in floor_match.group(1).split("."))
+    workflow_version = tuple(int(part) for part in str(setup_python_steps[0]["with"]["python-version"]).split("."))
+    width = max(len(floor), len(workflow_version))
+    assert workflow_version + (0,) * (width - len(workflow_version)) >= floor + (0,) * (width - len(floor))
+
+
 @pytest.mark.parametrize(
     ("detected_workers", "expected"),
     [("2", 2), (str(MAX_PARALLEL_WORKERS), MAX_PARALLEL_WORKERS), ("32", MAX_PARALLEL_WORKERS)],
@@ -155,6 +179,80 @@ def test_auto_worker_count_stays_capped_without_the_environment_override(pytestc
     monkeypatch.delenv("PYTEST_XDIST_AUTO_NUM_WORKERS", raising=False)
 
     assert 1 <= pytest_xdist_auto_num_workers(pytestconfig) <= MAX_PARALLEL_WORKERS
+
+
+@pytest.fixture
+def xdist_without_auto_worker_hook(monkeypatch):
+    """Remove xdist's optional hook from the real plugin module."""
+    import xdist.plugin
+
+    monkeypatch.delattr(xdist.plugin, "pytest_xdist_auto_num_workers", raising=False)
+
+
+def test_fallback_auto_worker_count_preserves_a_valid_override_below_the_cap(
+    pytestconfig,
+    monkeypatch,
+    xdist_without_auto_worker_hook,
+):
+    expected = MAX_PARALLEL_WORKERS - 1
+    monkeypatch.setenv("PYTEST_XDIST_AUTO_NUM_WORKERS", str(expected))
+    monkeypatch.setattr(os, "cpu_count", lambda: MAX_PARALLEL_WORKERS * 2)
+
+    assert pytest_xdist_auto_num_workers(pytestconfig) == expected
+
+
+@pytest.mark.parametrize("override", [str(MAX_PARALLEL_WORKERS * 2), None, "not-a-number"])
+def test_fallback_auto_worker_count_caps_an_override_or_cpu_count(
+    pytestconfig,
+    monkeypatch,
+    xdist_without_auto_worker_hook,
+    override,
+):
+    if override is None:
+        monkeypatch.delenv("PYTEST_XDIST_AUTO_NUM_WORKERS", raising=False)
+    else:
+        monkeypatch.setenv("PYTEST_XDIST_AUTO_NUM_WORKERS", override)
+    monkeypatch.setattr(os, "cpu_count", lambda: MAX_PARALLEL_WORKERS * 2)
+
+    assert pytest_xdist_auto_num_workers(pytestconfig) == MAX_PARALLEL_WORKERS
+
+
+def test_fallback_auto_worker_count_uses_one_when_cpu_count_is_unknown(
+    pytestconfig,
+    monkeypatch,
+    xdist_without_auto_worker_hook,
+):
+    monkeypatch.delenv("PYTEST_XDIST_AUTO_NUM_WORKERS", raising=False)
+    monkeypatch.setattr(os, "cpu_count", lambda: None)
+
+    assert pytest_xdist_auto_num_workers(pytestconfig) == 1
+
+
+def test_fallback_highest_auto_worker_has_private_redis_databases(
+    pytestconfig,
+    monkeypatch,
+    xdist_without_auto_worker_hook,
+):
+    monkeypatch.setenv("PYTEST_XDIST_AUTO_NUM_WORKERS", str(MAX_PARALLEL_WORKERS * 2))
+
+    workers = pytest_xdist_auto_num_workers(pytestconfig)
+
+    assert isolated_redis_databases(f"gw{workers - 1}") == (
+        MAX_PARALLEL_WORKERS - 1,
+        MAX_PARALLEL_WORKERS * 2 - 1,
+    )
+
+
+def test_auto_worker_count_propagates_type_error_from_xdist(pytestconfig, monkeypatch):
+    import xdist.plugin
+
+    def raise_type_error(config):
+        raise TypeError("xdist hook failed")
+
+    monkeypatch.setattr(xdist.plugin, "pytest_xdist_auto_num_workers", raise_type_error)
+
+    with pytest.raises(TypeError, match="xdist hook failed"):
+        pytest_xdist_auto_num_workers(pytestconfig)
 
 
 def _resolve_auto_worker_count(tmp_path, *path_args):
