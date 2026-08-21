@@ -696,7 +696,12 @@ class TestEverySchedulingViewTakesTheClaim:
         assert not unclaimed, "these views schedule a transition without claiming their page: " + ", ".join(unclaimed)
 
     def test_server_guarded_scheduling_views_drop_the_claim_without_a_server(self):
-        """A guarded scheduler must not suppress the write signal when its guard is false."""
+        """A guarded scheduler must not suppress the write signal when its guard is false.
+
+        This is a drift alarm over the shapes present today, not a proof. It cannot see a view
+        that returns early on a missing server key. The behaviour is proven end to end in
+        test_sync_cache_consistency.py.
+        """
         names = self._scheduler_names()
         guarded = {
             cls

@@ -255,6 +255,18 @@ def test_auto_worker_count_propagates_type_error_from_xdist(pytestconfig, monkey
         pytest_xdist_auto_num_workers(pytestconfig)
 
 
+def test_auto_worker_count_propagates_import_error_from_xdist(pytestconfig, monkeypatch):
+    import xdist.plugin
+
+    def raise_import_error(config):
+        raise ImportError("xdist hook import failed")
+
+    monkeypatch.setattr(xdist.plugin, "pytest_xdist_auto_num_workers", raise_import_error)
+
+    with pytest.raises(ImportError, match="xdist hook import failed"):
+        pytest_xdist_auto_num_workers(pytestconfig)
+
+
 def _resolve_auto_worker_count(tmp_path, *path_args):
     """Run `pytest -n auto` over the given paths and report the worker count it resolved to."""
     resolved = tmp_path / "resolved-workers.txt"
