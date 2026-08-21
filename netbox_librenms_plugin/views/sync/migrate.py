@@ -30,7 +30,6 @@ from netbox_librenms_plugin.sync_cache import (
     SyncTab,
     apply_request_cache_transition,
     claim_sync_page,
-    mapped_server_keys,
     schedule_request_cache_mutation,
     sync_page_key,
 )
@@ -227,11 +226,8 @@ def _safe_referer(request, fallback=None):
 
 
 def _schedule_winner_cache_mutation(request, winner, source_tab, server_key):
-    """Clean the winner's tabs only when it holds a mapping for this server."""
-    # An unmapped winner caches nothing for this server, and scheduling it anyway fails the
-    # whole cleanup after the move already committed.
-    if server_key in mapped_server_keys(winner, server_key):
-        schedule_request_cache_mutation(request, winner, source_tab, server_key)
+    """Schedule cleanup of the winner's mapped snapshots after a move."""
+    schedule_request_cache_mutation(request, winner, source_tab, server_key)
 
 
 def _hx_response(request, message, level=messages.SUCCESS, *, status=200, fallback_url=None):

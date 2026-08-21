@@ -451,8 +451,11 @@ class SyncCacheConsistency:
         source_fragment_required=False,
     ):
         """Invalidate dependent snapshots only after the current transaction commits."""
+        cleanup_tabs = set(self.applicable_tabs())
+        if active_server_key in mapped_server_keys(self.page_object, active_server_key):
+            cleanup_tabs.discard(source_tab)
         transition = CacheMutationTransition(
-            cleanup_tabs=set(self.applicable_tabs()) - {source_tab},
+            cleanup_tabs=cleanup_tabs,
             source_tab=source_tab,
             source_fragment_required=source_fragment_required,
         )
@@ -600,12 +603,8 @@ class SyncCacheConsistency:
         return bool(existing or removed_patterns)
 
     def _apply_mutation(self, source_tab, active_server_key, actor_id, transition):
+        # An unmapped active server owns no source snapshot to preserve.
         mapped_keys = mapped_server_keys(self.page_object, active_server_key)
-        if active_server_key not in mapped_keys:
-            raise ValueError(
-                f"Server {active_server_key!r} is not mapped to "
-                f"{self.page_object._meta.label_lower} {self.page_object.pk}."
-            )
 
         transition.affected_tabs = {
             (server_key, tab)
@@ -651,9 +650,6 @@ class SyncCacheConsistency:
     def _mark_cleanup_failure_states(self, source_tab, active_server_key, actor_id, transition):
         """Publish one fail-closed revision after incomplete cache cleanup."""
         mapped_keys = mapped_server_keys(self.page_object, active_server_key)
-        if active_server_key not in mapped_keys:
-            return
-
         mutation_revision = transition.transition_id
         for server_key in mapped_keys:
             for tab in self.applicable_tabs():

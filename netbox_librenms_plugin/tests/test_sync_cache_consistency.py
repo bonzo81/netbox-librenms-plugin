@@ -25,6 +25,9 @@ from netbox_librenms_plugin.sync_cache import (
     SyncTab,
     SyncTabState,
     apply_request_cache_transition,
+    claim_sync_page,
+    schedule_request_cache_mutation,
+    sync_page_key,
 )
 from netbox_librenms_plugin.tests.conftest import (
     configure_no_librenms_servers,
@@ -1062,6 +1065,132 @@ def test_interface_delete_without_a_usable_server_invalidates_the_source_snapsho
     assert state["state"] == SyncTabState.INVALIDATED.value
 
 
+@pytest.mark.django_db(transaction=True)
+def test_configured_unmapped_server_action_invalidates_mapped_snapshots_without_cleanup_failure(
+    client,
+    settings,
+):
+    """An unmapped action must not report cleanup failure and must invalidate mapped state.
+
+    The cleanup_failed assertion covers consequence (a). The snapshot and state assertions
+    cover consequence (b).
+    """
+    _configure_servers(settings)
+    configured_server_keys = tuple(settings.PLUGINS_CONFIG["netbox_librenms_plugin"]["servers"])
+    mapped_server_key, acting_server_key, *_remaining_server_keys = configured_server_keys
+    device = make_device(
+        "cache-configured-unmapped-action",
+        librenms_cf={mapped_server_key: {"id": 646}},
+    )
+    interface = make_interface(device, "Ethernet1", iface_type="1000base-t")
+    snapshots = {
+        SyncTab.INTERFACES: "ports",
+        SyncTab.CABLES: "links",
+        SyncTab.IP_ADDRESSES: "ip_addresses",
+        SyncTab.MODULES: "inventory",
+        SyncTab.VLANS: "vlans",
+    }
+    for data_type in snapshots.values():
+        _seed_snapshot(data_type, device, mapped_server_key)
+    client.force_login(make_superuser("cache-configured-unmapped-action-user"))
+    url = reverse(
+        "plugins:netbox_librenms_plugin:delete_netbox_interfaces",
+        kwargs={"object_type": "device", "object_id": device.pk},
+    )
+
+    response = client.post(
+        url,
+        {
+            "server_key": acting_server_key,
+            "interface_ids": [str(interface.pk)],
+        },
+    )
+
+    assert response.status_code == 200
+    assert not type(interface).objects.filter(pk=interface.pk).exists()
+    transition_header = response.get("X-LibreNMS-Cache-Transition")
+    cleanup_failed = json.loads(transition_header)["cleanup_failed"] if transition_header else False
+    coordinator = SyncCacheConsistency(device)
+    actual = {
+        "cleanup_failed": cleanup_failed,
+        "remaining_snapshots": {
+            tab.value
+            for tab, data_type in snapshots.items()
+            if cache.get(_cache_key(data_type, device, mapped_server_key)) is not None
+        },
+        "states": {
+            tab.value: (cache.get(coordinator.state_key(tab, mapped_server_key)) or {}).get("state")
+            for tab in snapshots
+        },
+    }
+    assert actual == {
+        "cleanup_failed": False,
+        "remaining_snapshots": set(),
+        "states": {tab.value: SyncTabState.INVALIDATED.value for tab in snapshots},
+    }
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "Two transitions for different servers in one request delete each other's source. "
+        "No view reaches this today: ordinary views schedule once, and the migration views "
+        "schedule twice for different objects on one server key. Recorded rather than fixed, "
+        "because _apply_mutation preserves only its own active server by design. Remove this "
+        "marker with the fix if a view ever schedules for a second server."
+    ),
+)
+@pytest.mark.django_db(transaction=True)
+def test_request_transitions_for_different_servers_preserve_both_sources(settings):
+    """The request scheduler must preserve every scheduled server source snapshot.
+
+    No routed view currently schedules transitions for different servers in one request.
+    This test exercises the lowest reachable request scheduler seam.
+    """
+    _configure_servers(settings)
+    configured_server_keys = tuple(settings.PLUGINS_CONFIG["netbox_librenms_plugin"]["servers"])
+    first_source_server, second_source_server, idle_server = configured_server_keys
+    device = make_device(
+        "cache-multi-server-request-transitions",
+        librenms_cf={server_key: {"id": 650 + index} for index, server_key in enumerate(configured_server_keys)},
+    )
+    interface = make_interface(device, "Ethernet1", iface_type="1000base-t")
+    source_payloads = {
+        first_source_server: {"snapshot": "first-source"},
+        second_source_server: {"snapshot": "second-source"},
+    }
+    for server_key, payload in source_payloads.items():
+        _seed_snapshot("ports", device, server_key, payload)
+    _seed_snapshot("ports", device, idle_server, {"snapshot": "idle-server"})
+    request = RequestFactory().post("/sync")
+    request.user = make_superuser("cache-multi-server-request-transitions-user")
+
+    with claim_sync_page(sync_page_key(device)), transaction.atomic():
+        interface.delete()
+        schedule_request_cache_mutation(
+            request,
+            device,
+            SyncTab.INTERFACES,
+            first_source_server,
+        )
+        schedule_request_cache_mutation(
+            request,
+            device,
+            SyncTab.INTERFACES,
+            second_source_server,
+        )
+
+    response = apply_request_cache_transition(request, HttpResponse())
+    payload = json.loads(response["X-LibreNMS-Cache-Transition"])
+    assert len(payload["transition_ids"]) == 2
+    assert cache.get(_cache_key("ports", device, idle_server)) is None
+    idle_state = cache.get(SyncCacheConsistency(device).state_key(SyncTab.INTERFACES, idle_server))
+    assert idle_state["state"] == SyncTabState.INVALIDATED.value
+    assert {
+        server_key: cache.get(_cache_key("ports", device, server_key)) for server_key in source_payloads
+    } == source_payloads
+
+
 @pytest.mark.django_db
 def test_module_serial_update_without_a_usable_server_invalidates_the_source_snapshot(
     client,
@@ -1171,6 +1300,46 @@ def test_interface_move_invalidates_winner_dependent_snapshots(
     interface.refresh_from_db()
     assert interface.device_id == winner.pk
     assert cache.get(_cache_key("ip_addresses", winner, "primary")) is None
+
+
+@pytest.mark.django_db(
+    transaction=True,
+    available_apps=tuple(app.name for app in django_apps.get_app_configs()),
+)
+def test_interface_move_clears_winner_snapshots_when_active_server_is_unmapped(
+    client,
+    settings,
+    django_capture_on_commit_callbacks,
+):
+    """Moving an interface must clear the winner's snapshots on its mapped server."""
+    _configure_servers(settings)
+    active_server_key, winner_server_key, *_remaining_server_keys = settings.PLUGINS_CONFIG["netbox_librenms_plugin"][
+        "servers"
+    ]
+    donor = make_device(
+        "cache-move-interface-unmapped-donor",
+        librenms_cf={active_server_key: {"id": 6418}},
+    )
+    winner = make_device(
+        "cache-move-interface-unmapped-winner",
+        librenms_cf={winner_server_key: {"id": 6419}},
+    )
+    mark_librenms_migrated(donor, winner.pk, active_server_key)
+    donor.save(update_fields=["custom_field_data"])
+    interface = make_interface(donor, "Ethernet1", iface_type="1000base-t")
+    winner_snapshot_keys = {_cache_key(data_type, winner, winner_server_key) for data_type in ("ports", "ip_addresses")}
+    for snapshot_key in winner_snapshot_keys:
+        cache.set(snapshot_key, {"snapshot": snapshot_key}, timeout=300)
+    client.force_login(make_superuser("cache-move-interface-unmapped-user"))
+    url = reverse("plugins:netbox_librenms_plugin:interface_move_to_winner", args=[interface.pk])
+
+    with django_capture_on_commit_callbacks(execute=True):
+        response = client.post(url, {"server_key": active_server_key}, HTTP_HX_REQUEST="true")
+
+    assert response.status_code == 200
+    interface.refresh_from_db()
+    assert interface.device_id == winner.pk
+    assert not {snapshot_key for snapshot_key in winner_snapshot_keys if cache.get(snapshot_key) is not None}
 
 
 @pytest.mark.django_db(transaction=True)
@@ -1493,6 +1662,48 @@ def test_cleanup_failure_invalidates_every_dependent_tab(
     )
     response = client.get(fragment_url, {"server_key": "primary"})
     assert response.status_code == 404
+
+
+@pytest.mark.django_db
+def test_cleanup_failure_on_unmapped_active_server_invalidates_surviving_mapped_snapshots(
+    settings,
+    django_capture_on_commit_callbacks,
+):
+    """A partial cleanup must fail closed for every surviving mapped snapshot."""
+    _configure_servers(settings)
+    mapped_server_key, active_server_key, *_remaining_server_keys = settings.PLUGINS_CONFIG["netbox_librenms_plugin"][
+        "servers"
+    ]
+    device = make_device(
+        "cache-cleanup-failure-unmapped-active",
+        librenms_cf={mapped_server_key: {"id": 652}},
+    )
+    coordinator = SyncCacheConsistency(device)
+    snapshots = {
+        SyncTab.INTERFACES: "ports",
+        SyncTab.CABLES: "links",
+        SyncTab.IP_ADDRESSES: "ip_addresses",
+        SyncTab.MODULES: "inventory",
+        SyncTab.VLANS: "vlans",
+    }
+    for data_type in snapshots.values():
+        _seed_snapshot(data_type, device, mapped_server_key)
+    cache.set(f"{_cache_key('links', device, mapped_server_key)}:manual-remote:test-row", 1, timeout=300)
+
+    with (
+        patch.object(cache, "delete_pattern", side_effect=RuntimeError("cache backend failed")),
+        django_capture_on_commit_callbacks(execute=True),
+    ):
+        transition = coordinator.schedule_mutation(SyncTab.INTERFACES, active_server_key, actor_id=1)
+
+    assert transition.error is not None
+    assert cache.get(_cache_key("ip_addresses", device, mapped_server_key)) is not None
+    assert set(transition.browser_payload()["cleanup_tabs"]) == {tab.value for tab in snapshots}
+    for tab in snapshots:
+        state = cache.get(coordinator.state_key(tab, mapped_server_key))
+        assert state is not None
+        assert state["state"] == SyncTabState.INVALIDATED.value
+    assert coordinator.status(mapped_server_key)[SyncTab.IP_ADDRESSES.value]["snapshot_available"] is False
 
 
 @pytest.mark.django_db
