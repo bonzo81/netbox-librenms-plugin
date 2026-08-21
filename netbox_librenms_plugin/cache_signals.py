@@ -246,13 +246,30 @@ def _m2m_interface_model(through):
     return None
 
 
+def _validate_owner_columns(models):
+    """Fail startup when a supported NetBox model lacks a declared owner column."""
+    from django.core.exceptions import ImproperlyConfigured
+
+    for model in models:
+        label = model._meta.label_lower
+        available = {field.attname for field in model._meta.get_fields() if hasattr(field, "attname")}
+        for column in OWNER_COLUMNS[label]:
+            if column not in available:
+                raise ImproperlyConfigured(
+                    f"Sync cache invalidation model {label} does not provide owner column {column}."
+                )
+
+
 def connect():
     """Subscribe to the NetBox writes the sync tabs depend on."""
     from dcim.models import CableTermination, Interface, MACAddress, Module, ModuleBay
     from ipam.models import IPAddress
     from virtualization.models import VMInterface
 
-    for model in (Module, ModuleBay, Interface, VMInterface, MACAddress, IPAddress, CableTermination):
+    models = (Module, ModuleBay, Interface, VMInterface, MACAddress, IPAddress, CableTermination)
+    _validate_owner_columns(models)
+
+    for model in models:
         label = model._meta.label_lower
         post_init.connect(_remember_owner, sender=model, dispatch_uid=f"{DISPATCH_PREFIX}_init_{label}")
         post_save.connect(_handle_write, sender=model, dispatch_uid=f"{DISPATCH_PREFIX}_save_{label}")

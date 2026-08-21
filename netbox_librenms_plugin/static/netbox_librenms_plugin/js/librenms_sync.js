@@ -17,6 +17,7 @@
 
 const TOMSELECT_INIT_DELAY_MS = 100;
 const COUNTDOWN_UPDATE_INTERVAL_MS = 1000;
+const SYNC_CACHE_STATUS_TIMEOUT_MS = 15000;
 
 /**
  * Return the CSRF token value, or null when the hidden input is missing/empty.
@@ -539,7 +540,7 @@ function renderedSyncCacheStatus() {
     }
 }
 
-function loadSyncCacheFragment(tab, statusGeneration = null) {
+function loadSyncCacheFragment(tab, statusGeneration = null, signal = null) {
     const pane = document.getElementById(tab);
     const content = syncCacheContent(tab);
     const controller = syncCacheController();
@@ -547,7 +548,11 @@ function loadSyncCacheFragment(tab, statusGeneration = null) {
     const requestGeneration = statusGeneration ?? controller.statusGeneration;
     const url = new URL(pane.dataset.fragmentUrl, window.location.href);
     url.searchParams.set('server_key', controller.root.dataset.serverKey);
-    return fetch(url, { credentials: 'same-origin', headers: { 'X-Requested-With': 'XMLHttpRequest' } })
+    return fetch(url, {
+        credentials: 'same-origin',
+        headers: { 'X-Requested-With': 'XMLHttpRequest' },
+        signal,
+    })
         .then(response => {
             if (!response.ok) throw new Error(`HTTP ${response.status}`);
             return response.text();
@@ -561,13 +566,14 @@ function loadSyncCacheFragment(tab, statusGeneration = null) {
             initializeScripts();
         })
         .catch(error => {
+            if (signal?.aborted) throw error;
             if (controller.statusGeneration !== requestGeneration) return;
             console.error(error.message);
             clearSyncTabContent(tab, 'Cache state could not be restored. Reload this tab before continuing.');
         });
 }
 
-function reconcileSyncCacheStatus(nextStatus, statusGeneration = null) {
+function reconcileSyncCacheStatus(nextStatus, statusGeneration = null, signal = null) {
     const controller = syncCacheController();
     if (!controller) return Promise.resolve();
     const requestGeneration = statusGeneration ?? controller.statusGeneration;
@@ -620,7 +626,7 @@ function reconcileSyncCacheStatus(nextStatus, statusGeneration = null) {
             )
         ) {
             if (tab === activeTab) {
-                fragmentLoads.push(loadSyncCacheFragment(tab, requestGeneration));
+                fragmentLoads.push(loadSyncCacheFragment(tab, requestGeneration, signal));
                 controller.requiredSourceFragments.delete(tab);
             }
         } else if (
@@ -630,7 +636,7 @@ function reconcileSyncCacheStatus(nextStatus, statusGeneration = null) {
         ) {
             if (tab === activeTab) {
                 controller.invalidatedLocally.delete(tab);
-                fragmentLoads.push(loadSyncCacheFragment(tab, requestGeneration));
+                fragmentLoads.push(loadSyncCacheFragment(tab, requestGeneration, signal));
             } else {
                 controller.invalidatedLocally.add(tab);
                 updateSyncCacheTabState(tab, { state: 'invalidated', snapshot_available: false });
@@ -641,7 +647,7 @@ function reconcileSyncCacheStatus(nextStatus, statusGeneration = null) {
             syncCacheContent(tab)?.dataset.cacheEmpty === 'true' &&
             !controller.invalidatedLocally.has(tab)
         ) {
-            fragmentLoads.push(loadSyncCacheFragment(tab, requestGeneration));
+            fragmentLoads.push(loadSyncCacheFragment(tab, requestGeneration, signal));
         }
     });
     if (controller.statusGeneration !== requestGeneration) return Promise.resolve();
@@ -678,8 +684,14 @@ function checkSyncCacheStatus() {
     const requestGeneration = controller.statusGeneration;
     const url = new URL(controller.root.dataset.statusUrl, window.location.href);
     url.searchParams.set('server_key', controller.root.dataset.serverKey);
+    const abortController = new AbortController();
+    const timeoutId = setTimeout(() => abortController.abort(), SYNC_CACHE_STATUS_TIMEOUT_MS);
     let statusRequest;
-    statusRequest = fetch(url, { credentials: 'same-origin', headers: { 'Accept': 'application/json' } })
+    statusRequest = fetch(url, {
+        credentials: 'same-origin',
+        headers: { 'Accept': 'application/json' },
+        signal: abortController.signal,
+    })
         .then(response => {
             if (controller.statusGeneration !== requestGeneration) return null;
             if (!response.ok) throw new Error(`HTTP ${response.status}`);
@@ -691,7 +703,7 @@ function checkSyncCacheStatus() {
             if (!expectedTabs.length || !isValidSyncCacheStatusPayload(payload, expectedTabs)) {
                 throw new Error('Invalid cache status response');
             }
-            return reconcileSyncCacheStatus(payload.tabs, requestGeneration);
+            return reconcileSyncCacheStatus(payload.tabs, requestGeneration, abortController.signal);
         })
         .then(() => {
             if (controller.statusGeneration === requestGeneration) controller.lastCheckFailed = false;
@@ -703,6 +715,7 @@ function checkSyncCacheStatus() {
             failClosedSyncControls('Cache status could not be verified. Reload this tab before continuing.');
         })
         .finally(() => {
+            clearTimeout(timeoutId);
             if (controller.checking !== statusRequest) return;
             controller.checking = null;
             if (controller.recheckPending) {

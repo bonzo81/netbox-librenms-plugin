@@ -63,6 +63,18 @@ def _clear(keys):
         cache.delete(key)
 
 
+def test_connect_rejects_a_missing_owner_column(monkeypatch):
+    """Fail startup when NetBox no longer exposes a declared owner column."""
+    from django.core.exceptions import ImproperlyConfigured
+
+    from netbox_librenms_plugin import cache_signals
+
+    monkeypatch.setitem(cache_signals.OWNER_COLUMNS, "dcim.interface", ("missing_owner_id",))
+
+    with pytest.raises(ImproperlyConfigured, match=r"dcim\.interface.*missing_owner_id"):
+        cache_signals.connect()
+
+
 @pytest.mark.django_db
 class TestOrmWritesInvalidateTheirOwner:
     """Every tracked write reaches the owning object's snapshots, whoever made it."""

@@ -571,6 +571,79 @@ def test_cache_status_failure_disables_every_loaded_sync_control():
         browser.close()
 
 
+def test_hung_cache_status_request_times_out_and_fails_closed():
+    """A stalled status request must release the controller and remove stale controls."""
+    initial = {
+        "interfaces": _state("before-interfaces"),
+        "ipaddresses": _state("before-ip"),
+    }
+
+    with playwright.sync_playwright() as runtime:
+        browser = runtime.chromium.launch(headless=True)
+        page = browser.new_page()
+        page.clock.install()
+        page.set_content(_page_html(initial))
+        stalled_routes = []
+        page.route("https://plugin.example.com/status?*", lambda route: stalled_routes.append(route))
+        page.add_script_tag(path=str(SCRIPT_PATH))
+        page.evaluate("() => { initializeSyncCacheConsistency(); checkSyncCacheStatus(); }")
+        assert page.locator("#interfaces-tab").evaluate("node => node.classList.contains('sync-cache-ready')")
+
+        page.clock.fast_forward(20_000)
+        page.clock.resume()
+        page.wait_for_function("syncCacheController().lastCheckFailed === true", timeout=1_000)
+
+        assert page.evaluate("syncCacheController().checking") is None
+        assert page.locator("#interface-action").count() == 0
+        assert not page.locator("#interfaces-tab").evaluate("node => node.classList.contains('sync-cache-ready')")
+        for route in stalled_routes:
+            route.abort()
+        browser.close()
+
+
+def test_hung_cache_fragment_request_times_out_and_fails_closed():
+    """A stalled fragment request must release the controller and remove stale controls."""
+    initial = {
+        "interfaces": _state("before-interfaces"),
+        "ipaddresses": _state("before-ip"),
+    }
+    current = {
+        **initial,
+        "interfaces": _state("after-interfaces"),
+    }
+
+    with playwright.sync_playwright() as runtime:
+        browser = runtime.chromium.launch(headless=True)
+        page = browser.new_page()
+        page.clock.install()
+        page.set_content(_page_html(initial))
+        stalled_routes = []
+        page.route(
+            "https://plugin.example.com/status?*",
+            lambda route: route.fulfill(json={"tabs": current}),
+        )
+        page.route("https://plugin.example.com/fragment/interfaces?*", lambda route: stalled_routes.append(route))
+        page.add_script_tag(path=str(SCRIPT_PATH))
+        with page.expect_request("https://plugin.example.com/fragment/interfaces?*"):
+            page.evaluate("() => { initializeSyncCacheConsistency(); checkSyncCacheStatus(); }")
+        page.wait_for_function("syncCacheController().status.interfaces.revision === 'after-interfaces'")
+        assert page.evaluate("syncCacheController().checking !== null")
+        assert page.evaluate("syncCacheController().lastCheckFailed") is False
+        assert page.locator("#interfaces-tab").evaluate("node => node.classList.contains('sync-cache-ready')")
+
+        page.clock.fast_forward(20_000)
+        page.clock.resume()
+        page.wait_for_function("syncCacheController().lastCheckFailed === true", timeout=1_000)
+
+        assert page.evaluate("syncCacheController().checking") is None
+        assert page.locator("#interface-action").count() == 0
+        assert not page.locator("#interfaces-tab").evaluate("node => node.classList.contains('sync-cache-ready')")
+        assert stalled_routes
+        for route in stalled_routes:
+            route.abort()
+        browser.close()
+
+
 def test_valid_status_recovers_when_the_initial_state_is_malformed():
     """The stable tab contract must validate status when initial state parsing fails."""
     current = {

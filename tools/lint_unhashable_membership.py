@@ -207,6 +207,11 @@ class MembershipChecker(ast.NodeVisitor):
                 if isinstance(target, ast.Name):
                     self._scope.tainted.add(target.id)
 
+    def visit_AnnAssign(self, node):
+        self.generic_visit(node)
+        if node.value is not None and self._is_tainted(node.value) and isinstance(node.target, ast.Name):
+            self._scope.tainted.add(node.target.id)
+
     # -- guards --------------------------------------------------------------
     def visit_If(self, node):
         self._guard_stack.append(node.test)
@@ -225,43 +230,53 @@ class MembershipChecker(ast.NodeVisitor):
     # -- the check ------------------------------------------------------------
     def visit_Compare(self, node):
         self.generic_visit(node)
-        if len(node.ops) != 1 or not isinstance(node.ops[0], (ast.In, ast.NotIn)):
-            return
-        right = node.comparators[0]
-        right_is_hashable_container = _is_hashable_container_literal(right) or (
-            isinstance(right, ast.Name) and right.id in self.hashable_containers
-        )
-        if isinstance(right, ast.Attribute) and right.attr in self.hashable_containers:
-            right_is_hashable_container = True
-        if not right_is_hashable_container:
-            return
+        left_operands = [node.left, *node.comparators[:-1]]
+        for left, operator, right in zip(left_operands, node.ops, node.comparators, strict=True):
+            if not isinstance(operator, (ast.In, ast.NotIn)):
+                continue
+            right_is_hashable_container = _is_hashable_container_literal(right) or (
+                isinstance(right, ast.Name) and right.id in self.hashable_containers
+            )
+            if isinstance(right, ast.Attribute) and right.attr in self.hashable_containers:
+                right_is_hashable_container = True
+            if not right_is_hashable_container or not self._is_tainted(left):
+                continue
 
-        left = node.left
-        if not self._is_tainted(left):
-            return
-
-        fingerprint = _fingerprint(left)
-        for guard in self._guard_stack:
-            if _guards_in(guard, fingerprint, node):
+            fingerprint = _fingerprint(left)
+            if any(_guards_in(guard, fingerprint, node) for guard in self._guard_stack):
+                continue
+            if self._suppressed(node.lineno):
                 return
 
-        if self._suppressed(node.lineno):
-            return
-
-        self.findings.append(
-            (
-                self.path,
-                node.lineno,
-                node.col_offset,
-                "membership test against a set/dict on an externally read value; "
-                "guard it with isinstance(..., str) first or compare against a tuple",
+            self.findings.append(
+                (
+                    self.path,
+                    node.lineno,
+                    node.col_offset,
+                    "membership test against a set/dict on an externally read value; "
+                    "guard it with isinstance(..., str) first or compare against a tuple",
+                )
             )
-        )
+            return
 
 
 def collect_container_names(paths):
-    """Return every name bound to a set, frozenset or dict literal anywhere in *paths*."""
-    names = set()
+    """Return the container names visible to each path, including imports."""
+    paths = tuple(paths)
+    names_by_path = {path: set() for path in paths}
+    imports_by_path = {path: [] for path in paths}
+
+    def imported_path(module):
+        module_parts = tuple(module.split("."))
+        candidates = []
+        for path in paths:
+            path_parts = path.with_suffix("").parts
+            if path_parts[-1:] == ("__init__",):
+                path_parts = path_parts[:-1]
+            if path_parts[-len(module_parts) :] == module_parts:
+                candidates.append(path)
+        return candidates[0] if len(candidates) == 1 else None
+
     for path in paths:
         try:
             tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
@@ -269,8 +284,25 @@ def collect_container_names(paths):
             continue
         checker = MembershipChecker(path)
         checker.collect_containers(tree)
-        names |= checker.hashable_containers
-    return names
+        names_by_path[path].update(checker.hashable_containers)
+        imports_by_path[path].extend(
+            (imported_path(node.module), alias.name, alias.asname or alias.name)
+            for node in ast.walk(tree)
+            if isinstance(node, ast.ImportFrom) and node.module
+            for alias in node.names
+            if alias.name != "*"
+        )
+    changed = True
+    while changed:
+        changed = False
+        for path, imported_names in imports_by_path.items():
+            for source_path, source_name, target_name in imported_names:
+                if source_path is None or source_name not in names_by_path[source_path]:
+                    continue
+                if target_name not in names_by_path[path]:
+                    names_by_path[path].add(target_name)
+                    changed = True
+    return names_by_path
 
 
 def check_file(path, hashable_containers=()):
@@ -307,10 +339,10 @@ def main(argv=None):
     args = parser.parse_args(argv)
 
     paths = list(iter_python_files(args.paths or ["netbox_librenms_plugin"]))
-    containers = collect_container_names(paths)
+    containers_by_path = collect_container_names(paths)
     findings = []
     for path in paths:
-        findings.extend(check_file(path, containers))
+        findings.extend(check_file(path, containers_by_path[path]))
 
     for path, line, col, message in findings:
         if args.github:

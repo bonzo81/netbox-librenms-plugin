@@ -88,6 +88,14 @@ def test_no_test_module_registers_a_session_wide_plugin():
     )
 
 
+def test_pyyaml_is_declared_for_the_direct_test_import():
+    """Declare packages imported directly by the test suite."""
+    requirements = (REPOSITORY_ROOT / "requirements_dev.txt").read_text().splitlines()
+    names = {re.split(r"[<>=!~;\s]", requirement, maxsplit=1)[0].lower() for requirement in requirements}
+
+    assert "pyyaml" in names
+
+
 def test_xdist_worker_gets_private_postgresql_and_redis_databases():
     """Assign one PostgreSQL database and two Redis databases to a worker."""
     assert isolated_test_database_name("test_netbox_librenms", "gw3") == "test_netbox_librenms_gw3"

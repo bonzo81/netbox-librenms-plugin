@@ -26,7 +26,7 @@ def _scan(tmp_path, source, extra_sources=()):
     target = tmp_path / "sample.py"
     target.write_text(source)
     paths.append(target)
-    return check_file(target, collect_container_names(paths))
+    return check_file(target, collect_container_names(paths)[target])
 
 
 CONSTANTS = 'NAMES = frozenset({"ifName", "ifDescr"})\nPREFS = {"a": 1}\n'
@@ -37,6 +37,10 @@ FLAGGED = {
     "json body value into a dict": 'def f(data):\n    key = data.get("key")\n    return key in PREFS\n',
     "subscript read into a frozenset": 'def f(cached):\n    return cached["x"] not in NAMES\n',
     "value carried through a local name": 'def f(cached):\n    v = cached.get("x")\n    return v in NAMES\n',
+    "value carried through an annotated local name": (
+        'def f(cached):\n    v: object = cached.get("x")\n    return v in NAMES\n'
+    ),
+    "membership inside a chained comparison": ('def f(cached):\n    v = cached.get("x")\n    return v is v in NAMES\n'),
 }
 
 CLEAN = {
@@ -124,13 +128,33 @@ def test_a_constant_imported_from_another_module_is_still_resolved(tmp_path):
     assert findings, "a cross-module constant must not hide the finding"
 
 
+def test_an_aliased_constant_imported_from_another_module_is_still_resolved(tmp_path):
+    """An import alias must retain the imported constant's container type."""
+    findings = _scan(
+        tmp_path,
+        'from extra_0 import NAMES as ALLOWED_NAMES\n\n\ndef f(cached):\n    return cached.get("x") in ALLOWED_NAMES\n',
+        extra_sources=[CONSTANTS],
+    )
+    assert findings, "an imported alias must not hide the finding"
+
+
+def test_an_import_alias_does_not_inherit_an_unrelated_modules_container_type(tmp_path):
+    """An alias must resolve against its imported module, not any same-named symbol."""
+    findings = _scan(
+        tmp_path,
+        'from extra_1 import NAMES as ALLOWED_NAMES\n\n\ndef f(cached):\n    return cached.get("x") in ALLOWED_NAMES\n',
+        extra_sources=[CONSTANTS, 'NAMES = ("safe",)\n'],
+    )
+    assert not findings, f"an unrelated container name contaminated the import alias: {findings}"
+
+
 def test_the_plugin_package_is_clean():
     """The whole point of the sweep: no unguarded site is left behind."""
     from lint_unhashable_membership import iter_python_files, main
 
     package = REPOSITORY_ROOT / "netbox_librenms_plugin"
     paths = list(iter_python_files([package]))
-    containers = collect_container_names(paths)
-    findings = [f for path in paths for f in check_file(path, containers)]
+    containers_by_path = collect_container_names(paths)
+    findings = [f for path in paths for f in check_file(path, containers_by_path[path])]
     assert not findings, "\n".join(f"{p}:{ln}: {msg}" for p, ln, _col, msg in findings)
     assert main([str(package)]) == 0

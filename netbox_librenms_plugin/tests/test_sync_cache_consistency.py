@@ -1058,6 +1058,7 @@ def test_interface_delete_without_a_usable_server_invalidates_the_source_snapsho
     assert not type(interface).objects.filter(pk=interface.pk).exists()
     assert cache.get(_cache_key("ports", device, server_key)) is None
     state = cache.get(SyncCacheConsistency(device).state_key(SyncTab.INTERFACES, server_key))
+    assert state is not None
     assert state["state"] == SyncTabState.INVALIDATED.value
 
 
@@ -1090,6 +1091,7 @@ def test_module_serial_update_without_a_usable_server_invalidates_the_source_sna
     assert module.serial == "NEW"
     assert cache.get(_cache_key("inventory", device, server_key)) is None
     state = cache.get(SyncCacheConsistency(device).state_key(SyncTab.MODULES, server_key))
+    assert state is not None
     assert state["state"] == SyncTabState.INVALIDATED.value
 
 
