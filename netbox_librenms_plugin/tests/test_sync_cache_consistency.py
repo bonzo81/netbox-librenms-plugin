@@ -49,6 +49,11 @@ def _configure_servers(settings):
     settings.PLUGINS_CONFIG = plugin_config
 
 
+def _configured_server_key(settings):
+    servers = settings.PLUGINS_CONFIG["netbox_librenms_plugin"]["servers"]
+    return next(iter(servers))
+
+
 def _cache_key(data_type, obj, server_key):
     from netbox_librenms_plugin.sync_cache import sync_snapshot_key
 
@@ -1028,42 +1033,64 @@ def test_interface_delete_without_posted_server_uses_active_namespace(
 
 
 @pytest.mark.django_db
-def test_interface_delete_succeeds_without_a_configured_librenms_server(client, settings):
-    """A NetBox-only deletion must not depend on constructing a LibreNMS client."""
-    configure_no_librenms_servers(settings)
-    device = make_device("cache-delete-without-server")
+def test_interface_delete_without_a_usable_server_invalidates_the_source_snapshot(
+    client,
+    settings,
+    django_capture_on_commit_callbacks,
+):
+    """A NetBox-only deletion without cleanup ownership must invalidate its source snapshot."""
+    server_key = _configured_server_key(settings)
+    device = make_device("cache-delete-without-server", librenms_cf={server_key: {"id": 644}})
     interface = make_interface(device, "Ethernet1", iface_type="1000base-t")
+    configure_no_librenms_servers(settings)
+    _seed_snapshot("ports", device, server_key)
+    assert cache.get(_cache_key("ports", device, server_key)) is not None
     client.force_login(make_superuser("cache-delete-without-server-user"))
     url = reverse(
         "plugins:netbox_librenms_plugin:delete_netbox_interfaces",
         kwargs={"object_type": "device", "object_id": device.pk},
     )
 
-    response = client.post(url, {"interface_ids": [str(interface.pk)]})
+    with django_capture_on_commit_callbacks(execute=True):
+        response = client.post(url, {"interface_ids": [str(interface.pk)]})
 
     assert response.status_code == 200
     assert not type(interface).objects.filter(pk=interface.pk).exists()
+    assert cache.get(_cache_key("ports", device, server_key)) is None
+    state = cache.get(SyncCacheConsistency(device).state_key(SyncTab.INTERFACES, server_key))
+    assert state["state"] == SyncTabState.INVALIDATED.value
 
 
 @pytest.mark.django_db
-def test_module_serial_update_succeeds_without_a_configured_librenms_server(client, settings):
-    """A NetBox-only serial update must not depend on constructing a LibreNMS client."""
-    configure_no_librenms_servers(settings)
-    device = make_device("cache-serial-without-server")
+def test_module_serial_update_without_a_usable_server_invalidates_the_source_snapshot(
+    client,
+    settings,
+    django_capture_on_commit_callbacks,
+):
+    """A NetBox-only module write without cleanup ownership must invalidate its source snapshot."""
+    server_key = _configured_server_key(settings)
+    device = make_device("cache-serial-without-server", librenms_cf={server_key: {"id": 645}})
     bay = ModuleBay.objects.create(device=device, name="Slot 1")
     module_type = ModuleType.objects.create(
         manufacturer=device.device_type.manufacturer,
         model="Serverless Serial Module",
     )
     module = Module.objects.create(device=device, module_bay=bay, module_type=module_type, serial="OLD")
+    configure_no_librenms_servers(settings)
+    _seed_snapshot("inventory", device, server_key)
+    assert cache.get(_cache_key("inventory", device, server_key)) is not None
     client.force_login(make_superuser("cache-serial-without-server-user"))
     url = reverse("plugins:netbox_librenms_plugin:update_module_serial", kwargs={"pk": device.pk})
 
-    response = client.post(url, {"module_id": str(module.pk), "serial": "NEW"})
+    with django_capture_on_commit_callbacks(execute=True):
+        response = client.post(url, {"module_id": str(module.pk), "serial": "NEW"})
 
     assert response.status_code == 302
     module.refresh_from_db()
     assert module.serial == "NEW"
+    assert cache.get(_cache_key("inventory", device, server_key)) is None
+    state = cache.get(SyncCacheConsistency(device).state_key(SyncTab.MODULES, server_key))
+    assert state["state"] == SyncTabState.INVALIDATED.value
 
 
 @pytest.mark.django_db

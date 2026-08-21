@@ -632,6 +632,41 @@ class TestEverySchedulingViewTakesTheClaim:
         names = names if names is not None else self._scheduler_names()
         return bool(self._called_names(definition) & names)
 
+    def _server_key_guarded_scheduler_calls(self, cls, names=None):
+        """Return scheduler calls nested in a truthy server-key branch."""
+        import ast
+        import inspect
+        import textwrap
+
+        definition = ast.parse(textwrap.dedent(inspect.getsource(cls))).body[0]
+        names = names if names is not None else self._scheduler_names()
+
+        def requires_server_key(test):
+            if isinstance(test, ast.Name):
+                return test.id == "server_key"
+            return (
+                isinstance(test, ast.BoolOp)
+                and isinstance(test.op, ast.And)
+                and any(requires_server_key(value) for value in test.values)
+            )
+
+        def find(node, server_key_guarded=False):
+            found = []
+            for child in ast.iter_child_nodes(node):
+                if isinstance(child, ast.ClassDef):
+                    continue
+                guarded = server_key_guarded
+                if isinstance(node, ast.If) and child in node.body:
+                    guarded |= requires_server_key(node.test)
+                if isinstance(child, ast.Call) and guarded:
+                    name = child.func.id if isinstance(child.func, ast.Name) else getattr(child.func, "attr", None)
+                    if name in names:
+                        found.append(name)
+                found.extend(find(child, guarded))
+            return found
+
+        return find(definition)
+
     def _own_nodes(self, node):
         """Yield every node under *node* except the body of a class nested inside it."""
         import ast
@@ -659,6 +694,30 @@ class TestEverySchedulingViewTakesTheClaim:
     def test_no_scheduling_view_is_missing_the_claim(self):
         unclaimed = self._unclaimed_scheduling_views()
         assert not unclaimed, "these views schedule a transition without claiming their page: " + ", ".join(unclaimed)
+
+    def test_server_guarded_scheduling_views_drop_the_claim_without_a_server(self):
+        """A guarded scheduler must not suppress the write signal when its guard is false."""
+        names = self._scheduler_names()
+        guarded = {
+            cls
+            for cls in self._view_classes()
+            if self._claims(cls) and self._server_key_guarded_scheduler_calls(cls, names)
+        }
+        expected = {
+            "AddBayTemplateView",
+            "DeleteNetBoxInterfacesView",
+            "MoveModuleView",
+            "UpdateModuleSerialView",
+        }
+        guarded_names = {cls.__qualname__ for cls in guarded}
+        assert expected <= guarded_names, f"the check no longer finds {sorted(expected - guarded_names)}"
+
+        missing = sorted(
+            f"{cls.__module__}.{cls.__qualname__}"
+            for cls in guarded
+            if not getattr(cls, "DROP_SYNC_PAGE_CLAIM_WITHOUT_SERVER", False)
+        )
+        assert not missing, "these guarded scheduling views retain the claim without a server: " + ", ".join(missing)
 
     def test_the_scan_reaches_every_class_the_views_package_defines(self):
         """Cross-check against the source: a class the scan never reaches is never checked."""

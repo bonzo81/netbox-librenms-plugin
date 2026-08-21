@@ -562,8 +562,8 @@ class LibreNMSAPIMixin:
         fallback, and that property raises KeyError/ValueError when the plugin configuration holds
         no bindable server. Every action view would then answer a 500. This resolve reports the
         missing server instead, and the caller decides what that means: a NetBox-only write (module
-        serial/move, bay template, interface delete) continues and skips its cache cleanup, while an
-        action that reads or writes server-scoped data fails closed.
+        serial/move, bay template, interface delete) continues and lets its write signal invalidate
+        the source snapshot, while an action that reads or writes server-scoped data fails closed.
 
         Args:
             data: A dict-like request payload (``request.POST`` or ``request.GET``) carrying an
@@ -802,11 +802,15 @@ class SyncPageClaimMixin:
     # that happens to share the number while leaving the real pages unprotected.
     SYNC_PAGE_MODEL_LABEL = None
 
-    def sync_page_claim(self, **kwargs):
+    # Opt in when an unusable server also prevents this view from scheduling its transition.
+    DROP_SYNC_PAGE_CLAIM_WITHOUT_SERVER = False
+
+    def sync_page_claim(self, request=None, **kwargs):
         """
         Return the identity of the object this request's sync page is acting on.
 
         Args:
+            request: The current request, used by views that cannot schedule without a server.
             **kwargs: The URL kwargs, carrying ``object_type`` plus ``object_id``, or ``pk``.
 
         Returns:
@@ -814,6 +818,13 @@ class SyncPageClaimMixin:
         """
         from netbox_librenms_plugin.sync_cache import sync_page_key
 
+        if (
+            self.DROP_SYNC_PAGE_CLAIM_WITHOUT_SERVER
+            and request is not None
+            and request.method == "POST"
+            and self.resolve_posted_server_key_or_none(request.POST) is None
+        ):
+            return None
         pk = kwargs.get("object_id", kwargs.get("pk"))
         if pk is None:
             return None
@@ -845,7 +856,7 @@ class SyncPageClaimMixin:
         """
         from netbox_librenms_plugin.sync_cache import claim_sync_page
 
-        with claim_sync_page(self.sync_page_claim(**kwargs)):
+        with claim_sync_page(self.sync_page_claim(request=request, **kwargs)):
             return super().dispatch(request, *args, **kwargs)
 
 

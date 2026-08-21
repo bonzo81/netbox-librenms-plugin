@@ -1672,6 +1672,7 @@ class UpdateModuleSerialView(
     """Update the serial number of an already-installed module from LibreNMS inventory data."""
 
     SYNC_PAGE_MODEL_LABEL = "dcim.device"
+    DROP_SYNC_PAGE_CLAIM_WITHOUT_SERVER = True
 
     def post(self, request, pk):
         from dcim.models import Device, Module
@@ -2309,6 +2310,7 @@ class MoveModuleView(
     """
 
     SYNC_PAGE_MODEL_LABEL = "dcim.device"
+    DROP_SYNC_PAGE_CLAIM_WITHOUT_SERVER = True
 
     def post(self, request, pk):
         from dcim.models import Device, Module, ModuleBay
@@ -2435,6 +2437,7 @@ class AddBayTemplateView(
     """
 
     SYNC_PAGE_MODEL_LABEL = "dcim.device"
+    DROP_SYNC_PAGE_CLAIM_WITHOUT_SERVER = True
 
     TARGET_KINDS = ("device_type", "module_type")
 
