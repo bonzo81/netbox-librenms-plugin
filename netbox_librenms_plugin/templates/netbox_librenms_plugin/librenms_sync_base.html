@@ -702,6 +702,27 @@ A migrated donor has its active librenms_id cleared (so it is never found_in_lib
 banner above directs the user to the per-row "Move to winner" actions that live in these tabs.
 Render the tabs in migrated mode too, or those interface/IP move controls are unreachable.
 {% endcomment %}
+{% comment %}
+A failed lookup is not an answer about the device, so it is shown before the branch below rather
+than as one of its outcomes. Saying "not found" here would send the user to clear a librenms_id
+that may well be correct.
+{% endcomment %}
+{% if librenms_lookup_error %}
+<div class="alert alert-danger d-flex align-items-center">
+    <i class="mdi mdi-alert-circle me-2"></i>
+    <div>
+        <strong>LibreNMS lookup failed:</strong>
+        {{ librenms_lookup_error.message }}
+        Whether LibreNMS has the device with <code>librenms_id</code> <code>{{ librenms_device_id }}</code> is unknown.
+        <hr class="my-2">
+        <span class="text-muted">
+            Leave the custom field as it is and retry once LibreNMS answers again. If this
+            continues, check the LibreNMS server and its logs for that device.
+        </span>
+    </div>
+</div>
+{% endif %}
+
 {% if found_in_librenms or migrated_to_marker or device_info_unavailable and has_librenms_id %}
 
 {% if sync_cache_status_url %}

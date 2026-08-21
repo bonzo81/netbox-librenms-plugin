@@ -1,0 +1,138 @@
+"""A failed LibreNMS lookup must say which failure it was.
+
+A device that LibreNMS does not have, a device LibreNMS errors on, and a server that cannot be
+reached are three different problems with three different fixes. Reporting all of them as
+"device not found" sends the user to remove a custom field that is correct.
+"""
+
+from copy import deepcopy
+
+import pytest
+from django.urls import reverse
+
+from netbox_librenms_plugin.tests.conftest import make_device, make_superuser
+from netbox_librenms_plugin.tests.mock_librenms_server import librenms_mock_server
+
+ABSENT_DEVICE_ID = 4041
+ERRORING_DEVICE_ID = 1255
+
+
+@pytest.fixture
+def librenms_server(monkeypatch):
+    """A real HTTP LibreNMS whose responses this test controls."""
+    monkeypatch.setenv("NO_PROXY", "127.0.0.1,localhost")
+    monkeypatch.setenv("no_proxy", "127.0.0.1,localhost")
+    with librenms_mock_server() as server:
+        yield server
+
+
+def _point_plugin_at(settings, url):
+    """Configure one server and return the key, so no test hardcodes an environment's key."""
+    plugin_config = deepcopy(settings.PLUGINS_CONFIG)
+    plugin_config["netbox_librenms_plugin"]["servers"] = {
+        "default": {"librenms_url": url, "api_token": "test-token", "verify_ssl": False}
+    }
+    settings.PLUGINS_CONFIG = plugin_config
+    return "default"
+
+
+def _api_for(server_key):
+    from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+
+    return LibreNMSAPI(server_key=server_key)
+
+
+@pytest.mark.django_db
+def test_a_missing_device_is_still_reported_as_missing(librenms_server, settings):
+    """The existing contract: LibreNMS answering 404 means the device is genuinely absent."""
+    server_key = _point_plugin_at(settings, librenms_server.url)
+    librenms_server.register(
+        f"/api/v0/devices/{ABSENT_DEVICE_ID}",
+        {"status": "error", "message": "Device does not exist"},
+        status=404,
+    )
+
+    assert _api_for(server_key).get_device_info(ABSENT_DEVICE_ID) == (False, None)
+
+
+@pytest.mark.django_db
+def test_a_server_error_is_not_reported_as_a_missing_device(librenms_server, settings):
+    """LibreNMS answering 500 says nothing about whether the device exists."""
+    from netbox_librenms_plugin.librenms_api import LibreNMSLookupError
+
+    server_key = _point_plugin_at(settings, librenms_server.url)
+    librenms_server.register(
+        f"/api/v0/devices/{ERRORING_DEVICE_ID}",
+        {"message": "Server Error"},
+        status=500,
+    )
+
+    success, failure = _api_for(server_key).get_device_info(ERRORING_DEVICE_ID)
+
+    assert success is False
+    assert isinstance(failure, LibreNMSLookupError)
+    assert failure.status_code == 500
+
+
+@pytest.mark.django_db
+def test_an_unreachable_server_is_not_reported_as_a_missing_device(librenms_server, settings):
+    """Nothing answered at all, so the device's existence is unknown rather than denied."""
+    from netbox_librenms_plugin.librenms_api import LibreNMSLookupError
+
+    # Take a port that was really bound, then stop listening on it, so the refusal is not a
+    # guess about which ports happen to be free.
+    server_key = _point_plugin_at(settings, librenms_server.url)
+    librenms_server.stop()
+
+    success, failure = _api_for(server_key).get_device_info(ERRORING_DEVICE_ID)
+
+    assert success is False
+    assert isinstance(failure, LibreNMSLookupError)
+    assert failure.status_code is None, "an HTTP answer arrived, so this did not test a transport failure"
+
+
+@pytest.mark.django_db
+def test_the_sync_page_does_not_tell_the_user_to_clear_a_correct_custom_field(client, librenms_server, settings):
+    """End to end: the page must not blame the custom field for a LibreNMS server error."""
+    server_key = _point_plugin_at(settings, librenms_server.url)
+    librenms_server.register(
+        f"/api/v0/devices/{ERRORING_DEVICE_ID}",
+        {"message": "Server Error"},
+        status=500,
+    )
+    device = make_device("librenms-500-device", librenms_cf={server_key: ERRORING_DEVICE_ID})
+    client.force_login(make_superuser("librenms-500-user"))
+
+    response = client.get(reverse("plugins:netbox_librenms_plugin:device_librenms_sync", args=[device.pk]))
+    body = response.content.decode()
+
+    assert response.status_code == 200
+    assert "LibreNMS lookup failed" in body
+    assert str(ERRORING_DEVICE_ID) in body
+    # Every place the page could still call the device missing, not just the banner.
+    assert "Device not found" not in body, "a server error was reported as a missing device"
+    assert "Remove the custom field value" not in body, "the page told the user to clear a correct value"
+    assert "Not found" not in body, "the status row still called the device missing"
+    # The control itself, not the phrase: the phrase also appears in a template comment.
+    assert 'data-bs-target="#add-device-modal"' not in body, "the page offered to add a device it could not look up"
+    assert 'id="add-device-modal"' not in body, "the add-device modal was rendered for a failed lookup"
+
+
+@pytest.mark.django_db
+def test_the_sync_page_still_reports_a_genuinely_missing_device(client, librenms_server, settings):
+    """The 404 path must keep its message, including the advice to clear the custom field."""
+    server_key = _point_plugin_at(settings, librenms_server.url)
+    librenms_server.register(
+        f"/api/v0/devices/{ABSENT_DEVICE_ID}",
+        {"status": "error", "message": "Device does not exist"},
+        status=404,
+    )
+    device = make_device("librenms-404-device", librenms_cf={server_key: ABSENT_DEVICE_ID})
+    client.force_login(make_superuser("librenms-404-user"))
+
+    response = client.get(reverse("plugins:netbox_librenms_plugin:device_librenms_sync", args=[device.pk]))
+    body = response.content.decode()
+
+    assert response.status_code == 200
+    assert "Device not found" in body
+    assert "Remove the custom field value" in body

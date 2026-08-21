@@ -1,6 +1,7 @@
 import logging
 import math
 import urllib.parse
+from dataclasses import dataclass
 
 import requests
 from django.core.cache import cache
@@ -17,7 +18,22 @@ DEFAULT_CACHE_TIMEOUT = 300
 # meaningfully staling the displayed values.
 DEVICE_INFO_CACHE_TIMEOUT = 60
 
+# LibreNMS answers 404 for a device it does not have; every other fault is a lookup error.
+HTTP_NOT_FOUND = 404
+
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class LibreNMSLookupError:
+    """Why a LibreNMS lookup failed, when the object being absent is not the reason.
+
+    ``status_code`` is None when nothing answered at all, so a server that reported a fault
+    stays distinguishable from a server that could not be reached.
+    """
+
+    message: str
+    status_code: int | None = None
 
 
 def configured_cache_timeout(server_key):
@@ -519,7 +535,23 @@ class LibreNMSAPI:
                 timeout=DEFAULT_API_TIMEOUT,
                 verify=self.verify_ssl,
             )
-            response.raise_for_status()
+        except requests.exceptions.RequestException:
+            # Nothing answered, so the device's existence is unknown rather than denied.
+            logger.warning("LibreNMS could not be reached for device %s", device_id, exc_info=True)
+            return False, LibreNMSLookupError("The LibreNMS server could not be reached.")
+
+        if response.status_code == HTTP_NOT_FOUND:
+            # The only answer that means the device is genuinely absent.
+            return False, None
+        # Checked explicitly rather than through raise_for_status(), which lets a terminal 3xx
+        # through and would let its body be read as a device.
+        if not 200 <= response.status_code < 300:
+            logger.warning("LibreNMS returned HTTP %s for device %s", response.status_code, device_id)
+            return False, LibreNMSLookupError(
+                f"LibreNMS answered with HTTP {response.status_code} for this device.", response.status_code
+            )
+
+        try:
             device_data = response.json()["devices"][0]
             if not isinstance(device_data, dict):
                 return False, None
@@ -533,7 +565,8 @@ class LibreNMSAPI:
             result = (True, device_data)
             cache.set(cache_key, result, timeout=DEVICE_INFO_CACHE_TIMEOUT)
             return result
-        except (requests.exceptions.RequestException, ValueError, IndexError, KeyError, TypeError):
+        except (ValueError, IndexError, KeyError, TypeError):
+            # A 2xx whose body carries no usable device is treated as absent, as before.
             return False, None
 
     def get_ports(self, device_id, with_vlans=True):

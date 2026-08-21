@@ -421,12 +421,16 @@ class TestGetDeviceInfoErrors:
         assert ok is False
         assert data is None
 
-    def test_request_exception_returns_false(self):
+    def test_request_exception_reports_the_lookup_failure(self):
+        """A transport failure is not an answer about the device, so it is not "not found"."""
+        from netbox_librenms_plugin.librenms_api import LibreNMSLookupError
+
         api = _make_api()
         with patch("requests.get", side_effect=requests.exceptions.RequestException("error")):
             ok, data = api.get_device_info(1)
         assert ok is False
-        assert data is None
+        assert isinstance(data, LibreNMSLookupError)
+        assert data.status_code is None
 
 
 class TestGetPortVlanDetailsErrors:

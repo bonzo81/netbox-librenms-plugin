@@ -278,6 +278,7 @@ class BaseLibreNMSSyncView(
                 "device_info_unavailable": device_info_unavailable,
                 "librenms_device_details": librenms_info.get("librenms_device_details"),
                 "mismatched_device": librenms_info.get("mismatched_device"),
+                "librenms_lookup_error": librenms_info.get("librenms_lookup_error"),
                 **librenms_info["librenms_device_details"],
                 "interface_name_field": interface_name_field,
                 "platform_info": platform_info,
@@ -450,6 +451,7 @@ class BaseLibreNMSSyncView(
         found_in_librenms = False
         mismatched_device = False
         device_info_unavailable = False
+        lookup_error = None
         librenms_device_details = {
             "librenms_device_url": None,
             "librenms_device_hardware": "-",
@@ -464,7 +466,13 @@ class BaseLibreNMSSyncView(
 
         if self.librenms_id is not None:
             success, device_info = self.librenms_api.get_device_info(self.librenms_id, cache_only=cache_only)
-            device_info_unavailable = cache_only and not success
+            # A lookup that failed for its own reason must not be reported as a missing device.
+            from netbox_librenms_plugin.librenms_api import LibreNMSLookupError
+
+            lookup_error = device_info if isinstance(device_info, LibreNMSLookupError) else None
+            # One flag for "no usable device info", so every consumer (status text, the add
+            # action, its modal, the tab region) stays in step. The reason travels separately.
+            device_info_unavailable = (cache_only and not success) or lookup_error is not None
             # isinstance(dict) guard: a truthy non-dict payload (string/list) would 500 on the
             # device_info.get(...) calls below; fall back to the default details block instead
             # of trusting success=True alone (issue #100).
@@ -596,6 +604,7 @@ class BaseLibreNMSSyncView(
             "device_info_unavailable": device_info_unavailable,
             "librenms_device_details": librenms_device_details,
             "mismatched_device": mismatched_device,
+            "librenms_lookup_error": lookup_error,
         }
 
     def get_interface_context(self, request, obj):

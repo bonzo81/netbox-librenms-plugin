@@ -1047,12 +1047,16 @@ class TestLibreNMSAPIDeviceOperations:
         """Failures are never cached, so a transient error doesn't persist for the cache window."""
         mock_get.side_effect = requests.exceptions.Timeout("boom")
 
-        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+        from netbox_librenms_plugin.librenms_api import LibreNMSAPI, LibreNMSLookupError
 
         api = LibreNMSAPI(server_key="default")
-        assert api.get_device_info(device_id=7778) == (False, None)
-        assert api.get_device_info(device_id=7778) == (False, None)
+        first_success, first_failure = api.get_device_info(device_id=7778)
+        second_success, _second_failure = api.get_device_info(device_id=7778)
 
+        assert (first_success, second_success) == (False, False)
+        # A timeout says nothing about whether the device exists, so it is not "not found".
+        assert isinstance(first_failure, LibreNMSLookupError)
+        assert first_failure.status_code is None
         assert mock_get.call_count == 2  # not cached → re-attempted on the next call
 
     @patch("netbox_librenms_plugin.librenms_api.requests.get")
@@ -1541,26 +1545,28 @@ class TestLibreNMSAPIErrorHandling:
         """Verify handling of network errors."""
         mock_get.side_effect = requests.exceptions.ConnectionError("Network unreachable")
 
-        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+        from netbox_librenms_plugin.librenms_api import LibreNMSAPI, LibreNMSLookupError
 
         api = LibreNMSAPI(server_key="default")
         success, result = api.get_device_info(device_id=123)
 
         assert success is False
-        assert result is None
+        assert isinstance(result, LibreNMSLookupError)
+        assert result.status_code is None
 
     @patch("netbox_librenms_plugin.librenms_api.requests.get")
     def test_timeout_error_handling(self, mock_get, mock_librenms_config):
         """Verify handling of timeout errors."""
         mock_get.side_effect = requests.exceptions.Timeout("Request timed out")
 
-        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+        from netbox_librenms_plugin.librenms_api import LibreNMSAPI, LibreNMSLookupError
 
         api = LibreNMSAPI(server_key="default")
         success, result = api.get_device_info(device_id=123)
 
         assert success is False
-        assert result is None
+        assert isinstance(result, LibreNMSLookupError)
+        assert result.status_code is None
 
     @patch("netbox_librenms_plugin.librenms_api.requests.get")
     def test_invalid_json_response(self, mock_get, mock_librenms_config):
@@ -1579,20 +1585,25 @@ class TestLibreNMSAPIErrorHandling:
 
     @patch("netbox_librenms_plugin.librenms_api.requests.get")
     def test_http_500_error_handling(self, mock_get, mock_librenms_config):
-        """Verify handling of HTTP 500 errors."""
+        """A 500 says the server failed, not that the device is absent.
+
+        The status is read from the response rather than through raise_for_status(), so this
+        reaches the 500 branch instead of falling through to the malformed-payload branch.
+        """
         mock_get.return_value.status_code = 500
         mock_get.return_value.json.return_value = {
             "status": "error",
             "message": "Internal server error",
         }
 
-        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+        from netbox_librenms_plugin.librenms_api import LibreNMSAPI, LibreNMSLookupError
 
         api = LibreNMSAPI(server_key="default")
         success, result = api.get_device_info(device_id=123)
 
         assert success is False
-        assert result is None
+        assert isinstance(result, LibreNMSLookupError)
+        assert result.status_code == 500
 
     @patch("netbox_librenms_plugin.librenms_api.requests.post")
     def test_malformed_api_response(self, mock_post, mock_librenms_config):
