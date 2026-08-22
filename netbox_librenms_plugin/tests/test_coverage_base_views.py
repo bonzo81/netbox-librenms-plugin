@@ -10,14 +10,14 @@ request has no authenticated user. Only the LibreNMS HTTP client stays mocked, w
 external boundary these tests are about.
 """
 
-import itertools
 from unittest.mock import MagicMock, patch
 
 import pytest
 
 from dcim.models import Device
 
-from netbox_librenms_plugin.tests.conftest import make_device, make_interface, make_ip, make_superuser
+from netbox_librenms_plugin.tests.conftest import make_device, make_interface, make_ip
+from netbox_librenms_plugin.tests.coverage_base_view_helpers import make_sync_page_device, make_sync_page_request
 from netbox_librenms_plugin.tests.mock_librenms_server import librenms_mock_server as run_librenms_server
 from netbox_librenms_plugin.tests.view_test_helpers import make_user_with_perms
 from netbox_librenms_plugin.tests.view_test_helpers import post as view_post
@@ -27,27 +27,6 @@ pytestmark = pytest.mark.django_db
 # =============================================================================
 # Helpers
 # =============================================================================
-
-_obj_counter = itertools.count(1)
-
-
-def _mock_obj(model_name="device", pk=None, name=None):
-    """Return a REAL Device the scoped querysets can resolve."""
-    return make_device(name or f"cov-base-{next(_obj_counter)}")
-
-
-def _mock_request(path="/plugins/librenms/device/1/cables/"):
-    """Return a REAL request carrying a real superuser, as ``setup()`` would bind it."""
-    from django.contrib.messages.storage.fallback import FallbackStorage
-    from django.test import RequestFactory
-
-    req = RequestFactory().get(path)
-    req.user = make_superuser()
-    req.headers = {}
-    req.session = {}
-    req._messages = FallbackStorage(req)
-    return req
-
 
 # =============================================================================
 # BaseCableTableView
@@ -64,7 +43,7 @@ class TestBaseCableTableViewGetPortsData:
         view._librenms_api = MagicMock(server_key="default")
         # self.librenms_id is deliberately NOT set: get_links_data (its only in-tree caller)
         # hasn't run. The public method must degrade to the OOB-only/no-host result, not raise.
-        result = view.get_ports_data(_mock_obj(), server_key="default")
+        result = view.get_ports_data(make_sync_page_device(), server_key="default")
         assert result == {"ports": []}
 
 
@@ -75,7 +54,7 @@ class TestBaseCableTableViewGetLinksData:
         from netbox_librenms_plugin.views.base.cables_view import BaseCableTableView
 
         view = object.__new__(BaseCableTableView)
-        view.request = _mock_request()
+        view.request = make_sync_page_request()
         view.librenms_id = 42
         view._librenms_api = MagicMock()
         view._librenms_api.server_key = "default"
@@ -90,7 +69,7 @@ class TestBaseCableTableViewGetLinksData:
         view = self._make_view()
         view._librenms_api.get_device_links.return_value = (False, {"error": "timeout"})
 
-        obj = _mock_obj()
+        obj = make_sync_page_device()
 
         with patch.object(view, "get_ports_data", return_value={"ports": []}):
             result = view.get_links_data(obj)
@@ -102,7 +81,7 @@ class TestBaseCableTableViewGetLinksData:
         view = self._make_view()
         view._librenms_api.get_device_links.return_value = (True, {"error": "some error"})
 
-        obj = _mock_obj()
+        obj = make_sync_page_device()
 
         with patch.object(view, "get_ports_data", return_value={"ports": []}):
             result = view.get_links_data(obj)
@@ -112,7 +91,7 @@ class TestBaseCableTableViewGetLinksData:
     def test_get_links_data_records_fetch_error_for_caller(self):
         """A real fetch failure must record _links_fetch_error so the caller can surface the actual error instead of the generic 'No links found' message; a no-links result (empty list) must leave it None."""
         view = self._make_view()
-        obj = _mock_obj()
+        obj = make_sync_page_device()
 
         # Failure → error recorded.
         view._librenms_api.get_device_links.return_value = (False, {"error": "auth failed"})
@@ -123,7 +102,7 @@ class TestBaseCableTableViewGetLinksData:
     def test_get_links_data_treats_non_dict_payload_as_failure(self):
         """get_device_links() returns the raw JSON body, so a 200 can yield a list/null/ scalar."""
         view = self._make_view()
-        obj = _mock_obj()
+        obj = make_sync_page_device()
 
         for bad_payload in ([{"local_port_id": 1}], None, "oops"):
             view = self._make_view()  # fresh per case so each proves it sets the error itself
@@ -135,7 +114,7 @@ class TestBaseCableTableViewGetLinksData:
     def test_get_links_data_treats_dict_with_malformed_links_as_failure(self):
         """A dict body whose 'links' is null/object (not a list) must also be a fetch failure — otherwise `for link in links` crashes or iterates dict keys."""
         view = self._make_view()
-        obj = _mock_obj()
+        obj = make_sync_page_device()
 
         for bad_links in (None, {}, {"a": 1}, "nope"):
             view = self._make_view()  # fresh per case so each proves it sets the error itself
@@ -157,7 +136,7 @@ class TestBaseCableTableViewGetLinksData:
         """An empty host-link list with a failed OOB fetch must NOT collapse to None: _prepare_context(fetch_fresh=True) must return a context so post() can show the OOB warning, instead of mislabeling it 'No links found'."""
         view = self._make_view()
         view._librenms_api.cache_timeout = 300
-        obj = _mock_obj()
+        obj = make_sync_page_device()
 
         def _fake_links(o, server_key=None, sync_device=None):
             view._oob_links_fetch_failed = True  # host has no links AND the OOB fetch failed
@@ -188,7 +167,7 @@ class TestBaseCableTableViewGetLinksData:
 
         view = self._make_view()
         view._librenms_api.cache_timeout = 300
-        obj = _mock_obj()
+        obj = make_sync_page_device()
         cache_key = "links-partial-stale-test"
         # A prior FULL snapshot is already cached (what verify/sync would resolve rows from).
         real_cache.set(cache_key, {"links": [{"local_port": "Gi0/1", "local_port_id": 11}]})
@@ -218,7 +197,7 @@ class TestBaseCableTableViewGetLinksData:
     def test_get_links_data_treats_status_error_payload_as_failure(self):
         """get_device_links returns the raw JSON body, so a 200 {"status": "error", ...} must be treated as a fetch failure (with its message), not silently fall through to 'No links found'."""
         view = self._make_view()
-        obj = _mock_obj()
+        obj = make_sync_page_device()
         view._librenms_api.get_device_links.return_value = (True, {"status": "error", "message": "device unreachable"})
         with patch.object(view, "get_ports_data", return_value={"ports": []}):
             result = view.get_links_data(obj)
@@ -247,7 +226,7 @@ class TestBaseCableTableViewGetLinksData:
                 {"port_id": 10, "ifName": "Gi0/0"},
             ]
         }
-        obj = _mock_obj()
+        obj = make_sync_page_device()
 
         with (
             patch.object(view, "get_ports_data", return_value=ports),
@@ -267,7 +246,7 @@ class TestBaseCableTableViewGetLinksData:
         # scenario (get_links_data reassigns self.librenms_id from get_librenms_id() at use,
         # but pinning it None here guards against any future read of the stale view attribute).
         view.librenms_id = None
-        obj = _mock_obj()
+        obj = make_sync_page_device()
 
         # Host has no LibreNMS id; only the OOB controller is mapped. Key the side_effect on the
         # device id rather than call order: the host fetch is now skipped entirely (no
@@ -317,7 +296,7 @@ class TestBaseCableTableViewGetLinksData:
     def test_get_links_data_successful_empty_returns_list_not_none(self):
         """A successful refresh with zero rows must return [] (not None) so _prepare_context() flows it through the success path instead of mislabeling it 'No links found'."""
         view = self._make_view()
-        obj = _mock_obj()
+        obj = make_sync_page_device()
         view._librenms_api.get_device_links.return_value = (True, {"links": []})
 
         with (
@@ -333,7 +312,7 @@ class TestBaseCableTableViewGetLinksData:
     def test_get_links_data_host_success_oob_failure_empty_returns_list(self):
         """Host LLDP succeeds with zero links but the OOB controller fetch fails: must return [] (with _oob_links_fetch_failed set) so post() can surface the OOB warning — not None, which would be mislabeled 'No links found' and drop the warning."""
         view = self._make_view()
-        obj = _mock_obj()
+        obj = make_sync_page_device()
         view._librenms_api.get_device_links.side_effect = [
             (True, {"links": []}),  # host: success, no links
             (False, {"error": "oob down"}),  # OOB controller: fetch fails
@@ -363,7 +342,7 @@ class TestBaseCableTableViewGetLinksData:
                 {"port_id": 10, "ifName": "Gi0/0"},
             ]
         }
-        obj = _mock_obj()
+        obj = make_sync_page_device()
 
         with (
             patch.object(view, "get_ports_data", return_value=ports),
@@ -387,7 +366,7 @@ class TestBaseCableTableViewGetLinksData:
                 {"port_id": 10, "ifName": "Gi0/0"},  # valid row resolves
             ]
         }
-        obj = _mock_obj()
+        obj = make_sync_page_device()
 
         with (
             patch.object(view, "get_ports_data", return_value=ports),
@@ -424,7 +403,7 @@ class TestBaseCableTableViewGetLinksData:
         )
 
         main_ports = {"ports": [{"port_id": 10, "ifName": "Gi0/0"}]}
-        obj = _mock_obj()
+        obj = make_sync_page_device()
 
         with (
             patch.object(view, "get_ports_data", return_value=main_ports),
@@ -480,7 +459,7 @@ class TestBaseCableTableViewGetLinksData:
         )
 
         main_ports = {"ports": [{"port_id": 10, "ifDescr": "GigabitEthernet0/0"}]}
-        obj = _mock_obj()
+        obj = make_sync_page_device()
 
         oob_mock = {"id": 7}
 
@@ -541,7 +520,7 @@ class TestBaseCableTableViewGetLinksData:
         )
         # Main port 10 carries both names too.
         main_ports = {"ports": [{"port_id": 10, "ifName": "Gi0/0", "ifDescr": "GigabitEthernet0/0"}]}
-        obj = _mock_obj()
+        obj = make_sync_page_device()
         oob_mock = {"id": 7}
 
         with (
@@ -586,7 +565,7 @@ class TestBaseCableTableViewGetLinksData:
         view._librenms_api.get_ports.return_value = (False, {})
 
         main_ports = {"ports": []}
-        obj = _mock_obj()
+        obj = make_sync_page_device()
         oob_mock = {"id": 7}
 
         with (
@@ -611,7 +590,7 @@ class TestBaseCableTableViewGetLinksData:
             (True, {"links": []}),  # main: no links
             (True, {"status": "error", "message": "oob unreachable"}),  # OOB: 200 error body
         ]
-        obj = _mock_obj()
+        obj = make_sync_page_device()
         oob_mock = {"id": 7}
 
         with (
@@ -634,7 +613,7 @@ class TestBaseCableTableViewGetLinksData:
             (True, {"links": [{"local_port_id": 1, "remote_hostname": "sw1"}]}),  # main: one link
             (True, {"links": None}),  # OOB: dict body, malformed links
         ]
-        obj = _mock_obj()
+        obj = make_sync_page_device()
 
         with (
             patch.object(view, "get_ports_data", return_value={"ports": []}),
@@ -929,7 +908,7 @@ class TestBaseCableTableViewEnrichLinksData:
 
         link1 = {"local_port": "Gi0/0", "local_port_id": 1, "remote_device": "sw-b"}
         link2 = {"local_port": "Gi0/1", "local_port_id": 2, "remote_device": None}
-        obj = _mock_obj()
+        obj = make_sync_page_device()
 
         with (
             patch.object(view, "enrich_local_port") as mock_enrich_local,
@@ -945,7 +924,7 @@ class TestBaseCableTableViewEnrichLinksData:
         view = self._make_view()
 
         link = {"local_port": "Gi0/0", "local_port_id": 1, "remote_device": None}
-        obj = _mock_obj()
+        obj = make_sync_page_device()
         obj.id = 55
 
         with patch.object(view, "enrich_local_port"):
@@ -966,7 +945,7 @@ class TestBaseCableTableViewEnrichLinksData:
         enriched = dict(link)
         enriched["netbox_remote_device_id"] = 10  # resolved
 
-        obj = _mock_obj()
+        obj = make_sync_page_device()
 
         with (
             patch.object(view, "enrich_local_port"),
@@ -985,7 +964,7 @@ class TestBaseCableTableViewPrepareContext:
         from netbox_librenms_plugin.views.base.cables_view import BaseCableTableView
 
         view = object.__new__(BaseCableTableView)
-        view.request = _mock_request()
+        view.request = make_sync_page_request()
         view._librenms_api = MagicMock()
         view._librenms_api.server_key = "default"
         view._librenms_api.cache_timeout = 300
@@ -994,7 +973,7 @@ class TestBaseCableTableViewPrepareContext:
     def test_fetch_fresh_none_links_returns_none(self):
         """When get_links_data returns None, _prepare_context returns None."""
         view = self._make_view()
-        obj = _mock_obj()
+        obj = make_sync_page_device()
 
         with patch.object(view, "get_links_data", return_value=None):
             result = view._prepare_context(view.request, obj, fetch_fresh=True)
@@ -1004,7 +983,7 @@ class TestBaseCableTableViewPrepareContext:
     def test_cache_miss_returns_none(self):
         """When cache has no data and fetch_fresh=False, returns None."""
         view = self._make_view()
-        obj = _mock_obj()
+        obj = make_sync_page_device()
 
         with (
             patch("netbox_librenms_plugin.views.base.cables_view.cache") as mock_cache,
@@ -1018,7 +997,7 @@ class TestBaseCableTableViewPrepareContext:
     def test_fetch_fresh_caches_and_returns_context(self):
         """Successful fresh fetch caches data and returns context dict."""
         view = self._make_view()
-        obj = _mock_obj()
+        obj = make_sync_page_device()
 
         links = [{"local_port": "Gi0/0"}]
         mock_table = MagicMock()
@@ -1046,7 +1025,7 @@ class TestBaseCableTableViewPrepareContext:
         """The pagination/sort URL (table.htmx_url) is built from the RESOLVED server scope, not the lazy session client (which can point at another server after a failed rebind or global switch — silently swapping the dataset mid-view). It must be set in _prepare_context: DeviceCableTableView overrides get_table without calling super, so a base-class get_table override never ran for the device tab."""
         view = self._make_view()
         view._librenms_api.server_key = "default"  # session client points at ANOTHER server
-        obj = _mock_obj()
+        obj = make_sync_page_device()
 
         mock_table = MagicMock()
         with (
@@ -1065,7 +1044,7 @@ class TestBaseCableTableViewPrepareContext:
     def test_cache_hit_re_enriches_and_returns_context(self):
         """Cached data is re-enriched and returned."""
         view = self._make_view()
-        obj = _mock_obj()
+        obj = make_sync_page_device()
 
         cached_links = [{"local_port": "Gi0/0", "remote_device": "sw-b"}]
         mock_table = MagicMock()
@@ -1091,7 +1070,7 @@ class TestBaseCableTableViewPrepareContext:
         """When librenms_api.server_key is non-default, _prepare_context passes it to enrich_links_data."""
         view = self._make_view()
         view._librenms_api.server_key = "non-default"
-        obj = _mock_obj()
+        obj = make_sync_page_device()
 
         links = [
             {
@@ -1141,8 +1120,8 @@ class TestBaseCableTableViewGetContextData:
     def test_returns_empty_context_when_no_cache(self):
         """When _prepare_context returns None, get_context_data returns fallback context."""
         view = self._make_view()
-        obj = _mock_obj()
-        request = _mock_request()
+        obj = make_sync_page_device()
+        request = make_sync_page_request()
 
         with patch.object(view, "_prepare_context", return_value=None):
             ctx = view.get_context_data(request, obj)
@@ -1154,8 +1133,8 @@ class TestBaseCableTableViewGetContextData:
     def test_returns_context_when_cache_populated(self):
         """When _prepare_context returns data, get_context_data returns it."""
         view = self._make_view()
-        obj = _mock_obj()
-        request = _mock_request()
+        obj = make_sync_page_device()
+        request = make_sync_page_request()
 
         fake_context = {"table": MagicMock(), "object": obj, "cache_expiry": None, "server_key": "default"}
 
@@ -1167,8 +1146,8 @@ class TestBaseCableTableViewGetContextData:
     def test_unresolved_server_key_renders_empty_not_cached_rows(self):
         """?server_key naming a removed server must render EMPTY: its links snapshot can still be cached until TTL, and serving it as a live table (while the sibling tabs render empty) lets 'Create cable' act on a gone server's stale data."""
         view = self._make_view()
-        obj = _mock_obj()
-        request = _mock_request()
+        obj = make_sync_page_device()
+        request = make_sync_page_request()
         request.GET = {"server_key": "ghost"}
 
         stale_context = {"table": MagicMock(), "object": obj, "cache_expiry": None, "server_key": "ghost"}
@@ -1193,8 +1172,8 @@ class TestBaseVLANTableViewUnresolvedServerKey:
         view = object.__new__(BaseVLANTableView)
         view._librenms_api = MagicMock()
         view._librenms_api.server_key = "default"
-        obj = _mock_obj()
-        request = _mock_request()
+        obj = make_sync_page_device()
+        request = make_sync_page_request()
         request.GET = {"server_key": "ghost"}
 
         with (
@@ -1224,8 +1203,8 @@ class TestBaseCableTableViewPost:
     def test_post_no_links_shows_error_and_renders(self):
         """When no links found, renders template with error message."""
         view = self._make_view()
-        obj = _mock_obj()
-        request = _mock_request()
+        obj = make_sync_page_device()
+        request = make_sync_page_request()
 
         with (
             patch.object(view, "get_object", return_value=obj),
@@ -1242,8 +1221,8 @@ class TestBaseCableTableViewPost:
     def test_post_success_shows_message_and_renders(self):
         """When links found, renders template with success message."""
         view = self._make_view()
-        obj = _mock_obj()
-        request = _mock_request()
+        obj = make_sync_page_device()
+        request = make_sync_page_request()
         fake_context = {"table": MagicMock(), "object": obj, "cache_expiry": None}
 
         with (
@@ -1272,7 +1251,7 @@ class TestBaseCableTableViewPost:
         view.librenms_id = 42
 
         cached = {"ports": [{"port_id": 1, "ifName": "Gi0/0"}]}
-        obj = _mock_obj()
+        obj = make_sync_page_device()
 
         with (
             patch.object(view, "get_cache_key", return_value="ports-key"),
@@ -1295,7 +1274,7 @@ class TestBaseCableTableViewPost:
         api_data = {"ports": [{"port_id": 2}]}
         view._librenms_api.get_ports.return_value = (True, api_data)
 
-        obj = _mock_obj()
+        obj = make_sync_page_device()
 
         with (
             patch.object(view, "get_cache_key", return_value="ports-key"),
@@ -1517,8 +1496,8 @@ class TestBaseInterfaceTableViewPost:
     def test_post_failed_rebind_renders_partial_not_redirect(self):
         """A stale POSTed server_key renders the fragment with the error, NOT a redirect: the redirect target is this same POST-only URL, so the hx-post XHR would follow it with GET → 405, no swap, a dead button (every sibling tab renders its partial here)."""
         view = self._make_view()
-        obj = _mock_obj()
-        request = _mock_request()
+        obj = make_sync_page_device()
+        request = make_sync_page_request()
 
         with (
             patch.object(view, "get_object", return_value=obj),
@@ -1558,8 +1537,8 @@ class TestBaseInterfaceTableViewPost:
     def test_post_no_librenms_id_redirects_with_error(self):
         """When librenms_id not found, error message and redirect — and the stale ports snapshot is cleared FIRST, so a failed refresh on a previously-synced device can't leave old interface data for the redirected tab or downstream sync to consume."""
         view = self._make_view()
-        obj = _mock_obj()
-        request = _mock_request()
+        obj = make_sync_page_device()
+        request = make_sync_page_request()
 
         view._librenms_api.get_librenms_id.return_value = None
 
@@ -1590,8 +1569,8 @@ class TestBaseInterfaceTableViewPost:
     def test_post_api_error_redirects_with_error(self):
         """When API returns failure, error message and redirect."""
         view = self._make_view()
-        obj = _mock_obj()
-        request = _mock_request()
+        obj = make_sync_page_device()
+        request = make_sync_page_request()
 
         view._librenms_api.get_librenms_id.return_value = 42
         view._librenms_api.get_ports.return_value = (False, "Connection refused")
@@ -1621,8 +1600,8 @@ class TestBaseInterfaceTableViewPost:
     def test_post_malformed_main_ports_payload_treated_as_failure(self):
         """A truthy success with a malformed MAIN ports payload (ports not a list of dicts) must fail closed — warn + failure-redirect, no degraded snapshot cached — mirroring the OOB branch."""
         view = self._make_view()
-        obj = _mock_obj()
-        request = _mock_request()
+        obj = make_sync_page_device()
+        request = make_sync_page_request()
 
         view._librenms_api.get_librenms_id.return_value = 42
         view._librenms_api.get_ports.return_value = (True, {"ports": "not-a-list"})
@@ -1649,8 +1628,8 @@ class TestBaseInterfaceTableViewPost:
     def test_post_malformed_main_ports_non_dict_row_treated_as_failure(self):
         """The docstring sibling above only covers a non-list ports payload."""
         view = self._make_view()
-        obj = _mock_obj()
-        request = _mock_request()
+        obj = make_sync_page_device()
+        request = make_sync_page_request()
 
         view._librenms_api.get_librenms_id.return_value = 42
         view._librenms_api.get_ports.return_value = (True, {"ports": [42]})
@@ -1677,8 +1656,8 @@ class TestBaseInterfaceTableViewPost:
     def test_failure_redirect_gated_by_open_redirect_barrier(self):
         """The appended server_key is POST-derived, so the failure redirect MUST gate the candidate URL through url_has_allowed_host_and_scheme (the CodeQL py/url-redirection barrier)."""
         view = self._make_view()
-        obj = _mock_obj()
-        request = _mock_request()
+        obj = make_sync_page_device()
+        request = make_sync_page_request()
         # Seed the POSTed server_key so the test proves post() actually reads the submitted key:
         # without it, request.POST is empty and rebind returns "prod" for any input, so a
         # regression that stopped reading the key would still pass.
@@ -1719,8 +1698,8 @@ class TestBaseInterfaceTableViewPost:
     def test_post_clears_stale_cache_before_fetch(self):
         """A refresh drops the previous ports snapshot before fetching, so a later failure can't leave stale data behind."""
         view = self._make_view()
-        obj = _mock_obj()
-        request = _mock_request()
+        obj = make_sync_page_device()
+        request = make_sync_page_request()
 
         view._librenms_api.get_librenms_id.return_value = 42
         view._librenms_api.get_ports.return_value = (True, {"ports": [{"port_id": 1, "ifName": "Gi0/0"}]})
@@ -1759,8 +1738,8 @@ class TestBaseInterfaceTableViewPost:
     def test_post_oob_fetch_failure_caches_incomplete_snapshot(self):
         """When the linked OOB controller's ports fetch fails, the host-only snapshot is cached tagged oob_incomplete (not deleted) so downstream verify/apply keep a backing snapshot and the incomplete state can be surfaced."""
         view = self._make_view()
-        obj = _mock_obj()
-        request = _mock_request()
+        obj = make_sync_page_device()
+        request = make_sync_page_request()
 
         view._librenms_api.get_librenms_id.return_value = 42
         # Host ports OK; OOB controller ports fetch fails.
@@ -1798,8 +1777,8 @@ class TestBaseInterfaceTableViewPost:
     def test_post_oob_malformed_but_successful_payload_treated_as_incomplete(self):
         """get_ports is an external boundary: oob_success=True does not guarantee a dict with a list of dict rows."""
         view = self._make_view()
-        obj = _mock_obj()
-        request = _mock_request()
+        obj = make_sync_page_device()
+        request = make_sync_page_request()
 
         view._librenms_api.get_librenms_id.return_value = 42
         # Host ports OK; OOB controller returns success but a malformed payload (non-dict row).
@@ -1834,8 +1813,8 @@ class TestBaseInterfaceTableViewPost:
     def test_post_oob_non_string_mac_does_not_crash(self):
         """get_ports is an external boundary: a malformed truthy ifPhysAddress (int/list) on a host or OOB port must be treated as absent in the shared-LOM dedup, not 500 on .lower() after the cache was already cleared."""
         view = self._make_view()
-        obj = _mock_obj()
-        request = _mock_request()
+        obj = make_sync_page_device()
+        request = make_sync_page_request()
 
         view._librenms_api.get_librenms_id.return_value = 42
         # Host port carries a corrupt non-string MAC; the OOB controller exposes a valid one.
@@ -1873,8 +1852,8 @@ class TestBaseInterfaceTableViewPost:
     def test_post_placeholder_mac_not_flagged_as_shared_lom(self):
         """A placeholder 00:00:00:00:00:00 on both host and OOB is not a real address, so it must not flag a shared-LOM conflict — while a genuinely shared MAC still does."""
         view = self._make_view()
-        obj = _mock_obj()
-        request = _mock_request()
+        obj = make_sync_page_device()
+        request = make_sync_page_request()
 
         view._librenms_api.get_librenms_id.return_value = 42
         # Host + OOB each carry a placeholder MAC (must NOT conflict) and a genuinely shared
@@ -1931,8 +1910,8 @@ class TestBaseInterfaceTableViewPost:
     def test_post_oob_ports_fetch_failure_warning_omits_oob_id(self):
         """The user-facing OOB-fetch-failure toast must not leak the internal LibreNMS OOB id (it is logged server-side only)."""
         view = self._make_view()
-        obj = _mock_obj()
-        request = _mock_request()
+        obj = make_sync_page_device()
+        request = make_sync_page_request()
 
         view._librenms_api.get_librenms_id.return_value = 42
         # Host ports OK; OOB controller fetch fails outright.
@@ -1970,8 +1949,8 @@ class TestBaseInterfaceTableViewPost:
     def test_post_oob_invalid_id_marks_snapshot_incomplete(self):
         """A corrupt stored OOB id fails closed: warn, skip the OOB fetch, tag the snapshot oob_incomplete."""
         view = self._make_view()
-        obj = _mock_obj()
-        request = _mock_request()
+        obj = make_sync_page_device()
+        request = make_sync_page_request()
 
         view._librenms_api.get_librenms_id.return_value = 42
         # Host ports OK. The OOB controller IS linked but its stored id is non-numeric, so the OOB
@@ -2015,8 +1994,8 @@ class TestBaseInterfaceTableViewPost:
     def test_post_success_caches_and_renders(self):
         """Successful fetch caches data and renders template."""
         view = self._make_view()
-        obj = _mock_obj()
-        request = _mock_request()
+        obj = make_sync_page_device()
+        request = make_sync_page_request()
 
         view._librenms_api.get_librenms_id.return_value = 42
         view._librenms_api.get_ports.return_value = (True, {"ports": [{"port_id": 1, "ifName": "Gi0/0"}]})
@@ -2971,7 +2950,7 @@ class TestBaseIPAddressTableViewEnrichIpData:
     def test_non_dict_entries_skipped(self):
         """Non-dict items in ip_data are silently skipped."""
         view = self._make_view()
-        obj = _mock_obj()
+        obj = make_sync_page_device()
 
         with patch.object(
             view,
@@ -2993,7 +2972,7 @@ class TestBaseIPAddressTableViewEnrichIpData:
     def test_entries_without_port_id_skipped(self):
         """Entries missing port_id field are skipped."""
         view = self._make_view()
-        obj = _mock_obj()
+        obj = make_sync_page_device()
         ip_data = [{"ip_address": "10.0.0.1", "prefix_length": 24}]  # no port_id
 
         with patch.object(
@@ -3016,7 +2995,7 @@ class TestBaseIPAddressTableViewEnrichIpData:
     def test_new_ip_gets_sync_status(self):
         """IP not in NetBox gets exists=False, status='sync'."""
         view = self._make_view()
-        obj = _mock_obj()
+        obj = make_sync_page_device()
 
         ip_data = [{"ip_address": "10.1.1.1", "prefix_length": 24, "port_id": 10}]
         prefetched = {
@@ -3043,7 +3022,7 @@ class TestBaseIPAddressTableViewEnrichIpData:
     def test_existing_ip_gets_enriched(self):
         """IP that exists in NetBox goes through enrich_existing path."""
         view = self._make_view()
-        obj = _mock_obj()
+        obj = make_sync_page_device()
 
         existing_ip = MagicMock()
         existing_ip.get_absolute_url.return_value = "/ipam/ip-addresses/1/"
@@ -3322,8 +3301,8 @@ class TestBaseIPAddressTableViewPrepareContext:
     def test_cache_miss_fetch_fresh_false_returns_none(self):
         """When no cached data and fetch_fresh=False, returns None."""
         view = self._make_view()
-        obj = _mock_obj()
-        request = _mock_request()
+        obj = make_sync_page_device()
+        request = make_sync_page_request()
 
         with (
             patch.object(view, "get_cache_key", return_value="ip-key"),
@@ -3341,8 +3320,8 @@ class TestBaseIPAddressTableViewPrepareContext:
     def test_fetch_fresh_caches_enriched_data(self):
         """When fetch_fresh=True, IP data is fetched, enriched, cached and returned."""
         view = self._make_view()
-        obj = _mock_obj()
-        request = _mock_request()
+        obj = make_sync_page_device()
+        request = make_sync_page_request()
 
         raw_ips = [{"ip_address": "10.0.0.1", "prefix_length": 24, "port_id": 1}]
         enriched_ips = [{"ip_with_mask": "10.0.0.1/24", "status": "sync"}]
@@ -3373,8 +3352,8 @@ class TestBaseIPAddressTableViewPrepareContext:
     def test_cache_hit_fetch_fresh_false_uses_cached_data(self):
         """Cached data available with fetch_fresh=False returns context."""
         view = self._make_view()
-        obj = _mock_obj()
-        request = _mock_request()
+        obj = make_sync_page_device()
+        request = make_sync_page_request()
 
         # A realistic cached row: the cached branch now validates each row (port_id + an
         # address/prefix pair) before reuse, so an incomplete stub would be purged as malformed.
@@ -3425,8 +3404,8 @@ class TestBaseIPAddressTableViewGetContextData:
     def test_returns_empty_context_when_no_cache(self):
         """When _prepare_context returns None, returns fallback context with table=None."""
         view = self._make_view()
-        obj = _mock_obj()
-        request = _mock_request()
+        obj = make_sync_page_device()
+        request = make_sync_page_request()
 
         with (
             patch.object(view, "_prepare_context", return_value=None),
@@ -3444,8 +3423,8 @@ class TestBaseIPAddressTableViewGetContextData:
     def test_returns_context_when_cache_populated(self):
         """When _prepare_context returns context, that context is returned."""
         view = self._make_view()
-        obj = _mock_obj()
-        request = _mock_request()
+        obj = make_sync_page_device()
+        request = make_sync_page_request()
 
         prepared = {"table": MagicMock(), "object": obj, "cache_expiry": None, "server_key": "default"}
 
@@ -3477,8 +3456,8 @@ class TestBaseIPAddressTableViewPost:
     def test_post_no_ips_renders_error(self):
         """When _prepare_context returns None, renders with error."""
         view = self._make_view()
-        obj = _mock_obj()
-        request = _mock_request()
+        obj = make_sync_page_device()
+        request = make_sync_page_request()
 
         with (
             patch.object(view, "get_object", return_value=obj),
@@ -3499,8 +3478,8 @@ class TestBaseIPAddressTableViewPost:
     def test_post_success_renders_with_context(self):
         """Successful fetch renders template with context."""
         view = self._make_view()
-        obj = _mock_obj()
-        request = _mock_request()
+        obj = make_sync_page_device()
+        request = make_sync_page_request()
         fake_ctx = {"table": MagicMock(), "object": obj}
 
         with (
@@ -3585,13 +3564,13 @@ class TestBaseIPAddressTableViewGetTable:
         view = object.__new__(BaseIPAddressTableView)
         view._librenms_api = MagicMock()
         view._librenms_api.server_key = "default"
-        view.request = _mock_request()
+        view.request = make_sync_page_request()
         return view
 
     def test_get_table_sets_htmx_url(self):
         """get_table creates table and sets htmx_url with tab parameter."""
         view = self._make_view()
-        obj = _mock_obj()
+        obj = make_sync_page_device()
 
         with patch("netbox_librenms_plugin.views.base.ip_addresses_view.IPAddressTable") as MockTable:
             mock_table = MagicMock()
