@@ -9,58 +9,34 @@ The page the user acted on is excluded: only the request knows which tab is the 
 only the response can report the cleanup, so that half stays with the view.
 """
 
+from types import SimpleNamespace
+
 import pytest
 
+from netbox_librenms_plugin.tests.cache_test_helpers import (
+    clear_snapshots as _clear,
+)
+from netbox_librenms_plugin.tests.cache_test_helpers import (
+    drain_pending_commit_callbacks as _drain_pending_commit_callbacks,
+)
+from netbox_librenms_plugin.tests.cache_test_helpers import (
+    seed_every_tab as _seed_every_tab,
+)
+from netbox_librenms_plugin.tests.cache_test_helpers import (
+    snapshot_state as _snapshot_state,
+)
 
 SERVER_KEY = "default"
 
 
-def _snapshot_state(obj, server_key=SERVER_KEY):
-    """Return which tabs still hold a snapshot for *obj*."""
-    from django.core.cache import cache
-
-    from netbox_librenms_plugin.sync_cache import SyncCacheConsistency
-
-    coordinator = SyncCacheConsistency(obj)
-    return {
-        tab: cache.get(coordinator.snapshot_key(tab, server_key)) is not None for tab in coordinator.applicable_tabs()
-    }
-
-
-def _seed_every_tab(obj, server_key=SERVER_KEY):
-    """Give *obj* a snapshot on every applicable tab so invalidation is observable."""
-    from django.core.cache import cache
-
-    from netbox_librenms_plugin.sync_cache import SyncCacheConsistency
-
-    _drain_pending_commit_callbacks()
-    coordinator = SyncCacheConsistency(obj)
-    keys = []
-    for tab in coordinator.applicable_tabs():
-        key = coordinator.snapshot_key(tab, server_key)
-        cache.set(key, [{"seeded": tab.value}], timeout=300)
-        keys.append(key)
-    assert all(cache.get(key) is not None for key in keys), "the seed never landed"
-    return keys
-
-
-def _drain_pending_commit_callbacks():
-    """Discard cleanups queued by the fixture writes, so a test isolates its own change.
-
-    Building a device and its bays is itself a tracked write, so a cleanup for that device is
-    already queued before the test seeds anything. Dropping it here is what makes the capture
-    below observe only the write under test.
-    """
-    from django.db import transaction
-
-    transaction.get_connection().run_on_commit.clear()
-
-
-def _clear(keys):
-    from django.core.cache import cache
-
-    for key in keys:
-        cache.delete(key)
+def _select_queries_from(captured, table):
+    """Return SELECT statements that read one database table."""
+    marker = f'FROM "{table}"'
+    return [
+        query["sql"]
+        for query in captured.captured_queries
+        if query["sql"].lstrip().upper().startswith("SELECT") and marker in query["sql"]
+    ]
 
 
 def test_connect_rejects_a_missing_owner_column(monkeypatch):
@@ -73,6 +49,18 @@ def test_connect_rejects_a_missing_owner_column(monkeypatch):
 
     with pytest.raises(ImproperlyConfigured, match=r"dcim\.interface.*missing_owner_id"):
         cache_signals.connect()
+
+
+def test_tagged_vlan_through_model_rejects_an_unknown_shape():
+    """Fail startup when NetBox no longer exposes one interface and one VLAN relation."""
+    from django.core.exceptions import ImproperlyConfigured
+
+    from netbox_librenms_plugin import cache_signals
+
+    through = SimpleNamespace(_meta=SimpleNamespace(fields=(), label_lower="dcim.unknown_tagged_vlans"))
+
+    with pytest.raises(ImproperlyConfigured, match="does not recognize tagged-VLAN through model"):
+        cache_signals._m2m_relation_fields(through)
 
 
 @pytest.mark.django_db
@@ -180,6 +168,30 @@ class TestOrmWritesInvalidateTheirOwner:
 
         assert not any(remaining.values()), f"a tagged-VLAN change left stale snapshots: {remaining}"
 
+    def test_clearing_a_vlan_from_the_reverse_side_invalidates_its_devices(self, django_capture_on_commit_callbacks):
+        """Reverse ``clear`` supplies no primary-key set, so owners must be captured first."""
+        from django.db import transaction
+        from ipam.models import VLAN
+
+        from netbox_librenms_plugin.tests.conftest import make_device, make_interface
+
+        device = make_device("signal-vlan-reverse-clear", librenms_cf={SERVER_KEY: 7})
+        interface = make_interface(device, "Ethernet1")
+        vlan = VLAN.objects.create(vid=102, name="signal-vlan-reverse-clear")
+        interface.tagged_vlans.add(vlan)
+        keys = _seed_every_tab(device)
+
+        try:
+            with django_capture_on_commit_callbacks(execute=True):
+                with transaction.atomic():
+                    vlan.interfaces_as_tagged.clear()
+            remaining = _snapshot_state(device)
+        finally:
+            _clear(keys)
+
+        assert not interface.tagged_vlans.filter(pk=vlan.pk).exists(), "the VLAN relation was not cleared"
+        assert not any(remaining.values()), f"a reverse tagged-VLAN clear left stale snapshots: {remaining}"
+
     def test_an_unrelated_device_keeps_its_snapshots(self, django_capture_on_commit_callbacks):
         """Positive control: invalidation follows the write, it is not a blanket flush."""
         from django.db import transaction
@@ -225,22 +237,6 @@ class TestOrmWritesInvalidateTheirOwner:
             _clear(keys)
 
         assert all(remaining.values()), f"a rolled-back write dropped snapshots: {remaining}"
-
-    def test_an_unmapped_device_is_skipped(self, django_capture_on_commit_callbacks):
-        """A device with no LibreNMS mapping owns no snapshots, so it costs no work."""
-        from django.db import transaction
-
-        from netbox_librenms_plugin.tests.conftest import install_module, make_device, make_module_bay
-
-        device = make_device("signal-unmapped")
-        make_module_bay(device, "Bay 1")
-        _drain_pending_commit_callbacks()
-
-        with django_capture_on_commit_callbacks(execute=True):
-            with transaction.atomic():
-                install_module(device, "Bay 1", "Signal Model", serial="SIG-6")
-
-        assert not any(_snapshot_state(device).values())
 
 
 @pytest.mark.django_db
@@ -328,6 +324,56 @@ class TestOneFlushPerObject:
                     make_interface(device, f"Ethernet{index}")
 
         assert len(callbacks) == 1, f"expected one flush for 25 writes, got {len(callbacks)}"
+
+    def test_many_assigned_rows_resolve_their_interface_in_one_query(self, django_capture_on_commit_callbacks):
+        """Generic assignments must be resolved once per model when the batch commits."""
+        from django.db import connection, transaction
+        from django.test.utils import CaptureQueriesContext
+        from ipam.models import IPAddress
+
+        from netbox_librenms_plugin.tests.conftest import make_device, make_interface
+
+        device = make_device("signal-assignment-batch", librenms_cf={SERVER_KEY: 7})
+        interface = make_interface(device, "Ethernet1")
+        keys = _seed_every_tab(device)
+
+        try:
+            with CaptureQueriesContext(connection) as captured:
+                with django_capture_on_commit_callbacks(execute=True):
+                    with transaction.atomic():
+                        for host in range(1, 26):
+                            IPAddress.objects.create(
+                                address=f"198.18.31.{host}/24",
+                                assigned_object=interface,
+                            )
+            remaining = _snapshot_state(device)
+        finally:
+            _clear(keys)
+
+        interface_selects = _select_queries_from(captured, "dcim_interface")
+        assert len(interface_selects) == 1, interface_selects
+        assert not any(remaining.values()), f"batched IP writes left stale snapshots: {remaining}"
+
+
+@pytest.mark.django_db
+def test_loading_deferred_rows_does_not_fetch_owner_columns():
+    """Remembering an owner must not turn ``only('pk')`` into one query per row."""
+    from dcim.models import Interface
+    from django.db import connection
+    from django.test.utils import CaptureQueriesContext
+
+    from netbox_librenms_plugin.tests.conftest import make_device, make_interface
+
+    device = make_device("signal-deferred-owner", librenms_cf={SERVER_KEY: 7})
+    interface = make_interface(device, "Ethernet1")
+    _drain_pending_commit_callbacks()
+
+    with CaptureQueriesContext(connection) as captured:
+        loaded = list(Interface.objects.only("pk").filter(pk=interface.pk))
+
+    interface_selects = _select_queries_from(captured, "dcim_interface")
+    assert [row.pk for row in loaded] == [interface.pk]
+    assert len(interface_selects) == 1, interface_selects
 
 
 @pytest.mark.django_db
@@ -613,7 +659,7 @@ class TestEverySchedulingViewTakesTheClaim:
                     for target in node.targets:
                         if isinstance(target, ast.Name):
                             refers.setdefault(target.id, set()).update(mentioned)
-            for node in tree.body:
+            for node in ast.walk(tree):
                 if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
                     refers.setdefault(node.name, set()).update(self._called_names(node))
 
@@ -848,6 +894,20 @@ class TestEverySchedulingViewTakesTheClaim:
             "from netbox_librenms_plugin.sync_cache import schedule_request_cache_mutation\n"
             "\n"
             "run = functools.partial(schedule_request_cache_mutation)\n"
+        )
+
+        assert "run" in self._scheduler_names([tree])
+
+    def test_a_scheduler_wrapped_in_a_method_still_counts(self):
+        """A method wrapper is callable by name through ``self`` and must stay in the closure."""
+        import ast
+
+        tree = ast.parse(
+            "from netbox_librenms_plugin.sync_cache import schedule_request_cache_mutation\n"
+            "\n"
+            "class Helpers:\n"
+            "    def run(self, request):\n"
+            "        schedule_request_cache_mutation(request)\n"
         )
 
         assert "run" in self._scheduler_names([tree])

@@ -1149,6 +1149,48 @@ def test_cleanup_failure_removes_controls_from_every_planned_tab():
         browser.close()
 
 
+def test_cleanup_failure_notice_survives_a_later_informational_event():
+    """A later success must not hide the reload instruction from a failed cleanup."""
+    initial = {
+        "interfaces": _state("before"),
+        "ipaddresses": _state("before-ip"),
+    }
+    failed = {
+        "transition_id": "failed-cleanup",
+        "removed": False,
+        "cleanup_failed": True,
+        "cleanup_tabs": ["ipaddresses"],
+        "revisions": {},
+    }
+    succeeded = {
+        "transition_id": "later-success",
+        "removed": True,
+        "cleanup_failed": False,
+        "tabs": ["ipaddresses"],
+        "revisions": {},
+    }
+
+    with playwright.sync_playwright() as runtime:
+        browser = runtime.chromium.launch(headless=True)
+        page = browser.new_page()
+        page.set_content(_page_html(initial))
+        page.route("https://plugin.example.com/status?*", lambda route: route.fulfill(json={"tabs": initial}))
+        page.add_script_tag(path=str(SCRIPT_PATH))
+        page.evaluate(
+            "payloads => { initializeSyncCacheConsistency(); "
+            "payloads.forEach(payload => document.dispatchEvent("
+            "new CustomEvent('librenmsCacheChanged', { detail: payload }))); }",
+            [failed, succeeded],
+        )
+
+        notice = page.locator("#librenms-sync-cache-notices .alert")
+        assert notice.count() == 1
+        assert notice.evaluate("node => node.classList.contains('alert-danger')")
+        assert "related cache cleanup failed" in notice.inner_text()
+        assert "Other sync tabs were cleared" not in notice.inner_text()
+        browser.close()
+
+
 def test_invalidation_reason_includes_relative_time():
     initial = {
         "interfaces": _state("before"),

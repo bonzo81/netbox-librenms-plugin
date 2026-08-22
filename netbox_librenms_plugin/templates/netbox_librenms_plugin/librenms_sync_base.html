@@ -233,7 +233,7 @@
                         <tr>
                             <th scope="row" style="width: 40%; padding-left: 1rem;">Status</th>
                             <td>
-                                <span class="{% if device_info_unavailable %}text-warning{% elif has_librenms_id %}text-success{% else %}text-danger{% endif %}">
+                                <span class="{% if device_info_unavailable %}text-warning{% elif found_in_librenms %}text-success{% else %}text-danger{% endif %}">
                                     {% if device_info_unavailable %}
                                     <i class="mdi mdi-alert-circle-outline"></i> Details unavailable
                                     {% elif found_in_librenms %}

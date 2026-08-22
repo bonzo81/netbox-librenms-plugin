@@ -372,6 +372,33 @@ def test_cold_sync_page_load_fetches_librenms_status(client, settings):
 
 
 @pytest.mark.django_db
+def test_mapped_device_missing_from_librenms_renders_danger_status(client, settings):
+    """A stale stored LibreNMS ID must not make a failed lookup look successful."""
+    _configure_servers(settings)
+    device = make_device("cache-missing-status", librenms_cf={"primary": {"id": 7402}})
+    client.force_login(make_superuser("cache-missing-status-user"))
+    url = reverse("plugins:netbox_librenms_plugin:device_librenms_sync", args=[device.pk])
+
+    with patch(
+        "netbox_librenms_plugin.librenms_api.requests.get",
+        return_value=_json_response(
+            "https://primary.example.com/api/v0/devices/7402",
+            {"status": "error", "message": "Device not found"},
+            status=404,
+        ),
+    ):
+        response = client.get(url, {"server_key": "primary", "tab": SyncTab.INTERFACES.value})
+
+    assert response.status_code == 200
+    html = response.content.decode()
+    status_position = html.index("Not found")
+    span_position = html.rfind("<span", 0, status_position)
+    status_tag = html[span_position : html.index(">", span_position) + 1]
+    assert "text-danger" in status_tag, status_tag
+    assert "text-success" not in status_tag, status_tag
+
+
+@pytest.mark.django_db
 def test_committed_interface_sync_invalidates_only_mapped_page_and_shared_snapshots(
     client,
     settings,

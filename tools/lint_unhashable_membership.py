@@ -17,7 +17,7 @@ import sys
 from pathlib import Path
 
 
-HASHABLE_NARROWING_TYPES = frozenset({"str", "int", "bytes", "float", "tuple", "frozenset"})
+HASHABLE_NARROWING_TYPES = frozenset({"str", "int", "bytes", "float", "frozenset"})
 TAINTING_CALLS = frozenset({"get", "loads", "pop"})
 # A Django QueryDict always yields str, so a form field can never be unhashable.
 QUERYDICT_SOURCES = frozenset({"POST", "GET", "query_params"})

@@ -41,6 +41,9 @@ FLAGGED = {
         'def f(cached):\n    v: object = cached.get("x")\n    return v in NAMES\n'
     ),
     "membership inside a chained comparison": ('def f(cached):\n    v = cached.get("x")\n    return v is v in NAMES\n'),
+    "tuple narrowing does not prove element hashability": (
+        'def f(cached):\n    v = cached.get("x")\n    if isinstance(v, tuple):\n        return v in NAMES\n    return False\n'
+    ),
 }
 
 CLEAN = {

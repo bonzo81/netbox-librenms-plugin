@@ -4,6 +4,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from netbox_librenms_plugin.tests.cache_test_helpers import seed_every_tab, snapshot_state
 from netbox_librenms_plugin.tests.view_test_helpers import make_request, make_view
 from netbox_librenms_plugin.tests.view_test_helpers import post as _post
 
@@ -21,40 +22,6 @@ def _seed_inventory(view, device, inventory, *, librenms_id=None, server_key="de
 @pytest.mark.django_db
 class TestModuleActionsInvalidateEveryChangedDevice:
     """A module action that changes another device must drop that device's snapshots too."""
-
-    @staticmethod
-    def _snapshot_state(device, server_key="default"):
-        """Return the per-tab snapshot presence for *device* on *server_key*."""
-        from django.core.cache import cache
-
-        from netbox_librenms_plugin.sync_cache import TAB_SPECS, SyncCacheConsistency
-
-        coordinator = SyncCacheConsistency(device)
-        return {
-            tab: cache.get(coordinator.snapshot_key(tab, server_key)) is not None
-            for tab in coordinator.applicable_tabs()
-            if tab in TAB_SPECS
-        }
-
-    @classmethod
-    def _seed_every_tab(cls, device, server_key="default"):
-        """Give *device* a snapshot on every applicable tab so invalidation is observable."""
-        from django.core.cache import cache
-        from django.db import transaction
-
-        from netbox_librenms_plugin.sync_cache import SyncCacheConsistency
-
-        coordinator = SyncCacheConsistency(device)
-        keys = []
-        for tab in coordinator.applicable_tabs():
-            key = coordinator.snapshot_key(tab, server_key)
-            cache.set(key, [{"seeded": tab.value}], timeout=300)
-            keys.append(key)
-        assert all(cache.get(key) is not None for key in keys), "the seed never landed"
-        # Building the fixtures is itself a tracked write, so a cleanup for these devices is
-        # already queued; dropping it makes the capture below observe only the action's own.
-        transaction.get_connection().run_on_commit.clear()
-        return keys
 
     def test_replace_invalidates_the_device_that_lost_the_serial_conflicting_module(
         self, django_capture_on_commit_callbacks
@@ -104,7 +71,7 @@ class TestModuleActionsInvalidateEveryChangedDevice:
             }
         ]
         key = _seed_inventory(view, page_device, inventory, librenms_id=7)
-        seeded = self._seed_every_tab(other_device)
+        seeded = seed_every_tab(other_device)
 
         try:
             with django_capture_on_commit_callbacks(execute=True):
@@ -113,7 +80,7 @@ class TestModuleActionsInvalidateEveryChangedDevice:
                 "the serial-conflicting module on the other device was not removed, "
                 "so this test never reached the invalidation it asserts"
             )
-            remaining = self._snapshot_state(other_device)
+            remaining = snapshot_state(other_device)
         finally:
             cache.delete(key)
             for seeded_key in seeded:
@@ -154,7 +121,7 @@ class TestModuleActionsInvalidateEveryChangedDevice:
             user=user,
         )
         view = make_view(MoveModuleView, request, librenms_api=SimpleNamespace(server_key="default"))
-        seeded = self._seed_every_tab(source_device)
+        seeded = seed_every_tab(source_device)
 
         try:
             with django_capture_on_commit_callbacks(execute=True):
@@ -163,7 +130,7 @@ class TestModuleActionsInvalidateEveryChangedDevice:
             assert moving.device_id == page_device.pk, (
                 "the module never moved, so this test never reached the invalidation it asserts"
             )
-            remaining = self._snapshot_state(source_device)
+            remaining = snapshot_state(source_device)
         finally:
             for seeded_key in seeded:
                 cache.delete(seeded_key)
@@ -217,12 +184,12 @@ class TestModuleActionsInvalidateEveryChangedDevice:
             }
         ]
         key = _seed_inventory(view, page_device, inventory, librenms_id=7)
-        seeded = self._seed_every_tab(bystander)
+        seeded = seed_every_tab(bystander)
 
         try:
             with django_capture_on_commit_callbacks(execute=True):
                 _post(view, request, pk=page_device.pk)
-            remaining = self._snapshot_state(bystander)
+            remaining = snapshot_state(bystander)
         finally:
             cache.delete(key)
             for seeded_key in seeded:

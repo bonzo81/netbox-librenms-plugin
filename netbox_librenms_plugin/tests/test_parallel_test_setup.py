@@ -23,7 +23,6 @@ from netbox_librenms_plugin.tests.parallel import (
     pytest_xdist_auto_num_workers,
 )
 
-
 REPOSITORY_ROOT = Path(__file__).parents[2]
 
 
@@ -575,6 +574,47 @@ def test_reused_database_restores_inventory_and_serial_seed_rules():
     seed_migration_rows()
     assert InventoryIgnoreRule.objects.filter(**inventory).exists()
     assert NormalizationRule.objects.filter(**serial).exists()
+
+
+def test_root_pytest_config_excludes_the_separate_browser_suite():
+    """A bare root pytest run must not collect tests owned by the browser config."""
+    browser_path = "netbox_librenms_plugin/tests/browser"
+    environment = {name: value for name, value in os.environ.items() if not name.startswith("PYTEST_")}
+    browser_environment = {
+        name: value
+        for name, value in environment.items()
+        if name not in {"DJANGO_SETTINGS_MODULE", "NETBOX_CONFIGURATION"}
+    }
+    root_collection = subprocess.run(
+        [sys.executable, "-m", "pytest", "--collect-only", "-q", "--no-cov", "-n", "0"],
+        capture_output=True,
+        text=True,
+        cwd=REPOSITORY_ROOT,
+        env=environment,
+        check=False,
+    )
+    browser_collection = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "pytest",
+            "-c",
+            f"{browser_path}/pytest.ini",
+            browser_path,
+            "--collect-only",
+            "-q",
+        ],
+        capture_output=True,
+        text=True,
+        cwd=REPOSITORY_ROOT,
+        env=browser_environment,
+        check=False,
+    )
+
+    assert root_collection.returncode == 0, root_collection.stderr
+    assert "test_sync_cache_browser.py" not in root_collection.stdout
+    assert browser_collection.returncode == 0, browser_collection.stderr
+    assert "test_sync_cache_browser.py" in browser_collection.stdout
 
 
 def test_isolated_settings_exclude_unrelated_installed_plugins(settings):

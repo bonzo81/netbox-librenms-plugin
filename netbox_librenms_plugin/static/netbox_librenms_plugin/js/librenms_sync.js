@@ -428,6 +428,7 @@ function showSyncCacheNotice(message, revision, level = 'warning') {
         container.id = 'librenms-sync-cache-notices';
         controller.root.insertAdjacentElement('afterend', container);
     }
+    if (level !== 'danger' && container.querySelector('.alert-danger')) return;
     const alertElement = document.createElement('div');
     alertElement.className = `alert alert-${level} alert-dismissible`;
     alertElement.setAttribute('role', 'alert');
