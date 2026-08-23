@@ -3,6 +3,20 @@
 from unittest.mock import patch
 
 
+def _cached_search_metadata(cached_at, filters):
+    """Return complete metadata for one cached-search reader fixture."""
+    return {
+        "server_key": "default",
+        "cache_timeout": 300,
+        "cached_at": cached_at,
+        "filters": filters,
+        "vc_enabled": False,
+        "use_sysname": True,
+        "strip_domain": False,
+        "device_count": 1,
+    }
+
+
 class TestGetLocationChoicesCacheKey:
     """Tests for get_location_choices_cache_key (line 14)."""
 
@@ -54,11 +68,7 @@ class TestGetActiveCachedSearches:
             if "librenms_locations_choices" in key:
                 return None
             if key == "some_cache_key":
-                return {
-                    "cache_timeout": 300,
-                    "cached_at": cached_at,
-                    "filters": {},
-                }
+                return _cached_search_metadata(cached_at, {"hostname": "edge"})
             return default
 
         mock_cache.get.side_effect = mock_get
@@ -67,7 +77,7 @@ class TestGetActiveCachedSearches:
         assert len(result) == 1
         assert result[0]["remaining_seconds"] > 0
         assert result[0]["cache_key"] == "some_cache_key"
-        assert result[0]["display_filters"] == {}
+        assert result[0]["display_filters"] == {"hostname": "edge"}
 
     @patch("netbox_librenms_plugin.import_utils.cache.cache")
     def test_expired_entry_is_cleaned_up(self, mock_cache):
@@ -84,11 +94,7 @@ class TestGetActiveCachedSearches:
             if "librenms_locations_choices" in key:
                 return None
             if key == "expired_key":
-                return {
-                    "cache_timeout": 300,
-                    "cached_at": old_time,
-                    "filters": {},
-                }
+                return _cached_search_metadata(old_time, {"hostname": "edge"})
             return default
 
         mock_cache.get.side_effect = mock_get
@@ -117,11 +123,7 @@ class TestGetActiveCachedSearches:
             if key == "librenms_locations_choices:default":
                 return [("42", "New York DC"), ("99", "London DC")]
             if key == "search_key":
-                return {
-                    "cache_timeout": 300,
-                    "cached_at": cached_at,
-                    "filters": {"location": "42"},
-                }
+                return _cached_search_metadata(cached_at, {"location": "42"})
             return default
 
         mock_cache.get.side_effect = mock_get
@@ -145,11 +147,7 @@ class TestGetActiveCachedSearches:
             if "librenms_locations_choices" in key:
                 return None
             if key == "search_key":
-                return {
-                    "cache_timeout": 300,
-                    "cached_at": cached_at,
-                    "filters": {"type": "network"},
-                }
+                return _cached_search_metadata(cached_at, {"type": "network"})
             return default
 
         mock_cache.get.side_effect = mock_get
@@ -159,7 +157,7 @@ class TestGetActiveCachedSearches:
         assert result[0]["display_filters"]["type"] == "Network"
 
     @patch("netbox_librenms_plugin.import_utils.cache.cache")
-    def test_missing_filters_key_falls_back_to_empty_dict(self, mock_cache):
+    def test_missing_filters_key_is_omitted(self, mock_cache):
         from datetime import datetime, timezone
 
         from netbox_librenms_plugin.import_utils.cache import get_active_cached_searches
@@ -173,18 +171,16 @@ class TestGetActiveCachedSearches:
             if "librenms_locations_choices" in key:
                 return None
             if key == "search_key":
-                # No 'filters' key
-                return {
-                    "cache_timeout": 300,
-                    "cached_at": cached_at,
-                }
+                metadata = _cached_search_metadata(cached_at, {"hostname": "edge"})
+                metadata.pop("filters")
+                return metadata
             return default
 
         mock_cache.get.side_effect = mock_get
 
         result = get_active_cached_searches("default")
-        assert len(result) == 1
-        assert result[0]["display_filters"] == {}
+        assert result == []
+        mock_cache.set.assert_called_once()
 
     @patch("netbox_librenms_plugin.import_utils.cache.cache")
     def test_timezone_naive_cached_at_normalized_to_utc(self, mock_cache):
@@ -200,9 +196,8 @@ class TestGetActiveCachedSearches:
                 return None
             if key == "search_key":
                 return {
+                    **_cached_search_metadata(naive_ts, {"hostname": "edge"}),
                     "cache_timeout": 99999999,
-                    "cached_at": naive_ts,
-                    "filters": {},
                 }
             return default
 
@@ -223,11 +218,7 @@ class TestGetActiveCachedSearches:
             if "librenms_locations_choices" in key:
                 return None
             if key == "search_key":
-                return {
-                    "cache_timeout": 300,
-                    "cached_at": "NOT_A_VALID_DATETIME",
-                    "filters": {},
-                }
+                return _cached_search_metadata("NOT_A_VALID_DATETIME", {"hostname": "edge"})
             return default
 
         mock_cache.get.side_effect = mock_get
@@ -272,9 +263,9 @@ class TestGetActiveCachedSearches:
             if "librenms_locations_choices" in key:
                 return None
             if key == "older_key":
-                return {"cache_timeout": 300, "cached_at": older, "filters": {}}
+                return _cached_search_metadata(older, {"hostname": "older-edge"})
             if key == "newer_key":
-                return {"cache_timeout": 300, "cached_at": newer, "filters": {}}
+                return _cached_search_metadata(newer, {"hostname": "newer-edge"})
             return default
 
         mock_cache.get.side_effect = mock_get

@@ -60,6 +60,64 @@ def _import_device(device_id, hostname):
     }
 
 
+def test_cached_search_aggregation_omits_expired_stale_and_removed_server_metadata():
+    """Only metadata owned by a currently configured server appears in the aggregate."""
+    from datetime import datetime, timedelta, timezone
+
+    from django.core.cache import cache
+
+    from netbox_librenms_plugin.import_utils import (
+        get_active_cached_searches_for_servers,
+        get_cache_metadata_key,
+    )
+
+    now = datetime.now(timezone.utc)
+
+    def metadata(server_key, cached_at):
+        return {
+            "server_key": server_key,
+            "cached_at": cached_at.isoformat(),
+            "cache_timeout": 300,
+            "filters": {"hostname": "shared-edge"},
+            "vc_enabled": False,
+            "use_sysname": True,
+            "strip_domain": False,
+            "device_count": 1,
+        }
+
+    primary_key = get_cache_metadata_key("primary", {"hostname": "shared-edge"}, False)
+    stale_key = "librenms_filter_cache_metadata_primary_stale"
+    incomplete_key = "librenms_filter_cache_metadata_primary_incomplete"
+    secondary_key = get_cache_metadata_key("secondary", {"hostname": "shared-edge"}, False)
+    retired_key = get_cache_metadata_key("retired", {"hostname": "shared-edge"}, False)
+    cache.set("librenms_cache_index_primary", [primary_key, stale_key, incomplete_key], timeout=300)
+    cache.set(primary_key, metadata("primary", now), timeout=300)
+    cache.set(stale_key, metadata("secondary", now), timeout=300)
+    cache.set(
+        incomplete_key,
+        {
+            "server_key": "primary",
+            "cached_at": now.isoformat(),
+            "cache_timeout": 300,
+            "device_count": 1,
+        },
+        timeout=300,
+    )
+    cache.set("librenms_cache_index_secondary", [secondary_key], timeout=300)
+    cache.set(secondary_key, metadata("secondary", now - timedelta(seconds=600)), timeout=300)
+    cache.set("librenms_cache_index_retired", [retired_key], timeout=300)
+    cache.set(retired_key, metadata("retired", now), timeout=300)
+
+    searches = get_active_cached_searches_for_servers(
+        {"primary": "Primary LibreNMS", "secondary": "Secondary LibreNMS"}
+    )
+
+    assert [(search["server_key"], search["cache_key"]) for search in searches] == [("primary", primary_key)]
+    assert cache.get("librenms_cache_index_primary") == [primary_key]
+    assert cache.get("librenms_cache_index_secondary") == []
+    assert cache.get("librenms_cache_index_retired") == [retired_key]
+
+
 @pytest.mark.django_db
 def test_import_starts_on_installation_default_and_offers_transient_server_switches(client, settings):
     """The import selector lists configured servers without changing installation settings."""
@@ -352,13 +410,23 @@ def test_synchronous_import_search_and_cache_are_scoped_to_the_active_server(cli
     def librenms_response(request_url, **_kwargs):
         requested_urls.append(request_url)
         if request_url.endswith("/api/v0/resources/locations"):
-            return _json_response(request_url, {"status": "ok", "locations": []})
+            return _json_response(
+                request_url,
+                {"status": "ok", "locations": [{"id": 1, "location": "Test Lab"}]},
+            )
         if request_url.endswith("/api/v0/devices"):
             if request_url.startswith("https://primary.example.com"):
                 devices = [_import_device(46101, "primary-edge")]
             else:
                 devices = [_import_device(46102, "secondary-edge")]
             return _json_response(request_url, {"status": "ok", "devices": devices})
+        if request_url.endswith("/api/v0/devices/46101"):
+            return _json_response(request_url, {"status": "ok", "devices": [_import_device(46101, "primary-edge")]})
+        if request_url.endswith("/api/v0/devices/46102"):
+            return _json_response(
+                request_url,
+                {"status": "ok", "devices": [_import_device(46102, "secondary-edge")]},
+            )
         if "/api/v0/inventory/" in request_url:
             return _json_response(request_url, {"status": "ok", "inventory": []})
         raise AssertionError(f"Unexpected LibreNMS request: {request_url}")
@@ -396,14 +464,216 @@ def test_synchronous_import_search_and_cache_are_scoped_to_the_active_server(cli
     assert b'<input type="hidden" name="server_key" value="secondary">' in confirmation_response.content
     secondary_html = responses["secondary"].content.decode()
     cached_search_start = secondary_html.index('id="cached-searches-collapse"')
+    cached_searches_html = secondary_html[cached_search_start : secondary_html.index("</div>", cached_search_start)]
+    assert cached_searches_html.count("data-cached-server-key=") == 2
+    assert 'data-cached-server-key="primary"' in cached_searches_html
+    assert 'data-cached-server-key="secondary"' in cached_searches_html
+    assert "Primary LibreNMS" in cached_searches_html
+    assert "Secondary LibreNMS" in cached_searches_html
     cached_search_end = secondary_html.index('title="Click to load this cached search"', cached_search_start)
     cached_search_link = secondary_html[cached_search_start:cached_search_end]
-    assert 'href="?server_key=secondary&amp;apply_filters=1&amp;librenms_hostname=scoped-edge"' in cached_search_link
+    assert (
+        'href="?server_key=secondary&amp;apply_filters=1&amp;librenms_hostname=scoped-edge'
+        '&amp;use_sysname=1&amp;strip_domain=0"'
+    ) in cached_search_link
     device_searches = [url for url in requested_urls if url.endswith("/api/v0/devices")]
     assert device_searches == [
         "https://primary.example.com/api/v0/devices",
         "https://secondary.example.com/api/v0/devices",
     ]
+
+
+@pytest.mark.django_db
+def test_cached_search_navigation_restores_its_server_and_naming_namespace(client, settings):
+    """Opening a cached search restores its server and naming options without a new query."""
+    _configure_servers(settings)
+    LibreNMSSettings.objects.update_or_create(pk=1, defaults={"selected_server": "primary"})
+    client.force_login(make_superuser("cached-search-navigator"))
+    import_url = reverse("plugins:netbox_librenms_plugin:librenms_import")
+    save_pref_url = reverse("plugins:netbox_librenms_plugin:save_user_pref")
+    requested_urls = []
+
+    def librenms_response(request_url, **_kwargs):
+        requested_urls.append(request_url)
+        server_key = "primary" if request_url.startswith("https://primary.example.com") else "secondary"
+        device_id = 46111 if server_key == "primary" else 46112
+        device = _import_device(device_id, f"{server_key}-shared-edge")
+        if request_url.endswith("/api/v0/resources/locations"):
+            return _json_response(
+                request_url,
+                {"status": "ok", "locations": [{"id": 1, "location": f"{server_key.title()} Lab"}]},
+            )
+        if request_url.endswith("/api/v0/devices"):
+            return _json_response(request_url, {"status": "ok", "devices": [device]})
+        if request_url.endswith(f"/api/v0/devices/{device_id}"):
+            return _json_response(request_url, {"status": "ok", "devices": [device]})
+        if "/api/v0/inventory/" in request_url:
+            return _json_response(request_url, {"status": "ok", "inventory": []})
+        raise AssertionError(f"Unexpected LibreNMS request: {request_url}")
+
+    with patch("netbox_librenms_plugin.librenms_api.requests.get", side_effect=librenms_response):
+        primary_response = client.get(
+            import_url,
+            {
+                "server_key": "primary",
+                "apply_filters": "1",
+                "librenms_hostname": "shared-edge",
+                "use_background_job": "",
+            },
+        )
+        assert primary_response.status_code == 200
+        for key, value in (("use_sysname", False), ("strip_domain", True)):
+            preference_response = client.post(
+                save_pref_url,
+                data=json.dumps({"key": key, "value": value}),
+                content_type="application/json",
+            )
+            assert preference_response.status_code == 200
+        secondary_response = client.get(
+            import_url,
+            {
+                "server_key": "secondary",
+                "apply_filters": "1",
+                "librenms_hostname": "shared-edge",
+                "use_background_job": "",
+            },
+        )
+
+        assert secondary_response.status_code == 200
+        requested_urls.clear()
+        restored_response = client.get(
+            import_url,
+            {
+                "server_key": "primary",
+                "apply_filters": "1",
+                "librenms_hostname": "shared-edge",
+                "use_sysname": "1",
+                "strip_domain": "0",
+                "use_background_job": "",
+            },
+        )
+
+    assert restored_response.status_code == 200
+    assert b"primary-shared-edge" in restored_response.content
+    assert b"secondary-shared-edge" not in restored_response.content
+    assert restored_response.context["use_sysname"] is True
+    assert restored_response.context["strip_domain"] is False
+    assert requested_urls == []
+
+
+@pytest.mark.django_db
+def test_import_clear_controls_preserve_other_server_cache_namespaces(client, settings):
+    """Clear preserves all searches, while Clear cache refreshes only the active namespace."""
+    _configure_servers(settings)
+    LibreNMSSettings.objects.update_or_create(pk=1, defaults={"selected_server": "primary"})
+    client.force_login(make_superuser("cached-search-clearer"))
+    import_url = reverse("plugins:netbox_librenms_plugin:librenms_import")
+    requested_urls = []
+    primary_generation = {"fresh": False, "empty": False}
+
+    def librenms_response(request_url, **_kwargs):
+        requested_urls.append(request_url)
+        server_key = "primary" if request_url.startswith("https://primary.example.com") else "secondary"
+        if server_key == "primary" and primary_generation["fresh"]:
+            device_id = 46123
+            hostname = "primary-refreshed-edge"
+        elif server_key == "primary":
+            device_id = 46121
+            hostname = "primary-original-edge"
+        else:
+            device_id = 46122
+            hostname = "secondary-original-edge"
+        device = _import_device(device_id, hostname)
+        if request_url.endswith("/api/v0/resources/locations"):
+            return _json_response(
+                request_url,
+                {"status": "ok", "locations": [{"id": 1, "location": f"{server_key.title()} Lab"}]},
+            )
+        if request_url.endswith("/api/v0/devices"):
+            if server_key == "primary" and primary_generation["empty"]:
+                return _json_response(request_url, {"status": "ok", "devices": []})
+            return _json_response(request_url, {"status": "ok", "devices": [device]})
+        if request_url.endswith(f"/api/v0/devices/{device_id}"):
+            return _json_response(request_url, {"status": "ok", "devices": [device]})
+        if "/api/v0/inventory/" in request_url:
+            return _json_response(request_url, {"status": "ok", "inventory": []})
+        raise AssertionError(f"Unexpected LibreNMS request: {request_url}")
+
+    with patch("netbox_librenms_plugin.librenms_api.requests.get", side_effect=librenms_response):
+        for server_key in ("primary", "secondary"):
+            search_response = client.get(
+                import_url,
+                {
+                    "server_key": server_key,
+                    "apply_filters": "1",
+                    "librenms_hostname": "original-edge",
+                    "use_background_job": "",
+                },
+            )
+            assert search_response.status_code == 200
+
+        requested_urls.clear()
+        clear_response = client.get(import_url, {"server_key": "primary"})
+        clear_html = clear_response.content.decode()
+        assert clear_response.status_code == 200
+        assert clear_html.count("data-cached-server-key=") == 2
+        assert 'data-active-server-key="primary"' in clear_html
+        assert requested_urls == []
+
+        primary_generation["fresh"] = True
+        refresh_response = client.get(
+            import_url,
+            {
+                "server_key": "primary",
+                "apply_filters": "1",
+                "librenms_hostname": "original-edge",
+                "clear_cache": "on",
+                "use_background_job": "",
+            },
+        )
+        assert refresh_response.status_code == 200
+        assert b"primary-refreshed-edge" in refresh_response.content
+        assert b"secondary-original-edge" not in refresh_response.content
+        assert requested_urls
+        assert all(url.startswith("https://primary.example.com/") for url in requested_urls)
+
+        requested_urls.clear()
+        secondary_response = client.get(
+            import_url,
+            {
+                "server_key": "secondary",
+                "apply_filters": "1",
+                "librenms_hostname": "original-edge",
+                "use_sysname": "1",
+                "strip_domain": "0",
+                "use_background_job": "",
+            },
+        )
+
+        primary_generation["empty"] = True
+        requested_urls.clear()
+        empty_refresh_response = client.get(
+            import_url,
+            {
+                "server_key": "primary",
+                "apply_filters": "1",
+                "librenms_hostname": "original-edge",
+                "clear_cache": "on",
+                "use_background_job": "",
+            },
+        )
+
+    secondary_html = secondary_response.content.decode()
+    assert secondary_response.status_code == 200
+    assert b"secondary-original-edge" in secondary_response.content
+    assert b"primary-refreshed-edge" not in secondary_response.content
+    assert secondary_html.count("data-cached-server-key=") == 2
+    empty_refresh_html = empty_refresh_response.content.decode()
+    assert empty_refresh_response.status_code == 200
+    assert 'data-cached-server-key="primary"' not in empty_refresh_html
+    assert empty_refresh_html.count('data-cached-server-key="secondary"') == 1
+    assert requested_urls
+    assert all(url.startswith("https://primary.example.com/") for url in requested_urls)
 
 
 @pytest.mark.django_db

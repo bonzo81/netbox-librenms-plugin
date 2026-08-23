@@ -1287,6 +1287,26 @@ def process_device_filters(
     else:
         logger.info(f"Fetching devices with filters: {filters}")
 
+    cache_metadata_key = get_cache_metadata_key(
+        server_key=api.server_key,
+        filters=filters,
+        vc_enabled=vc_detection_enabled,
+        use_sysname=use_sysname,
+        strip_domain=strip_domain,
+    )
+    cache_index_key = f"librenms_cache_index_{api.server_key}"
+    if clear_cache:
+        cache.delete(cache_metadata_key)
+        cache_index = cache.get(cache_index_key, [])
+        if isinstance(cache_index, list):
+            remaining_cache_keys = [key for key in cache_index if key != cache_metadata_key]
+            if remaining_cache_keys:
+                cache.set(cache_index_key, remaining_cache_keys, timeout=api.cache_timeout)
+            else:
+                cache.delete(cache_index_key)
+        else:
+            cache.delete(cache_index_key)
+
     # Always get cache status internally, even if not returning it
     # We need it to determine if metadata should be updated
     libre_devices, from_cache = get_librenms_devices_for_import(
@@ -1422,14 +1442,6 @@ def process_device_filters(
     if validated_devices:
         from datetime import datetime, timezone
 
-        cache_metadata_key = get_cache_metadata_key(
-            server_key=api.server_key,
-            filters=filters,
-            vc_enabled=vc_detection_enabled,
-            use_sysname=use_sysname,
-            strip_domain=strip_domain,
-        )
-
         # Check if metadata already exists to preserve original timestamp
         # BUT: if clear_cache was requested or data came fresh from LibreNMS, update it
         existing_metadata = cache.get(cache_metadata_key)
@@ -1441,16 +1453,18 @@ def process_device_filters(
         else:
             # No metadata exists, OR cache was cleared, OR fresh data - create/update it now
             cache_metadata = {
+                "server_key": api.server_key,
                 "cached_at": datetime.now(timezone.utc).isoformat(),
                 "cache_timeout": api.cache_timeout,
                 "filters": filters,
                 "vc_enabled": vc_detection_enabled,
+                "use_sysname": use_sysname,
+                "strip_domain": strip_domain,
                 "device_count": len(validated_devices),
             }
             cache.set(cache_metadata_key, cache_metadata, timeout=api.cache_timeout)
 
             # Maintain cache index for this server to enable listing active searches
-            cache_index_key = f"librenms_cache_index_{api.server_key}"
             cache_index = cache.get(cache_index_key, [])
             # Add this cache key if not already in index
             if cache_metadata_key not in cache_index:

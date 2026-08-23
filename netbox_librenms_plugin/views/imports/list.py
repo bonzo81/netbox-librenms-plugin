@@ -11,7 +11,7 @@ from utilities.rqworker import get_workers_for_queue
 from netbox_librenms_plugin.forms import LibreNMSImportFilterForm
 from netbox_librenms_plugin.librenms_api import LibreNMSAPI
 from netbox_librenms_plugin.import_utils import (
-    get_active_cached_searches,
+    get_active_cached_searches_for_servers,
     process_device_filters,
 )
 from netbox_librenms_plugin.librenms_api import LibreNMSUnreachable
@@ -25,6 +25,16 @@ from netbox_librenms_plugin.utils import get_user_pref
 from netbox_librenms_plugin.views.mixins import LibreNMSAPIMixin, LibreNMSGenericPermissionMixin
 
 logger = logging.getLogger(__name__)
+
+
+def _cached_search_option(data, key, fallback):
+    """Return one explicit cached-search boolean without changing user preferences."""
+    values = data.getlist(key)
+    if values == ["1"]:
+        return True
+    if values == ["0"]:
+        return False
+    return fallback
 
 
 class LibreNMSImportView(LibreNMSGenericPermissionMixin, LibreNMSAPIMixin, generic.ObjectListView):
@@ -226,6 +236,9 @@ class LibreNMSImportView(LibreNMSGenericPermissionMixin, LibreNMSAPIMixin, gener
         if _strip_domain is None:
             _strip_domain = getattr(settings_obj, "strip_domain_default", False) if settings_obj else False
 
+        _use_sysname = _cached_search_option(request.GET, "use_sysname", _use_sysname)
+        _strip_domain = _cached_search_option(request.GET, "strip_domain", _strip_domain)
+
         self._use_sysname = _use_sysname
         self._strip_domain = _strip_domain
         self._settings = settings_obj
@@ -398,10 +411,7 @@ class LibreNMSImportView(LibreNMSGenericPermissionMixin, LibreNMSAPIMixin, gener
 
         filter_warning = self._filter_warning
 
-        # Get active cached searches for this server
-        cached_searches = (
-            get_active_cached_searches(self._active_server_key) if self._active_server_key is not None else []
-        )
+        cached_searches = get_active_cached_searches_for_servers(LibreNMSAPI.get_available_servers())
 
         server_key = self._active_server_key
         context = {

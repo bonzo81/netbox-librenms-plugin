@@ -89,7 +89,10 @@ Clear cache before search
 : Forces fresh data from LibreNMS instead of using cached results. LibreNMS data is normally cached for 5 minutes to improve performance. See [Background Jobs & Caching](background_jobs.md) for caching details.
 
 ## Saved Cached Searches
-The import page displays recent searches for the active LibreNMS server at the top. Each cached search shows the filters used, device count, and time remaining before expiration. Click a cached search to reload those results without re-running filters. Cached searches from another server do not appear and cannot be loaded through these links.
+
+The import page displays active searches from every configured LibreNMS server at the top. Each entry includes a server label, filters, device count, and time remaining. Identical filters on different servers remain separate.
+
+Click an entry to activate its server and reload only that server's results. The link retains its filters, naming options, and Virtual Chassis detection state. **Clear** keeps all cached searches and the active server. **Clear cache before search** refreshes only the active server and filter combination.
 
 ## Next Steps
 

@@ -24,6 +24,7 @@ from .bulk_import import (  # noqa: F401
 )
 from .cache import (  # noqa: F401
     get_active_cached_searches,
+    get_active_cached_searches_for_servers,
     get_cache_metadata_key,
     get_import_device_cache_key,
     get_import_search_cache_key,

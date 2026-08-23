@@ -11,6 +11,7 @@ All tests use mocking and direct attribute manipulation instead of HTTP requests
 from unittest.mock import MagicMock, patch
 
 import pytest
+from django.http import QueryDict
 
 
 @pytest.fixture(autouse=True)
@@ -1368,7 +1369,8 @@ class TestGracefulFallback:
         request = MagicMock()
         request.user.is_superuser = superuser
         request.user.username = "testuser"
-        request.GET = dict(query_params or {})
+        request.GET = QueryDict("", mutable=True)
+        request.GET.update(query_params or {})
         view.request = request
         return view, request
 
@@ -1395,7 +1397,10 @@ class TestGracefulFallback:
             patch("netbox_librenms_plugin.import_utils.get_device_count_for_filters", return_value=5),
             patch("netbox_librenms_plugin.views.imports.list.render") as mock_render,
             patch("netbox_librenms_plugin.views.imports.list.DeviceImportTable"),
-            patch("netbox_librenms_plugin.views.imports.list.get_active_cached_searches", return_value=[]),
+            patch(
+                "netbox_librenms_plugin.views.imports.list.get_active_cached_searches_for_servers",
+                return_value=[],
+            ),
             patch("netbox_librenms_plugin.jobs.FilterDevicesJob") as mock_job_cls,
             patch("netbox_librenms_plugin.views.imports.list.messages"),
             patch("netbox_librenms_plugin.views.imports.list.process_device_filters") as mock_pdf,
@@ -1494,7 +1499,10 @@ class TestGracefulFallback:
             patch("netbox_librenms_plugin.import_utils.get_device_count_for_filters", return_value=3),
             patch("netbox_librenms_plugin.views.imports.list.render") as mock_render,
             patch("netbox_librenms_plugin.views.imports.list.DeviceImportTable"),
-            patch("netbox_librenms_plugin.views.imports.list.get_active_cached_searches", return_value=[]),
+            patch(
+                "netbox_librenms_plugin.views.imports.list.get_active_cached_searches_for_servers",
+                return_value=[],
+            ),
             patch("netbox_librenms_plugin.jobs.FilterDevicesJob"),
         ):
             mock_settings.objects.first.return_value = None

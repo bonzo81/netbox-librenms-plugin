@@ -33,6 +33,89 @@ def _render_server_selector(active_server_key):
     )
 
 
+def _render_cached_search_links():
+    """Render production cached-search links for two servers with identical filters."""
+    template_root = Path(__file__).parents[2] / "templates"
+    template = Engine(dirs=[template_root]).get_template("netbox_librenms_plugin/inc/_cached_search_links.html")
+    searches = [
+        SimpleNamespace(
+            server_key="primary",
+            server_display_name="Primary LibreNMS",
+            filters={"hostname": "shared-edge"},
+            display_filters={"hostname": "shared-edge"},
+            vc_enabled=False,
+            use_sysname=True,
+            strip_domain=False,
+            device_count=1,
+            cached_at="2026-08-23T10:00:00+00:00",
+            cache_timeout=300,
+            remaining_seconds=240,
+        ),
+        SimpleNamespace(
+            server_key="secondary",
+            server_display_name="Secondary LibreNMS",
+            filters={"hostname": "shared-edge"},
+            display_filters={"hostname": "shared-edge"},
+            vc_enabled=False,
+            use_sysname=False,
+            strip_domain=True,
+            device_count=1,
+            cached_at="2026-08-23T10:01:00+00:00",
+            cache_timeout=300,
+            remaining_seconds=299,
+        ),
+    ]
+    return template.render(Context({"cached_searches": searches}, use_l10n=False))
+
+
+def test_cached_search_labels_its_server_and_activates_that_server_when_opened():
+    """A cached-search click carries its server and complete search state."""
+    base_url = "https://plugin.example.com/import/"
+    destination = (
+        f"{base_url}?server_key=primary&apply_filters=1&librenms_hostname=shared-edge&use_sysname=1&strip_domain=0"
+    )
+    initial_html = f'<div id="cached-searches">{_render_cached_search_links()}</div>'
+    destination_html = """
+        <div id="librenms-server-selector" data-active-server-key="primary"></div>
+        <div id="search-results">primary-shared-edge</div>
+    """
+
+    def handle_route(route):
+        if route.request.url == base_url:
+            route.fulfill(body=initial_html, content_type="text/html")
+            return
+        if route.request.url == destination:
+            route.fulfill(body=destination_html, content_type="text/html")
+            return
+        raise AssertionError(f"Unexpected browser request: {route.request.url}")
+
+    with playwright.sync_playwright() as runtime:
+        browser = runtime.chromium.launch(headless=True)
+        page = browser.new_page()
+        page.route("**/*", handle_route)
+        page.goto(base_url)
+
+        assert page.locator('[data-cached-server-key="primary"] .cached-search-server-label').inner_text() == (
+            "Primary LibreNMS"
+        )
+        assert page.locator('[data-cached-server-key="secondary"] .cached-search-server-label').inner_text() == (
+            "Secondary LibreNMS"
+        )
+        page.locator('[data-cached-server-key="primary"]').click()
+        page.wait_for_url(destination)
+
+        assert parse_qs(urlparse(page.url).query) == {
+            "server_key": ["primary"],
+            "apply_filters": ["1"],
+            "librenms_hostname": ["shared-edge"],
+            "use_sysname": ["1"],
+            "strip_domain": ["0"],
+        }
+        assert page.locator("#librenms-server-selector").get_attribute("data-active-server-key") == "primary"
+        assert page.locator("#search-results").inner_text() == "primary-shared-edge"
+        browser.close()
+
+
 def test_server_switch_keeps_the_tab_and_marks_the_destination_active():
     """A selector click replaces transient state with the chosen server and current tab."""
     destination = "https://plugin.example.com/device/1/librenms-sync/?tab=modules&server_key=primary"
