@@ -18,7 +18,11 @@ def _configured_default_server(monkeypatch):
     """Give these import regressions one explicit usable server."""
     from netbox_librenms_plugin.server_selection import LibreNMSAPI
 
-    monkeypatch.setattr(LibreNMSAPI, "get_available_servers", lambda: {"default": "Default"})
+    monkeypatch.setattr(
+        LibreNMSAPI,
+        "get_available_servers",
+        classmethod(lambda _cls: {"default": "Default"}),
+    )
 
 
 class _LibreNMSBoundary:

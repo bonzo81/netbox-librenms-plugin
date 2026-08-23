@@ -570,10 +570,11 @@ class TestGetView:
         assert context["vc_detection_enabled"] is True
 
     def test_get_invalid_job_id_logs_warning(self):
-        """Invalid (non-integer) job_id is caught and logged."""
+        """Invalid job IDs are logged without interpolating request data into the message."""
         from netbox_librenms_plugin.views.imports.list import LibreNMSImportView
 
-        view, request = self._make_view_with_request(query_params={"job_id": "not-an-int"})
+        invalid_job_id = "not-an-int\r\nforged-entry"
+        view, request = self._make_view_with_request(query_params={"job_id": invalid_job_id})
 
         mock_api = MagicMock()
         mock_api.server_key = "default"
@@ -604,7 +605,9 @@ class TestGetView:
                                 with patch.object(view, "get_server_info", return_value={}):
                                     with patch("netbox_librenms_plugin.views.imports.list.logger") as mock_logger:
                                         view.get(request)
-                                        mock_logger.warning.assert_called()
+                                        mock_logger.warning.assert_called_once_with(
+                                            "Invalid job_id parameter: %r", invalid_job_id
+                                        )
 
     def test_get_no_job_id_renders_template(self):
         """Normal GET without job_id renders the import template."""

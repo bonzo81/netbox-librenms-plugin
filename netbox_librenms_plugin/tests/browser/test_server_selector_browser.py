@@ -247,7 +247,7 @@ def test_stopped_import_filter_job_returns_to_the_active_server():
         page.add_script_tag(path=script_path)
 
         page.locator("#librenms-import-filter-form").evaluate("form => form.requestSubmit()")
-        page.wait_for_timeout(500)
+        page.wait_for_url(active_server_url)
 
         assert page.url == active_server_url
         browser.close()

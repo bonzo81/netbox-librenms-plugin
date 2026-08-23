@@ -251,7 +251,8 @@ def test_active_and_preferred_servers_render_as_distinct_states(client, settings
     assert 'data-preferred-server-key="secondary"' in html
     assert 'name="active_server_key" value="primary"' in html
     assert reverse("plugins:netbox_librenms_plugin:set_preferred_server", args=[owner.pk]) in html
-    assert "confirm(" not in html[html.index('id="librenms-connections"') : html.index("</table>")]
+    card_start = html.index('id="librenms-connections"')
+    assert "confirm(" not in html[card_start : html.index("</table>", card_start)]
 
 
 @pytest.mark.django_db

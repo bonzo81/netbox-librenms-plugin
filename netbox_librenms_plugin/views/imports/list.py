@@ -266,7 +266,7 @@ class LibreNMSImportView(LibreNMSGenericPermissionMixin, LibreNMSAPIMixin, gener
                         "Job results have expired. Please re-apply your filters.",
                     )
             except (ValueError, TypeError):
-                logger.warning(f"Invalid job_id parameter: {request.GET.get('job_id')}")
+                logger.warning("Invalid job_id parameter: %r", request.GET.get("job_id"))
             if self._active_server_key is None and not self._server_selection_error:
                 self._active_server_key, self._server_selection_error = self._resolve_import_server(request)
 

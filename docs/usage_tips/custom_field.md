@@ -90,9 +90,11 @@ You can manually assign a value to the `librenms_id` custom field for a device u
       For multiple servers: `{"production": 42, "staging": 17}`
 
       An object with multiple usable mappings can also store its preferred server:
+
       ```json
       {"production": 42, "staging": 17, "_preferred_server": "production"}
       ```
+
       Use the star control on the object sync page to manage this value. Do not use `_preferred_server` as a server identity key.
 
 3. **Save Changes:**
