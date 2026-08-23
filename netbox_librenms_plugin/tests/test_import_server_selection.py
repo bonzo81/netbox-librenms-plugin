@@ -2,6 +2,7 @@
 
 import json
 from copy import deepcopy
+from urllib.parse import urlsplit
 from unittest.mock import patch
 from uuid import uuid4
 
@@ -58,6 +59,25 @@ def _import_device(device_id, hostname):
         "disabled": 0,
         "status": 1,
     }
+
+
+def _librenms_request_server_key(request_url):
+    """Return the configured test server for an exact request hostname."""
+    server_keys_by_hostname = {
+        "primary.example.com": "primary",
+        "secondary.example.com": "secondary",
+    }
+    hostname = urlsplit(request_url).hostname
+    try:
+        return server_keys_by_hostname[hostname]
+    except KeyError:
+        raise AssertionError(f"Unexpected LibreNMS request host: {hostname}") from None
+
+
+def test_librenms_request_server_key_rejects_hostname_suffix():
+    """A hostname that only starts with a configured host is not that server."""
+    with pytest.raises(AssertionError, match="Unexpected LibreNMS request host"):
+        _librenms_request_server_key("https://primary.example.com.attacker.invalid/api/v0/devices")
 
 
 def test_cached_search_aggregation_omits_expired_stale_and_removed_server_metadata():
@@ -346,7 +366,7 @@ def test_virtual_chassis_details_queries_only_its_transient_server(client, setti
 
     assert response.status_code == 200
     assert requested_urls
-    assert all(url.startswith("https://secondary.example.com/") for url in requested_urls)
+    assert all(_librenms_request_server_key(url) == "secondary" for url in requested_urls)
 
 
 @pytest.mark.django_db
@@ -415,7 +435,7 @@ def test_synchronous_import_search_and_cache_are_scoped_to_the_active_server(cli
                 {"status": "ok", "locations": [{"id": 1, "location": "Test Lab"}]},
             )
         if request_url.endswith("/api/v0/devices"):
-            if request_url.startswith("https://primary.example.com"):
+            if _librenms_request_server_key(request_url) == "primary":
                 devices = [_import_device(46101, "primary-edge")]
             else:
                 devices = [_import_device(46102, "secondary-edge")]
@@ -495,7 +515,7 @@ def test_cached_search_navigation_restores_its_server_and_naming_namespace(clien
 
     def librenms_response(request_url, **_kwargs):
         requested_urls.append(request_url)
-        server_key = "primary" if request_url.startswith("https://primary.example.com") else "secondary"
+        server_key = _librenms_request_server_key(request_url)
         device_id = 46111 if server_key == "primary" else 46112
         device = _import_device(device_id, f"{server_key}-shared-edge")
         if request_url.endswith("/api/v0/resources/locations"):
@@ -573,7 +593,7 @@ def test_import_clear_controls_preserve_other_server_cache_namespaces(client, se
 
     def librenms_response(request_url, **_kwargs):
         requested_urls.append(request_url)
-        server_key = "primary" if request_url.startswith("https://primary.example.com") else "secondary"
+        server_key = _librenms_request_server_key(request_url)
         if server_key == "primary" and primary_generation["fresh"]:
             device_id = 46123
             hostname = "primary-refreshed-edge"
@@ -635,7 +655,7 @@ def test_import_clear_controls_preserve_other_server_cache_namespaces(client, se
         assert b"primary-refreshed-edge" in refresh_response.content
         assert b"secondary-original-edge" not in refresh_response.content
         assert requested_urls
-        assert all(url.startswith("https://primary.example.com/") for url in requested_urls)
+        assert all(_librenms_request_server_key(url) == "primary" for url in requested_urls)
 
         requested_urls.clear()
         secondary_response = client.get(
@@ -673,7 +693,7 @@ def test_import_clear_controls_preserve_other_server_cache_namespaces(client, se
     assert 'data-cached-server-key="primary"' not in empty_refresh_html
     assert empty_refresh_html.count('data-cached-server-key="secondary"') == 1
     assert requested_urls
-    assert all(url.startswith("https://primary.example.com/") for url in requested_urls)
+    assert all(_librenms_request_server_key(url) == "primary" for url in requested_urls)
 
 
 @pytest.mark.django_db
@@ -790,7 +810,7 @@ def test_background_filter_job_uses_and_records_its_transient_server(settings):
     assert cache.get(get_import_device_cache_key(46104, "secondary"))["hostname"] == "secondary-background-edge"
     assert cache.get(get_import_device_cache_key(46104, "primary")) is None
     assert requested_urls
-    assert all(url.startswith("https://secondary.example.com/") for url in requested_urls)
+    assert all(_librenms_request_server_key(url) == "secondary" for url in requested_urls)
 
 
 @pytest.mark.django_db
