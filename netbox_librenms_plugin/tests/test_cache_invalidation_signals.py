@@ -29,6 +29,15 @@ from netbox_librenms_plugin.tests.cache_test_helpers import (
 SERVER_KEY = "default"
 
 
+class _RejectUnboundInterfaceReads:
+    """Expose signal reads that ignore the database alias carried by the write."""
+
+    def db_for_read(self, model, **hints):
+        if model._meta.label_lower == "dcim.interface":
+            raise AssertionError("tagged-VLAN invalidation routed an unbound interface read")
+        return None
+
+
 def _select_queries_from(captured, table):
     """Return SELECT statements that read one database table."""
     marker = f'FROM "{table}"'
@@ -167,6 +176,33 @@ class TestOrmWritesInvalidateTheirOwner:
             _clear(keys)
 
         assert not any(remaining.values()), f"a tagged-VLAN change left stale snapshots: {remaining}"
+
+    def test_reverse_tagged_vlan_change_reads_owners_on_the_write_alias(
+        self,
+        django_capture_on_commit_callbacks,
+    ):
+        """A reverse m2m write must not route its owner lookup to another database."""
+        from django.db import transaction
+        from django.test import override_settings
+        from ipam.models import VLAN
+
+        from netbox_librenms_plugin.tests.conftest import make_device, make_interface
+
+        device = make_device("signal-vlan-write-alias", librenms_cf={SERVER_KEY: 7})
+        interface = make_interface(device, "Ethernet1")
+        vlan = VLAN.objects.create(vid=103, name="signal-vlan-write-alias")
+        keys = _seed_every_tab(device)
+
+        try:
+            with override_settings(DATABASE_ROUTERS=[_RejectUnboundInterfaceReads()]):
+                with django_capture_on_commit_callbacks(execute=True):
+                    with transaction.atomic():
+                        vlan.interfaces_as_tagged.add(interface)
+            remaining = _snapshot_state(device)
+        finally:
+            _clear(keys)
+
+        assert not any(remaining.values()), f"a reverse tagged-VLAN write left stale snapshots: {remaining}"
 
     def test_clearing_a_vlan_from_the_reverse_side_invalidates_its_devices(self, django_capture_on_commit_callbacks):
         """Reverse ``clear`` supplies no primary-key set, so owners must be captured first."""

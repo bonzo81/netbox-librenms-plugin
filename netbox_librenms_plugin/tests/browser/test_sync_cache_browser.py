@@ -571,6 +571,54 @@ def test_cache_status_failure_disables_every_loaded_sync_control():
         browser.close()
 
 
+def test_successful_cache_status_check_restores_only_fail_closed_modal_controls():
+    """A transient status failure must not leave an open modal permanently disabled."""
+    initial = {
+        "interfaces": _state("before-interfaces"),
+        "ipaddresses": _state("before-ip"),
+    }
+    attempts = 0
+
+    def status_response(route):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            route.fulfill(status=503)
+        else:
+            route.fulfill(json={"tabs": initial})
+
+    with playwright.sync_playwright() as runtime:
+        browser = runtime.chromium.launch(headless=True)
+        page = browser.new_page()
+        page.set_content(_page_html(initial))
+        page.evaluate(
+            """() => {
+                const control = document.createElement('button');
+                control.id = 'modal-already-disabled';
+                control.disabled = true;
+                document.querySelector('#htmx-modal-content form').append(control);
+            }"""
+        )
+        page.route("https://plugin.example.com/status?*", status_response)
+        page.add_script_tag(path=str(SCRIPT_PATH))
+        page.evaluate("initializeSyncCacheConsistency(); checkSyncCacheStatus()")
+        page.wait_for_function(
+            "syncCacheController().lastCheckFailed === true && syncCacheController().checking === null"
+        )
+
+        assert page.locator("#modal-force-action").is_disabled()
+        assert page.locator("#modal-already-disabled").is_disabled()
+
+        page.evaluate("checkSyncCacheStatus()")
+        page.wait_for_function(
+            "syncCacheController().lastCheckFailed === false && syncCacheController().checking === null"
+        )
+
+        assert not page.locator("#modal-force-action").is_disabled()
+        assert page.locator("#modal-already-disabled").is_disabled()
+        browser.close()
+
+
 def test_hung_cache_status_request_times_out_and_fails_closed():
     """A stalled status request must release the controller and remove stale controls."""
     initial = {

@@ -139,7 +139,7 @@ def _get_cached_inventory_for_device(sync_device, server_key, get_cache_key):
 
     current_librenms_id = _coerce_positive_int(get_librenms_device_id(sync_device, server_key, auto_save=False))
     cached_librenms_id = _coerce_positive_int(cached_payload.get("librenms_id"))
-    if current_librenms_id and cached_librenms_id and current_librenms_id != cached_librenms_id:
+    if current_librenms_id is None or cached_librenms_id is None or current_librenms_id != cached_librenms_id:
         return None
 
     return inventory

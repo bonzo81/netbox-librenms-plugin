@@ -511,7 +511,19 @@ function failClosedSyncControls(message) {
         updateSyncCacheTabState(tab, { state: 'invalidated', snapshot_available: false });
     });
     document.querySelectorAll('#htmx-modal-content button, #htmx-modal-content input, #htmx-modal-content select, #htmx-modal-content textarea')
-        .forEach(control => { control.disabled = true; });
+        .forEach(control => {
+            if (control.disabled) return;
+            control.disabled = true;
+            control.dataset.cacheFailClosed = 'true';
+        });
+}
+
+function restoreFailClosedSyncControls() {
+    document.querySelectorAll('#htmx-modal-content [data-cache-fail-closed]')
+        .forEach(control => {
+            delete control.dataset.cacheFailClosed;
+            control.disabled = false;
+        });
 }
 
 function expireSyncTabFromElement(element) {
@@ -707,7 +719,9 @@ function checkSyncCacheStatus() {
             return reconcileSyncCacheStatus(payload.tabs, requestGeneration, abortController.signal);
         })
         .then(() => {
-            if (controller.statusGeneration === requestGeneration) controller.lastCheckFailed = false;
+            if (controller.statusGeneration !== requestGeneration) return;
+            controller.lastCheckFailed = false;
+            restoreFailClosedSyncControls();
         })
         .catch(error => {
             if (controller.statusGeneration !== requestGeneration) return;

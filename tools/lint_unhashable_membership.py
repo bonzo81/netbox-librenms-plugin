@@ -57,6 +57,16 @@ def _is_hashable_container_literal(node):
     )
 
 
+def _reference_name(node):
+    """Return the dotted name of a name or attribute expression."""
+    if isinstance(node, ast.Name):
+        return node.id
+    if isinstance(node, ast.Attribute):
+        parent = _reference_name(node.value)
+        return f"{parent}.{node.attr}" if parent else None
+    return None
+
+
 def _isinstance_narrows(node, target_fingerprint):
     """Return whether *node* is an ``isinstance`` call proving *target* is hashable."""
     if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "isinstance"):
@@ -154,13 +164,17 @@ class MembershipChecker(ast.NodeVisitor):
         """
         for scope in [tree] + [n for n in ast.walk(tree) if isinstance(n, ast.ClassDef)]:
             for node in scope.body:
-                if not isinstance(node, ast.Assign) or not _is_hashable_container_literal(node.value):
+                if isinstance(node, ast.Assign):
+                    targets = node.targets
+                elif isinstance(node, ast.AnnAssign):
+                    targets = (node.target,)
+                else:
                     continue
-                for target in node.targets:
-                    if isinstance(target, ast.Name):
-                        self.hashable_containers.add(target.id)
-                    elif isinstance(target, ast.Attribute):
-                        self.hashable_containers.add(target.attr)
+                if node.value is None or not _is_hashable_container_literal(node.value):
+                    continue
+                for target in targets:
+                    if reference := _reference_name(target):
+                        self.hashable_containers.add(reference)
 
     # -- taint ---------------------------------------------------------------
     @property
@@ -235,10 +249,8 @@ class MembershipChecker(ast.NodeVisitor):
             if not isinstance(operator, (ast.In, ast.NotIn)):
                 continue
             right_is_hashable_container = _is_hashable_container_literal(right) or (
-                isinstance(right, ast.Name) and right.id in self.hashable_containers
+                _reference_name(right) in self.hashable_containers
             )
-            if isinstance(right, ast.Attribute) and right.attr in self.hashable_containers:
-                right_is_hashable_container = True
             if not right_is_hashable_container or not self._is_tainted(left):
                 continue
 
@@ -265,6 +277,7 @@ def collect_container_names(paths):
     paths = tuple(paths)
     names_by_path = {path: set() for path in paths}
     imports_by_path = {path: [] for path in paths}
+    module_imports_by_path = {path: [] for path in paths}
 
     def imported_path(module):
         module_parts = tuple(module.split("."))
@@ -292,6 +305,12 @@ def collect_container_names(paths):
             for alias in node.names
             if alias.name != "*"
         )
+        module_imports_by_path[path].extend(
+            (imported_path(alias.name), alias.asname or alias.name)
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Import)
+            for alias in node.names
+        )
     changed = True
     while changed:
         changed = False
@@ -302,6 +321,16 @@ def collect_container_names(paths):
                 if target_name not in names_by_path[path]:
                     names_by_path[path].add(target_name)
                     changed = True
+            for source_path, qualifier in module_imports_by_path[path]:
+                if source_path is None:
+                    continue
+                for source_name in names_by_path[source_path]:
+                    if "." in source_name:
+                        continue
+                    target_name = f"{qualifier}.{source_name}"
+                    if target_name not in names_by_path[path]:
+                        names_by_path[path].add(target_name)
+                        changed = True
     return names_by_path
 
 

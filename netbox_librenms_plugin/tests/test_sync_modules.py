@@ -3398,6 +3398,15 @@ class TestInstallViewsPreserveInventoryCache:
             ],
         )
 
+    @staticmethod
+    def _trusted_inventory(device, inventory):
+        """Bind one source snapshot to the device's current object mapping."""
+        from netbox_librenms_plugin.utils import set_librenms_device_id
+
+        set_librenms_device_id(device, 555, "default")
+        device.save()
+        return {"inventory": inventory, "librenms_id": 555}
+
     def test_install_module_preserves_inventory_cache(self):
         from types import SimpleNamespace
 
@@ -3421,7 +3430,7 @@ class TestInstallViewsPreserveInventoryCache:
         view = InstallModuleView()
         view._librenms_api = SimpleNamespace(server_key="default")
         cache_key = view.get_cache_key(device, "inventory", server_key="default")
-        payload = {"inventory": inventory}
+        payload = self._trusted_inventory(device, inventory)
         cache.set(cache_key, payload, timeout=300)
         try:
             response = _post(view, request, pk=device.pk)
@@ -3454,7 +3463,7 @@ class TestInstallViewsPreserveInventoryCache:
         view = view_class()
         view._librenms_api = SimpleNamespace(server_key="default")
         cache_key = view.get_cache_key(device, "inventory", server_key="default")
-        payload = {"inventory": inventory}
+        payload = self._trusted_inventory(device, inventory)
         cache.set(cache_key, payload, timeout=300)
         try:
             response = _post(view, request, pk=device.pk)
@@ -3490,7 +3499,7 @@ class TestInstallViewsPreserveInventoryCache:
         view = view_class()
         view._librenms_api = SimpleNamespace(server_key="default")
         cache_key = view.get_cache_key(device, "inventory", server_key="default")
-        cache.set(cache_key, {"inventory": inventory}, timeout=300)
+        cache.set(cache_key, self._trusted_inventory(device, inventory), timeout=300)
         try:
             response = _post(view, request, pk=device.pk)
 
@@ -3499,6 +3508,91 @@ class TestInstallViewsPreserveInventoryCache:
             assert any(
                 "no matching interface found for port_id 4242" in text for text in message_texts(request, "info")
             )
+        finally:
+            cache.delete(cache_key)
+
+    @pytest.mark.parametrize(
+        ("view_name", "request_data"),
+        [
+            ("branch-untrusted", {"parent_index": "100", "server_key": "default"}),
+            ("selected-untrusted", {"select": ["100"], "server_key": "default"}),
+        ],
+    )
+    @pytest.mark.parametrize("cached_librenms_id", [None, "invalid"], ids=["missing", "invalid"])
+    def test_bulk_install_rejects_inventory_without_a_valid_cached_fingerprint(
+        self,
+        view_name,
+        request_data,
+        cached_librenms_id,
+    ):
+        """An untrusted source snapshot cannot drive a module installation."""
+        from types import SimpleNamespace
+
+        from dcim.models import Module
+        from django.core.cache import cache
+
+        from netbox_librenms_plugin.tests.view_test_helpers import make_request, message_texts
+        from netbox_librenms_plugin.utils import set_librenms_device_id
+        from netbox_librenms_plugin.views.sync.modules import InstallBranchView, InstallSelectedView
+
+        device, _bay, _module_type, inventory = self._objects(view_name)
+        set_librenms_device_id(device, 999, "default")
+        device.save()
+        request = make_request("post", request_data, user=self._user(view_name))
+        view_class = InstallBranchView if view_name == "branch-untrusted" else InstallSelectedView
+        view = view_class()
+        view._librenms_api = SimpleNamespace(server_key="default")
+        cache_key = view.get_cache_key(device, "inventory", server_key="default")
+        payload = {"inventory": inventory}
+        if cached_librenms_id is not None:
+            payload["librenms_id"] = cached_librenms_id
+        cache.set(cache_key, payload, timeout=300)
+        try:
+            response = _post(view, request, pk=device.pk)
+
+            assert response.status_code == 302
+            assert not Module.objects.filter(device=device).exists()
+            assert cache.get(cache_key) == payload
+            assert any("No cached inventory data" in text for text in message_texts(request, "error"))
+        finally:
+            cache.delete(cache_key)
+
+    @pytest.mark.parametrize(
+        ("view_name", "request_data"),
+        [
+            ("branch-unmapped", {"parent_index": "100", "server_key": "default"}),
+            ("selected-unmapped", {"select": ["100"], "server_key": "default"}),
+        ],
+    )
+    def test_bulk_install_rejects_inventory_without_a_valid_current_fingerprint(
+        self,
+        view_name,
+        request_data,
+    ):
+        """A source snapshot cannot be applied after its object mapping disappears."""
+        from types import SimpleNamespace
+
+        from dcim.models import Module
+        from django.core.cache import cache
+
+        from netbox_librenms_plugin.tests.view_test_helpers import make_request, message_texts
+        from netbox_librenms_plugin.views.sync.modules import InstallBranchView, InstallSelectedView
+
+        device, _bay, _module_type, inventory = self._objects(view_name)
+        request = make_request("post", request_data, user=self._user(view_name))
+        view_class = InstallBranchView if view_name == "branch-unmapped" else InstallSelectedView
+        view = view_class()
+        view._librenms_api = SimpleNamespace(server_key="default")
+        cache_key = view.get_cache_key(device, "inventory", server_key="default")
+        payload = {"inventory": inventory, "librenms_id": 555}
+        cache.set(cache_key, payload, timeout=300)
+        try:
+            response = _post(view, request, pk=device.pk)
+
+            assert response.status_code == 302
+            assert not Module.objects.filter(device=device).exists()
+            assert cache.get(cache_key) == payload
+            assert any("No cached inventory data" in text for text in message_texts(request, "error"))
         finally:
             cache.delete(cache_key)
 

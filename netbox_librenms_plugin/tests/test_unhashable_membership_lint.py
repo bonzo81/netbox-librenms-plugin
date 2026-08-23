@@ -141,6 +141,39 @@ def test_an_aliased_constant_imported_from_another_module_is_still_resolved(tmp_
     assert findings, "an imported alias must not hide the finding"
 
 
+def test_an_annotated_container_constant_is_still_resolved(tmp_path):
+    """A type annotation must not hide a module-level container constant."""
+    findings = _scan(
+        tmp_path,
+        'NAMES: frozenset[str] = frozenset({"ifName"})\n\n\ndef f(cached):\n    return cached.get("x") in NAMES\n',
+    )
+    assert findings, "an annotated container constant must not hide the finding"
+
+
+def test_a_module_qualified_container_constant_is_still_resolved(tmp_path):
+    """A module alias must retain the imported module's container constants."""
+    findings = _scan(
+        tmp_path,
+        'import extra_0 as constants\n\n\ndef f(cached):\n    return cached.get("x") in constants.NAMES\n',
+        extra_sources=[CONSTANTS],
+    )
+    assert findings, "a module-qualified container constant must not hide the finding"
+
+
+def test_a_module_qualified_name_does_not_inherit_an_unrelated_container_type(tmp_path):
+    """A qualified name must resolve against its module, not an imported namesake."""
+    findings = _scan(
+        tmp_path,
+        (
+            "from extra_0 import NAMES\n"
+            "import extra_1 as constants\n\n\n"
+            'def f(cached):\n    return cached.get("x") in constants.NAMES\n'
+        ),
+        extra_sources=[CONSTANTS, 'NAMES = ("safe",)\n'],
+    )
+    assert not findings, f"an unrelated container name contaminated the module alias: {findings}"
+
+
 def test_an_import_alias_does_not_inherit_an_unrelated_modules_container_type(tmp_path):
     """An alias must resolve against its imported module, not any same-named symbol."""
     findings = _scan(

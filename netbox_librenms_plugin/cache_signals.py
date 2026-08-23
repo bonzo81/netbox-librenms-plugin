@@ -308,7 +308,7 @@ def _handle_m2m(sender, instance, action, reverse, pk_set=None, using=None, **kw
         return
     interface_field, _vlan_field = _m2m_relation_fields(sender)
     interface_model = interface_field.related_model
-    for changed in interface_model.objects.filter(pk__in=pk_set):
+    for changed in interface_model.objects.using(using).filter(pk__in=pk_set):
         _schedule(_owner_key_of(changed), using)
 
 
