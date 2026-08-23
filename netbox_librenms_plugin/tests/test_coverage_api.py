@@ -176,7 +176,7 @@ class TestGetAvailableServersLegacy:
     """get_available_servers on the pre-multi-server config shape."""
 
     def test_legacy_config_no_servers(self, settings):
-        """With no servers mapping, the legacy URL is offered under the default key."""
+        """With no servers mapping, a complete legacy pair is offered under the default key."""
         from netbox_librenms_plugin.librenms_api import LibreNMSAPI
 
         configure_legacy(settings, "https://legacy.example.com")
@@ -185,15 +185,18 @@ class TestGetAvailableServersLegacy:
 
         assert result == {"default": "Default Server (https://legacy.example.com)"}
 
-    def test_no_legacy_url_returns_default_label(self, settings):
-        """With neither a servers mapping nor a legacy URL, only the bare default label is offered."""
+    @pytest.mark.parametrize(
+        ("url", "token"),
+        [(None, None), ("https://legacy.example.com", None)],
+        ids=["nothing-configured", "url-without-token"],
+    )
+    def test_incomplete_legacy_config_returns_no_server(self, settings, url, token):
+        """Legacy mode offers no server without a usable URL and token pair."""
         from netbox_librenms_plugin.librenms_api import LibreNMSAPI
 
-        configure_legacy(settings, None)
+        configure_legacy(settings, url, token=token)
 
-        result = LibreNMSAPI.get_available_servers()
-
-        assert result == {"default": "Default Server"}
+        assert LibreNMSAPI.get_available_servers() == {}
 
 
 @pytest.mark.django_db

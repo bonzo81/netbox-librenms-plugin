@@ -13,6 +13,22 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 
+@pytest.fixture(autouse=True)
+def _configured_job_server_keys():
+    """Give job tests explicit usable server keys."""
+    with patch(
+        "netbox_librenms_plugin.server_selection.LibreNMSAPI.get_available_servers",
+        return_value={
+            "default": "Default",
+            "primary": "Primary",
+            "secondary": "Secondary",
+            "non-default": "Non-default",
+            "resolved-default": "Resolved default",
+        },
+    ):
+        yield
+
+
 class TestShouldUseBackgroundJob:
     """Test background job decision logic."""
 
@@ -116,6 +132,7 @@ class TestFilterDevicesJob:
             vc_detection_enabled=True,
             clear_cache=False,
             show_disabled=False,
+            server_key="default",
         )
 
         # Verify process_device_filters was called with correct args
@@ -145,6 +162,7 @@ class TestFilterDevicesJob:
             vc_detection_enabled=True,
             clear_cache=False,
             show_disabled=False,
+            server_key="default",
         )
 
         call_kwargs = mock_process.call_args.kwargs
@@ -169,6 +187,7 @@ class TestFilterDevicesJob:
             vc_detection_enabled=False,
             clear_cache=True,
             show_disabled=False,
+            server_key="default",
         )
 
         call_kwargs = mock_process.call_args.kwargs
@@ -193,6 +212,7 @@ class TestFilterDevicesJob:
             vc_detection_enabled=False,
             clear_cache=False,
             show_disabled=True,
+            server_key="default",
         )
 
         call_kwargs = mock_process.call_args.kwargs
@@ -218,6 +238,7 @@ class TestFilterDevicesJob:
             clear_cache=False,
             show_disabled=False,
             exclude_existing=True,
+            server_key="default",
         )
 
         call_kwargs = mock_process.call_args.kwargs
@@ -268,7 +289,7 @@ class TestFilterDevicesJob:
             vc_detection_enabled=False,
             clear_cache=False,
             show_disabled=False,
-            server_key=None,
+            server_key="default",
         )
 
         assert job.job.data["server_key"] == "resolved-default"
@@ -329,6 +350,7 @@ class TestFilterDevicesJob:
             vc_detection_enabled=False,
             clear_cache=False,
             show_disabled=False,
+            server_key="default",
         )
 
         # Verify job data shows zero devices
@@ -354,6 +376,7 @@ class TestFilterDevicesJob:
             vc_detection_enabled=True,
             clear_cache=False,
             show_disabled=False,
+            server_key="default",
         )
 
         # Verify logger was called with expected messages
@@ -679,6 +702,7 @@ class TestImportDevicesJob:
             device_ids=[1, 2],
             vm_imports={},
             manual_mappings_per_device=manual_mappings,
+            server_key="default",
         )
 
         # Verify manual_mappings passed to bulk_import_devices_shared
@@ -706,7 +730,7 @@ class TestImportDevicesJob:
 
         job = create_mock_job_runner(ImportDevicesJob, job_pk=794)
 
-        job.run(device_ids=[1], vm_imports={})
+        job.run(device_ids=[1], vm_imports={}, server_key="default")
 
         assert 100 in job.job.data["imported_device_pks"]
 
@@ -731,7 +755,7 @@ class TestImportDevicesJob:
 
         job = create_mock_job_runner(ImportDevicesJob, job_pk=795)
 
-        job.run(device_ids=[42], vm_imports={})
+        job.run(device_ids=[42], vm_imports={}, server_key="default")
 
         assert 42 in job.job.data["imported_libre_device_ids"]
 
@@ -769,6 +793,7 @@ class TestImportDevicesJob:
         job.run(
             device_ids=[1],
             vm_imports={10: {"cluster": None}},
+            server_key="default",
         )
 
         # Verify errors aggregated
@@ -808,7 +833,7 @@ class TestImportDevicesJob:
 
         job = create_mock_job_runner(ImportDevicesJob, job_pk=800)
 
-        job.run(device_ids=[1, 2], vm_imports={})
+        job.run(device_ids=[1, 2], vm_imports={}, server_key="default")
 
         # The import path is actually exercised, and the bulk-import failures (not an
         # unresolved/collision block message) are the stored errors.
@@ -938,7 +963,7 @@ class TestImportDevicesJob:
         mock_bulk_vms.return_value = {"success": [], "failed": [], "skipped": []}
 
         job = create_mock_job_runner(ImportDevicesJob)
-        job.run(device_ids=[1], vm_imports={}, server_key=None)
+        job.run(device_ids=[1], vm_imports={}, server_key="default")
 
         assert job.job.data["server_key"] == "resolved-default"
         mock_bulk_devices.assert_called_once()
@@ -1078,6 +1103,15 @@ class TestImportDevicesJob:
 class TestLoadJobResults:
     """Test loading results from completed background jobs."""
 
+    @pytest.fixture(autouse=True)
+    def _configured_job_servers(self):
+        """Give persisted-job tests explicit usable server keys."""
+        with patch(
+            "netbox_librenms_plugin.server_selection.LibreNMSAPI.get_available_servers",
+            return_value={"default": "Default", "primary": "Primary", "secondary": "Secondary"},
+        ):
+            yield
+
     @patch("netbox_librenms_plugin.views.imports.list.cache")
     @patch("netbox_librenms_plugin.import_utils.get_validated_device_cache_key")
     @patch("core.models.Job")
@@ -1110,6 +1144,7 @@ class TestLoadJobResults:
         ]
 
         view = LibreNMSImportView()
+        view.rebind_api_for_server = MagicMock(return_value="primary")
         results = view._load_job_results(123)
 
         # Verify cache key function called with correct params
@@ -1132,6 +1167,7 @@ class TestLoadJobResults:
         )
 
         assert len(results) == 2
+        view.rebind_api_for_server.assert_called_once_with("primary")
 
     @patch("netbox_librenms_plugin.views.imports.list.cache")
     @patch("netbox_librenms_plugin.import_utils.get_validated_device_cache_key")
@@ -1157,6 +1193,7 @@ class TestLoadJobResults:
         mock_cache.get.return_value = {"device_id": 1}
 
         view = LibreNMSImportView()
+        view.rebind_api_for_server = MagicMock(return_value="secondary")
         view._load_job_results(456)
 
         # Verify get_validated_device_cache_key called with extracted values
@@ -1168,6 +1205,7 @@ class TestLoadJobResults:
             use_sysname=True,
             strip_domain=False,
         )
+        view.rebind_api_for_server.assert_called_once_with("secondary")
 
     @patch("netbox_librenms_plugin.views.imports.list.cache")
     @patch("netbox_librenms_plugin.import_utils.get_validated_device_cache_key")

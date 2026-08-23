@@ -71,6 +71,12 @@ PLUGINS_CONFIG = {
 
 This server is the installation default. Import uses its own transient server selection. An object sync page uses only servers that have a mapping in the object's `librenms_id` field.
 
+### Import server selection
+
+The Device Import page starts on the installation default. Use the server selector on that page to search another configured server for the current workflow. This transient selection does not change Plugin Settings.
+
+Changing the import server clears the current filters and results. The **Clear** action also clears filters and results, but it keeps the active server. Searches, cached results, background jobs, validation actions, and imports stay on that server until you choose another one.
+
 ### Object sync server selection
 
 The LibreNMS Connections card uses separate indicators for the active server and the preferred server:

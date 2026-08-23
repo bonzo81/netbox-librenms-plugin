@@ -677,6 +677,9 @@ class DeviceImportTable(tables.Table):
             "plugins:netbox_librenms_plugin:device_vc_details",
             kwargs={"device_id": device_id},
         )
+        server_key = getattr(self, "server_key", None)
+        if server_key:
+            vc_url += f"?server_key={quote_plus(str(server_key))}"
 
         # Show error button if detection failed
         if vc_data.get("detection_error"):

@@ -1,8 +1,36 @@
 """Browser-level checks for object server selector navigation."""
 
+from pathlib import Path
+from types import SimpleNamespace
 from urllib.parse import parse_qs, urlparse
 
+from django.template import Context, Engine
 from playwright import sync_api as playwright
+
+
+def _render_server_selector(active_server_key):
+    """Render the production selector include with two transient server options."""
+    template_root = Path(__file__).parents[2] / "templates"
+    template = Engine(dirs=[template_root]).get_template("netbox_librenms_plugin/inc/_server_selector.html")
+    options = [
+        SimpleNamespace(
+            server_key=server_key,
+            display_name=f"{server_key.title()} LibreNMS",
+            is_selectable=True,
+            is_active=server_key == active_server_key,
+        )
+        for server_key in ("primary", "secondary")
+    ]
+    return template.render(
+        Context(
+            {
+                "request": SimpleNamespace(path="/import/"),
+                "server_key": active_server_key,
+                "server_selection_active_name": f"{active_server_key.title()} LibreNMS",
+                "all_server_mappings": options,
+            }
+        )
+    )
 
 
 def test_server_switch_keeps_the_tab_and_marks_the_destination_active():
@@ -39,6 +67,106 @@ def test_server_switch_keeps_the_tab_and_marks_the_destination_active():
         assert page.locator("#librenms-server-selector").get_attribute("data-active-server-key") == "primary"
         assert page.locator("#librenms-sync-tabs").get_attribute("data-active-tab") == "modules"
         assert page.locator('[aria-current="true"]').inner_text() == "Primary LibreNMS"
+        browser.close()
+
+
+def test_import_server_switch_clears_search_and_keeps_the_installation_default():
+    """An import selector click keeps only the new transient server in the destination URL."""
+    base_url = "https://plugin.example.com/import/"
+    initial_url = f"{base_url}?server_key=primary&apply_filters=1&librenms_hostname=old-search&job_id=42"
+    destination = f"{base_url}?server_key=secondary"
+    installation_settings = {"selected_server": "primary"}
+    initial_html = f"""
+        {_render_server_selector("primary")}
+        <form><input name="librenms_hostname" value="old-search"></form>
+        <div id="search-results">Old result</div>
+    """
+    destination_html = f"""
+        {_render_server_selector("secondary")}
+        <form><input name="librenms_hostname" value=""></form>
+        <div id="search-results"></div>
+    """
+
+    def handle_route(route):
+        if route.request.url == initial_url:
+            route.fulfill(body=initial_html, content_type="text/html")
+            return
+        if route.request.url == destination:
+            route.fulfill(body=destination_html, content_type="text/html")
+            return
+        raise AssertionError(f"Unexpected browser request: {route.request.url}")
+
+    with playwright.sync_playwright() as runtime:
+        browser = runtime.chromium.launch(headless=True)
+        page = browser.new_page()
+        page.route("**/*", handle_route)
+        page.goto(initial_url)
+
+        page.get_by_role("link", name="Secondary LibreNMS").click()
+        page.wait_for_url(destination)
+
+        query = parse_qs(urlparse(page.url).query)
+        assert query == {"server_key": ["secondary"]}
+        assert page.locator('[name="librenms_hostname"]').input_value() == ""
+        assert page.locator("#search-results").inner_text() == ""
+        assert page.locator("#librenms-server-selector").get_attribute("data-active-server-key") == "secondary"
+        assert installation_settings["selected_server"] == "primary"
+        browser.close()
+
+
+def test_stopped_import_filter_job_returns_to_the_active_server():
+    """A stopped background search clears filters but retains its transient server."""
+    base_url = "https://plugin.example.com/import/"
+    active_server_url = f"{base_url}?server_key=secondary"
+    poll_url = "https://plugin.example.com/api/jobs/active-filter/"
+    script_path = Path(__file__).parents[2] / "static" / "netbox_librenms_plugin" / "js" / "librenms_import.js"
+    initial_html = f"""
+        <form id="librenms-import-filter-form" action="{base_url}">
+          <input name="server_key" value="secondary">
+          <input name="librenms_hostname" value="background-edge">
+        </form>
+        <div id="filter-processing-modal">
+          <h5>Applying Filters</h5>
+          <span class="spinner-border"></span>
+          <div id="filter-progress-message"></div>
+          <button id="cancel-filter-btn" type="button">Cancel</button>
+        </div>
+    """
+
+    def handle_route(route):
+        if route.request.url == poll_url:
+            route.fulfill(json={"status": {"value": "stopped"}})
+            return
+        if route.request.url.startswith(f"{base_url}?") and "librenms_hostname" in route.request.url:
+            route.fulfill(
+                json={
+                    "use_polling": True,
+                    "job_id": "active-filter",
+                    "job_pk": 42,
+                    "poll_url": poll_url,
+                    "device_count": 1,
+                }
+            )
+            return
+        if route.request.url == base_url:
+            route.fulfill(body=initial_html, content_type="text/html")
+            return
+        if route.request.url == active_server_url:
+            route.fulfill(body='<div id="redirect-destination"></div>', content_type="text/html")
+            return
+        raise AssertionError(f"Unexpected browser request: {route.request.url}")
+
+    with playwright.sync_playwright() as runtime:
+        browser = runtime.chromium.launch(headless=True)
+        page = browser.new_page()
+        page.route("**/*", handle_route)
+        page.goto(base_url)
+        page.add_script_tag(path=script_path)
+
+        page.locator("#librenms-import-filter-form").evaluate("form => form.requestSubmit()")
+        page.wait_for_timeout(500)
+
+        assert page.url == active_server_url
         browser.close()
 
 

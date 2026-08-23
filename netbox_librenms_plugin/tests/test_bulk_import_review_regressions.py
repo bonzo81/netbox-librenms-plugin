@@ -13,6 +13,14 @@ from netbox_librenms_plugin.tests.conftest import make_device, make_superuser, m
 from netbox_librenms_plugin.tests.view_test_helpers import grant, make_request, make_user_with_perms, post
 
 
+@pytest.fixture(autouse=True)
+def _configured_default_server(monkeypatch):
+    """Give these import regressions one explicit usable server."""
+    from netbox_librenms_plugin.server_selection import LibreNMSAPI
+
+    monkeypatch.setattr(LibreNMSAPI, "get_available_servers", lambda: {"default": "Default"})
+
+
 class _LibreNMSBoundary:
     """Real-shape stand-in for the external LibreNMS HTTP boundary."""
 
@@ -103,7 +111,7 @@ def test_collision_response_redacts_target_outside_view_scope(view_name):
     _cache_rows(rows)
     api = _LibreNMSBoundary(rows)
     request = make_request(
-        data={"select": ["96001", "96002"]},
+        data={"select": ["96001", "96002"], "server_key": "default"},
         user=user,
         path="/bulk-import/",
         HTTP_HX_REQUEST="true",
@@ -243,7 +251,7 @@ def test_unresolved_warning_does_not_claim_an_existing_row_imported(monkeypatch)
     api = _LibreNMSBoundary(rows)
     monkeypatch.setattr(bulk_import_module, "LibreNMSAPI", lambda server_key=None: api)
     request = make_request(
-        data={"select": ["96101", "96102"]},
+        data={"select": ["96101", "96102"], "server_key": "default"},
         user=make_superuser("bulk-result-superuser"),
         path="/bulk-import/",
         HTTP_HX_REQUEST="true",

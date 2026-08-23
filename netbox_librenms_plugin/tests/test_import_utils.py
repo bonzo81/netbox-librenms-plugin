@@ -2312,7 +2312,13 @@ class TestDeviceConflictActionView:
     @pytest.fixture(autouse=True)
     def _no_advisory_lock(self):
         """The serial guard's pg_advisory_xact_lock needs a real connection these mock tests don't have."""
-        with patch("netbox_librenms_plugin.views.imports.actions._acquire_serial_assignment_lock"):
+        with (
+            patch("netbox_librenms_plugin.views.imports.actions._acquire_serial_assignment_lock"),
+            patch(
+                "netbox_librenms_plugin.server_selection.LibreNMSAPI.get_available_servers",
+                return_value={"default": "Default LibreNMS", "production": "Production LibreNMS"},
+            ),
+        ):
             yield
 
     def _create_view(self):
@@ -2324,7 +2330,14 @@ class TestDeviceConflictActionView:
         view._librenms_api.server_key = "default"
         return view
 
-    def _create_request(self, action, existing_device_id, use_sysname=False, strip_domain=False):
+    def _create_request(
+        self,
+        action,
+        existing_device_id,
+        use_sysname=False,
+        strip_domain=False,
+        server_key="default",
+    ):
         """
         Create a mock request with POST data and permission stubs.
 
@@ -2339,6 +2352,7 @@ class TestDeviceConflictActionView:
         post_data = {
             "action": action,
             "existing_device_id": str(existing_device_id),
+            "server_key": server_key,
             "use-sysname-toggle": "on" if use_sysname else "off",
             "strip-domain-toggle": "on" if strip_domain else "off",
         }
@@ -2346,7 +2360,7 @@ class TestDeviceConflictActionView:
         return request
 
     def test_unknown_server_key_returns_error_without_500(self):
-        """A stale/tampered POST server_key must surface a graceful HTMX error, not raise (build_librenms_api → None when the key is unknown)."""
+        """A stale POST server key must fail before an API client is built."""
         view = self._create_view()
         request = self._create_request("link", 42)
         request.POST["server_key"] = "ghost"
@@ -2355,12 +2369,12 @@ class TestDeviceConflictActionView:
             view.request = request
             resp = view.post(request, device_id=10)
 
-        mock_build.assert_called_once_with("ghost")
+        mock_build.assert_not_called()
         assert resp.status_code == 200
         assert b"no longer configured" in resp.content
 
     def test_blank_server_key_with_broken_default_returns_error_without_500(self):
-        """A POST that omits server_key must fail closed via rebind_api_for_server (which routes the blank case through build_librenms_api(None)) rather than the lazy self.librenms_api property raising a 500 when the default server is missing/misconfigured."""
+        """A blank POST server key must fail before the broken default is resolved."""
         view = self._create_view()
         view._librenms_api = None  # fresh request: no client built yet, as in production at the rebind point
         request = self._create_request("link", 42)
@@ -2370,9 +2384,7 @@ class TestDeviceConflictActionView:
             view.request = request
             resp = view.post(request, device_id=10)
 
-        # The fix routes the blank key through build_librenms_api(None); the unfixed code skipped
-        # the rebind entirely (build never called) and hit the raising property.
-        mock_build.assert_called_once_with(None)
+        mock_build.assert_not_called()
         assert resp.status_code == 200
         assert b"no longer configured" in resp.content
 
@@ -2449,7 +2461,7 @@ class TestDeviceConflictActionView:
         validation = {"can_import": False, "existing_device": existing_device}
         selections = {}
 
-        request = self._create_request("link", 42, use_sysname=True)
+        request = self._create_request("link", 42, use_sysname=True, server_key="production")
 
         with (
             patch.object(DeviceConflictActionView, "get_validated_device_with_selections") as mock_validate,
@@ -2546,7 +2558,7 @@ class TestDeviceConflictActionView:
         validation = {"can_import": False, "existing_device": existing_device, "resolved_name": "switch-01"}
         selections = {}
 
-        request = self._create_request("update", 42)
+        request = self._create_request("update", 42, server_key="production")
 
         with (
             patch.object(DeviceConflictActionView, "get_validated_device_with_selections") as mock_validate,

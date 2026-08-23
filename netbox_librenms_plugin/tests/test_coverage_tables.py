@@ -926,6 +926,7 @@ class TestDeviceImportTableRenderVirtualChassis:
 
     def test_multi_member_shows_count_button(self):
         table = self._table()
+        table.server_key = "secondary"
         record = {
             "device_id": 6,
             "_validation": {
@@ -940,6 +941,7 @@ class TestDeviceImportTableRenderVirtualChassis:
             result = str(table.render_virtual_chassis(value=6, record=record))
         assert "3 members" in result
         assert "btn-outline-info" in result
+        assert 'hx-get="/vc-details/6/?server_key=secondary"' in result
 
     def test_no_vc_data_shows_dash(self):
         """When virtual_chassis key is missing from validation, shows dash."""

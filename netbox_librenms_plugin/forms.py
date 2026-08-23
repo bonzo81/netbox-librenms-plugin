@@ -1192,6 +1192,9 @@ class DeviceStatusFilterForm(NetBoxModelFilterSetForm):
     model = Device
 
 
+_USE_INSTALLATION_DEFAULT_SERVER = object()
+
+
 class LibreNMSImportFilterForm(forms.Form):
     """
     Filter form for LibreNMS Import view - shows LibreNMS devices for import.
@@ -1280,8 +1283,9 @@ class LibreNMSImportFilterForm(forms.Form):
         widget=forms.CheckboxInput(attrs={"class": "form-check-input"}),
     )
 
-    def __init__(self, *args, **kwargs):
+    def __init__(self, *args, librenms_api=_USE_INSTALLATION_DEFAULT_SERVER, **kwargs):
         """Initialize the form and populate dynamic choices."""
+        self._librenms_api = librenms_api
         # For bound forms, ensure use_background_job defaults to 'on' if not present
         # This handles the case where checkbox is checked by default but not in GET params
         # Only apply this default when no filters are applied (initial page load)
@@ -1300,14 +1304,15 @@ class LibreNMSImportFilterForm(forms.Form):
                 "librenms_hardware",
             ]
             has_filters = any(data.get(field) for field in filter_fields)
-
-            non_option_fields = [
-                f for f in filter_fields if data.get(f) not in (None, "", []) and str(data.get(f, "")).strip()
-            ]
-            has_option_only = bool(data) and not bool(non_option_fields) and not has_filters
+            has_non_navigation_data = any(field != "server_key" for field in data)
 
             # Apply default only on initial load (no filters, no job_id, no real submission)
-            if "use_background_job" not in data and not data.get("job_id") and not has_filters and not has_option_only:
+            if (
+                "use_background_job" not in data
+                and not data.get("job_id")
+                and not has_filters
+                and not has_non_navigation_data
+            ):
                 data["use_background_job"] = "on"
             args = (data,) + args[1:]
 
@@ -1342,14 +1347,20 @@ class LibreNMSImportFilterForm(forms.Form):
         from netbox_librenms_plugin.librenms_api import LibreNMSAPI
 
         try:
-            # Determine server_key cheaply from settings to check cache before instantiating the API
-            try:
-                from netbox_librenms_plugin.models import LibreNMSSettings
+            api = self._librenms_api
+            if api is None:
+                return
+            if api is not _USE_INSTALLATION_DEFAULT_SERVER:
+                _server_key = api.server_key
+            else:
+                # Determine server_key cheaply from settings to check cache before instantiating the API
+                try:
+                    from netbox_librenms_plugin.models import LibreNMSSettings
 
-                _settings = LibreNMSSettings.objects.first()
-                _server_key = (_settings.selected_server if _settings else None) or "default"
-            except Exception:
-                _server_key = "default"
+                    _settings = LibreNMSSettings.objects.first()
+                    _server_key = (_settings.selected_server if _settings else None) or "default"
+                except Exception:
+                    _server_key = "default"
 
             cache_key = get_location_choices_cache_key(_server_key)
             cached_choices = cache.get(cache_key)
@@ -1358,7 +1369,7 @@ class LibreNMSImportFilterForm(forms.Form):
                 return
 
             # Cache miss — instantiate the API client and fetch
-            api = LibreNMSAPI()
+            api = LibreNMSAPI() if api is _USE_INSTALLATION_DEFAULT_SERVER else api
             # Recompute cache_key with the resolved server_key in case it differs from settings
             cache_key = get_location_choices_cache_key(api.server_key)
             # Second cache check: the resolved server_key may differ from the settings key

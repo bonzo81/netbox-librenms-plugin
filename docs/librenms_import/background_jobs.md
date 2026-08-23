@@ -27,7 +27,7 @@ All background jobs appear in NetBox's **Jobs** interface, where you can view st
 
 ## Caching
 
-The import table caches data for 5 minutes to reduce load times and minimize API calls to LibreNMS. Cache keys are unique per filter combination.
+The import table caches data for 5 minutes to reduce load times and minimize API calls to LibreNMS. Cache keys are unique per LibreNMS server and filter combination.
 
 ### What Gets Cached
 
@@ -67,7 +67,7 @@ The search form includes a "Clear cache before search" checkbox:
 
 ### Active Cached Searches
 
-The import page displays all your recent searches at the top, showing which filter combinations, that are still found in the cache. Each cached search shows the filters used, device count, and time remaining before expiration.
+The import page displays recent searches for the active LibreNMS server at the top. Each cached search shows the filters used, device count, and time remaining before expiration.
 
 Click any cached search to instantly reload those results without re-running filters or Virtual Chassis detection. This is particularly useful when switching between different filter combinations.
 

@@ -315,9 +315,10 @@ class LibreNMSAPI:
         else:
             # Legacy single-server configuration
             legacy_url = get_plugin_config("netbox_librenms_plugin", "librenms_url")
-            if legacy_url:
+            legacy_token = get_plugin_config("netbox_librenms_plugin", "api_token")
+            if legacy_url and legacy_token:
                 return {"default": f"Default Server ({legacy_url})"}
-            return {"default": "Default Server"}
+            return {}
 
     def get_stored_librenms_id(self, obj, server_key=None):
         """

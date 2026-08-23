@@ -28,24 +28,30 @@
   {% include 'inc/messages.html' %}
 
   {# LibreNMS Server Information #}
-  {% if librenms_server_info %}
+  {% if server_selection_error %}
+  <div class="alert alert-danger" id="librenms-import-server-error" role="alert">
+    <i class="mdi mdi-alert-circle me-1"></i>{{ server_selection_error }}
+  </div>
+  {% endif %}
+  {% if librenms_server_info or all_server_mappings %}
   <div class="card mb-3">
     <div class="card-body p-2">
       <div class="d-flex justify-content-between align-items-center">
         <div>
           <i class="mdi mdi-server-network text-primary"></i>
           <strong>Active LibreNMS Server:</strong>
-          {% if librenms_server_info.is_legacy %}
+          {% if not librenms_server_info %}
+          None
+          {% elif librenms_server_info.is_legacy %}
           {{ librenms_server_info.url }}
           {% else %}
           {{ librenms_server_info.display_name }} ({{ librenms_server_info.url }})
           {% endif %}
         </div>
-        {% if not librenms_server_info.is_legacy %}
-        <a href="{% url 'plugins:netbox_librenms_plugin:settings' %}" class="btn btn-sm btn-outline-primary ms-3">
-          <i class="mdi mdi-cog"></i> Change Server
-        </a>
-        {% endif %}
+        <div class="d-flex align-items-center gap-2">
+          <span class="text-muted small">This selection does not change the installation settings.</span>
+          {% include "netbox_librenms_plugin/inc/_server_selector.html" %}
+        </div>
       </div>
     </div>
   </div>
@@ -101,6 +107,7 @@
             <div class="col-md-8">
               <form method="get" class="form" id="librenms-import-filter-form">
                 <input type="hidden" name="apply_filters" value="1">
+                <input type="hidden" name="server_key" value="{{ server_key }}">
                 {% if show_filter_warning %}
                   <div class="alert alert-warning alert-dismissible fade show border-warning" role="alert" style="border-left: 4px solid #ffc107;">
                     <i class="mdi mdi-alert text-warning"></i>
@@ -223,7 +230,7 @@
                   <button type="submit" class="btn btn-primary" id="apply-filters-btn">
                     <i class="mdi mdi-filter"></i> Apply Filters
                   </button>
-                  <a href="{% url 'plugins:netbox_librenms_plugin:librenms_import' %}" class="btn btn-secondary">
+                  <a href="{% url 'plugins:netbox_librenms_plugin:librenms_import' %}{% if server_key %}?server_key={{ server_key|urlencode }}{% endif %}" class="btn btn-secondary">
                     <i class="mdi mdi-close"></i> Clear
                   </a>
                 </div>
@@ -251,7 +258,7 @@
       <div class="card-body p-2">
         <div class="d-flex flex-wrap gap-2">
           {% for search in cached_searches %}
-            <a href="?apply_filters=1{% for key, value in search.filters.items %}&librenms_{{ key }}={{ value|urlencode }}{% endfor %}{% if search.vc_enabled %}&enable_vc_detection=1{% endif %}"
+            <a href="?{% if server_key %}server_key={{ server_key|urlencode }}&amp;{% endif %}apply_filters=1{% for key, value in search.filters.items %}&amp;librenms_{{ key }}={{ value|urlencode }}{% endfor %}{% if search.vc_enabled %}&amp;enable_vc_detection=1{% endif %}"
                class="btn btn-sm btn-outline-secondary"
                style="text-decoration: none;"
                title="Click to load this cached search">
@@ -388,6 +395,7 @@
     <form method="post" class="form form-horizontal" id="import-selection-form">
     {% csrf_token %}
     <input type="hidden" name="return_url" value="{% if return_url %}{{ return_url }}{% else %}{{ request.path }}{% if request.GET %}?{{ request.GET.urlencode }}{% endif %}{% endif %}" />
+      <input type="hidden" name="server_key" value="{{ server_key }}" />
       <input type="hidden" name="enable_vc_detection" value="{{ vc_detection_enabled|yesno:'true,false' }}" />
 
     {# Objects table #}

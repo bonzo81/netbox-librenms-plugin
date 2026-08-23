@@ -42,6 +42,24 @@ class ServerMapping:
 
 
 @dataclass(frozen=True)
+class ServerSelectorOption:
+    """One configured server offered by a transient selector."""
+
+    server_key: str
+    display_name: str
+    is_selectable: bool
+    is_active: bool
+
+
+@dataclass(frozen=True)
+class ParsedConfiguredServerKey:
+    """One exact configured server key parsed from request or job data."""
+
+    is_present: bool
+    server_key: str | None
+
+
+@dataclass(frozen=True)
 class ObjectServerSelection:
     """All server-selection facts needed to render one object sync page."""
 
@@ -77,6 +95,45 @@ def installation_default_server_key() -> str | None:
 
     api = build_librenms_api(None)
     return api.server_key if api is not None else None
+
+
+def build_configured_server_options(active_key=None) -> tuple[ServerSelectorOption, ...]:
+    """Build selector options for all usable configured servers."""
+    return tuple(
+        ServerSelectorOption(
+            server_key=server_key,
+            display_name=display_name,
+            is_selectable=True,
+            is_active=server_key == active_key,
+        )
+        for server_key, display_name in LibreNMSAPI.get_available_servers().items()
+    )
+
+
+def parse_configured_server_key(data) -> ParsedConfiguredServerKey:
+    """Parse one configured server key without defaulting malformed input."""
+    getlist = getattr(data, "getlist", None)
+    values = getlist("server_key") if callable(getlist) else None
+    if isinstance(values, (list, tuple)):
+        is_present = bool(values)
+    else:
+        raw_value = data.get("server_key")
+        try:
+            is_present = "server_key" in data
+        except TypeError:
+            is_present = raw_value is not None
+        if isinstance(raw_value, (list, tuple)):
+            values = raw_value
+        else:
+            values = [raw_value] if is_present else []
+
+    if len(values) != 1 or not isinstance(values[0], str) or not values[0].strip():
+        return ParsedConfiguredServerKey(is_present=is_present, server_key=None)
+
+    server_key = values[0].strip()
+    if server_key not in LibreNMSAPI.get_available_servers():
+        return ParsedConfiguredServerKey(is_present=True, server_key=None)
+    return ParsedConfiguredServerKey(is_present=True, server_key=server_key)
 
 
 def _plugin_config() -> dict:

@@ -118,6 +118,7 @@
                             hx-swap="none"
                             hx-include="#use-sysname-toggle, #strip-domain-toggle">
                         {% csrf_token %}
+                        {% include "netbox_librenms_plugin/inc/_hidden_server_key.html" %}
                         <input type="hidden" name="existing_device_id" value="{{ validation.existing_device.pk }}">
                         <input type="hidden" name="existing_device_type" value="{{ existing_device_model_name|default:'device' }}">
                         <input type="hidden" name="action" value="sync_name">
@@ -249,6 +250,7 @@
                           hx-swap="none"
                           hx-include="#use-sysname-toggle, #strip-domain-toggle">
                       {% csrf_token %}
+                      {% include "netbox_librenms_plugin/inc/_hidden_server_key.html" %}
                       <input type="hidden" name="existing_device_id" value="{{ validation.existing_device.pk }}">
                       <input type="hidden" name="existing_device_type" value="{{ existing_device_model_name|default:'device' }}">
                       <input type="hidden" name="action" value="update_type">
@@ -267,6 +269,7 @@
                             hx-post="{% url 'plugins:netbox_librenms_plugin:device_conflict_action' device_id=libre_device.device_id %}"
                             hx-swap="none">
                         {% csrf_token %}
+                        {% include "netbox_librenms_plugin/inc/_hidden_server_key.html" %}
                         <input type="hidden" name="existing_device_id" value="{{ validation.existing_device.pk }}">
                         <input type="hidden" name="existing_device_type" value="{{ existing_device_model_name|default:'device' }}">
                         <input type="hidden" name="action" value="sync_device_type">
@@ -325,6 +328,7 @@
                             hx-post="{% url 'plugins:netbox_librenms_plugin:device_conflict_action' device_id=libre_device.device_id %}"
                             hx-swap="none">
                         {% csrf_token %}
+                        {% include "netbox_librenms_plugin/inc/_hidden_server_key.html" %}
                         <input type="hidden" name="existing_device_id" value="{{ validation.existing_device.pk }}">
                         <input type="hidden" name="existing_device_type" value="{{ existing_device_model_name|default:'device' }}">
                         <input type="hidden" name="action" value="sync_serial">
@@ -380,6 +384,7 @@
                               hx-post="{% url 'plugins:netbox_librenms_plugin:device_conflict_action' device_id=libre_device.device_id %}"
                               hx-swap="none">
                           {% csrf_token %}
+                          {% include "netbox_librenms_plugin/inc/_hidden_server_key.html" %}
                           <input type="hidden" name="existing_device_id" value="{{ validation.existing_device.pk }}">
                           <input type="hidden" name="existing_device_type" value="{{ existing_device_model_name|default:'device' }}">
                           <input type="hidden" name="action" value="sync_platform">
@@ -404,6 +409,7 @@
                           hx-post="{% url 'plugins:netbox_librenms_plugin:device_conflict_action' device_id=libre_device.device_id %}"
                           hx-swap="none">
                       {% csrf_token %}
+                      {% include "netbox_librenms_plugin/inc/_hidden_server_key.html" %}
                       <input type="hidden" name="existing_device_id" value="{{ validation.existing_device.pk }}">
                       <input type="hidden" name="existing_device_type" value="{{ existing_device_model_name|default:'device' }}">
                       <input type="hidden" name="action" value="sync_platform">

@@ -3,7 +3,7 @@
 import json
 import logging
 import re
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, urlencode, urlparse
 
 from django.contrib import messages
 from django.core.cache import cache
@@ -46,6 +46,7 @@ from netbox_librenms_plugin.import_validation_helpers import (
 )
 from netbox_librenms_plugin.ip_addressing import parse_host_address
 from netbox_librenms_plugin.server_mappings import iter_server_mapping_entries
+from netbox_librenms_plugin.server_selection import parse_configured_server_key
 from netbox_librenms_plugin.tables.device_status import DeviceImportTable
 from netbox_librenms_plugin.utils import (
     acquire_advisory_transaction_lock,
@@ -65,6 +66,19 @@ from netbox_librenms_plugin.utils import (
 from netbox_librenms_plugin.views.mixins import LibreNMSAPIMixin, LibreNMSPermissionMixin, NetBoxObjectPermissionMixin
 
 logger = logging.getLogger(__name__)
+
+
+def _import_page_url(server_key):
+    """Return the cleared import page URL for one active server."""
+    base_url = reverse("plugins:netbox_librenms_plugin:librenms_import")
+    return f"{base_url}?{urlencode({'server_key': server_key})}"
+
+
+def _invalid_import_page_url(data):
+    """Return an import URL that preserves an invalid submitted server state."""
+    base_url = reverse("plugins:netbox_librenms_plugin:librenms_import")
+    values = data.getlist("server_key") or [""]
+    return f"{base_url}?{urlencode([('server_key', value) for value in values])}"
 
 
 def _attach_messages_oob(response, request):
@@ -253,10 +267,21 @@ def _rebind_or_htmx_error(view, request) -> HttpResponse | None:
     Returns:
         HttpResponse | None: An HTMX error toast when the rebind fails closed, else ``None``.
     """
-    post_server_key = (request.POST.get("server_key") or "").strip()
-    if view.rebind_api_for_server(post_server_key) is None:
+    if _rebind_configured_import_server(view, request.POST) is None:
         return _htmx_error_response("Selected LibreNMS server is no longer configured.")
     return None
+
+
+def _rebind_configured_import_server(view, data) -> str | None:
+    """Bind one exact configured import server without falling back."""
+    parsed_server = parse_configured_server_key(data)
+    if parsed_server.server_key is None:
+        return None
+
+    cached_api = getattr(view, "_librenms_api", None)
+    if cached_api is not None and cached_api.server_key == parsed_server.server_key:
+        return parsed_server.server_key
+    return view.rebind_api_for_server(parsed_server.server_key)
 
 
 def _mapping_change_is_allowed(view, model, pk) -> bool:
@@ -1037,17 +1062,17 @@ class BulkImportDevicesView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
         # htmx:responseError -> showErrorToast fallback.)
         is_htmx = bool(request.headers.get("HX-Request"))
 
-        post_server_key = (request.POST.get("server_key") or "").strip()
         # Rebind to the POSTed server, failing closed on a blank/unknown/misconfigured key so a
         # missing or broken default can't raise a 500 via the lazy self.librenms_api property.
-        if self.rebind_api_for_server(post_server_key) is None:
+        if _rebind_configured_import_server(self, request.POST) is None:
             msg = "Selected LibreNMS server is no longer configured."
             # HTMX gets a 200 OOB toast; a non-HTMX POST must get the normal
             # message + redirect flow, not a toast fragment served as a full page.
             if is_htmx:
                 return _htmx_error_response(msg)
             messages.error(request, msg)
-            return redirect("plugins:netbox_librenms_plugin:librenms_import")
+            return redirect(_invalid_import_page_url(request.POST))
+        active_import_url = _import_page_url(self.librenms_api.server_key)
 
         device_ids = request.POST.getlist("select")
         if not device_ids:
@@ -1057,7 +1082,7 @@ class BulkImportDevicesView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
             if is_htmx:
                 return HttpResponse("No devices selected", status=400)
             messages.error(request, "No devices selected for import")
-            return redirect("plugins:netbox_librenms_plugin:librenms_import")
+            return redirect(active_import_url)
 
         try:
             # De-duplicate on the *parsed* int, not the raw string: a POST carrying both "1" and
@@ -1068,7 +1093,7 @@ class BulkImportDevicesView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
             if is_htmx:
                 return HttpResponse("Invalid device identifier", status=400)
             messages.error(request, "Invalid device identifier supplied")
-            return redirect("plugins:netbox_librenms_plugin:librenms_import")
+            return redirect(active_import_url)
 
         use_sysname, strip_domain = resolve_naming_preferences(request)
         vc_detection_enabled = _resolve_vc_detection_enabled(request)
@@ -1102,7 +1127,7 @@ class BulkImportDevicesView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
                     if is_htmx:
                         return HttpResponse("Invalid cluster or role selection", status=400)
                     messages.error(request, "Invalid cluster or role selection supplied")
-                    return redirect("plugins:netbox_librenms_plugin:librenms_import")
+                    return redirect(active_import_url)
                 vm_imports[device_id] = {"cluster_id": cluster_id}
                 # VMs can also have roles. A bad role only drops the role: the VM is still
                 # created under the cluster the user picked, so the object type does not change.
@@ -1165,10 +1190,8 @@ class BulkImportDevicesView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
             messages.error(request, deny_msg)
             if is_htmx:
                 # 200 + HX-Redirect, like the other denial paths: HTMX skips the swap on non-2xx.
-                return HttpResponse(
-                    "", headers={"HX-Redirect": reverse("plugins:netbox_librenms_plugin:librenms_import")}
-                )
-            return redirect("plugins:netbox_librenms_plugin:librenms_import")
+                return HttpResponse("", headers={"HX-Redirect": active_import_url})
+            return redirect(active_import_url)
 
         # Seed the shared device cache from ALREADY-cached entries only, before the
         # background-vs-sync decision. Reading the Django cache directly (not
@@ -1238,10 +1261,10 @@ class BulkImportDevicesView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
                     # This matches the "Clear" button behavior
                     return HttpResponse(
                         "",
-                        headers={"HX-Redirect": reverse("plugins:netbox_librenms_plugin:librenms_import")},
+                        headers={"HX-Redirect": active_import_url},
                     )
                 else:
-                    return redirect("plugins:netbox_librenms_plugin:librenms_import")
+                    return redirect(active_import_url)
             else:
                 # No workers available - warn user and proceed synchronously
                 logger.warning("No RQ workers available for import job, falling back to synchronous import")
@@ -1295,7 +1318,7 @@ class BulkImportDevicesView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
                         {"collisions": outcome.collisions, "oob": True},
                     )
                 messages.error(request, outcome.block_message)
-                return redirect("plugins:netbox_librenms_plugin:librenms_import")
+                return redirect(active_import_url)
             if outcome.skipped_ids:
                 # Skip ONLY the rows that couldn't be fetched/validated to collision-check them
                 # (import the rest) rather than blocking the whole batch — a transient fetch miss on
@@ -1345,16 +1368,16 @@ class BulkImportDevicesView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
             if request.headers.get("HX-Request"):
                 return HttpResponse(
                     "",
-                    headers={"HX-Redirect": reverse("plugins:netbox_librenms_plugin:librenms_import")},
+                    headers={"HX-Redirect": active_import_url},
                 )
-            return redirect("plugins:netbox_librenms_plugin:librenms_import")
+            return redirect(active_import_url)
 
         except Exception:  # pragma: no cover - defensive guard
             logger.exception("Error during bulk import")
             if request.headers.get("HX-Request"):
                 return HttpResponse("Import failed. Please check server logs.", status=500)
             messages.error(request, "Bulk import failed. Please check server logs.")
-            return redirect("plugins:netbox_librenms_plugin:librenms_import")
+            return redirect(active_import_url)
 
         # Combine results
         success_count = len(device_result.get("success", [])) + len(vm_result.get("success", []))
@@ -1503,7 +1526,7 @@ class BulkImportDevicesView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
                 headers={"HX-Trigger": '{"closeModal": null}'},
             )
 
-        return redirect("plugins:netbox_librenms_plugin:librenms_import")
+        return redirect(active_import_url)
 
 
 class DeviceVCDetailsView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
@@ -1511,6 +1534,11 @@ class DeviceVCDetailsView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
 
     def get(self, request, device_id):
         """Render virtual chassis details for a LibreNMS device."""
+        if _rebind_configured_import_server(self, request.GET) is None:
+            return HttpResponse(
+                '<div class="alert alert-danger">Selected LibreNMS server is no longer configured.</div>',
+                status=200,
+            )
         libre_device = get_librenms_device_by_id(self.librenms_api, device_id)
         if not libre_device:
             # 200, not 404: this is an HTMX fragment swapped into the modal, and HTMX skips the
@@ -1573,22 +1601,16 @@ class DeviceValidationDetailsView(LibreNMSPermissionMixin, LibreNMSAPIMixin, Dev
 
     def get(self, request, device_id):
         """Render detailed validation information for a LibreNMS device."""
-        # Rebind to the import page's server (?server_key) before fetching. Reached via its own
-        # URL (the modal-open HTMX GET), this view has no parent handler to inject the
-        # import-scoped client, so without this it would fetch/cache against the global
-        # LibreNMSSettings.selected_server — which may differ from the server the import ran on,
-        # rendering "Device not found" for a device that only exists on the import's server. A
-        # blank/absent ?server_key keeps the already-bound (parent-injected) or session client.
-        _scoped_server, unresolved = self.resolve_get_render_server_key(request)
-        if unresolved:
-            # ?server_key named a server that no longer resolves (deleted/misconfigured); the rebind
-            # declined and left the default/session client bound. Fail closed rather than fetch and
-            # render validation data from the wrong server. 200, not 4xx — HTMX swaps the fragment in
-            # place (a 4xx makes it skip the swap), matching the "Device not found" branch below.
+        # This modal has its own URL, so it must bind the exact server carried by the row link.
+        if _rebind_configured_import_server(self, request.GET) is None:
             return HttpResponse(
                 '<div class="alert alert-danger">Selected LibreNMS server is no longer configured.</div>',
                 status=200,
             )
+        return self._render_for_bound_server(request, device_id)
+
+    def _render_for_bound_server(self, request, device_id):
+        """Render validation details after a caller binds an exact server."""
         libre_device, validation, selections = self.get_validated_device_with_selections(device_id, request)
 
         if not libre_device:
@@ -2333,7 +2355,7 @@ class AddDeviceTypeMappingView(
         # fetch_device_with_cache a cache hit, so no extra LibreNMS call is made.
         detail_view = DeviceValidationDetailsView()
         detail_view._librenms_api = self._librenms_api
-        modal_html = detail_view.get(request, device_id).content.decode("utf-8")
+        modal_html = detail_view._render_for_bound_server(request, device_id).content.decode("utf-8")
         oob_modal = format_html(
             '<div id="htmx-modal-content" hx-swap-oob="innerHTML">{}</div>',
             mark_safe(modal_html),
@@ -2371,10 +2393,9 @@ class CreatePlatformFromImportView(
         """Render the shared create-platform form fragment for the import HTMX modal."""
         from dcim.models import Manufacturer
 
-        post_server_key = (request.GET.get("server_key") or "").strip()
         # Rebind to the POSTed server, failing closed on a blank/unknown/misconfigured key so a
         # missing or broken default can't raise a 500 via the lazy self.librenms_api property.
-        if self.rebind_api_for_server(post_server_key) is None:
+        if _rebind_configured_import_server(self, request.GET) is None:
             return _htmx_error_response("Selected LibreNMS server is no longer configured.")
 
         libre_device = fetch_device_with_cache(device_id, self.librenms_api)
@@ -2692,7 +2713,7 @@ class CreatePlatformFromImportView(
         # to compose the OOB envelope without introducing new escape boundaries.
         detail_view = DeviceValidationDetailsView()
         detail_view._librenms_api = self._librenms_api
-        modal_html = detail_view.get(request, device_id).content.decode("utf-8")
+        modal_html = detail_view._render_for_bound_server(request, device_id).content.decode("utf-8")
         oob_modal = format_html(
             '<div id="htmx-modal-content" hx-swap-oob="innerHTML">{}</div>',
             mark_safe(modal_html),
@@ -3358,7 +3379,7 @@ class PromoteToHostView(
 
         # Fail closed on a blank/unknown/misconfigured key (the mixin validates the default too)
         # so a broken default can't 500 via the lazy self.librenms_api property later.
-        if self.rebind_api_for_server(request.POST.get("server_key")) is None:
+        if _rebind_configured_import_server(self, request.POST) is None:
             return _htmx_error_response("Selected LibreNMS server is no longer configured.")
 
         # Gate before the lookup (see DeviceConflictActionView.post).
@@ -3601,7 +3622,7 @@ class MergeNetBoxDevicesView(
 
         # Fail closed on a blank/unknown/misconfigured key (the mixin validates the default too)
         # so a broken default can't 500 via the lazy self.librenms_api property later.
-        if self.rebind_api_for_server(request.POST.get("server_key")) is None:
+        if _rebind_configured_import_server(self, request.POST) is None:
             return _htmx_error_response("Selected LibreNMS server is no longer configured.")
 
         winner_pk_raw = request.POST.get("winner_pk")
@@ -4011,7 +4032,7 @@ class AddPlatformMappingView(
 
         detail_view = DeviceValidationDetailsView()
         detail_view._librenms_api = self._librenms_api
-        modal_html = detail_view.get(request, device_id).content.decode("utf-8")
+        modal_html = detail_view._render_for_bound_server(request, device_id).content.decode("utf-8")
         oob_modal = format_html(
             '<div id="htmx-modal-content" hx-swap-oob="innerHTML">{}</div>',
             mark_safe(modal_html),
