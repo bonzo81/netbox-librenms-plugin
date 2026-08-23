@@ -17,6 +17,7 @@ from django.utils import timezone
 from django.utils.dateparse import parse_datetime
 
 from netbox_librenms_plugin.librenms_api import configured_cache_timeout
+from netbox_librenms_plugin.server_mappings import iter_server_mapping_entries
 from netbox_librenms_plugin.utils import (
     cache_remaining_ttl,
     coerce_librenms_id,
@@ -310,7 +311,7 @@ def _explicit_server_keys(obj):
         return set()
     return {
         str(server_key)
-        for server_key, entry in raw_mapping.items()
+        for server_key, entry in iter_server_mapping_entries(raw_mapping)
         if isinstance(server_key, str)
         and server_key
         and (

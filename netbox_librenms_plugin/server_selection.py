@@ -6,15 +6,15 @@ from enum import StrEnum
 from django.conf import settings as django_settings
 
 from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+from netbox_librenms_plugin.server_mappings import (
+    PREFERRED_SERVER_FIELD,
+    iter_server_mapping_entries,
+)
 from netbox_librenms_plugin.utils import (
     get_librenms_sync_device,
     is_legacy_librenms_id,
     resolve_server_mapping_display_id,
 )
-
-
-PREFERRED_SERVER_FIELD = "_preferred_server"
-RESERVED_SERVER_KEYS = frozenset({PREFERRED_SERVER_FIELD})
 
 
 class ServerSelectionState(StrEnum):
@@ -37,6 +37,7 @@ class ServerMapping:
     is_configured: bool
     is_selectable: bool
     is_active: bool
+    is_preferred: bool
     is_oob_only: bool
 
 
@@ -51,6 +52,13 @@ class ObjectServerSelection:
     mapping_owner: object
     mappings: tuple[ServerMapping, ...]
     error: str | None = None
+    warning: str | None = None
+    preferred_key: str | None = None
+
+    @property
+    def has_multiple_usable_mappings(self) -> bool:
+        """Return whether an explicit preference can change selection behavior."""
+        return sum(mapping.is_selectable for mapping in self.mappings) > 1
 
     @property
     def active_display_name(self) -> str:
@@ -90,10 +98,9 @@ def build_server_mappings(owner, active_key=None, *, plugin_config=None) -> tupl
     servers_config = _servers_config(plugin_config)
     available_servers = LibreNMSAPI.get_available_servers()
     mappings = []
+    stored_preference = raw_mappings.get(PREFERRED_SERVER_FIELD)
 
-    for server_key, entry in raw_mappings.items():
-        if server_key in RESERVED_SERVER_KEYS:
-            continue
+    for server_key, entry in iter_server_mapping_entries(raw_mappings):
         device_id, is_oob_only = resolve_server_mapping_display_id(entry)
         if device_id is None:
             continue
@@ -118,6 +125,7 @@ def build_server_mappings(owner, active_key=None, *, plugin_config=None) -> tupl
                 is_configured=is_configured,
                 is_selectable=server_key in available_servers,
                 is_active=server_key == active_key,
+                is_preferred=server_key == stored_preference,
                 is_oob_only=is_oob_only,
             )
         )
@@ -140,6 +148,31 @@ def resolve_object_server(page_object, requested_key=None, installation_default_
     selectable = tuple(mapping for mapping in mappings if mapping.is_selectable)
     raw_mappings = mapping_owner.custom_field_data.get("librenms_id")
     legacy_mapping = is_legacy_librenms_id(raw_mappings)
+    selectable_keys = {mapping.server_key for mapping in selectable}
+    preference_is_stored = isinstance(raw_mappings, dict) and PREFERRED_SERVER_FIELD in raw_mappings
+    stored_preference = raw_mappings.get(PREFERRED_SERVER_FIELD) if preference_is_stored else None
+    preferred_key = (
+        stored_preference if isinstance(stored_preference, str) and stored_preference in selectable_keys else None
+    )
+
+    warning = None
+    if len(selectable) > 1 and not preference_is_stored:
+        warning = "No preferred LibreNMS server is stored."
+    elif preference_is_stored and preferred_key is None:
+        if not isinstance(stored_preference, str) or not stored_preference.strip():
+            warning = "The stored preferred LibreNMS server is malformed."
+        elif stored_preference not in mappings_by_key:
+            warning = f"The stored preferred LibreNMS server '{stored_preference}' has no object mapping."
+        else:
+            warning = f"The stored preferred LibreNMS server '{stored_preference}' is not configured or usable."
+
+    if warning:
+        if requested_key is not None:
+            warning += " The transient server selection remains active."
+        elif installation_default_key in selectable_keys:
+            warning += f" Using installation default server '{installation_default_key}'."
+        else:
+            warning += " The installation default is not mapped, so select a server."
 
     if requested_key is not None:
         mapping = mappings_by_key.get(requested_key)
@@ -158,6 +191,8 @@ def resolve_object_server(page_object, requested_key=None, installation_default_
                 mapping_owner=mapping_owner,
                 mappings=build_server_mappings(mapping_owner, requested_key),
                 error=f"LibreNMS server '{requested_key}' is not an available mapping for this object.",
+                warning=warning,
+                preferred_key=preferred_key,
             )
         active_key = requested_key
     elif not selectable:
@@ -165,9 +200,7 @@ def resolve_object_server(page_object, requested_key=None, installation_default_
     elif len(selectable) == 1:
         active_key = selectable[0].server_key
     else:
-        preferred_key = raw_mappings.get(PREFERRED_SERVER_FIELD) if isinstance(raw_mappings, dict) else None
-        selectable_keys = {mapping.server_key for mapping in selectable}
-        if isinstance(preferred_key, str) and preferred_key in selectable_keys:
+        if preferred_key is not None:
             active_key = preferred_key
         elif installation_default_key in selectable_keys:
             active_key = installation_default_key
@@ -180,6 +213,8 @@ def resolve_object_server(page_object, requested_key=None, installation_default_
                 mapping_owner=mapping_owner,
                 mappings=mappings,
                 error="Select a LibreNMS server to continue.",
+                warning=warning,
+                preferred_key=preferred_key,
             )
 
     return ObjectServerSelection(
@@ -189,4 +224,6 @@ def resolve_object_server(page_object, requested_key=None, installation_default_
         installation_default_key=installation_default_key,
         mapping_owner=mapping_owner,
         mappings=build_server_mappings(mapping_owner, active_key),
+        warning=warning,
+        preferred_key=preferred_key,
     )

@@ -7,7 +7,7 @@ from django.db import IntegrityError, transaction
 from django.utils.text import slugify
 
 from django.http import HttpResponse
-from django.shortcuts import redirect
+from django.shortcuts import get_object_or_404, redirect
 from django.urls import reverse
 from django.utils.html import escape
 from django.views import View
@@ -16,6 +16,15 @@ from virtualization.models import VirtualMachine
 from netbox_librenms_plugin.import_utils import _determine_device_name
 from netbox_librenms_plugin.import_utils.virtual_chassis import _generate_vc_member_name
 from netbox_librenms_plugin.models import PlatformMapping
+from netbox_librenms_plugin.server_mappings import (
+    PREFERRED_SERVER_FIELD,
+    iter_server_mapping_entries,
+    require_server_key,
+    with_preferred_server,
+    without_server_mapping,
+)
+from netbox_librenms_plugin.server_selection import build_server_mappings
+from netbox_librenms_plugin.sync_cache import SyncTab
 from netbox_librenms_plugin.utils import (
     AmbiguousLibreNMSIdError,
     find_by_librenms_id,
@@ -810,6 +819,11 @@ class RemoveServerMappingView(LibreNMSPermissionMixin, NetBoxObjectPermissionMix
         if not server_key:
             messages.error(request, "No server_key provided.")
             return redirect(sync_url, pk=pk)
+        try:
+            server_key = require_server_key(server_key)
+        except ValueError as exc:
+            messages.error(request, str(exc))
+            return redirect(sync_url, pk=pk)
 
         cf_value = self._normalize_librenms_mapping(obj.custom_field_data.get("librenms_id"))
         if not isinstance(cf_value, dict) or server_key not in cf_value:
@@ -850,8 +864,12 @@ class RemoveServerMappingView(LibreNMSPermissionMixin, NetBoxObjectPermissionMix
                 legacy_url_configured and not configured_servers and server_key == "default"
             )
             if isinstance(cf, dict) and server_key in cf and not _is_protected:
-                del cf[server_key]
-                obj_locked.custom_field_data["librenms_id"] = cf if cf else None
+                cf = without_server_mapping(cf, server_key)
+                obj_locked.custom_field_data["librenms_id"] = cf
+                usable_count = sum(mapping.is_selectable for mapping in build_server_mappings(obj_locked))
+                if usable_count <= 1:
+                    cf.pop(PREFERRED_SERVER_FIELD, None)
+                obj_locked.custom_field_data["librenms_id"] = cf if any(iter_server_mapping_entries(cf)) else None
                 try:
                     obj_locked.full_clean()
                     obj_locked.save()
@@ -873,6 +891,91 @@ class RemoveServerMappingView(LibreNMSPermissionMixin, NetBoxObjectPermissionMix
                 messages.warning(request, f"Mapping for server '{server_key}' was already removed.")
 
         return redirect(sync_url, pk=pk)
+
+
+class SetPreferredServerView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, View):
+    """Store the preferred server on a Device or VirtualMachine mapping owner."""
+
+    required_object_permissions = {
+        "POST": [("change", Device), ("change", VirtualMachine)],
+    }
+
+    @staticmethod
+    def _object_type(value):
+        if value == "virtualmachine":
+            return "vm"
+        return value
+
+    @staticmethod
+    def _model(object_type):
+        return VirtualMachine if object_type == "vm" else Device
+
+    @staticmethod
+    def _sync_url_name(object_type):
+        if object_type == "vm":
+            return "plugins:netbox_librenms_plugin:vm_librenms_sync"
+        return "plugins:netbox_librenms_plugin:device_librenms_sync"
+
+    def _redirect(self, object_type, pk, active_server_key=None, active_sync_tab=None):
+        url = reverse(self._sync_url_name(object_type), kwargs={"pk": pk})
+        query = {}
+        if active_sync_tab:
+            query["tab"] = active_sync_tab
+        if active_server_key:
+            query["server_key"] = active_server_key
+        if query:
+            from urllib.parse import urlencode
+
+            url = f"{url}?{urlencode(query)}"
+        return redirect(url)
+
+    def post(self, request, pk):
+        object_type = self._object_type(request.POST.get("object_type", "device"))
+        if object_type not in ("device", "vm"):
+            return HttpResponse(f"Invalid object_type: {escape(object_type)}", status=400)
+
+        model = self._model(object_type)
+        self.required_object_permissions = {"POST": [("change", model)]}
+        if error := self.require_all_permissions("POST"):
+            return error
+
+        submitted_tab = request.POST.get("tab")
+        active_sync_tab = submitted_tab if submitted_tab in {tab.value for tab in SyncTab} else None
+        try:
+            requested_key = require_server_key(request.POST.get("server_key", ""))
+        except ValueError as exc:
+            messages.error(request, str(exc))
+            return self._redirect(object_type, pk, active_sync_tab=active_sync_tab)
+        submitted_active_key = request.POST.get("active_server_key", "").strip() or None
+
+        with transaction.atomic():
+            owner = get_object_or_404(
+                self.restricted_queryset(model, "change").select_for_update(of=("self",)),
+                pk=pk,
+            )
+            raw_mapping = owner.custom_field_data.get("librenms_id")
+            mappings = build_server_mappings(owner)
+            selectable_keys = {mapping.server_key for mapping in mappings if mapping.is_selectable}
+            active_server_key = submitted_active_key if submitted_active_key in selectable_keys else None
+            if len(selectable_keys) <= 1:
+                messages.error(request, "A preferred server requires at least two usable object mappings.")
+                return self._redirect(object_type, pk, active_server_key, active_sync_tab)
+            if requested_key not in selectable_keys:
+                messages.error(request, "The preferred server is not a usable mapping for this object.")
+                return self._redirect(object_type, pk, active_server_key, active_sync_tab)
+
+            owner.custom_field_data["librenms_id"] = with_preferred_server(raw_mapping, requested_key)
+            try:
+                owner.full_clean()
+                owner.save(update_fields=["custom_field_data"])
+            except ValidationError as exc:
+                transaction.set_rollback(True)
+                error = exc.message_dict if hasattr(exc, "message_dict") else str(exc)
+                messages.error(request, f"Validation error changing preferred server: {error}")
+                return self._redirect(object_type, pk, active_server_key, active_sync_tab)
+
+        messages.success(request, f"Preferred LibreNMS server changed to '{requested_key}'.")
+        return self._redirect(object_type, pk, active_server_key, active_sync_tab)
 
 
 class ConvertLegacyLibreNMSIdView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreNMSAPIMixin, View):

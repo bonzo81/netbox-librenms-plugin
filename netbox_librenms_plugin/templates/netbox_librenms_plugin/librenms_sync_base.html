@@ -47,6 +47,12 @@
 </div>
 {% endif %}
 
+{% if server_selection_warning %}
+<div class="alert alert-warning" role="alert" id="librenms-server-preference-warning">
+    <i class="mdi mdi-alert-outline me-1"></i>{{ server_selection_warning }}
+</div>
+{% endif %}
+
 {% if migrated_to_marker %}
 <div class="alert alert-warning d-flex align-items-start" role="alert">
     <i class="mdi mdi-alert-octagon me-2 fs-3"></i>
@@ -120,7 +126,8 @@
 
 <!-- LibreNMS Server Information -->
 {% if all_server_mappings %}
-<div class="card mb-3">
+<div class="card mb-3" id="librenms-connections"
+     data-preferred-server-key="{{ server_selection_preferred_key|default:'' }}">
     <div class="card-header d-flex justify-content-between align-items-center py-2">
         <span><i class="mdi mdi-server-network text-primary me-1"></i><strong>LibreNMS Connections</strong></span>
         <div class="d-flex gap-2 align-items-center">
@@ -138,6 +145,9 @@
             {% for mapping in all_server_mappings %}
             <tr>
                 <td class="ps-3" style="width:40%">
+                    {% if mapping.is_preferred %}
+                    <i class="mdi mdi-star text-warning me-1" title="Preferred server"></i>
+                    {% endif %}
                     {% if mapping.is_active and mapping.is_selectable %}
                     <i class="mdi mdi-check-circle text-success me-1" title="Currently active server"></i>
                     {% elif mapping.is_configured %}
@@ -167,6 +177,24 @@
                     {% endif %}
                 </td>
                 <td class="text-end pe-3">
+                    {% if can_manage_server_preference and mapping.is_selectable %}
+                    {% if not mapping.is_preferred %}
+                    <form method="post"
+                          action="{% url 'plugins:netbox_librenms_plugin:set_preferred_server' pk=lookup_device_pk %}"
+                          class="d-inline me-2">
+                        {% csrf_token %}
+                        <input type="hidden" name="server_key" value="{{ mapping.server_key }}">
+                        <input type="hidden" name="active_server_key" value="{{ server_key|default:'' }}">
+                        <input type="hidden" name="tab" value="{{ active_sync_tab|default:'' }}">
+                        <input type="hidden" name="object_type" value="{{ lookup_device_model_name }}">
+                        <button type="submit" class="btn btn-sm btn-outline-warning"
+                                title="Make {{ mapping.display_name }} the preferred server"
+                                aria-label="Make {{ mapping.display_name }} the preferred server">
+                            <i class="mdi mdi-star-outline"></i>
+                        </button>
+                    </form>
+                    {% endif %}
+                    {% endif %}
                     {% if not mapping.is_configured %}
                     {% if lookup_device_model_name == "device" or lookup_device_model_name == "virtualmachine" %}
                     {% if lookup_device_pk == object.pk %}

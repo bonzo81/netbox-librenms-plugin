@@ -149,6 +149,7 @@ from .sync.device_fields import (  # noqa: F401
     ConvertLegacyLibreNMSIdView,
     CreateAndAssignPlatformView,
     RemoveServerMappingView,
+    SetPreferredServerView,
     UpdateDeviceNameView,
     UpdateDevicePlatformView,
     UpdateDeviceSerialView,

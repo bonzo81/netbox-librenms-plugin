@@ -23,6 +23,7 @@ from netbox_librenms_plugin.constants import (
     is_supported_interface_name_field,
 )
 from netbox_librenms_plugin.ip_addressing import parse_address_with_prefix, parse_host_address
+from netbox_librenms_plugin.server_mappings import iter_server_mapping_entries, require_server_key
 
 logger = logging.getLogger(__name__)
 
@@ -875,6 +876,9 @@ def get_librenms_sync_device(device: Device, server_key: str = None) -> Optional
         Optional[Device]: The device that should handle LibreNMS sync, or None if
                          the device is not in a virtual chassis.
     """
+    if server_key is not None:
+        server_key = require_server_key(server_key)
+
     if not hasattr(device, "virtual_chassis") or not device.virtual_chassis:
         return device
 
@@ -926,13 +930,15 @@ def get_librenms_sync_device(device: Device, server_key: str = None) -> Optional
         for member in all_members:
             raw_cf = member.cf.get("librenms_id")
             if isinstance(raw_cf, dict):
-                if any(_host_id_valid(v) for v in raw_cf.values()):
+                if any(_host_id_valid(value) for _key, value in iter_server_mapping_entries(raw_cf)):
                     return member
             elif _host_id_valid(raw_cf):
                 return member
         for member in all_members:
             raw_cf = member.cf.get("librenms_id")
-            if isinstance(raw_cf, dict) and any(_oob_id_valid(v) for v in raw_cf.values()):
+            if isinstance(raw_cf, dict) and any(
+                _oob_id_valid(value) for _key, value in iter_server_mapping_entries(raw_cf)
+            ):
                 return member
 
     # Priority 2: Use master device if it has primary IP
@@ -2161,6 +2167,7 @@ def get_librenms_device_id(obj, server_key: str = "default", *, auto_save: bool 
     Returns:
         int or None
     """
+    server_key = require_server_key(server_key)
     cf_value = obj.cf.get("librenms_id")
     if cf_value is None:
         return None
@@ -2223,6 +2230,7 @@ def set_librenms_device_id(obj, device_id, server_key: str = "default"):
         device_id: LibreNMS device ID (integer).
         server_key: LibreNMS server key (from plugin ``servers`` config).
     """
+    server_key = require_server_key(server_key)
     if isinstance(device_id, bool):
         logger.warning(
             "librenms_id device_id is a boolean (%r) on %r; not storing.",
@@ -2310,6 +2318,10 @@ def build_librenms_id_qs(server_key, value):
             bare) and the OOB-controller predicate (``__oob__id``), kept separate so callers can
             fail closed on a host-vs-OOB cross-row collision.
     """
+    if not isinstance(server_key, str) or not server_key.strip():
+        match_none = Q(pk__in=[])
+        return match_none, match_none
+    server_key = require_server_key(server_key)
     # Fail closed centrally so every caller is safe: a value that isn't a valid librenms_id
     # (bool / None / zero / negative / non-numeric string like "abc") must never build a predicate
     # that could match a corrupt legacy row (e.g. ``custom_field_data__librenms_id="abc"``). Callers
@@ -2498,6 +2510,7 @@ def get_librenms_oob(obj, server_key: str = "default") -> dict | None:
     Returns:
         dict or None
     """
+    server_key = require_server_key(server_key)
     cf_value = obj.cf.get("librenms_id")
     if not isinstance(cf_value, dict):
         return None
@@ -2543,6 +2556,8 @@ def set_librenms_oob(
             silently dropping the corrupted host link).
     """
     from netbox_librenms_plugin.constants import OOB_TYPE_PATTERN, OOB_TYPES
+
+    server_key = require_server_key(server_key)
 
     _type_normalized = (oob_type or "").strip().lower()
     if _type_normalized == "oob":
@@ -2624,6 +2639,7 @@ def clear_librenms_oob(obj, server_key: str = "default") -> None:
         obj: NetBox object with a ``librenms_id`` custom field.
         server_key: LibreNMS server key (from plugin ``servers`` config).
     """
+    server_key = require_server_key(server_key)
     cf_value = obj.custom_field_data.get("librenms_id")
     if not isinstance(cf_value, dict):
         return
@@ -2686,6 +2702,7 @@ def migrate_legacy_librenms_id(obj, server_key: str = "default") -> bool:
     Returns:
         True if the value was migrated, False if it was already in the correct format.
     """
+    server_key = require_server_key(server_key)
     cf_value = obj.custom_field_data.get("librenms_id")
     if isinstance(cf_value, bool):
         return False
@@ -2924,6 +2941,8 @@ def merge_librenms_links(winner, donor, server_key: str = "default") -> dict:
         (None or dict).  Useful for audit logging and tests.
     """
     from netbox_librenms_plugin.constants import normalize_oob_type
+
+    server_key = require_server_key(server_key)
 
     summary = {
         "host_id_from_donor": None,
@@ -3214,7 +3233,7 @@ def mark_librenms_migrated(donor, winner_pk: int, server_key: str = "default", a
     if isinstance(winner_pk, bool) or not isinstance(winner_pk, int) or winner_pk <= 0:
         raise ValueError(f"winner_pk must be a positive integer, got {winner_pk!r}")
     # Keep the writer's key normalization paired with get_migrated_to_marker()'s.
-    server_key = server_key or "default"
+    server_key = require_server_key(server_key or "default")
 
     cf_value = donor.custom_field_data.get("librenms_id")
     if cf_value is None:
@@ -3317,11 +3336,9 @@ def get_migrated_to_marker(device, server_key: str = "default") -> dict | None:
             was previously merged via :func:`mark_librenms_migrated`, or None when no
             valid marker is present (missing, malformed, or superseded by a live link).
     """
+    server_key = require_server_key(server_key or "default")
     if device is None:
         return None
-    # Blank/None server_key means the default server everywhere else in this plugin; normalize
-    # here so every marker reader agrees, whatever key hygiene its call site has.
-    server_key = server_key or "default"
     cf_value = device.cf.get("librenms_id") if hasattr(device, "cf") else None
     if not isinstance(cf_value, dict):
         return None

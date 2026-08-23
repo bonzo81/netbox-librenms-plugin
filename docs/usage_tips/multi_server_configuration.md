@@ -69,7 +69,22 @@ PLUGINS_CONFIG = {
 2. Select your desired LibreNMS server from the dropdown
 3. Click **Save Settings**
 
-All subsequent LibreNMS operations will use the selected server.
+This server is the installation default. Import uses its own transient server selection. An object sync page uses only servers that have a mapping in the object's `librenms_id` field.
+
+### Object sync server selection
+
+The LibreNMS Connections card uses separate indicators for the active server and the preferred server:
+
+- The check mark identifies the active server for the current page.
+- The filled star identifies the object's preferred server.
+- The server selector changes the active server for the current page. It does not change the preference.
+- An authorized user can select an outline star to change the preference. This action keeps the current active server and sync tab.
+
+The preference controls are available only when the object has more than one usable mapping. One usable mapping is implicit and does not store a preference.
+
+Without a transient selection, the page uses a valid object preference first. If no valid preference exists, it uses the installation default only when the object has a mapping for that server. Otherwise, the page asks the user to select a mapped server.
+
+The page shows a warning when a preference is missing or invalid. A preference is invalid when it is malformed, has no object mapping, or names a server that is not configured and usable. Loading the page does not repair or remove the stored value.
 
 ## Configuration Options
 
@@ -81,6 +96,8 @@ Each server configuration supports the following options:
 - `cache_timeout`: Cache timeout in seconds (optional, default: 300)
 - `verify_ssl`: Whether to verify SSL certificates (optional, default: True)
 - `interface_name_field`: LibreNMS field for interface names (optional, default: 'ifDescr')
+
+The `_preferred_server` key is reserved for object metadata. Do not use it as a configured server key. NetBox rejects a configuration that uses this key.
 
 ## Migration from Single to Multi-Server
 

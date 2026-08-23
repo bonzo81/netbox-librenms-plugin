@@ -182,6 +182,13 @@ class BaseLibreNMSSyncView(
 
         return render(request, self.template_name, context)
 
+    def _can_manage_server_preference(self, selection):
+        """Check plugin write and object change scope for the mapping owner."""
+        if not selection or not selection.has_multiple_usable_mappings or not self.has_write_permission():
+            return False
+        owner = selection.mapping_owner
+        return self.restricted_queryset(type(owner), "change").filter(pk=owner.pk).exists()
+
     def _render_server_selection_blocked(self, request, obj, selection):
         """Render the object page shell without constructing or querying an API client."""
         from netbox_librenms_plugin.utils import build_migrated_context
@@ -206,7 +213,10 @@ class BaseLibreNMSSyncView(
                 "all_server_mappings": selection.mappings,
                 "server_selection_state": selection.state,
                 "server_selection_error": selection.error,
+                "server_selection_warning": selection.warning,
                 "server_selection_active_name": selection.active_display_name,
+                "server_selection_preferred_key": selection.preferred_key,
+                "can_manage_server_preference": self._can_manage_server_preference(selection),
                 "server_selection_blocked": True,
                 "has_librenms_id": False,
                 "found_in_librenms": False,
@@ -384,7 +394,10 @@ class BaseLibreNMSSyncView(
                 ),
                 "server_selection_state": selection.state if selection is not None else None,
                 "server_selection_error": selection.error if selection is not None else None,
+                "server_selection_warning": selection.warning if selection is not None else None,
                 "server_selection_active_name": selection.active_display_name if selection is not None else None,
+                "server_selection_preferred_key": selection.preferred_key if selection is not None else None,
+                "can_manage_server_preference": self._can_manage_server_preference(selection),
                 "librenms_id_is_legacy": librenms_id_is_legacy,
                 "librenms_id_serial_confirmed": librenms_id_serial_confirmed,
                 # Lookup device may differ from object (e.g. VC master vs member).

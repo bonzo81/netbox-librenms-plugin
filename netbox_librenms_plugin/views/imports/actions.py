@@ -45,6 +45,7 @@ from netbox_librenms_plugin.import_validation_helpers import (
     merge_candidate_pks,
 )
 from netbox_librenms_plugin.ip_addressing import parse_host_address
+from netbox_librenms_plugin.server_mappings import iter_server_mapping_entries
 from netbox_librenms_plugin.tables.device_status import DeviceImportTable
 from netbox_librenms_plugin.utils import (
     acquire_advisory_transaction_lock,
@@ -1724,7 +1725,7 @@ class DeviceValidationDetailsView(LibreNMSPermissionMixin, LibreNMSAPIMixin, Dev
         if not isinstance(servers_config, dict):
             servers_config = {}
         result = []
-        for sk, did in cf_value.items():
+        for sk, did in iter_server_mapping_entries(cf_value):
             # Resolve the host id, falling back to the OOB controller's id for an OOB-only entry
             # ({"oob": {...}} with no usable host "id"). An OOB-only link is still a real link to
             # this server, so surface it like the device-sync modal (_build_all_server_mappings)
