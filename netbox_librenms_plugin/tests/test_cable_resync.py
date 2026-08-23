@@ -304,7 +304,6 @@ class TestPatchPathSyncGuard:
         from django.test import Client
         from django.urls import reverse
 
-        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
         from netbox_librenms_plugin.views.sync.cables import SyncCablesView
 
         local_device = make_device("patch-guard-local")
@@ -322,7 +321,7 @@ class TestPatchPathSyncGuard:
             "remote_port_id": 20,
             "_source": "main",
         }
-        server_key = next(iter(LibreNMSAPI.get_available_servers()))
+        server_key = SERVER_KEY
         sync_view = object.__new__(SyncCablesView)
         cache.set(
             sync_view.get_cache_key(local_device, "links", server_key),

@@ -2996,22 +2996,43 @@ class TestVCMemberInterfaceNormalization:
                 type="10gbase-x-sfpp",
             )
 
-        with CaptureQueriesContext(connection) as captured:
-            result = _normalize_module_interface_names_for_vc_member(
-                device,
-                module,
-                Interface.objects.all(),
-                Interface.objects.all(),
-            )
+        result = _normalize_module_interface_names_for_vc_member(
+            device,
+            module,
+            Interface.objects.all(),
+            Interface.objects.all(),
+        )
 
-        permission_probes = [
-            query["sql"]
-            for query in captured.captured_queries
-            if 'SELECT 1 AS "a" FROM "dcim_interface"' in query["sql"]
-            and 'WHERE "dcim_interface"."id" =' in query["sql"]
-        ]
         assert result["renamed"] == 3
-        assert permission_probes == []
+
+        permission_device, permission_module = self._module("permission-query-scope")
+        permission_anchor = Interface.objects.create(
+            device=permission_device,
+            name="Permission Anchor",
+            type="virtual",
+        )
+        permission_scope = Interface.objects.filter(pk=permission_anchor.pk)
+
+        def denied_query_count(port_count, suffix):
+            denied_device, denied_module = self._module(f"permission-query-{suffix}")
+            for port in range(1, port_count + 1):
+                Interface.objects.create(
+                    device=denied_device,
+                    module=denied_module,
+                    name=f"TenGigabitEthernet1/1/{port}",
+                    type="10gbase-x-sfpp",
+                )
+            with CaptureQueriesContext(connection) as denied_queries:
+                denied = _normalize_module_interface_names_for_vc_member(
+                    denied_device,
+                    denied_module,
+                    permission_scope,
+                    permission_scope,
+                )
+            assert denied["skipped"] == port_count
+            return len(denied_queries)
+
+        assert denied_query_count(2, "small") == denied_query_count(6, "large")
 
     def test_normalize_adopts_existing_standalone_conflict(self):
         from dcim.models import Interface

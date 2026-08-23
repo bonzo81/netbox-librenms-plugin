@@ -764,3 +764,26 @@ class TestResolveLocalInterfaceCore:
 
         device, _ = self._dev("core-empty")
         assert resolve_interface_on_device(device, "default", None, []) is None
+
+    def test_two_name_matches_resolve_nothing(self):
+        from dcim.models import Interface
+
+        from netbox_librenms_plugin.utils import resolve_interface_on_device
+
+        device, first = self._dev("core-name-ambiguous")
+        second = Interface.objects.create(device=device, name="eth-alt", type="1000base-t")
+
+        assert resolve_interface_on_device(device, "default", None, [first.name, second.name]) is None
+
+    def test_two_id_matches_resolve_nothing(self):
+        from dcim.models import Interface
+
+        from netbox_librenms_plugin.utils import resolve_interface_on_device
+
+        device, _by_name = self._dev("core-id-ambiguous")
+        for name in ("eth-dup-a", "eth-dup-b"):
+            duplicate = Interface.objects.create(device=device, name=name, type="1000base-t")
+            duplicate.custom_field_data["librenms_id"] = {"default": 4242}
+            duplicate.save()
+
+        assert resolve_interface_on_device(device, "default", 4242, ["eth-by-name"]) is None

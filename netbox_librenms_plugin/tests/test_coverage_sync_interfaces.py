@@ -1843,7 +1843,14 @@ class TestInterfaceContextVirtualChassisOwner:
         from netbox_librenms_plugin.views.object_sync.devices import SingleInterfaceVerifyView
 
         device = make_device("verify-vlan-group-override")
-        group = VLANGroup.objects.create(name="Verify VLAN Group", slug="verify-vlan-group")
+        default_group = VLANGroup.objects.create(
+            name="Verify VLAN Group A",
+            slug="verify-vlan-group-a",
+        )
+        override_group = VLANGroup.objects.create(
+            name="Verify VLAN Group B",
+            slug="verify-vlan-group-b",
+        )
         server_key = configured_server_key()
         port = {
             "port_id": 10,
@@ -1862,7 +1869,7 @@ class TestInterfaceContextVirtualChassisOwner:
         ports_key = view.get_cache_key(device, "ports", server_key)
         overrides_key = view.get_vlan_overrides_key(device, server_key)
         cache.set(ports_key, {"ports": [port], "port_stack_relationships": {}})
-        cache.set(overrides_key, {"100": str(group.pk)})
+        cache.set(overrides_key, {"100": str(override_group.pk)})
         client.force_login(make_superuser("verify-vlan-group-override"))
 
         try:
@@ -1883,7 +1890,8 @@ class TestInterfaceContextVirtualChassisOwner:
 
         assert response.status_code == 200, response.content
         vlan_html = json.loads(response.content)["formatted_row"]["vlans"]
-        assert f'name="vlan_group_10_100" value="{group.pk}"' in vlan_html
+        assert f'name="vlan_group_10_100" value="{override_group.pk}"' in vlan_html
+        assert f'value="{default_group.pk}"' not in vlan_html
 
     def test_remote_vc_target_sync_uses_its_rack_vlan_lookup(self):
         from types import SimpleNamespace
