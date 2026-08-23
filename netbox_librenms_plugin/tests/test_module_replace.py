@@ -6,7 +6,11 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 
-from netbox_librenms_plugin.tests.view_test_helpers import get as _get, post as _post
+from netbox_librenms_plugin.tests.view_test_helpers import (
+    get as _get,
+    post as _post,
+    trusted_module_inventory_payload,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -20,6 +24,7 @@ def _make_device(pk=24, name="test-device"):
     d.name = name
     d.device_type = MagicMock()
     d.device_type.manufacturer = None
+    d.virtual_chassis = None
     return d
 
 
@@ -132,7 +137,7 @@ class TestModuleMismatchPreviewView:
             patch.object(view, "get_cache_key", return_value="cache-key"),
             patch("netbox_librenms_plugin.views.sync.modules.cache") as mock_cache,
         ):
-            mock_cache.get.return_value = {"inventory": cached, "librenms_id": "test"}
+            mock_cache.get.return_value = trusted_module_inventory_payload(device, cached)
             resp = _get(view, request, pk=24)
 
         assert resp.status_code == 400
@@ -166,7 +171,7 @@ class TestModuleMismatchPreviewView:
             patch("dcim.models.Module") as mock_module_cls,
             patch("netbox_librenms_plugin.views.sync.modules.render", return_value=HttpResponse("OK")) as mock_render,
         ):
-            mock_cache.get.return_value = {"inventory": cached, "librenms_id": "test"}
+            mock_cache.get.return_value = trusted_module_inventory_payload(device, cached)
             mock_module_cls.objects.restrict.return_value = mock_module_cls.objects
             mock_module_cls.objects.filter.return_value.exclude.return_value.count.return_value = 0
             resp = view.get(request, pk=24)
@@ -207,7 +212,7 @@ class TestModuleMismatchPreviewView:
             patch("dcim.models.Module") as mock_module_cls,
             patch("netbox_librenms_plugin.views.sync.modules.render", return_value=HttpResponse("OK")) as mock_render,
         ):
-            mock_cache.get.return_value = {"inventory": cached, "librenms_id": "test"}
+            mock_cache.get.return_value = trusted_module_inventory_payload(device, cached)
             mock_module_cls.objects.restrict.return_value = mock_module_cls.objects
             mock_module_cls.objects.filter.return_value.exclude.return_value.count.return_value = 1
             mock_module_cls.objects.filter.return_value.select_related.return_value.first.return_value = conflict_module
@@ -290,16 +295,16 @@ class TestModuleMismatchTypeMatchedBadge:
         ckey = view.get_cache_key(sync_device, "inventory", server_key="default")
         cache.set(
             ckey,
-            {
-                "inventory": [
+            trusted_module_inventory_payload(
+                sync_device,
+                [
                     {
                         "entPhysicalIndex": 100,
                         "entPhysicalModelName": librenms_model,
                         "entPhysicalSerialNum": librenms_serial,
                     }
                 ],
-                "librenms_id": 1,
-            },
+            ),
         )
         try:
             with patch.object(view, "require_object_permissions", return_value=None):
@@ -439,16 +444,16 @@ class TestReplaceModuleView:
         cache_key = view.get_cache_key(device, "inventory", server_key="default")
         cache.set(
             cache_key,
-            {
-                "inventory": [
+            trusted_module_inventory_payload(
+                device,
+                [
                     {
                         "entPhysicalIndex": 100,
                         "entPhysicalModelName": new_type.model,
                         "entPhysicalSerialNum": "REPLACE-REAL-NEW-SERIAL",
                     }
                 ],
-                "librenms_id": 1,
-            },
+            ),
             timeout=300,
         )
         try:
@@ -506,16 +511,16 @@ class TestReplaceModuleView:
         cache_key = view.get_cache_key(device, "inventory", server_key="default")
         cache.set(
             cache_key,
-            {
-                "inventory": [
+            trusted_module_inventory_payload(
+                device,
+                [
                     {
                         "entPhysicalIndex": 100,
                         "entPhysicalModelName": new_type.model,
                         "entPhysicalSerialNum": conflict.serial,
                     }
                 ],
-                "librenms_id": 1,
-            },
+            ),
             timeout=300,
         )
         try:
@@ -594,16 +599,16 @@ class TestReplaceModuleView:
         cache_key = view.get_cache_key(device, "inventory", server_key="default")
         cache.set(
             cache_key,
-            {
-                "inventory": [
+            trusted_module_inventory_payload(
+                device,
+                [
                     {
                         "entPhysicalIndex": 100,
                         "entPhysicalModelName": new_type.model,
                         "entPhysicalSerialNum": "REPLACE-ADOPTION-NEW-SERIAL",
                     }
                 ],
-                "librenms_id": 1,
-            },
+            ),
             timeout=300,
         )
         try:

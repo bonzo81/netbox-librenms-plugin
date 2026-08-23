@@ -179,6 +179,27 @@ def missing_pk(model, offset=1000):
     return (highest_pk or 0) + offset
 
 
+def trusted_module_inventory_payload(device, inventory, *, server_key="default", librenms_id=1):
+    """Build a module inventory payload bound to the device's current LibreNMS mapping.
+
+    Positive-path tests must use the same device fingerprint that the production cache writer
+    stores. This helper supports real NetBox devices and the older real-shape substitutes still
+    used by narrow module tests.
+    """
+    from netbox_librenms_plugin.utils import set_librenms_device_id
+
+    if not isinstance(device.custom_field_data, dict):
+        device.custom_field_data = {}
+        device.cf = device.custom_field_data
+    set_librenms_device_id(device, librenms_id, server_key)
+    device.save(update_fields=["custom_field_data"])
+    return {
+        "inventory": inventory,
+        "librenms_id": librenms_id,
+        "oob_librenms_id": None,
+    }
+
+
 def assert_locked_before_update(captured, table):
     """Assert *table* was locked with ``SELECT ... FOR UPDATE`` before it was updated.
 

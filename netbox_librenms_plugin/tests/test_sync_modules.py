@@ -14,7 +14,11 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 
-from netbox_librenms_plugin.tests.view_test_helpers import get as _get, post as _post
+from netbox_librenms_plugin.tests.view_test_helpers import (
+    get as _get,
+    post as _post,
+    trusted_module_inventory_payload,
+)
 
 
 @pytest.mark.django_db
@@ -1539,15 +1543,17 @@ class TestSingleInstallInterfaceBinding:
         device = _make_device()
 
         with patch("netbox_librenms_plugin.views.sync.modules.cache") as mock_cache:
-            mock_cache.get.return_value = {
-                "inventory": [
+            mock_cache.get.return_value = trusted_module_inventory_payload(
+                device,
+                [
                     {
                         "entPhysicalIndex": 77,
                         "_librenms_port_id": 42,
                         "_librenms_ifname": "Te1/1/1",
                     }
-                ]
-            }
+                ],
+                server_key="production",
+            )
             get_cache_key = MagicMock(return_value="inventory-key")
             item = _resolve_single_install_binding_item(request, device, "production", get_cache_key)
 
@@ -1771,15 +1777,17 @@ class TestSingleInstallInterfaceBinding:
             # The locked re-fetch goes through restrict(user, ...), so hand back the same manager.
             mock_objects.restrict.return_value = mock_objects
             mock_objects.select_for_update.return_value = mock_qs
-            mock_cache.get.return_value = {
-                "inventory": [
+            mock_cache.get.return_value = trusted_module_inventory_payload(
+                device,
+                [
                     {
                         "entPhysicalIndex": 77,
                         "_librenms_port_id": 42,
                         "_librenms_ifname": "Te1/1/1",
                     }
-                ]
-            }
+                ],
+                server_key="production",
+            )
             view.request = request
             view.post(request, pk=24)
 
@@ -1860,15 +1868,17 @@ class TestSingleInstallInterfaceBinding:
             # The locked re-fetch goes through restrict(user, ...), so hand back the same manager.
             mock_objects.restrict.return_value = mock_objects
             mock_objects.select_for_update.return_value = mock_qs
-            mock_cache.get.return_value = {
-                "inventory": [
+            mock_cache.get.return_value = trusted_module_inventory_payload(
+                device,
+                [
                     {
                         "entPhysicalIndex": 77,
                         "_librenms_port_id": 42,
                         "_librenms_ifname": "Te1/1/1",
                     }
-                ]
-            }
+                ],
+                server_key="production",
+            )
             view.request = request
             view.post(request, pk=24)
 
@@ -2224,8 +2234,9 @@ class TestSingleInstallInterfaceBinding:
         cache_key = view.get_cache_key(device, "inventory", server_key="default")
         cache.set(
             cache_key,
-            {
-                "inventory": [
+            trusted_module_inventory_payload(
+                device,
+                [
                     {
                         "entPhysicalIndex": 77,
                         "entPhysicalModelName": new_type.model,
@@ -2234,8 +2245,7 @@ class TestSingleInstallInterfaceBinding:
                         "_librenms_ifname": interface.name,
                     }
                 ],
-                "librenms_id": 1,
-            },
+            ),
         )
         try:
             response = _post(view, request, pk=device.pk)
@@ -3401,11 +3411,7 @@ class TestInstallViewsPreserveInventoryCache:
     @staticmethod
     def _trusted_inventory(device, inventory):
         """Bind one source snapshot to the device's current object mapping."""
-        from netbox_librenms_plugin.utils import set_librenms_device_id
-
-        set_librenms_device_id(device, 555, "default")
-        device.save()
-        return {"inventory": inventory, "librenms_id": 555}
+        return trusted_module_inventory_payload(device, inventory, librenms_id=555)
 
     def test_install_module_preserves_inventory_cache(self):
         from types import SimpleNamespace
@@ -4447,6 +4453,7 @@ def _make_device(pk=24, name="test-device"):
     d.name = name
     d.device_type = MagicMock()
     d.device_type.manufacturer = None
+    d.virtual_chassis = None
     return d
 
 
@@ -4588,7 +4595,7 @@ class TestPKValidationErrorPaths:
             patch("netbox_librenms_plugin.views.sync.modules.messages") as mock_msg,
             patch("netbox_librenms_plugin.views.sync.modules.redirect") as mock_redirect,
         ):
-            mock_cache.get.return_value = {"inventory": cached, "librenms_id": "test"}
+            mock_cache.get.return_value = trusted_module_inventory_payload(device, cached)
             view.request = request
             view.post(request, pk=24)
 

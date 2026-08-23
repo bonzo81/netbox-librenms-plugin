@@ -12,6 +12,8 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from netbox_librenms_plugin.tests.view_test_helpers import trusted_module_inventory_payload
+
 
 class TestLibreNMSAPIMixinWiring:
     """Views that need LibreNMSAPIMixin must have it in their MRO."""
@@ -1592,16 +1594,16 @@ class TestGatedViewsRefuseOutOfScopeObjects:
         cache_key = view.get_cache_key(device, "inventory", server_key="default")
         cache.set(
             cache_key,
-            {
-                "inventory": [
+            trusted_module_inventory_payload(
+                device,
+                [
                     {
                         "entPhysicalIndex": 100,
                         "entPhysicalModelName": module_type.model,
                         "entPhysicalSerialNum": "NEW-TARGET",
                     }
                 ],
-                "librenms_id": 1,
-            },
+            ),
         )
         try:
             with pytest.raises(Http404):
@@ -1657,16 +1659,16 @@ class TestGatedViewsRefuseOutOfScopeObjects:
         cache_key = view.get_cache_key(device, "inventory", server_key="default")
         cache.set(
             cache_key,
-            {
-                "inventory": [
+            trusted_module_inventory_payload(
+                device,
+                [
                     {
                         "entPhysicalIndex": 100,
                         "entPhysicalModelName": module_type.model,
                         "entPhysicalSerialNum": hidden.serial,
                     }
                 ],
-                "librenms_id": 1,
-            },
+            ),
         )
         try:
             view.post(request, pk=device.pk)
@@ -1721,16 +1723,16 @@ class TestGatedViewsRefuseOutOfScopeObjects:
         cache_key = view.get_cache_key(device, "inventory", server_key="default")
         cache.set(
             cache_key,
-            {
-                "inventory": [
+            trusted_module_inventory_payload(
+                device,
+                [
                     {
                         "entPhysicalIndex": 100,
                         "entPhysicalModelName": module_type.model,
                         "entPhysicalSerialNum": hidden.serial,
                     }
                 ],
-                "librenms_id": 1,
-            },
+            ),
         )
         try:
             response = view.get(request, pk=device.pk)
