@@ -40,6 +40,13 @@
 
 {% block content %}
 
+{% if server_selection_error %}
+<div class="alert {% if server_selection_state == 'selection_required' %}alert-info{% else %}alert-danger{% endif %}"
+     role="alert" id="librenms-server-selection-error">
+    <i class="mdi mdi-alert-circle-outline me-1"></i>{{ server_selection_error }}
+</div>
+{% endif %}
+
 {% if migrated_to_marker %}
 <div class="alert alert-warning d-flex align-items-start" role="alert">
     <i class="mdi mdi-alert-octagon me-2 fs-3"></i>
@@ -116,11 +123,14 @@
 <div class="card mb-3">
     <div class="card-header d-flex justify-content-between align-items-center py-2">
         <span><i class="mdi mdi-server-network text-primary me-1"></i><strong>LibreNMS Connections</strong></span>
-        {% if librenms_server_info and not librenms_server_info.is_legacy %}
-        <a href="{% url 'plugins:netbox_librenms_plugin:settings' %}" class="btn btn-sm btn-outline-primary">
-            <i class="mdi mdi-cog"></i> Change Server
-        </a>
-        {% endif %}
+        <div class="d-flex gap-2 align-items-center">
+            {% include "netbox_librenms_plugin/inc/_server_selector.html" %}
+            {% if librenms_server_info and not librenms_server_info.is_legacy %}
+            <a href="{% url 'plugins:netbox_librenms_plugin:settings' %}" class="btn btn-sm btn-outline-secondary">
+                <i class="mdi mdi-cog"></i> Configure Servers
+            </a>
+            {% endif %}
+        </div>
     </div>
     <div class="card-body p-0">
         <table class="table table-sm mb-0">
@@ -128,7 +138,7 @@
             {% for mapping in all_server_mappings %}
             <tr>
                 <td class="ps-3" style="width:40%">
-                    {% if mapping.is_active %}
+                    {% if mapping.is_active and mapping.is_selectable %}
                     <i class="mdi mdi-check-circle text-success me-1" title="Currently active server"></i>
                     {% elif mapping.is_configured %}
                     <i class="mdi mdi-server-network text-muted me-1"></i>
@@ -209,6 +219,7 @@
 </div>
 {% endif %}
 
+{% if not server_selection_blocked %}
 <!-- Only show Device Status and Sync Cards if NOT a VC member OR if this device IS the sync device.
      Hidden entirely for a migrated donor: its update/sync actions (name, type, serial,
      platform, location, Add to LibreNMS) must not write back onto the merged-away device. -->
@@ -948,6 +959,7 @@ that may well be correct.
                     id="snmpv1v2-form" name="snmpv1v2-form" style="display: block;">
                     {% csrf_token %}
                     <input type="hidden" name="object_type" value="{{ object_model_name }}">
+                    {% include "netbox_librenms_plugin/inc/_hidden_server_key.html" %}
                     <!-- v1/v2c Toggle Button -->
                     <div class="mb-3">
                         <label class="form-label">Protocol Version</label>
@@ -998,6 +1010,7 @@ that may well be correct.
                     id="snmpv3-form" name="snmpv3-form" style="display: none;">
                     {% csrf_token %}
                     <input type="hidden" name="object_type" value="{{ object_model_name }}">
+                    {% include "netbox_librenms_plugin/inc/_hidden_server_key.html" %}
                     {{ v3form.snmp_version }}
 
                     <div class="row">
@@ -1073,6 +1086,7 @@ that may well be correct.
                 <form method="post" id="vc-serials-form"
                       action="{% url 'plugins:netbox_librenms_plugin:assign_vc_serial' pk=object.pk %}">
                     {% csrf_token %}
+                    {% include "netbox_librenms_plugin/inc/_hidden_server_key.html" %}
                     <table class="table table-striped">
                         <thead>
                             <tr>
@@ -1137,6 +1151,7 @@ that may well be correct.
         </div>
     </div>
 </div>
+{% endif %}
 {% endif %}
 
 {% endblock %} <!-- End content -->

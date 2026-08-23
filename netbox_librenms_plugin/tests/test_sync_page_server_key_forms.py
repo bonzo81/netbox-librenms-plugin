@@ -198,7 +198,10 @@ class TestSyncPageFormsCarryServerKey:
         # Serial/type/platform differ from LibreNMS values → the sync forms render.
         from dcim.models import DeviceType, Manufacturer, Platform
 
+        from netbox_librenms_plugin.models import LibreNMSSettings
+
         device = make_device("sync-page-forms", serial="NB-SER-1", librenms_cf=42)
+        LibreNMSSettings.objects.update_or_create(pk=1, defaults={"selected_server": "secondary"})
         # A DeviceType matching the LibreNMS hardware string (≠ the device's own type)
         # → the Device Type sync form renders.
         mfr = Manufacturer.objects.get(slug="test-mfr")
@@ -294,7 +297,7 @@ class TestSyncPageMisconfiguredDefaultDegrades:
         assert "not configured correctly" in response.content.decode()
 
     def test_get_with_stale_server_key_and_broken_default_renders_degraded_page(self):
-        """Verify that a stale server key with a broken default renders through the active key fallback without a 500."""
+        """A stale server key must fail closed before API client construction."""
         from django.contrib.auth import get_user_model
         from django.contrib.messages.storage.fallback import FallbackStorage
 
@@ -321,9 +324,9 @@ class TestSyncPageMisconfiguredDefaultDegrades:
                 "netbox_librenms_plugin.librenms_api.get_plugin_config",
                 side_effect=lambda _plugin, key, default=None: TWO_SERVERS if key == "servers" else default,
             ),
-            # Neither the requested key nor the default can build a client...
+            # Neither the requested key nor the default can build a client.
             patch("netbox_librenms_plugin.librenms_api.build_librenms_api", return_value=None) as mock_build,
-            # ...so any lazy LibreNMSAPI() reconstruction would raise, as in production.
+            # Any lazy LibreNMSAPI() reconstruction would raise, as in production.
             patch(
                 "netbox_librenms_plugin.views.mixins.LibreNMSAPI",
                 side_effect=ValueError("LibreNMS URL or API token is not configured"),
@@ -331,17 +334,12 @@ class TestSyncPageMisconfiguredDefaultDegrades:
         ):
             response = view.get(request, pk=device.pk)
 
-        # The stale key was routed to the factory (so the unresolved branch is the one taken),
-        # and the broken default was then tried as the fallback bind.
+        # Selection reads the installation default once, then rejects the stale requested key
+        # without trying to construct a client for it.
         build_keys = [c.args[0] for c in mock_build.call_args_list]
-        assert "gone-server" in build_keys
-        assert None in build_keys
+        assert build_keys == [None]
         assert response.status_code == 200
-        # The header's server-info block degrades to the configuration-error display
-        # (get_server_info's fail-soft branch) instead of the page 500ing...
-        assert "Configuration error" in response.content.decode()
-        # ...and the page is NOT the minimal early-return render the *blank*-key branch produces
-        # (the unresolved path must still render the tabbed page scoped to the requested key).
+        assert "is not an available mapping for this object" in response.content.decode()
         assert view._server_key_unresolved is True
         assert view._scoped_render_server_key == "gone-server"
         assert view.librenms_id is None  # failed closed: no default-server mapping attributed
