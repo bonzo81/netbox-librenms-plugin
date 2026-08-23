@@ -195,7 +195,7 @@ def resolve_object_server(page_object, requested_key=None, installation_default_
                 preferred_key=preferred_key,
             )
         active_key = requested_key
-    elif not selectable:
+    elif not selectable and not mappings and not preference_is_stored:
         active_key = installation_default_key
     elif len(selectable) == 1:
         active_key = selectable[0].server_key

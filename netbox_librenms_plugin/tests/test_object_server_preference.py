@@ -374,6 +374,31 @@ def test_unconfigured_preferred_mapping_warns_and_falls_back_without_mutation(cl
 
 
 @pytest.mark.django_db
+def test_only_unusable_mapping_requires_selection_without_get_mutation(client, settings):
+    """An unmapped default cannot replace an unusable preferred object mapping."""
+    _configure_servers(settings)
+    mapping = {
+        "retired": {"id": 13529},
+        "_preferred_server": "retired",
+    }
+    owner = make_device("unusable-preference-selection", librenms_cf=mapping)
+    client.force_login(make_superuser("unusable-preference-viewer"))
+
+    with patch(
+        "netbox_librenms_plugin.librenms_api.requests.get",
+        side_effect=AssertionError("The unmapped installation default contacted LibreNMS"),
+    ) as requests_get:
+        response = client.get(reverse("plugins:netbox_librenms_plugin:device_librenms_sync", args=[owner.pk]))
+
+    requests_get.assert_not_called()
+    assert response.status_code == 200
+    assert b"The installation default is not mapped, so select a server." in response.content
+    assert b"Select a LibreNMS server to continue." in response.content
+    owner.refresh_from_db()
+    assert owner.custom_field_data["librenms_id"] == mapping
+
+
+@pytest.mark.django_db
 @pytest.mark.parametrize("preferred_removed", [True, False])
 def test_removing_mapping_clears_preference_when_it_is_removed_or_only_one_mapping_remains(
     client,
