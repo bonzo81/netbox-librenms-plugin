@@ -10,7 +10,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from netbox_librenms_plugin.tests.conftest import make_device, make_interface, make_vm
+from netbox_librenms_plugin.tests.conftest import make_device, make_interface, make_vm, persist_test_server_mapping
 from netbox_librenms_plugin.tests.view_test_helpers import (
     grant,
     make_request,
@@ -360,6 +360,7 @@ class TestSyncCablesViewSuccessPath:
         user = get_user_model().objects.create_superuser("cable-enrich-user", "", "pw")
         client = Client()
         client.force_login(user)
+        persist_test_server_mapping(dev_local, server_key)
         rendered = client.get(
             reverse("plugins:netbox_librenms_plugin:device_librenms_sync", args=[dev_local.pk]),
             {"tab": "cables", "server_key": server_key},

@@ -27,6 +27,7 @@ from netbox_librenms_plugin.tests.conftest import (
     make_patch_panel as _panel,  # 1-position patch panel; version-gated front/rear wiring
     make_serial_device,
     make_serial_row as _serial_row,
+    persist_test_server_mapping,
 )
 from netbox_librenms_plugin.tests.test_serial_cables_view import _make_view
 
@@ -263,6 +264,7 @@ class TestCableAdoptHtmx:
         client = Client()
         client.force_login(user)
         url = reverse("plugins:netbox_librenms_plugin:sync_device_cables", args=[acs.pk])
+        persist_test_server_mapping(acs, SERVER_KEY)
         rendered = client.get(
             reverse("plugins:netbox_librenms_plugin:device_librenms_sync", args=[acs.pk]),
             {"tab": "cables", "server_key": SERVER_KEY},
@@ -328,6 +330,7 @@ class TestPatchPathSyncGuard:
             {"links": [row], "snapshot_token": "patch-path-guard"},
             timeout=300,
         )
+        persist_test_server_mapping(local_device, server_key)
         user = get_user_model().objects.create_superuser(
             "patch-guard-admin",
             "patch-guard@example.com",

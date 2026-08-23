@@ -28,6 +28,7 @@ from netbox_librenms_plugin.tests.conftest import (
     make_serial_device,
     make_serial_row as _serial_row,
     make_virtual_chassis,
+    persist_test_server_mapping,
 )
 from netbox_librenms_plugin.tests.test_serial_cables_view import _make_view
 
@@ -84,13 +85,8 @@ def _serial_refetch_get(link):
 
 
 def _rendered_sync_data(client, device, row_ids, server_key=SERVER_KEY, submit_name="select"):
-    """Return the endpoint-bound fields emitted by the real cable table."""
-    from django.urls import reverse
-
-    rendered = client.get(
-        reverse("plugins:netbox_librenms_plugin:device_librenms_sync", args=[device.pk]),
-        {"tab": "cables", "server_key": server_key},
-    )
+    """Return the endpoint-bound fields emitted for a server-mapped device."""
+    rendered = _render_cable_sync_page(client, device, server_key)
     assert rendered.status_code == 200
     requested_ids = [row_ids] if isinstance(row_ids, (str, int)) else list(row_ids)
     records = {str(row.record["row_id"]): row.record for row in rendered.context["cable_sync"]["table"].rows}
@@ -109,6 +105,17 @@ def _rendered_sync_data(client, device, row_ids, server_key=SERVER_KEY, submit_n
             }
         )
     return data
+
+
+def _render_cable_sync_page(client, device, server_key=SERVER_KEY):
+    """Render the real cable table for a server-mapped test device."""
+    from django.urls import reverse
+
+    persist_test_server_mapping(device, server_key)
+    return client.get(
+        reverse("plugins:netbox_librenms_plugin:device_librenms_sync", args=[device.pk]),
+        {"tab": "cables", "server_key": server_key},
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -440,11 +447,9 @@ class TestRemotePickerEndpoint:
             {"links": [row]},
             timeout=300,
         )
+        persist_test_server_mapping(local, server_key)
 
-        rendered = client.get(
-            reverse("plugins:netbox_librenms_plugin:device_librenms_sync", args=[local.pk]),
-            {"tab": "cables", "server_key": server_key},
-        )
+        rendered = _render_cable_sync_page(client, local, server_key)
 
         assert rendered.status_code == 200
         record = next(iter(rendered.context["cable_sync"]["table"].rows)).record
@@ -563,10 +568,7 @@ class TestRemotePickerEndpoint:
         mark_librenms_migrated(selected, winner.pk, server_key)
         selected.save()
 
-        rendered = client.get(
-            reverse("plugins:netbox_librenms_plugin:device_librenms_sync", args=[page.pk]),
-            {"tab": "cables", "server_key": server_key},
-        )
+        rendered = _render_cable_sync_page(client, page, server_key)
         assert rendered.status_code == 200
         record = next(iter(rendered.context["cable_sync"]["table"].rows)).record
         table_html = rendered.context["cable_sync"]["table"].as_html(rendered.wsgi_request)
@@ -629,10 +631,8 @@ class TestRemotePickerEndpoint:
         row["local_port_id"] = "serial:migrated-donor"
         cache_key = object.__new__(SyncCablesView).get_cache_key(donor, "links", server_key)
         cache.set(cache_key, {"links": [row]}, timeout=300)
-        rendered = client.get(
-            reverse("plugins:netbox_librenms_plugin:device_librenms_sync", args=[donor.pk]),
-            {"tab": "cables", "server_key": server_key},
-        )
+        persist_test_server_mapping(donor, server_key)
+        rendered = _render_cable_sync_page(client, donor, server_key)
         record = next(iter(rendered.context["cable_sync"]["table"].rows)).record
         assert record["can_create_cable"] is True
         mark_librenms_migrated(donor, winner.pk, server_key)
@@ -1233,10 +1233,7 @@ class TestRemotePickerEndpoint:
         cache_key = object.__new__(SyncCablesView).get_cache_key(local_device, "links", server_key)
         cache.set(cache_key, {"links": rows, "snapshot_token": "duplicate-link-snapshot"}, timeout=300)
 
-        rendered = client.get(
-            reverse("plugins:netbox_librenms_plugin:device_librenms_sync", args=[local_device.pk]),
-            {"tab": "cables", "server_key": server_key},
-        )
+        rendered = _render_cable_sync_page(client, local_device, server_key)
 
         assert rendered.status_code == 200
         table = rendered.context["cable_sync"]["table"]
@@ -1349,10 +1346,7 @@ class TestRemotePickerEndpoint:
         cache_key = object.__new__(SyncCablesView).get_cache_key(local, "links", server_key)
         cache.set(cache_key, {"links": [row], "snapshot_token": "stale-auto-target"}, timeout=300)
 
-        rendered = client.get(
-            reverse("plugins:netbox_librenms_plugin:device_librenms_sync", args=[local.pk]),
-            {"tab": "cables", "server_key": server_key},
-        )
+        rendered = _render_cable_sync_page(client, local, server_key)
         assert rendered.status_code == 200
         record = next(iter(rendered.context["cable_sync"]["table"].rows)).record
         table_html = rendered.context["cable_sync"]["table"].as_html(rendered.wsgi_request)
@@ -1419,10 +1413,7 @@ class TestRemotePickerEndpoint:
         assert picked.status_code == 200
         deleted_csp.delete()
 
-        rendered = client.get(
-            reverse("plugins:netbox_librenms_plugin:device_librenms_sync", args=[local.pk]),
-            {"tab": "cables", "server_key": server_key},
-        )
+        rendered = _render_cable_sync_page(client, local, server_key)
         records = [row.record for row in rendered.context["cable_sync"]["table"].rows]
         rendered_auto = next(row for row in records if row["row_id"] == auto_row["local_port_id"])
         assert rendered_auto["netbox_remote_interface_id"] == console_port.pk
@@ -1701,10 +1692,7 @@ class TestRemotePickerEndpoint:
             timeout=300,
         )
 
-        rendered = client.get(
-            reverse("plugins:netbox_librenms_plugin:device_librenms_sync", args=[local_device.pk]),
-            {"tab": "cables", "server_key": server_key},
-        )
+        rendered = _render_cable_sync_page(client, local_device, server_key)
 
         assert rendered.status_code == 200
         record = next(iter(rendered.context["cable_sync"]["table"].rows)).record
@@ -1832,10 +1820,7 @@ class TestRemotePickerEndpoint:
             {"links": [row], "snapshot_token": "vc-verified-local"},
             timeout=300,
         )
-        initial_render = client.get(
-            reverse("plugins:netbox_librenms_plugin:device_librenms_sync", args=[first.pk]),
-            {"tab": "cables", "server_key": server_key},
-        )
+        initial_render = _render_cable_sync_page(client, first, server_key)
         initial_record = next(iter(initial_render.context["cable_sync"]["table"].rows)).record
         assert initial_record["netbox_local_interface_id"] == first_local.pk
         assert initial_record["netbox_local_device_id"] == first.pk
@@ -2611,7 +2596,6 @@ class TestRemotePickerObjectScope:
 
     def test_plugin_view_only_user_does_not_receive_a_picker_action(self):
         from django.core.cache import cache
-        from django.urls import reverse
 
         from netbox_librenms_plugin.librenms_api import LibreNMSAPI
         from netbox_librenms_plugin.views.sync.cables import SyncCablesView
@@ -2630,10 +2614,7 @@ class TestRemotePickerObjectScope:
             view_console_ports=True,
         )
 
-        response = client.get(
-            reverse("plugins:netbox_librenms_plugin:device_librenms_sync", args=[acs.pk]),
-            {"tab": "cables", "server_key": server_key},
-        )
+        response = _render_cable_sync_page(client, acs, server_key)
 
         assert response.status_code == 200
         table_html = response.context["cable_sync"]["table"].as_html(response.wsgi_request)
@@ -2680,10 +2661,7 @@ class TestRemotePickerObjectScope:
 
         client = Client()
         client.force_login(user)
-        rendered = client.get(
-            reverse("plugins:netbox_librenms_plugin:device_librenms_sync", args=[local.pk]),
-            {"tab": "cables", "server_key": server_key},
-        )
+        rendered = _render_cable_sync_page(client, local, server_key)
         record = next(iter(rendered.context["cable_sync"]["table"].rows)).record
         synced = client.post(
             reverse("plugins:netbox_librenms_plugin:sync_device_cables", args=[local.pk]),
@@ -2712,7 +2690,6 @@ class TestRemotePickerObjectScope:
         from dcim.models import Cable, ConsolePort, ConsoleServerPort, Device
         from django.core.cache import cache
         from django.test import Client
-        from django.urls import reverse
 
         from netbox_librenms_plugin.librenms_api import LibreNMSAPI
         from netbox_librenms_plugin.tests.view_test_helpers import grant, make_user_with_perms
@@ -2747,10 +2724,7 @@ class TestRemotePickerObjectScope:
         client = Client()
         client.force_login(user)
 
-        response = client.get(
-            reverse("plugins:netbox_librenms_plugin:device_librenms_sync", args=[local.pk]),
-            {"tab": "cables", "server_key": server_key},
-        )
+        response = _render_cable_sync_page(client, local, server_key)
 
         assert response.status_code == 200
         record = next(iter(response.context["cable_sync"]["table"].rows)).record
@@ -2812,10 +2786,7 @@ class TestRemotePickerObjectScope:
         )
         assert picked.status_code == 200
 
-        response = client.get(
-            reverse("plugins:netbox_librenms_plugin:device_librenms_sync", args=[local.pk]),
-            {"tab": "cables", "server_key": server_key},
-        )
+        response = _render_cable_sync_page(client, local, server_key)
 
         assert response.status_code == 200
         records = {row.record["row_id"]: row.record for row in response.context["cable_sync"]["table"].rows}
@@ -3229,10 +3200,7 @@ class TestNormalCableLinkObjectScope:
         client = Client()
         client.force_login(user)
 
-        response = client.get(
-            reverse("plugins:netbox_librenms_plugin:device_librenms_sync", args=[visible.pk]),
-            {"tab": "cables", "server_key": server_key},
-        )
+        response = _render_cable_sync_page(client, visible, server_key)
 
         assert response.status_code == 200
         table = response.context["cable_sync"]["table"]
@@ -3300,10 +3268,7 @@ class TestNormalCableLinkObjectScope:
         client = Client()
         client.force_login(user)
 
-        initial = client.get(
-            reverse("plugins:netbox_librenms_plugin:device_librenms_sync", args=[local_device.pk]),
-            {"tab": "cables", "server_key": server_key},
-        )
+        initial = _render_cable_sync_page(client, local_device, server_key)
         initial_record = next(iter(initial.context["cable_sync"]["table"].rows)).record
         verified = client.post(
             reverse("plugins:netbox_librenms_plugin:verify_cable"),
@@ -3463,10 +3428,7 @@ class TestNormalCableLinkObjectScope:
         client = Client()
         client.force_login(user)
 
-        rendered = client.get(
-            reverse("plugins:netbox_librenms_plugin:device_librenms_sync", args=[local_device.pk]),
-            {"tab": "cables", "server_key": server_key},
-        )
+        rendered = _render_cable_sync_page(client, local_device, server_key)
 
         assert rendered.status_code == 200
         record = next(iter(rendered.context["cable_sync"]["table"].rows)).record
@@ -3499,7 +3461,6 @@ class TestCablePathReadScope:
         from django.apps import apps
         from django.contrib.auth import get_user_model
         from django.core.cache import cache
-        from django.urls import reverse
         from users.models import ObjectPermission
 
         from netbox_librenms_plugin.librenms_api import LibreNMSAPI
@@ -3557,10 +3518,7 @@ class TestCablePathReadScope:
         )
         client.force_login(user)
 
-        response = client.get(
-            reverse("plugins:netbox_librenms_plugin:device_librenms_sync", args=[local_device.pk]),
-            {"tab": "cables", "server_key": server_key},
-        )
+        response = _render_cable_sync_page(client, local_device, server_key)
 
         assert response.status_code == 200
         table = response.context["cable_sync"]["table"]

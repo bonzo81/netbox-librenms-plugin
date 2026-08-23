@@ -40,6 +40,15 @@ def configured_server_key():
     return next(iter(LibreNMSAPI.get_available_servers()))
 
 
+def persist_test_server_mapping(obj, server_key):
+    """Persist the server mapping required by a real sync-page request."""
+    from netbox_librenms_plugin.utils import get_librenms_device_id, set_librenms_device_id
+
+    if get_librenms_device_id(obj, server_key, auto_save=False) is None:
+        set_librenms_device_id(obj, obj.pk, server_key)
+        obj.save(update_fields=["custom_field_data"])
+
+
 def _isolated_cache_config(caches_config):
     """Return the worker cache config with a unique per-test namespace."""
     isolated = deepcopy(caches_config)

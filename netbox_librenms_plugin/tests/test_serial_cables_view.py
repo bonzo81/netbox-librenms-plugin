@@ -16,7 +16,12 @@ from unittest.mock import patch
 import pytest
 
 # Shared real-DB builders (see tests/conftest.py).
-from netbox_librenms_plugin.tests.conftest import cable_together, configured_server_key, make_serial_device
+from netbox_librenms_plugin.tests.conftest import (
+    cable_together,
+    configured_server_key,
+    make_serial_device,
+    persist_test_server_mapping,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -869,6 +874,7 @@ class TestNormalCableLinkQueryBound:
         )
         user = get_user_model().objects.create_superuser("normal-multi-url-user", "", "pw")
         client.force_login(user)
+        persist_test_server_mapping(local, server_key)
 
         response = client.get(
             reverse("plugins:netbox_librenms_plugin:device_librenms_sync", args=[local.pk]),
@@ -1424,6 +1430,7 @@ class TestCableSyncHtmxPartial:
         )
         client = Client()
         client.force_login(user)
+        persist_test_server_mapping(acs, server_key)
         rendered = client.get(
             reverse("plugins:netbox_librenms_plugin:device_librenms_sync", args=[acs.pk]),
             {"tab": "cables", "server_key": server_key},
@@ -1485,6 +1492,7 @@ class TestCableSyncHtmxPartial:
         user = get_user_model().objects.create_superuser("serial-local-rebind-user", "", "pw")
         client = Client()
         client.force_login(user)
+        persist_test_server_mapping(local, server_key)
         rendered = client.get(
             reverse("plugins:netbox_librenms_plugin:device_librenms_sync", args=[local.pk]),
             {"tab": "cables", "server_key": server_key},
@@ -1916,6 +1924,7 @@ class TestSerialCableReadScope:
             {"pk__in": [local_interface.pk, visible_interface.pk]},
         )
         client.force_login(user)
+        persist_test_server_mapping(local, server_key)
 
         response = client.get(
             reverse("plugins:netbox_librenms_plugin:device_librenms_sync", args=[local.pk]),
@@ -1952,6 +1961,7 @@ class TestSerialCableReadScope:
         self._grant(user, "serial-strong-name-csp", ConsoleServerPort, ["view"], {"pk": csp.pk})
         self._grant(user, "serial-strong-name-cp", ConsolePort, ["view"], {"pk": console_port.pk})
         client.force_login(user)
+        persist_test_server_mapping(local, server_key)
 
         response = client.get(
             reverse("plugins:netbox_librenms_plugin:device_librenms_sync", args=[local.pk]),

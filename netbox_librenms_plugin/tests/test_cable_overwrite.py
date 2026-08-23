@@ -26,6 +26,7 @@ from netbox_librenms_plugin.tests.conftest import (
     make_serial_device,
     make_serial_row,
     make_superuser,
+    persist_test_server_mapping,
 )
 
 SERVER_KEY = configured_server_key()
@@ -86,8 +87,10 @@ def _intent_from_modal(response, row_id):
 
 
 def _rendered_sync_data(client, device, row_id, server_key=SERVER_KEY):
-    """Return the endpoint-bound fields emitted by the real cable table."""
+    """Return the endpoint-bound fields emitted for a server-mapped device."""
     from django.urls import reverse
+
+    persist_test_server_mapping(device, server_key)
 
     rendered = client.get(
         reverse("plugins:netbox_librenms_plugin:device_librenms_sync", args=[device.pk]),
