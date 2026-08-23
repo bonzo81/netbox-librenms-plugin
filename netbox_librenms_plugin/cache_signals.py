@@ -18,7 +18,11 @@ from typing import NamedTuple
 from django.db import transaction
 from django.db.models.signals import m2m_changed, post_delete, post_init, post_save, pre_delete, pre_save
 
-from netbox_librenms_plugin.sync_cache import SyncCacheConsistency, active_sync_page_keys, sync_page_key
+from netbox_librenms_plugin.sync_cache import (
+    SyncCacheConsistency,
+    active_sync_subject_keys,
+    sync_subject_key,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -174,15 +178,15 @@ def _owner_key_from_columns(label, values):
         values: The values of that model's :data:`OWNER_COLUMNS`, in order.
 
     Returns:
-        The key from :func:`sync_page_key`, or None when the row belongs to no sync page.
+        The key from :func:`sync_subject_key`, or None when the row belongs to no synchronization subject.
     """
     if not values or values[0] is None:
         return None
     if label in ASSIGNED_OBJECT_LABELS:
         raise ValueError(f"Assigned object {label} must be resolved through the transaction batch.")
     if label == "virtualization.vminterface":
-        return sync_page_key(VIRTUAL_MACHINE_LABEL, values[0])
-    return sync_page_key(DEVICE_LABEL, values[0])
+        return sync_subject_key(VIRTUAL_MACHINE_LABEL, values[0])
+    return sync_subject_key(DEVICE_LABEL, values[0])
 
 
 def _owner_key_of(instance):
@@ -196,13 +200,13 @@ def _owner_key_of(instance):
         instance: A model instance, or None.
 
     Returns:
-        The key from :func:`sync_page_key`, or None when there is no sync page behind it.
+        The key from :func:`sync_subject_key`, or None when there is no synchronization subject behind it.
     """
     if instance is None or instance.pk is None:
         return None
     label = instance._meta.label_lower
     if label in (DEVICE_LABEL, VIRTUAL_MACHINE_LABEL):
-        return sync_page_key(instance)
+        return sync_subject_key(instance)
     if label in ASSIGNED_OBJECT_LABELS:
         raise ValueError(f"Assigned object {label} must be resolved through the transaction batch.")
     columns = OWNER_COLUMNS.get(label, ())
@@ -214,11 +218,11 @@ def _schedule(key, using):
     Queue one cleanup for an owner identity, at most once per transaction.
 
     Args:
-        key: The owner identity from :func:`sync_page_key`.
+        key: The owner identity from :func:`sync_subject_key`.
         using: The database alias the write went through.
     """
-    if key is None or key in active_sync_page_keys():
-        # The acting page keeps its own transition, which preserves its source tab.
+    if key is None or key in active_sync_subject_keys():
+        # The synchronization subject keeps its own transition, which preserves its source tab.
         return
     _record(transaction.get_connection(using), key)
 
@@ -230,7 +234,7 @@ def _schedule_columns(label, values, using):
             _record_assignment(
                 transaction.get_connection(using),
                 _AssignmentReference(*values),
-                active_sync_page_keys(),
+                active_sync_subject_keys(),
             )
         return
     _schedule(_owner_key_from_columns(label, values), using)

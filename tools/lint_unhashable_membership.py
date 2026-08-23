@@ -127,6 +127,24 @@ def _contains(node, needle):
     return any(sub is needle for sub in ast.walk(node))
 
 
+def _container_names(body):
+    """Return direct names in *body* that hold hash-sensitive containers."""
+    names = set()
+    for node in body:
+        if isinstance(node, ast.Assign):
+            targets = node.targets
+        elif isinstance(node, ast.AnnAssign):
+            targets = (node.target,)
+        else:
+            continue
+        if node.value is None or not _is_hashable_container_literal(node.value):
+            continue
+        for target in targets:
+            if isinstance(target, ast.Name):
+                names.add(target.id)
+    return names
+
+
 class _Scope:
     """Track which local names hold a value read from outside the process."""
 
@@ -145,6 +163,7 @@ class MembershipChecker(ast.NodeVisitor):
         # constants.py is still recognised where another module imports it.
         self.hashable_containers = set(hashable_containers)
         self._scopes = [_Scope()]
+        self._class_containers = []
         self._guard_stack = []
 
     def _suppressed(self, lineno):
@@ -162,19 +181,9 @@ class MembershipChecker(ast.NodeVisitor):
         raises while it is being built, one step before any membership test, so flagging the
         membership test would point at the wrong line and bury the real signal.
         """
-        for scope in [tree] + [n for n in ast.walk(tree) if isinstance(n, ast.ClassDef)]:
-            for node in scope.body:
-                if isinstance(node, ast.Assign):
-                    targets = node.targets
-                elif isinstance(node, ast.AnnAssign):
-                    targets = (node.target,)
-                else:
-                    continue
-                if node.value is None or not _is_hashable_container_literal(node.value):
-                    continue
-                for target in targets:
-                    if reference := _reference_name(target):
-                        self.hashable_containers.add(reference)
+        self.hashable_containers.update(_container_names(tree.body))
+        for class_node in (node for node in ast.walk(tree) if isinstance(node, ast.ClassDef)):
+            self.hashable_containers.update(f"{class_node.name}.{name}" for name in _container_names(class_node.body))
 
     # -- taint ---------------------------------------------------------------
     @property
@@ -214,6 +223,12 @@ class MembershipChecker(ast.NodeVisitor):
 
     visit_AsyncFunctionDef = visit_FunctionDef
 
+    def visit_ClassDef(self, node):
+        """Keep instance-qualified constants local to the class that defines them."""
+        self._class_containers.append(_container_names(node.body))
+        self.generic_visit(node)
+        self._class_containers.pop()
+
     def visit_Assign(self, node):
         self.generic_visit(node)
         if self._is_tainted(node.value):
@@ -248,8 +263,16 @@ class MembershipChecker(ast.NodeVisitor):
         for left, operator, right in zip(left_operands, node.ops, node.comparators, strict=True):
             if not isinstance(operator, (ast.In, ast.NotIn)):
                 continue
-            right_is_hashable_container = _is_hashable_container_literal(right) or (
-                _reference_name(right) in self.hashable_containers
+            reference = _reference_name(right)
+            instance_container = bool(
+                self._class_containers
+                and isinstance(right, ast.Attribute)
+                and isinstance(right.value, ast.Name)
+                and right.value.id in {"self", "cls"}
+                and right.attr in self._class_containers[-1]
+            )
+            right_is_hashable_container = (
+                _is_hashable_container_literal(right) or reference in self.hashable_containers or instance_container
             )
             if not right_is_hashable_container or not self._is_tainted(left):
                 continue
@@ -325,8 +348,6 @@ def collect_container_names(paths):
                 if source_path is None:
                     continue
                 for source_name in names_by_path[source_path]:
-                    if "." in source_name:
-                        continue
                     target_name = f"{qualifier}.{source_name}"
                     if target_name not in names_by_path[path]:
                         names_by_path[path].add(target_name)

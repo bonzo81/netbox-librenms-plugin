@@ -51,6 +51,7 @@ class SyncTabState(StrEnum):
     INVALIDATED = "invalidated"
     REFRESH_FAILED = "refresh_failed"
     LOCALLY_CHANGED = "locally_changed"
+    MISSING = "missing"
 
 
 @dataclass(frozen=True)
@@ -117,6 +118,20 @@ TAB_SPECS = {
         has_last_fetched_key=True,
     ),
 }
+
+
+def sync_cache_browser_contract(tabs):
+    """Serialize the tab metadata and wire states that the browser consumes."""
+    return {
+        "tabs": {
+            tab.value: {
+                "content_id": TAB_SPECS[tab].content_id,
+                "label": TAB_SPECS[tab].label,
+            }
+            for tab in tabs
+        },
+        "states": [state.value for state in SyncTabState],
+    }
 
 
 @dataclass
@@ -214,10 +229,10 @@ def merge_cache_transitions(transitions):
     )
 
 
-_ACTIVE_SYNC_PAGE = ContextVar("librenms_active_sync_page", default=frozenset())
+_ACTIVE_SYNC_SUBJECTS = ContextVar("librenms_active_sync_subjects", default=frozenset())
 
 
-def sync_page_key(obj_or_label, pk=None):
+def sync_subject_key(obj_or_label, pk=None):
     """
     Return the identity the claim and the write signals compare on.
 
@@ -233,13 +248,13 @@ def sync_page_key(obj_or_label, pk=None):
     return (str(obj_or_label).lower(), pk)
 
 
-def active_sync_page_keys():
-    """Return the identities whose sync pages are mid-action."""
-    return _ACTIVE_SYNC_PAGE.get()
+def active_sync_subject_keys():
+    """Return the synchronization subject identities whose actions are in progress."""
+    return _ACTIVE_SYNC_SUBJECTS.get()
 
 
 @contextmanager
-def claim_sync_page(*keys):
+def claim_sync_subjects(*keys):
     """
     Exclude these objects from write-driven invalidation for the duration of an action.
 
@@ -250,14 +265,14 @@ def claim_sync_page(*keys):
     rather than leaving stale data behind. Claims nest, because one action can own two pages.
 
     Args:
-        *keys: Identities from :func:`sync_page_key`; ``None`` entries are ignored.
+        *keys: Identities from :func:`sync_subject_key`; ``None`` entries are ignored.
     """
     claimed = frozenset(key for key in keys if key is not None)
-    token = _ACTIVE_SYNC_PAGE.set(_ACTIVE_SYNC_PAGE.get() | claimed)
+    token = _ACTIVE_SYNC_SUBJECTS.set(_ACTIVE_SYNC_SUBJECTS.get() | claimed)
     try:
         yield
     finally:
-        _ACTIVE_SYNC_PAGE.reset(token)
+        _ACTIVE_SYNC_SUBJECTS.reset(token)
 
 
 def request_actor_id(request):
@@ -285,8 +300,8 @@ def sync_vlan_overrides_key(obj, server_key=None):
     return f"{base}_{server_key}" if server_key else base
 
 
-def _state_key(page_object, server_key, tab):
-    return f"librenms_sync_tab_state_{page_object._meta.model_name}_{page_object.pk}_{server_key}_{tab.value}"
+def _state_key(subject, server_key, tab):
+    return f"librenms_sync_tab_state_{subject._meta.model_name}_{subject.pk}_{server_key}_{tab.value}"
 
 
 def _explicit_server_keys(obj):
@@ -305,10 +320,10 @@ def _explicit_server_keys(obj):
     }
 
 
-def mapped_server_keys(page_object, active_server_key=None):
-    """Return only server namespaces explicitly linked to the page or its VC."""
-    objects = [page_object]
-    virtual_chassis = getattr(page_object, "virtual_chassis", None)
+def mapped_server_keys(subject, active_server_key=None):
+    """Return only server namespaces linked to the synchronization subject or its VC."""
+    objects = [subject]
+    virtual_chassis = getattr(subject, "virtual_chassis", None)
     if virtual_chassis is not None:
         objects = list(virtual_chassis.members.all())
 
@@ -317,7 +332,7 @@ def mapped_server_keys(page_object, active_server_key=None):
         server_keys.update(_explicit_server_keys(obj))
 
     if active_server_key and active_server_key not in server_keys:
-        sync_owner = get_librenms_sync_device(page_object, server_key=active_server_key) or page_object
+        sync_owner = get_librenms_sync_device(subject, server_key=active_server_key) or subject
         raw_mapping = getattr(sync_owner, "custom_field_data", {}).get("librenms_id")
         if not isinstance(raw_mapping, dict) and coerce_librenms_id(raw_mapping) is not None:
             server_keys.add(active_server_key)
@@ -330,31 +345,31 @@ def mapped_server_keys(page_object, active_server_key=None):
 class SyncCacheConsistency:
     """Own sync-tab cache keys, transitions, and status serialization."""
 
-    def __init__(self, page_object):
-        self.page_object = page_object
+    def __init__(self, subject):
+        self.subject = subject
         # One instance serves a single request or post-commit callback, so the owner a server
         # key resolves to cannot change during its lifetime.
         self._shared_owners = {}
 
     def applicable_tabs(self):
-        """Return the tabs supported by this page object's model."""
-        is_virtual_machine = self.page_object._meta.model_name == "virtualmachine"
+        """Return the tabs supported by the synchronization subject's model."""
+        is_virtual_machine = self.subject._meta.model_name == "virtualmachine"
         return tuple(tab for tab, spec in TAB_SPECS.items() if not is_virtual_machine or spec.supports_virtual_machine)
 
     def _shared_owner(self, server_key):
-        if self.page_object._meta.model_name != "device":
-            return self.page_object
+        if self.subject._meta.model_name != "device":
+            return self.subject
         if server_key not in self._shared_owners:
             self._shared_owners[server_key] = (
-                get_librenms_sync_device(self.page_object, server_key=server_key) or self.page_object
+                get_librenms_sync_device(self.subject, server_key=server_key) or self.subject
             )
         return self._shared_owners[server_key]
 
     def _primary_owner(self, tab, server_key):
-        return self._shared_owner(server_key) if TAB_SPECS[tab].shared_vc_owner else self.page_object
+        return self._shared_owner(server_key) if TAB_SPECS[tab].shared_vc_owner else self.subject
 
     def _candidate_owners(self, tab, server_key):
-        owners = {self.page_object.pk: self.page_object}
+        owners = {self.subject.pk: self.subject}
         if TAB_SPECS[tab].shared_vc_owner:
             shared_owner = self._shared_owner(server_key)
             owners[shared_owner.pk] = shared_owner
@@ -452,7 +467,7 @@ class SyncCacheConsistency:
     ):
         """Invalidate dependent snapshots only after the current transaction commits."""
         cleanup_tabs = set(self.applicable_tabs())
-        if active_server_key in mapped_server_keys(self.page_object, active_server_key):
+        if active_server_key in mapped_server_keys(self.subject, active_server_key):
             cleanup_tabs.discard(source_tab)
         transition = CacheMutationTransition(
             cleanup_tabs=cleanup_tabs,
@@ -497,12 +512,12 @@ class SyncCacheConsistency:
             set: The owner identity, plus its virtual-chassis members for a shared tab.
         """
         owner = self._primary_owner(tab, server_key)
-        keys = {sync_page_key(owner)}
+        keys = {sync_subject_key(owner)}
         if not TAB_SPECS[tab].shared_vc_owner:
             return keys
         virtual_chassis = getattr(owner, "virtual_chassis", None)
         if virtual_chassis is not None:
-            keys |= {sync_page_key(member) for member in virtual_chassis.members.all()}
+            keys |= {sync_subject_key(member) for member in virtual_chassis.members.all()}
         return keys
 
     def invalidate_every_tab(self):
@@ -514,10 +529,10 @@ class SyncCacheConsistency:
         Runs inline, because the caller has already deferred it to commit.
         """
         revision = uuid4().hex
-        claimed = active_sync_page_keys()
+        claimed = active_sync_subject_keys()
         # Every server this object is mapped to, not one acting server: the NetBox change is
         # server-independent, so a snapshot under any of its namespaces is equally stale.
-        for server_key in mapped_server_keys(self.page_object):
+        for server_key in mapped_server_keys(self.subject):
             for tab in self.applicable_tabs():
                 # A VC-shared tab resolves to one snapshot for the whole chassis, and the page
                 # holding the claim need not be the member that snapshot is keyed on. Compare
@@ -604,7 +619,7 @@ class SyncCacheConsistency:
 
     def _apply_mutation(self, source_tab, active_server_key, actor_id, transition):
         # An unmapped active server owns no source snapshot to preserve.
-        mapped_keys = mapped_server_keys(self.page_object, active_server_key)
+        mapped_keys = mapped_server_keys(self.subject, active_server_key)
 
         transition.affected_tabs = {
             (server_key, tab)
@@ -649,7 +664,7 @@ class SyncCacheConsistency:
 
     def _mark_cleanup_failure_states(self, source_tab, active_server_key, actor_id, transition):
         """Publish one fail-closed revision after incomplete cache cleanup."""
-        mapped_keys = mapped_server_keys(self.page_object, active_server_key)
+        mapped_keys = mapped_server_keys(self.subject, active_server_key)
         mutation_revision = transition.transition_id
         for server_key in mapped_keys:
             for tab in self.applicable_tabs():
@@ -705,10 +720,10 @@ class SyncCacheConsistency:
                 SyncTabState.READY.value,
                 SyncTabState.LOCALLY_CHANGED.value,
             ):
-                state = "missing"
+                state = SyncTabState.MISSING.value
             result[tab.value] = {
                 "revision": record.get("revision"),
-                "state": state or (SyncTabState.READY.value if snapshot_available else "missing"),
+                "state": state or (SyncTabState.READY.value if snapshot_available else SyncTabState.MISSING.value),
                 "source_tab": record.get("source_tab"),
                 "timestamp": timestamp,
                 "reason": reason,
@@ -729,8 +744,8 @@ class SyncCacheConsistency:
         def acknowledgement_key(tab):
             return ":".join(
                 (
-                    self.page_object._meta.model_name,
-                    str(self.page_object.pk),
+                    self.subject._meta.model_name,
+                    str(self.subject.pk),
                     server_key,
                     tab.value,
                 )
@@ -820,14 +835,14 @@ def render_sync_cache_miss(request, refresh_label, *, retarget=None):
 
 def schedule_request_cache_mutation(
     request,
-    page_object,
+    subject,
     source_tab,
     server_key,
     *,
     source_fragment_required=False,
 ):
     """Schedule one mutation transition and retain it for the endpoint response."""
-    transition = SyncCacheConsistency(page_object).schedule_mutation(
+    transition = SyncCacheConsistency(subject).schedule_mutation(
         source_tab,
         server_key,
         actor_id=request_actor_id(request),

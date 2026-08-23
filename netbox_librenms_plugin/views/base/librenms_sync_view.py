@@ -15,6 +15,7 @@ from netbox_librenms_plugin.sync_cache import (
     SyncTab,
     SyncTabState,
     mapped_server_keys,
+    sync_cache_browser_contract,
 )
 from netbox_librenms_plugin.utils import (
     coerce_librenms_id,
@@ -325,13 +326,7 @@ class BaseLibreNMSSyncView(
             context.update(
                 {
                     "sync_cache_status": sync_cache_status,
-                    "sync_cache_contract": {
-                        tab.value: {
-                            "content_id": TAB_SPECS[tab].content_id,
-                            "label": TAB_SPECS[tab].label,
-                        }
-                        for tab in coordinator.applicable_tabs()
-                    },
+                    "sync_cache_contract": sync_cache_browser_contract(coordinator.applicable_tabs()),
                     "sync_cache_status_url": reverse(
                         "plugins:netbox_librenms_plugin:sync_cache_status",
                         kwargs={"object_type": object_type, "pk": obj.pk},

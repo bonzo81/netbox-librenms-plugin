@@ -33,7 +33,7 @@ def _make_api(url, token="test-token"):
         "test": {
             "librenms_url": url,
             "api_token": token,
-            "cache_timeout": 0,
+            "cache_timeout": 1,
             "verify_ssl": False,
         }
     }
@@ -42,6 +42,11 @@ def _make_api(url, token="test-token"):
         api = LibreNMSAPI(server_key="test")
     assert api.server_key == "test"
     return api
+
+
+def test_integration_api_uses_a_short_nonzero_cache_timeout(mock_server):
+    """Integration requests must exercise cache reads without retaining state between tests."""
+    assert _make_api(mock_server.url).cache_timeout == 1
 
 
 class TestMockServerSanity:

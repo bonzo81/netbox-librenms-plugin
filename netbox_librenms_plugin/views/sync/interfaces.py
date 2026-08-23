@@ -1170,7 +1170,7 @@ class DeleteNetBoxInterfacesView(
 ):
     """Delete interfaces that exist only in NetBox."""
 
-    DROP_SYNC_PAGE_CLAIM_WITHOUT_SERVER = True
+    DROP_SYNC_SUBJECT_CLAIM_WITHOUT_SERVER = True
 
     def get_required_permissions_for_object_type(self, object_type):
         """Return the required permissions based on object type."""

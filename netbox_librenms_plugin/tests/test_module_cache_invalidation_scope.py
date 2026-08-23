@@ -207,7 +207,12 @@ class TestModuleActionsInvalidateEveryChangedDevice:
         from django.core.cache import cache
         from django.db import transaction
 
-        from netbox_librenms_plugin.sync_cache import SyncCacheConsistency, SyncTab, claim_sync_page, sync_page_key
+        from netbox_librenms_plugin.sync_cache import (
+            SyncCacheConsistency,
+            SyncTab,
+            claim_sync_subjects,
+            sync_subject_key,
+        )
         from netbox_librenms_plugin.tests.conftest import (
             install_module,
             make_module_bay,
@@ -230,7 +235,7 @@ class TestModuleActionsInvalidateEveryChangedDevice:
         try:
             # The claim has to outlive the flush, exactly as CacheMixin.dispatch holds it for
             # the whole request while the view's transaction commits inside it.
-            with claim_sync_page(sync_page_key(page_device)):
+            with claim_sync_subjects(sync_subject_key(page_device)):
                 with django_capture_on_commit_callbacks(execute=True):
                     with transaction.atomic():
                         install_module(sibling, "Bay 1", "Sibling Model", serial="VC-SHARED")

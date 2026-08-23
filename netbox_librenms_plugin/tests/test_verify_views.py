@@ -1510,7 +1510,7 @@ class TestSingleIPAddressVerifyObjectPermissionGate:
     """SingleIPAddressVerifyView must gate POST on dcim.view_device.
 
     The read-only verify endpoint resolves an arbitrary ``device_id`` from the
-    JSON body and returns that object's name/url/cached rows. Without the gate a
+    JSON body and returns that object's name, URL, and source snapshot. Without the gate a
     caller with only plugin-view rights could probe and read back objects they
     cannot see (mirrors the interface/module/cable verify views' hardening).
 

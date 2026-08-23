@@ -819,7 +819,7 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObject
         obj = self.get_object(pk)
         posted_server_key = request.POST.get("server_key")
         # Rebind the API to the POSTed server so live link/port fetches hit the same
-        # LibreNMS instance the cached rows are namespaced under (multi-server tabs).
+        # Active server whose source snapshot supplies this multi-server tab.
         server_key = self.rebind_api_for_server(posted_server_key)
         if server_key is None:
             messages.error(request, "Selected LibreNMS server is no longer configured.")

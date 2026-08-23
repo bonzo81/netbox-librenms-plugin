@@ -15,13 +15,22 @@ def _replace_fixture_markup(html, old, new):
     return html.replace(old, new)
 
 
-def _page_html(initial_state, contract=None, active_tab="interfaces"):
+def _page_html(initial_state, contract=None, active_tab="interfaces", valid_states=None):
     state = json.dumps(initial_state)
     contract = contract or {
         "interfaces": {"content_id": "interface-sync-content", "label": "Interface"},
         "ipaddresses": {"content_id": "ipaddress-sync-content", "label": "IP address"},
     }
-    contract_json = json.dumps(contract)
+    states = (
+        ["ready", "invalidated", "refresh_failed", "locally_changed", "missing"]
+        if valid_states is None
+        else valid_states
+    )
+    serialized_contract = {
+        "tabs": contract,
+        "states": states,
+    }
+    contract_json = json.dumps(serialized_contract)
     interface_content_id = contract["interfaces"]["content_id"]
     ip_content_id = contract["ipaddresses"]["content_id"]
     return f"""
@@ -90,6 +99,31 @@ def test_server_contract_drives_cache_content_replacement():
 
         assert page.locator("#interface-action").count() == 0
         assert "Network port data" in page.locator("#custom-interface-content").inner_text()
+        browser.close()
+
+
+def test_server_contract_defines_valid_wire_states():
+    """The browser must validate status states against the server contract."""
+    initial = {
+        "interfaces": _state("before-interfaces", state="source_ready"),
+        "ipaddresses": _state("before-ip", state="source_ready"),
+    }
+
+    with playwright.sync_playwright() as runtime:
+        browser = runtime.chromium.launch(headless=True)
+        page = browser.new_page()
+        page.set_content(_page_html(initial, valid_states=["source_ready"]))
+        page.route(
+            "https://plugin.example.com/status?*",
+            lambda route: route.fulfill(json={"tabs": initial}),
+        )
+        page.add_script_tag(path=str(SCRIPT_PATH))
+        page.evaluate("initializeSyncCacheConsistency(); checkSyncCacheStatus()")
+        page.wait_for_function("syncCacheController().checking === null")
+
+        assert page.evaluate("syncCacheController().lastCheckFailed") is False
+        assert page.locator("#interface-action").count() == 1
+        assert not page.locator("#modal-force-action").is_disabled()
         browser.close()
 
 
@@ -600,6 +634,10 @@ def test_successful_cache_status_check_restores_only_fail_closed_modal_controls(
             }"""
         )
         page.route("https://plugin.example.com/status?*", status_response)
+        page.route(
+            "https://plugin.example.com/fragment/interfaces?*",
+            lambda route: route.fulfill(body='<button id="restored-interface-action">Sync</button>'),
+        )
         page.add_script_tag(path=str(SCRIPT_PATH))
         page.evaluate("initializeSyncCacheConsistency(); checkSyncCacheStatus()")
         page.wait_for_function(
@@ -616,6 +654,48 @@ def test_successful_cache_status_check_restores_only_fail_closed_modal_controls(
 
         assert not page.locator("#modal-force-action").is_disabled()
         assert page.locator("#modal-already-disabled").is_disabled()
+        assert page.locator("#restored-interface-action").count() == 1
+        browser.close()
+
+
+def test_available_status_without_a_usable_fragment_keeps_modal_controls_disabled():
+    """A status response alone must not restore controls after fail-closed content loss."""
+    initial = {
+        "interfaces": _state("before-interfaces"),
+        "ipaddresses": _state("before-ip"),
+    }
+    attempts = 0
+
+    def status_response(route):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            route.fulfill(status=503)
+        else:
+            route.fulfill(json={"tabs": initial})
+
+    with playwright.sync_playwright() as runtime:
+        browser = runtime.chromium.launch(headless=True)
+        page = browser.new_page()
+        page.set_content(_page_html(initial))
+        page.route("https://plugin.example.com/status?*", status_response)
+        page.route(
+            "https://plugin.example.com/fragment/interfaces?*",
+            lambda route: route.fulfill(status=503),
+        )
+        page.add_script_tag(path=str(SCRIPT_PATH))
+        page.evaluate("initializeSyncCacheConsistency(); checkSyncCacheStatus()")
+        page.wait_for_function(
+            "syncCacheController().lastCheckFailed === true && syncCacheController().checking === null"
+        )
+
+        page.evaluate("checkSyncCacheStatus()")
+        page.wait_for_function(
+            "syncCacheController().lastCheckFailed === false && syncCacheController().checking === null"
+        )
+
+        assert page.locator("#modal-force-action").is_disabled()
+        assert "could not be restored" in page.locator("#interface-sync-content").inner_text()
         browser.close()
 
 
@@ -774,6 +854,32 @@ def test_malformed_cache_status_disables_every_loaded_sync_control():
         page.route(
             "https://plugin.example.com/status?*",
             lambda route: route.fulfill(json={"tabs": None}),
+        )
+        page.add_script_tag(path=str(SCRIPT_PATH))
+        page.evaluate("initializeSyncCacheConsistency(); checkSyncCacheStatus()")
+        page.wait_for_function("syncCacheController().checking === null")
+
+        assert page.locator("#interface-action").count() == 0
+        assert page.locator("#ip-action").count() == 0
+        assert page.locator("#modal-force-action").is_disabled()
+        assert page.evaluate("syncCacheController().lastCheckFailed") is True
+        browser.close()
+
+
+def test_null_cache_status_disables_every_loaded_sync_control():
+    """A null JSON response must fail closed like every other invalid schema."""
+    initial = {
+        "interfaces": _state("before-interfaces"),
+        "ipaddresses": _state("before-ip"),
+    }
+
+    with playwright.sync_playwright() as runtime:
+        browser = runtime.chromium.launch(headless=True)
+        page = browser.new_page()
+        page.set_content(_page_html(initial))
+        page.route(
+            "https://plugin.example.com/status?*",
+            lambda route: route.fulfill(body="null", content_type="application/json"),
         )
         page.add_script_tag(path=str(SCRIPT_PATH))
         page.evaluate("initializeSyncCacheConsistency(); checkSyncCacheStatus()")

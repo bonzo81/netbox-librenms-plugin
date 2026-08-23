@@ -25,9 +25,10 @@ from netbox_librenms_plugin.sync_cache import (
     SyncTab,
     SyncTabState,
     apply_request_cache_transition,
-    claim_sync_page,
+    claim_sync_subjects,
     schedule_request_cache_mutation,
-    sync_page_key,
+    sync_cache_browser_contract,
+    sync_subject_key,
 )
 from netbox_librenms_plugin.tests.conftest import (
     configure_no_librenms_servers,
@@ -40,6 +41,21 @@ from netbox_librenms_plugin.tests.conftest import (
 )
 from netbox_librenms_plugin.utils import mark_librenms_migrated, set_librenms_device_id
 from netbox_librenms_plugin.views.sync.ip_addresses import SyncIPAddressesView
+
+
+def test_browser_contract_serializes_states_from_the_domain_enum():
+    """The server contract must expose every state that a status response can emit."""
+    contract = sync_cache_browser_contract((SyncTab.INTERFACES,))
+
+    assert contract == {
+        "tabs": {
+            "interfaces": {
+                "content_id": "interface-sync-content",
+                "label": "Interface",
+            }
+        },
+        "states": [state.value for state in SyncTabState],
+    }
 
 
 def _configure_servers(settings):
@@ -1192,7 +1208,7 @@ def test_request_transitions_for_different_servers_preserve_both_sources(setting
     request = RequestFactory().post("/sync")
     request.user = make_superuser("cache-multi-server-request-transitions-user")
 
-    with claim_sync_page(sync_page_key(device)), transaction.atomic():
+    with claim_sync_subjects(sync_subject_key(device)), transaction.atomic():
         interface.delete()
         schedule_request_cache_mutation(
             request,
@@ -1385,7 +1401,7 @@ def test_interface_move_response_reports_winner_cleanup_failure(
     real_apply_mutation = SyncCacheConsistency._apply_mutation
 
     def fail_winner_cleanup(coordinator, *args):
-        if coordinator.page_object.pk == winner.pk:
+        if coordinator.subject.pk == winner.pk:
             raise RuntimeError("winner cache backend failed")
         return real_apply_mutation(coordinator, *args)
 

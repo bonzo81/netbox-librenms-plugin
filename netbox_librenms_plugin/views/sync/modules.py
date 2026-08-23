@@ -39,7 +39,7 @@ from netbox_librenms_plugin.views.mixins import (
     LibreNMSAPIMixin,
     LibreNMSPermissionMixin,
     NetBoxObjectPermissionMixin,
-    SyncPageClaimMixin,
+    SyncSubjectClaimMixin,
 )
 
 logger = logging.getLogger(__name__)
@@ -1666,13 +1666,13 @@ class UpdateModuleSerialView(
     LibreNMSPermissionMixin,
     NetBoxObjectPermissionMixin,
     LibreNMSAPIMixin,
-    SyncPageClaimMixin,
+    SyncSubjectClaimMixin,
     View,
 ):
     """Update the serial number of an already-installed module from LibreNMS inventory data."""
 
-    SYNC_PAGE_MODEL_LABEL = "dcim.device"
-    DROP_SYNC_PAGE_CLAIM_WITHOUT_SERVER = True
+    SYNC_SUBJECT_MODEL_LABEL = "dcim.device"
+    DROP_SYNC_SUBJECT_CLAIM_WITHOUT_SERVER = True
 
     def post(self, request, pk):
         from dcim.models import Device, Module
@@ -2297,7 +2297,7 @@ class MoveModuleView(
     LibreNMSPermissionMixin,
     NetBoxObjectPermissionMixin,
     LibreNMSAPIMixin,
-    SyncPageClaimMixin,
+    SyncSubjectClaimMixin,
     View,
 ):
     """
@@ -2309,8 +2309,8 @@ class MoveModuleView(
     and recreating, preserving the module's history.
     """
 
-    SYNC_PAGE_MODEL_LABEL = "dcim.device"
-    DROP_SYNC_PAGE_CLAIM_WITHOUT_SERVER = True
+    SYNC_SUBJECT_MODEL_LABEL = "dcim.device"
+    DROP_SYNC_SUBJECT_CLAIM_WITHOUT_SERVER = True
 
     def post(self, request, pk):
         from dcim.models import Device, Module, ModuleBay
@@ -2425,7 +2425,7 @@ class AddBayTemplateView(
     LibreNMSPermissionMixin,
     NetBoxObjectPermissionMixin,
     LibreNMSAPIMixin,
-    SyncPageClaimMixin,
+    SyncSubjectClaimMixin,
     View,
 ):
     """
@@ -2436,8 +2436,8 @@ class AddBayTemplateView(
     POST creates the bay template and redirects back to the modules tab.
     """
 
-    SYNC_PAGE_MODEL_LABEL = "dcim.device"
-    DROP_SYNC_PAGE_CLAIM_WITHOUT_SERVER = True
+    SYNC_SUBJECT_MODEL_LABEL = "dcim.device"
+    DROP_SYNC_SUBJECT_CLAIM_WITHOUT_SERVER = True
 
     TARGET_KINDS = ("device_type", "module_type")
 

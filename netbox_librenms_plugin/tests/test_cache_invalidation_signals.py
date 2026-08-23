@@ -283,7 +283,12 @@ class TestTheActingPageKeepsItsOwnTransition:
         from django.core.cache import cache
         from django.db import transaction
 
-        from netbox_librenms_plugin.sync_cache import SyncCacheConsistency, SyncTab, claim_sync_page, sync_page_key
+        from netbox_librenms_plugin.sync_cache import (
+            SyncCacheConsistency,
+            SyncTab,
+            claim_sync_subjects,
+            sync_subject_key,
+        )
         from netbox_librenms_plugin.tests.conftest import install_module, make_device, make_module_bay
 
         device = make_device("signal-claimed-page", librenms_cf={SERVER_KEY: 7})
@@ -292,7 +297,7 @@ class TestTheActingPageKeepsItsOwnTransition:
         modules_key = SyncCacheConsistency(device).snapshot_key(SyncTab.MODULES, SERVER_KEY)
 
         try:
-            with claim_sync_page(sync_page_key(device)):
+            with claim_sync_subjects(sync_subject_key(device)):
                 with django_capture_on_commit_callbacks(execute=True):
                     with transaction.atomic():
                         install_module(device, "Bay 1", "Signal Model", serial="SIG-7")
@@ -300,7 +305,7 @@ class TestTheActingPageKeepsItsOwnTransition:
         finally:
             _clear(keys)
 
-        assert survived, "the acting page's snapshot was dropped by the signal flush"
+        assert survived, "the synchronization subject's snapshot was dropped by the signal flush"
 
     def test_an_unclaimed_page_is_invalidated(self, django_capture_on_commit_callbacks):
         """Positive control: the claim is what protects it, not the seeding."""
@@ -326,7 +331,11 @@ class TestTheActingPageKeepsItsOwnTransition:
         assert not survived
 
     def test_the_claim_is_released_even_when_the_body_raises(self):
-        from netbox_librenms_plugin.sync_cache import active_sync_page_keys, claim_sync_page, sync_page_key
+        from netbox_librenms_plugin.sync_cache import (
+            active_sync_subject_keys,
+            claim_sync_subjects,
+            sync_subject_key,
+        )
         from netbox_librenms_plugin.tests.conftest import make_device
 
         device = make_device("signal-claim-release")
@@ -335,11 +344,11 @@ class TestTheActingPageKeepsItsOwnTransition:
             pass
 
         with pytest.raises(_Boom):
-            with claim_sync_page(sync_page_key(device)):
-                assert active_sync_page_keys()
+            with claim_sync_subjects(sync_subject_key(device)):
+                assert active_sync_subject_keys()
                 raise _Boom
 
-        assert not active_sync_page_keys(), "a raising view would leave the next request unprotected"
+        assert not active_sync_subject_keys(), "a raising view would leave the next request unprotected"
 
 
 @pytest.mark.django_db
@@ -510,8 +519,8 @@ class TestSharedSnapshotsFollowTheWholeChassis:
         from netbox_librenms_plugin.sync_cache import (
             SyncCacheConsistency,
             SyncTab,
-            claim_sync_page,
-            sync_page_key,
+            claim_sync_subjects,
+            sync_subject_key,
         )
         from netbox_librenms_plugin.tests.conftest import install_module, make_module_bay, make_virtual_chassis_members
         from netbox_librenms_plugin.utils import get_librenms_sync_device, set_librenms_device_id
@@ -534,7 +543,7 @@ class TestSharedSnapshotsFollowTheWholeChassis:
         _drain_pending_commit_callbacks()
 
         try:
-            with claim_sync_page(sync_page_key(page_device)):
+            with claim_sync_subjects(sync_subject_key(page_device)):
                 with django_capture_on_commit_callbacks(execute=True):
                     with transaction.atomic():
                         install_module(writing_device, "Bay 9", "Signal Model", serial="SHARED-1")
@@ -610,7 +619,7 @@ class TestAWriteOutsideATransactionStillInvalidates:
 class TestEverySchedulingViewTakesTheClaim:
     """A view that schedules a transition must also claim its page.
 
-    Without the claim the write signals invalidate the page object for the view's own write,
+    Without the claim, write signals invalidate the synchronization subject for the view's own write,
     deleting the source snapshot the transition preserves and the response is about to render.
     Missing the mixin is silent, so it is checked rather than remembered.
 
@@ -773,9 +782,9 @@ class TestEverySchedulingViewTakesTheClaim:
 
     def _claims(self, cls):
         """Return whether *cls* takes the claim, as Python resolves it."""
-        from netbox_librenms_plugin.views.mixins import CacheMixin, SyncPageClaimMixin
+        from netbox_librenms_plugin.views.mixins import CacheMixin, SyncSubjectClaimMixin
 
-        return issubclass(cls, (CacheMixin, SyncPageClaimMixin))
+        return issubclass(cls, (CacheMixin, SyncSubjectClaimMixin))
 
     def _unclaimed_scheduling_views(self):
         names = self._scheduler_names()
@@ -814,7 +823,7 @@ class TestEverySchedulingViewTakesTheClaim:
         missing = sorted(
             f"{cls.__module__}.{cls.__qualname__}"
             for cls in guarded
-            if not getattr(cls, "DROP_SYNC_PAGE_CLAIM_WITHOUT_SERVER", False)
+            if not getattr(cls, "DROP_SYNC_SUBJECT_CLAIM_WITHOUT_SERVER", False)
         )
         assert not missing, "these guarded scheduling views retain the claim without a server: " + ", ".join(missing)
 

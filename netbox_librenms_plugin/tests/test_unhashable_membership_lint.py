@@ -174,6 +174,43 @@ def test_a_module_qualified_name_does_not_inherit_an_unrelated_container_type(tm
     assert not findings, f"an unrelated container name contaminated the module alias: {findings}"
 
 
+def test_a_class_qualified_container_constant_is_resolved(tmp_path):
+    """A class name must retain the container type of its own constant."""
+    findings = _scan(
+        tmp_path,
+        (
+            'class Choices:\n    NAMES: frozenset[str] = frozenset({"ifName"})\n\n\n'
+            'def f(cached):\n    return cached.get("x") in Choices.NAMES\n'
+        ),
+    )
+    assert findings, "a class-qualified constant must not hide the finding"
+
+
+def test_an_instance_qualified_class_container_is_resolved(tmp_path):
+    """A method must resolve a container constant through its instance."""
+    findings = _scan(
+        tmp_path,
+        (
+            'class Choices:\n    NAMES = frozenset({"ifName"})\n\n'
+            '    def accepts(self, cached):\n        return cached.get("x") in self.NAMES\n'
+        ),
+    )
+    assert findings, "an instance-qualified class constant must not hide the finding"
+
+
+def test_a_class_qualified_name_does_not_inherit_another_class_container_type(tmp_path):
+    """A qualified name must resolve against its class, not a class namesake."""
+    findings = _scan(
+        tmp_path,
+        (
+            'class SafeChoices:\n    NAMES = ("safe",)\n\n'
+            'class UnsafeChoices:\n    NAMES = frozenset({"ifName"})\n\n\n'
+            'def f(cached):\n    return cached.get("x") in SafeChoices.NAMES\n'
+        ),
+    )
+    assert not findings, f"another class contaminated the qualified name: {findings}"
+
+
 def test_an_import_alias_does_not_inherit_an_unrelated_modules_container_type(tmp_path):
     """An alias must resolve against its imported module, not any same-named symbol."""
     findings = _scan(

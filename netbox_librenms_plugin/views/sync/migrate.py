@@ -29,9 +29,9 @@ from ipam.models import IPAddress
 from netbox_librenms_plugin.sync_cache import (
     SyncTab,
     apply_request_cache_transition,
-    claim_sync_page,
+    claim_sync_subjects,
     schedule_request_cache_mutation,
-    sync_page_key,
+    sync_subject_key,
 )
 from netbox_librenms_plugin.utils import (
     DEVICE_IP_FK_FIELDS,
@@ -46,7 +46,7 @@ from netbox_librenms_plugin.views.mixins import (
     LibreNMSAPIMixin,
     LibreNMSPermissionMixin,
     NetBoxObjectPermissionMixin,
-    SyncPageClaimMixin,
+    SyncSubjectClaimMixin,
     relock_scoped_row,
     resolve_configured_server_key,
     validated_referer,
@@ -338,7 +338,7 @@ def _reconcile_donor_device_ip_fks(donor, winner):
 
 
 class _BaseMoveToWinnerView(
-    LibreNMSAPIMixin, LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, SyncPageClaimMixin, View
+    LibreNMSAPIMixin, LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, SyncSubjectClaimMixin, View
 ):
     """Shared plumbing for the per-resource move endpoints."""
 
@@ -566,7 +566,7 @@ class MoveInterfaceToWinnerView(_BaseMoveToWinnerView):
                 status=409,
             )
 
-        with claim_sync_page(sync_page_key(donor), sync_page_key(winner)):
+        with claim_sync_subjects(sync_subject_key(donor), sync_subject_key(winner)):
             with transaction.atomic():
                 donor, winner, err = self._lock_donor_winner_and_reverify(request, donor, winner, server_key)
                 if err is not None:
@@ -795,7 +795,7 @@ class MoveIPAddressToWinnerView(_BaseMoveToWinnerView):
                 status=409,
             )
 
-        with claim_sync_page(sync_page_key(donor), sync_page_key(winner)):
+        with claim_sync_subjects(sync_subject_key(donor), sync_subject_key(winner)):
             with transaction.atomic():
                 donor, winner, err = self._lock_donor_winner_and_reverify(request, donor, winner, server_key)
                 if err is not None:
@@ -902,7 +902,7 @@ class TransferDeviceIPView(_BaseMoveToWinnerView):
                 status=409,
             )
 
-        with claim_sync_page(sync_page_key(donor), sync_page_key(winner)):
+        with claim_sync_subjects(sync_subject_key(donor), sync_subject_key(winner)):
             with transaction.atomic():
                 donor, winner, err = self._lock_donor_winner_and_reverify(request, donor, winner, server_key)
                 if err is not None:

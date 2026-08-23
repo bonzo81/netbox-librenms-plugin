@@ -18,6 +18,7 @@
 const TOMSELECT_INIT_DELAY_MS = 100;
 const COUNTDOWN_UPDATE_INTERVAL_MS = 1000;
 const SYNC_CACHE_STATUS_TIMEOUT_MS = 15000;
+const STALE_SYNC_CACHE_STATUS = Symbol('stale sync cache status');
 
 /**
  * Return the CSRF token value, or null when the hidden input is missing/empty.
@@ -328,20 +329,26 @@ function syncCacheController() {
             initial = {};
         }
     }
-    let contract = {};
+    let serializedContract = {};
     const contractElement = document.getElementById('librenms-sync-cache-contract');
     if (contractElement) {
         try {
-            contract = JSON.parse(contractElement.textContent) || {};
+            serializedContract = JSON.parse(contractElement.textContent) || {};
         } catch (_) {
-            contract = {};
+            serializedContract = {};
         }
     }
+    const contract = serializedContract.tabs || {};
+    const validStates = new Set(
+        Array.isArray(serializedContract.states) ? serializedContract.states : []
+    );
     root._controller = {
         root,
         status: initial,
         contract,
+        validStates,
         invalidatedLocally: new Set(),
+        failClosedTabs: new Set(),
         ownRevisions: new Set(),
         requiredSourceFragments: new Set(),
         notifiedRevisions: new Set(),
@@ -507,20 +514,30 @@ function failClosedSyncControls(message) {
     if (!controller) return;
     Object.keys(controller.contract).forEach(tab => {
         controller.invalidatedLocally.add(tab);
+        controller.failClosedTabs.add(tab);
         clearSyncTabContent(tab, message);
         updateSyncCacheTabState(tab, { state: 'invalidated', snapshot_available: false });
     });
+    const sourceTab = activeSyncTab();
     document.querySelectorAll('#htmx-modal-content button, #htmx-modal-content input, #htmx-modal-content select, #htmx-modal-content textarea')
         .forEach(control => {
             if (control.disabled) return;
             control.disabled = true;
-            control.dataset.cacheFailClosed = 'true';
+            control.dataset.cacheFailClosed = sourceTab;
         });
 }
 
-function restoreFailClosedSyncControls() {
+function restoreFailClosedSyncControls(status) {
     document.querySelectorAll('#htmx-modal-content [data-cache-fail-closed]')
         .forEach(control => {
+            const sourceTab = control.dataset.cacheFailClosed;
+            const sourceState = status?.[sourceTab];
+            const sourceContent = syncCacheContent(sourceTab);
+            if (
+                !sourceState?.snapshot_available ||
+                !sourceContent ||
+                sourceContent.dataset.cacheEmpty === 'true'
+            ) return;
             delete control.dataset.cacheFailClosed;
             control.disabled = false;
         });
@@ -575,6 +592,7 @@ function loadSyncCacheFragment(tab, statusGeneration = null, signal = null) {
             content.innerHTML = html;
             delete content.dataset.cacheEmpty;
             controller.invalidatedLocally.delete(tab);
+            controller.failClosedTabs.delete(tab);
             if (typeof htmx !== 'undefined') htmx.process(content);
             initializeScripts();
         })
@@ -658,7 +676,10 @@ function reconcileSyncCacheStatus(nextStatus, statusGeneration = null, signal = 
             state.snapshot_available &&
             tab === activeTab &&
             syncCacheContent(tab)?.dataset.cacheEmpty === 'true' &&
-            !controller.invalidatedLocally.has(tab)
+            (
+                controller.failClosedTabs.has(tab) ||
+                !controller.invalidatedLocally.has(tab)
+            )
         ) {
             fragmentLoads.push(loadSyncCacheFragment(tab, requestGeneration, signal));
         }
@@ -669,12 +690,11 @@ function reconcileSyncCacheStatus(nextStatus, statusGeneration = null, signal = 
     return Promise.all(fragmentLoads);
 }
 
-function isValidSyncCacheStatusPayload(payload, expectedTabs) {
+function isValidSyncCacheStatusPayload(payload, expectedTabs, validStates) {
     const tabs = payload?.tabs;
     if (!tabs || typeof tabs !== 'object' || Array.isArray(tabs)) return false;
     const tabNames = Object.keys(tabs);
     if (tabNames.length !== expectedTabs.length || !expectedTabs.every(tab => tabNames.includes(tab))) return false;
-    const validStates = new Set(['ready', 'invalidated', 'refresh_failed', 'locally_changed', 'missing']);
     return tabNames.every(tab => {
         const state = tabs[tab];
         return Boolean(
@@ -706,22 +726,30 @@ function checkSyncCacheStatus() {
         signal: abortController.signal,
     })
         .then(response => {
-            if (controller.statusGeneration !== requestGeneration) return null;
+            if (controller.statusGeneration !== requestGeneration) return STALE_SYNC_CACHE_STATUS;
             if (!response.ok) throw new Error(`HTTP ${response.status}`);
             return response.json();
         })
         .then(payload => {
-            if (payload === null || controller.statusGeneration !== requestGeneration) return;
+            if (
+                payload === STALE_SYNC_CACHE_STATUS ||
+                controller.statusGeneration !== requestGeneration
+            ) return;
             const expectedTabs = Object.keys(controller.contract || {});
-            if (!expectedTabs.length || !isValidSyncCacheStatusPayload(payload, expectedTabs)) {
+            if (
+                !expectedTabs.length ||
+                !controller.validStates.size ||
+                !isValidSyncCacheStatusPayload(payload, expectedTabs, controller.validStates)
+            ) {
                 throw new Error('Invalid cache status response');
             }
-            return reconcileSyncCacheStatus(payload.tabs, requestGeneration, abortController.signal);
+            return reconcileSyncCacheStatus(payload.tabs, requestGeneration, abortController.signal)
+                .then(() => payload.tabs);
         })
-        .then(() => {
+        .then(status => {
             if (controller.statusGeneration !== requestGeneration) return;
             controller.lastCheckFailed = false;
-            restoreFailClosedSyncControls();
+            restoreFailClosedSyncControls(status);
         })
         .catch(error => {
             if (controller.statusGeneration !== requestGeneration) return;
