@@ -28,6 +28,23 @@ def test_reserved_preference_key_is_rejected_in_server_configuration():
         )
 
 
+@pytest.mark.parametrize("server_key", [" primary ", "dc__west", "contains"])
+def test_unsafe_server_key_is_rejected_in_server_configuration(server_key):
+    """Configured keys must preserve identity and remain one JSON path component."""
+    config = SimpleNamespace(name="netbox_librenms_plugin")
+
+    with pytest.raises(ImproperlyConfigured, match="invalid"):
+        LibreNMSSyncConfig._validate_multi_server_config(
+            config,
+            {
+                server_key: {
+                    "librenms_url": "https://librenms.example.com",
+                    "api_token": "test-token",
+                }
+            },
+        )
+
+
 def test_mapping_iteration_excludes_reserved_preference_metadata():
     """Generic mapping iteration cannot treat preference metadata as an identity."""
     mapping = {"primary": 42, PREFERRED_SERVER_FIELD: "13521"}

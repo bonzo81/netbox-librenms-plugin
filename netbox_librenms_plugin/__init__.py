@@ -58,7 +58,7 @@ class LibreNMSSyncConfig(PluginConfig):
 
     def _validate_multi_server_config(self, servers_config):
         """Validate multi-server configuration."""
-        from netbox_librenms_plugin.server_mappings import RESERVED_SERVER_KEYS
+        from netbox_librenms_plugin.server_mappings import require_server_key
 
         if not servers_config or not isinstance(servers_config, dict):
             raise ImproperlyConfigured(
@@ -66,10 +66,10 @@ class LibreNMSSyncConfig(PluginConfig):
             )
 
         for server_key, server_config in servers_config.items():
-            if server_key in RESERVED_SERVER_KEYS:
-                raise ImproperlyConfigured(
-                    f"Plugin {self.name} server key '{server_key}' is reserved for object metadata."
-                )
+            try:
+                require_server_key(server_key)
+            except ValueError as exc:
+                raise ImproperlyConfigured(f"Plugin {self.name} server key {server_key!r} is invalid: {exc}") from exc
             if not isinstance(server_config, dict):
                 raise ImproperlyConfigured(f"Plugin {self.name} server '{server_key}' must be a dictionary.")
 

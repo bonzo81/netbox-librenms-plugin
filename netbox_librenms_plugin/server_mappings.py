@@ -1,17 +1,25 @@
 """Shared structure for server identities stored in ``librenms_id``."""
 
+from django.db.models import JSONField
+
 PREFERRED_SERVER_FIELD = "_preferred_server"
 RESERVED_SERVER_KEYS = frozenset({PREFERRED_SERVER_FIELD})
+JSON_FIELD_LOOKUP_NAMES = frozenset(JSONField.get_lookups())
 
 
 def require_server_key(server_key: str) -> str:
-    """Return a normalized server identity key or reject reserved metadata."""
+    """Return a safe server identity key or reject invalid metadata paths."""
     if not isinstance(server_key, str) or not server_key.strip():
         raise ValueError("LibreNMS server key must be a non-empty string.")
-    normalized = server_key.strip()
-    if normalized in RESERVED_SERVER_KEYS:
-        raise ValueError(f"LibreNMS server key {normalized!r} is reserved for object metadata.")
-    return normalized
+    if server_key != server_key.strip():
+        raise ValueError("LibreNMS server key must not contain leading or trailing whitespace.")
+    if "__" in server_key:
+        raise ValueError("LibreNMS server key must not contain '__'.")
+    if server_key in JSON_FIELD_LOOKUP_NAMES:
+        raise ValueError(f"LibreNMS server key {server_key!r} conflicts with a Django JSON lookup.")
+    if server_key in RESERVED_SERVER_KEYS:
+        raise ValueError(f"LibreNMS server key {server_key!r} is reserved for object metadata.")
+    return server_key
 
 
 def iter_server_mapping_entries(value):
