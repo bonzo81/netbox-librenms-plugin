@@ -46,16 +46,16 @@ def _make_request(post=None, get=None, headers=None, user_is_superuser=False):
     """Build a mock request object with QueryDict-like POST/GET."""
     req = MagicMock()
 
+    def getlist(data, key):
+        value = data.get(key, [])
+        return value if isinstance(value, list) else [value]
+
     # Create a QueryDict-like object for POST
     post_data = {"server_key": "default", **(post or {})}
     post_mock = MagicMock()
     post_mock.__contains__ = lambda self, key: key in post_data
     post_mock.get = lambda key, default=None: post_data.get(key, default)
-    post_mock.getlist = lambda key: (
-        post_data.get(key, [])
-        if isinstance(post_data.get(key), list)
-        else ([post_data[key]] if key in post_data else [])
-    )
+    post_mock.getlist = lambda key: getlist(post_data, key)
     post_mock.__getitem__ = lambda self, key: post_data[key]
     req.POST = post_mock
 
@@ -64,7 +64,7 @@ def _make_request(post=None, get=None, headers=None, user_is_superuser=False):
     get_mock = MagicMock()
     get_mock.__contains__ = lambda self, key: key in get_data
     get_mock.get = lambda key, default=None: get_data.get(key, default)
-    get_mock.getlist = lambda key: get_data.get(key, [])
+    get_mock.getlist = lambda key: getlist(get_data, key)
     get_mock.__getitem__ = lambda self, key: get_data[key]
     req.GET = get_mock
 
@@ -80,6 +80,12 @@ def _set_posted_device_ids(request, device_ids):
     request.POST.getlist = MagicMock(
         side_effect=lambda key: list(device_ids) if key == "select" else original_getlist(key)
     )
+
+
+def test_make_request_getlist_matches_querydict_for_scalar_values():
+    request = _make_request(get={"server_key": "secondary"})
+
+    assert request.GET.getlist("server_key") == ["secondary"]
 
 
 def _make_api():
