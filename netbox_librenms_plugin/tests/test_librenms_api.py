@@ -1548,7 +1548,7 @@ class TestLibreNMSAPIErrorHandling:
         from netbox_librenms_plugin.librenms_api import LibreNMSAPI, LibreNMSLookupError
 
         api = LibreNMSAPI(server_key="default")
-        success, result = api.get_device_info(device_id=123)
+        success, result = api.get_device_info(device_id=123, use_cache=False)
 
         assert success is False
         assert isinstance(result, LibreNMSLookupError)
@@ -1562,7 +1562,7 @@ class TestLibreNMSAPIErrorHandling:
         from netbox_librenms_plugin.librenms_api import LibreNMSAPI, LibreNMSLookupError
 
         api = LibreNMSAPI(server_key="default")
-        success, result = api.get_device_info(device_id=123)
+        success, result = api.get_device_info(device_id=123, use_cache=False)
 
         assert success is False
         assert isinstance(result, LibreNMSLookupError)
@@ -1579,7 +1579,7 @@ class TestLibreNMSAPIErrorHandling:
         api = LibreNMSAPI(server_key="default")
 
         # ValueError is now caught, returning (False, None) instead of propagating
-        success, result = api.get_device_info(device_id=123)
+        success, result = api.get_device_info(device_id=123, use_cache=False)
         assert success is False
         assert result is None
 
@@ -1599,7 +1599,7 @@ class TestLibreNMSAPIErrorHandling:
         from netbox_librenms_plugin.librenms_api import LibreNMSAPI, LibreNMSLookupError
 
         api = LibreNMSAPI(server_key="default")
-        success, result = api.get_device_info(device_id=123)
+        success, result = api.get_device_info(device_id=123, use_cache=False)
 
         assert success is False
         assert isinstance(result, LibreNMSLookupError)

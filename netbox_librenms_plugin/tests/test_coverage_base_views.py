@@ -192,7 +192,7 @@ class TestBaseCableTableViewGetLinksData:
             with (
                 patch.object(view, "get_links_data", side_effect=_fake_links),
                 patch.object(view, "get_cache_key", return_value=cache_key),
-                patch.object(view, "enrich_links_data", side_effect=lambda d, *a, **k: d),
+                patch.object(view, "enrich_links_data", side_effect=lambda d, *a, **k: d) as mock_enrich,
                 patch.object(view, "get_table", return_value=MagicMock()),
                 patch("netbox_librenms_plugin.views.base.cables_view.get_librenms_sync_device", return_value=obj),
             ):
@@ -200,6 +200,7 @@ class TestBaseCableTableViewGetLinksData:
 
             # The stale full snapshot must be gone so downstream verify/sync can't serve it.
             assert real_cache.get(cache_key) is None
+            mock_enrich.assert_not_called()
         finally:
             real_cache.delete(cache_key)
 

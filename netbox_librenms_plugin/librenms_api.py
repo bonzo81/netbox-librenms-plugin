@@ -517,8 +517,11 @@ class LibreNMSAPI:
                 (still refreshing the cache on success). Import decisions pass False so a
                 value just corrected in LibreNMS isn't read back stale within the cache window.
             cache_only: When True, return a cached value or a miss without querying LibreNMS.
+
         Returns:
-            tuple: (success: bool, data: dict)
+            tuple: ``(success, data)``. On success, ``data`` is the device dictionary. For an
+                absent device or a cache-only miss, ``data`` is ``None``. For a transport failure
+                or another non-2xx response, ``data`` is a :class:`LibreNMSLookupError`.
         """
         cache_key = f"librenms_device_info_{self.server_key}_{device_id}"
         if use_cache or cache_only:

@@ -732,44 +732,19 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObject
             # deleted and cause DoesNotExist in check_cable_status().
             links_data = [{k: v for k, v in link.items() if k in _RAW_LINK_KEYS} for link in links_data]
 
-        # Enrich data in both cases to ensure current NetBox state
-        links_data = self.enrich_links_data(links_data, obj, server_key=server_key)
-
-        # Cache after enrichment so verify/sync views read current NetBox state
         cache_key = self.get_cache_key(cache_device, "links", server_key)
-        # Don't persist a PARTIAL fresh snapshot: a host fetch failure on a device that has a host
-        # id, or any OOB fetch failure, drops one side's cable rows — caching it would make later
-        # cached renders / verify actions silently serve the incomplete set. An OOB-only mapping
+        # Don't persist or enrich a PARTIAL fresh snapshot: a host fetch failure on a device that
+        # has a host id, or any OOB fetch failure, drops one side's cable rows. An OOB-only mapping
         # (no host id) legitimately records _links_fetch_error for the absent host, so keep caching
         # that successful OOB refresh (mirrors the host_mapping_absent_but_oob_scoped guard above).
         partial_fetch_failed = fetch_fresh and (
             bool(getattr(self, "_oob_links_fetch_failed", False))
             or (bool(getattr(self, "_links_fetch_error", None)) and getattr(self, "librenms_id", None) is not None)
         )
-        if fetch_fresh:
-            if partial_fetch_failed:
-                # Don't just skip writing the partial snapshot — also drop any prior FULL snapshot.
-                # This refresh returns no table at all (see the partial_fetch_failed return below),
-                # but verify/sync actions resolve rows from this cache key, so a leftover full
-                # snapshot would let a user act on cable data the partial refresh just superseded.
-                cache.delete(cache_key)
-            else:
-                cache.set(
-                    cache_key,
-                    {"links": links_data},
-                    timeout=self.librenms_api.cache_timeout,
-                )
-        elif not getattr(self, "cache_only", False):
-            # Write enriched data back, preserving original TTL
-            remaining_ttl = cache_remaining_ttl(cache, cache_key)
-            if remaining_ttl and remaining_ttl > 0:
-                cache.set(cache_key, {"links": links_data}, timeout=remaining_ttl)
-
-        # Calculate cache expiry
-        cache_ttl = None if partial_fetch_failed else cache_remaining_ttl(cache, cache_key)
-        if cache_ttl is not None and cache_ttl > 0:
-            cache_expiry = timezone.now() + timezone.timedelta(seconds=cache_ttl)
         if partial_fetch_failed:
+            # Drop any prior full snapshot so verify and sync actions cannot use data that this
+            # incomplete refresh superseded.
+            cache.delete(cache_key)
             return {
                 "table": None,
                 "object": obj,
@@ -777,6 +752,27 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObject
                 "server_key": server_key,
                 "refresh_incomplete": True,
             }
+
+        # Enrich data in both cases to ensure current NetBox state
+        links_data = self.enrich_links_data(links_data, obj, server_key=server_key)
+
+        # Cache after enrichment so verify/sync views read current NetBox state
+        if fetch_fresh:
+            cache.set(
+                cache_key,
+                {"links": links_data},
+                timeout=self.librenms_api.cache_timeout,
+            )
+        elif not getattr(self, "cache_only", False):
+            # Write enriched data back, preserving original TTL
+            remaining_ttl = cache_remaining_ttl(cache, cache_key)
+            if remaining_ttl and remaining_ttl > 0:
+                cache.set(cache_key, {"links": links_data}, timeout=remaining_ttl)
+
+        # Calculate cache expiry
+        cache_ttl = cache_remaining_ttl(cache, cache_key)
+        if cache_ttl is not None and cache_ttl > 0:
+            cache_expiry = timezone.now() + timezone.timedelta(seconds=cache_ttl)
         # Generate the table
         table = self.get_table(links_data, obj)
         # Build the follow-up HTMX URL (pagination/sorting) on the RESOLVED server scope —

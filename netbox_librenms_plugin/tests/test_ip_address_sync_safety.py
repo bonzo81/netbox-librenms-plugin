@@ -18,7 +18,7 @@ from ipam.models import IPAddress, VRF
 from requests import Response
 
 from netbox_librenms_plugin.constants import INTERFACE_NAME_FIELDS
-from netbox_librenms_plugin.sync_cache import SyncCacheConsistency, SyncTab
+from netbox_librenms_plugin.sync_cache import TAB_SPECS, SyncCacheConsistency, SyncTab, sync_snapshot_key
 from netbox_librenms_plugin.tests.conftest import (
     make_device,
     make_interface,
@@ -1501,8 +1501,8 @@ def test_interface_sync_keeps_its_source_snapshot_and_clears_the_ip_snapshot(
     client.force_login(make_superuser("ip-cache-cleared-user"))
     ip_refresh_url = reverse("plugins:netbox_librenms_plugin:device_ipaddress_sync", args=[device.pk])
     interface_refresh_url = reverse("plugins:netbox_librenms_plugin:device_interface_sync", args=[device.pk])
-    ip_cache_key = f"librenms_ip_addresses_device_{device.pk}_default"
-    interface_cache_key = f"librenms_ports_device_{device.pk}_default"
+    ip_cache_key = sync_snapshot_key(device, TAB_SPECS[SyncTab.IP_ADDRESSES].data_type, "default")
+    interface_cache_key = sync_snapshot_key(device, TAB_SPECS[SyncTab.INTERFACES].data_type, "default")
     with patch("netbox_librenms_plugin.librenms_api.requests.get", side_effect=librenms_response):
         assert (
             client.post(
