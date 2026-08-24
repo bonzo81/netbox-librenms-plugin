@@ -1,7 +1,9 @@
 """Request-level tests for adding LibreNMS server mappings through import."""
 
 import json
+from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
+from threading import Barrier, local
 from unittest.mock import patch
 
 import pytest
@@ -13,6 +15,7 @@ from netbox_librenms_plugin.tests.conftest import (
     make_ip,
     make_superuser,
     make_vm,
+    transactional_db_with_all_apps,
 )
 
 
@@ -56,6 +59,45 @@ def _librenms_device(device_id, hostname):
         "disabled": 0,
         "status": 1,
     }
+
+
+class _MappingClaimBarrier:
+    """Hold competing mapping claims at the target lock and completed conflict scan."""
+
+    def __init__(self, claim_barrier, target_barrier, conflict_barrier):
+        self.claim_barrier = claim_barrier
+        self.target_barrier = target_barrier
+        self.conflict_barrier = conflict_barrier
+        self.target_lock_seen = False
+        self.advisory_lock_seen = False
+        self.conflict_queries = 0
+
+    @staticmethod
+    def _wait(barrier):
+        barrier.wait(timeout=5)
+
+    def __call__(self, execute, sql, params, many, context):
+        if "pg_advisory_xact_lock" in sql:
+            self._wait(self.claim_barrier)
+            result = execute(sql, params, many, context)
+            self.advisory_lock_seen = True
+            return result
+
+        result = execute(sql, params, many, context)
+        if "FOR UPDATE" in sql and ('FROM "dcim_device"' in sql or 'FROM "virtualization_virtualmachine"' in sql):
+            self.target_lock_seen = True
+            if not self.advisory_lock_seen:
+                self._wait(self.target_barrier)
+        elif (
+            self.target_lock_seen
+            and sql.lstrip().upper().startswith("SELECT")
+            and '"custom_field_data"' in sql
+            and ('FROM "dcim_device"' in sql or 'FROM "virtualization_virtualmachine"' in sql)
+        ):
+            self.conflict_queries += 1
+            if self.conflict_queries == 2 and not self.advisory_lock_seen:
+                self._wait(self.conflict_barrier)
+        return result
 
 
 @pytest.mark.django_db
@@ -533,6 +575,87 @@ def test_vm_link_rechecks_device_id_collisions_after_validation(client, settings
     assert b"already assigned to device" in response.content
     vm.refresh_from_db()
     assert vm.custom_field_data["librenms_id"] == {"primary": 49501}
+
+
+@transactional_db_with_all_apps()
+def test_device_and_vm_links_serialize_one_cross_model_id_claim(settings):
+    """Competing Device and VM transactions must produce one server-scoped ID owner."""
+    from django.contrib.auth import get_user_model
+    from django.db import close_old_connections, connection
+    from django.test import Client
+    from django.urls import reverse
+
+    _configure_servers(settings)
+    device = make_device("concurrent-cross-model-device", librenms_cf={"primary": 49701})
+    vm = make_vm("concurrent-cross-model-vm")
+    vm.custom_field_data["librenms_id"] = {"primary": 49702}
+    vm.save(update_fields=["custom_field_data"])
+    user = make_superuser("concurrent-cross-model-linker")
+    claim_barrier = Barrier(2)
+    target_barrier = Barrier(2)
+    conflict_barrier = Barrier(2)
+    fetch_barrier = Barrier(2)
+    wrappers = [_MappingClaimBarrier(claim_barrier, target_barrier, conflict_barrier) for _target in range(2)]
+    request_context = local()
+
+    def librenms_response(request_url, **_kwargs):
+        if request_url == "https://secondary.example.com/api/v0/devices/49801":
+            libre_device = _librenms_device(49801, request_context.hostname)
+            _MappingClaimBarrier._wait(fetch_barrier)
+            return _json_response(request_url, {"status": "ok", "devices": [libre_device]})
+        if request_url.startswith("https://secondary.example.com/api/v0/inventory/49801"):
+            return _json_response(request_url, {"status": "ok", "inventory": []})
+        raise AssertionError(f"Unexpected LibreNMS request: {request_url}")
+
+    def link(target_pk, target_type, hostname, wrapper):
+        close_old_connections()
+        try:
+            with connection.cursor() as cursor:
+                cursor.execute("SET lock_timeout = '30s'")
+                cursor.execute("SET statement_timeout = '45s'")
+            request_context.hostname = hostname
+            thread_client = Client()
+            thread_client.force_login(get_user_model().objects.get(pk=user.pk))
+            action_url = reverse(
+                "plugins:netbox_librenms_plugin:device_conflict_action",
+                kwargs={"device_id": 49801},
+            )
+            with connection.execute_wrapper(wrapper):
+                response = thread_client.post(
+                    action_url,
+                    {
+                        "action": "link",
+                        "existing_device_id": target_pk,
+                        "existing_device_type": target_type,
+                        "server_key": "secondary",
+                        "use-sysname-toggle": "on",
+                        "strip-domain-toggle": "off",
+                    },
+                    headers={"HX-Request": "true"},
+                )
+            return response.status_code, response.content
+        finally:
+            connection.close()
+
+    with (
+        patch("netbox_librenms_plugin.librenms_api.requests.get", side_effect=librenms_response),
+        ThreadPoolExecutor(max_workers=2) as executor,
+    ):
+        futures = [
+            executor.submit(link, device.pk, "device", device.name, wrappers[0]),
+            executor.submit(link, vm.pk, "virtualmachine", vm.name, wrappers[1]),
+        ]
+        outcomes = [future.result(timeout=60) for future in futures]
+
+    device.refresh_from_db()
+    vm.refresh_from_db()
+    mappings = [device.custom_field_data["librenms_id"], vm.custom_field_data["librenms_id"]]
+    owners = [mapping for mapping in mappings if mapping.get("secondary") == 49801]
+    assert [status for status, _content in outcomes] == [200, 200]
+    assert all(wrapper.target_lock_seen for wrapper in wrappers)
+    assert all(wrapper.advisory_lock_seen for wrapper in wrappers)
+    assert len(owners) == 1
+    assert sum(b"LibreNMS ID conflict" in content for _status, content in outcomes) == 1
 
 
 @pytest.mark.django_db

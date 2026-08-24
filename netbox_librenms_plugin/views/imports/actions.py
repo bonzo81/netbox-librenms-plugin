@@ -1904,23 +1904,17 @@ class DeviceConflictActionView(
         if librenms_id is None:
             return _htmx_error_response("Invalid or missing LibreNMS device_id in payload")
 
-        # Wrap the LibreNMS-ID collision check and subsequent write in a single
-        # transaction so the read-then-write is atomic for link/update/update_serial.
-        # NOTE: A fully race-free guarantee would require a DB-unique constraint on
-        # (server_key, librenms_id) — e.g., a dedicated DeviceLibreNMSIDMapping model.
-        # That is deferred to a future schema migration.  Until then, we acquire a
-        # row-level lock on the target device before re-checking for conflicts, which
-        # serializes concurrent operations on the SAME device and greatly reduces the
-        # window for assigning the same ID to two DIFFERENT devices.
+        # Keep the LibreNMS-ID collision check and subsequent write in one transaction.
+        # A transaction-scoped lock on the server/ID claim serializes writers across both
+        # object tables. The target-row lock separately preserves concurrent changes to the
+        # object receiving the mapping.
         if action in {"link", "update", "update_serial"}:
             from netbox_librenms_plugin.utils import AmbiguousLibreNMSIdError, find_by_librenms_id
 
             with transaction.atomic():
                 server_key = self.librenms_api.server_key
-                # Lock the target device row so concurrent requests for the same
-                # device are serialized.  The conflict check below is still a
-                # best-effort guard for different devices; a DB unique constraint
-                # would be needed for full protection.
+                acquire_advisory_transaction_lock(f"netbox-librenms-plugin:librenms-id:{server_key}:{librenms_id}")
+                # Lock the target row so concurrent requests preserve its other mappings.
                 try:
                     existing_device = (
                         self.restricted_queryset(existing_model, "change")

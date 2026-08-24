@@ -14,6 +14,16 @@ from netbox_librenms_plugin.tests.parallel import isolated_test_database_name
 _TEST_DATABASE_BASE_NAME = os.environ["TEST_DB_NAME"]
 
 
+def transactional_db_with_all_apps():
+    """Mark a transactional test for cleanup across every installed app."""
+    from django.apps import apps
+
+    return pytest.mark.django_db(
+        transaction=True,
+        available_apps=tuple(app.name for app in apps.get_app_configs()),
+    )
+
+
 def clear_test_cache(cache_backend):
     """Clear only the active test namespace when the backend supports patterns."""
     try:
