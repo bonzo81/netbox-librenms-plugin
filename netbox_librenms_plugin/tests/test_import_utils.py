@@ -2311,9 +2311,11 @@ class TestDeviceConflictActionView:
 
     @pytest.fixture(autouse=True)
     def _no_advisory_lock(self):
-        """The serial guard's pg_advisory_xact_lock needs a real connection these mock tests don't have."""
+        """Replace database advisory locks at the mocked transaction boundary."""
         with (
             patch("netbox_librenms_plugin.views.imports.actions._acquire_serial_assignment_lock"),
+            patch("netbox_librenms_plugin.views.imports.actions.acquire_advisory_transaction_lock"),
+            patch("netbox_librenms_plugin.utils.find_by_librenms_id", return_value=None),
             patch(
                 "netbox_librenms_plugin.server_selection.LibreNMSAPI.get_available_servers",
                 return_value={"default": "Default LibreNMS", "production": "Production LibreNMS"},

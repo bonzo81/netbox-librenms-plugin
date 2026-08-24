@@ -4218,6 +4218,12 @@ class TestDeviceConflictActionBoolAndInvalidId:
 class TestDeviceConflictLinkIdConflict:
     """Test DeviceConflictActionView 'link' when ID is already used (line 1069-1070)."""
 
+    @pytest.fixture(autouse=True)
+    def _no_advisory_lock(self):
+        """Replace the database advisory lock at the mocked transaction boundary."""
+        with patch("netbox_librenms_plugin.views.imports.actions.acquire_advisory_transaction_lock"):
+            yield
+
     def _make_view(self):
         from netbox_librenms_plugin.views.imports.actions import DeviceConflictActionView
 
@@ -4307,6 +4313,12 @@ class TestSaveDevicePath:
 
 class TestDeviceConflictSelectForUpdateDoesNotExist:
     """Tests for select_for_update DoesNotExist (lines 1069-1070)."""
+
+    @pytest.fixture(autouse=True)
+    def _no_advisory_lock(self):
+        """Replace the database advisory lock at the mocked transaction boundary."""
+        with patch("netbox_librenms_plugin.views.imports.actions.acquire_advisory_transaction_lock"):
+            yield
 
     def _make_view(self):
         from netbox_librenms_plugin.views.imports.actions import DeviceConflictActionView
@@ -4433,8 +4445,11 @@ class TestUpdateAndSerialSaveErrors:
 
     @pytest.fixture(autouse=True)
     def _no_advisory_lock(self):
-        """The serial guard's pg_advisory_xact_lock needs a real connection these mock tests don't have."""
-        with patch("netbox_librenms_plugin.views.imports.actions._acquire_serial_assignment_lock"):
+        """Replace database advisory locks at the mocked transaction boundary."""
+        with (
+            patch("netbox_librenms_plugin.views.imports.actions._acquire_serial_assignment_lock"),
+            patch("netbox_librenms_plugin.views.imports.actions.acquire_advisory_transaction_lock"),
+        ):
             yield
 
     def _make_view(self):
