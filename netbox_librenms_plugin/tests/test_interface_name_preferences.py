@@ -78,7 +78,7 @@ def test_sync_tab_links_replace_the_server_rendered_region(client, settings):
     marker = 'id="ipaddresses-tab"'
     position = html.index(marker)
     link = html[html.rfind("<a", 0, position) : html.index(">", position) + 1]
-    expected_query = "?tab=ipaddresses&amp;server_key=default"
+    expected_query = "?tab=ipaddresses&amp;server_key=default&amp;interface_name_field=ifDescr"
     assert f'href="{response.request["PATH_INFO"]}{expected_query}"' in link
     assert f'hx-get="{response.request["PATH_INFO"]}{expected_query}"' in link
     assert 'hx-target="#librenms-sync-tabs"' in link

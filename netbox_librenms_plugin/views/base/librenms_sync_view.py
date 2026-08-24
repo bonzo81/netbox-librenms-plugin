@@ -153,7 +153,6 @@ class BaseLibreNMSSyncView(
         for sync_tab in applicable_tabs:
             query = request.GET.copy()
             query["tab"] = sync_tab.value
-            query.pop("interface_name_field", None)
             sync_tab_urls[sync_tab.value] = f"{request.path}?{query.urlencode()}"
 
         # Add our specific context

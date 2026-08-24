@@ -427,7 +427,6 @@ function updateSyncCacheTabState(tab, state) {
 function showSyncCacheNotice(message, revision, level = 'warning') {
     const controller = syncCacheController();
     if (!controller || (revision && controller.notifiedRevisions.has(revision))) return;
-    if (revision) controller.notifiedRevisions.add(revision);
 
     let container = document.getElementById('librenms-sync-cache-notices');
     if (!container) {
@@ -436,6 +435,7 @@ function showSyncCacheNotice(message, revision, level = 'warning') {
         controller.root.insertAdjacentElement('afterend', container);
     }
     if (level !== 'danger' && container.querySelector('.alert-danger')) return;
+    if (revision) controller.notifiedRevisions.add(revision);
     const alertElement = document.createElement('div');
     alertElement.className = `alert alert-${level} alert-dismissible`;
     alertElement.setAttribute('role', 'alert');

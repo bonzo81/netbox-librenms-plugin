@@ -1345,6 +1345,53 @@ def test_cleanup_failure_notice_survives_a_later_informational_event():
         browser.close()
 
 
+def test_blocked_cache_notice_can_render_after_danger_is_dismissed():
+    """A danger notice must not consume the revision of a blocked later notice."""
+    initial = {
+        "interfaces": _state("before"),
+        "ipaddresses": _state("before-ip"),
+    }
+    failed = {
+        "transition_id": "failed-cleanup",
+        "removed": False,
+        "cleanup_failed": True,
+        "cleanup_tabs": ["ipaddresses"],
+        "revisions": {},
+    }
+    succeeded = {
+        "transition_id": "later-success",
+        "removed": True,
+        "cleanup_failed": False,
+        "tabs": ["ipaddresses"],
+        "revisions": {},
+    }
+
+    with playwright.sync_playwright() as runtime:
+        browser = runtime.chromium.launch(headless=True)
+        page = browser.new_page()
+        page.set_content(_page_html(initial))
+        page.route("https://plugin.example.com/status?*", lambda route: route.fulfill(json={"tabs": initial}))
+        page.add_script_tag(path=str(SCRIPT_PATH))
+        page.evaluate(
+            "payloads => { initializeSyncCacheConsistency(); "
+            "payloads.forEach(payload => document.dispatchEvent("
+            "new CustomEvent('librenmsCacheChanged', { detail: payload }))); }",
+            [failed, succeeded],
+        )
+
+        page.locator("#librenms-sync-cache-notices .btn-close").click()
+        page.evaluate(
+            "payload => document.dispatchEvent(new CustomEvent('librenmsCacheChanged', { detail: payload }))",
+            succeeded,
+        )
+
+        notice = page.locator("#librenms-sync-cache-notices .alert")
+        assert notice.count() == 1
+        assert notice.evaluate("node => node.classList.contains('alert-info')")
+        assert "Other sync tabs were cleared" in notice.inner_text()
+        browser.close()
+
+
 def test_invalidation_reason_includes_relative_time():
     initial = {
         "interfaces": _state("before"),
