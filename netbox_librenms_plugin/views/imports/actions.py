@@ -1958,15 +1958,19 @@ class DeviceConflictActionView(
                 if current_mapping is not None and not isinstance(current_mapping, dict):
                     return _htmx_error_response("The existing LibreNMS mapping has an invalid format.")
 
-                if action == "link":
-                    # Link to LibreNMS and update name from LibreNMS data
-                    hostname = _get_hostname_for_action(request, validation, libre_device)
+                try:
                     add_librenms_server_mapping(
                         existing_device,
                         librenms_id,
                         self.librenms_api.server_key,
                         configured_server_keys=self.librenms_api.get_available_servers(),
                     )
+                except ValueError as exc:
+                    return _htmx_error_response(str(exc))
+
+                if action == "link":
+                    # Link to LibreNMS and update name from LibreNMS data
+                    hostname = _get_hostname_for_action(request, validation, libre_device)
                     existing_device.name = hostname
                     fields = ["custom_field_data", "name"]
                     if librenms_device_type:
@@ -1991,12 +1995,6 @@ class DeviceConflictActionView(
                     if librenms_device_type:
                         existing_device.device_type = librenms_device_type
                         fields.append("device_type")
-                    add_librenms_server_mapping(
-                        existing_device,
-                        librenms_id,
-                        self.librenms_api.server_key,
-                        configured_server_keys=self.librenms_api.get_available_servers(),
-                    )
                     if err := _save_device(existing_device, update_fields=fields, request=request):
                         return err
                     logger.info(
@@ -2016,12 +2014,6 @@ class DeviceConflictActionView(
                     if librenms_device_type:
                         existing_device.device_type = librenms_device_type
                         fields.append("device_type")
-                    add_librenms_server_mapping(
-                        existing_device,
-                        librenms_id,
-                        self.librenms_api.server_key,
-                        configured_server_keys=self.librenms_api.get_available_servers(),
-                    )
                     if err := _save_device(existing_device, update_fields=fields, request=request):
                         return err
                     logger.info(

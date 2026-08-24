@@ -5,7 +5,6 @@ from copy import deepcopy
 from unittest.mock import patch
 
 import pytest
-from django.urls import reverse
 from requests import Response
 
 from netbox_librenms_plugin.tests.conftest import (
@@ -62,6 +61,8 @@ def _librenms_device(device_id, hostname):
 @pytest.mark.django_db
 def test_device_link_adds_secondary_mapping_and_prefers_the_previous_sole_mapping(client, settings):
     """An explicit second-server link preserves the first mapping as object preference."""
+    from django.urls import reverse
+
     _configure_servers(settings)
     device = make_device(
         "edge-link-device",
@@ -115,6 +116,8 @@ def test_device_link_adds_secondary_mapping_and_prefers_the_previous_sole_mappin
 @pytest.mark.django_db
 def test_vm_link_uses_the_same_second_server_mapping_contract(client, settings):
     """A hostname-matched VM can add a server mapping through the import action."""
+    from django.urls import reverse
+
     _configure_servers(settings)
     vm = make_vm("edge-link-vm")
     vm.custom_field_data["librenms_id"] = {"primary": 48301}
@@ -157,6 +160,8 @@ def test_vm_link_uses_the_same_second_server_mapping_contract(client, settings):
 @pytest.mark.django_db
 def test_vm_validation_is_read_only_and_offers_an_explicit_link(client, settings):
     """Validation exposes the VM link action without changing its stored mappings."""
+    from django.urls import reverse
+
     _configure_servers(settings)
     vm = make_vm("edge-link-vm-preview")
     vm.custom_field_data["librenms_id"] = {"primary": 48501}
@@ -187,6 +192,8 @@ def test_vm_validation_is_read_only_and_offers_an_explicit_link(client, settings
 @pytest.mark.django_db
 def test_primary_ip_matched_device_changes_only_after_explicit_update_and_link(client, settings):
     """A primary-IP match stays read-only until its update-and-link POST."""
+    from django.urls import reverse
+
     _configure_servers(settings)
     device = make_device("existing-primary-ip-device", librenms_cf={"primary": 48701})
     interface = make_interface(device, "mgmt0")
@@ -244,6 +251,7 @@ def test_primary_ip_matched_device_changes_only_after_explicit_update_and_link(c
 @pytest.mark.django_db
 def test_primary_ip_matched_vm_changes_only_after_explicit_update_and_link(client, settings):
     """A VM primary-IP match uses the same explicit mapping action as a Device."""
+    from django.urls import reverse
     from virtualization.models import VMInterface
 
     _configure_servers(settings)
@@ -304,10 +312,114 @@ def test_primary_ip_matched_vm_changes_only_after_explicit_update_and_link(clien
 
 
 @pytest.mark.django_db
+def test_serial_matched_device_changes_only_after_explicit_update_and_link(client, settings):
+    """A serial match remains read-only until its update-and-link POST."""
+    from django.urls import reverse
+
+    _configure_servers(settings)
+    device = make_device(
+        "existing-serial-device",
+        serial="TEST-SERIAL-49101",
+        librenms_cf={"primary": 49101},
+    )
+    client.force_login(make_superuser("serial-device-linker"))
+    validation_url = reverse(
+        "plugins:netbox_librenms_plugin:device_validation_details",
+        kwargs={"device_id": 49201},
+    )
+    action_url = reverse(
+        "plugins:netbox_librenms_plugin:device_conflict_action",
+        kwargs={"device_id": 49201},
+    )
+    libre_device = _librenms_device(49201, "renamed-serial-device")
+    libre_device["serial"] = "TEST-SERIAL-49101"
+
+    def librenms_response(request_url, **_kwargs):
+        if request_url == "https://secondary.example.com/api/v0/devices/49201":
+            return _json_response(request_url, {"status": "ok", "devices": [libre_device]})
+        if request_url.startswith("https://secondary.example.com/api/v0/inventory/49201"):
+            return _json_response(request_url, {"status": "ok", "inventory": []})
+        raise AssertionError(f"Unexpected LibreNMS request: {request_url}")
+
+    with patch("netbox_librenms_plugin.librenms_api.requests.get", side_effect=librenms_response):
+        preview = client.get(validation_url, {"server_key": "secondary"})
+        device.refresh_from_db()
+        assert device.name == "existing-serial-device"
+        assert device.custom_field_data["librenms_id"] == {"primary": 49101}
+        preview_html = preview.content.decode()
+        assert "Serial match" in preview_html
+        assert 'name="action" value="update"' in preview_html
+
+        response = client.post(
+            action_url,
+            {
+                "action": "update",
+                "existing_device_id": device.pk,
+                "existing_device_type": "device",
+                "server_key": "secondary",
+                "use-sysname-toggle": "on",
+                "strip-domain-toggle": "off",
+            },
+            headers={"HX-Request": "true"},
+        )
+
+    assert response.status_code == 200
+    device.refresh_from_db()
+    assert device.name == "renamed-serial-device"
+    assert device.custom_field_data["librenms_id"] == {
+        "primary": 49101,
+        "secondary": 49201,
+        "_preferred_server": "primary",
+    }
+
+
+@pytest.mark.django_db
+def test_normal_link_blocks_a_different_host_id_on_the_active_server(client, settings):
+    """Normal linking leaves a different same-server identity for the confirmation workflow."""
+    from django.urls import reverse
+
+    _configure_servers(settings)
+    device = make_device("same-server-conflict", librenms_cf={"secondary": 49301})
+    client.force_login(make_superuser("same-server-conflict-linker"))
+    action_url = reverse(
+        "plugins:netbox_librenms_plugin:device_conflict_action",
+        kwargs={"device_id": 49401},
+    )
+    libre_device = _librenms_device(49401, device.name)
+
+    def librenms_response(request_url, **_kwargs):
+        if request_url == "https://secondary.example.com/api/v0/devices/49401":
+            return _json_response(request_url, {"status": "ok", "devices": [libre_device]})
+        if request_url.startswith("https://secondary.example.com/api/v0/inventory/49401"):
+            return _json_response(request_url, {"status": "ok", "inventory": []})
+        raise AssertionError(f"Unexpected LibreNMS request: {request_url}")
+
+    with patch("netbox_librenms_plugin.librenms_api.requests.get", side_effect=librenms_response):
+        response = client.post(
+            action_url,
+            {
+                "action": "link",
+                "existing_device_id": device.pk,
+                "existing_device_type": "device",
+                "server_key": "secondary",
+                "use-sysname-toggle": "on",
+                "strip-domain-toggle": "off",
+            },
+            headers={"HX-Request": "true"},
+        )
+
+    assert response.status_code == 200
+    assert b"requires the separate replacement confirmation" in response.content
+    device.refresh_from_db()
+    assert device.custom_field_data["librenms_id"] == {"secondary": 49301}
+
+
+@pytest.mark.django_db
 def test_link_reloads_locked_mapping_state_before_adding_the_active_server(client, settings):
     """A mapping change after the request starts is preserved by the locked write."""
     from django.db import connection
     from django.test.utils import CaptureQueriesContext
+    from django.urls import reverse
 
     _configure_servers(settings)
     device = make_device("concurrent-link-device", librenms_cf={"primary": 49101})
@@ -369,6 +481,8 @@ def test_link_reloads_locked_mapping_state_before_adding_the_active_server(clien
 @pytest.mark.django_db
 def test_link_preserves_an_established_preference_and_every_other_mapping(client, settings):
     """Adding the active server does not rewrite existing preference or mapping state."""
+    from django.urls import reverse
+
     _configure_servers(settings)
     device = make_device(
         "preferred-link-device",

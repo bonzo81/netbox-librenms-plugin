@@ -2300,7 +2300,7 @@ def add_librenms_server_mapping(obj, device_id, server_key: str, *, configured_s
         configured_server_keys: Server keys that are currently usable.
 
     Raises:
-        ValueError: If the current custom-field value is corrupt or legacy.
+        ValueError: If the custom-field container is not a server mapping or uses the legacy format.
     """
     server_key = require_server_key(server_key)
     normalized_device_id = coerce_librenms_id(device_id)
@@ -2313,6 +2313,17 @@ def add_librenms_server_mapping(obj, device_id, server_key: str, *, configured_s
         raise ValueError("The existing LibreNMS mapping has an invalid format.")
 
     current_mapping = current_value or {}
+    existing_entry = current_mapping.get(server_key)
+    if isinstance(existing_entry, dict):
+        existing_host_id = coerce_librenms_id(existing_entry.get("id"))
+    else:
+        existing_host_id = coerce_librenms_id(existing_entry)
+    if existing_host_id is not None and existing_host_id != normalized_device_id:
+        raise ValueError(
+            f"LibreNMS server '{server_key}' is already mapped to host ID {existing_host_id}. "
+            f"Replacing it with {normalized_device_id} requires the separate replacement confirmation."
+        )
+
     configured_keys = set(configured_server_keys)
     previous_usable_keys = [
         mapped_key
