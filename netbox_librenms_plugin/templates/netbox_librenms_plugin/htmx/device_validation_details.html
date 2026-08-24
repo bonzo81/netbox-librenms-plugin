@@ -617,11 +617,6 @@
           Import blocked: The incoming serial number is already assigned to another device in NetBox.
           Resolve the duplicate serial before linking.
         </div>
-      {% elif validation.import_as_vm or existing_device_model_name == "virtualmachine" %}
-        <div class="alert alert-info py-2 mb-3">
-          <i class="mdi mdi-information-outline"></i>
-          Hostname match found for a VM — use the import action to proceed.
-        </div>
       {% else %}
       <div class="mb-3">
         <form style="display:inline"
@@ -1079,10 +1074,32 @@
       <div class="alert alert-warning py-2 mb-3 d-flex flex-wrap align-items-center gap-1">
         <span class="badge bg-warning-lt me-1"><i class="mdi mdi-ip-network"></i> IP match</span>
         <span class="text-muted ms-1">
-          — Device with IP {{ libre_device.ip }} exists as
+          Device with IP {{ libre_device.ip }} exists as
           <a href="{{ existing_device_url }}" target="_blank" rel="noopener noreferrer">{{ validation.existing_device.name }}</a>.
-          Consider adding LibreNMS ID manually.
         </span>
+      </div>
+      <div class="mb-3">
+        <form style="display:inline"
+              hx-post="{% url 'plugins:netbox_librenms_plugin:device_conflict_action' device_id=libre_device.device_id %}"
+              hx-swap="none"
+              hx-include="#use-sysname-toggle, #strip-domain-toggle">
+          {% csrf_token %}
+          {% include "netbox_librenms_plugin/inc/_hidden_server_key.html" %}
+          <input type="hidden" name="existing_device_id" value="{{ validation.existing_device.pk }}">
+          <input type="hidden" name="existing_device_type" value="{{ existing_device_model_name|default:'device' }}">
+          {% if validation.device_type_mismatch %}
+            <div class="form-check mb-2">
+              <input class="form-check-input" type="checkbox" name="force" id="force-primary-ip-{{ libre_device.device_id }}"
+                     onchange="this.closest('form').querySelector('.force-action-btn').disabled = !this.checked">
+              <label class="form-check-label text-danger" for="force-primary-ip-{{ libre_device.device_id }}">
+                <i class="mdi mdi-alert-circle"></i> Device type mismatch, check to force
+              </label>
+            </div>
+          {% endif %}
+          <button type="submit" name="action" value="update" class="btn btn-sm btn-warning{% if validation.device_type_mismatch %} force-action-btn{% endif %}"{% if validation.device_type_mismatch %} disabled{% endif %}>
+            <i class="mdi mdi-pencil"></i> Update &amp; Link
+          </button>
+        </form>
       </div>
       {% endif %}
 

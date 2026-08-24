@@ -2157,7 +2157,7 @@ class TestDeviceConflictActionView:
             "post",
             {
                 "server_key": self.server_key,
-                "action": "link",
+                "action": "update_serial",
                 "existing_device_id": "5",
                 "existing_device_type": "virtualmachine",
             },
@@ -2555,7 +2555,7 @@ class TestBulkImportDevicesViewErrorPaths:
 
 
 class TestDeviceConflictActionViewVMGuard:
-    """Tests for DeviceConflictActionView VM action guard (lines 994-1002)."""
+    """Tests for the DeviceConflictActionView VM action guard."""
 
     def _make_view(self):
         from netbox_librenms_plugin.views.imports.actions import DeviceConflictActionView
@@ -2565,12 +2565,12 @@ class TestDeviceConflictActionViewVMGuard:
         view.request = MagicMock()
         return view
 
-    def test_non_migrate_action_for_vm_renders_htmx_error_toast(self):
-        """Lines 995-999: VM + non-migrate action = 400."""
+    def test_device_only_action_for_vm_renders_htmx_error_toast(self):
+        """A VM cannot run a Device-only serial action."""
         view = self._make_view()
         request = _make_request(
             post={
-                "action": "link",
+                "action": "update_serial",
                 "existing_device_id": "1",
                 "existing_device_type": "virtualmachine",
             }
@@ -4451,6 +4451,7 @@ class TestUpdateAndSerialSaveErrors:
         mock_existing = MagicMock()
         mock_existing.pk = 1
         mock_existing.name = "router01"
+        mock_existing.custom_field_data = {}
         libre_device = {"device_id": 42, "hostname": "r01", "serial": "SN001", "hardware": "Cisco", "os": "ios"}
         validation = {"existing_device": mock_existing, "device_type_mismatch": False}
         return view, request, mock_existing, libre_device, validation
@@ -4478,7 +4479,7 @@ class TestUpdateAndSerialSaveErrors:
             patch.object(view, "get_validated_device_with_selections", return_value=(libre_device, validation, {}))
         )
         stack.enter_context(patch("netbox_librenms_plugin.utils.find_by_librenms_id", return_value=None))
-        stack.enter_context(patch("netbox_librenms_plugin.views.imports.actions.set_librenms_device_id"))
+        stack.enter_context(patch("netbox_librenms_plugin.views.imports.actions.add_librenms_server_mapping"))
         stack.enter_context(patch("netbox_librenms_plugin.views.imports.actions.cache"))
         stack.enter_context(
             patch("netbox_librenms_plugin.views.imports.actions.get_import_device_cache_key", return_value="key")

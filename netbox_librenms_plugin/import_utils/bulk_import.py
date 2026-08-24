@@ -1090,28 +1090,29 @@ def _refresh_existing_device(validation: dict, libre_device: dict = None, server
             # duplicate-resolution blocker, not stale new-import ones.
             return
 
-        if not new_device and not name_ambiguous and not import_as_vm:
+        if not new_device and not name_ambiguous:
             # Serial- and IP-based matches: validate_device_for_import() catches these, so the
             # refresh re-check must have the same breadth. Without them a row whose
             # librenms_id/name link disappeared (or that never matched) can flip to importable
-            # and re-import a device that already exists in NetBox under a different name —
-            # matched only by hardware serial or management IP. Device-only (VMs have no serial
-            # or primary-IP identity here). The richer serial_action/OOB-candidate heuristics
-            # stay in the full validation path; here the contract is simply: block the import.
+            # and re-import an object that already exists in NetBox under a different name.
+            # Serial applies only to Devices. Management IP applies to Devices and VMs.
+            # The richer action heuristics stay in the full validation path; here the contract
+            # is simply to block the duplicate import and bind the current object type.
             from dcim.models import Device as _Device
 
             # This fallback fails closed on ambiguity exactly like validate_device_for_import():
-            # if the serial OR the management IP resolves to more than one distinct NetBox device,
-            # binding to whichever row sorts first would render the wrong device as the existing
+            # if the serial OR the management IP resolves to more than one distinct NetBox object,
+            # binding to whichever row sorts first would render the wrong object as the existing
             # match, so flag the row ambiguous and block instead of picking arbitrarily.
             ambiguous_fallback = False
-            serial = normalize_serial(libre_device.get("serial"))
-            if serial and serial != "-":
-                serial_matches = list(_Device.objects.filter(serial=serial)[:2])
-                if len(serial_matches) > 1:
-                    ambiguous_fallback = True
-                elif serial_matches:
-                    new_device, match_type = serial_matches[0], "serial"
+            if not import_as_vm:
+                serial = normalize_serial(libre_device.get("serial"))
+                if serial and serial != "-":
+                    serial_matches = list(_Device.objects.filter(serial=serial)[:2])
+                    if len(serial_matches) > 1:
+                        ambiguous_fallback = True
+                    elif serial_matches:
+                        new_device, match_type = serial_matches[0], "serial"
 
             if not new_device and not ambiguous_fallback:
                 primary_ip = libre_device.get("ip")
@@ -1119,11 +1120,12 @@ def _refresh_existing_device(validation: dict, libre_device: dict = None, server
                     # Shared resolver (scans interface-assignment + oob_ip-FK across all duplicate
                     # net_host rows, fails closed on >1 distinct device) — same helper
                     # validate_device_for_import() uses, so the two paths can't drift.
-                    device, ip_ambiguous, _matching_ips = resolve_device_by_host_ip(primary_ip)
+                    matched_object, ip_ambiguous, _matching_ips = resolve_device_by_host_ip(primary_ip)
                     if ip_ambiguous:
                         ambiguous_fallback = True
-                    elif device:
-                        new_device, match_type = device, "primary_ip"
+                    elif matched_object:
+                        new_device, match_type = matched_object, "primary_ip"
+                        found_as_cross_model = isinstance(matched_object, CrossModel)
 
             if ambiguous_fallback:
                 # Block without binding to an arbitrary device: append a blocking issue (the

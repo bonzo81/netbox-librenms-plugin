@@ -23,7 +23,11 @@ from netbox_librenms_plugin.constants import (
     is_supported_interface_name_field,
 )
 from netbox_librenms_plugin.ip_addressing import parse_address_with_prefix, parse_host_address
-from netbox_librenms_plugin.server_mappings import iter_server_mapping_entries, require_server_key
+from netbox_librenms_plugin.server_mappings import (
+    PREFERRED_SERVER_FIELD,
+    iter_server_mapping_entries,
+    require_server_key,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -2280,6 +2284,48 @@ def set_librenms_device_id(obj, device_id, server_key: str = "default"):
     else:
         cf_value[server_key] = int_id
     obj.custom_field_data["librenms_id"] = cf_value
+
+
+def add_librenms_server_mapping(obj, device_id, server_key: str, *, configured_server_keys) -> None:
+    """Add one import mapping while preserving the object's established server choice.
+
+    The first mapping stays implicit. When this call adds a second usable mapping and the
+    object has no stored preference, the previous sole mapping becomes preferred. The caller
+    must hold a row lock so this read-modify-write uses current object state.
+
+    Args:
+        obj: Locked Device or VirtualMachine receiving the mapping.
+        device_id: LibreNMS device ID for ``server_key``.
+        server_key: Active import server key.
+        configured_server_keys: Server keys that are currently usable.
+
+    Raises:
+        ValueError: If the current custom-field value is corrupt or legacy.
+    """
+    server_key = require_server_key(server_key)
+    normalized_device_id = coerce_librenms_id(device_id)
+    if normalized_device_id is None:
+        raise ValueError("LibreNMS device ID must be a positive integer.")
+    current_value = obj.custom_field_data.get("librenms_id")
+    if is_legacy_librenms_id(current_value):
+        raise ValueError("Convert the legacy LibreNMS mapping before adding another server.")
+    if current_value is not None and not isinstance(current_value, dict):
+        raise ValueError("The existing LibreNMS mapping has an invalid format.")
+
+    current_mapping = current_value or {}
+    configured_keys = set(configured_server_keys)
+    previous_usable_keys = [
+        mapped_key
+        for mapped_key, entry in iter_server_mapping_entries(current_mapping)
+        if mapped_key in configured_keys and resolve_server_mapping_display_id(entry)[0] is not None
+    ]
+    adds_new_mapping = server_key not in current_mapping
+
+    set_librenms_device_id(obj, normalized_device_id, server_key)
+    updated_mapping = obj.custom_field_data["librenms_id"]
+    if adds_new_mapping and len(previous_usable_keys) == 1 and PREFERRED_SERVER_FIELD not in updated_mapping:
+        updated_mapping[PREFERRED_SERVER_FIELD] = previous_usable_keys[0]
+        obj.custom_field_data["librenms_id"] = updated_mapping
 
 
 class AmbiguousLibreNMSIdError(LookupError):

@@ -50,6 +50,7 @@ from netbox_librenms_plugin.server_selection import parse_configured_server_key
 from netbox_librenms_plugin.tables.device_status import DeviceImportTable
 from netbox_librenms_plugin.utils import (
     acquire_advisory_transaction_lock,
+    add_librenms_server_mapping,
     coerce_librenms_id,
     coerce_model_pk,
     get_librenms_sync_device,
@@ -61,7 +62,6 @@ from netbox_librenms_plugin.utils import (
     save_interface_name_preference,
     save_user_pref,
     set_device_ip_fk,
-    set_librenms_device_id,
 )
 from netbox_librenms_plugin.views.mixins import LibreNMSAPIMixin, LibreNMSPermissionMixin, NetBoxObjectPermissionMixin
 
@@ -151,7 +151,7 @@ _OOB_INTERFACE_NAME_PATTERN = re.compile(
 )
 
 # Actions that operate on Device-only fields and cannot be applied to VMs.
-_DEVICE_ONLY_ACTIONS = frozenset({"link", "update", "update_serial", "update_type", "sync_serial", "sync_device_type"})
+_DEVICE_ONLY_ACTIONS = frozenset({"update_serial", "update_type", "sync_serial", "sync_device_type"})
 
 
 _TRUTHY_VALUES = {"1", "true", "on", "yes"}
@@ -1850,13 +1850,13 @@ class DeviceConflictActionView(
         if not action or not existing_device_id:
             return _htmx_error_response("Missing action or existing_device_id")
 
-        # VirtualMachine supports migrate_librenms_id, sync_name, and sync_platform.
-        # Device-only actions (serial, device_type, legacy link/update) are rejected.
+        from virtualization.models import VirtualMachine as NetBoxVM
+
+        # VirtualMachine supports mapping, name, platform, and mapping-migration actions.
+        # Device-only serial and device-type actions are rejected.
         if existing_device_type == "virtualmachine":
             if action in _DEVICE_ONLY_ACTIONS:
                 return _htmx_error_response(f"Action '{action}' is not supported for virtual machines")
-            from virtualization.models import VirtualMachine as NetBoxVM
-
             existing_model: type = NetBoxVM
         else:
             existing_model = Device
@@ -1923,22 +1923,25 @@ class DeviceConflictActionView(
                 # would be needed for full protection.
                 try:
                     existing_device = (
-                        self.restricted_queryset(Device, "change")
+                        self.restricted_queryset(existing_model, "change")
                         .select_for_update(of=("self",))
                         .get(pk=existing_device.pk)
                     )
-                except Device.DoesNotExist:
-                    return _htmx_error_response("Device no longer exists; it may have been deleted concurrently.")
+                except existing_model.DoesNotExist:
+                    object_label = "VM" if existing_model is NetBoxVM else "Device"
+                    return _htmx_error_response(
+                        f"{object_label} no longer exists; it may have been deleted concurrently."
+                    )
                 try:
-                    id_conflict = find_by_librenms_id(Device, int(librenms_id), server_key)
+                    id_conflict = find_by_librenms_id(existing_model, int(librenms_id), server_key)
                 except AmbiguousLibreNMSIdError:
                     return _htmx_error_response(
-                        f"LibreNMS ID {librenms_id} is ambiguous — it matches more than one device. "
-                        "Resolve the duplicate assignment before linking."
+                        f"LibreNMS ID {librenms_id} is ambiguous. Resolve the duplicate assignment before linking."
                     )
-                if id_conflict and id_conflict.pk != existing_device.pk:
+                if id_conflict is not None and id_conflict.pk != existing_device.pk:
+                    object_label = "VM" if existing_model is NetBoxVM else "device"
                     return _htmx_error_response(
-                        f"LibreNMS ID conflict: ID {librenms_id} is already assigned to device "
+                        f"LibreNMS ID conflict: ID {librenms_id} is already assigned to {object_label} "
                         f"'{id_conflict.name}' (ID: {id_conflict.pk})"
                     )
 
@@ -1946,16 +1949,24 @@ class DeviceConflictActionView(
                 # silently skips writes for legacy formats, leaving the device partially
                 # updated. User must run "Convert mapping" migration first. Shared predicate
                 # with AddAsOOBView and set_librenms_device_id so the three can't drift.
-                if is_legacy_librenms_id(existing_device.custom_field_data.get("librenms_id")):
+                current_mapping = existing_device.custom_field_data.get("librenms_id")
+                if is_legacy_librenms_id(current_mapping):
                     return _htmx_error_response(
-                        "Device has a legacy bare-integer librenms_id; use 'Convert mapping' "
+                        "Object has a legacy bare-integer librenms_id; use 'Convert mapping' "
                         "to migrate to the multi-server format before linking."
                     )
+                if current_mapping is not None and not isinstance(current_mapping, dict):
+                    return _htmx_error_response("The existing LibreNMS mapping has an invalid format.")
 
                 if action == "link":
                     # Link to LibreNMS and update name from LibreNMS data
                     hostname = _get_hostname_for_action(request, validation, libre_device)
-                    set_librenms_device_id(existing_device, librenms_id, self.librenms_api.server_key)
+                    add_librenms_server_mapping(
+                        existing_device,
+                        librenms_id,
+                        self.librenms_api.server_key,
+                        configured_server_keys=self.librenms_api.get_available_servers(),
+                    )
                     existing_device.name = hostname
                     fields = ["custom_field_data", "name"]
                     if librenms_device_type:
@@ -1970,7 +1981,7 @@ class DeviceConflictActionView(
                     hostname = _get_hostname_for_action(request, validation, libre_device)
                     # Trimmed like validate/import_single_device, so the stored value and the
                     # conflict lookup can't disagree with the match paths on whitespace.
-                    incoming_serial = normalize_serial(libre_device.get("serial"))
+                    incoming_serial = normalize_serial(libre_device.get("serial")) if existing_model is Device else None
                     fields = ["custom_field_data", "name"]
                     if incoming_serial and incoming_serial != "-":
                         if err := _apply_conflict_checked_serial(existing_device, incoming_serial):
@@ -1980,7 +1991,12 @@ class DeviceConflictActionView(
                     if librenms_device_type:
                         existing_device.device_type = librenms_device_type
                         fields.append("device_type")
-                    set_librenms_device_id(existing_device, librenms_id, self.librenms_api.server_key)
+                    add_librenms_server_mapping(
+                        existing_device,
+                        librenms_id,
+                        self.librenms_api.server_key,
+                        configured_server_keys=self.librenms_api.get_available_servers(),
+                    )
                     if err := _save_device(existing_device, update_fields=fields, request=request):
                         return err
                     logger.info(
@@ -2000,7 +2016,12 @@ class DeviceConflictActionView(
                     if librenms_device_type:
                         existing_device.device_type = librenms_device_type
                         fields.append("device_type")
-                    set_librenms_device_id(existing_device, librenms_id, self.librenms_api.server_key)
+                    add_librenms_server_mapping(
+                        existing_device,
+                        librenms_id,
+                        self.librenms_api.server_key,
+                        configured_server_keys=self.librenms_api.get_available_servers(),
+                    )
                     if err := _save_device(existing_device, update_fields=fields, request=request):
                         return err
                     logger.info(
