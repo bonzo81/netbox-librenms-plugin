@@ -1932,14 +1932,18 @@ class DeviceConflictActionView(
                     return _htmx_error_response(
                         f"{object_label} no longer exists; it may have been deleted concurrently."
                     )
-                try:
-                    id_conflict = find_by_librenms_id(existing_model, int(librenms_id), server_key)
-                except AmbiguousLibreNMSIdError:
-                    return _htmx_error_response(
-                        f"LibreNMS ID {librenms_id} is ambiguous. Resolve the duplicate assignment before linking."
-                    )
-                if id_conflict is not None and id_conflict.pk != existing_device.pk:
-                    object_label = "VM" if existing_model is NetBoxVM else "device"
+                for conflict_model in (Device, NetBoxVM):
+                    try:
+                        id_conflict = find_by_librenms_id(conflict_model, int(librenms_id), server_key)
+                    except AmbiguousLibreNMSIdError:
+                        return _htmx_error_response(
+                            f"LibreNMS ID {librenms_id} is ambiguous. Resolve the duplicate assignment before linking."
+                        )
+                    if id_conflict is None or (
+                        type(id_conflict) is type(existing_device) and id_conflict.pk == existing_device.pk
+                    ):
+                        continue
+                    object_label = "VM" if conflict_model is NetBoxVM else "device"
                     return _htmx_error_response(
                         f"LibreNMS ID conflict: ID {librenms_id} is already assigned to {object_label} "
                         f"'{id_conflict.name}' (ID: {id_conflict.pk})"

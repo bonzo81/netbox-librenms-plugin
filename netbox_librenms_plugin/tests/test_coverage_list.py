@@ -113,7 +113,7 @@ class TestLoadJobResults:
                 mock_job_cls.DoesNotExist = MockDoesNotExist
                 mock_job_cls.objects.get.side_effect = MockDoesNotExist("not found")
 
-                result = view._load_job_results(999)
+                result = view._load_job_results(999, MagicMock())
                 assert result == []
                 mock_logger.warning.assert_called()
 
@@ -130,7 +130,7 @@ class TestLoadJobResults:
             with patch("core.models.Job") as mock_job_cls:
                 mock_job_cls.objects.get.return_value = mock_job
 
-                result = view._load_job_results(42)
+                result = view._load_job_results(42, MagicMock())
                 assert result == []
 
     def test_empty_device_ids_returns_empty(self):
@@ -147,7 +147,7 @@ class TestLoadJobResults:
             with patch("core.models.Job") as mock_job_cls:
                 mock_job_cls.objects.get.return_value = mock_job
 
-                result = view._load_job_results(42)
+                result = view._load_job_results(42, MagicMock())
                 assert result == []
 
     def test_devices_loaded_from_cache(self):
@@ -181,7 +181,7 @@ class TestLoadJobResults:
                         mock_key.side_effect = lambda **kwargs: f"key_{kwargs['device_id']}"
                         mock_cache.get.side_effect = lambda key: mock_device_a if key == "key_1" else mock_device_b
 
-                        result = view._load_job_results(42)
+                        result = view._load_job_results(42, MagicMock())
                         assert len(result) == 2
                         assert mock_device_a in result
                         assert mock_device_b in result
@@ -212,7 +212,7 @@ class TestLoadJobResults:
                         mock_key.return_value = "key_1"
                         mock_cache.get.return_value = {"device_id": 1}
 
-                        result = view._load_job_results(42)
+                        result = view._load_job_results(42, MagicMock())
 
         assert len(result) == 1
         assert view._vc_detection_enabled is True
@@ -246,7 +246,7 @@ class TestLoadJobResults:
                         # device_id=2 is missing from cache (returns None)
                         mock_cache.get.side_effect = lambda key: mock_device if key == "key_1" else None
 
-                        result = view._load_job_results(42)
+                        result = view._load_job_results(42, MagicMock())
                         assert len(result) == 1
                         assert result[0] == mock_device
 
@@ -276,7 +276,7 @@ class TestLoadJobResults:
                         mock_key.return_value = "some_key"
                         mock_cache.get.return_value = None
 
-                        result = view._load_job_results(42)
+                        result = view._load_job_results(42, MagicMock())
                         assert result == []
                         mock_logger.error.assert_called_once()
 
@@ -301,7 +301,7 @@ class TestLoadJobResults:
             with patch("netbox_librenms_plugin.import_utils.get_validated_device_cache_key", return_value="cache_key"):
                 with patch("netbox_librenms_plugin.views.imports.list.cache") as mock_cache:
                     mock_cache.get.return_value = {"device_id": 1, "hostname": "router1"}
-                    result = view._load_job_results(1)
+                    result = view._load_job_results(1, MagicMock())
 
         assert len(result) == 1
         assert view._use_sysname is False
@@ -526,7 +526,7 @@ class TestGetView:
 
                                     with patch.object(view, "get_server_info", return_value={}):
                                         view.get(request)
-                                        mock_load.assert_called_once_with(42)
+                                        mock_load.assert_called_once_with(42, request.user)
 
     def test_get_job_id_preserves_vc_flag_when_query_flag_missing(self):
         """job_id pages keep vc_detection_enabled from loaded job results."""
@@ -537,7 +537,7 @@ class TestGetView:
         mock_api = MagicMock()
         mock_api.server_key = "default"
 
-        def _load_job_side_effect(_job_id):
+        def _load_job_side_effect(_job_id, _user):
             view._vc_detection_enabled = True
             return [{"device_id": 1, "hostname": "router1"}]
 
@@ -565,7 +565,7 @@ class TestGetView:
                                     with patch.object(view, "get_server_info", return_value={}):
                                         view.get(request)
 
-        mock_load.assert_called_once_with(42)
+        mock_load.assert_called_once_with(42, request.user)
         context = mock_render.call_args[0][2]
         assert context["vc_detection_enabled"] is True
 

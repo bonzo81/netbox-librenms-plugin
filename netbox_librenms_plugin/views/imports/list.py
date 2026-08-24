@@ -104,12 +104,13 @@ class LibreNMSImportView(LibreNMSGenericPermissionMixin, LibreNMSAPIMixin, gener
         self._librenms_api = api
         return api.server_key, None
 
-    def _load_job_results(self, job_id):
+    def _load_job_results(self, job_id, user):
         """
         Load cached results from a completed background job.
 
         Args:
             job_id: ID of the completed FilterDevicesJob
+            user: User who requested the result page
 
         Returns:
             List[dict]: Validated devices from job cache, or [] if cache expired
@@ -117,7 +118,7 @@ class LibreNMSImportView(LibreNMSGenericPermissionMixin, LibreNMSAPIMixin, gener
         from core.models import Job
 
         try:
-            job = Job.objects.get(pk=job_id)
+            job = Job.objects.get(pk=job_id, user=user)
         except Job.DoesNotExist:
             logger.warning(f"Job {job_id} not found")
             return []
@@ -248,11 +249,11 @@ class LibreNMSImportView(LibreNMSGenericPermissionMixin, LibreNMSAPIMixin, gener
 
         # Check if loading results from completed background job
         # Only load job results if NOT submitting new filters
-        if job_id and not filters_submitted:
+        if job_id and not filters_submitted and request.user.is_superuser:
             try:
                 job_id = int(job_id)
                 logger.info(f"Loading results from job {job_id}")
-                validated_devices = self._load_job_results(job_id)
+                validated_devices = self._load_job_results(job_id, request.user)
                 if validated_devices:
                     self._import_data = validated_devices
                     self._job_results_loaded = True
@@ -267,6 +268,10 @@ class LibreNMSImportView(LibreNMSGenericPermissionMixin, LibreNMSAPIMixin, gener
                     )
             except (ValueError, TypeError):
                 logger.warning("Invalid job_id parameter: %r", request.GET.get("job_id"))
+            if self._active_server_key is None and not self._server_selection_error:
+                self._active_server_key, self._server_selection_error = self._resolve_import_server(request)
+        elif job_id and not filters_submitted:
+            logger.warning("Non-superuser %s requested background job results", request.user)
             if self._active_server_key is None and not self._server_selection_error:
                 self._active_server_key, self._server_selection_error = self._resolve_import_server(request)
 

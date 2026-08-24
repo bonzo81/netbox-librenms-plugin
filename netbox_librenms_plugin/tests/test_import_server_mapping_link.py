@@ -479,6 +479,63 @@ def test_link_reloads_locked_mapping_state_before_adding_the_active_server(clien
 
 
 @pytest.mark.django_db
+def test_vm_link_rechecks_device_id_collisions_after_validation(client, settings):
+    """A Device mapping added after VM validation must block the VM mapping write."""
+    from django.db import connection
+    from django.urls import reverse
+
+    _configure_servers(settings)
+    vm = make_vm("cross-model-link-target")
+    vm.custom_field_data["librenms_id"] = {"primary": 49501}
+    vm.save(update_fields=["custom_field_data"])
+    device = make_device("cross-model-link-owner", librenms_cf={"primary": 49502})
+    client.force_login(make_superuser("cross-model-linker"))
+    action_url = reverse(
+        "plugins:netbox_librenms_plugin:device_conflict_action",
+        kwargs={"device_id": 49601},
+    )
+    libre_device = _librenms_device(49601, vm.name)
+    concurrent_mapping_added = False
+
+    def add_device_mapping_before_target_lock(execute, sql, params, many, context):
+        nonlocal concurrent_mapping_added
+        if not concurrent_mapping_added and 'FROM "virtualization_virtualmachine"' in sql and "FOR UPDATE" in sql:
+            concurrent_mapping_added = True
+            type(device).objects.filter(pk=device.pk).update(
+                custom_field_data={"librenms_id": {"primary": 49502, "secondary": 49601}}
+            )
+        return execute(sql, params, many, context)
+
+    def librenms_response(request_url, **_kwargs):
+        if request_url == "https://secondary.example.com/api/v0/devices/49601":
+            return _json_response(request_url, {"status": "ok", "devices": [libre_device]})
+        raise AssertionError(f"Unexpected LibreNMS request: {request_url}")
+
+    with (
+        connection.execute_wrapper(add_device_mapping_before_target_lock),
+        patch("netbox_librenms_plugin.librenms_api.requests.get", side_effect=librenms_response),
+    ):
+        response = client.post(
+            action_url,
+            {
+                "action": "link",
+                "existing_device_id": vm.pk,
+                "existing_device_type": "virtualmachine",
+                "server_key": "secondary",
+                "use-sysname-toggle": "on",
+                "strip-domain-toggle": "off",
+            },
+            headers={"HX-Request": "true"},
+        )
+
+    assert concurrent_mapping_added
+    assert response.status_code == 200
+    assert b"already assigned to device" in response.content
+    vm.refresh_from_db()
+    assert vm.custom_field_data["librenms_id"] == {"primary": 49501}
+
+
+@pytest.mark.django_db
 def test_link_preserves_an_established_preference_and_every_other_mapping(client, settings):
     """Adding the active server does not rewrite existing preference or mapping state."""
     from django.urls import reverse

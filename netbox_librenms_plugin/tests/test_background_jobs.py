@@ -1146,7 +1146,7 @@ class TestLoadJobResults:
 
         view = LibreNMSImportView()
         view.rebind_api_for_server = MagicMock(return_value="primary")
-        results = view._load_job_results(123)
+        results = view._load_job_results(123, MagicMock())
 
         # Verify cache key function called with correct params
         assert mock_get_key.call_count == 2
@@ -1195,7 +1195,7 @@ class TestLoadJobResults:
 
         view = LibreNMSImportView()
         view.rebind_api_for_server = MagicMock(return_value="secondary")
-        view._load_job_results(456)
+        view._load_job_results(456, MagicMock())
 
         # Verify get_validated_device_cache_key called with extracted values
         mock_get_key.assert_called_once_with(
@@ -1233,7 +1233,7 @@ class TestLoadJobResults:
         ]
 
         view = LibreNMSImportView()
-        results = view._load_job_results(789)
+        results = view._load_job_results(789, MagicMock())
 
         assert len(results) == 2
         assert results[0]["hostname"] == "device1"
@@ -1261,7 +1261,7 @@ class TestLoadJobResults:
         mock_cache.get.return_value = {"device_id": 1}
 
         view = LibreNMSImportView()
-        view._load_job_results(456)
+        view._load_job_results(456, MagicMock())
 
         assert view._cache_timestamp == "2026-01-20T12:00:00Z"
         assert view._cache_timeout == 900
@@ -1276,7 +1276,7 @@ class TestLoadJobResults:
         mock_job_class.objects.get.side_effect = mock_job_class.DoesNotExist
 
         view = LibreNMSImportView()
-        results = view._load_job_results(999)
+        results = view._load_job_results(999, MagicMock())
 
         assert results == []
 
@@ -1290,7 +1290,7 @@ class TestLoadJobResults:
         mock_job_class.objects.get.return_value = mock_job
 
         view = LibreNMSImportView()
-        results = view._load_job_results(123)
+        results = view._load_job_results(123, MagicMock())
 
         assert results == []
 
@@ -1318,7 +1318,7 @@ class TestLoadJobResults:
         mock_cache.get.return_value = None
 
         view = LibreNMSImportView()
-        results = view._load_job_results(123)
+        results = view._load_job_results(123, MagicMock())
 
         assert results == []
 
@@ -1350,7 +1350,7 @@ class TestLoadJobResults:
         ]
 
         view = LibreNMSImportView()
-        results = view._load_job_results(123)
+        results = view._load_job_results(123, MagicMock())
 
         # Should return available devices only
         assert len(results) == 2

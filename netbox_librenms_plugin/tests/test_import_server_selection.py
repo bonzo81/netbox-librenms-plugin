@@ -697,6 +697,154 @@ def test_import_clear_controls_preserve_other_server_cache_namespaces(client, se
 
 
 @pytest.mark.django_db
+def test_completed_filter_job_results_are_private_to_the_job_owner(client, settings):
+    """A superuser cannot load another user's cached import results by job ID."""
+    from core.models import Job
+    from django.contrib.auth import get_user_model
+    from django.core.cache import cache
+
+    from netbox_librenms_plugin.import_utils import get_validated_device_cache_key
+
+    _configure_servers(settings)
+    LibreNMSSettings.objects.update_or_create(pk=1, defaults={"selected_server": "primary"})
+    user_model = get_user_model()
+    owner = user_model.objects.create(username="private-job-owner", is_superuser=True, is_active=True)
+    requester = user_model.objects.create(username="private-job-requester", is_superuser=True, is_active=True)
+    import_url = reverse("plugins:netbox_librenms_plugin:librenms_import")
+    device_id = 46105
+    filters = {"hostname": "private-job-result"}
+    cached_device = _import_device(device_id, "private-job-result")
+    cache_key = get_validated_device_cache_key(
+        server_key="secondary",
+        filters=filters,
+        device_id=device_id,
+        vc_enabled=False,
+        use_sysname=True,
+        strip_domain=False,
+    )
+    cache.set(cache_key, cached_device, timeout=300)
+    job = Job.objects.create(
+        name="Private transient server filter job",
+        user=owner,
+        job_id=uuid4(),
+        status="completed",
+        data={
+            "device_ids": [device_id],
+            "filters": filters,
+            "server_key": "secondary",
+            "vc_detection_enabled": False,
+            "use_sysname": True,
+            "strip_domain": False,
+        },
+    )
+    client.force_login(requester)
+
+    def librenms_response(request_url, **_kwargs):
+        if request_url in {
+            "https://primary.example.com/api/v0/resources/locations",
+            "https://secondary.example.com/api/v0/resources/locations",
+        }:
+            return _json_response(request_url, {"status": "ok", "locations": []})
+        raise AssertionError(f"Unexpected LibreNMS request: {request_url}")
+
+    try:
+        with patch("netbox_librenms_plugin.librenms_api.requests.get", side_effect=librenms_response):
+            response = client.get(import_url, {"job_id": job.pk})
+    finally:
+        cache.delete(cache_key)
+
+    assert response.status_code == 200
+    html = response.content.decode()
+    marker = "private-job-result"
+    marker_index = html.find(marker)
+    assert marker_index == -1, html[max(0, marker_index - 200) : marker_index + 200]
+
+
+@pytest.mark.django_db
+def test_non_superuser_job_url_falls_back_to_synchronous_server_search(client, settings):
+    """A non-superuser cannot load job data and can still run a server-scoped search."""
+    from core.models import Job
+    from dcim.models import Device
+    from django.core.cache import cache
+
+    from netbox_librenms_plugin.import_utils import get_validated_device_cache_key
+    from netbox_librenms_plugin.tests.view_test_helpers import make_user_with_perms
+
+    _configure_servers(settings)
+    LibreNMSSettings.objects.update_or_create(pk=1, defaults={"selected_server": "primary"})
+    user = make_user_with_perms("non-superuser-job-requester", [("view", Device)])
+    import_url = reverse("plugins:netbox_librenms_plugin:librenms_import")
+    job_device_id = 46106
+    filters = {"hostname": "private-non-superuser-job-result"}
+    cache_key = get_validated_device_cache_key(
+        server_key="secondary",
+        filters=filters,
+        device_id=job_device_id,
+        vc_enabled=False,
+        use_sysname=True,
+        strip_domain=False,
+    )
+    cache.set(cache_key, _import_device(job_device_id, "private-non-superuser-job-result"), timeout=300)
+    job = Job.objects.create(
+        name="Non-superuser transient server filter job",
+        user=user,
+        job_id=uuid4(),
+        status="completed",
+        data={
+            "device_ids": [job_device_id],
+            "filters": filters,
+            "server_key": "secondary",
+            "vc_detection_enabled": False,
+            "use_sysname": True,
+            "strip_domain": False,
+        },
+    )
+    client.force_login(user)
+    requested_urls = []
+
+    def librenms_response(request_url, **_kwargs):
+        requested_urls.append(request_url)
+        if request_url.endswith("/api/v0/resources/locations"):
+            return _json_response(request_url, {"status": "ok", "locations": []})
+        if request_url == "https://primary.example.com/api/v0/devices":
+            return _json_response(
+                request_url,
+                {"status": "ok", "devices": [_import_device(46107, "non-superuser-sync-result")]},
+            )
+        if request_url == "https://primary.example.com/api/v0/devices/46107":
+            return _json_response(
+                request_url,
+                {"status": "ok", "devices": [_import_device(46107, "non-superuser-sync-result")]},
+            )
+        if request_url.startswith("https://primary.example.com/api/v0/inventory/46107"):
+            return _json_response(request_url, {"status": "ok", "inventory": []})
+        raise AssertionError(f"Unexpected LibreNMS request: {request_url}")
+
+    try:
+        with patch("netbox_librenms_plugin.librenms_api.requests.get", side_effect=librenms_response):
+            job_response = client.get(import_url, {"job_id": job.pk})
+            with patch("netbox_librenms_plugin.jobs.FilterDevicesJob.enqueue") as enqueue:
+                search_response = client.get(
+                    import_url,
+                    {
+                        "server_key": "primary",
+                        "apply_filters": "1",
+                        "librenms_hostname": "sync-result",
+                        "use_background_job": "1",
+                    },
+                )
+    finally:
+        cache.delete(cache_key)
+
+    assert job_response.status_code == 200
+    assert b"private-non-superuser-job-result" not in job_response.content
+    assert search_response.status_code == 200
+    assert b"non-superuser-sync-result" in search_response.content
+    enqueue.assert_not_called()
+    assert "https://primary.example.com/api/v0/devices" in requested_urls
+
+
+@pytest.mark.django_db
 def test_completed_filter_job_rebinds_results_and_follow_up_forms_to_its_server(client, settings):
     """A completed job remains authoritative when its result URL omits server_key."""
     from core.models import Job
