@@ -25,6 +25,8 @@ from netbox_librenms_plugin.constants import (
 from netbox_librenms_plugin.ip_addressing import parse_address_with_prefix, parse_host_address
 from netbox_librenms_plugin.server_mappings import (
     PREFERRED_SERVER_FIELD,
+    SameServerIdentityConflict,
+    StaleIdentityReplacement,
     iter_server_mapping_entries,
     require_server_key,
 )
@@ -2286,7 +2288,9 @@ def set_librenms_device_id(obj, device_id, server_key: str = "default"):
     obj.custom_field_data["librenms_id"] = cf_value
 
 
-def add_librenms_server_mapping(obj, device_id, server_key: str, *, configured_server_keys) -> None:
+def add_librenms_server_mapping(
+    obj, device_id, server_key: str, *, configured_server_keys, confirmed_replacement_of: int | None = None
+) -> None:
     """Add one import mapping while preserving the object's established server choice.
 
     The first mapping stays implicit. When this call adds a second usable mapping and the
@@ -2298,9 +2302,13 @@ def add_librenms_server_mapping(obj, device_id, server_key: str, *, configured_s
         device_id: LibreNMS device ID for ``server_key``.
         server_key: Active import server key.
         configured_server_keys: Server keys that are currently usable.
+        confirmed_replacement_of: Host ID the caller confirmed replacing on ``server_key``. It is
+            compared against the locked row, so a confirmation issued for different state fails.
 
     Raises:
         ValueError: If the custom-field container is not a server mapping or uses the legacy format.
+        SameServerIdentityConflict: If an unconfirmed call would replace a different host ID.
+        StaleIdentityReplacement: If ``confirmed_replacement_of`` is not the current host ID.
     """
     server_key = require_server_key(server_key)
     normalized_device_id = coerce_librenms_id(device_id)
@@ -2318,11 +2326,13 @@ def add_librenms_server_mapping(obj, device_id, server_key: str, *, configured_s
         existing_host_id = coerce_librenms_id(existing_entry.get("id"))
     else:
         existing_host_id = coerce_librenms_id(existing_entry)
-    if existing_host_id is not None and existing_host_id != normalized_device_id:
-        raise ValueError(
-            f"LibreNMS server '{server_key}' is already mapped to host ID {existing_host_id}. "
-            f"Replacing it with {normalized_device_id} requires the separate replacement confirmation."
-        )
+    # The confirmation carries the host ID the user was shown, so comparing it against the locked
+    # row rejects a replay and any change made after the confirmation was issued.
+    if confirmed_replacement_of is not None:
+        if existing_host_id != confirmed_replacement_of:
+            raise StaleIdentityReplacement(server_key, existing_host_id, confirmed_replacement_of)
+    elif existing_host_id is not None and existing_host_id != normalized_device_id:
+        raise SameServerIdentityConflict(server_key, existing_host_id, normalized_device_id)
 
     configured_keys = set(configured_server_keys)
     previous_usable_keys = [

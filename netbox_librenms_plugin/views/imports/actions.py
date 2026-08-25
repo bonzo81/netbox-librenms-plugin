@@ -20,6 +20,13 @@ from django.utils.text import slugify
 from django.views import View
 
 from netbox_librenms_plugin.constants import OOB_TYPES
+from netbox_librenms_plugin.identity_replacement import (
+    INTENT_FIELD,
+    IdentityReplacementIntent,
+    InvalidIdentityReplacementIntent,
+    load_identity_replacement_intent,
+    sign_identity_replacement_intent,
+)
 from netbox_librenms_plugin.import_utils import (
     _determine_device_name,
     bulk_import_devices,
@@ -45,7 +52,11 @@ from netbox_librenms_plugin.import_validation_helpers import (
     merge_candidate_pks,
 )
 from netbox_librenms_plugin.ip_addressing import parse_host_address
-from netbox_librenms_plugin.server_mappings import iter_server_mapping_entries
+from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+from netbox_librenms_plugin.server_mappings import (
+    SameServerIdentityConflict,
+    iter_server_mapping_entries,
+)
 from netbox_librenms_plugin.server_selection import parse_configured_server_key
 from netbox_librenms_plugin.tables.device_status import DeviceImportTable
 from netbox_librenms_plugin.utils import (
@@ -137,6 +148,13 @@ def _attach_messages_oob(response, request):
 
 # Actions that require the force checkbox when a device-type mismatch is detected.
 _FORCE_REQUIRED_ACTIONS = frozenset({"link", "update", "update_serial", "update_type"})
+# Only these two are ever posted; ``existing._meta.model_name`` produces them.
+_SUPPORTED_EXISTING_OBJECT_TYPES = frozenset({"device", "virtualmachine"})
+_MAPPING_ACTION_LABELS = {
+    "link": "Link to LibreNMS",
+    "update": "Update and link",
+    "update_serial": "Update serial and link",
+}
 
 # Existing-interface names that look like an OOB/management port, used to pre-select the
 # OOB-attach interface suggestion. Compiled once at import; see _suggest_oob_interface().
@@ -249,6 +267,55 @@ def _htmx_error_response(message: str) -> HttpResponse:
     # our OOB-only payload; OOB still applies regardless of HX-Reswap.
     resp["HX-Reswap"] = "none"
     return resp
+
+
+def _render_identity_replacement_confirmation(request, obj, action, force, conflict) -> HttpResponse:
+    """
+    Offer the signed confirmation for one blocked same-server identity replacement.
+
+    Args:
+        request: The current HTMX request.
+        obj: The locked Device or VirtualMachine whose mapping would change.
+        action: The mapping action that was blocked.
+        force: Whether the blocked action carried the device-type force flag.
+        conflict: The raised :class:`SameServerIdentityConflict`.
+
+    Returns:
+        HttpResponse: The confirmation dialog, swapped over the open modal.
+    """
+    intent = IdentityReplacementIntent(
+        user_pk=request.user.pk,
+        object_type=obj._meta.model_name,
+        object_pk=obj.pk,
+        server_key=conflict.server_key,
+        action=action,
+        force=force,
+        current_host_id=conflict.current_host_id,
+        proposed_host_id=conflict.proposed_host_id,
+    )
+    use_sysname, strip_domain = resolve_naming_preferences(request)
+    # Identity and labels come from the locked row, never from the posted form.
+    response = render(
+        request,
+        "netbox_librenms_plugin/htmx/identity_replacement_confirm.html",
+        {
+            "intent_field": INTENT_FIELD,
+            "intent_token": sign_identity_replacement_intent(intent),
+            "confirm_url": request.path,
+            "object_label": obj._meta.verbose_name,
+            "object_name": str(obj),
+            "server_key": conflict.server_key,
+            "server_display_name": LibreNMSAPI.get_available_servers().get(conflict.server_key, conflict.server_key),
+            "current_host_id": conflict.current_host_id,
+            "proposed_host_id": conflict.proposed_host_id,
+            "action_label": _MAPPING_ACTION_LABELS.get(action, action),
+            "use_sysname": use_sysname,
+            "strip_domain": strip_domain,
+        },
+    )
+    # OOB-only payload: leave the row the action was posted from untouched.
+    response["HX-Reswap"] = "none"
+    return response
 
 
 def _rebind_or_htmx_error(view, request) -> HttpResponse | None:
@@ -1836,19 +1903,40 @@ class DeviceConflictActionView(
 
         from dcim.models import Device
 
-        action = request.POST.get("action")
-        existing_device_id = request.POST.get("existing_device_id")
-        existing_device_type = request.POST.get("existing_device_type", "device")
+        # A signed confirmation is authoritative: the object, server, action, force flag, and both
+        # host IDs are read back from it so the confirming form cannot re-aim the replacement.
+        replacement_intent = None
+        if raw_intent := request.POST.get(INTENT_FIELD):
+            try:
+                replacement_intent = load_identity_replacement_intent(raw_intent)
+            except InvalidIdentityReplacementIntent as exc:
+                return _htmx_error_response(str(exc))
+            if replacement_intent.user_pk != request.user.pk:
+                return _htmx_error_response("The replacement confirmation was issued for a different user.")
+
+        if replacement_intent is not None:
+            action = replacement_intent.action
+            existing_device_id = str(replacement_intent.object_pk)
+            existing_device_type = replacement_intent.object_type
+            server_key_source = {"server_key": replacement_intent.server_key}
+        else:
+            action = request.POST.get("action")
+            existing_device_id = request.POST.get("existing_device_id")
+            existing_device_type = request.POST.get("existing_device_type", "device")
+            server_key_source = request.POST
 
         # If the form submitted a specific server_key, honour it so the handler uses
         # the same server context as the import page when the user clicked the button.
         # Rebind to the POSTed server, failing closed (blank/unknown/misconfigured) so a missing
         # or broken default can't 500 via the lazy librenms_api property.
-        if err := _rebind_or_htmx_error(self, request):
-            return err
+        if _rebind_configured_import_server(self, server_key_source) is None:
+            return _htmx_error_response("Selected LibreNMS server is no longer configured.")
 
         if not action or not existing_device_id:
             return _htmx_error_response("Missing action or existing_device_id")
+
+        if existing_device_type not in _SUPPORTED_EXISTING_OBJECT_TYPES:
+            return _htmx_error_response(f"Unsupported object type '{existing_device_type}'")
 
         from virtualization.models import VirtualMachine as NetBoxVM
 
@@ -1889,7 +1977,7 @@ class DeviceConflictActionView(
             return _htmx_error_response("Device ID mismatch: existing_device_id does not match validated device")
 
         # Require force flag when device type mismatches, but only for actions that use it
-        force = request.POST.get("force") == "on"
+        force = replacement_intent.force if replacement_intent is not None else request.POST.get("force") == "on"
         if validation.get("device_type_mismatch") and action in _FORCE_REQUIRED_ACTIONS and not force:
             return _htmx_error_response("Device type mismatch detected. Check the force checkbox to proceed.")
 
@@ -1903,6 +1991,14 @@ class DeviceConflictActionView(
         librenms_id = coerce_librenms_id(libre_device.get("device_id"))
         if librenms_id is None:
             return _htmx_error_response("Invalid or missing LibreNMS device_id in payload")
+
+        # The confirmation names one proposed host ID; a LibreNMS payload that no longer reports it
+        # would replace the mapping with something the user never saw.
+        if replacement_intent is not None and librenms_id != replacement_intent.proposed_host_id:
+            return _htmx_error_response(
+                f"The proposed LibreNMS host ID changed from {replacement_intent.proposed_host_id} "
+                f"to {librenms_id} since the confirmation was issued. Re-run the action."
+            )
 
         # Keep the LibreNMS-ID collision check and subsequent write in one transaction.
         # A transaction-scoped lock on the server/ID claim serializes writers across both
@@ -1962,7 +2058,12 @@ class DeviceConflictActionView(
                         librenms_id,
                         self.librenms_api.server_key,
                         configured_server_keys=self.librenms_api.get_available_servers(),
+                        confirmed_replacement_of=(
+                            replacement_intent.current_host_id if replacement_intent is not None else None
+                        ),
                     )
+                except SameServerIdentityConflict as exc:
+                    return _render_identity_replacement_confirmation(request, existing_device, action, force, exc)
                 except ValueError as exc:
                     return _htmx_error_response(str(exc))
 

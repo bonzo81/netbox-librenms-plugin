@@ -51,3 +51,31 @@ def without_server_mapping(value, server_key: str) -> dict:
     if updated.get(PREFERRED_SERVER_FIELD) == server_key:
         updated.pop(PREFERRED_SERVER_FIELD, None)
     return updated
+
+
+class SameServerIdentityConflict(ValueError):
+    """The active server already maps this object to a different LibreNMS host ID."""
+
+    def __init__(self, server_key: str, current_host_id: int, proposed_host_id: int):
+        self.server_key = server_key
+        self.current_host_id = current_host_id
+        self.proposed_host_id = proposed_host_id
+        super().__init__(
+            f"LibreNMS server '{server_key}' is already mapped to host ID {current_host_id}. "
+            f"Replacing it with {proposed_host_id} requires the separate replacement confirmation."
+        )
+
+
+class StaleIdentityReplacement(ValueError):
+    """A confirmed replacement no longer matches the object's current mapping."""
+
+    def __init__(self, server_key: str, current_host_id, expected_host_id: int):
+        self.server_key = server_key
+        self.current_host_id = current_host_id
+        self.expected_host_id = expected_host_id
+        current = "no host ID" if current_host_id is None else f"host ID {current_host_id}"
+        super().__init__(
+            f"The replacement confirmation no longer matches the current mapping: server "
+            f"'{server_key}' now has {current}, not host ID {expected_host_id}. "
+            "Re-run the action to get a fresh confirmation."
+        )

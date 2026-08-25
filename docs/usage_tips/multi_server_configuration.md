@@ -77,6 +77,10 @@ The Device Import page starts on the installation default. Use the server select
 
 Changing the import server clears the current filters and results. The **Clear** action also clears filters and results, but it keeps the active server. Searches, cached results, background jobs, validation actions, and imports stay on that server until you choose another one.
 
+### Replacing an identity on the active server
+
+An import link or update action never replaces a different host ID that the object already stores for the active server. It is blocked, and a separate confirmation offers the replacement. Confirming changes only that server's host ID and keeps its out-of-band link, every other server mapping, and the preferred server. See [Validation](../librenms_import/validation.md#replacing-a-librenms-identity).
+
 ### Object sync server selection
 
 The LibreNMS Connections card uses separate indicators for the active server and the preferred server:
