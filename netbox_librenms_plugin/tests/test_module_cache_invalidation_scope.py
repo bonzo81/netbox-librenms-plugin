@@ -4,7 +4,11 @@ from types import SimpleNamespace
 
 import pytest
 
-from netbox_librenms_plugin.tests.cache_test_helpers import seed_every_tab, snapshot_state
+from netbox_librenms_plugin.tests.cache_test_helpers import (
+    drain_pending_commit_callbacks,
+    seed_every_tab,
+    snapshot_state,
+)
 from netbox_librenms_plugin.tests.view_test_helpers import make_request, make_view
 from netbox_librenms_plugin.tests.view_test_helpers import post as _post
 
@@ -189,6 +193,12 @@ class TestModuleActionsInvalidateEveryChangedDevice:
         try:
             with django_capture_on_commit_callbacks(execute=True):
                 _post(view, request, pk=page_device.pk)
+            # Without this the control passes on any early POST failure (permission, cache
+            # validation, module-type resolution), none of which invalidate anything.
+            assert not Module.objects.filter(pk=conflict.pk).exists(), (
+                "the replace never removed the serial-conflicting module, "
+                "so this control never exercised any invalidation"
+            )
             remaining = snapshot_state(bystander)
         finally:
             cache.delete(key)
@@ -230,7 +240,7 @@ class TestModuleActionsInvalidateEveryChangedDevice:
         sibling_only_key = SyncCacheConsistency(sibling).snapshot_key(SyncTab.IP_ADDRESSES, "default")
         cache.set(shared_key, [{"seeded": "modules"}], timeout=300)
         cache.set(sibling_only_key, [{"seeded": "ipaddresses"}], timeout=300)
-        transaction.get_connection().run_on_commit.clear()
+        drain_pending_commit_callbacks()
 
         try:
             # The claim has to outlive the flush, exactly as CacheMixin.dispatch holds it for
