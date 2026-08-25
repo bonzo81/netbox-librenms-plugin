@@ -347,8 +347,14 @@ def collect_container_names(paths):
             for source_path, qualifier in module_imports_by_path[path]:
                 if source_path is None:
                     continue
-                for source_name in names_by_path[source_path]:
-                    target_name = f"{qualifier}.{source_name}"
+                prefix = f"{qualifier}."
+                # A self-import (`import pkg.mod` inside pkg/mod.py) reads the set it writes:
+                # iterate a copy, and never re-qualify a name this qualifier already carries,
+                # or each pass prepends the qualifier again and the fixed point never settles.
+                for source_name in tuple(names_by_path[source_path]):
+                    if source_path == path and source_name.startswith(prefix):
+                        continue
+                    target_name = f"{prefix}{source_name}"
                     if target_name not in names_by_path[path]:
                         names_by_path[path].add(target_name)
                         changed = True

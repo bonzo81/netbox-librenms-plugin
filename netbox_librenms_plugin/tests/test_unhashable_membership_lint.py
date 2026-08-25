@@ -221,6 +221,17 @@ def test_an_import_alias_does_not_inherit_an_unrelated_modules_container_type(tm
     assert not findings, f"an unrelated container name contaminated the import alias: {findings}"
 
 
+def test_a_self_importing_module_still_reaches_a_fixed_point(tmp_path):
+    """`import sample` inside sample.py makes the resolver read the set it writes."""
+    target = tmp_path / "sample.py"
+    target.write_text('import sample\n\nNAMES = frozenset({"a"})\n')
+
+    names = collect_container_names((target,))[target]
+
+    assert "NAMES" in names
+    assert "sample.NAMES" in names
+
+
 def test_the_plugin_package_is_clean():
     """The whole point of the sweep: no unguarded site is left behind."""
     from lint_unhashable_membership import iter_python_files, main
