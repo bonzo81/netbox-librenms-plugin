@@ -80,11 +80,7 @@ def test_interface_move_preserves_source_snapshots_for_donor_and_winner(
     unrelated = make_device("claim-interface-unrelated", librenms_cf={SERVER_KEY: {"id": 3}})
     _mark_migrated(donor, winner)
 
-    interface_number = 1
-    interface = make_interface(donor, f"Ethernet{interface_number}", iface_type="1000base-t")
-    while interface.pk in {donor.pk, winner.pk, unrelated.pk}:
-        interface_number += 1
-        interface = make_interface(donor, f"Ethernet{interface_number}", iface_type="1000base-t")
+    interface = make_interface(donor, "Ethernet1", iface_type="1000base-t")
 
     snapshots = {device.pk: _seed_every_tab(device) for device in (donor, winner, unrelated)}
     assert cache.get(_snapshot_key(donor, SyncTab.INTERFACES)) == snapshots[donor.pk][SyncTab.INTERFACES]
@@ -133,11 +129,7 @@ def test_ip_address_move_preserves_source_snapshots_for_donor_and_winner(
     unrelated = make_device("claim-ip-unrelated", librenms_cf={SERVER_KEY: {"id": 6}})
     _mark_migrated(donor, winner)
 
-    address_number = 10
-    address = ip_on(donor, f"198.18.0.{address_number}/24", f"Ethernet{address_number}")
-    while address.pk in {donor.pk, winner.pk, unrelated.pk}:
-        address_number += 1
-        address = ip_on(donor, f"198.18.0.{address_number}/24", f"Ethernet{address_number}")
+    address = ip_on(donor, "198.18.0.10/24", "Ethernet10")
     make_interface(winner, address.assigned_object.name, iface_type="1000base-t")
 
     snapshots = {device.pk: _seed_every_tab(device) for device in (donor, winner, unrelated)}

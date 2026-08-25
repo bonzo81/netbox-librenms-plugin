@@ -339,6 +339,33 @@ def test_intact_seeds_are_left_alone_when_no_flush_is_detected():
     assert restore_seeded_state(force=False) is False
 
 
+@pytest.mark.django_db
+def test_a_surviving_row_does_not_hide_the_seeds_that_went_missing_with_it():
+    """A partial row loss must still restore, because one row is not the whole seed."""
+    for model, lookup_field, _value, rows in _seeded_model_rows():
+        survivor = rows[0][0]
+        removed, _details = model.objects.exclude(**{lookup_field: survivor}).delete()
+        assert removed, f"{model.__name__} kept every row, so this test never made the seed partial"
+
+    assert restore_seeded_state(force=False) is True
+
+    for model, lookup_field, _value, rows in _seeded_model_rows():
+        stored = set(model.objects.values_list(lookup_field, flat=True))
+        assert stored >= {lookup for lookup, _value in rows}
+
+
+@pytest.mark.django_db
+def test_a_missing_custom_field_restores_even_though_the_seeded_rows_are_intact():
+    """The custom field is seeded state too, so losing it alone must trigger a restore."""
+    from extras.models import CustomField
+
+    assert CustomField.objects.filter(name="librenms_id").exists(), "the custom field was already missing"
+    CustomField.objects.filter(name="librenms_id").delete()
+
+    assert restore_seeded_state(force=False) is True
+    assert CustomField.objects.filter(name="librenms_id").exists()
+
+
 def _run_netbox_test_alias(worker_value=None, *, db_name="test_alias_contract", redis_host="redis-alias-contract"):
     """Run the local test alias with pytest and the venv activation stubbed out."""
     script = "\n".join(

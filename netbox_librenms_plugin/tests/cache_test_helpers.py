@@ -33,6 +33,7 @@ def seed_every_tab(obj, server_key="default"):
         key = coordinator.snapshot_key(tab, server_key)
         cache.set(key, [{"seeded": tab.value}], timeout=300)
         keys.append(key)
+    assert keys, f"no tab applies to {obj!r}, so nothing was seeded and every assertion would be vacuous"
     assert all(cache.get(key) is not None for key in keys), "the seed never landed"
     return keys
 

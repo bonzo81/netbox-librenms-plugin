@@ -73,6 +73,19 @@ def test_tagged_vlan_through_model_rejects_an_unknown_shape():
 
 
 @pytest.mark.django_db
+def test_seeding_every_tab_refuses_a_subject_with_no_applicable_tab(monkeypatch):
+    """A seed that lands on no tab must fail, not leave every later assertion vacuous."""
+    from netbox_librenms_plugin import sync_cache
+    from netbox_librenms_plugin.tests.conftest import make_device
+
+    device = make_device("cache-helper-guard")
+    monkeypatch.setattr(sync_cache, "TAB_SPECS", {})
+
+    with pytest.raises(AssertionError, match="nothing was seeded"):
+        _seed_every_tab(device)
+
+
+@pytest.mark.django_db
 class TestOrmWritesInvalidateTheirOwner:
     """Every tracked write reaches the owning object's snapshots, whoever made it."""
 

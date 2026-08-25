@@ -152,9 +152,20 @@ def _restore_librenms_custom_field():
     _ensure_librenms_id_custom_field(sender=None, using="default")
 
 
+def _seeds_are_intact():
+    """Return whether every declared seed row and the plugin's custom field are present."""
+    from extras.models import CustomField
+
+    for model, lookup_field, _value, rows in _seeded_model_rows():
+        stored = set(model.objects.values_list(lookup_field, flat=True))
+        if not stored.issuperset(lookup for lookup, _value in rows):
+            return False
+    return CustomField.objects.filter(name="librenms_id").exists()
+
+
 def restore_seeded_state(*, force):
     """Recreate every row and custom field a flush removed, unless the seeds are intact."""
-    if not force and all(model.objects.exists() for model, _lookup, _value, _rows in _seeded_model_rows()):
+    if not force and _seeds_are_intact():
         return False
     seed_migration_rows()
     _restore_librenms_custom_field()
