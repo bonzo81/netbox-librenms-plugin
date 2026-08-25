@@ -1120,6 +1120,114 @@ class TestSerialSyncSurvivesHostLinks404:
         assert console_port.cable_id == csp.cable_id
         assert Cable.objects.filter(pk=csp.cable_id).exists()
 
+    def test_a_carried_over_serial_row_is_not_syncable(self, client):
+        """A refresh that could not read the serial source keeps the prior rows but must not sync them.
+
+        A user who may view the Device but no ConsoleServerPort does not authorize the instance-wide
+        sensor fetch, so the refresh carries the previous serial rows forward and records the source
+        as incomplete. LibreNMS may have moved that sensor since, so acting on the row would create a
+        cable from superseded data.
+        """
+        import json
+
+        import requests
+        from dcim.models import Cable, ConsolePort, Device, Interface
+        from django.core.cache import cache
+        from django.urls import reverse
+
+        from netbox_librenms_plugin.tests.conftest import make_superuser
+        from netbox_librenms_plugin.tests.view_test_helpers import make_user_with_perms
+        from netbox_librenms_plugin.utils import set_librenms_device_id
+        from netbox_librenms_plugin.views.sync.cables import SyncCablesView
+
+        local, (csp,), _ = make_serial_device("serial-carryover-local", csp_names=["ttyS7"])
+        server_key = configured_server_key()
+        set_librenms_device_id(local, 13, server_key)
+        local.save()
+        _remote, _, (console_port,) = make_serial_device("serial-carryover-remote", cp_names=["console"])
+
+        def routed_get(url, *args, **kwargs):
+            response = requests.models.Response()
+            response.url = url
+            if url.endswith("/links"):
+                response.status_code = 200
+                response._content = b'{"status":"ok","links":[]}'
+            elif url.endswith("/ports"):
+                response.status_code = 200
+                response._content = b'{"status":"ok","ports":[]}'
+            elif url.endswith("/resources/sensors"):
+                response.status_code = 200
+                response._content = json.dumps(
+                    {
+                        "status": "ok",
+                        "sensors": [
+                            {
+                                "sensor_id": 1007,
+                                "device_id": 13,
+                                "sensor_type": "acsSerialPortTable",
+                                "sensor_index": "acsSerialPortTableStatus.7",
+                                "sensor_descr": "serial-carryover-remote Status",
+                            }
+                        ],
+                    }
+                ).encode()
+            else:  # pragma: no cover - unexpected external route
+                response.status_code = 404
+                response._content = b"{}"
+            return response
+
+        cache_key = object.__new__(SyncCablesView).get_cache_key(local, "links", server_key)
+
+        # A privileged refresh reads the sensors and caches the serial row.
+        client.force_login(make_superuser())
+        with patch("netbox_librenms_plugin.librenms_api.requests.get", side_effect=routed_get):
+            client.post(
+                reverse("plugins:netbox_librenms_plugin:device_cable_sync", args=[local.pk]),
+                {"server_key": server_key},
+                HTTP_HX_REQUEST="true",
+            )
+        assert cache.get(cache_key)["incomplete_sources"] == []
+
+        # A refresh that may not view any ConsoleServerPort carries that row forward unread.
+        client.force_login(
+            make_user_with_perms(
+                "serial-carryover-restricted",
+                [("view", Device), ("view", Interface), ("view", ConsolePort), ("view", Cable)],
+            )
+        )
+        with patch("netbox_librenms_plugin.librenms_api.requests.get", side_effect=routed_get):
+            client.post(
+                reverse("plugins:netbox_librenms_plugin:device_cable_sync", args=[local.pk]),
+                {"server_key": server_key},
+                HTTP_HX_REQUEST="true",
+            )
+        carried = cache.get(cache_key)
+        assert carried["incomplete_sources"] == ["serial"]
+        assert [row["row_id"] for row in carried["links"]] == ["serial:1007"]
+
+        # The carried row must not create a cable, even for a user who could read the sensors.
+        client.force_login(make_superuser("serial-carryover-admin"))
+        synced = client.post(
+            reverse("plugins:netbox_librenms_plugin:sync_device_cables", args=[local.pk]),
+            {
+                "sync_one": "serial:1007",
+                "expected_local_id_serial:1007": csp.pk,
+                "expected_local_device_id_serial:1007": local.pk,
+                "expected_remote_id_serial:1007": console_port.pk,
+                "expected_remote_device_id_serial:1007": console_port.device_id,
+                "server_key": server_key,
+            },
+            HTTP_HX_REQUEST="true",
+        )
+
+        assert synced.status_code == 200
+        assert "Refresh Cables before syncing" in synced.content.decode()
+        csp.refresh_from_db()
+        console_port.refresh_from_db()
+        assert csp.cable_id is None
+        assert console_port.cable_id is None
+        assert not Cable.objects.exists()
+
     def test_host_link_remains_syncable_when_sensor_fetch_fails(self, client):
         """A serial sensor outage must not invalidate a successful host-link snapshot."""
         import json

@@ -162,6 +162,7 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libre
         """
         self._cable_row_identity_error = False
         self._cable_source_permission_error = False
+        self._incomplete_sources = set()
         server_key = getattr(self, "_post_server_key", None) or self.librenms_api.server_key
         cache_obj = get_librenms_sync_device(obj, server_key=server_key) or obj
         if not self.restricted_queryset(Device, "view").filter(pk=cache_obj.pk).exists():
@@ -181,6 +182,9 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libre
         )
         if cached_data["links"] and not links:
             self._cable_row_identity_error = True
+        incomplete = cached_data.get("incomplete_sources")
+        if isinstance(incomplete, list):
+            self._incomplete_sources = {source.lower() for source in incomplete if isinstance(source, str)}
         from netbox_librenms_plugin.views.object_sync.devices import DeviceCableTableView
 
         view = DeviceCableTableView()
@@ -647,6 +651,12 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libre
         # sync (interfaces.py) and module sync (modules.py).
         if link_data.get("_source") == "oob":
             return None, {"status": "skipped", "interface": display_name}
+        # A source named in incomplete_sources contributed no fresh rows to this snapshot, so a
+        # row still carrying it was carried over from an earlier refresh (see the permission-skip
+        # carry-over in cables_view). LibreNMS may have moved that sensor since, so the row is
+        # unverified: show it, but never create or replace a cable from it.
+        if (link_data.get("_source") or "host").lower() in getattr(self, "_incomplete_sources", set()):
+            return None, {"status": "unverified", "interface": display_name}
         # A multi-termination (breakout) cable on either end stops the enrichment before it
         # resolves the remote IDs, so the expected-endpoint check would report the row as
         # "stale". Name the real reason instead; classify_cable_action still catches a cable
@@ -866,6 +876,7 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libre
             "conflict": [],
             "denied": [],
             "stale": [],
+            "unverified": [],
             "unsupported": [],
             "patch_path": [],
         }
@@ -1069,6 +1080,13 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libre
                 request,
                 "The cable state or target changed after confirmation. Refresh and review the current cable for: "
                 f"{', '.join(results['stale'])}",
+            )
+        if results.get("unverified"):
+            messages.error(
+                request,
+                "These links come from a LibreNMS source the last refresh could not read, so they "
+                "may be out of date. Refresh Cables before syncing: "
+                f"{', '.join(results['unverified'])}.",
             )
         if results.get("unsupported"):
             messages.error(
