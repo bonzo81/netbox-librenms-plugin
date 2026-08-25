@@ -1234,6 +1234,32 @@ def test_request_transitions_for_different_servers_preserve_both_sources(setting
     } == source_payloads
 
 
+@pytest.mark.django_db(transaction=True)
+def test_a_response_built_inside_the_transaction_reports_the_committed_cleanup(settings):
+    """A response serialized before commit must still report the cleanup that commit runs.
+
+    Under ATOMIC_REQUESTS, or any caller that wraps the view, schedule_mutation defers the
+    cleanup to commit, so the transition is still empty when the endpoint builds its response.
+    """
+    server_key = _configured_server_key(settings)
+    device = make_device("cache-deferred-response", librenms_cf={server_key: {"id": 651}})
+    interface = make_interface(device, "Ethernet1", iface_type="1000base-t")
+    # Seed a DEPENDENT tab: schedule_mutation discards the source tab from cleanup_tabs when
+    # the device is mapped to the active server, so seeding "ports" would clean nothing.
+    _seed_snapshot("ip_addresses", device, server_key, {"snapshot": "pre-commit"})
+    request = RequestFactory().post("/sync", HTTP_HX_REQUEST="true")
+    request.user = make_superuser("cache-deferred-response-user")
+
+    with claim_sync_subjects(sync_subject_key(device)), transaction.atomic():
+        interface.delete()
+        schedule_request_cache_mutation(request, device, SyncTab.INTERFACES, server_key)
+        response = apply_request_cache_transition(request, HttpResponse())
+
+    trigger = json.loads(response["HX-Trigger"])["librenmsCacheChanged"]
+    assert trigger["removed"] is True, "the browser was told nothing was removed"
+    assert trigger["revisions"], "the browser got no revision for the cleaned tab"
+
+
 @pytest.mark.django_db
 def test_module_serial_update_without_a_usable_server_invalidates_the_source_snapshot(
     client,

@@ -791,7 +791,16 @@ def apply_transition_to_response(request, response, transition):
     """Attach one mutation transition to the endpoint's existing response style."""
     if transition is None:
         return response
+    if not transition.completed and transaction.get_connection().in_atomic_block:
+        # schedule_mutation() deferred the cleanup to commit, so the transition is still empty:
+        # serializing now reports removed=false and no revisions for cleanup that does run.
+        transaction.on_commit(lambda: _write_transition_to_response(request, response, transition))
+        return response
+    return _write_transition_to_response(request, response, transition)
 
+
+def _write_transition_to_response(request, response, transition):
+    """Serialize one completed transition onto the response headers and messages."""
     payload = transition.browser_payload()
     response["X-LibreNMS-Cache-Transition"] = json.dumps(payload, separators=(",", ":"))
     browser_navigation = bool(response.get("Location") or response.get("HX-Redirect"))
@@ -861,9 +870,18 @@ def apply_request_cache_transition(request, response):
     transitions = getattr(request, "_librenms_cache_transitions", None)
     if not isinstance(transitions, list):
         transitions = []
-    transition = merge_cache_transitions(transitions)
+    if (
+        any(transition is not None and not transition.completed for transition in transitions)
+        and transaction.get_connection().in_atomic_block
+    ):
+        # Merge from the commit queue too: merge_cache_transitions() snapshots removed_tabs and
+        # revisions eagerly, so merging now would freeze the pre-commit emptiness.
+        transaction.on_commit(
+            lambda: _write_transition_to_response(request, response, merge_cache_transitions(transitions))
+        )
+        return response
     return apply_transition_to_response(
         request,
         response,
-        transition,
+        merge_cache_transitions(transitions),
     )
