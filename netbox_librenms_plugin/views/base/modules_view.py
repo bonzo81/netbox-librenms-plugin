@@ -539,19 +539,24 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
             logger.warning("Port metadata fetch failed for device %s: %s", self.librenms_id, ports_error)
             messages.warning(
                 request,
-                "Inventory refreshed, but port metadata fetch failed; interface matching may be incomplete."
-                " See server logs for details.",
+                "Inventory refresh was incomplete: port metadata fetch failed, so no module rows were"
+                " loaded. Refresh Modules to try again. See server logs for details.",
             )
         if txr_error:
             logger.warning("Transceiver fetch failed for device %s: %s", self.librenms_id, txr_error)
-            messages.warning(request, "Inventory refreshed, but transceiver fetch failed; see server logs for details.")
+            messages.warning(
+                request,
+                "Inventory refresh was incomplete: transceiver fetch failed, so no module rows were loaded."
+                " Refresh Modules to try again. See server logs for details.",
+            )
         if oob_failed:
             # Keep the toast generic — the device/OOB ids are already in the logger.warning
             # above (line ~418); surfacing internal LibreNMS ids in the UI is needless leakage
             # and inconsistent with the ports/transceiver toasts.
             messages.warning(
                 request,
-                "Inventory refreshed, but OOB controller inventory fetch failed; see server logs for details.",
+                "Inventory refresh was incomplete: OOB controller inventory fetch failed, so no module rows"
+                " were loaded. Refresh Modules to try again. See server logs for details.",
             )
         if not refresh_incomplete:
             messages.success(request, "Inventory data refreshed successfully.")

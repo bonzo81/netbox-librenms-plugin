@@ -1024,8 +1024,8 @@ class TestMergeTransceiverDataPortIdentity:
 
         mock_messages.warning.assert_called_once_with(
             request,
-            "Inventory refreshed, but port metadata fetch failed; interface matching may be incomplete."
-            " See server logs for details.",
+            "Inventory refresh was incomplete: port metadata fetch failed, so no module rows were"
+            " loaded. Refresh Modules to try again. See server logs for details.",
         )
         mock_messages.success.assert_not_called()
 
@@ -1061,8 +1061,8 @@ class TestMergeTransceiverDataPortIdentity:
         mock_cache.delete.assert_called_once_with("test_cache_key")
         mock_messages.warning.assert_called_once_with(
             request,
-            "Inventory refreshed, but port metadata fetch failed; interface matching may be incomplete."
-            " See server logs for details.",
+            "Inventory refresh was incomplete: port metadata fetch failed, so no module rows were"
+            " loaded. Refresh Modules to try again. See server logs for details.",
         )
         mock_messages.success.assert_not_called()
 

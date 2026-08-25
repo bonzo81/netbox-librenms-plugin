@@ -4,7 +4,9 @@ A lint nobody trusts gets disabled, so the negative cases matter as much as the 
 ones. Each sample is written to a temporary file and scanned exactly as CI scans the package.
 """
 
+import signal
 import sys
+from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
@@ -27,6 +29,22 @@ def _scan(tmp_path, source, extra_sources=()):
     target.write_text(source)
     paths.append(target)
     return check_file(target, collect_container_names(paths)[target])
+
+
+@contextmanager
+def _settles_within(seconds):
+    """Fail instead of hanging when the fixed-point loop never terminates."""
+
+    def _timed_out(_signum, _frame):
+        raise AssertionError(f"collect_container_names did not settle within {seconds}s")
+
+    previous = signal.signal(signal.SIGALRM, _timed_out)
+    signal.alarm(seconds)
+    try:
+        yield
+    finally:
+        signal.alarm(0)
+        signal.signal(signal.SIGALRM, previous)
 
 
 CONSTANTS = 'NAMES = frozenset({"ifName", "ifDescr"})\nPREFS = {"a": 1}\n'
@@ -230,6 +248,23 @@ def test_a_self_importing_module_still_reaches_a_fixed_point(tmp_path):
 
     assert "NAMES" in names
     assert "sample.NAMES" in names
+
+
+def test_two_modules_that_import_each_other_reach_a_fixed_point(tmp_path):
+    """A mutual `import` pair re-qualified each other's names, so the loop never settled."""
+    package = tmp_path / "pkg"
+    package.mkdir()
+    first = package / "a.py"
+    second = package / "b.py"
+    first.write_text('import pkg.b\n\nNAMES = frozenset({"a"})\n')
+    second.write_text('import pkg.a\n\nOTHER = frozenset({"b"})\n')
+
+    with _settles_within(10):
+        names = collect_container_names((first, second))
+
+    assert "pkg.b.OTHER" in names[first]
+    assert "pkg.a.NAMES" in names[second]
+    assert not [name for name in names[first] if name.startswith("pkg.b.pkg.")]
 
 
 def test_the_plugin_package_is_clean():

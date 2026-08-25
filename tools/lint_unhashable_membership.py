@@ -334,6 +334,9 @@ def collect_container_names(paths):
             if isinstance(node, ast.Import)
             for alias in node.names
         )
+    module_qualifiers = tuple(
+        sorted({f"{qualifier}." for imports in module_imports_by_path.values() for _source_path, qualifier in imports})
+    )
     changed = True
     while changed:
         changed = False
@@ -348,11 +351,10 @@ def collect_container_names(paths):
                 if source_path is None:
                     continue
                 prefix = f"{qualifier}."
-                # A self-import (`import pkg.mod` inside pkg/mod.py) reads the set it writes:
-                # iterate a copy, and never re-qualify a name this qualifier already carries,
-                # or each pass prepends the qualifier again and the fixed point never settles.
+                # Re-qualifying an already qualified name never settles: a self-import reads the
+                # set it writes, and a mutual import pair prepends the two qualifiers in turn.
                 for source_name in tuple(names_by_path[source_path]):
-                    if source_path == path and source_name.startswith(prefix):
+                    if source_name.startswith(module_qualifiers):
                         continue
                     target_name = f"{prefix}{source_name}"
                     if target_name not in names_by_path[path]:

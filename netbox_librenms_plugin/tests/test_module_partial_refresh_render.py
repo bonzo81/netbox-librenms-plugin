@@ -134,3 +134,6 @@ class TestPartialModuleRefreshRendersEmpty:
         assert snapshot_dropped, "the truncated snapshot was left to be served as complete"
         assert any(expected in text for text in message_texts(request)), message_texts(request)
         assert "Inventory data refreshed successfully." not in message_texts(request)
+        warning = next(text for text in message_texts(request) if expected in text)
+        assert "Inventory refreshed" not in warning, warning
+        assert "no module rows were loaded" in warning, warning
