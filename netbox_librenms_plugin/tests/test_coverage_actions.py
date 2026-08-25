@@ -48,7 +48,9 @@ def _make_request(post=None, get=None, headers=None, user_is_superuser=False):
 
     def getlist(data, key):
         value = data.get(key, [])
-        return value if isinstance(value, list) else [value]
+        # QueryDict.getlist() returns a copy (MultiValueDict._getlist force_list=True), so a
+        # caller that mutates the result must not reach back into the stored values.
+        return list(value) if isinstance(value, list) else [value]
 
     # Create a QueryDict-like object for POST
     post_data = {"server_key": "default", **(post or {})}
@@ -80,6 +82,14 @@ def _set_posted_device_ids(request, device_ids):
     request.POST.getlist = MagicMock(
         side_effect=lambda key: list(device_ids) if key == "select" else original_getlist(key)
     )
+
+
+def test_make_request_getlist_returns_a_copy_like_querydict():
+    request = _make_request(post={"device_ids": ["1", "2"]})
+
+    request.POST.getlist("device_ids").append("3")
+
+    assert request.POST.getlist("device_ids") == ["1", "2"]
 
 
 def test_make_request_getlist_matches_querydict_for_scalar_values():
