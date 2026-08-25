@@ -2451,3 +2451,44 @@ def test_failed_duplicate_selection_keeps_the_committed_rows_invalidation(
     assert IPAddress.objects.filter(address=address, assigned_object_id=interface.pk).exists()
     assert cache.get(_cache_key("ip_addresses", device, "primary")) == ip_payload
     assert cache.get(_cache_key("ports", device, "primary")) is None
+
+
+@pytest.mark.django_db
+def test_a_cache_only_render_reports_the_vc_inventory_as_not_loaded(client, settings):
+    """A cache-only Virtual Chassis render must not read as a chassis with no serials."""
+    _configure_servers(settings)
+    _virtual_chassis, members = make_virtual_chassis_members("cacheonly-vc-inventory")
+    device = members[0]
+    set_librenms_device_id(device, 7801, "primary")
+    device.save(update_fields=["custom_field_data"])
+    user = make_superuser("cache-only-vc-inventory-user")
+    client.force_login(user)
+    url = reverse("plugins:netbox_librenms_plugin:device_librenms_sync", args=[device.pk])
+
+    def librenms_response(request_url, **_kwargs):
+        if request_url.endswith("/api/v0/devices/7801"):
+            return _device_info_response(request_url, 7801, device.name, "VC Hardware 7801")
+        if "/inventory/" in request_url:
+            return _json_response(request_url, {"status": "ok", "inventory": []})
+        raise AssertionError(f"Unexpected LibreNMS request: {request_url}")
+
+    # Warm the device-info cache so the cache-only render still reports the device as found.
+    with patch("netbox_librenms_plugin.librenms_api.requests.get", side_effect=librenms_response):
+        warm = client.get(url, {"server_key": "primary", "tab": SyncTab.INTERFACES.value})
+    assert warm.status_code == 200
+
+    SyncCacheConsistency(device).mark_refresh_failure(SyncTab.INTERFACES, "primary", actor_id=user.pk)
+
+    with patch(
+        "netbox_librenms_plugin.librenms_api.requests.get",
+        side_effect=AssertionError("the cache-only render contacted LibreNMS"),
+    ):
+        response = client.get(url, {"server_key": "primary", "tab": SyncTab.INTERFACES.value})
+
+    assert response.status_code == 200
+    html = response.content.decode()
+    # The device itself is still reported as found, which is why silence about the inventory
+    # is indistinguishable from a chassis that genuinely has no serials.
+    assert "VC Hardware 7801" in html
+    assert "Details unavailable" not in html
+    assert "VC Serials not loaded" in html

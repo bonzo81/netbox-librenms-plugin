@@ -651,3 +651,36 @@ def test_librenms_config_mock_is_not_applied_to_unrelated_tests(settings):
         )
 
     assert get_plugin_config("netbox_librenms_plugin", "servers") == original_servers
+
+
+def test_configured_norecursedirs_still_skips_pytest_default_directories(tmp_path):
+    """Setting norecursedirs replaces pytest's defaults, so ours must still cover them."""
+    configured = tomllib.loads((REPOSITORY_ROOT / "pyproject.toml").read_text())
+    patterns = configured["tool"]["pytest"]["ini_options"]["norecursedirs"]
+    # Drive a throwaway project with the repository's own patterns, so this stays true by
+    # behaviour rather than by a second copy of pytest's default list.
+    rendered = ", ".join(f'"{pattern}"' for pattern in patterns)
+    (tmp_path / "pyproject.toml").write_text(f"[tool.pytest.ini_options]\nnorecursedirs = [{rendered}]\n")
+    for directory in ("venv", "build", "dist", "node_modules", ".hidden"):
+        (tmp_path / directory).mkdir()
+        (tmp_path / directory / "test_skipped_by_default.py").write_text("def test_skipped(): pass\n")
+    (tmp_path / "test_collected.py").write_text("def test_collected(): pass\n")
+    environment = {
+        name: value
+        for name, value in os.environ.items()
+        if not name.startswith("PYTEST_") and name not in {"DJANGO_SETTINGS_MODULE", "NETBOX_CONFIGURATION"}
+    }
+
+    collection = subprocess.run(
+        [sys.executable, "-m", "pytest", "--collect-only", "-q", "-p", "no:cacheprovider", "-p", "no:randomly"],
+        capture_output=True,
+        text=True,
+        cwd=tmp_path,
+        env=environment,
+        check=False,
+    )
+
+    assert "test_collected" in collection.stdout, collection.stdout + collection.stderr
+    assert "test_skipped_by_default" not in collection.stdout, (
+        "norecursedirs dropped pytest's default exclusions:\n" + collection.stdout
+    )

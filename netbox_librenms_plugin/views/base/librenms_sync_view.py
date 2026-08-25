@@ -456,6 +456,7 @@ class BaseLibreNMSSyncView(
             "librenms_device_location": "-",
             "librenms_device_hardware_match": None,
             "vc_inventory_serials": [],
+            "vc_inventory_not_loaded": False,
         }
 
         if self.librenms_id is not None:
@@ -532,10 +533,13 @@ class BaseLibreNMSSyncView(
                 )
 
                 # For Virtual Chassis, fetch inventory. Inventory has no snapshot, so a
-                # cache-only render must skip it instead of contacting LibreNMS.
-                if not cache_only and hasattr(obj, "virtual_chassis") and obj.virtual_chassis:
-                    vc_serials = self._get_vc_inventory_serials(obj)
-                    librenms_device_details["vc_inventory_serials"] = vc_serials
+                # cache-only render must skip it instead of contacting LibreNMS. The skip is
+                # reported separately, or an unloaded inventory renders as an empty one.
+                if hasattr(obj, "virtual_chassis") and obj.virtual_chassis:
+                    if cache_only:
+                        librenms_device_details["vc_inventory_not_loaded"] = True
+                    else:
+                        librenms_device_details["vc_inventory_serials"] = self._get_vc_inventory_serials(obj)
 
                 # Device was retrieved successfully via librenms_id — trust the ID
                 found_in_librenms = True

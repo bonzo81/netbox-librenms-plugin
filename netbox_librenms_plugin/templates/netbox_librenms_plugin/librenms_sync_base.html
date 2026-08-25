@@ -532,6 +532,11 @@
                                                     title="View VC member serials from inventory">
                                                 <i class="mdi mdi-server-network"></i> VC Serials ({{ vc_inventory_serials|length }})
                                             </button>
+                                        {% elif vc_inventory_not_loaded %}
+                                            <span class="badge bg-secondary text-white"
+                                                  title="Refresh this tab to load the VC member serials from LibreNMS inventory.">
+                                                <i class="mdi mdi-server-network"></i> VC Serials not loaded
+                                            </span>
                                         {% else %}
                                             {% if librenms_device_serial != "-" %}
                                                 {% if object.serial != librenms_device_serial %}
