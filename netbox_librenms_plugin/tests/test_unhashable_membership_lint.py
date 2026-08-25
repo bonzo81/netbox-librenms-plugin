@@ -250,6 +250,22 @@ def test_a_self_importing_module_still_reaches_a_fixed_point(tmp_path):
     assert "sample.NAMES" in names
 
 
+def test_an_unrelated_import_alias_does_not_hide_a_class_qualified_name(tmp_path):
+    """A global alias set let one module's `import Choices` hide `Choices.NAMES` everywhere."""
+    source = tmp_path / "source.py"
+    source.write_text('class Choices:\n    NAMES = frozenset({"a"})\n')
+    consumer = tmp_path / "consumer.py"
+    consumer.write_text("import source\n")
+    unrelated = tmp_path / "unrelated.py"
+    unrelated.write_text("import Choices\n")
+
+    with _settles_within(10):
+        names = collect_container_names((source, consumer, unrelated))
+
+    assert "Choices.NAMES" in names[source]
+    assert "source.Choices.NAMES" in names[consumer]
+
+
 def test_two_modules_that_import_each_other_reach_a_fixed_point(tmp_path):
     """A mutual `import` pair re-qualified each other's names, so the loop never settled."""
     package = tmp_path / "pkg"

@@ -355,6 +355,21 @@ def test_a_surviving_row_does_not_hide_the_seeds_that_went_missing_with_it():
 
 
 @pytest.mark.django_db
+def test_a_changed_seed_value_is_restored_even_though_its_lookup_key_survived():
+    """A seeded row can keep its key and lose its value, so the value is part of the seeded state."""
+    for model, lookup_field, value_field, rows in _seeded_model_rows():
+        lookup, _value = rows[0]
+        drifted = model.objects.filter(**{lookup_field: lookup}).update(**{value_field: r"^ZZZ\d+$"})
+        assert drifted, f"{model.__name__} has no row for {lookup!r}, so nothing drifted"
+
+    assert restore_seeded_state(force=False) is True
+
+    for model, lookup_field, value_field, rows in _seeded_model_rows():
+        stored = set(model.objects.values_list(lookup_field, value_field))
+        assert stored.issuperset(rows)
+
+
+@pytest.mark.django_db
 def test_a_missing_custom_field_restores_even_though_the_seeded_rows_are_intact():
     """The custom field is seeded state too, so losing it alone must trigger a restore."""
     from extras.models import CustomField

@@ -97,7 +97,7 @@ def _seeded_sap_rows():
 
     Kept apart from :func:`_seeded_model_rows` because migration 0016 sets a second field on rows
     0013 already created, so these rows are applied with ``update()`` rather than
-    ``get_or_create()``. Both the restore and its intactness check read this one definition.
+    ``update_or_create()``. Both the restore and its intactness check read this one definition.
     """
     import importlib
 
@@ -123,12 +123,12 @@ def _seeded_inventory_rules():
 
 
 def seed_migration_rows():
-    """Recreate every row the plugin's data migrations seed."""
+    """Recreate every row the plugin's data migrations seed, with its declared value."""
     for model, lookup_field, value_field, rows in _seeded_model_rows():
         for lookup, value in rows:
-            model.objects.get_or_create(**{lookup_field: lookup}, defaults={value_field: value})
+            model.objects.update_or_create(**{lookup_field: lookup}, defaults={value_field: value})
 
-    # get_or_create above matches the 0013 row and leaves the 0016 field at the model's blank
+    # update_or_create above sets only the 0013 field and leaves the 0016 one at the model's blank
     # default, so the Nokia SAP rule silently disappears for every test after the first
     # transactional one. Re-apply it from the migration's own seed data.
     for model, lookup_field, value_field, rows in _seeded_sap_rows():
@@ -156,9 +156,9 @@ def _seeds_are_intact():
     """Return whether every declared seed row and the plugin's custom field are present."""
     from extras.models import CustomField
 
-    for model, lookup_field, _value, rows in _seeded_model_rows():
-        stored = set(model.objects.values_list(lookup_field, flat=True))
-        if not stored.issuperset(lookup for lookup, _value in rows):
+    for model, lookup_field, value_field, rows in _seeded_model_rows():
+        stored = set(model.objects.values_list(lookup_field, value_field))
+        if not stored.issuperset(rows):
             return False
     return CustomField.objects.filter(name="librenms_id").exists()
 

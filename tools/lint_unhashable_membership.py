@@ -334,9 +334,7 @@ def collect_container_names(paths):
             if isinstance(node, ast.Import)
             for alias in node.names
         )
-    module_qualifiers = tuple(
-        sorted({f"{qualifier}." for imports in module_imports_by_path.values() for _source_path, qualifier in imports})
-    )
+    qualified_by_path = {path: set() for path in paths}
     changed = True
     while changed:
         changed = False
@@ -351,14 +349,13 @@ def collect_container_names(paths):
                 if source_path is None:
                     continue
                 prefix = f"{qualifier}."
-                # Re-qualifying an already qualified name never settles: a self-import reads the
-                # set it writes, and a mutual import pair prepends the two qualifiers in turn.
-                for source_name in tuple(names_by_path[source_path]):
-                    if source_name.startswith(module_qualifiers):
-                        continue
+                # Re-qualifying a name this loop already qualified never settles: a self-import
+                # reads the set it writes, and a mutual import pair prepends both qualifiers.
+                for source_name in tuple(names_by_path[source_path] - qualified_by_path[source_path]):
                     target_name = f"{prefix}{source_name}"
                     if target_name not in names_by_path[path]:
                         names_by_path[path].add(target_name)
+                        qualified_by_path[path].add(target_name)
                         changed = True
     return names_by_path
 
