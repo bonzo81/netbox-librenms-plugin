@@ -5447,3 +5447,59 @@ class TestRelationshipSyncObjectScope:
         assert bulk_response.status_code == 302
         child.refresh_from_db()
         assert child.parent_id is None
+
+
+def test_relinking_repairs_an_aggregate_edited_back_to_a_non_lag_type():
+    """A retry must repair a stale aggregate type instead of reporting success."""
+    from types import SimpleNamespace
+
+    from dcim.models import Interface
+    from django.core.cache import cache
+
+    from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+    from netbox_librenms_plugin.tests.conftest import make_superuser
+    from netbox_librenms_plugin.utils import set_librenms_device_id
+    from netbox_librenms_plugin.views.sync.interfaces import SyncInterfaceLagView
+
+    # Derive the key: CI configures one server, the dev environment configures several.
+    server_key = next(iter(LibreNMSAPI.get_available_servers()))
+    device = make_device("lag-type-repair")
+    member = make_interface(device, "Ethernet1")
+    aggregate = make_interface(device, "Port-Channel1", iface_type="lag")
+    set_librenms_device_id(member, 10, server_key)
+    set_librenms_device_id(aggregate, 20, server_key)
+    aggregate.save()
+    member.lag = aggregate
+    member.save()
+    # NetBox permits this: Interface.clean() validates LAG membership from the member side only,
+    # so an aggregate that already has members can still be edited to a non-LAG type.
+    Interface.objects.filter(pk=aggregate.pk).update(type="1000base-t")
+
+    view = SyncInterfaceLagView()
+    view._librenms_api = SimpleNamespace(server_key=server_key)
+    cache_key = view.get_cache_key(device, "ports", server_key)
+    cache.set(
+        cache_key,
+        {
+            "ports": [
+                {"port_id": 10, "ifName": member.name},
+                {"port_id": 20, "ifName": aggregate.name},
+            ],
+            "port_stack_relationships": {"lag_members": {10: 20}, "sub_interfaces": {}},
+        },
+    )
+    request = make_request(
+        "post",
+        {"port_id": "10", "lag_port_id": "20", "server_key": server_key},
+        user=make_superuser("lag-type-repair-user"),
+    )
+    try:
+        response = _post(view, request, object_type="device", object_id=device.pk)
+    finally:
+        cache.delete(cache_key)
+
+    assert response.status_code == 200, response.content
+    member.refresh_from_db()
+    aggregate.refresh_from_db()
+    assert member.lag_id == aggregate.pk
+    assert aggregate.type == "lag"

@@ -1368,6 +1368,11 @@ def _build_locked_relationship_indexes(
     return catalog_index, source_index, related_index, changeable_ids
 
 
+def _lag_aggregate_needs_promotion(agg):
+    """Return whether *agg* is an Interface that is not yet ``type=lag``."""
+    return isinstance(agg, Interface) and agg.type != "lag"
+
+
 def _promote_lag_aggregate(agg, *, with_restore):
     """
     Bump a LAG aggregate to ``type=lag`` in memory so a member's ``clean()`` accepts the link.
@@ -1391,7 +1396,7 @@ def _promote_lag_aggregate(agg, *, with_restore):
     Returns:
         callable | tuple | None: ``persist`` (or ``(persist, restore)``), or None when nothing to do.
     """
-    if not (isinstance(agg, Interface) and agg.type != "lag"):
+    if not _lag_aggregate_needs_promotion(agg):
         return None
     original_type = agg.type
     agg.type = "lag"
@@ -1581,6 +1586,10 @@ class _BaseRelationshipSyncView(
         """
         return None
 
+    def _related_needs_preparation(self, related_iface):
+        """Hook: whether _prepare_related still has work to do on an already-linked pair."""
+        return False
+
     def _get_current_edge(self, obj, server_key, request, port_id, related_port_id):
         """Return the current cached edge rows and safe name hints, or ``None`` when stale."""
         cache_obj = get_librenms_sync_device(obj, server_key=server_key) or obj
@@ -1748,7 +1757,9 @@ class _BaseRelationshipSyncView(
                 # _prepare_related (e.g. the aggregate's type=lag, persisted only on success), and
                 # saves with update_fields.
                 try:
-                    if getattr(source_iface, f"{self.relation_field}_id") != related_iface.pk:
+                    if getattr(
+                        source_iface, f"{self.relation_field}_id"
+                    ) != related_iface.pk or self._related_needs_preparation(related_iface):
                         _apply_interface_relationship(
                             source_iface, self.relation_field, related_iface, self._prepare_related
                         )
@@ -1828,6 +1839,10 @@ class SyncInterfaceLagView(_BaseRelationshipSyncView):
         """Promote the aggregate to type=lag so member_iface.clean() accepts the link."""
         # Single-row endpoint: no aggregate reuse across rows, so no restore needed.
         return _promote_lag_aggregate(related_iface, with_restore=False)
+
+    def _related_needs_preparation(self, related_iface):
+        """The aggregate can be edited back to a non-LAG type after linking, so a retry repairs it."""
+        return _lag_aggregate_needs_promotion(related_iface)
 
 
 class SyncInterfaceParentView(_BaseRelationshipSyncView):
