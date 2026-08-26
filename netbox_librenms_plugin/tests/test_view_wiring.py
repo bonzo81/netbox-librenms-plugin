@@ -379,6 +379,29 @@ class TestTemplateSyntax:
         self._engine.from_string(source)
 
 
+class TestHtmxSwapConvention:
+    """The frontend guideline allows one outerHTML swap, so the templates must match it."""
+
+    GUIDELINE = Path(__file__).resolve().parents[2] / ".github" / "instructions" / "frontend.instructions.md"
+    EXCEPTION = _TEMPLATE_DIR / "inc" / "_sync_tab_link.html"
+
+    def test_only_the_recorded_exception_swaps_outerhtml(self):
+        """A second outerHTML swap has to be argued in the guideline, not added quietly."""
+        swapping = [path for path in _TEMPLATE_FILES if 'hx-swap="outerHTML"' in path.read_text()]
+
+        assert swapping == [self.EXCEPTION], (
+            "frontend.instructions.md records one outerHTML swap; update it before adding another"
+        )
+
+    def test_the_guideline_records_the_exception_and_its_reason(self):
+        """The rule and its exception share a file so neither can drift alone."""
+        guideline = self.GUIDELINE.read_text()
+
+        assert "Avoid `outerHTML` swaps" in guideline
+        assert "_sync_tab_link.html" in guideline
+        assert "data-active-tab" in guideline
+
+
 class TestSingleCableVerifyServerKey:
     """SingleCableVerifyView.post() must thread server_key from the POST body into VC resolution + cache key."""
 

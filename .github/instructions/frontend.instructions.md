@@ -8,6 +8,7 @@ description: Frontend patterns for templates, HTMX, and static assets
 ## HTMX Conventions
 - HTMX 2.x is the primary async layer. Table row updates return `<tr hx-swap-oob="true">`.
 - Avoid `outerHTML` swaps; use OOB or targeted `innerHTML` swaps to keep table layout intact.
+- One recorded exception: the sync tab link (`inc/_sync_tab_link.html`) swaps `#librenms-sync-tabs` with `outerHTML`. That container carries `data-active-tab`, which `activeSyncTab()` in `librenms_sync.js` reads to resolve the active tab. A swap that keeps the element would leave the previous tab in that attribute. `test_the_swapped_tab_region_carries_the_active_tab_marker` pins the behaviour. Do not extend the exception to other nodes.
 - All HTMX requests and `fetch()` calls must include a CSRF token. The standard pattern is `document.querySelector('[name=csrfmiddlewaretoken]').value` (from a hidden form input). The import JS also uses `getCookie('csrftoken')` as a fallback — prefer the hidden input approach for consistency.
 
 ## Modal Implementation
