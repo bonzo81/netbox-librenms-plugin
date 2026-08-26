@@ -1,4 +1,4 @@
-{# outerHTML is deliberate: hx-select picks the same node, so an innerHTML swap would nest the region inside itself. #}
+{# outerHTML is deliberate: #librenms-sync-tabs carries data-active-tab, which activeSyncTab() reads, so the swap must replace the element itself. #}
 <a class="nav-link{% if current_tab == tab_id %} active{% endif %}{% if tab_status.snapshot_available %} sync-cache-ready{% elif tab_status.attention_required %} sync-cache-unavailable{% endif %}" id="{{ tab_id }}-tab"
     data-tab="{{ tab_id }}" href="{{ tab_url }}" hx-get="{{ tab_url }}"
     hx-target="#librenms-sync-tabs" hx-select="#librenms-sync-tabs" hx-swap="outerHTML"
