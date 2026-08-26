@@ -2680,14 +2680,17 @@ def test_failed_cable_verify_restores_controls_without_a_member_baseline(page):
     page.route("https://plugin.example.com/verify-cable/", hold_verify_route)
     page.set_content(html)
     page.add_script_tag(path=str(SCRIPT_PATH))
-    page.evaluate(
-        """
-        () => {
-            const select = document.querySelector('#member');
-            handleCableChange(select, select.value);
-        }
-        """
-    )
+    # handleCableChange disables the row before it calls fetch, so waiting on the disabled
+    # controls alone can outrun the route handler that captures pending_route.
+    with page.expect_request("https://plugin.example.com/verify-cable/"):
+        page.evaluate(
+            """
+            () => {
+                const select = document.querySelector('#member');
+                handleCableChange(select, select.value);
+            }
+            """
+        )
     page.wait_for_function(
         """
         () => {
