@@ -22,15 +22,13 @@ from netbox_librenms_plugin.tests.import_server_helpers import (
 
 
 class _MappingClaimBarrier:
-    """Hold competing mapping claims at the target lock and completed conflict scan."""
+    """Hold competing mapping claims at the server-scoped LibreNMS ID advisory lock."""
 
-    def __init__(self, claim_barrier, target_barrier, conflict_barrier):
+    def __init__(self, claim_barrier):
         self.claim_barrier = claim_barrier
-        self.target_barrier = target_barrier
-        self.conflict_barrier = conflict_barrier
         self.target_lock_seen = False
         self.advisory_lock_seen = False
-        self.conflict_queries = 0
+        self.claim_lock_preceded_the_target_lock = None
 
     @staticmethod
     def _wait(barrier):
@@ -44,19 +42,13 @@ class _MappingClaimBarrier:
             return result
 
         result = execute(sql, params, many, context)
-        if "FOR UPDATE" in sql and ('FROM "dcim_device"' in sql or 'FROM "virtualization_virtualmachine"' in sql):
-            self.target_lock_seen = True
-            if not self.advisory_lock_seen:
-                self._wait(self.target_barrier)
-        elif (
-            self.target_lock_seen
-            and sql.lstrip().upper().startswith("SELECT")
-            and '"custom_field_data"' in sql
+        if (
+            not self.target_lock_seen
+            and "FOR UPDATE" in sql
             and ('FROM "dcim_device"' in sql or 'FROM "virtualization_virtualmachine"' in sql)
         ):
-            self.conflict_queries += 1
-            if self.conflict_queries == 2 and not self.advisory_lock_seen:
-                self._wait(self.conflict_barrier)
+            self.target_lock_seen = True
+            self.claim_lock_preceded_the_target_lock = self.advisory_lock_seen
         return result
 
 
@@ -511,10 +503,8 @@ def test_device_and_vm_links_serialize_one_cross_model_id_claim(settings):
     vm.save(update_fields=["custom_field_data"])
     user = make_superuser("concurrent-cross-model-linker")
     claim_barrier = Barrier(2)
-    target_barrier = Barrier(2)
-    conflict_barrier = Barrier(2)
     fetch_barrier = Barrier(2)
-    wrappers = [_MappingClaimBarrier(claim_barrier, target_barrier, conflict_barrier) for _target in range(2)]
+    wrappers = [_MappingClaimBarrier(claim_barrier) for _target in range(2)]
     request_context = local()
 
     def librenms_response(request_url, **_kwargs):
@@ -573,6 +563,9 @@ def test_device_and_vm_links_serialize_one_cross_model_id_claim(settings):
     assert [status for status, _content in outcomes] == [200, 200]
     assert all(wrapper.target_lock_seen for wrapper in wrappers)
     assert all(wrapper.advisory_lock_seen for wrapper in wrappers)
+    # The claim lock is what serializes the two transactions; taking the target row first
+    # would let both read the same unclaimed ID.
+    assert all(wrapper.claim_lock_preceded_the_target_lock for wrapper in wrappers)
     assert len(owners) == 1
     assert sum(b"LibreNMS ID conflict" in content for _status, content in outcomes) == 1
 
