@@ -87,12 +87,37 @@ def test_no_test_module_registers_a_session_wide_plugin():
     )
 
 
-def test_pyyaml_is_declared_for_the_direct_test_import():
+# Import root -> the distribution name that provides it.
+THIRD_PARTY_TEST_IMPORT_ROOTS = {
+    "django": "django",
+    "playwright": "playwright",
+    "pytest": "pytest",
+    "requests": "requests",
+    "yaml": "pyyaml",
+}
+
+
+def _third_party_roots_the_test_suite_imports():
+    """Return the third-party import roots the test modules use directly, at any indent."""
+    pattern = re.compile(r"^[ \t]*(?:import|from)\s+([A-Za-z_][A-Za-z0-9_]*)", re.MULTILINE)
+    roots = set()
+    for module in (REPOSITORY_ROOT / "netbox_librenms_plugin" / "tests").rglob("*.py"):
+        roots.update(pattern.findall(module.read_text()))
+    return roots & THIRD_PARTY_TEST_IMPORT_ROOTS.keys()
+
+
+def test_packages_the_test_suite_imports_directly_are_declared():
     """Declare packages imported directly by the test suite."""
     requirements = (REPOSITORY_ROOT / "requirements_dev.txt").read_text().splitlines()
     names = {re.split(r"[<>=!~;\s]", requirement, maxsplit=1)[0].lower() for requirement in requirements}
+    imported = _third_party_roots_the_test_suite_imports()
+    assert imported, "the scan found no third-party import, so every name below would pass vacuously"
 
-    assert "pyyaml" in names
+    undeclared = sorted(
+        THIRD_PARTY_TEST_IMPORT_ROOTS[root] for root in imported if THIRD_PARTY_TEST_IMPORT_ROOTS[root] not in names
+    )
+
+    assert not undeclared, f"imported by the test suite but not declared in requirements_dev.txt: {undeclared}"
 
 
 def test_xdist_worker_gets_private_postgresql_and_redis_databases():
