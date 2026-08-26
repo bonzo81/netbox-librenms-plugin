@@ -490,6 +490,7 @@ class BaseLibreNMSSyncView(
         * ``device_url``    – direct URL to the device page on that server (or ``None``).
         * ``is_configured`` – True when the server key exists in current plugin config.
         * ``is_active``     – True when this is the currently active server.
+        * ``is_selectable`` – True when the user can switch the page to that server.
         * ``is_oob_only``   – True when the mapping was surfaced via an OOB-only linkage
           (no host ``id``, only a nested ``oob.id``).
 
@@ -505,12 +506,7 @@ class BaseLibreNMSSyncView(
         """
         plugins_cfg = getattr(django_settings, "PLUGINS_CONFIG", {}).get("netbox_librenms_plugin", {})
         mappings = build_server_mappings(obj, active_server_key, plugin_config=plugins_cfg)
-        result = []
-        for mapping in mappings:
-            row = asdict(mapping)
-            row.pop("is_selectable")
-            result.append(row)
-        return result or None
+        return [asdict(mapping) for mapping in mappings] or None
 
     def get_librenms_device_info(self, obj, request=None, *, cache_only=False):
         """Get the LibreNMS device information for the given object."""

@@ -484,3 +484,25 @@ def test_add_device_forms_carry_the_installation_default_server(client, settings
         start = html.index(f'id="{form_id}"')
         end = html.index("</form>", start)
         assert 'name="server_key" value="primary"' in html[start:end]
+
+
+@pytest.mark.django_db
+def test_fallback_mapping_rows_render_the_active_server_the_same_way(settings):
+    """Both producers of all_server_mappings feed one template, so their rows carry one shape."""
+    from django.template.loader import render_to_string
+
+    from netbox_librenms_plugin.views.base.librenms_sync_view import BaseLibreNMSSyncView
+
+    _configure_servers(settings)
+    device = make_device("fallback-selector-device", librenms_cf={"primary": 51001, "secondary": 51002})
+
+    rows = BaseLibreNMSSyncView._build_all_server_mappings(device, "primary")
+
+    assert rows, "no mapping row was built, so the render below would assert nothing"
+    markup = render_to_string(
+        "netbox_librenms_plugin/inc/_server_selector.html",
+        {"all_server_mappings": rows, "server_key": "primary"},
+    )
+
+    assert "dropdown-item active" in markup
+    assert "dropdown-item disabled" not in markup
