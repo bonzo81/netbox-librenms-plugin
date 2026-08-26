@@ -3335,23 +3335,41 @@ class TestGetSerialPortSensors:
         assert success is False
         assert "invalid sensor item" in msg.lower()
 
-    def test_non_string_sensor_type_fails_closed(self, mock_librenms_api, mock_response_factory):
-        """A non-string sensor_type (e.g. a JSON array) must fail closed, not raise TypeError.
+    def test_non_string_sensor_type_is_skipped_without_dropping_the_serial_rows(
+        self, mock_librenms_api, mock_response_factory
+    ):
+        """A non-string sensor_type names no serial type, so the row is skipped, not fatal.
 
-        `sensor_type in serial_types` with an unhashable value would raise an uncaught TypeError and
-        break serial refresh; the response is malformed, so return the normal failure tuple instead.
+        `sensor_type in serial_types` with an unhashable value would raise an uncaught TypeError;
+        the endpoint is instance-wide, so failing here would stop serial refresh for every device.
         """
         import unittest.mock as mock
 
-        bad = self._make_sensor(12, port_num=8)
-        bad["sensor_type"] = ["acsSerialPortTable"]  # unhashable → TypeError on `in serial_types`
-        sensors = [self._make_sensor(12, port_num=7), bad]
-        mock_resp = mock_response_factory(status_code=200, json_data={"status": "ok", "sensors": sensors})
+        unreadable = self._make_sensor(12, port_num=8)
+        unreadable["sensor_type"] = ["acsSerialPortTable"]  # unhashable → TypeError on `in serial_types`
+        good = self._make_sensor(12, port_num=7)
+        mock_resp = mock_response_factory(status_code=200, json_data={"status": "ok", "sensors": [unreadable, good]})
         with mock.patch("netbox_librenms_plugin.librenms_api.requests.get", return_value=mock_resp):
-            success, msg = mock_librenms_api.get_serial_port_sensors(device_id=12)
+            success, data = mock_librenms_api.get_serial_port_sensors(device_id=12)
 
-        assert success is False
-        assert "invalid sensor_type" in msg.lower()
+        assert success is True
+        assert [sensor["sensor_id"] for sensor in data] == [good["sensor_id"]]
+
+    def test_unrelated_non_string_sensor_type_does_not_fail_the_serial_fetch(
+        self, mock_librenms_api, mock_response_factory
+    ):
+        """One unrelated sensor on another device must not stop this device's serial refresh."""
+        import unittest.mock as mock
+
+        unrelated = self._make_sensor(99, port_num=5)
+        unrelated["sensor_type"] = {"name": "tempSensor"}
+        good = self._make_sensor(12, port_num=7)
+        mock_resp = mock_response_factory(status_code=200, json_data={"status": "ok", "sensors": [unrelated, good]})
+        with mock.patch("netbox_librenms_plugin.librenms_api.requests.get", return_value=mock_resp):
+            success, data = mock_librenms_api.get_serial_port_sensors(device_id=12)
+
+        assert success is True
+        assert [sensor["sensor_id"] for sensor in data] == [good["sensor_id"]]
 
     def test_non_numeric_sensor_id_fails_closed(self, mock_librenms_api, mock_response_factory):
         import unittest.mock as mock

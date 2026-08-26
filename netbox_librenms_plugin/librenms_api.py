@@ -1894,19 +1894,20 @@ class LibreNMSAPI:
                 if any(not isinstance(s, dict) for s in all_sensors):
                     logger.warning("Unexpected sensors response for %s: non-dict sensor item", self.server_key)
                     return False, result.get("message") or "Unexpected response format: invalid sensor item"
-                # sensor_type must be a scalar string before the membership test below: a JSON
-                # array/object value would raise an uncaught TypeError on `in serial_types` (an
-                # unhashable type) and break serial refresh instead of returning the failure tuple.
-                if any(not isinstance(s.get("sensor_type"), str) for s in all_sensors):
-                    logger.warning("Unexpected sensors response for %s: invalid sensor_type", self.server_key)
-                    return False, result.get("message") or "Unexpected response format: invalid sensor_type"
                 # Narrow to the serial subset BEFORE validating the rest of each row. This
                 # endpoint returns every sensor on the instance, so a temperature probe with an
                 # out-of-contract sensor_id would otherwise fail the whole serial refresh (and
                 # every row would be copied for normalization).
                 serial_sensors = []
+                unreadable_sensor_types = 0
                 for sensor in all_sensors:
-                    if sensor.get("sensor_type") not in serial_types:
+                    sensor_type = sensor.get("sensor_type")
+                    # A non-string sensor_type names no serial type and would raise TypeError on
+                    # the membership test; skip the row rather than fail every device's refresh.
+                    if not isinstance(sensor_type, str):
+                        unreadable_sensor_types += 1
+                        continue
+                    if sensor_type not in serial_types:
                         continue
                     deleted = sensor.get("sensor_deleted", 0)
                     valid_deleted = (
@@ -1925,6 +1926,12 @@ class LibreNMSAPI:
                         logger.warning("Unexpected sensors response for %s: invalid sensor_id", self.server_key)
                         return False, result.get("message") or "Unexpected response format: invalid sensor_id"
                     serial_sensors.append({**sensor, "sensor_id": sensor_id})
+                if unreadable_sensor_types:
+                    logger.warning(
+                        "Skipped %s sensor(s) with a non-string sensor_type for %s",
+                        unreadable_sensor_types,
+                        self.server_key,
+                    )
                 return True, serial_sensors
             if isinstance(result, dict):
                 return False, result.get("message") or "Unexpected response format"
