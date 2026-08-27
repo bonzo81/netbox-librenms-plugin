@@ -26,7 +26,8 @@ logger = logging.getLogger(__name__)
 
 @dataclass(frozen=True)
 class LibreNMSLookupError:
-    """Why a LibreNMS lookup failed, when the object being absent is not the reason.
+    """
+    Why a LibreNMS lookup failed, when the object being absent is not the reason.
 
     ``status_code`` is None when nothing answered at all, so a server that reported a fault
     stays distinguishable from a server that could not be reached.
@@ -96,11 +97,17 @@ class LibreNMSAPI:
         Return True only for a server mapping that ``__init__`` can bind.
 
         A server entry is usable only when it is a dict carrying a non-empty
-        ``librenms_url`` and ``api_token`` — the same fields ``__init__`` requires
+        ``librenms_url`` and ``api_token``, the same fields ``__init__`` requires
         before it will build a client. Sharing this predicate keeps the server
         picker (``get_available_servers``) and the auto-default fallback from
         offering, or silently selecting, a partially configured entry that would
         immediately raise ``ValueError``.
+
+        Args:
+            config (object): The candidate server configuration.
+
+        Returns:
+            bool: True if the configuration is a usable server mapping.
         """
         return isinstance(config, dict) and bool(config.get("librenms_url")) and bool(config.get("api_token"))
 

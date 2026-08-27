@@ -64,14 +64,28 @@ class BaseInterfaceTableView(
     def get_interfaces(self, obj):
         """
         Get interfaces related to the object.
+
         Should be implemented in subclasses.
+
+        Args:
+            obj (Device | VirtualMachine): Object whose interfaces to retrieve.
+
+        Raises:
+            NotImplementedError: Always, because subclasses must implement this method.
         """
         raise NotImplementedError
 
     def get_redirect_url(self, obj):
         """
         Get the redirect URL for the object.
+
         Should be implemented in subclasses.
+
+        Args:
+            obj (Device | VirtualMachine): Object whose redirect URL to retrieve.
+
+        Raises:
+            NotImplementedError: Always, because subclasses must implement this method.
         """
         raise NotImplementedError
 

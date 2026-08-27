@@ -175,11 +175,15 @@ class MembershipChecker(ast.NodeVisitor):
 
     # -- container constants -------------------------------------------------
     def collect_containers(self, tree):
-        """Record every module-level or class-level name bound to a set/frozenset/dict.
+        """
+        Record every module-level or class-level name bound to a set/frozenset/dict.
 
         Only constants are tracked. A dict or set built inside a function from a payload
         raises while it is being built, one step before any membership test, so flagging the
         membership test would point at the wrong line and bury the real signal.
+
+        Args:
+            tree (ast.Module): The parsed module whose container constants to record.
         """
         self.hashable_containers.update(_container_names(tree.body))
         for class_node in (node for node in ast.walk(tree) if isinstance(node, ast.ClassDef)):

@@ -50,6 +50,13 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libre
 
         Each ``select`` value is a ``local_port_id`` (stable LibreNMS identifier)
         so that matching against cached link data is user-preference agnostic.
+
+        Args:
+            request (HttpRequest): The request that contains the selected interface data.
+            initial_device (Device): The page device to use when no device override is selected.
+
+        Returns:
+            list[dict] | None: The selected interface entries, or None when no interfaces are selected.
         """
         selected_interfaces = []
         selected_data = [x for x in request.POST.getlist("select") if x]
@@ -222,6 +229,13 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libre
 
         Each interface is processed in its own atomic block so individual
         failures roll back only that cable without affecting others.
+
+        Args:
+            selected_interfaces (list[dict]): The selected interface entries to synchronize.
+            cached_links (list[dict]): The cached LibreNMS link data.
+
+        Returns:
+            dict[str, list[str]]: The interface names grouped by synchronization result.
         """
         results = {
             "valid": [],

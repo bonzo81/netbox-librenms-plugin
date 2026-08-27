@@ -527,6 +527,9 @@ class SyncCacheConsistency:
         Called from the write-driven signals, where there is no request, no source tab and
         nothing to report: the object's NetBox data changed, so each snapshot it held is stale.
         Runs inline, because the caller has already deferred it to commit.
+
+        Raises:
+            Exception: If resolving mapped servers, deleting cache values, or publishing invalidation states fails.
         """
         revision = uuid4().hex
         claimed = active_sync_subject_keys()

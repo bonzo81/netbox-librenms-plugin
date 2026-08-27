@@ -160,9 +160,15 @@ class BaseVLANTableView(
         """
         Build context for VLAN sync table.
 
-        Returns context with:
-        - vlan_table: LibreNMSVLANTable instance
-        - vlan_groups: QuerySet of available VLAN groups
+        Args:
+            request (HttpRequest): The current request.
+            obj (Device | VirtualMachine): The NetBox object to synchronize.
+            server_key (str | None): The selected LibreNMS server key. Resolve it from the request if None.
+
+        Returns:
+            dict: Context with:
+                - ``vlan_table``: LibreNMSVLANTable instance.
+                - ``vlan_groups``: QuerySet of available VLAN groups.
         """
         vlan_table = None
 

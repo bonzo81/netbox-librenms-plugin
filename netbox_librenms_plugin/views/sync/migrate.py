@@ -61,11 +61,18 @@ def _parse_marker_winner_pk(device_id):
 
     A marker id from a tampered/legacy source may arrive as a string: accept ONLY a plain digit
     string (``str.isdecimal()``) so whitespace/sign/decimal forms (``" 5 "``, ``"+5"``, ``"1.9"``)
-    fail closed — deliberately stricter than the raw ``int()`` :func:`~netbox_librenms_plugin.utils.
-    coerce_librenms_id` applies to LibreNMS ids. The int/positive-value coercion itself is delegated
-    to ``coerce_librenms_id`` (bool rejected, positive int only) so that rule lives in one place and
-    can't drift from the rest of the plugin's id handling. Shared by :func:`_resolve_winner_for_donor`
-    and :func:`_winner_unavailable_reason` so the two can't disagree on a parseable winner id.
+    fail closed. This is deliberately stricter than the raw ``int()``
+    :func:`~netbox_librenms_plugin.utils.coerce_librenms_id` applies to LibreNMS ids. The
+    int/positive-value coercion itself is delegated to ``coerce_librenms_id`` (bool rejected,
+    positive int only) so that rule lives in one place and can't drift from the rest of the plugin's
+    id handling. This function is shared by :func:`_resolve_winner_for_donor` and
+    :func:`_winner_unavailable_reason` so the two can't disagree on a parseable winner id.
+
+    Args:
+        device_id (object): The marker's candidate winner device id.
+
+    Returns:
+        int | None: The positive winner device pk, or None if the marker value is invalid.
     """
     if isinstance(device_id, str) and not device_id.isdecimal():
         return None
@@ -475,9 +482,12 @@ def _refresh_cable_termination_caches(interface):
 
     ``CableTermination`` denormalizes ``_device``/``_rack``/``_location``/``_site``
     for cable-list filtering, and recomputes them only inside its own ``save()``
-    (``cache_related_objects()``) — nothing tracks an Interface changing device
+    (``cache_related_objects()``). Nothing tracks an Interface changing device
     (the same upstream gap as netbox#9788 for device site moves). Without this,
     the moved interface's cables keep filtering under the DONOR's cable lists.
+
+    Args:
+        interface (Interface): The moved interface whose cable termination caches to refresh.
     """
     ct_type = ContentType.objects.get_for_model(Interface)
     for termination in CableTermination.objects.filter(termination_type=ct_type, termination_id=interface.pk):
@@ -490,9 +500,16 @@ def _donor_side_dependents(interface, donor):
 
     Interfaces left on the donor whose ``lag``/``parent``/``bridge`` points at a
     moved row would persist as cross-device relationships NetBox itself refuses
-    to create — surfacing only as a validation error on their NEXT save. The
-    move therefore carries the whole family. BFS order (level by level) so a
+    to create. These relationships surface only as a validation error on their NEXT save. The
+    move therefore carries the whole family. The function uses BFS order (level by level), so a
     parent is always moved before its own dependents ``full_clean()``.
+
+    Args:
+        interface (Interface): The moved interface whose dependents to collect.
+        donor (Device): The donor device whose interfaces to search.
+
+    Returns:
+        list[Interface]: The locked dependent interfaces in breadth-first order.
     """
     dependents = []
     seen = {interface.pk}

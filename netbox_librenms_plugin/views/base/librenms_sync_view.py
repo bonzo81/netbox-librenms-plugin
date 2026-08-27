@@ -385,6 +385,13 @@ class BaseLibreNMSSyncView(
 
         Returns ``None`` for legacy bare-int format (no per-server info to show)
         and ``None`` when the CF is absent/invalid.
+
+        Args:
+            obj (Device or VirtualMachine): The NetBox object with the LibreNMS mappings.
+            active_server_key (str): The key for the active LibreNMS server.
+
+        Returns:
+            list[dict] or None: The server mappings, or None when no mapping information is available.
         """
         cf_value = obj.custom_field_data.get("librenms_id")
         if not isinstance(cf_value, dict) or not cf_value:
@@ -608,35 +615,60 @@ class BaseLibreNMSSyncView(
     def get_interface_context(self, request, obj):
         """
         Get the context data for interface sync.
+
         Subclasses should override this method.
+
+        Args:
+            request (HttpRequest): The current request.
+            obj (Device or VirtualMachine): The NetBox object to synchronize.
         """
         return None
 
     def get_cable_context(self, request, obj):
         """
         Get the context data for cable sync.
+
         Subclasses should override this method if applicable.
+
+        Args:
+            request (HttpRequest): The current request.
+            obj (Device or VirtualMachine): The NetBox object to synchronize.
         """
         return None
 
     def get_ip_context(self, request, obj):
         """
         Get the context data for IP address sync.
+
         Subclasses should override this method.
+
+        Args:
+            request (HttpRequest): The current request.
+            obj (Device or VirtualMachine): The NetBox object to synchronize.
         """
         return None
 
     def get_vlan_context(self, request, obj):
         """
         Get the context data for VLAN sync.
+
         Subclasses should override this method.
+
+        Args:
+            request (HttpRequest): The current request.
+            obj (Device or VirtualMachine): The NetBox object to synchronize.
         """
         return None
 
     def get_module_context(self, request, obj):
         """
         Get the context data for module sync.
+
         Subclasses should override this method if applicable (e.g. VMs return None).
+
+        Args:
+            request (HttpRequest): The current request.
+            obj (Device or VirtualMachine): The NetBox object to synchronize.
         """
         return None
 
@@ -650,8 +682,12 @@ class BaseLibreNMSSyncView(
         pattern ``-M{position}`` and name ``switch01-m2``, this returns
         ``switch01``.
 
-        Returns the stripped name, or None if it equals the original
-        (i.e. no suffix was found).
+        Args:
+            name (str): The device name.
+
+        Returns:
+            str or None: The stripped name, or None if it equals the original
+                (i.e. no suffix was found).
         """
         try:
             from netbox_librenms_plugin.models import LibreNMSSettings

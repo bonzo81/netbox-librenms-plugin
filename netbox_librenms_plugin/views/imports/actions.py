@@ -167,6 +167,12 @@ def _resolve_vc_detection_enabled(request) -> bool:
     2. Explicit GET enable_vc_detection
     3. return_url query param fallback (POST, then GET)
     4. Default False
+
+    Args:
+        request (HttpRequest): The HTTP request that contains the preference values.
+
+    Returns:
+        bool: Whether VC detection is enabled.
     """
     for source in (request.POST, request.GET):
         parsed = _parse_boolish(source.get("enable_vc_detection"))
@@ -197,12 +203,18 @@ def _htmx_error_response(message: str) -> HttpResponse:
 
     Uses an out-of-band swap of NetBox's ``#django-messages`` container so the
     toast renders through the same Bootstrap pipeline NetBox uses for the
-    standard ``messages`` framework — no dependency on ``window.bootstrap``.
+    standard ``messages`` framework. It does not depend on ``window.bootstrap``.
 
     Returns ``200`` (with ``HX-Reswap: none``) so the primary swap target is
     left untouched *and* so ``django-htmx``'s DEBUG-mode handler does not
     replace the page body with the response payload (it only does so for
     4xx/5xx responses).
+
+    Args:
+        message (str): The error message to show in the toast.
+
+    Returns:
+        HttpResponse: The HTMX error response.
     """
     toast_html = format_html(
         '<div id="django-messages" class="toast-container position-fixed bottom-0 end-0 p-3" hx-swap-oob="true">'
@@ -377,7 +389,13 @@ def _platform_device_type_mismatch(device) -> HttpResponse | None:
     unrelated legacy field values), but a device_type/platform write still carries the
     cross-field manufacturer constraint Device.clean() enforces, with no DB backstop. Validate
     only that one rule so an inconsistent platform/device_type pairing can't be persisted
-    silently. Returns an HTMX error response on mismatch, else None.
+    silently.
+
+    Args:
+        device (Device): The device to validate.
+
+    Returns:
+        HttpResponse | None: An HTMX error response on mismatch, otherwise None.
     """
     platform = getattr(device, "platform", None)
     device_type = getattr(device, "device_type", None)
@@ -405,11 +423,16 @@ def _device_type_rack_fit_error(device) -> HttpResponse | None:
     face/position, and the new device_type's ``u_height`` must fit in the free units at the
     device's rack position/face. A LibreNMS-matched device_type violating any of these would
     otherwise persist an invalid rack elevation with a success toast and no DB backstop.
-    Re-validate only those rules (like :func:`_platform_device_type_mismatch`): return an HTMX
-    error response on a violation, else ``None``. A device that isn't rack-mounted (no
-    rack/position/face) is unaffected. Note the 0U/child rules can't be left to the space check:
-    ``get_available_units(u_height=0)`` contains every unit, so it passes trivially for exactly
-    the types these rules reject.
+    Re-validate only those rules (like :func:`_platform_device_type_mismatch`). A device that isn't
+    rack-mounted (no rack/position/face) is unaffected. Note the 0U/child rules can't be left to
+    the space check: ``get_available_units(u_height=0)`` contains every unit, so it passes
+    trivially for exactly the types these rules reject.
+
+    Args:
+        device (Device): The device to validate.
+
+    Returns:
+        HttpResponse | None: An HTMX error response on a violation, otherwise None.
     """
     rack = getattr(device, "rack", None)
     position = getattr(device, "position", None)
@@ -552,6 +575,14 @@ def _get_hostname_for_action(request, validation: dict, libre_device: dict) -> s
     Prefer the cached ``resolved_name`` from validation (already computed with the
     user's naming prefs at validation time). Fall back to computing it fresh from
     the current request's naming preferences.
+
+    Args:
+        request (HttpRequest): The current HTTP request.
+        validation (dict): The validation data that can contain the cached resolved name.
+        libre_device (dict): The LibreNMS device data used to compute a fresh name.
+
+    Returns:
+        str: The resolved hostname.
     """
     resolved = validation.get("resolved_name")
     if resolved:
@@ -1650,9 +1681,15 @@ class DeviceValidationDetailsView(LibreNMSPermissionMixin, LibreNMSAPIMixin, Dev
         """
         Return per-server ID mappings for the existing device's librenms_id custom field.
 
-        Returns a list of dicts with server_key, display_name, and device_id — one entry
+        Returns a list of dicts with server_key, display_name, and device_id, with one entry
         per server the device is linked to. Returns None when the format is legacy (bare int)
         or when the field is absent/invalid.
+
+        Args:
+            existing_device (Device | VirtualMachine): The existing NetBox object.
+
+        Returns:
+            list[dict] | None: The per-server ID mappings, or None for legacy, absent, or invalid data.
         """
         from django.conf import settings
 

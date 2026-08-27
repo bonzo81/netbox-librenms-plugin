@@ -269,12 +269,19 @@ class LibreNMSModuleTable(tables.Table):
         Render the sync-status badge alongside a hidden in-flight spinner badge.
 
         The live badge is wrapped so CSS (see ``_module_sync.html``) can swap it
-        for the spinner badge while a row-action POST is in flight — the row forms
+        for the spinner badge while a row-action POST is in flight. The row forms
         set ``hx-indicator="closest tr"``, so HTMX marks the row with ``htmx-request``
         for the duration. The spinner label tracks the row's action: "Updating…" on an
         installed-module row offering Update Serial / Update Interface, "Installing…"
         on an install / install-branch / carrier-install row. It stays hidden in every
         other state, including the inline verify-endpoint cell updates.
+
+        Args:
+            value (str): The sync status to render.
+            record (dict): The table row with the action and status details.
+
+        Returns:
+            SafeString: The live status badge and hidden in-flight spinner badge.
         """
         # An update action (Update Serial / Update Interface) acts on an already-installed module
         # and a row never offers it alongside an install-flavoured action, so a row with an update
@@ -427,11 +434,23 @@ class LibreNMSModuleTable(tables.Table):
         trigger that opens the Add Bay Template modal pre-filled with the
         LibreNMS-derived suggestion.
 
-        When the viewer can't add bay templates, the badge is hidden so it
-        doesn't act as a dead-end control (the modal would only return a 403
-        for them).  The ``<a href>`` and ``<span>`` fallbacks below are kept
-        for callers that don't have a bound device (e.g. unit tests built via
+        When the viewer cannot add bay templates, the badge is hidden so it
+        does not act as a dead-end control (the modal would only return a 403
+        for them). The ``<a href>`` and ``<span>`` fallbacks below are kept
+        for callers that do not have a bound device (e.g. unit tests built via
         ``object.__new__``) or have no ``target_pk`` / URL available.
+
+        Args:
+            title (str): The badge tooltip text.
+            target_kind (str): The target model kind sent to the modal.
+            target_pk (int | None): The target object's primary key, or ``None`` when it is unavailable.
+            target_label (str): The target label. This function does not use it.
+            suggestion (dict): The LibreNMS-derived bay template fields.
+            fallback_url (str): The URL for the linked fallback, or an empty string when it is unavailable.
+            label (str): The text shown on the badge.
+
+        Returns:
+            SafeString: The HTMX button, empty safe string, linked fallback, or non-interactive fallback markup.
         """
         device = getattr(self, "device", None)
         can_add_template = getattr(self, "can_add_module_bay_template", False)

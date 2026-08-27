@@ -259,6 +259,14 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObject
         Shared by the host and OOB cable branches so they name local ports identically. A
         malformed payload (non-dict, non-list ports, non-dict rows) yields empty maps rather
         than crashing.
+
+        Args:
+            ports_data (dict): A get_ports payload.
+            interface_name_field (str): The field that supplies each displayed port name.
+            alt_name_field (str): The field that supplies alternate port names.
+
+        Returns:
+            tuple[dict, dict]: Maps from port IDs to displayed names and alternate names.
         """
         name_map = {}
         alt_map = {}
@@ -289,6 +297,15 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObject
 
         Shared by the host (``source='main'``) and OOB (``source='oob'``) branches. Non-dict
         rows are skipped; an unmapped local_port_id falls back to the LibreNMS-reported name.
+
+        Args:
+            links (list): LibreNMS LLDP link rows.
+            name_map (dict): A map from local port IDs to displayed names.
+            alt_map (dict): A map from local port IDs to alternate names.
+            source (str): The source tag for each table row.
+
+        Returns:
+            list[dict]: Table rows tagged with the source.
         """
         rows = []
         for link in links:
@@ -334,6 +351,16 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObject
         classification can tell an OOB-only mapping from a truly unmapped device. Sets
         ``self._oob_links_fetch_failed`` on a failed/malformed OOB fetch so post() can warn
         rather than silently dropping OOB rows.
+
+        Args:
+            links_data (list): The table rows to extend with OOB links.
+            lookup_device (Device): The device that can have a linked OOB controller.
+            server_key (str): The LibreNMS server key for the OOB lookup.
+            interface_name_field (str): The field that supplies each displayed port name.
+            alt_name_field (str): The field that supplies alternate port names.
+
+        Returns:
+            bool: True when an OOB controller is linked, otherwise False.
         """
         oob = get_librenms_oob(lookup_device, server_key=server_key)
         if not oob:

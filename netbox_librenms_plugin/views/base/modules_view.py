@@ -85,10 +85,17 @@ def _oob_item_offsettable(item: dict) -> bool:
     Return True if an OOB inventory item's index fields can be offset arithmetically.
 
     The OOB merge shifts ``entPhysicalIndex`` / ``entPhysicalContainedIn`` by a numeric
-    offset, so both must be an int (or absent / the 0 root) — a non-int from a malformed
-    OOB payload would raise ``TypeError`` (e.g. ``"5" + offset``) and 500 the module tab.
+    offset, so both must be an int (or absent / the 0 root). A non-int from a malformed
+    OOB payload would raise ``TypeError`` (e.g. ``"5" + offset``) and cause the
+    module tab to return HTTP 500.
     Used to fail the whole OOB fetch closed to a host-only snapshot, the same way the
     non-dict element guard does, rather than crash the offset loop.
+
+    Args:
+        item (dict): The OOB inventory item to check.
+
+    Returns:
+        bool: True if the item's index fields can be offset arithmetically.
     """
     idx = item.get("entPhysicalIndex")
     parent = item.get("entPhysicalContainedIn")
@@ -120,9 +127,9 @@ def _check_ignore_rules(
     Return the matched rule action or ``None`` if no rule matches.
 
     Return values:
-        ``None``          — no rule matched; process the item normally.
-        ``"skip"``        — drop the item from the sync table.
-        ``"transparent"`` — hide the item's row but promote its ENTITY-MIB
+        ``None``: no rule matched; process the item normally.
+        ``"skip"``: drop the item from the sync table.
+        ``"transparent"``: hide the item's row but promote its ENTITY-MIB
                             children to device-level bay matching (used for
                             embedded RPs on fixed-chassis routers).
 
@@ -131,15 +138,15 @@ def _check_ignore_rules(
     **serial_matches_device**
         Matches when the item's ``entPhysicalSerialNum`` equals *device_serial*
         (the NetBox ``Device.serial`` value) **and** the item sits at chassis
-        level — i.e. has no parent (top-level entity) or its direct parent has
-        ``entPhysicalClass="chassis"``.  No name pattern is used.
+        level. It must have no parent (top-level entity), or its direct parent
+        must have ``entPhysicalClass="chassis"``.  No name pattern is used.
         ``require_serial_match_parent`` is ignored for this type.
 
         The chassis-level requirement prevents the rule from misfiring on
         chassis-based devices whose line cards happen to share a serial with
         the device record (e.g. Cisco ASR-9904 with ``Device.serial`` set to
-        the linecard's serial — without the guard, the linecard becomes
-        transparent and its sub-ports collapse to chassis-level bay matching).
+        the linecard's serial). Without the guard, the linecard becomes
+        transparent and its sub-ports collapse to chassis-level bay matching.
 
     **Name-based types** (ends_with / starts_with / contains / regex):
         Matches on ``entPhysicalName``.  When ``require_serial_match_parent``
@@ -148,11 +155,21 @@ def _check_ignore_rules(
         up from the direct parent).
 
         Ancestor walking handles cases like Cisco IOS-XR where an IDPROM entry
-        is not a direct child of the module it represents — e.g.
+        is not a direct child of the module it represents. For example,
         ``0/RP0/CPU0-Base Board IDPROM`` is a child of ``0/RP0/CPU0-Mother Board``
         (empty serial), but its serial matches the grandparent ``0/RP0/CPU0``.
-        Traversal stops at the first non-empty serial encountered to avoid false
-        positives deeper in the tree.
+        Traversal stops at the first non-empty serial encountered. This
+        prevents false positives deeper in the tree.
+
+    Args:
+        item (dict): The inventory item to check.
+        parent_item (dict | None): The item's direct parent, if it has one.
+        rules (list): The ignore rules to evaluate.
+        index_map (dict | None): Inventory items keyed by physical index.
+        device_serial (str): The NetBox device serial.
+
+    Returns:
+        str | None: The matched rule action, or None if no rule matches.
     """
     item_serial = _clean_librenms_value(item.get("entPhysicalSerialNum"))
     if device_serial.lower() in _PLACEHOLDER_VALUES:
@@ -255,8 +272,14 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
 
         The verify path (SingleModuleVerifyView) sets ``_active_server_key`` but leaves the API
         bound to the default client, so read the interface's per-server port_id under the active
-        key — not ``self.librenms_api.server_key`` — to match the server the row's interface match
-        (``_attach_interface_match``) resolves against.
+        key, not ``self.librenms_api.server_key``. This matches the server that the row's
+        interface match (``_attach_interface_match``) resolves against.
+
+        Args:
+            interface (Interface): The NetBox interface to inspect.
+
+        Returns:
+            int | None: The normalized LibreNMS port ID, or None if no valid ID is stored.
         """
         server_key = getattr(self, "_active_server_key", None) or self.librenms_api.server_key
         return normalize_librenms_port_id(self.librenms_api.get_stored_librenms_id(interface, server_key=server_key))
@@ -776,6 +799,17 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
 
         Includes synthetic transceiver items. Excludes items that have any
         ancestor with an INVENTORY_CLASSES class (they appear as sub-components).
+
+        Args:
+            inventory_data (list): The inventory items to inspect.
+            index_map (dict): Inventory items keyed by physical index.
+            ignore_rules (list): The ignore rules to evaluate for uncached items.
+            device_serial (str): The NetBox device serial.
+            transparent_indices (set): Physical indices for transparent parents.
+            ignore_cache (dict): Cached ignore actions keyed by physical index.
+
+        Returns:
+            list: The top-level inventory items for the sync table.
         """
         top_items = []
         for item in inventory_data:
@@ -865,7 +899,8 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
 
     @staticmethod
     def _compute_all_bays(device_bays: dict, module_scoped_bays: dict) -> dict:
-        """Build a deterministic flat bay lookup from module-scoped and device bays.
+        """
+        Build a deterministic flat bay lookup from module-scoped and device bays.
 
         Module IDs are sorted so the first-match-wins behaviour is stable across
         runs (lower PK wins on collision).  Device-level bays are merged last so
@@ -873,6 +908,13 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
 
         Logs a DEBUG message when the same bay name appears in more than one
         module scope.
+
+        Args:
+            device_bays (dict): Device-level bays keyed by name.
+            module_scoped_bays (dict): Bay lookups keyed by module ID.
+
+        Returns:
+            dict: A flat bay lookup with device-level bays taking precedence.
         """
         module_bay_flat: dict = {}
         collision_names: set = set()
@@ -1476,15 +1518,18 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
 
     @staticmethod
     def _nest_synthetic_transceivers(inventory_data):
-        """Set ``entPhysicalContainedIn`` on synthetic transceiver items by
-        matching path-prefix in their name against an existing item's name.
+        """
+        Set ``entPhysicalContainedIn`` on synthetic transceiver items by matching path prefixes.
 
-        Generic, vendor-agnostic: only relies on the convention that ports
-        are named like ``a/b/c`` and their parent module is named in a way
-        that ends with the path prefix (e.g. ``MDA 1/1`` for ``1/1/c1``,
-        ``XIOM 2/x1`` for ``2/x1/1/c2`` if the MDA is missing). Items
-        already nested by ENTITY-MIB (``entPhysicalContainedIn != 0``) and
-        non-synthetic items are left untouched.
+        The match compares a path prefix in each transceiver name against an existing item's name.
+        This vendor-agnostic match only relies on the convention that ports are named like
+        ``a/b/c`` and their parent module is named in a way that ends with the path prefix
+        (e.g. ``MDA 1/1`` for ``1/1/c1``, or ``XIOM 2/x1`` for ``2/x1/1/c2``
+        if the MDA is missing). Items already nested by ENTITY-MIB
+        (``entPhysicalContainedIn != 0``) and non-synthetic items are left untouched.
+
+        Args:
+            inventory_data (list): The inventory items to update.
         """
         # Build name → index lookup once
         name_to_index = {}
@@ -1592,6 +1637,13 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         Fetches port data from LibreNMS to resolve port IDs to interface labels,
         enabling better bay matching for synthetic transceiver items (e.g.,
         Nokia 1/1/c1 instead of opaque port IDs).
+
+        Args:
+            transceivers (list): The transceiver records to map.
+            ports_data (dict | None): Optional pre-fetched LibreNMS port data.
+
+        Returns:
+            dict: Interface labels keyed by normalized port ID.
         """
         port_ids = {txr.get("port_id") for txr in transceivers if txr.get("port_id")}
         if not port_ids:
@@ -1654,10 +1706,17 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
 
     @staticmethod
     def _extract_interface_port_indices(item):
-        """Extract candidate numeric port indices from interface-style labels.
+        """
+        Extract candidate numeric port indices from interface-style labels.
 
         The first candidate is the preferred bay/port index. Additional
         candidates are fallbacks for vendor-specific naming schemes.
+
+        Args:
+            item (dict): The inventory item that contains interface labels.
+
+        Returns:
+            list: Candidate numeric port indices in preferred order.
         """
         indices = []
         for label in BaseModuleTableView._interface_name_candidates(item):
@@ -1682,12 +1741,19 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
 
     @staticmethod
     def _extract_interface_numeric_coordinates(label):
-        """Extract slash-delimited numeric coordinates from interface labels.
+        """
+        Extract slash-delimited numeric coordinates from interface labels.
 
         Examples:
         - TenGigabitEthernet1/1/1 -> [1, 1, 1]
         - GigabitEthernet5/0/24 -> [5, 0, 24]
         - xe-2/1/0 -> [2, 1, 0]
+
+        Args:
+            label (str): The interface label to parse.
+
+        Returns:
+            list: The numeric coordinates, or an empty list for an invalid label.
         """
         if not label or "/" not in label:
             return []
@@ -1752,7 +1818,15 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         """
         Find descendant items with a model name (real hardware, not empty containers).
 
-        Returns list of (depth, item) tuples.
+        Args:
+            parent_idx (int): The physical index where the search starts.
+            children_by_parent (dict): Child items keyed by parent physical index.
+            index_map (dict): Inventory items keyed by physical index.
+            ignore_rules (list): The ignore rules to apply.
+            device_serial (str): The NetBox device serial.
+
+        Returns:
+            list[tuple[int, dict]]: The descendant items paired with their depths.
         """
         results = []
         self._collect_descendants(
@@ -1929,7 +2003,8 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         return list(qs)
 
     def _apply_carrier_install_rules(self, row, item, selected_device):
-        """Attach carrier_install_options to a No Bay row when configured rules match.
+        """
+        Attach carrier_install_options to a No Bay row when configured rules match.
 
         Rules match when:
           * device_type_pattern (if set) fullmatches the selected device's
@@ -1943,6 +2018,11 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         Each matching (rule, empty bay) pair becomes one suggestion. Also
         attaches ``device_empty_bay_names`` on No Bay rows so the table can
         pre-fill an "Add Carrier Rule" link.
+
+        Args:
+            row (dict): The table row to update.
+            item (dict): The LibreNMS inventory item for the row.
+            selected_device (Device): The selected NetBox device.
         """
         if row.get("status") != "No Bay":
             return
@@ -2005,6 +2085,13 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
 
         Skips ancestors with an empty entPhysicalName and continues upward until a
         non-empty name is found or the chain is exhausted.
+
+        Args:
+            item (dict): The inventory item whose ancestors to inspect.
+            index_map (dict): Inventory items keyed by physical index.
+
+        Returns:
+            str | None: The nearest non-empty ancestor name, or None if no name is found.
         """
         contained_in = item.get("entPhysicalContainedIn", 0)
         visited: set = set()
@@ -2023,10 +2110,20 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
 
     @staticmethod
     def _build_bay_candidate_names(item, index_map, include_normalized=False, norm_rules_bay=None):
-        """Build deduplicated candidate names for bay matching.
+        """
+        Build deduplicated candidate names for bay matching.
 
         Candidate order is stable: nearest parent container name first, then
         interface/item label variants. Optionally appends normalized variants.
+
+        Args:
+            item (dict): The inventory item to describe.
+            index_map (dict): Inventory items keyed by physical index.
+            include_normalized (bool): Whether to append normalized name variants.
+            norm_rules_bay (list | None): Preloaded module bay normalization rules.
+
+        Returns:
+            list[str]: Candidate names in matching order.
         """
         parent_name = BaseModuleTableView._find_parent_container_name_static(item, index_map)
         candidate_names = [parent_name] if parent_name else []
@@ -2049,8 +2146,17 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
     def _match_module_bay(self, item, index_map, module_bays):
         """
         Try to match an inventory item to a NetBox ModuleBay.
+
         Checks ModuleBayMapping table first (exact then regex), then falls back
         to exact parent name match, then positional matching.
+
+        Args:
+            item (dict): The inventory item to match.
+            index_map (dict): Inventory items keyed by physical index.
+            module_bays (dict): Available NetBox module bays keyed by name.
+
+        Returns:
+            ModuleBay | None: The matched module bay, or None if no bay matches.
         """
         phys_class = (item.get("entPhysicalClass") or "").strip()
         manufacturer_id = getattr(self, "_current_manufacturer_id", None)
@@ -2117,6 +2223,13 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         module slot position matches the FPC number in the descriptor. Prevents
         orphaned top-level items (e.g. QSFP @ 1/1/1 when FPC1 is not installed)
         from incorrectly matching bays belonging to a different FPC's module.
+
+        Args:
+            candidate_name (str): The positional descriptor to validate.
+            bay (ModuleBay): The regex-matched NetBox module bay.
+
+        Returns:
+            bool: True if the descriptor and bay slot are consistent.
         """
         match = re.search(r"@\s+(\d+)/", candidate_name)
         if not match:
@@ -2140,9 +2253,17 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
     @staticmethod
     def _filter_mappings_by_manufacturer(mappings, manufacturer_id):
         """
-        Order mappings by manufacturer scoping priority:
-        device-manufacturer match first, then vendor-agnostic (NULL), skip
-        mappings scoped to a different manufacturer.
+        Order mappings by manufacturer scoping priority.
+
+        Put device-manufacturer matches first, then vendor-agnostic (NULL) mappings.
+        Skip mappings that are scoped to a different manufacturer.
+
+        Args:
+            mappings (list): The mappings to filter and order.
+            manufacturer_id (int | None): The selected device manufacturer ID.
+
+        Returns:
+            list: Matching manufacturer-scoped mappings followed by global mappings.
         """
         scoped = []
         global_ = []
@@ -2164,7 +2285,16 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         and skips mappings scoped to a different manufacturer.
         Iterates the underlying dict scopes (supports both plain dicts and legacy
         ChainMap instances) so the returned bay is validated via _fpc_slot_matches.
-        Returns the matched module bay or None.
+
+        Args:
+            name (str): The candidate name to match.
+            phys_class (str): The item's physical class.
+            module_bays (dict): Available NetBox module bays keyed by name.
+            exact_mappings (list): The exact ModuleBayMapping entries to check.
+            manufacturer_id (int | None): The selected device manufacturer ID.
+
+        Returns:
+            ModuleBay | None: The matched module bay, or None if no mapping resolves.
         """
         maps = module_bays.maps if hasattr(module_bays, "maps") else [module_bays]
         scoped_mappings = BaseModuleTableView._filter_mappings_by_manufacturer(exact_mappings, manufacturer_id)
@@ -2198,7 +2328,15 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         precedence over vendor-agnostic ones; mappings scoped to a different
         manufacturer are skipped.
 
-        Returns matched module bay or None.
+        Args:
+            name (str): The candidate name to match.
+            phys_class (str): The item's physical class.
+            module_bays (dict): Available NetBox module bays keyed by name.
+            regex_mappings (list): The regex ModuleBayMapping entries to check.
+            manufacturer_id (int | None): The selected device manufacturer ID.
+
+        Returns:
+            ModuleBay | None: The matched module bay, or None if no mapping resolves.
         """
         scoped_mappings = BaseModuleTableView._filter_mappings_by_manufacturer(regex_mappings, manufacturer_id)
         # Filter preloaded list by class (exact class match, then empty-class fallback)
@@ -2240,6 +2378,14 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         When an item is inside a container (no model), walk up to find the
         nearest ancestor with a real hardware model, count which container slot
         the item occupies, and match to the bay by number (e.g., SFP 1, SFP 2).
+
+        Args:
+            item (dict): The inventory item to match.
+            index_map (dict): Inventory items keyed by physical index.
+            module_bays (dict): Available NetBox module bays keyed by name.
+
+        Returns:
+            ModuleBay | None: The position-matched module bay, or None if no bay matches.
         """
         # Walk up through containers with placeholder/empty models to find the
         # parent with a real hardware model.  Use a visited set to detect cycles.
@@ -2394,11 +2540,12 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         scope_empty_installed_bays=False,
         normalized_serial=None,
     ):
-        """Build a single table row from a LibreNMS inventory item.
+        """
+        Build a single table row from a LibreNMS inventory item.
 
         ``scope_uninstalled`` (caller-provided) indicates the empty bay scope
         is empty because some ancestor's bay matched but has no installed
-        module — the user can fix the row by installing the ancestor first
+        module. The user can fix the row by installing the ancestor first
         (which materialises the bay templates) rather than by editing the
         device/module-type templates.
 
@@ -2412,7 +2559,24 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         the nearest installed module ancestor's type has no bay templates
         defined.  Propagates through intermediate unmatched containers so
         deeply-nested items (e.g. SFPs nested under a transceiver carrier)
-        still show "No Bay on Parent" rather than plain "No Bay"."""
+        still show "No Bay on Parent" rather than plain "No Bay".
+
+        Args:
+            item (dict): The LibreNMS inventory item to render.
+            index_map (dict): Inventory items keyed by physical index.
+            module_bays (dict): Available NetBox module bays keyed by name.
+            module_types (dict): Available NetBox module types keyed for matching.
+            depth (int): The row's depth in the inventory hierarchy.
+            manufacturer (Manufacturer | None): The selected device manufacturer.
+            sibling_counts (dict | None): Sibling bay counts used for name-conflict checks.
+            scope_uninstalled (bool): Whether an ancestor matched an empty module bay.
+            scope_preserved (bool): Whether the bay scope came from an unmatched ancestor.
+            scope_empty_installed_bays (bool): Whether the installed parent type has
+                no bay templates.
+
+        Returns:
+            dict: The table row for the inventory item.
+        """
         from netbox_librenms_plugin.utils import (
             has_nested_name_conflict,
             resolve_module_type,
@@ -2687,8 +2851,6 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         Derive a sensible pre-fill for the Add Bay Template modal from a
         LibreNMS inventory item dict.
 
-        Returns a dict with keys ``name``, ``position`` and ``label``.
-
         - ``name``: the LibreNMS item name as-is (the user can edit before
           submit).  Falls back to a class-derived placeholder when the name
           is empty.
@@ -2696,6 +2858,12 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
           present (e.g. "Slot 1" -> "1", "CMA-A" -> "A").
         - ``label``: the LibreNMS description (entPhysicalDescr) trimmed,
           which is usually a richer human-readable label than the bay name.
+
+        Args:
+            item (dict): The LibreNMS inventory item to describe.
+
+        Returns:
+            dict: Suggested values with ``name``, ``position``, and ``label`` keys.
         """
         raw_name = (item.get("entPhysicalName") or "").strip()
         descr = (item.get("entPhysicalDescr") or "").strip()
@@ -2756,6 +2924,18 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         When a `suggestion` dict is provided (from `_suggest_bay_mapping`),
         appends the proposed regex/target so the user sees a concrete fix
         alongside the diagnosis.
+
+        Args:
+            item (dict): The unmatched LibreNMS inventory item.
+            module_bays (dict): The module bays available in the current scope.
+            suggestion (dict | None): An optional proposed ModuleBayMapping.
+            scope_uninstalled (bool): Whether an ancestor matched an empty module bay.
+            scope_empty_installed_bays (bool): Whether the installed parent type has
+                no bay templates.
+            holder_hint (str | None): An optional holder or carrier installation hint.
+
+        Returns:
+            str: The warning that describes how to resolve the missing bay.
         """
         phys_class = (item.get("entPhysicalClass") or "").strip().lower()
         class_hints = {
@@ -2819,7 +2999,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         Some chassis (e.g. Nokia 7750 SR-s with CMA controller carriers, mezzanine
         carriers, line-card cassettes) expose a holder module bay at the chassis
         level. Until the holder ModuleType is installed in that bay, NetBox does
-        not expose the holder's nested child bays — so LibreNMS-reported children
+        not expose the holder's nested child bays. LibreNMS-reported children
         (CPMs, MDAs, mezzanines) appear with no matching bay.
 
         Triggers only when:
@@ -2828,10 +3008,21 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
             (scope_uninstalled / scope_empty_installed_bays);
           * the device has at least one EMPTY device-level bay.
 
-        The hint is informational only — it lists the empty bay names so the
+        The hint is informational only. It lists the empty bay names so the
         user can recognise the pattern and install the appropriate holder
         ModuleType themselves. Doing so will expose nested child bays which
         will then match LibreNMS-reported children automatically.
+
+        Args:
+            item (dict): The unmatched LibreNMS inventory item.
+            phys_class (str): The item's physical class.
+            device_bays (dict | None): Device-level module bays keyed by name.
+            scope_uninstalled (bool): Whether an ancestor matched an empty module bay.
+            scope_empty_installed_bays (bool): Whether the installed parent type has
+                no bay templates.
+
+        Returns:
+            str | None: The holder installation hint, or None when the pattern does not apply.
         """
         if scope_uninstalled or scope_empty_installed_bays:
             return None
@@ -3003,14 +3194,22 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
     @staticmethod
     def _suggest_bay_mapping_from_descr(item, module_bays, item_name, item_class):
         """
-        Derive a ModuleBayMapping suggestion from the item's description when
-        the description encodes a class+slot hint like ``"MIC: ... @ 0/0/*"``
-        (Juniper) — useful when the LibreNMS name is just a model number with
+        Derive a ModuleBayMapping suggestion from the item's description.
+
+        The description must encode a class+slot hint like ``"MIC: ... @ 0/0/*"``
+        (Juniper). This is useful when the LibreNMS name is just a model number with
         no positional info that the name-based heuristic could latch onto.
 
-        Returns the suggestion dict (with a regex matching the description and
-        a target bay name like ``"MIC \\1"``) or None when the description
-        doesn't fit the pattern or the implied bay isn't present in scope.
+        Args:
+            item (dict): The LibreNMS inventory item to inspect.
+            module_bays (dict): Available NetBox module bays keyed by name.
+            item_name (str): The item's display name.
+            item_class (str): The item's physical class.
+
+        Returns:
+            dict | None: A suggestion with a description regex and a target bay name such as
+                ``"MIC \\1"``, or None when the description does not fit the pattern or the implied
+                bay is not present in scope.
         """
         descr = (item.get("entPhysicalDescr") or "").strip()
         if not descr or not module_bays:
@@ -3059,9 +3258,16 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         name-based pass) so transceivers don't propose chassis line-card
         bays as targets, fans don't propose Slot N, etc.
 
-        Returns the suggestion dict, or None when no plausible mapping
-        can be derived (no descr, no trailing token, descr same as name,
-        or no bay shares the trailing token).
+        Args:
+            item (dict): The LibreNMS inventory item to inspect.
+            candidate_names (list): Class-filtered bay names to consider.
+            item_name (str): The item's display name.
+            item_class (str): The item's physical class.
+
+        Returns:
+            dict | None: The suggestion, or None when no plausible mapping can be derived because
+                there is no description, no trailing token, the description equals the name, or no
+                bay shares the trailing token.
         """
         descr = (item.get("entPhysicalDescr") or "").strip()
         if not descr or not candidate_names:
@@ -3116,8 +3322,13 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         create form arrives pre-filled for the user.  The user still needs to
         select or create the matching NetBox ModuleType.
 
-        Returns None when the model name is blank — no meaningful mapping can
-        be created without at least a model name to key on.
+        Args:
+            item (dict): The LibreNMS inventory item to describe.
+            matched_bay (ModuleBay | None): The matched NetBox module bay.
+
+        Returns:
+            dict | None: The pre-filled mapping values, or None when the model name is blank.
+                No meaningful mapping can be created without at least a model name to key on.
         """
         model = _normalize_librenms_text(item.get("entPhysicalModelName"))
         if not model:
@@ -3147,16 +3358,21 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         ModuleType in one click instead of opening the form blank.
 
         Pre-filled fields (all derived from the LibreNMS ENTITY-MIB row):
-          * ``manufacturer``  — PK of the device's manufacturer (when known)
-          * ``model``         — entPhysicalModelName (truncated to 100 chars)
-          * ``part_number``   — entPhysicalModelName (truncated to 50 chars)
-          * ``description``   — entPhysicalDescr (truncated to 200 chars)
-          * ``comments``      — full entPhysicalDescr when it had to be
-                                truncated for ``description``
+          * ``manufacturer``: PK of the device's manufacturer (when known)
+          * ``model``: entPhysicalModelName (truncated to 100 chars)
+          * ``part_number``: entPhysicalModelName (truncated to 50 chars)
+          * ``description``: entPhysicalDescr (truncated to 200 chars)
+          * ``comments``: full entPhysicalDescr when it had to be truncated for
+            ``description``
 
-        Returns None when no model name was reported — without a model name
-        there's nothing meaningful to pre-fill and the row can't be made
-        installable by adding a type either.
+        Args:
+            item (dict): The LibreNMS inventory item to describe.
+            manufacturer (Manufacturer | None): The selected device manufacturer.
+
+        Returns:
+            dict | None: The pre-filled ModuleType values, or None when no model name was reported.
+                Without a model name, there is nothing meaningful to pre-fill, and adding a type
+                cannot make the row installable.
         """
         model = _normalize_librenms_text(item.get("entPhysicalModelName"))
         if not model:
@@ -3179,13 +3395,21 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
 
     @staticmethod
     def _build_no_type_warning(item, ambiguity_candidates=None):
-        """Hint when LibreNMS reports a model that NetBox doesn't define.
+        """
+        Hint when LibreNMS reports a model that NetBox doesn't define.
 
         When ``ambiguity_candidates`` is a non-empty list of ModuleType
         instances, the warning explains that NetBox has *multiple* types
         sharing the same model/part_number string, so the plugin refuses to
         guess.  The message names each conflicting ``manufacturer / model``
         pair so the user can resolve the data issue in NetBox itself.
+
+        Args:
+            item (dict): The LibreNMS inventory item to describe.
+            ambiguity_candidates (list | None): Conflicting NetBox ModuleType instances.
+
+        Returns:
+            str: The warning for the missing or ambiguous module type.
         """
         model = _normalize_librenms_text(item.get("entPhysicalModelName"))
         if not model:
@@ -3215,6 +3439,15 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         Nokia ``3HE18883AARB01`` whose normalized key ``3HE18883AA`` is
         ambiguous is still detected).  Returns an empty list when there is
         no collision (or when *ambiguities* is falsy).
+
+        Args:
+            model_name (str): The raw LibreNMS model name.
+            ambiguities (dict | None): ModuleType collisions keyed by model string.
+            manufacturer (Manufacturer | None): The selected device manufacturer.
+            norm_rules (list | None): Preloaded module type normalization rules.
+
+        Returns:
+            list: The colliding ModuleType instances, or an empty list when no collision exists.
         """
         from netbox_librenms_plugin.utils import apply_normalization_rules
 
@@ -3235,8 +3468,8 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         Detect the "integrated child" SNMP pattern (e.g. Nokia XIOM hosting a
         single fixed MDA).
 
-        Some vendors expose the same physical card as two ENTITY-MIB rows —
-        a parent module and a child module — that share both
+        Some vendors expose the same physical card as two ENTITY-MIB rows:
+        a parent module and a child module. These rows share both
         ``entPhysicalSerialNum`` and ``entPhysicalModelName``.  Returns the
         ancestor item that matches *item*'s serial+model (so the caller can
         present the row as ``Integrated in <parent>`` instead of trying to
@@ -3248,6 +3481,14 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         module-class entry (we don't dedupe chassis / PSU / fan rows
         because shared serials there usually indicate a real vendor data
         bug we want to surface).
+
+        Args:
+            item (dict): The inventory item to inspect.
+            index_map (dict): Inventory items keyed by physical index.
+
+        Returns:
+            dict | None: The ancestor with the same serial and model, or None if no
+                such ancestor exists.
         """
         item_class = (item.get("entPhysicalClass") or "").strip()
         if item_class not in INVENTORY_CLASSES or item_class in {"container", "powerSupply", "fan"}:
@@ -3282,12 +3523,15 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         """
         Bulk-check whether LibreNMS serials for replaceable or installable rows already exist elsewhere in NetBox.
 
-        For each row with can_replace or can_install, checks whether the LibreNMS serial (the value we want to
-        write) is already assigned to a *different* module.  When a conflict is found the row
-        gets two extra keys:
+        For each row with can_replace or can_install, checks whether the LibreNMS
+        serial (the value we want to write) is already assigned to a *different*
+        module. When a conflict is found the row gets two extra keys:
 
-          serial_conflict_module  – the conflicting Module object (with device/module_bay loaded)
-          can_move_from           – True (convenience flag for templates/tests)
+          serial_conflict_module: the conflicting Module object (with device/module_bay loaded)
+          can_move_from: True (convenience flag for templates/tests)
+
+        Args:
+            table_data (list): The table rows to check and update.
         """
         from dcim.models import Module
 

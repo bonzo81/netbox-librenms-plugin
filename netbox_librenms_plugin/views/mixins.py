@@ -19,13 +19,22 @@ logger = logging.getLogger(__name__)
 
 
 def parse_request_json(request):
-    """Parse JSON from request.body, returning (data, error_response).
+    """
+    Parse JSON from request.body, returning (data, error_response).
 
     On success returns (dict, None). On malformed input returns (None, JsonResponse 400).
-    json.loads happily returns a bare list/str/number for a valid-JSON non-object body;
-    every caller immediately does ``data.get(...)``, which would 500 on those — so a
-    non-dict payload is rejected here with a 400, keeping the (dict, None) contract true
-    for every endpoint instead of only the ones that added their own guard.
+    ``json.loads`` accepts a bare list, string, or number for a valid JSON non-object body.
+    Every caller immediately uses ``data.get(...)``, which would cause a 500 response for
+    these values. This function rejects a non-dict payload with a 400 response. This keeps
+    the (dict, None) contract true for every endpoint, not only the endpoints that added
+    their own guard.
+
+    Args:
+        request (HttpRequest): The request whose body contains JSON.
+
+    Returns:
+        tuple[dict | None, JsonResponse | None]: The parsed object and no error response,
+            or no data and a 400 error response.
     """
     try:
         data = json.loads(request.body)
@@ -66,10 +75,17 @@ def validated_referer(request):
     """
     Return the request's ``Referer`` when it passes the open-redirect barrier, else None.
 
-    The single home for the CWE-601 Referer check (``url_has_allowed_host_and_scheme`` against the
-    current host/scheme) so every redirect helper that trusts the Referer — ``_get_safe_redirect_url``
-    here and ``migrate._safe_referer`` — validates it identically and can't drift. Callers own their
-    own fallback when this returns None.
+    This function is the single home for the CWE-601 Referer check. It uses
+    ``url_has_allowed_host_and_scheme`` with the current host and scheme. This ensures that every
+    redirect helper which trusts the Referer validates it identically. These helpers are
+    ``_get_safe_redirect_url`` here and ``migrate._safe_referer``. Their validation cannot drift.
+    Callers provide their own fallback when this function returns None.
+
+    Args:
+        request (HttpRequest): The request that supplies the Referer and validation context.
+
+    Returns:
+        str | None: The validated Referer, or None when validation fails.
     """
     referrer = request.META.get("HTTP_REFERER")
     if referrer and url_has_allowed_host_and_scheme(
@@ -87,6 +103,12 @@ def _get_safe_redirect_url(request):
 
     Validates the Referer against allowed hosts and schemes to prevent
     open-redirect attacks. Falls back to the current request path or "/".
+
+    Args:
+        request (HttpRequest): The request that supplies the Referer and fallback path.
+
+    Returns:
+        str: The validated Referer, current request path, or root fallback.
     """
     if referrer := validated_referer(request):
         return referrer
@@ -112,6 +134,12 @@ def _safe_redirect_response(request):
 
     Returns an HTMX ``HX-Redirect`` response for HTMX requests, otherwise a
     standard redirect.
+
+    Args:
+        request (HttpRequest): The permission-denied request to redirect.
+
+    Returns:
+        HttpResponse: An HTMX ``HX-Redirect`` response or a standard redirect response.
     """
     target = _get_safe_redirect_url(request)
     is_htmx = bool(request.headers.get("HX-Request"))
@@ -853,6 +881,14 @@ class SyncSubjectClaimMixin:
         The claim is taken here rather than where the transition is scheduled, because NetBox
         leaves ATOMIC_REQUESTS off: a view's own atomic block commits, and the write-driven
         cleanup runs, before the view reaches its scheduling call.
+
+        Args:
+            request (HttpRequest): The request whose synchronization subject to claim.
+            *args (Any): Positional arguments for the next dispatch implementation.
+            **kwargs (Any): URL arguments for the claim and the next dispatch implementation.
+
+        Returns:
+            HttpResponse: The response from the next dispatch implementation.
         """
         from netbox_librenms_plugin.sync_cache import claim_sync_subjects
 
@@ -896,6 +932,13 @@ class CacheMixin(SyncSubjectClaimMixin):
         Stores a {vid_str: group_id_str} map so that "apply to all" VLAN
         group choices persist across table pages. Including server_key scopes
         overrides per-server to avoid leakage when multiple servers are configured.
+
+        Args:
+            obj (Device): The device whose VLAN group override selections are cached.
+            server_key (str | None): The optional LibreNMS server key for the cache namespace.
+
+        Returns:
+            str: The cache key for the device and server.
         """
         from netbox_librenms_plugin.sync_cache import sync_vlan_overrides_key
 
@@ -999,11 +1042,16 @@ class VlanAssignmentMixin:
         """
         Build lookup dictionaries for VLAN matching.
 
-        Returns a dict with:
-        - vid_to_groups: {vid: [vlan_group, ...]} - VID to groups containing that VID
-        - vid_group_to_vlan: {(vid, group_id): vlan} - unique per group lookup
-        - vid_to_vlans: {vid: [vlan, ...]} - all VLANs with that VID
-        - vid_name_to_vlan: {(vid, name): vlan} - VID + name lookup
+        Args:
+            vlan_groups (list[VLANGroup]): The VLAN groups to include.
+
+        Returns:
+            dict: A dictionary with these lookup maps:
+
+                - vid_to_groups: {vid: [vlan_group, ...]}, VID to groups containing that VID.
+                - vid_group_to_vlan: {(vid, group_id): vlan}, unique per-group lookup.
+                - vid_to_vlans: {vid: [vlan, ...]}, all VLANs with that VID.
+                - vid_name_to_vlan: {(vid, name): vlan}, VID and name lookup.
         """
         from ipam.models import VLAN
 
@@ -1073,6 +1121,12 @@ class VlanAssignmentMixin:
           Maps each VID to its auto-selected VLAN group based on scope hierarchy.
           If vlan_group_overrides contains a user selection for a VID, that takes
           precedence over auto-selection.
+
+        Args:
+            port (dict): The port record to update.
+            lookup_maps (dict): The VLAN lookup maps used for group selection.
+            device (Device): The device that supplies the scope hierarchy.
+            vlan_group_overrides (dict | None): User-selected VLAN groups keyed by VID.
         """
         vid_to_groups = lookup_maps.get("vid_to_groups", {})
         untagged_vid = port.get("untagged_vlan")
@@ -1161,6 +1215,10 @@ class VlanAssignmentMixin:
 
         Sets:
         - missing_vlans: List of VIDs not found in any NetBox VLAN group
+
+        Args:
+            port (dict): The port record to update.
+            lookup_maps (dict): The VLAN lookup maps used to find missing VIDs.
         """
         vid_to_vlans = lookup_maps.get("vid_to_vlans", {})
         missing_vlans = []
@@ -1272,7 +1330,14 @@ class VlanAssignmentMixin:
     def _get_ancestors(self, obj):
         """
         Get all ancestors of a hierarchical object (location, region, site group).
+
         Returns list including the object itself and all parents up to root.
+
+        Args:
+            obj (Location | Region | SiteGroup | None): The hierarchical object, or None.
+
+        Returns:
+            list: The object and all parents up to the root, or an empty list for None.
         """
         ancestors = []
         current = obj

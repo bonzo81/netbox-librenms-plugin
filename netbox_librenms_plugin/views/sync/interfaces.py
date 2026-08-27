@@ -586,14 +586,21 @@ class SyncInterfacesView(
     @staticmethod
     def _prepare_bulk_lag_aggregate(agg_iface):
         """
-        LAG-pass hook: promote the aggregate to type=lag, returning ``(persist, restore)`` or None.
+        LAG-pass hook: promote the aggregate to type=lag and return ``(persist, restore)`` or None.
 
         member_iface.clean() only accepts the link when the aggregate is type=lag, so it
         is bumped in memory before validation. The aggregate object is reused across rows via
         the shared interface index, so a member whose link later fails validation must restore
-        the in-memory type — otherwise a subsequent valid member sharing this aggregate would
+        the in-memory type. Otherwise, a subsequent valid member sharing this aggregate would
         skip the save() and leave the aggregate's type stale in the DB. The restore path is why
         this passes ``with_restore=True`` to the shared promotion helper.
+
+        Args:
+            agg_iface (Interface): The LAG aggregate to promote.
+
+        Returns:
+            tuple[callable, callable] | None: The persist and restore callables, or None when no
+                promotion is needed.
         """
         return _promote_lag_aggregate(agg_iface, with_restore=True)
 
@@ -620,9 +627,28 @@ class SyncInterfacesView(
         Both ends are resolved by stable LibreNMS port_id. The source is pinned to the row target.
         A selected related row is pinned to its own target, which can be another member of the same
         Virtual Chassis.
-        Returns ``(None, None)`` — skip the row — on any lookup failure (logged at debug) or,
-        when *require_interface_source* is set, when the source isn't an Interface (a
-        VMInterface has no lag field).
+        Returns ``(None, None)`` and skips the row on any lookup failure (logged at debug). It also
+        skips the row when *require_interface_source* is set and the source is not an Interface
+        (a VMInterface has no lag field).
+
+        Args:
+            obj (Device | VirtualMachine): The object whose relationship scope contains the interfaces.
+            port_id (str): The stable LibreNMS port ID for the source interface.
+            related_raw (int | str): The raw LibreNMS port ID for the related interface.
+            port_by_id (dict): The cached port rows keyed by normalized LibreNMS port ID.
+            catalog_index (dict): The ambiguity-preserving index for all candidate interfaces.
+            source_index (dict): The index of candidate source interfaces that can be changed.
+            related_index (dict): The index of candidate related interfaces that can be viewed or changed.
+            server_key (str): The LibreNMS server key that scopes stored IDs.
+            source_expected_owner (tuple): The expected device or virtual machine owner for the source.
+            interface_name_field (str): The cached port field used for interface names.
+            unambiguous_name_port_ids (set): The port IDs that permit a safe name fallback.
+            log_kind (str): The relationship label used in debug messages.
+            require_interface_source (bool): Whether the source must be an Interface instead of a VMInterface.
+
+        Returns:
+            tuple[Interface | VMInterface | None, Interface | VMInterface | None]: The resolved interface pair,
+                or ``(None, None)`` when the row must be skipped.
         """
         related_port_id = str(related_raw)
         normalized_related_port_id = normalize_librenms_port_id(related_raw)
@@ -696,6 +722,16 @@ class SyncInterfacesView(
         validation failure is logged and skipped so the batch continues, never raised.
         ``prepare_related`` is the LAG pass's aggregate type=lag hook (returns
         ``(persist, restore)``); the parent pass passes None.
+
+        Args:
+            source_iface (Interface | VMInterface): The interface whose relationship field is updated.
+            relation_field (str): The relationship field to update.
+            related_iface (Interface | VMInterface): The interface assigned to the relationship field.
+            prepare_related (callable | None): The hook that prepares the related interface before validation.
+            log_kind (str): The relationship label used in log messages.
+
+        Returns:
+            bool: True when the relationship is saved, or False when validation or persistence fails.
         """
         try:
             # Own savepoint: an IntegrityError from the persist poisons the enclosing batch
@@ -1585,6 +1621,9 @@ class _BaseRelationshipSyncView(
         Returns a no-arg callable that persists that mutation (invoked only after the source
         interface validates) or None when there's nothing to do. SyncInterfaceLagView
         overrides this to bump the aggregate's type to 'lag'; parent has no equivalent.
+
+        Args:
+            related_iface (Interface | VMInterface): The related interface that a subclass can prepare.
         """
         return None
 

@@ -110,12 +110,19 @@ def _module_bind_result_changed(bind_result):
 
 
 def _extract_inventory_list(cached_payload):
-    """Return the inventory row list from a cached payload, or ``None`` when it is unusable.
+    """
+    Return the inventory row list from a cached payload, or ``None`` when it is unusable.
 
     The cache stores ``{"inventory": [...], "librenms_id": ...}``. A refreshed device whose
     LibreNMS inventory is empty caches ``[]``, which is data rather than a miss, so callers
     must test ``is None``. The list-of-dicts guard mirrors
     BaseModuleTableView.get_context_data so both readers of this entry reject the same payloads.
+
+    Args:
+        cached_payload (object): The cached value to validate.
+
+    Returns:
+        list[dict] | None: The inventory rows, or ``None`` when the payload is unusable.
     """
     if not isinstance(cached_payload, dict):
         return None
@@ -126,11 +133,20 @@ def _extract_inventory_list(cached_payload):
 
 
 def _get_cached_inventory_for_device(sync_device, server_key, get_cache_key):
-    """Return cached inventory for ``sync_device``, or ``None`` when it is absent or stale.
+    """
+    Return cached inventory for ``sync_device``, or ``None`` when it is absent or stale.
 
     Cache entries are namespaced by server key and include ``librenms_id``.
     When both current and cached IDs are valid positive integers, they must
     match; otherwise cached data is treated as stale.
+
+    Args:
+        sync_device (object): The NetBox device whose inventory is requested.
+        server_key (str): The LibreNMS server key for the cache namespace.
+        get_cache_key (Callable): The function that builds the inventory cache key.
+
+    Returns:
+        list[dict] | None: The cached inventory, or ``None`` when it is absent or stale.
     """
     cached_payload = cache.get(get_cache_key(sync_device, "inventory", server_key=server_key))
     inventory = _extract_inventory_list(cached_payload)
@@ -192,9 +208,11 @@ def _warn_invalid_selected_device(request):
 
 
 class _SerialConflictAmbiguous(Exception):
-    """Raised inside ReplaceModuleView's transaction when more than one module
-    holds the incoming serial — used to abort the atomic block and surface a
-    user-friendly error after the rollback."""
+    """
+    Signal that more than one module holds the incoming serial during a replacement transaction.
+
+    ReplaceModuleView uses this exception to abort the atomic block and show a user-friendly error after the rollback.
+    """
 
     def __init__(self, serial):
         super().__init__(serial)
@@ -531,6 +549,15 @@ def _normalize_module_interface_names_for_vc_member(
     vc_position (e.g., Te3/1/1). If a standalone interface with the rewritten
     name already exists, it is adopted into the module and the newly-created
     conflicting interface is removed.
+
+    Args:
+        device (Device): The selected virtual chassis member.
+        module (Module): The installed module whose interfaces are normalized.
+        changeable_interfaces (QuerySet): The interfaces the caller can change.
+        deletable_interfaces (QuerySet): The interfaces the caller can delete.
+
+    Returns:
+        dict[str, int]: The counts of renamed, adopted, removed, and skipped interfaces.
     """
     result = {
         "renamed": 0,
@@ -618,6 +645,16 @@ def _bind_interface_librenms_id(device, item, module_pk, server_key, interfaces)
     Applies only for inventory items carrying stable port identity metadata.
     The binding is non-destructive: if the port ID already belongs to a different
     interface, no reassignment is performed and a conflict is reported.
+
+    Args:
+        device (Device): The NetBox device that owns the interface.
+        item (dict): The LibreNMS inventory item with port identity metadata.
+        module_pk (int | None): The module primary key for the interface.
+        server_key (str): The LibreNMS server key for the port identity.
+        interfaces (QuerySet): The interfaces available to the caller.
+
+    Returns:
+        dict | None: The binding outcome, or ``None`` when the item has no port ID.
     """
     from dcim.models import Interface
 
@@ -1054,6 +1091,16 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
         Returns items in install order (parent before children).
         Optionally filters items matching 'skip' ignore rules; 'transparent' items
         are excluded from installation but their children are still collected.
+
+        Args:
+            parent_index (int): The inventory index at the branch root.
+            inventory_data (list[dict]): The LibreNMS inventory items.
+            ignore_rules (list[dict] | None): The optional inventory ignore rules.
+            device_serial (str): The device serial used to evaluate ignore rules.
+            index_map (dict | None): The inventory items keyed by index.
+
+        Returns:
+            list[dict]: The collected items in parent-first install order.
         """
         items = []
         parent = next((i for i in inventory_data if i.get("entPhysicalIndex") == parent_index), None)
@@ -1093,11 +1140,21 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
     def _collect_children(
         self, parent_idx, inventory_data, items, visited=None, ignore_rules=None, device_serial="", index_map=None
     ):
-        """Recursively collect children with models, depth-first.
+        """
+        Recursively collect children with models, depth-first.
 
         When ignore_rules are provided, items matching a 'skip' rule (and their
         subtree) are excluded.  Items matching 'transparent' are not installed but
         their children are still collected at the same depth.
+
+        Args:
+            parent_idx (int): The inventory index whose children are collected.
+            inventory_data (list[dict]): The LibreNMS inventory items.
+            items (list[dict]): The output list that receives installable children.
+            visited (set[int] | None): The inventory indexes already visited.
+            ignore_rules (list[dict] | None): The optional inventory ignore rules.
+            device_serial (str): The device serial used to evaluate ignore rules.
+            index_map (dict | None): The inventory items keyed by index.
         """
         if visited is None:
             visited = set()
@@ -1152,6 +1209,24 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
 
         Re-fetches module bays each time since parent installs create new ones.
         Scopes bay lookup to the correct parent module to handle duplicate bay names.
+
+        Args:
+            device (Device): The NetBox device that receives the module.
+            item (dict): The LibreNMS inventory item to install.
+            index_map (dict): The inventory items keyed by index.
+            module_types (dict): The available module types indexed for matching.
+            module_bays (QuerySet): The module bays available to the caller.
+            allowed_module_type_ids (set[int]): The module type IDs available to the caller.
+            changeable_components (dict): The component querysets available for adoption.
+            changeable_interfaces (QuerySet): The interfaces the caller can change.
+            deletable_interfaces (QuerySet): The interfaces the caller can delete.
+            exact_mappings (list | None): The optional exact module bay mappings.
+            regex_mappings (list | None): The optional regular expression module bay mappings.
+            manufacturer_id (int | None): The optional device manufacturer ID.
+            norm_rules_bay (list | None): The optional module bay normalization rules.
+
+        Returns:
+            dict: The install status and its result details.
         """
         from dcim.models import Module
 
@@ -2464,13 +2539,21 @@ class AddBayTemplateView(
         device/module of ``target`` so the resolver can match it immediately.
 
         NetBox auto-creates bays from templates only when a Device/Module is
-        first created — a template added later is invisible to existing
+        first created. A template added later is invisible to existing
         instances until manually instantiated. ``target_kind`` selects the
         scope: device-type templates are instantiated on every Device of that
         type; module-type templates are instantiated on every installed Module
         of that type. Pre-existing bays with the resolved name (under the same
         device/module scope) are skipped so re-adding a template after a
         partial manual fix is safe.
+
+        Args:
+            bay_template (ModuleBayTemplate): The saved module bay template to instantiate.
+            target_kind (str): The target type, either ``device_type`` or ``module_type``.
+            target (DeviceType | ModuleType): The device type or module type that owns the template.
+
+        Returns:
+            int: The number of module bays created on existing instances.
         """
         from dcim.models import Device, Module, ModuleBay
 
@@ -2581,11 +2664,20 @@ class AddBayTemplateView(
     @staticmethod
     def _existing_regex_mapping_covers(librenms_name, librenms_class, manufacturer):
         """
-        True when an existing regex ModuleBayMapping already matches
-        ``librenms_name`` for the given manufacturer / global scope.
-        Iterates regex rows in Python — the row count is small (one per
-        bay-family) so this is cheap, and Postgres can't compare its
+        Return whether an existing regex ModuleBayMapping already matches the requested scope.
+
+        The function checks ``librenms_name`` for the given manufacturer or global scope.
+        It iterates regex rows in Python. The row count is small (one per
+        bay-family), so this is cheap, and Postgres cannot compare its
         re-flavoured patterns server-side anyway.
+
+        Args:
+            librenms_name (str): The LibreNMS bay name to match.
+            librenms_class (str): The LibreNMS inventory class to match.
+            manufacturer (Manufacturer | None): The optional manufacturer scope.
+
+        Returns:
+            bool: Whether an existing regular expression mapping covers the name and scope.
         """
         from netbox_librenms_plugin.models import ModuleBayMapping
 
@@ -2610,12 +2702,20 @@ class AddBayTemplateView(
     @staticmethod
     def _existing_bay_mapping(librenms_name, librenms_class, manufacturer):
         """
-        True when a ModuleBayMapping already covers (librenms_name, librenms_class)
-        for the given manufacturer (vendor-scoped) or globally (manufacturer is null).
+        Return whether a ModuleBayMapping already covers the requested name, class, and scope.
 
-        Only checks exact mappings — regex mappings are intentionally ignored
-        because the per-row suggestion is for one specific name and we don't
+        The scope is the given manufacturer (vendor-scoped) or global (manufacturer is null).
+        This function checks only exact mappings. It intentionally ignores regex mappings
+        because the per-row suggestion is for one specific name and we do not
         want to second-guess broader patterns the operator already wrote.
+
+        Args:
+            librenms_name (str): The LibreNMS bay name to match.
+            librenms_class (str): The LibreNMS inventory class to match.
+            manufacturer (Manufacturer | None): The optional manufacturer scope.
+
+        Returns:
+            bool: Whether an existing exact mapping covers the name, class, and scope.
         """
         from netbox_librenms_plugin.models import ModuleBayMapping
 

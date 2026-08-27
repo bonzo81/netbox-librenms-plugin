@@ -339,11 +339,18 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
         return intents, errors
 
     def get_management_ip(self, obj):
-        """Return the LibreNMS management/polling IP for *obj*, or None.
+        """
+        Return the LibreNMS management/polling IP for *obj*, or None.
 
         Used to decide which synced IP (if any) should become the object's
         Primary IP. Best-effort: any lookup failure yields None so the sync
         itself is never blocked.
+
+        Args:
+            obj (Device | VirtualMachine): The object whose management IP to read.
+
+        Returns:
+            str | None: The management/polling IP, or None if the lookup fails or has no result.
         """
         try:
             librenms_id = self.librenms_api.get_librenms_id(obj)
@@ -638,11 +645,22 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
         return index_ip_sync_rows(cached_ips)
 
     def _prelock_ip_hosts(self, request, selected_ips, cached_index, duplicate_cached_rows, force_intents):
-        """Acquire every valid batch host lock in one deterministic order.
+        """
+        Acquire every valid batch host lock in one deterministic order.
 
         The transaction remains open across the batch. Acquire host advisory locks before the
         first Device, virtual-chassis, VM, or interface row lock so opposite row orders cannot
         hold one host lock while waiting for a shared owner scope.
+
+        Args:
+            request (HttpRequest): The request that contains the VRF selections.
+            selected_ips (list[str]): The selected cached IP row identifiers.
+            cached_index (dict[str, dict]): The cached rows indexed by canonical CIDR.
+            duplicate_cached_rows (set[str]): The canonical row identifiers that occur more than once.
+            force_intents (dict[str, dict]): The confirmed IP changes indexed by canonical row identifier.
+
+        Returns:
+            set[str]: The acquired advisory lock identities.
         """
         lock_entries = {}
         for selected_ip in selected_ips:
@@ -981,11 +999,25 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
         cached_ports_by_id=None,
         interface_name_field=None,
     ):
-        """Create or update IP addresses in NetBox from cached LibreNMS data.
+        """
+        Create or update IP addresses in NetBox from cached LibreNMS data.
 
-        When the "set Primary IP" toggle is on, the synced IP that matches the
-        LibreNMS management IP — and ends up assigned to one of the object's
-        interfaces — is also set as the object's ``primary_ip4``/``primary_ip6``.
+        When the "set Primary IP" toggle is on, the synced IP that matches the LibreNMS management
+        IP and ends up assigned to one of the object's interfaces is also set as the object's
+        ``primary_ip4``/``primary_ip6``.
+
+        Args:
+            request (HttpRequest): The current HTTP request.
+            selected_ips (list[str]): The selected cached IP row identifiers.
+            cached_ips (list[dict]): The cached LibreNMS IP rows.
+            obj (Device | VirtualMachine): The object that owns the target interfaces.
+            object_type (str): The synced object type.
+            force_intents (dict[str, dict] | None): Confirmed IP changes indexed by canonical row identifier.
+            cached_ports_by_id (dict[str, dict] | None): Cached LibreNMS ports indexed by stable port ID.
+            interface_name_field (str | None): The configured LibreNMS interface name field.
+
+        Returns:
+            dict: The per-outcome row lists, errors, conflicts, and batch mutation state.
         """
         results = {
             "created": [],
