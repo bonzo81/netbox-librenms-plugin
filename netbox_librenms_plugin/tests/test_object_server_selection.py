@@ -225,6 +225,27 @@ def test_a_malformed_requested_server_key_renders_the_blocked_page(client, setti
 
 
 @pytest.mark.django_db
+@pytest.mark.parametrize("requested_key", ["contains", "dc__west", "_preferred_server"])
+@pytest.mark.parametrize(
+    "url_name,tab_argument",
+    [("sync_cache_status", []), ("sync_cache_fragment", ["interfaces"])],
+)
+def test_the_cache_only_endpoints_reject_a_malformed_server_key(
+    client, settings, requested_key, url_name, tab_argument
+):
+    """The mapped-server gate reads a raw query value, so a rejected key must not reach the validator."""
+    configure_servers(settings)
+    label = f"{url_name}-{requested_key}"
+    device = make_device(f"malformed-cache-{label}", librenms_cf={"secondary": {"id": 13410}})
+    client.force_login(make_superuser(f"object-server-cache-{label}-user"))
+    url = reverse(f"plugins:netbox_librenms_plugin:{url_name}", args=["device", device.pk, *tab_argument])
+
+    response = client.get(url, {"server_key": requested_key})
+
+    assert response.status_code == 404
+
+
+@pytest.mark.django_db
 def test_unconfigured_mapping_is_removable_but_not_selectable(client, settings):
     """A stale mapping remains visible for cleanup and cannot become an API target."""
     configure_servers(settings)
