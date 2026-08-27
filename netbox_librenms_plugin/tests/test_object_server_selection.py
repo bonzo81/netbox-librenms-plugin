@@ -230,6 +230,28 @@ def test_configured_but_unmapped_server_fails_closed_without_discovery(client, s
 
 
 @pytest.mark.django_db
+@pytest.mark.parametrize("stored_key", ["contains", "dc__west"])
+def test_a_malformed_stored_server_key_does_not_break_the_page(client, settings, stored_key):
+    """Hand-edited custom-field data must not take down server discovery."""
+    _configure_servers(settings)
+    device = make_device(
+        f"malformed-stored-{stored_key}",
+        librenms_cf={stored_key: {"_migrated_to": {"device_id": 4242, "server_key": stored_key}}, "secondary": 13409},
+    )
+    client.force_login(make_superuser(f"object-server-stored-{stored_key}-user"))
+    url = reverse("plugins:netbox_librenms_plugin:device_librenms_sync", args=[device.pk])
+
+    with patch("netbox_librenms_plugin.librenms_api.requests.get") as requests_get:
+        requests_get.return_value = _json_response(url, {"devices": []})
+        response = client.get(url, {"server_key": "secondary"})
+
+    assert response.status_code == 200
+    html = response.content.decode()
+    assert 'data-active-server-key="secondary"' in html
+    assert stored_key not in _selector_html(html)
+
+
+@pytest.mark.django_db
 def test_unconfigured_mapping_is_removable_but_not_selectable(client, settings):
     """A stale mapping remains visible for cleanup and cannot become an API target."""
     _configure_servers(settings)

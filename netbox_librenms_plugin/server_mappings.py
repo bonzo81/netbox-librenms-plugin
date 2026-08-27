@@ -22,12 +22,23 @@ def require_server_key(server_key: str) -> str:
     return server_key
 
 
+def is_server_key(value) -> bool:
+    """Return whether *value* is usable as a server identity key."""
+    try:
+        require_server_key(value)
+    except ValueError:
+        return False
+    return True
+
+
 def iter_server_mapping_entries(value):
     """Yield only server identity entries from a ``librenms_id`` mapping."""
     if not isinstance(value, dict):
         return
     for server_key, entry in value.items():
-        if isinstance(server_key, str) and server_key not in RESERVED_SERVER_KEYS:
+        # Hand-edited custom-field data can hold a key the validator rejects; every reader below
+        # would raise on it, so drop it here instead of breaking server discovery.
+        if is_server_key(server_key):
             yield server_key, entry
 
 
