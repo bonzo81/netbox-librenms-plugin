@@ -712,9 +712,10 @@ class TestSyncCablesViewHelpers:
         """A per-row Sync button posts sync_one, which must win over any checked boxes."""
         from netbox_librenms_plugin.views.sync.cables import SyncCablesView
 
-        view = object.__new__(SyncCablesView)
+        device = _cov_device()
+        view = SyncCablesView()
         req = _make_request(post_data={"select": ["port1", "port2"], "sync_one": "port2"})
-        result = view.get_selected_interfaces(req, MagicMock(id=1))
+        result = view.get_selected_interfaces(req, device)
         assert [row["row_id"] for row in result] == ["port2"]
 
     def test_validate_prerequisites_false_on_no_cache(self):
@@ -797,29 +798,42 @@ class TestSyncCablesViewHelpers:
         """Verify that cached source rows receive identities and current NetBox enrichment when read."""
         from django.core.cache import cache
 
+        from netbox_librenms_plugin.tests.conftest import cable_together
         from netbox_librenms_plugin.views.sync.cables import SyncCablesView
 
         device = _cov_device()
-        interface = make_interface(device, "Gi0/1")
+        remote_device = make_device("sync-cached-links-remote")
+        local_interface = make_interface(device, "Gi0/1")
+        remote_interface = make_interface(remote_device, "Gi0/2")
+        cable = cable_together(local_interface, remote_interface)
         request = _make_request()
-        view = object.__new__(SyncCablesView)
+        view = SyncCablesView()
         view.setup(request, pk=device.pk)
         view._post_server_key = "default"
         cache_key = view.get_cache_key(device, "links", "default")
         _seeded_cache_keys.add(cache_key)
         cache.set(
             cache_key,
-            {"links": [{"local_port_id": "p", "local_port": interface.name, "device_id": device.pk}]},
+            {
+                "links": [
+                    {
+                        "local_port_id": "p",
+                        "local_port": local_interface.name,
+                        "remote_device": remote_device.name,
+                        "remote_port": remote_interface.name,
+                    }
+                ]
+            },
             timeout=300,
         )
 
-        with patch.object(
-            type(view), "librenms_api", new_callable=lambda: property(lambda s: MagicMock(server_key="default"))
-        ):
-            result = view.get_cached_links_data(request, device)
+        result = view.get_cached_links_data(request, device)
 
         assert [row["row_id"] for row in result] == ["p"]
-        assert result[0]["netbox_local_interface_id"] == interface.pk
+        assert result[0]["netbox_local_interface_id"] == local_interface.pk
+        assert result[0]["netbox_remote_interface_id"] == remote_interface.pk
+        assert result[0]["cable_status"] == "Cable Found"
+        assert result[0]["cable_url"].endswith(f"/{cable.pk}/")
 
     def test_duplicate_cached_row_identities_report_the_real_cause(self):
         """Duplicate row identities must not be reported as an expired cache."""
@@ -829,7 +843,7 @@ class TestSyncCablesViewHelpers:
 
         device = _cov_device()
         request = _make_request()
-        view = object.__new__(SyncCablesView)
+        view = SyncCablesView()
         view.setup(request, pk=device.pk)
         view._post_server_key = "default"
         cache_key = view.get_cache_key(device, "links", "default")
@@ -842,10 +856,7 @@ class TestSyncCablesViewHelpers:
         }
         cache.set(cache_key, {"links": [duplicate, duplicate]}, timeout=300)
 
-        with patch.object(
-            type(view), "librenms_api", new_callable=lambda: property(lambda s: MagicMock(server_key="default"))
-        ):
-            cached_links = view.get_cached_links_data(request, device)
+        cached_links = view.get_cached_links_data(request, device)
 
         assert cached_links == []
         assert view.validate_prerequisites(cached_links, [{"row_id": "duplicate"}]) is False

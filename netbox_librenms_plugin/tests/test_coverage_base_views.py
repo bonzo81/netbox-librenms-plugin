@@ -158,36 +158,39 @@ class TestBaseCableTableViewGetLinksData:
 
     def test_prepare_context_replaces_stale_links_cache_on_partial_fetch(self):
         """Verify that a partial fresh fetch replaces the prior snapshot and records the failed source."""
-        from django.core.cache import cache as real_cache
+        from django.core.cache import cache
 
-        view = self._make_view()
-        view._librenms_api.cache_timeout = 300
+        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+        from netbox_librenms_plugin.views.object_sync.devices import DeviceCableTableView
+
+        view = DeviceCableTableView()
+        view.request = make_sync_page_request()
+        api = object.__new__(LibreNMSAPI)
+        api.server_key = "default"
+        api.cache_timeout = 300
+        view._librenms_api = api
         obj = make_sync_page_device()
-        cache_key = "links-partial-stale-test"
+        make_interface(obj, "Gi0/1")
+        fresh_interface = make_interface(obj, "Gi0/2")
+        cache_key = view.get_cache_key(obj, "links", "default")
         # A prior FULL snapshot is already cached (what verify/sync would resolve rows from).
-        real_cache.set(cache_key, {"links": [{"local_port": "Gi0/1", "local_port_id": 11}]})
+        cache.set(cache_key, {"links": [{"local_port": "Gi0/1", "local_port_id": 11, "_source": "main"}]})
 
         def _fake_links(o, server_key=None, sync_device=None):
             view._oob_links_fetch_failed = True  # partial: the OOB-side fetch failed
-            return [{"local_port": "Gi0/2", "local_port_id": 22}]  # fresh PARTIAL set
+            return [{"local_port": fresh_interface.name, "local_port_id": 22, "_source": "main"}]
 
         try:
-            with (
-                patch.object(view, "get_links_data", side_effect=_fake_links),
-                patch.object(view, "get_cache_key", return_value=cache_key),
-                patch.object(view, "enrich_links_data", side_effect=lambda d, *a, **k: d),
-                patch.object(view, "get_table", return_value=MagicMock()),
-                patch("netbox_librenms_plugin.views.base.cables_view.get_librenms_sync_device", return_value=obj),
-            ):
+            with patch.object(view, "get_links_data", side_effect=_fake_links):
                 context = view._prepare_context(view.request, obj, fetch_fresh=True, server_key="default")
 
-            cached = real_cache.get(cache_key)
+            cached = cache.get(cache_key)
             # The superseded full snapshot is gone; only the fresh partial rows remain.
             assert [row["local_port_id"] for row in cached["links"]] == [22]
             assert cached["incomplete_sources"] == ["OOB"]
             assert context["incomplete_sources"] == ["OOB"]
         finally:
-            real_cache.delete(cache_key)
+            cache.delete(cache_key)
 
     def test_get_links_data_treats_status_error_payload_as_failure(self):
         """get_device_links returns the raw JSON body, so a 200 {"status": "error", ...} must be treated as a fetch failure (with its message), not silently fall through to 'No links found'."""

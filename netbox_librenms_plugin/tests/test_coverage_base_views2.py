@@ -228,7 +228,7 @@ class TestGetObjectAndIpAddress:
         from django.contrib.auth import get_user_model
         from django.http import Http404
 
-        from netbox_librenms_plugin.tests.view_test_helpers import grant
+        from netbox_librenms_plugin.tests.view_test_helpers import grant, make_request
         from netbox_librenms_plugin.views.object_sync.devices import DeviceCableTableView
 
         visible = make_device("cbv2-get-object-visible")
@@ -236,10 +236,8 @@ class TestGetObjectAndIpAddress:
         user = get_user_model().objects.create_user("cbv2-get-object")
         user = grant(user, "view", Device, constraints={"pk": visible.pk})
 
-        view = object.__new__(DeviceCableTableView)
-        view._librenms_api = MagicMock(server_key="default")
-        view.request = make_sync_page_request()
-        view.request.user = user
+        view = DeviceCableTableView()
+        view.setup(make_request("get", user=user), pk=visible.pk)
 
         assert view.get_object(visible.pk) == visible
         with pytest_mod.raises(Http404):
@@ -2360,35 +2358,20 @@ class TestEnrichLocalPortVCNameFallback:
 class TestPostHandlerCanCreateCable:
     """Tests for SingleCableVerifyView.post() can_create_cable branch (lines 519-525)."""
 
-    def _make_view(self):
-        from netbox_librenms_plugin.views.base.cables_view import SingleCableVerifyView
-
-        view = object.__new__(SingleCableVerifyView)
-        view._librenms_api = MagicMock()
-        view._librenms_api.server_key = "default"
-        # dispatch() sets self.request in production; tests call post() directly, so set an
-        # authorized request here for the object-permission gate (reads self.request.user).
-        view.request = make_sync_page_request()
-        return view
-
     @pytest.mark.django_db
     def test_can_create_cable_adds_sync_action(self):
         """Verify that can_create_cable adds a sync action that submits the row through the table form."""
-        import json as json_mod
+        import json
 
-        view = self._make_view()
-        view.request.user = _authorized_superuser("cancreate")
-        device = _real_cable_device("cancreate", bound_port_id=10)  # local interface bound to librenms id 10
-        remote_interface = make_interface(make_device("cbv2-cancreate-remote"), "Gi0/1")
+        from django.core.cache import cache
 
-        mock_request = MagicMock()
-        mock_request.body = json_mod.dumps(
-            {
-                "device_id": device.pk,
-                "row_id": "10",
-                "server_key": "default",
-            }
-        ).encode()
+        from netbox_librenms_plugin.tests.view_test_helpers import make_request
+        from netbox_librenms_plugin.views.base.cables_view import SingleCableVerifyView
+
+        device = _real_cable_device("cancreate", bound_port_id=10)
+        remote_device = make_device("cbv2-cancreate-remote", librenms_cf={"default": 99})
+        remote_interface = make_interface(remote_device, "Gi0/1")
+        _seed_lib_id(remote_interface, 20)
 
         cached_links = {
             "links": [
@@ -2403,48 +2386,30 @@ class TestPostHandlerCanCreateCable:
             ]
         }
 
-        process_result = {
-            "local_port": "Gi0/0",
-            "remote_port": "Gi0/1",
-            "remote_device": "switch-b",
-            "remote_port_id": 20,
-            "remote_device_id": 99,
-            "netbox_remote_device_id": remote_interface.device_id,
-            "netbox_remote_interface_id": remote_interface.pk,
-            "remote_device_url": "/device/5/",
-            "remote_port_url": "/interface/20/",
-            "remote_port_name": "Gi0/1",
-            "cable_status": "No Cable",
-            "can_create_cable": True,
-        }
-
-        with (
-            patch(
-                "netbox_librenms_plugin.views.base.cables_view.get_librenms_sync_device",
-                return_value=device,
+        request = make_request(
+            "post",
+            data=json.dumps(
+                {
+                    "device_id": device.pk,
+                    "row_id": "10",
+                    "server_key": "default",
+                }
             ),
-            patch("netbox_librenms_plugin.views.base.cables_view.cache") as mock_cache,
-            patch.object(view, "get_cache_key", return_value="test-key"),
-            patch.object(view, "process_remote_device", return_value=process_result),
-            patch.object(view, "check_cable_status", return_value=process_result),
-            patch(
-                "netbox_librenms_plugin.views.base.cables_view.reverse",
-                side_effect=[
-                    "/dcim/interfaces/99/",
-                    "/plugins/librenms/sync/cables/1/",
-                ],
-            ),
-            patch(
-                "netbox_librenms_plugin.views.base.cables_view.escape",
-                side_effect=lambda x: x,
-            ),
-        ):
-            mock_cache.get.return_value = cached_links
-            response = view.post(mock_request)
+            content_type="application/json",
+            user=_authorized_superuser("cancreate"),
+        )
+        view = SingleCableVerifyView()
+        view.setup(request)
+        view._librenms_api = MagicMock(server_key="default")
+        links_cache_key = view.get_cache_key(device, "links", "default")
+        cache.set(links_cache_key, cached_links, timeout=300)
 
-        import json as json_mod2
+        try:
+            response = view.post(request)
+            data = json.loads(response.content)
+        finally:
+            cache.delete(links_cache_key)
 
-        data = json_mod2.loads(response.content)
         assert data["status"] == "success"
         assert 'name="sync_one"' in data["formatted_row"]["actions"]
         assert 'value="10"' in data["formatted_row"]["actions"]

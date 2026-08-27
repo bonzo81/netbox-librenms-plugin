@@ -3231,64 +3231,65 @@ class TestGetSerialPortSensors:
             "group": "Serial Ports",
         }
 
-    def test_empty_recognition_table_skips_the_instance_sensor_request(self, mock_librenms_api):
-        import unittest.mock as mock
-
+    def test_empty_recognition_table_skips_the_instance_sensor_request(self, mock_librenms_api, librenms_server):
         from netbox_librenms_plugin.models import SerialSensorTypePattern
 
         SerialSensorTypePattern.objects.all().delete()
+        requests_seen = []
 
-        with mock.patch("netbox_librenms_plugin.librenms_api.requests.get") as external_get:
-            success, data = mock_librenms_api.get_serial_port_sensors(device_id=12)
+        def response(**request):
+            requests_seen.append(request)
+            return 200, {"status": "ok", "sensors": []}
+
+        librenms_server.register("/api/v0/resources/sensors", response, method="GET")
+        mock_librenms_api.librenms_url = librenms_server.url
+
+        success, data = mock_librenms_api.get_serial_port_sensors(device_id=12)
 
         assert success is True
         assert data == []
-        external_get.assert_not_called()
+        assert requests_seen == []
 
-    def test_success_filters_by_device_and_type(self, mock_librenms_api, mock_response_factory):
-        import unittest.mock as mock
-
+    def test_success_filters_by_device_and_type(self, mock_librenms_api, librenms_server):
         sensors = [
             self._make_sensor(12, port_num=7),
             self._make_sensor(12, port_num=11),
             self._make_sensor(99, port_num=3),  # different device
             self._make_sensor(12, sensor_type="tempSensor", port_num=5),  # wrong type
         ]
-        mock_resp = mock_response_factory(status_code=200, json_data={"status": "ok", "sensors": sensors})
-        with mock.patch("netbox_librenms_plugin.librenms_api.requests.get", return_value=mock_resp):
-            success, data = mock_librenms_api.get_serial_port_sensors(device_id=12)
+        librenms_server.register("/api/v0/resources/sensors", {"status": "ok", "sensors": sensors})
+        mock_librenms_api.librenms_url = librenms_server.url
+
+        success, data = mock_librenms_api.get_serial_port_sensors(device_id=12)
 
         assert success is True
         assert len(data) == 2
         assert all(s["device_id"] == 12 for s in data)
         assert all(s["sensor_type"] == "acsSerialPortTable" for s in data)
 
-    def test_explicit_sensor_types_map_bypasses_db(self, mock_librenms_api, mock_response_factory):
+    def test_explicit_sensor_types_map_bypasses_db(self, mock_librenms_api, librenms_server):
         """A caller-supplied recognition map filters without the live database rows."""
-        import unittest.mock as mock
-
         from netbox_librenms_plugin.models import SerialSensorTypePattern
 
         SerialSensorTypePattern.objects.all().delete()  # a replay host may have no rows at all
 
         sensors = [self._make_sensor(12, port_num=7)]
-        mock_resp = mock_response_factory(status_code=200, json_data={"status": "ok", "sensors": sensors})
-        with mock.patch("netbox_librenms_plugin.librenms_api.requests.get", return_value=mock_resp):
-            success, data = mock_librenms_api.get_serial_port_sensors(
-                device_id=12, sensor_types={"acsSerialPortTable": "ttyS{N}"}
-            )
-            assert success is True
-            assert len(data) == 1
+        librenms_server.register("/api/v0/resources/sensors", {"status": "ok", "sensors": sensors})
+        mock_librenms_api.librenms_url = librenms_server.url
 
-            # The DB-map path sees no rows, so it filters everything out.
-            success2, data2 = mock_librenms_api.get_serial_port_sensors(device_id=12)
-            assert success2 is True
-            assert data2 == []
+        success, data = mock_librenms_api.get_serial_port_sensors(
+            device_id=12, sensor_types={"acsSerialPortTable": "ttyS{N}"}
+        )
+        assert success is True
+        assert len(data) == 1
 
-    def test_cisco_async_line_survives_type_filter(self, mock_librenms_api, mock_response_factory):
+        # The DB-map path sees no rows, so it filters everything out.
+        success2, data2 = mock_librenms_api.get_serial_port_sensors(device_id=12)
+        assert success2 is True
+        assert data2 == []
+
+    def test_cisco_async_line_survives_type_filter(self, mock_librenms_api, librenms_server):
         """Cisco async-line sensors pass the serial type filter alongside Avocent, others are dropped."""
-        import unittest.mock as mock
-
         cisco = {
             "sensor_id": 2002,
             "device_id": 12,
@@ -3303,9 +3304,10 @@ class TestGetSerialPortSensors:
             cisco,
             self._make_sensor(12, sensor_type="tempSensor", port_num=5),  # unrelated -> excluded
         ]
-        mock_resp = mock_response_factory(status_code=200, json_data={"status": "ok", "sensors": sensors})
-        with mock.patch("netbox_librenms_plugin.librenms_api.requests.get", return_value=mock_resp):
-            success, data = mock_librenms_api.get_serial_port_sensors(device_id=12)
+        librenms_server.register("/api/v0/resources/sensors", {"status": "ok", "sensors": sensors})
+        mock_librenms_api.librenms_url = librenms_server.url
+
+        success, data = mock_librenms_api.get_serial_port_sensors(device_id=12)
 
         assert success is True
         assert {s["sensor_type"] for s in data} == {
@@ -3313,89 +3315,90 @@ class TestGetSerialPortSensors:
             "OLD-CISCO-TS-MIB::ltsLineTable",
         }
 
-    def test_non_dict_sensor_item_fails_closed(self, mock_librenms_api, mock_response_factory):
+    def test_non_dict_sensor_item_fails_closed(self, mock_librenms_api, librenms_server):
         """Verify a malformed non-dictionary sensor item fails closed instead of appearing as no serial sensors."""
-        import unittest.mock as mock
-
         sensors = ["bad-string", None, self._make_sensor(12, port_num=7)]
-        mock_resp = mock_response_factory(status_code=200, json_data={"status": "ok", "sensors": sensors})
-        with mock.patch("netbox_librenms_plugin.librenms_api.requests.get", return_value=mock_resp):
-            success, msg = mock_librenms_api.get_serial_port_sensors(device_id=12)
+        librenms_server.register("/api/v0/resources/sensors", {"status": "ok", "sensors": sensors})
+        mock_librenms_api.librenms_url = librenms_server.url
+
+        success, msg = mock_librenms_api.get_serial_port_sensors(device_id=12)
 
         assert success is False
         assert "invalid sensor item" in msg.lower()
 
     def test_non_string_sensor_type_is_skipped_without_dropping_the_serial_rows(
-        self, mock_librenms_api, mock_response_factory
+        self, mock_librenms_api, librenms_server
     ):
         """Verify an unhashable sensor type is skipped so one malformed row cannot stop the instance-wide refresh."""
-        import unittest.mock as mock
-
         unreadable = self._make_sensor(12, port_num=8)
         unreadable["sensor_type"] = ["acsSerialPortTable"]  # unhashable → TypeError on `in serial_types`
         good = self._make_sensor(12, port_num=7)
-        mock_resp = mock_response_factory(status_code=200, json_data={"status": "ok", "sensors": [unreadable, good]})
-        with mock.patch("netbox_librenms_plugin.librenms_api.requests.get", return_value=mock_resp):
-            success, data = mock_librenms_api.get_serial_port_sensors(device_id=12)
+        librenms_server.register(
+            "/api/v0/resources/sensors",
+            {"status": "ok", "sensors": [unreadable, good]},
+        )
+        mock_librenms_api.librenms_url = librenms_server.url
+
+        success, data = mock_librenms_api.get_serial_port_sensors(device_id=12)
 
         assert success is True
         assert [sensor["sensor_id"] for sensor in data] == [good["sensor_id"]]
 
-    def test_unrelated_non_string_sensor_type_does_not_fail_the_serial_fetch(
-        self, mock_librenms_api, mock_response_factory
-    ):
+    def test_unrelated_non_string_sensor_type_does_not_fail_the_serial_fetch(self, mock_librenms_api, librenms_server):
         """One unrelated sensor on another device must not stop this device's serial refresh."""
-        import unittest.mock as mock
-
         unrelated = self._make_sensor(99, port_num=5)
         unrelated["sensor_type"] = {"name": "tempSensor"}
         good = self._make_sensor(12, port_num=7)
-        mock_resp = mock_response_factory(status_code=200, json_data={"status": "ok", "sensors": [unrelated, good]})
-        with mock.patch("netbox_librenms_plugin.librenms_api.requests.get", return_value=mock_resp):
-            success, data = mock_librenms_api.get_serial_port_sensors(device_id=12)
+        librenms_server.register(
+            "/api/v0/resources/sensors",
+            {"status": "ok", "sensors": [unrelated, good]},
+        )
+        mock_librenms_api.librenms_url = librenms_server.url
+
+        success, data = mock_librenms_api.get_serial_port_sensors(device_id=12)
 
         assert success is True
         assert [sensor["sensor_id"] for sensor in data] == [good["sensor_id"]]
 
-    def test_non_numeric_sensor_id_fails_closed(self, mock_librenms_api, mock_response_factory):
-        import unittest.mock as mock
-
+    def test_non_numeric_sensor_id_fails_closed(self, mock_librenms_api, librenms_server):
         bad = self._make_sensor(12, port_num=8)
         bad["sensor_id"] = "';alert(1);//"
-        mock_resp = mock_response_factory(status_code=200, json_data={"status": "ok", "sensors": [bad]})
+        librenms_server.register("/api/v0/resources/sensors", {"status": "ok", "sensors": [bad]})
+        mock_librenms_api.librenms_url = librenms_server.url
 
-        with mock.patch("netbox_librenms_plugin.librenms_api.requests.get", return_value=mock_resp):
-            success, msg = mock_librenms_api.get_serial_port_sensors(device_id=12)
+        success, msg = mock_librenms_api.get_serial_port_sensors(device_id=12)
 
         assert success is False
         assert "invalid sensor_id" in msg.lower()
 
-    def test_unrelated_sensor_id_does_not_fail_the_serial_fetch(self, mock_librenms_api, mock_response_factory):
+    def test_unrelated_sensor_id_does_not_fail_the_serial_fetch(self, mock_librenms_api, librenms_server):
         """The endpoint returns every sensor on the instance, so only serial rows may fail it."""
-        import unittest.mock as mock
-
         unrelated = self._make_sensor(99, sensor_type="tempSensor", port_num=5)
         unrelated["sensor_id"] = None
         good = self._make_sensor(12, port_num=7)
-        mock_resp = mock_response_factory(status_code=200, json_data={"status": "ok", "sensors": [unrelated, good]})
+        librenms_server.register(
+            "/api/v0/resources/sensors",
+            {"status": "ok", "sensors": [unrelated, good]},
+        )
+        mock_librenms_api.librenms_url = librenms_server.url
 
-        with mock.patch("netbox_librenms_plugin.librenms_api.requests.get", return_value=mock_resp):
-            success, data = mock_librenms_api.get_serial_port_sensors(device_id=12)
+        success, data = mock_librenms_api.get_serial_port_sensors(device_id=12)
 
         assert success is True
         assert [sensor["sensor_id"] for sensor in data] == [good["sensor_id"]]
 
-    def test_unrelated_sensor_deleted_does_not_fail_the_serial_fetch(self, mock_librenms_api, mock_response_factory):
+    def test_unrelated_sensor_deleted_does_not_fail_the_serial_fetch(self, mock_librenms_api, librenms_server):
         """One unrelated sensor with an out-of-contract sensor_deleted must not drop serial rows."""
-        import unittest.mock as mock
-
         unrelated = self._make_sensor(99, sensor_type="tempSensor", port_num=5)
         unrelated["sensor_deleted"] = 2
         good = self._make_sensor(12, port_num=7)
-        mock_resp = mock_response_factory(status_code=200, json_data={"status": "ok", "sensors": [unrelated, good]})
+        librenms_server.register(
+            "/api/v0/resources/sensors",
+            {"status": "ok", "sensors": [unrelated, good]},
+        )
+        mock_librenms_api.librenms_url = librenms_server.url
 
-        with mock.patch("netbox_librenms_plugin.librenms_api.requests.get", return_value=mock_resp):
-            success, data = mock_librenms_api.get_serial_port_sensors(device_id=12)
+        success, data = mock_librenms_api.get_serial_port_sensors(device_id=12)
 
         assert success is True
         assert [sensor["sensor_id"] for sensor in data] == [good["sensor_id"]]
@@ -3404,108 +3407,104 @@ class TestGetSerialPortSensors:
     def test_non_integer_sensor_deleted_on_a_serial_row_fails_closed(
         self,
         mock_librenms_api,
-        mock_response_factory,
+        librenms_server,
         deleted_value,
     ):
         """A serial row with an unreadable sensor_deleted is still a malformed response."""
-        import unittest.mock as mock
-
         bad = self._make_sensor(12, port_num=8)
         bad["sensor_deleted"] = deleted_value
-        mock_resp = mock_response_factory(status_code=200, json_data={"status": "ok", "sensors": [bad]})
+        librenms_server.register("/api/v0/resources/sensors", {"status": "ok", "sensors": [bad]})
+        mock_librenms_api.librenms_url = librenms_server.url
 
-        with mock.patch("netbox_librenms_plugin.librenms_api.requests.get", return_value=mock_resp):
-            success, msg = mock_librenms_api.get_serial_port_sensors(device_id=12)
+        success, msg = mock_librenms_api.get_serial_port_sensors(device_id=12)
 
         assert success is False
         assert "invalid sensor_deleted" in msg.lower()
 
-    def test_empty_sensor_list_returns_empty(self, mock_librenms_api, mock_response_factory):
-        import unittest.mock as mock
+    def test_empty_sensor_list_returns_empty(self, mock_librenms_api, librenms_server):
+        librenms_server.register("/api/v0/resources/sensors", {"status": "ok", "sensors": []})
+        mock_librenms_api.librenms_url = librenms_server.url
 
-        mock_resp = mock_response_factory(status_code=200, json_data={"status": "ok", "sensors": []})
-        with mock.patch("netbox_librenms_plugin.librenms_api.requests.get", return_value=mock_resp):
-            success, data = mock_librenms_api.get_serial_port_sensors(device_id=12)
+        success, data = mock_librenms_api.get_serial_port_sensors(device_id=12)
 
         assert success is True
         assert data == []
 
-    def test_librenms_empty_inventory_404_returns_empty(self, mock_librenms_api, mock_response_factory):
+    def test_librenms_empty_inventory_404_returns_empty(self, mock_librenms_api, librenms_server):
         """LibreNMS reports a valid empty sensor inventory as a specific 404 message."""
-        import unittest.mock as mock
-
-        import requests as req
-
-        response = mock_response_factory(
-            status_code=404,
-            json_data={"status": "error", "message": "Sensors do not exist"},
+        librenms_server.register(
+            "/api/v0/resources/sensors",
+            {"status": "error", "message": "Sensors do not exist"},
+            status=404,
         )
-        response.raise_for_status.side_effect = req.exceptions.HTTPError(response=response)
-        with mock.patch("netbox_librenms_plugin.librenms_api.requests.get", return_value=response):
-            success, data = mock_librenms_api.get_serial_port_sensors(device_id=12)
+        mock_librenms_api.librenms_url = librenms_server.url
+
+        success, data = mock_librenms_api.get_serial_port_sensors(device_id=12)
 
         assert success is True
         assert data == []
 
-    def test_deleted_serial_sensors_are_excluded(self, mock_librenms_api, mock_response_factory):
+    def test_deleted_serial_sensors_are_excluded(self, mock_librenms_api, librenms_server):
         """A discovery-deleted line must not become a live cable-sync row."""
-        import unittest.mock as mock
-
         active = self._make_sensor(12, port_num=7)
         active["sensor_deleted"] = "0"
         deleted = self._make_sensor(12, port_num=8)
         deleted["sensor_deleted"] = 1
-        response = mock_response_factory(
-            status_code=200,
-            json_data={"status": "ok", "sensors": [active, deleted]},
+        librenms_server.register(
+            "/api/v0/resources/sensors",
+            {"status": "ok", "sensors": [active, deleted]},
         )
-        with mock.patch("netbox_librenms_plugin.librenms_api.requests.get", return_value=response):
-            success, data = mock_librenms_api.get_serial_port_sensors(device_id=12)
+        mock_librenms_api.librenms_url = librenms_server.url
+
+        success, data = mock_librenms_api.get_serial_port_sensors(device_id=12)
 
         assert success is True
         assert [sensor["sensor_id"] for sensor in data] == [active["sensor_id"]]
 
-    def test_missing_sensors_key_returns_failure(self, mock_librenms_api, mock_response_factory):
+    def test_missing_sensors_key_returns_failure(self, mock_librenms_api, librenms_server):
         """status=ok but neither 'sensors' nor 'resources' present is a malformed response, not a successful zero-sensor result."""
-        import unittest.mock as mock
+        librenms_server.register(
+            "/api/v0/resources/sensors",
+            {"status": "ok", "message": "no sensors key"},
+        )
+        mock_librenms_api.librenms_url = librenms_server.url
 
-        mock_resp = mock_response_factory(status_code=200, json_data={"status": "ok", "message": "no sensors key"})
-        with mock.patch("netbox_librenms_plugin.librenms_api.requests.get", return_value=mock_resp):
-            success, msg = mock_librenms_api.get_serial_port_sensors(device_id=12)
+        success, msg = mock_librenms_api.get_serial_port_sensors(device_id=12)
 
         assert success is False
         assert "no sensors key" in msg
 
-    def test_falsy_present_sensors_value_returns_failure(self, mock_librenms_api, mock_response_factory):
+    def test_falsy_present_sensors_value_returns_failure(self, mock_librenms_api, librenms_server):
         """A present-but-non-list 'sensors' (e.g. "") must fail, not be coerced to an empty success."""
-        import unittest.mock as mock
+        librenms_server.register("/api/v0/resources/sensors", {"status": "ok", "sensors": ""})
+        mock_librenms_api.librenms_url = librenms_server.url
 
-        mock_resp = mock_response_factory(status_code=200, json_data={"status": "ok", "sensors": ""})
-        with mock.patch("netbox_librenms_plugin.librenms_api.requests.get", return_value=mock_resp):
-            success, msg = mock_librenms_api.get_serial_port_sensors(device_id=12)
+        success, msg = mock_librenms_api.get_serial_port_sensors(device_id=12)
 
         assert success is False
         assert "missing sensor list" in msg.lower()
 
-    def test_non_ok_status_returns_error(self, mock_librenms_api, mock_response_factory):
-        import unittest.mock as mock
-
-        mock_resp = mock_response_factory(
-            status_code=200, json_data={"status": "error", "message": "something went wrong"}
+    def test_non_ok_status_returns_error(self, mock_librenms_api, librenms_server):
+        librenms_server.register(
+            "/api/v0/resources/sensors",
+            {"status": "error", "message": "something went wrong"},
         )
-        with mock.patch("netbox_librenms_plugin.librenms_api.requests.get", return_value=mock_resp):
-            success, msg = mock_librenms_api.get_serial_port_sensors(device_id=12)
+        mock_librenms_api.librenms_url = librenms_server.url
+
+        success, msg = mock_librenms_api.get_serial_port_sensors(device_id=12)
 
         assert success is False
         assert "wrong" in msg
 
-    def test_404_returns_error(self, mock_librenms_api, mock_response_factory):
-        import unittest.mock as mock
-        import requests as req
+    def test_404_returns_error(self, mock_librenms_api, librenms_server):
+        librenms_server.register(
+            "/api/v0/resources/sensors",
+            {"status": "error", "message": "Resource does not exist"},
+            status=404,
+        )
+        mock_librenms_api.librenms_url = librenms_server.url
 
-        http_err = req.exceptions.HTTPError(response=mock.MagicMock(status_code=404))
-        with mock.patch("netbox_librenms_plugin.librenms_api.requests.get", side_effect=http_err):
-            success, msg = mock_librenms_api.get_serial_port_sensors(device_id=12)
+        success, msg = mock_librenms_api.get_serial_port_sensors(device_id=12)
 
         assert success is False
         assert "not found" in msg.lower()
@@ -3522,40 +3521,52 @@ class TestGetSerialPortSensors:
         assert success is False
         assert "refused" in msg or "error" in msg.lower()
 
-    def test_recognized_type_change_applies_on_the_next_fetch(self, mock_librenms_api, mock_response_factory):
+    def test_recognized_type_change_applies_on_the_next_fetch(self, mock_librenms_api, librenms_server):
         """Adding a recognized sensor type applies on the next fresh fetch."""
-        import unittest.mock as mock
-
         from netbox_librenms_plugin.models import SerialSensorTypePattern
 
         sensor_type = "reviewSerialTable"
         sensors = [self._make_sensor(12, sensor_type=sensor_type, port_num=7)]
-        mock_resp = mock_response_factory(status_code=200, json_data={"status": "ok", "sensors": sensors})
+        requests_seen = []
 
-        with mock.patch("netbox_librenms_plugin.librenms_api.requests.get", return_value=mock_resp) as mock_get:
-            first_success, first_data = mock_librenms_api.get_serial_port_sensors(device_id=12)
-            SerialSensorTypePattern.objects.create(sensor_type=sensor_type, port_name_pattern="console{N}")
-            second_success, second_data = mock_librenms_api.get_serial_port_sensors(device_id=12)
+        def response(**request):
+            requests_seen.append(request)
+            return 200, {"status": "ok", "sensors": sensors}
+
+        librenms_server.register("/api/v0/resources/sensors", response, method="GET")
+        mock_librenms_api.librenms_url = librenms_server.url
+
+        first_success, first_data = mock_librenms_api.get_serial_port_sensors(device_id=12)
+        SerialSensorTypePattern.objects.create(sensor_type=sensor_type, port_name_pattern="console{N}")
+        second_success, second_data = mock_librenms_api.get_serial_port_sensors(device_id=12)
 
         assert first_success is True and first_data == []
         assert second_success is True and [sensor["sensor_type"] for sensor in second_data] == [sensor_type]
-        assert mock_get.call_count == 2
+        assert len(requests_seen) == 2
 
-    def test_failed_fetch_is_retried(self, mock_librenms_api, mock_response_factory):
+    def test_failed_fetch_is_retried(self, mock_librenms_api, librenms_server):
         """A transient failure does not prevent the next request from fetching again."""
-        import unittest.mock as mock
-
         good = [self._make_sensor(12, port_num=7)]
-        err_resp = mock_response_factory(status_code=200, json_data={"status": "error", "message": "boom"})
-        ok_resp = mock_response_factory(status_code=200, json_data={"status": "ok", "sensors": good})
-        with mock.patch(
-            "netbox_librenms_plugin.librenms_api.requests.get", side_effect=[err_resp, ok_resp]
-        ) as mock_get:
-            ok1, msg1 = mock_librenms_api.get_serial_port_sensors(device_id=12)
-            ok2, data2 = mock_librenms_api.get_serial_port_sensors(device_id=12)
+        responses = iter(
+            [
+                {"status": "error", "message": "boom"},
+                {"status": "ok", "sensors": good},
+            ]
+        )
+        requests_seen = []
+
+        def response(**request):
+            requests_seen.append(request)
+            return 200, next(responses)
+
+        librenms_server.register("/api/v0/resources/sensors", response, method="GET")
+        mock_librenms_api.librenms_url = librenms_server.url
+
+        ok1, msg1 = mock_librenms_api.get_serial_port_sensors(device_id=12)
+        ok2, data2 = mock_librenms_api.get_serial_port_sensors(device_id=12)
 
         assert ok1 is False and "boom" in msg1
-        assert mock_get.call_count == 2
+        assert len(requests_seen) == 2
         assert ok2 is True and [s["device_id"] for s in data2] == [12]
 
     def test_json_decode_error_reported_as_invalid_json(self, mock_librenms_api, mock_response_factory):

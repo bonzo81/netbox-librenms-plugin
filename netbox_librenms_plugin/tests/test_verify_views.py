@@ -72,22 +72,48 @@ class TestSingleCableVerifyView:
         return view
 
     @pytest.mark.django_db
-    @patch("netbox_librenms_plugin.views.base.cables_view.get_librenms_sync_device")
-    @patch("netbox_librenms_plugin.views.base.cables_view.cache")
-    def test_vc_no_resolvable_sync_device_falls_back_to_the_page_device(self, mock_cache, mock_sync):
+    def test_vc_no_resolvable_sync_device_falls_back_to_the_page_device(self):
         """Verify a virtual chassis without a resolvable sync member reads the authorized page device snapshot."""
-        device = _real_vc_device("cbl-nosync")
-        mock_sync.return_value = None
-        mock_cache.get.return_value = None
+        from django.core.cache import cache
+
+        from netbox_librenms_plugin.tests.conftest import make_interface, make_virtual_chassis_members
+        from netbox_librenms_plugin.utils import get_librenms_sync_device
+
+        _virtual_chassis, (device, _sibling) = make_virtual_chassis_members("cbl-nosync")
+        device.vc_position = None
+        device.save(update_fields=["vc_position"])
+        assert get_librenms_sync_device(device, server_key="default") is None
+
+        interface = make_interface(device, "Gi0/42")
         view, request = _real_verify_view(
             SingleCableVerifyView, {"device_id": device.pk, "row_id": "42"}, _verify_superuser("cbl-nosync")
         )
-        response = view.post(request)
+        cache_key = view.get_cache_key(device, "links", "default")
+        cache.set(
+            cache_key,
+            {
+                "links": [
+                    {
+                        "local_port": interface.name,
+                        "local_port_id": 42,
+                        "remote_port": "",
+                        "remote_device": "",
+                        "_source": "main",
+                    }
+                ]
+            },
+            timeout=300,
+        )
+
+        try:
+            response = view.post(request)
+        finally:
+            cache.delete(cache_key)
 
         data = json.loads(response.content)
         assert data["status"] == "success"
         assert data["formatted_row"]["cable_status"] == "Missing Ports"
-        mock_cache.get.assert_called_once_with(view.get_cache_key(device, "links", "default"))
+        assert f"/dcim/interfaces/{interface.pk}/" in data["formatted_row"]["local_port"]
 
     @pytest.mark.django_db
     @patch("netbox_librenms_plugin.views.base.cables_view.get_librenms_sync_device")
