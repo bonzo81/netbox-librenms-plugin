@@ -341,13 +341,7 @@ def _unwrap_recorded_response(value):
 
 
 class LibreNMSStubServer(MockLibreNMSServer):
-    """Data-shape-backed LibreNMS API stub for the development container.
-
-    Recorded structural responses remain the source for device, inventory, port,
-    port-stack, transceiver, and serial-sensor data. The server derives the
-    instance-wide endpoints that data-shape capture does not record and keeps
-    device/location writes in memory until the process restarts.
-    """
+    """Serve recorded LibreNMS data shapes, derive instance endpoints, and keep device and location writes in memory."""
 
     def __init__(self, recordings, *, api_token, host="127.0.0.1", port=0, quiet=True):
         super().__init__(host, port, api_token=api_token, quiet=quiet)
