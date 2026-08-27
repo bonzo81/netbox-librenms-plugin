@@ -2794,6 +2794,36 @@ def test_the_mapping_views_gate_a_vm_object_type_on_the_vm_model(client, url_nam
 
 @pytest.mark.django_db
 @pytest.mark.parametrize(
+    "posted_type,factory,url_name",
+    [
+        ("device", make_device, "device_librenms_sync"),
+        ("vm", make_vm, "vm_librenms_sync"),
+    ],
+)
+def test_the_convert_view_redirects_to_the_sync_page_of_the_posted_object_type(
+    client, settings, posted_type, factory, url_name
+):
+    """The shared URL-name selection decides the redirect target, so a VM must not land on a device page."""
+    from django.urls import reverse
+
+    from netbox_librenms_plugin.tests.import_server_helpers import configure_servers
+    from netbox_librenms_plugin.tests.view_test_helpers import make_user_with_perms
+
+    configure_servers(settings)
+    subject = factory(f"convert-redirect-{posted_type}")
+    subject.custom_field_data["librenms_id"] = {"secondary": {"id": 13411}}
+    subject.save(update_fields=["custom_field_data"])
+    client.force_login(make_user_with_perms(f"convert-redirect-{posted_type}", [("change", type(subject))]))
+    url = reverse("plugins:netbox_librenms_plugin:convert_legacy_librenms_id", args=[subject.pk])
+
+    response = client.post(url, {"object_type": posted_type, "server_key": "secondary"})
+
+    assert response.status_code == 302
+    assert response.url.startswith(reverse(f"plugins:netbox_librenms_plugin:{url_name}", args=[subject.pk]))
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
     "url_name",
     ["remove_server_mapping", "set_preferred_server", "convert_legacy_librenms_id"],
 )

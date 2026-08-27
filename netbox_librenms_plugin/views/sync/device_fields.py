@@ -992,12 +992,11 @@ class ConvertLegacyLibreNMSIdView(LibreNMSPermissionMixin, NetBoxObjectPermissio
     }
 
     def _get_model_and_object(self, object_type, pk):
-        model = VirtualMachine if object_type == "vm" else Device
+        model = _sync_model(object_type)
         return model, self.restrict_object_or_404(model, "change", pk=pk)
 
     def _sync_url(self, object_type, pk):
-        name = "vm_librenms_sync" if object_type == "vm" else "device_librenms_sync"
-        url = reverse(f"plugins:netbox_librenms_plugin:{name}", kwargs={"pk": pk})
+        url = reverse(_sync_url_name(object_type), kwargs={"pk": pk})
         # Propagate the active multi-server server_key so redirects land on the server the user was
         # working in. Source it here (re-match against the trusted config, with a bound-API
         # fallback), then delegate the redirect to the shared redirect_with_server_key — like the
