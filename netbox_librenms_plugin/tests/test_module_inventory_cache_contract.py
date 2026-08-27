@@ -180,3 +180,35 @@ class TestReplaceReadsAreStalenessChecked:
             "inventory cached for another LibreNMS device was applied to this device"
         )
         assert CACHE_MISS_TEXT in message_texts(request)
+
+
+@pytest.mark.django_db
+class TestTrustedPayloadMatchesTheDeviceMapping:
+    """The payload fingerprint must equal the mapping the helper actually wrote."""
+
+    @pytest.mark.parametrize(
+        ("case", "librenms_cf", "librenms_id"),
+        [
+            ("legacy-bare-integer", 42, 7),
+            ("non-positive-id", {"default": 3}, 0),
+        ],
+    )
+    def test_a_declined_mapping_write_fails_the_helper(self, case, librenms_cf, librenms_id):
+        from netbox_librenms_plugin.tests.conftest import make_device
+        from netbox_librenms_plugin.tests.view_test_helpers import trusted_module_inventory_payload
+
+        device = make_device(f"trusted-payload-{case}", librenms_cf=librenms_cf)
+
+        with pytest.raises(AssertionError, match="declined the write"):
+            trusted_module_inventory_payload(device, [], librenms_id=librenms_id)
+
+    def test_a_written_mapping_still_returns_the_payload(self):
+        """Positive control: the guard must not reject the ordinary path."""
+        from netbox_librenms_plugin.tests.conftest import make_device
+        from netbox_librenms_plugin.tests.view_test_helpers import trusted_module_inventory_payload
+
+        device = make_device("trusted-payload-ok", librenms_cf={"default": 3})
+
+        payload = trusted_module_inventory_payload(device, [{"index": 1}], librenms_id=9)
+
+        assert payload == {"inventory": [{"index": 1}], "librenms_id": 9, "oob_librenms_id": None}

@@ -186,13 +186,21 @@ def trusted_module_inventory_payload(device, inventory, *, server_key="default",
     stores. This helper supports real NetBox devices and the older real-shape substitutes still
     used by narrow module tests.
     """
-    from netbox_librenms_plugin.utils import set_librenms_device_id
+    from netbox_librenms_plugin.utils import get_librenms_device_id, set_librenms_device_id
 
     if not isinstance(device.custom_field_data, dict):
         device.custom_field_data = {}
         device.cf = device.custom_field_data
     set_librenms_device_id(device, librenms_id, server_key)
     device.save(update_fields=["custom_field_data"])
+    # set_librenms_device_id() only logs and returns when it refuses a write (legacy bare
+    # integer, non-positive id), which would leave the payload claiming a mapping the device
+    # does not have; every caller would then fail on the production staleness guard instead.
+    stored = get_librenms_device_id(device, server_key, auto_save=False)
+    assert stored == librenms_id, (
+        f"set_librenms_device_id declined the write (stored {stored!r}, wanted {librenms_id!r}); "
+        "the payload fingerprint would not match the device mapping"
+    )
     return {
         "inventory": inventory,
         "librenms_id": librenms_id,
