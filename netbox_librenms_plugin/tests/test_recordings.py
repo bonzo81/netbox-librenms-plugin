@@ -279,16 +279,14 @@ def test_manifest_is_in_sync_with_bundled_recordings():
     assert recordings_store.load_manifest() == expected, "run: manage.py librenms_recordings --rebuild-manifest"
 
 
-def test_load_manifest_returns_empty_on_unreadable_file():
-    """load_manifest() is best-effort: an OSError from read_text (permission/IO) must return [], not propagate and break every caller. read_text's OSError is a filesystem boundary that can't be triggered reliably as root, so inject it."""
-    from unittest.mock import MagicMock
-
+def test_load_manifest_returns_empty_on_unreadable_file(tmp_path):
+    """load_manifest() is best-effort: an OSError from read_text must return [], not break callers."""
     from netbox_librenms_plugin.data_shapes import recordings_store
 
-    fake_path = MagicMock()
-    fake_path.exists.return_value = True
-    fake_path.read_text.side_effect = OSError("permission denied")
-    with patch.object(recordings_store, "MANIFEST_PATH", fake_path):
+    manifest_path = tmp_path / "manifest.json"
+    manifest_path.mkdir()
+
+    with patch.object(recordings_store, "MANIFEST_PATH", manifest_path):
         assert recordings_store.load_manifest() == []
 
 

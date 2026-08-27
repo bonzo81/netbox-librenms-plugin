@@ -2356,15 +2356,15 @@ class TestGetPortStack:
             {"low_port_id": 2},
         ],
     )
-    def test_mapping_without_both_port_ids_fails_closed(self, mock_librenms_api, mapping):
+    def test_mapping_without_both_port_ids_fails_closed(self, mock_librenms_api, librenms_server, mapping):
         """Each mapping must identify both relationship endpoints."""
-        from unittest.mock import MagicMock, patch
+        librenms_server.register(
+            "/api/v0/devices/5/port_stack",
+            {"status": "ok", "mappings": [mapping]},
+        )
+        mock_librenms_api.librenms_url = librenms_server.url
 
-        fake_response = MagicMock()
-        fake_response.raise_for_status = MagicMock()
-        fake_response.json.return_value = {"status": "ok", "mappings": [mapping]}
-        with patch("netbox_librenms_plugin.librenms_api.requests.get", return_value=fake_response):
-            success, data = mock_librenms_api.get_port_stack(5)
+        success, data = mock_librenms_api.get_port_stack(5)
 
         assert success is False
         assert "mappings" in data

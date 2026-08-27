@@ -283,11 +283,12 @@ def test_capture_view_errors_on_mid_capture_transport_failure(recording_server):
     device = make_device("cap-dev-transport", librenms_cf={"test": {"id": 1000}})
     view = _view_with_api(api)
 
-    with patch(
-        "netbox_librenms_plugin.views.data_shapes.capture_device_recording",
-        side_effect=RuntimeError("Capture failed for 'devices/1000/ports': no HTTP response (status 0)"),
-    ):
-        response = _run_capture(view, server, device)
+    def refuse_request(**_request):
+        raise ConnectionResetError("simulated connection reset")
+
+    server.register("/api/v0/devices/1000/ports", refuse_request, method="GET")
+
+    response = _run_capture(view, server, device)
 
     assert response.status_code == 200
     html = response.content.decode()

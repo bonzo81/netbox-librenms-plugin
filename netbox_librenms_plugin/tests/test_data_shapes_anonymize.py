@@ -1,7 +1,5 @@
 """Tests for data-shape anonymization: PII scrubbed, logic fields preserved, deterministic, replayable."""
 
-from unittest.mock import patch
-
 from netbox_librenms_plugin.data_shapes.anonymize import anonymize_recording, find_pii, pseudonymize_os
 from netbox_librenms_plugin.serial_utils import map_sensors_to_serial_links
 from netbox_librenms_plugin.tests.recordings import load_recording
@@ -488,17 +486,15 @@ def test_salt_changes_pseudonyms():
     assert s_a != s_b
 
 
-def test_anonymized_recording_still_detects_vc(recording_server):
+def test_anonymized_recording_still_detects_vc(recording_server, db):
     """An anonymized recording replays to the same VC outcome (member count + position order)."""
     from netbox_librenms_plugin.import_utils.virtual_chassis import detect_virtual_chassis_from_inventory
+    from netbox_librenms_plugin.models import LibreNMSSettings
 
+    LibreNMSSettings.objects.update_or_create(pk=1, defaults={"vc_member_name_pattern": "-M{position}"})
     anon = anonymize_recording(load_recording("cisco-stackwise-3member"))
     _server, api = recording_server(anon)
-    with patch(
-        "netbox_librenms_plugin.import_utils.virtual_chassis._load_vc_member_name_pattern",
-        return_value="{master}-m{position}",
-    ):
-        result = detect_virtual_chassis_from_inventory(api, 1000)
+    result = detect_virtual_chassis_from_inventory(api, 1000)
 
     assert result is not None
     assert result["member_count"] == 3

@@ -5,8 +5,6 @@ re-run the real detection / relationship-resolution logic on the captured record
 capture and replay are faithful.
 """
 
-from unittest.mock import patch
-
 import pytest
 
 from netbox_librenms_plugin.data_shapes.capture import capture_device_recording
@@ -246,6 +244,9 @@ def test_capture_skips_sensors_route_when_device_has_none(recording_server):
 
 def test_capture_roundtrip_preserves_vc_outcome(recording_server):
     """Capturing a VC device and replaying the capture yields the same detection result."""
+    from netbox_librenms_plugin.models import LibreNMSSettings
+
+    LibreNMSSettings.objects.update_or_create(pk=1, defaults={"vc_member_name_pattern": "-M{position}"})
     seed = load_recording("cisco-stackwise-3member")
     _server, api = recording_server(seed)
 
@@ -269,11 +270,7 @@ def test_capture_roundtrip_preserves_vc_outcome(recording_server):
     from netbox_librenms_plugin.import_utils.virtual_chassis import detect_virtual_chassis_from_inventory
 
     _server2, api2 = recording_server(captured)
-    with patch(
-        "netbox_librenms_plugin.import_utils.virtual_chassis._load_vc_member_name_pattern",
-        return_value="{master}-m{position}",
-    ):
-        result = detect_virtual_chassis_from_inventory(api2, 1000)
+    result = detect_virtual_chassis_from_inventory(api2, 1000)
 
     assert result is not None
     assert result["member_count"] == 3
