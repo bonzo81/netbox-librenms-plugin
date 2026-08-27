@@ -119,13 +119,7 @@ def test_selected_vc_target_is_locked_through_interface_sync():
 
 
 def _run_vlan_scope_sync(*, move_target, suffix, settings):
-    """Run the VLAN-scope sync once and return the synced interface.
-
-    ``move_target`` commits the target's site change inside the lock window. The caller with
-    ``move_target=False`` is the positive control: it proves the POST keys and the row itself
-    reach VLAN assignment, so an empty result in the racing run means the scope was rejected
-    rather than never attempted.
-    """
+    """Run one VLAN-scope sync, optionally commit a target site change inside the lock window, and return its interface."""
     from types import SimpleNamespace
 
     from dcim.models import Device, Site

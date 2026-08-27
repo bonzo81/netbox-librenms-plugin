@@ -280,9 +280,7 @@ def test_manual_pick_overlay_reads_the_real_cache_in_one_batch():
 # ---------------------------------------------------------------------------
 @pytest.mark.django_db
 class TestTaggedSerialCableTrustedOverLabel:
-    """A librenms-tagged serial cable was placed deliberately (possibly via a manual pick);
-    a wrong-name label must not flip it to a mismatch offering a silent re-point.
-    """
+    """Verify a tagged serial cable remains trusted when its device label names another target."""
 
     def test_tagged_cable_to_other_device_is_not_a_mismatch(self):
         acs, (csp,), _ = make_serial_device("trust-ser", csp_names=["ttyS1"])
@@ -2097,12 +2095,7 @@ class TestRemotePickerEndpoint:
         assert "same cable endpoint" in response.content.decode()
 
     def test_batch_rejects_two_rows_overridden_onto_one_vc_member_interface(self):
-        """The uniqueness gate must resolve the local end exactly as the sync does.
-
-        A member override re-resolves the local port by LibreNMS port id and by both name
-        candidates. Two rows whose alternate name is the same port on the chosen member collapse
-        onto one interface, so the batch must be refused whole — not applied row by row.
-        """
+        """Verify alternate-name member overrides that resolve two rows to one interface reject the whole batch."""
         from dcim.models import Cable
         from django.core.cache import cache
         from django.urls import reverse
@@ -2175,12 +2168,7 @@ class TestRemotePickerEndpoint:
 
     @pytest.mark.parametrize("malformed", [[None], "not-a-dict"])
     def test_picker_search_survives_a_malformed_cached_snapshot(self, malformed):
-        """The search fragment never reads the snapshot, so a corrupt one cannot break it.
-
-        Purging the corrupt entry is the job of the readers that consume it (see the modal
-        render and the verify path); see also
-        ``test_search_fragment_does_not_read_the_cable_snapshot``.
-        """
+        """Verify picker search ignores malformed cached snapshots and leaves cleanup to snapshot readers."""
         from django.core.cache import cache
         from django.urls import reverse
 
@@ -2213,10 +2201,7 @@ class TestRemotePickerEndpoint:
 # ---------------------------------------------------------------------------
 @pytest.mark.django_db
 class TestManualRepointOfExistingCable:
-    """Cabled rows offer the picker too, and a manual re-point ALWAYS confirms through the
-    warning modal, including a plugin-tagged cable. Every destructive replacement confirms the
-    exact current cable and gets the visible trace plus the force checkbox.
-    """
+    """Verify every manual re-point, including tagged cables, confirms the exact current cable in the warning modal."""
 
     def test_tagged_cabled_row_offers_the_picker(self):
         """A satisfied (tagged Cable Found) row still offers the pick-remote action so the cable can be changed."""
@@ -2436,12 +2421,7 @@ class TestManualRepointOfExistingCable:
 
 @pytest.mark.django_db
 class TestRemotePickerObjectScope:
-    """The picker enumerates devices and their ports, so every lookup must run through a restricted
-    queryset.
-
-    Its gate asks ``has_perm("dcim.view_device")`` without an instance, which a CONSTRAINED grant
-    clears — a raw manager would then let that grant enumerate and bind terminations it cannot see.
-    """
+    """Verify constrained view grants cannot enumerate or bind picker terminations outside their object scope."""
 
     @staticmethod
     def _scoped_client(
@@ -2795,13 +2775,7 @@ class TestRemotePickerObjectScope:
         assert records[manual_row["local_port_id"]]["can_create_cable"] is False
 
     def test_first_cable_sync_bootstraps_the_provenance_tag(self):
-        """Cable permissions alone carry the first sync: the tag is plugin infrastructure.
-
-        Its name and color come from the plugin settings row, so the plugin creates it on first
-        use the same way it creates the ``librenms_id`` custom field. Charging the first syncing
-        user for ``extras.add_tag`` would make cable sync fail for exactly one operator and
-        contradicts the documented permission set (docs/usage_tips/permissions.md).
-        """
+        """Verify the first cable sync creates the configured provenance tag without requiring extras.add_tag."""
         from core.models import ObjectType
         from dcim.models import Cable, ConsolePort, ConsoleServerPort, Device
         from django.apps import apps

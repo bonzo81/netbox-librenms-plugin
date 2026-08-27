@@ -25,12 +25,7 @@ SERVER_KEY = "default"
 
 
 def _cable_device(tag, ifaces):
-    """Create a real Device named *tag* with named interfaces.
-
-    ``ifaces`` is a list of ``(name, librenms_port_id)`` — a non-None port id binds the interface's
-    ``librenms_id`` custom field for that server so the view's ``_librenms_id_q`` lookup resolves it.
-    Returns ``(device, {name: interface})``.
-    """
+    """Create a real device and return its interfaces, with optional LibreNMS port IDs for the default server."""
     from dcim.models import Device, DeviceRole, DeviceType, Interface, Manufacturer, Site
 
     mfr, _ = Manufacturer.objects.get_or_create(name=f"CblMfr-{tag}", slug=f"cblmfr-{tag}")
@@ -234,8 +229,7 @@ class TestXSSEscaping:
 
 
 def _cable_view_with_api(tag, body, *, api_server_key="default"):
-    """A real SingleCableVerifyView + real superuser request, with _librenms_api stubbed only to supply
-    the active-server fallback key (its constructor would otherwise need real LibreNMS config)."""
+    """Create a cable verification view and superuser request with only the active server key stubbed."""
     from django.contrib.auth import get_user_model
 
     from netbox_librenms_plugin.views.base.cables_view import SingleCableVerifyView
@@ -264,12 +258,7 @@ class TestServerKeyGuard:
         assert response.status_code == 200
 
     def test_valid_string_server_key_is_honoured_in_cache_namespace(self):
-        """A configured string key scopes the REAL links cache namespace, via the real classmethod check (#108/#109).
-
-        Unlike the old device_id="" version, this actually exercises the resolved server_key: it drives
-        the real LibreNMSAPI.get_available_servers() classmethod (patched to configure 'prod') and asserts
-        the resolved key threads into get_cache_key — so it fails if the membership check ever regresses.
-        """
+        """Verify a configured string key scopes the real links cache through the server membership check."""
         device, _ = _cable_device("guard-valid", [("eth0", 100)])
         view, request = _cable_view_with_api("valid", {"device_id": device.pk, "row_id": "100", "server_key": "prod"})
 
@@ -591,12 +580,7 @@ class TestOOBRowsNeverActionable:
         assert ("Sync Cable" in actions) is expect_sync
 
     def test_oob_row_never_links_a_host_interface(self):
-        """Verify must not resolve an OOB row's local end against the HOST device.
-
-        The controller-managed port lives on the OOB device; a shared name (or colliding
-        stored librenms_id) would render a clickable HOST-interface link on it — mirrors
-        the enrich_local_port guard on the initial table render.
-        """
+        """Verify an OOB row never resolves its local end against a host interface with a shared name or LibreNMS ID."""
         from django.core.cache import cache
 
         from dcim.models import Interface
@@ -728,9 +712,7 @@ class TestEnrichRemotePortEmptyPort:
 
 @pytest.mark.django_db
 class TestResolveLocalInterfaceCore:
-    """The shared id→dual-name resolution core used by BOTH enrich_local_port and the verify
-    re-resolution (extracted so the issue-#88 name fallback / precedence can't drift between
-    the two copies again)."""
+    """Verify both callers share LibreNMS ID precedence and dual-name fallback for local-interface resolution."""
 
     def _dev(self, name):
         from netbox_librenms_plugin.tests.conftest import make_device, make_interface

@@ -1272,13 +1272,7 @@ class TestRenderServerKeyDegradation:
 
 @pytest.mark.django_db  # the blank rebind reads the selected server from LibreNMSSettings
 class TestRebindApiForServerOrDefault:
-    """rebind_api_for_server_or_default: an unresolvable key degrades to the session/default
-    server's RESOLVED key, never to the literal 'default'.
-
-    The action paths (cable sync response, remote picker) scope a cache WRITE and the closing
-    re-render by this key. In a multi-server setup 'default' names no configured server, so the
-    literal would namespace the write under a server no render ever reads.
-    """
+    """Verify that rebinding keeps valid keys and avoids the literal default when a configured key can resolve."""
 
     _CONFIG = {
         "netbox_librenms_plugin": {

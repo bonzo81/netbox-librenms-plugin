@@ -222,11 +222,7 @@ class TestGetObjectAndIpAddress:
         return view
 
     def test_get_object_resolves_through_the_view_scope(self):
-        """get_object resolves the page object through the request's view scope.
-
-        A constrained grant clears the model-level gate, so an out-of-scope pk must 404 exactly
-        like a nonexistent one instead of exposing another device's cable rows.
-        """
+        """Verify that get_object returns 404 for a primary key outside the request's constrained view scope."""
         import pytest as pytest_mod
         from dcim.models import Device
         from django.contrib.auth import get_user_model
@@ -926,13 +922,7 @@ class TestCablePostHostFetchWarning:
 
 
 class TestCableTableHtmxUrl:
-    """_prepare_context sets table.htmx_url from the RESOLVED server scope.
-
-    Set in _prepare_context (not a base get_table override): DeviceCableTableView
-    overrides get_table without calling super, so a base override never ran for the
-    device tab — and the base's lazy self.librenms_api.server_key could point at a
-    different server than the resolved scope.
-    """
+    """Verify that _prepare_context sets table.htmx_url from the resolved server scope."""
 
     def _run_prepare(self, server_key, path="/cables/"):
         from netbox_librenms_plugin.views.base.cables_view import BaseCableTableView
@@ -1720,12 +1710,7 @@ class TestPrepareContextInterfaceNameFieldNone:
 
 @pytest.mark.django_db
 class TestSingleIPAddressVerifyViewGetObject:
-    """_get_object resolves the right real object by type (and untyped), scoped to the caller's perms.
-
-    Rewritten from get_object_or_404/Device.objects.filter call-shape mocks to real Device/VM rows:
-    the object-scoping added in this PR routes the lookup through ``Model.objects.restrict`` and reads
-    ``self.request.user``, which the old call-signature assertions never exercised.
-    """
+    """Verify that _get_object resolves typed and untyped real objects within the caller's permission scope."""
 
     def _view(self):
         from django.contrib.auth import get_user_model
@@ -1891,12 +1876,7 @@ class TestSingleIPAddressVerifyViewFindInCache:
 
 @pytest.mark.django_db
 class TestSingleIPAddressVerifyViewFindExistingIp:
-    """Real-DB tests for SingleIPAddressVerifyView._find_existing_ip.
-
-    _find_existing_ip queries the real IPAddress model the plugin owns, so these exercise the
-    actual ORM lookup (address + vrf scoping). Mocking IPAddress.objects here left the exact
-    filter kwargs unverified — a change to the lookup fields would pass while the real query broke.
-    """
+    """Verify that _find_existing_ip queries real IPAddress rows by address and VRF."""
 
     def _make_view(self):
         from netbox_librenms_plugin.views.base.ip_addresses_view import SingleIPAddressVerifyView
@@ -2393,11 +2373,7 @@ class TestPostHandlerCanCreateCable:
 
     @pytest.mark.django_db
     def test_can_create_cable_adds_sync_action(self):
-        """can_create_cable=True → the actions cell submits the row through the table's form.
-
-        The verify row no longer renders a nested <form> with its own CSRF token: it posts the
-        row identity through the surrounding cable-sync form with a ``sync_one`` submit button.
-        """
+        """Verify that can_create_cable adds a sync action that submits the row through the table form."""
         import json as json_mod
 
         view = self._make_view()

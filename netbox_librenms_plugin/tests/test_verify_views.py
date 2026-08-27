@@ -75,11 +75,7 @@ class TestSingleCableVerifyView:
     @patch("netbox_librenms_plugin.views.base.cables_view.get_librenms_sync_device")
     @patch("netbox_librenms_plugin.views.base.cables_view.cache")
     def test_vc_no_resolvable_sync_device_falls_back_to_the_page_device(self, mock_cache, mock_sync):
-        """VC where get_librenms_sync_device returns None: read the page device's own snapshot.
-
-        The page device was resolved through a restricted queryset, so falling back to it keeps
-        the cables tab populated instead of blanking a chassis whose sync member is unresolvable.
-        """
+        """Verify a virtual chassis without a resolvable sync member reads the authorized page device snapshot."""
         device = _real_vc_device("cbl-nosync")
         mock_sync.return_value = None
         mock_cache.get.return_value = None
@@ -2146,11 +2142,7 @@ def test_verify_rejects_a_device_id_beyond_the_bigint_range():
 
 @pytest.mark.django_db
 def test_cable_verify_selects_the_cached_row_named_by_row_id():
-    """The view matches cached links by row_id, so a populated cache must select that row.
-
-    The sibling tests all run against an empty cache, so they return the default row before any
-    matching happens and cannot tell row selection from a no-op.
-    """
+    """Verify a populated cable cache selects the row named by row_id instead of returning the default row."""
     from django.core.cache import cache
 
     from netbox_librenms_plugin.utils import assign_cable_row_ids

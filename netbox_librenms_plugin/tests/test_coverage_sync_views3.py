@@ -156,12 +156,7 @@ class TestGetCachedPortsData:
 
 
 class TestSyncInterface:
-    """
-    Which device the LibreNMS row is written to, resolved against real rows.
-
-    ``update_interface_attributes`` and ``_sync_interface_vlans`` stay stubbed: they are the
-    view's own next steps, and these tests are about target selection, not field copying.
-    """
+    """Verify which real device or virtual chassis member receives each LibreNMS interface row."""
 
     def _v(self, request=None):
         v = _make_iv(request)

@@ -169,11 +169,7 @@ class TestMapSensorsToSerialLinks:
         assert links[0]["remote_device"] == "ttyS49"
 
     def test_non_list_sensors_fails_closed_to_empty(self):
-        """A None/non-iterable top-level payload (malformed LibreNMS response) must return [], not crash.
-
-        Without the guard, iterating ``sensors`` raises before any per-row hardening runs, so the
-        serial-sync path would 500 instead of degrading to "no serial links".
-        """
+        """Verify malformed non-list sensor payloads fail closed to an empty result."""
         from netbox_librenms_plugin.serial_utils import map_sensors_to_serial_links
 
         for bad in (None, {"sensor_id": 1}, 42, "not-a-list"):
@@ -400,15 +396,7 @@ class TestMapSensorsMalformedRows:
 
 @pytest.mark.django_db
 class TestConfigurableSensorTypes:
-    """Recognized serial sensor_types AND their local port-name patterns are configurable.
-
-    ``SerialSensorTypePattern`` rows map each LibreNMS ``sensor_type`` to the local
-    ConsoleServerPort name pattern for that vendor, so Avocent lines become ``ttyS{N}`` and Cisco
-    IOS async lines become ``Line {N}``. Both ship seeded by migration; a new vendor is one row.
-    Cisco ``OLD-CISCO-TS-MIB::ltsLineTable`` sensors (once shaped like Avocent: sensor_class=state, group
-    "Serial Ports", ``"<peer> Status"`` descr) flow through the identical mapper — only the type
-    and naming differ.
-    """
+    """Verify stored sensor-type patterns control vendor recognition and local console-port names."""
 
     def _cisco_line(self, sid=13650, port=2, descr="test_location Status"):
         # Real device-52 (Catalyst 8300) shape: tsLineActive.<line> index, "<peer> Status" descr.
@@ -476,11 +464,7 @@ class TestConfigurableSensorTypes:
         assert [(r["sensor_id"], r["local_port"]) for r in links] == [(1975, "ttyS11")]
 
     def test_generator_sensor_types_not_consumed_by_membership_checks(self):
-        """A bare ITERABLE of types is materialized once — a generator must recognize every row.
-
-        Pre-fix the first row's membership check consumed the generator, so every subsequent
-        row of the same type was silently dropped.
-        """
+        """Verify a generator of sensor types is materialized once so every matching row is recognized."""
         from netbox_librenms_plugin.serial_utils import map_sensors_to_serial_links
 
         links = map_sensors_to_serial_links(
@@ -509,12 +493,7 @@ class TestConfigurableSensorTypes:
         assert patterns["acsSerialPortTable"] == "ttyS{N}"
 
     def test_deleting_all_rows_disables_recognition(self):
-        """No code-level fallback resurrects the defaults: an emptied table means OFF.
-
-        Deleting a seeded row is the operator's way to disable a vendor; deleting them all
-        must disable serial sensor recognition entirely, not silently re-enable the shipped
-        defaults.
-        """
+        """Verify deleting all stored sensor-type patterns disables recognition without restoring defaults."""
         from netbox_librenms_plugin.models import SerialSensorTypePattern
         from netbox_librenms_plugin.serial_utils import get_serial_sensor_type_patterns, map_sensors_to_serial_links
 
@@ -571,13 +550,7 @@ class TestSerialSensorTypePatternModel:
             self._make(sensor_type="ACSSERIALPORTTABLE").save()
 
     def test_whitespace_padded_duplicate_rejected_by_constraint(self):
-        """The DB-level uniqueness canonicalizes whitespace too (Lower(Trim), like 0012).
-
-        clean() strips padding, but a clean-bypassing write (queryset.update, bulk_create,
-        loaddata) could otherwise park " acsSerialPortTable " next to the seeded row — a
-        near-dupe that can never match real payloads. validate_constraints() builds its
-        check from the Meta constraint expressions, so this pins the canonical form.
-        """
+        """Verify the database constraint rejects duplicates after canonical whitespace trimming."""
         from django.core.exceptions import ValidationError
 
         padded = self._make(sensor_type=" acsSerialPortTable ")
@@ -728,12 +701,7 @@ class TestMapSensorsWithFixture:
         assert row["is_configured"] is True
 
     def test_fixture_carries_no_raw_operator_labels(self, fixture_sensors):
-        """Privacy: every bundled serial-port label must be a safe pseudonym (rdev-<hash>) or a default ttySNN.
-
-        The fixture is committed to the repo, so operator-assigned hostnames (vendor/site/date
-        identifiers) must be pseudonymized following the rdev-<hash> convention. This guards against
-        the recurring leak of real infra labels into the corpus.
-        """
+        """Verify every bundled serial-port label uses the safe pseudonym or default ttySNN format."""
         import re
 
         from netbox_librenms_plugin.serial_utils import strip_status_suffix

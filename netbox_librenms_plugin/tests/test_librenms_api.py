@@ -1361,12 +1361,7 @@ class TestLibreNMSAPIPortsAndInventory:
 
     @patch("netbox_librenms_plugin.librenms_api.requests.get")
     def test_get_device_links_no_links_404_is_empty_not_failure(self, mock_get, mock_librenms_config):
-        """A 404 from /links is LibreNMS's 'device has no links' — a successful empty result, NOT a fetch failure.
-
-        A terminal/console server has no LLDP neighbours, so this endpoint always 404s for it.
-        Treating that as a failure poisons the whole cable snapshot (the partial-fetch guard deletes
-        the cache), which breaks serial cable sync for exactly the devices the feature targets.
-        """
+        """Verify a no-links 404 returns an empty success so serial cable sync retains the cache snapshot."""
         import requests as _requests
 
         resp = _requests.models.Response()
@@ -3319,12 +3314,7 @@ class TestGetSerialPortSensors:
         }
 
     def test_non_dict_sensor_item_fails_closed(self, mock_librenms_api, mock_response_factory):
-        """A non-dict item in the sensor list is a malformed response, not a filterable row.
-
-        Silently dropping it would make a broken payload indistinguishable from "no serial
-        sensors" and skip serial sync without surfacing the error — same per-item validation
-        contract as get_device_inventory().
-        """
+        """Verify a malformed non-dictionary sensor item fails closed instead of appearing as no serial sensors."""
         import unittest.mock as mock
 
         sensors = ["bad-string", None, self._make_sensor(12, port_num=7)]
@@ -3338,11 +3328,7 @@ class TestGetSerialPortSensors:
     def test_non_string_sensor_type_is_skipped_without_dropping_the_serial_rows(
         self, mock_librenms_api, mock_response_factory
     ):
-        """A non-string sensor_type names no serial type, so the row is skipped, not fatal.
-
-        `sensor_type in serial_types` with an unhashable value would raise an uncaught TypeError;
-        the endpoint is instance-wide, so failing here would stop serial refresh for every device.
-        """
+        """Verify an unhashable sensor type is skipped so one malformed row cannot stop the instance-wide refresh."""
         import unittest.mock as mock
 
         unreadable = self._make_sensor(12, port_num=8)

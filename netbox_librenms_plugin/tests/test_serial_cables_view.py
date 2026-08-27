@@ -184,12 +184,7 @@ class TestRawKeysPreservation:
     """Serial-specific source fields survive the _raw_keys strip in _prepare_context."""
 
     def test_serial_fields_survive_strip(self):
-        """sensor_id, sensor_index_int, is_configured AND device_id survive; derived keys are stripped.
-
-        Exercises the PRODUCTION _RAW_LINK_KEYS (not a hand-copied set). device_id must survive for
-        serial rows: enrich_links_data's serial branch continues before re-setting it, and the
-        Cables-tab render reads record["device_id"], so dropping it 500s the tab on a cached replay.
-        """
+        """Verify raw-key stripping preserves serial source fields and device_id but removes derived fields."""
         from netbox_librenms_plugin.views.base.cables_view import _RAW_LINK_KEYS
 
         serial_link = {
@@ -228,13 +223,7 @@ class TestSerialLinkDeviceIdSurvivesCachedRender:
     """A cached serial row must retain device_id through strip+re-enrich (the Cables render reads it)."""
 
     def test_cached_serial_link_keeps_device_id_through_enrich(self):
-        """Strip a cached serial link to _RAW_LINK_KEYS, re-enrich, and confirm device_id survives.
-
-        Reproduces the Cables-tab 500: on a cached render _prepare_context strips links to
-        _RAW_LINK_KEYS then calls enrich_links_data, whose serial branch continues without re-setting
-        device_id. The render (tables/cables.py) then does record["device_id"] → KeyError before the
-        fix. Uses a real console-server device (not a MagicMock) so the CSP resolution is exercised.
-        """
+        """Verify strip and re-enrichment preserve a cached serial row's console-server device ID."""
         from netbox_librenms_plugin.views.base.cables_view import _RAW_LINK_KEYS
 
         view = _make_view()
@@ -321,12 +310,7 @@ class TestCableTableSerialRendering:
         assert "fst-italic" not in html
 
     def test_unconfigured_serial_port_with_no_remote_name_renders_empty_not_none(self):
-        """A serial row with no remote device name must not render the literal 'None'.
-
-        render_local_port already normalizes (value or "") for the same reason; the
-        dimmed serial-row branch passes the display value into format_html, which would
-        stringify a None into visible "None" text in the UI.
-        """
+        """Verify an unnamed unconfigured serial row renders empty text instead of the literal 'None'."""
         table = self._make_table()
         record = {"_source": "serial", "is_configured": False, "remote_device_url": None}
         html = str(table.render_remote_device(None, record))
@@ -1001,18 +985,7 @@ class TestSerialFetchSkippedWithoutHostId:
 # ---------------------------------------------------------------------------
 @pytest.mark.django_db
 class TestSerialSyncSurvivesHostLinks404:
-    """End-to-end regression for the 'Cache has expired' bug.
-
-    A console/terminal server has no LLDP neighbours, so LibreNMS's ``/devices/<id>/links``
-    endpoint returns HTTP 404 for it. That 404 used to be miscategorised as a fetch failure,
-    which made ``_prepare_context`` treat the whole refresh as a partial snapshot and DELETE the
-    links cache — even though the (independently fetched) serial rows rendered fine with a Sync
-    button. Every serial cable sync then failed with 'Cache has expired'.
-
-    This drives the real ``get_links_data`` → cache → ``SyncCablesView`` cable-creation flow with
-    only the external LibreNMS HTTP boundary (``requests.get``) stubbed, so the real
-    ``get_device_links`` 404-is-empty handling is exercised end-to-end.
-    """
+    """Verify a host links 404 leaves serial rows cached and syncable through the full cable-creation flow."""
 
     def _routed_get(self):
         import json
@@ -1121,13 +1094,7 @@ class TestSerialSyncSurvivesHostLinks404:
         assert Cable.objects.filter(pk=csp.cable_id).exists()
 
     def test_a_carried_over_serial_row_is_not_syncable(self, client):
-        """A refresh that could not read the serial source keeps the prior rows but must not sync them.
-
-        A user who may view the Device but no ConsoleServerPort does not authorize the instance-wide
-        sensor fetch, so the refresh carries the previous serial rows forward and records the source
-        as incomplete. LibreNMS may have moved that sensor since, so acting on the row would create a
-        cable from superseded data.
-        """
+        """Verify an incomplete serial refresh carries prior rows forward without allowing sync from superseded data."""
         import json
 
         import requests
@@ -1425,11 +1392,7 @@ class TestSerialSyncSurvivesHostLinks404:
 # ---------------------------------------------------------------------------
 @pytest.mark.django_db
 class TestCableSyncHtmxPartial:
-    """An HTMX cable-sync submit re-renders the ``#cable-sync-content`` partial (HTTP 200) instead
-    of a full-page 302 redirect, so creating a cable no longer reloads the whole device page. A
-    non-HTMX submit still redirects (no-JS fallback). Driven through the real Django request stack
-    (Client) so middleware, permissions, and template rendering are exercised end-to-end.
-    """
+    """Verify HTMX cable sync re-renders the table partial while non-HTMX sync redirects."""
 
     def _seed_and_post(self, *, hx):
         from django.contrib.auth import get_user_model
@@ -1679,11 +1642,7 @@ class TestSerialCableReadScope:
         return row
 
     def test_sensor_without_a_netbox_port_stays_visible_to_a_granted_user(self, client):
-        """A sensor with no ConsoleServerPort is LibreNMS data, so every granted user sees it.
-
-        Hiding it would give a granted user a shorter table than an administrator and drop the
-        one row that tells the operator which console port still has to be created.
-        """
+        """Verify a granted user sees an unmodelled LibreNMS sensor so the missing console port remains visible."""
         import json
 
         import requests
@@ -2163,13 +2122,7 @@ class TestSerialCableReadScope:
 # ---------------------------------------------------------------------------
 @pytest.mark.django_db
 class TestCableEnrichment:
-    """``create_cable`` stamps provenance on every cable the sync creates: the ``librenms``
-    tag (so the plugin can later recognise/own its own cables for the planned DCIM remodel),
-    a configured color + description carrying the server key, and the REMOTE device's tenant.
-    Driven end-to-end against real ConsoleServerPort / ConsolePort / Tenant rows through
-    ``handle_cable_creation`` → ``create_cable`` (the write point shared with the
-    non-serial Interface↔Interface path).
-    """
+    """Verify synced cables carry the LibreNMS tag, configured color, server-key description, and remote-device tenant."""
 
     def _sync_one(self, csp, cp, server_key="production"):
         from netbox_librenms_plugin.views.sync.cables import SyncCablesView

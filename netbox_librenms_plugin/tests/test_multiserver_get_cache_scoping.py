@@ -25,12 +25,7 @@ _NO_TTL_CACHE = {"default": {"BACKEND": "django.core.cache.backends.locmem.LocMe
 
 
 def _get_request(server_key):
-    """Return an authorized GET render request for *server_key*.
-
-    These tests are about cache scoping. The tabs resolve every object through the request's view
-    scope, so an unprivileged user renders an empty table for permission reasons and would hide
-    the scoping regression under a passing assertion.
-    """
+    """Build an authorized GET request so permission filtering cannot hide cache-scoping failures."""
     request = RequestFactory().get("/", {"server_key": server_key})
     request.user = make_superuser()
     return request
@@ -131,15 +126,7 @@ class TestMultiServerGetRenderCacheScoping:
             real_cache.delete(ip_key)
 
     def test_modules_build_context_receives_scoped_server_key(self):
-        """get_context_data must thread the RESOLVED server into _build_context explicitly.
-
-        _build_context keys _active_server_key on server_key or self.librenms_api.server_key. Both
-        equal 'prod' today (the rebind side effect), so the bug is unobservable via the result —
-        it only bites if a future reorder makes them diverge. Spy the call contract instead:
-        unfixed passes no server_key (None); fixed passes 'prod'. The real get_context_data runs
-        end to end (real cache read + real librenms_id/oob guards); only the downstream
-        _build_context (tested elsewhere) is stubbed to capture the kwarg.
-        """
+        """Verify module context receives the resolved server key explicitly instead of relying on the rebound client."""
         from netbox_librenms_plugin.views.object_sync.devices import DeviceModuleTableView
 
         device = make_device("scoped-mod")
@@ -351,14 +338,7 @@ class TestUnresolvedServerKeyRendersEmpty:
 
 @pytest.mark.django_db
 def test_cables_get_render_survives_backend_without_ttl(settings):
-    """The cable tab's GET render must not 500 on a non-Redis cache backend (no .ttl()).
-
-    The other four base views already guard ``cache.ttl()`` with ``getattr(cache, "ttl", ...)``;
-    cables was the lone holdout. This swaps in the real Django LocMemCache (which genuinely lacks
-    ``ttl``) via the pytest-django ``settings`` fixture, seeds the links cache so the render
-    reaches the TTL computation, and only patches the HTTP-client boundary — so the unguarded
-    ``cache.ttl()`` would raise AttributeError mid-render here.
-    """
+    """Verify cable GET rendering supports cache backends without ttl(), such as Django LocMemCache."""
     from netbox_librenms_plugin.views.object_sync.devices import DeviceCableTableView
 
     settings.CACHES = _NO_TTL_CACHE  # rebuilds the default-cache proxy to a backend without .ttl()

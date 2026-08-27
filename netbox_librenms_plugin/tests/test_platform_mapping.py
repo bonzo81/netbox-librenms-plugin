@@ -330,12 +330,7 @@ class TestFindMatchingPlatformWithMapping:
 
     @staticmethod
     def _duplicate_mappings(librenms_os, platform):
-        """Insert case-variant mappings for one OS string.
-
-        ``PlatformMapping.clean()`` lowercases ``librenms_os`` and the column is unique, so
-        ordinary saves cannot produce this. bulk_create bypasses full_clean, standing in for
-        rows that predate the normalisation — the only way the ambiguity guard is reachable.
-        """
+        """Insert case-variant mappings with bulk_create because normal saves cannot reach the ambiguity guard."""
         from netbox_librenms_plugin.models import PlatformMapping
 
         PlatformMapping.objects.bulk_create(

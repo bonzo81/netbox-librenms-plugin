@@ -440,11 +440,7 @@ class TestSyncCablesViewSkipsOOBRows:
 
 
 def _expected_fields(row_id, *, local=None, remote=None):
-    """The hidden endpoint fields a rendered cable row posts back with its selection.
-
-    Sync rejects a selection whose endpoints no longer match what the page showed, so a POST that
-    omits these reads as stale rather than as a fresh confirmation.
-    """
+    """Build hidden endpoint fields so sync rejects selections whose endpoints changed after rendering."""
     data = {}
     if local is not None:
         data[f"expected_local_id_{row_id}"] = str(local.pk)
@@ -798,11 +794,7 @@ class TestSyncCablesViewHelpers:
         assert result is None
 
     def test_get_cached_links_data_returns_enriched_rows(self):
-        """The cached snapshot is given row identities and re-enriched against current NetBox state.
-
-        The snapshot itself stores only LibreNMS source fields, so the sync path has to derive the
-        NetBox ids for this request rather than trusting whatever was cached.
-        """
+        """Verify that cached source rows receive identities and current NetBox enrichment when read."""
         from django.core.cache import cache
 
         from netbox_librenms_plugin.views.sync.cables import SyncCablesView
@@ -1065,13 +1057,7 @@ class TestAddDeviceToLibreNMSViewV3:
 
 class TestAddDeviceToLibreNMSViewUnknownVersion:
     def test_unknown_snmp_version_shows_error(self):
-        """
-        A version string that is neither v1/v2c nor v3 is refused before reaching LibreNMS.
-
-        ``snmp_version`` on the v3 form is a plain CharField whose ``initial`` does not constrain a
-        BOUND form, so a posted "v99" survives validation, reaches form_valid as the version, and
-        must hit the guard rather than be sent on.
-        """
+        """Verify that the view rejects an unknown value from the bound v3 field before calling LibreNMS."""
         dev = make_device("addsnmp-badversion")
         req = _make_request(
             post_data={
@@ -2632,12 +2618,7 @@ class TestSyncVLANsViewWithGroup:
         assert any("several VLANs" in text for text in message_texts(req, "error"))
 
     def test_invalid_vid_string_skipped(self):
-        """
-        A non-numeric selection is skipped, and the rest of the batch still syncs.
-
-        The batch carries a valid VID after the bad one so a `break` in place of the
-        `continue` would be caught — a single-item batch cannot tell them apart.
-        """
+        """Verify that an invalid VID is skipped and a later valid batch item still syncs."""
         from ipam.models import VLAN
 
         dev = make_device("vlan-badvid")
@@ -2789,12 +2770,7 @@ class TestSyncVLANsViewGroupedUpdateSkip:
 
 
 def _make_site(name, *, latitude=None, longitude=None):
-    """
-    A real Site, optionally with coordinates.
-
-    Re-read from the DB so the coordinate fields come back as the Decimals the view actually
-    formats in production, not the Python floats that were passed in.
-    """
+    """Create and reload a real Site so coordinate fields use the Decimal values seen in production."""
     from dcim.models import Site
     from django.utils.text import slugify
 

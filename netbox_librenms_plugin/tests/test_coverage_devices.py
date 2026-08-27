@@ -66,11 +66,7 @@ def _real_port(**overrides):
 
 
 def _user_with_perms(tag, perm_specs):
-    """Real user granted exactly ``perm_specs`` = [(action, Model), ...] via NetBox ObjectPermissions.
-
-    Lets a test drive the view's real ``has_perm`` from a precise, real permission set (instead of a
-    mocked ``has_perm`` side-effect), so the perm→table-flag mapping is exercised end to end.
-    """
+    """Grant a real user the exact permissions needed to exercise the permission-to-table-flag mapping."""
     from core.models import ObjectType
     from django.contrib.auth import get_user_model
     from users.models import ObjectPermission
@@ -1487,14 +1483,7 @@ class TestSaveVlanGroupOverridesView:
 
 @pytest.mark.django_db
 class TestSaveVlanGroupOverridesRealCacheBackend:
-    """Drive SaveVlanGroupOverridesView against a REAL cache backend, not a MagicMock.
-
-    The MagicMock-cache tests above synthesise a ``.ttl()`` on the cache; ``cache.ttl()``
-    is a django-redis extension that every other Django backend (e.g. the LocMemCache
-    NetBox falls back to) lacks, so those tests stay green even though the raw ``cache.ttl()``
-    call raised ``AttributeError`` mid-request. These exercise the real view against a real
-    LocMemCache so the backend-agnostic ``cache_remaining_ttl`` guard is actually tested.
-    """
+    """Verify that SaveVlanGroupOverridesView handles real cache backends with and without ttl()."""
 
     def _post(self, device, cache_backend, *, vid_group_map=None):
         import json

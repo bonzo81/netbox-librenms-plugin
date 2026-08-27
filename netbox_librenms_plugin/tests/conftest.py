@@ -357,17 +357,7 @@ def make_serial_device(name, *, csp_names=(), cp_names=()):
 
 
 def make_serial_row(csp, label, obj, *, sensor_index_int=1, **extra):
-    """A serial cable row as it comes out of the cache strip (raw keys only), plus overrides.
-
-    One canonical builder for the serial-row shape shared by the picker/resync/verify test
-    files, so a change to the row contract is made once instead of kept in sync by hand.
-
-    ``sensor_index_int`` is the port number production derives from the LibreNMS sensor index and
-    SORTS the rows by (serial_utils.build_serial_links). It is an explicit parameter (default 1)
-    rather than a hardcoded field so a caller that builds MORE THAN ONE serial row must give each a
-    distinct index — otherwise every row shares index 1, a cache shape production never produces and
-    one that hides the sort ordering.
-    """
+    """Build a raw serial cache row, using distinct sensor indexes to preserve production link ordering."""
     row = {
         "_source": "serial",
         "device_id": obj.id,
@@ -411,13 +401,7 @@ def cable_together(term_a, term_b):
 
 
 def make_patch_panel(name):
-    """Create a 1-position patch panel: (panel, front_port, rear_port).
-
-    NetBox 4.5+ models front/rear pass-through via a PortMapping table, while the
-    plugin's declared floor (4.2) still uses a rear_port FK on FrontPort — so the
-    wiring is version-gated on the model's presence. Shared here so the cable
-    trace/overwrite/re-sync/picker tests can't drift on that wiring.
-    """
+    """Create a one-position patch panel with pass-through wiring for the active NetBox version."""
     from dcim.models import FrontPort, RearPort
 
     panel = make_device(name)

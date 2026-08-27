@@ -157,12 +157,7 @@ class TestBaseCableTableViewGetLinksData:
         assert view._oob_links_fetch_failed is True
 
     def test_prepare_context_replaces_stale_links_cache_on_partial_fetch(self):
-        """A partial fresh fetch must REPLACE the prior snapshot and record the failed source.
-
-        Downstream verify/sync resolve rows from this key, so the superseded full snapshot must
-        not survive. The partial rows still cache, flagged through ``incomplete_sources`` so the
-        table can warn instead of presenting the short list as complete.
-        """
+        """Verify that a partial fresh fetch replaces the prior snapshot and records the failed source."""
         from django.core.cache import cache as real_cache
 
         view = self._make_view()

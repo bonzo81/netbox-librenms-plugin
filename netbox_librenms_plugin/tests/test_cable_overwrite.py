@@ -117,12 +117,7 @@ def _make_tag(name, color="ff0000"):
 
 
 def _classify(local, remote):
-    """Classify against freshly-loaded ``.cable`` state.
-
-    ``cable_together`` writes the cable but does not update the passed-in termination instances'
-    cached ``.cable`` FK; the production view re-fetches each termination (``.objects.get``) so it
-    always sees fresh state. Mirror that here by refreshing before classifying.
-    """
+    """Refresh stale cable foreign keys before classification to match the production view."""
     from netbox_librenms_plugin.utils import classify_cable_action
 
     local.refresh_from_db()
@@ -508,12 +503,7 @@ class TestSerialCableOverwriteBehaviour:
         assert len(provenance_tag_selects) == 1
 
     def test_tagging_failure_rolls_back_the_cable(self):
-        """A provenance-tagging failure must not commit an untagged cable while reporting failure.
-
-        An untagged cable isn't recognized as plugin-owned by classify_cable_action, so a
-        half-persisted create both contradicts the error toast and turns the user's retry
-        into a force-confirm conflict against their own cable.
-        """
+        """Verify a tagging failure rolls back the cable and leaves retries free of a self-conflict."""
         from dcim.models import Cable
         from django.db import connection
 
@@ -676,11 +666,7 @@ class TestSerialCableOverwriteBehaviour:
 # ---------------------------------------------------------------------------
 @pytest.mark.django_db
 class TestCableOverwriteHtmxModal:
-    """A conflicted HTMX sync returns the force-confirm modal out-of-band and leaves the DB
-    untouched; re-submitting with ``force=on`` replaces the foreign cable. Driven through the
-    real Django request stack (Client) so routing, permissions, the cache read, template
-    rendering, and the OOB-swap markup are all exercised end-to-end.
-    """
+    """Verify the real HTMX request flow preserves conflicts until force confirmation replaces the foreign cable."""
 
     def _seed(self, name):
         from django.contrib.auth import get_user_model
@@ -1047,11 +1033,7 @@ class TestCableOverwriteHtmxModal:
 # ---------------------------------------------------------------------------
 @pytest.mark.django_db
 class TestOverwritePreservesMidPathSegments:
-    """A forced re-point must delete ONLY the cable segment(s) directly attached to the two
-    endpoints. Patch-panel trunks (rear-to-rear inter-rack cables) and every other mid-path
-    segment carry OTHER circuits and are permanent infrastructure — they must survive, and
-    the warning modal must say precisely which segment dies and that the rest stays.
-    """
+    """Verify forced re-pointing deletes only endpoint segments and warns that mid-path segments stay."""
 
     def _panel_path(self, name):
         """csp --c1-- FrontPort | RearPort --c2 (trunk-ish)-- ConsolePort@end."""
@@ -1089,8 +1071,7 @@ class TestOverwritePreservesMidPathSegments:
         assert result["removed_cables"] == [f"#{c1.pk}"]  # only the endpoint segment, never c2
 
     def test_modal_marks_deleted_segment_and_keeps_the_rest(self):
-        """E2E: the warning modal highlights the doomed endpoint segment and labels the rest of
-        the path as staying — it must NOT claim panel segments get deleted."""
+        """Verify the warning modal marks only the endpoint segment for deletion and the remaining path as staying."""
         from django.contrib.auth import get_user_model
         from django.core.cache import cache
         from django.test import Client
@@ -1138,26 +1119,10 @@ class TestOverwritePreservesMidPathSegments:
 # ---------------------------------------------------------------------------
 @pytest.mark.django_db
 class TestOverwriteRequiresDeletePermission:
-    """The sync view's blanket gate covers add/change Cable, but the overwrite paths DELETE
-    existing cables — that must additionally require dcim.delete_cable, checked precisely on
-    the destructive branch so create-only syncs keep working for add/change users.
-
-    Acting on an EXISTING cable also needs view scope for it: the cable table reports current
-    cable state through view-scoped queries, so a row whose cable the user cannot see must not
-    be adopted, replaced or described. Each test below narrows one grant and leaves the rest
-    open, so the denial it asserts can only come from the gate it names.
-    """
+    """Verify overwrite requires scoped view and delete permissions for existing cables without blocking creation."""
 
     def _sync_view_with_real_user(self, *actions, constraints=None, constrained_actions=None, device_ids=None):
-        """Build a sync view whose request user holds a REAL NetBox ObjectPermission for Cable
-        with the given actions — NetBox's ObjectPermissionBackend ignores Django's
-        user_permissions m2m, so has_perm() only honors ObjectPermission assignments.
-
-        *constraints* makes a grant a CONSTRAINED one: ``has_perm`` (asked without an instance)
-        still passes, while ``restrict()`` narrows to the matching cables. It applies only to
-        *constrained_actions* (default: every action), so a test can narrow the one gate it is
-        about and leave the others wide open.
-        """
+        """Build a sync view with real constrained NetBox permissions because has_perm ignores user_permissions."""
         from core.models import ObjectType
         from dcim.models import Cable
         from django.contrib.auth import get_user_model
@@ -1334,9 +1299,7 @@ class TestOverwriteRequiresDeletePermission:
         assert not Cable.objects.filter(pk=old.pk).exists()
 
     def test_overwrite_denied_when_the_delete_grant_excludes_the_doomed_cable(self):
-        """A CONSTRAINED delete_cable grant clears has_perm (no instance is asked), so the doomed
-        cable must be checked against the user's actual delete scope — otherwise the overwrite
-        destroys a cable the user cannot see."""
+        """Verify overwrite checks the doomed cable against delete scope even when the broad permission gate passes."""
         from dcim.models import Cable
 
         from netbox_librenms_plugin.utils import get_librenms_cable_tag

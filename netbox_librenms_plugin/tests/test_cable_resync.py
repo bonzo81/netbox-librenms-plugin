@@ -227,9 +227,7 @@ class TestSerialRowResyncStatus:
 # ---------------------------------------------------------------------------
 @pytest.mark.django_db
 class TestCableAdoptHtmx:
-    """Syncing a matched-but-untagged row through the real HTTP stack adopts the cable:
-    the librenms tag is added, the cable is NOT deleted/recreated, and no modal is raised.
-    """
+    """Verify real HTTP sync tags a matched untagged cable without recreating it or showing a modal."""
 
     def test_sync_adopts_matched_untagged_cable(self):
         from dcim.models import Cable
@@ -388,11 +386,7 @@ class TestPatchPathSyncGuard:
 # ---------------------------------------------------------------------------
 @pytest.mark.django_db
 class TestCabledSerialRowFarEndDisplay:
-    """A cabled serial row must show where the cable REALLY goes — the far-end device and
-    port, linked — even when the LibreNMS label resolves to nothing (or to something else).
-    The cable itself knows its far end; an unresolvable name hint must not leave the Remote
-    Device / Remote Port columns dead.
-    """
+    """Verify cabled serial rows show the linked far end when the LibreNMS label is wrong or unresolved."""
 
     def _enrich(self, obj, row):
         return _make_view().enrich_links_data([row], obj, server_key=SERVER_KEY)[0]
@@ -416,8 +410,7 @@ class TestCabledSerialRowFarEndDisplay:
         assert link["can_create_cable"] is False  # display only — no sync target from a dead label
 
     def test_tagged_trusted_cable_shows_actual_far_end_not_label_device(self):
-        """The trust rule keeps the row inactionable, but the display must show where the
-        tagged cable REALLY goes — not the wrong-name label device."""
+        """Verify a trusted tagged cable displays its actual far end instead of the label-matched device."""
         acs, (csp,), _ = make_serial_device("farend-trust", csp_names=["ttyS1"])
         actual, _, (cp,) = make_serial_device("farend-trust-actual", cp_names=["console"])
         _label_dev, _, _ = make_serial_device("farend-trust-label", cp_names=["console"])
@@ -432,10 +425,7 @@ class TestCabledSerialRowFarEndDisplay:
         assert link["can_create_cable"] is False
 
     def test_far_end_display_does_not_leak_into_the_cached_label(self):
-        """Enrichment must be idempotent across the cache round-trip: the far-end DISPLAY name
-        must not overwrite the raw LibreNMS label, or a fresh refresh and a cached re-render
-        disagree forever (label dead -> "Cable Found"; leaked far-end name resolves -> the same
-        row flips to "Connected via Patch Path" on the next render)."""
+        """Verify enrichment preserves the raw label across cache round-trips so cable status remains stable."""
         from netbox_librenms_plugin.views.base.cables_view import _RAW_LINK_KEYS
 
         acs, (csp,), _ = make_serial_device("leak-ser", csp_names=["ttyS1"])
@@ -456,8 +446,7 @@ class TestCabledSerialRowFarEndDisplay:
         assert again["remote_device"] == "name-that-matches-nothing"
 
     def test_patch_path_row_shows_path_end_not_panel(self):
-        """A Connected-via-Patch-Path row shows the END of the traced path (the real console),
-        not the panel port the first cable segment lands on."""
+        """Verify patch-path rows display the traced path endpoint instead of the first panel port."""
         acs, (csp,), _ = make_serial_device("farend-path", csp_names=["ttyS1"])
         _panel_dev, fp, rp = _panel("farend-path-pp")
         end, _, (cp,) = make_serial_device("farend-path-end", cp_names=["console"])

@@ -83,12 +83,7 @@ def test_concurrent_hidden_interface_winner_is_not_reused(monkeypatch):
 
 
 def test_an_interface_outside_the_view_scope_is_never_locked():
-    """Locking must happen inside the caller's view scope, not before it.
-
-    The resolver used to lock the (device, name) row and only hide it afterwards, so a caller could
-    take a row lock on an interface it cannot see and stall whoever legitimately owns it. Hold that
-    row from a second connection: the scoped resolver must return without waiting on it.
-    """
+    """Verify an interface outside the caller's view scope is rejected without taking its row lock."""
     from dcim.models import Interface
     from django.db import close_old_connections, connection, transaction
 
@@ -133,12 +128,7 @@ def test_an_interface_outside_the_view_scope_is_never_locked():
 
 
 def test_hidden_ip_row_is_not_locked_by_an_out_of_scope_caller():
-    """A caller who cannot see the matching IP must refuse without locking its row.
-
-    Locking first lets a caller pin a row it has no grant for, stalling the request that owns it
-    for the rest of the enclosing transaction. The hidden row here is held from a second
-    connection, so an unscoped lock blocks until lock_timeout instead of returning.
-    """
+    """Verify a caller rejects a hidden matching IP without taking its row lock."""
     from dcim.models import Device, Interface
     from django.contrib.auth import get_user_model
     from django.db import close_old_connections, connection, transaction
