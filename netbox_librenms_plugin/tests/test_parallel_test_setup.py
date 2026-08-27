@@ -93,6 +93,7 @@ THIRD_PARTY_TEST_IMPORT_ROOTS = {
     "playwright": "playwright",
     "pytest": "pytest",
     "requests": "requests",
+    "xdist": "pytest-xdist",
     "yaml": "pyyaml",
 }
 
