@@ -1742,12 +1742,14 @@ class TestRemoveServerMappingViewHelpers:
         assert obj is mock_vm
 
     def test_sync_url_name_device(self):
-        view = self._view()
-        assert view._sync_url_name("device") == "plugins:netbox_librenms_plugin:device_librenms_sync"
+        from netbox_librenms_plugin.views.sync.device_fields import _sync_url_name
+
+        assert _sync_url_name("device") == "plugins:netbox_librenms_plugin:device_librenms_sync"
 
     def test_sync_url_name_vm(self):
-        view = self._view()
-        assert view._sync_url_name("vm") == "plugins:netbox_librenms_plugin:vm_librenms_sync"
+        from netbox_librenms_plugin.views.sync.device_fields import _sync_url_name
+
+        assert _sync_url_name("vm") == "plugins:netbox_librenms_plugin:vm_librenms_sync"
 
     def test_normalize_bool(self):
         view = self._view()
@@ -2763,3 +2765,51 @@ class TestSyncUrlUnboundApiDoesNotReconstructDefault:
         # configured server). It degrades to a bare redirect instead.
         mock_api.assert_not_called()
         assert "server_key=" not in resp.url
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    "url_name",
+    ["remove_server_mapping", "set_preferred_server", "convert_legacy_librenms_id"],
+)
+@pytest.mark.parametrize("posted_type", ["vm", "virtualmachine"])
+def test_the_mapping_views_gate_a_vm_object_type_on_the_vm_model(client, url_name, posted_type):
+    """The shared model selection decides the permission scope, so Device rights must not carry over."""
+    from dcim.models import Device
+    from django.contrib.messages import get_messages
+    from django.urls import reverse
+
+    from netbox_librenms_plugin.tests.view_test_helpers import make_user_with_perms
+
+    user = make_user_with_perms(f"objtype-{url_name}-{posted_type}", [("change", Device)])
+    client.force_login(user)
+    subject = make_device(f"objtype-subject-{url_name}-{posted_type}")
+    url = reverse(f"plugins:netbox_librenms_plugin:{url_name}", args=[subject.pk])
+
+    response = client.post(url, {"object_type": posted_type, "server_key": "default"})
+
+    texts = [str(message) for message in get_messages(response.wsgi_request)]
+    assert any("Missing permissions" in text and "virtualmachine" in text for text in texts), texts
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    "url_name",
+    ["remove_server_mapping", "set_preferred_server", "convert_legacy_librenms_id"],
+)
+def test_the_mapping_views_reject_an_unsupported_object_type_the_same_way(client, url_name):
+    """An unsupported object_type is refused before the permission gate, echoing the raw value."""
+    from django.urls import reverse
+
+    from netbox_librenms_plugin.tests.view_test_helpers import make_user_with_perms
+
+    user = make_user_with_perms(f"objtype-bad-{url_name}", [])
+    client.force_login(user)
+    subject = make_device(f"objtype-bad-subject-{url_name}")
+    url = reverse(f"plugins:netbox_librenms_plugin:{url_name}", args=[subject.pk])
+
+    response = client.post(url, {"object_type": "cluster<script>", "server_key": "default"})
+
+    assert response.status_code == 400
+    body = response.content.decode()
+    assert "Invalid object_type: cluster&lt;script&gt;" in body

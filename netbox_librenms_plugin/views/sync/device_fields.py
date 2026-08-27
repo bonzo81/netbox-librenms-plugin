@@ -47,6 +47,28 @@ from netbox_librenms_plugin.views.mixins import (
 logger = logging.getLogger(__name__)
 
 
+SYNC_OBJECT_TYPES = ("device", "vm")
+
+
+def _normalize_sync_object_type(value):
+    """Return the canonical sync object type, or None when it is not supported."""
+    if value == "virtualmachine":
+        value = "vm"
+    return value if value in SYNC_OBJECT_TYPES else None
+
+
+def _sync_model(object_type):
+    """Return the model that owns the LibreNMS mapping for one object type."""
+    return VirtualMachine if object_type == "vm" else Device
+
+
+def _sync_url_name(object_type):
+    """Return the sync-page URL name for one object type."""
+    if object_type == "vm":
+        return "plugins:netbox_librenms_plugin:vm_librenms_sync"
+    return "plugins:netbox_librenms_plugin:device_librenms_sync"
+
+
 def _device_sync_redirect(request, pk, server_key):
     """
     Redirect to the device sync tab, carrying the already-resolved ``server_key``.
@@ -782,13 +804,8 @@ class RemoveServerMappingView(LibreNMSPermissionMixin, NetBoxObjectPermissionMix
 
     def _get_object(self, object_type, pk):
         """Return the Device or VirtualMachine for the given pk."""
-        model = VirtualMachine if object_type == "vm" else Device
+        model = _sync_model(object_type)
         return self.restrict_object_or_404(model, "change", pk=pk), model
-
-    def _sync_url_name(self, object_type):
-        if object_type == "vm":
-            return "plugins:netbox_librenms_plugin:vm_librenms_sync"
-        return "plugins:netbox_librenms_plugin:device_librenms_sync"
 
     def _normalize_librenms_mapping(self, value):
         if isinstance(value, bool):
@@ -801,19 +818,18 @@ class RemoveServerMappingView(LibreNMSPermissionMixin, NetBoxObjectPermissionMix
 
     def post(self, request, pk):
         # Scope required permissions to the specific model being modified before checking.
-        object_type = request.POST.get("object_type", "device")
-        if object_type == "virtualmachine":
-            object_type = "vm"
-        if object_type not in ("device", "vm"):
-            return HttpResponse(f"Invalid object_type: {escape(object_type)}", status=400)
-        target_model = VirtualMachine if object_type == "vm" else Device
+        raw_object_type = request.POST.get("object_type", "device")
+        object_type = _normalize_sync_object_type(raw_object_type)
+        if object_type is None:
+            return HttpResponse(f"Invalid object_type: {escape(raw_object_type)}", status=400)
+        target_model = _sync_model(object_type)
         self.required_object_permissions = {"POST": [("change", target_model)]}
 
         if error := self.require_all_permissions("POST"):
             return error
 
         obj, model = self._get_object(object_type, pk)
-        sync_url = self._sync_url_name(object_type)
+        sync_url = _sync_url_name(object_type)
         server_key = request.POST.get("server_key", "").strip()
 
         if not server_key:
@@ -900,24 +916,8 @@ class SetPreferredServerView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixi
         "POST": [("change", Device), ("change", VirtualMachine)],
     }
 
-    @staticmethod
-    def _object_type(value):
-        if value == "virtualmachine":
-            return "vm"
-        return value
-
-    @staticmethod
-    def _model(object_type):
-        return VirtualMachine if object_type == "vm" else Device
-
-    @staticmethod
-    def _sync_url_name(object_type):
-        if object_type == "vm":
-            return "plugins:netbox_librenms_plugin:vm_librenms_sync"
-        return "plugins:netbox_librenms_plugin:device_librenms_sync"
-
     def _redirect(self, object_type, pk, active_server_key=None, active_sync_tab=None):
-        url = reverse(self._sync_url_name(object_type), kwargs={"pk": pk})
+        url = reverse(_sync_url_name(object_type), kwargs={"pk": pk})
         query = {}
         if active_sync_tab:
             query["tab"] = active_sync_tab
@@ -930,11 +930,12 @@ class SetPreferredServerView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixi
         return redirect(url)
 
     def post(self, request, pk):
-        object_type = self._object_type(request.POST.get("object_type", "device"))
-        if object_type not in ("device", "vm"):
-            return HttpResponse(f"Invalid object_type: {escape(object_type)}", status=400)
+        raw_object_type = request.POST.get("object_type", "device")
+        object_type = _normalize_sync_object_type(raw_object_type)
+        if object_type is None:
+            return HttpResponse(f"Invalid object_type: {escape(raw_object_type)}", status=400)
 
-        model = self._model(object_type)
+        model = _sync_model(object_type)
         self.required_object_permissions = {"POST": [("change", model)]}
         if error := self.require_all_permissions("POST"):
             return error
@@ -1025,13 +1026,12 @@ class ConvertLegacyLibreNMSIdView(LibreNMSPermissionMixin, NetBoxObjectPermissio
         return redirect_with_server_key(request, url, server_key)
 
     def post(self, request, pk):
-        object_type = request.POST.get("object_type", "device")
-        if object_type == "virtualmachine":
-            object_type = "vm"
-        if object_type not in ("device", "vm"):
-            return HttpResponse(f"Invalid object_type: {escape(object_type)}", status=400)
+        raw_object_type = request.POST.get("object_type", "device")
+        object_type = _normalize_sync_object_type(raw_object_type)
+        if object_type is None:
+            return HttpResponse(f"Invalid object_type: {escape(raw_object_type)}", status=400)
 
-        target_model = VirtualMachine if object_type == "vm" else Device
+        target_model = _sync_model(object_type)
         self.required_object_permissions = {"POST": [("change", target_model)]}
         if error := self.require_all_permissions("POST"):
             return error
