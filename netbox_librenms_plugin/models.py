@@ -34,7 +34,8 @@ def _trim_python_whitespace(expression):
 
 
 def _validate_replacement_template(compiled: re.Pattern, replacement: str) -> None:
-    """Verify that *replacement* is a valid back-reference template for *compiled*.
+    """
+    Verify that *replacement* is a valid back-reference template for *compiled*.
 
     ``re.sub(pattern, replacement, test_string)`` only evaluates group references
     when the pattern actually matches the test string.  Using the pattern text
@@ -47,7 +48,13 @@ def _validate_replacement_template(compiled: re.Pattern, replacement: str) -> No
     references are validated correctly), guaranteeing a match and ensuring all
     back-references are exercised.
 
-    Raises ``re.error`` or ``IndexError`` if the replacement is invalid.
+    Args:
+        compiled (re.Pattern): The compiled pattern whose capture groups the template can reference.
+        replacement (str): The replacement template to validate.
+
+    Raises:
+        re.error: If the replacement is invalid.
+        IndexError: If the replacement is invalid.
     """
     n = compiled.groups
     if n == 0:
@@ -1291,6 +1298,12 @@ class PortStackLagPattern(FullCleanOnSaveMixin, NetBoxModel):
         not re-globalize every vendor's regex); otherwise the patterns whose ``librenms_os``
         matches after the same trim/lower normalization as the database constraint. Patterns
         that fail to compile are skipped and logged.
+
+        Args:
+            device_os (str | None): The LibreNMS OS name, or None to load every stored pattern.
+
+        Returns:
+            list[re.Pattern]: The compiled patterns that apply to the specified OS.
         """
         queryset = cls._patterns_for_os_queryset(device_os)
         if queryset is None:

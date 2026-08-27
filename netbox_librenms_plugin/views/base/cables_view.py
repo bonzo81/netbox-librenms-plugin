@@ -986,6 +986,18 @@ class BaseCableTableView(
 
         Returns the resolved ConsoleServerPort for a serial row (so the caller can reuse it for
         the cable-status check without a second fetch by pk), else None.
+
+        Args:
+            link (dict): The cable row to enrich.
+            obj (Device): The device shown on the cable page.
+            server_key (str | None): The LibreNMS server key, or None to resolve it.
+            sync_device (Device | None): The pre-resolved LibreNMS sync device.
+            serial_ports_by_name (dict[str, ConsoleServerPort] | None): Preloaded serial ports
+                keyed by name.
+            normal_context (dict | None): Preloaded interface and chassis lookup data.
+
+        Returns:
+            ConsoleServerPort | None: The resolved serial port for a serial row, or None.
         """
         # Merged OOB-controller rows are context-only: their local port lives on the
         # CONTROLLER, not the host, so a shared name (or colliding stored librenms_id)
@@ -1121,16 +1133,23 @@ class BaseCableTableView(
 
         States (``cable_status`` / ``can_create_cable``):
 
-        - ``"No Cable"`` / True — neither end cabled; sync creates the cable.
-        - ``"Cable Found"`` / untagged-only — the desired connection is already cabled directly.
+        - ``"No Cable"`` / True: neither end cabled; sync creates the cable.
+        - ``"Cable Found"`` / untagged-only: the desired connection is already cabled directly.
           When the cable lacks the librenms tag a sync merely adopts it (``tag_only`` in
           :func:`~netbox_librenms_plugin.utils.classify_cable_action`); when already tagged
           there is nothing to do.
-        - ``"Connected via Patch Path"`` / False — both ends cabled and the traced path reaches
+        - ``"Connected via Patch Path"`` / False: both ends cabled and the traced path reaches
           the LibreNMS target through patch panels: a remodel is a better model of the same
           link, so no re-sync is offered.
-        - ``"Cable Mismatch"`` / True — cabled somewhere that does NOT reach the target; a
+        - ``"Cable Mismatch"`` / True: cabled somewhere that does NOT reach the target; a
           re-sync is offered and the exact current cable must be confirmed before replacement.
+
+        Args:
+            link (dict): The cable row to update.
+            normal_context (dict | None): Preloaded interface, cable, and trace data.
+
+        Returns:
+            dict: The cable row with its status and sync affordance.
         """
         local_interface_id = link.get("netbox_local_interface_id")
         remote_interface_id = link.get("netbox_remote_interface_id")
@@ -1261,10 +1280,19 @@ class BaseCableTableView(
         return link
 
     def check_serial_cable_status(self, link, csp=None, remote_context=None):
-        """Check cable status for a serial ConsoleServerPort row.
+        """
+        Check cable status for a serial ConsoleServerPort row.
 
         ``csp`` may be the ConsoleServerPort already loaded by ``enrich_local_port`` for this
         row; when it matches the resolved id it's reused instead of re-fetching by pk.
+
+        Args:
+            link (dict): The serial cable row to update.
+            csp (ConsoleServerPort | None): The preloaded local console server port.
+            remote_context (dict | None): Preloaded cable visibility data.
+
+        Returns:
+            dict: The serial cable row with its status and sync affordance.
         """
         csp_id = link.get("netbox_local_interface_id")
         link["can_create_cable"] = False

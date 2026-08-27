@@ -591,10 +591,16 @@ def get_cable_sync_settings(*, lock=False):
     """
     Return the settings row driving the cable-sync provenance stamp (tag name/color, description).
 
-    These are DB/UI-managed (plugin Settings → Cable Sync), not PLUGINS_CONFIG — operator
-    preferences changeable without a NetBox restart, same split as the SerialSensorTypePattern
-    rows. Falls back to an UNSAVED instance (pure field defaults) when no row exists yet, so
-    read paths never write.
+    These settings are DB/UI-managed (plugin Settings → Cable Sync), not PLUGINS_CONFIG. Operators
+    can change their preferences without a NetBox restart. This split matches the
+    SerialSensorTypePattern rows. The function falls back to an UNSAVED instance (pure field
+    defaults) when no row exists yet, so read paths never write.
+
+    Args:
+        lock (bool): Whether to lock the settings row and create it when it does not exist.
+
+    Returns:
+        LibreNMSSettings: The saved settings row, or an unsaved instance with field defaults.
     """
     from netbox_librenms_plugin.models import LibreNMSSettings
 
@@ -830,16 +836,20 @@ def cable_path_reaches(
 
 
 def _object_is_visible(obj, user, cache=None) -> bool:
-    """Return whether *user* may view one concrete NetBox object.
+    """
+    Return whether *user* may view one concrete NetBox object.
 
     Fails closed without a user: the production caller always supplies the request's user, so a
     missing one means the caller could not establish an identity, not that everything is public.
 
     Args:
-        obj: The NetBox object whose visibility is checked.
-        user: The user the labels are rendered for.
-        cache: Optional dict memoising the answer per object for one render, so a long trace does
-            not repeat the same restricted lookup at every hop.
+        obj (models.Model): The NetBox object whose visibility is checked.
+        user (object | None): The user the labels are rendered for.
+        cache (dict | None): Optional dict memoising the answer per object for one render, so a
+            long trace does not repeat the same restricted lookup at every hop.
+
+    Returns:
+        bool: Whether the user may view the object.
     """
     if user is None:
         return False

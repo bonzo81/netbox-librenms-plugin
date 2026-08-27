@@ -543,6 +543,17 @@ class SingleVlanGroupVerifyView(LibreNMSPermissionMixin, NetBoxObjectPermissionM
         Render the VLANs cell HTML with correct color coding.
 
         Reuses the same color logic as LibreNMSInterfaceTable.render_vlans().
+
+        Args:
+            untagged (int | None): The untagged VLAN ID.
+            tagged (list[int]): The tagged VLAN IDs.
+            missing_vlans (list[int]): The VLAN IDs that do not exist in NetBox.
+            exists_in_netbox (bool): Whether the interface exists in NetBox.
+            netbox_untagged_vid (int | None): The interface's NetBox untagged VLAN ID.
+            netbox_tagged_vids (set[int]): The interface's NetBox tagged VLAN IDs.
+
+        Returns:
+            str: The rendered VLAN cell HTML.
         """
         from django.utils.safestring import mark_safe
 

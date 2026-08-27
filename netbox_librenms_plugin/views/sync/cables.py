@@ -96,6 +96,14 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libre
         The tag is plugin infrastructure: its name and color come from the plugin settings row,
         and the plugin bootstraps it on first use the same way it bootstraps the ``librenms_id``
         custom field. Cable sync therefore does not ask the syncing user for ``extras.add_tag``.
+
+        Args:
+            create (bool): Whether to create the configured tag when it does not exist.
+            sync_settings (LibreNMSSettings | None): The settings row to use, or None to load it.
+
+        Returns:
+            Tag | None: The configured provenance tag, or None when creation is disabled and it
+                does not exist.
         """
         sync_settings = sync_settings or self._get_cable_sync_settings()
         if not getattr(self, "_cable_provenance_tag_resolved", False):
@@ -990,12 +998,21 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libre
 
         An HTMX submit gets the same ``#cable-sync-content`` partial the "Refresh Cables" action
         produces, rebuilt from the (now cable-updated) cache so a just-synced row flips to
-        "Cable Found" and drops its Sync button — no full-page reload. The sync flash messages
-        render inline via the partial's ``inc/messages.html`` include, and the page's global
+        "Cable Found" and drops its Sync button. This does not require a full-page reload. The sync
+        flash messages render inline via the partial's ``inc/messages.html`` include, and the page's global
         ``htmx:afterSwap`` handler re-initialises the table's checkboxes/filters/selects.
 
         A non-HTMX submit (JS disabled, or a direct POST) still gets the redirect, where Django
         messages survive to the reloaded tab.
+
+        Args:
+            request (HttpRequest): The cable sync request.
+            obj (Device): The device whose cable data was synced.
+            server_key (str | None): The resolved LibreNMS server key.
+            redirect_url (str): The full-page fallback URL.
+
+        Returns:
+            HttpResponse: The partial render or full-page redirect response.
         """
         # htmx always sends "HX-Request: true"; match the exact value (mirrors modules.py) so a
         # non-htmx POST — or a test's mock request whose headers aren't a real dict — falls through
