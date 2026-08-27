@@ -117,12 +117,19 @@ class CaptureDataShapeView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin,
         """
         Build a prefilled GitHub issue URL targeting the data-shape issue form.
 
-        Only ``template``/``title``/``labels`` are prefilled — the data-shape.yml issue *form*
+        Only ``template``/``title``/``labels`` are prefilled. The data-shape.yml issue *form*
         ignores a ``body`` query param, and the anonymized recording is intentionally kept out of
         the URL (a full recording would blow past URL length limits). The user pastes the JSON
         (copy/download from the modal) into the form's "Anonymized recording" field. The title uses
-        the *anonymized* recording name (``os-<hash>-shape-<hash>``), never the real device name —
-        the title goes into the public issue URL, so it must not leak infra the JSON scrubbed.
+        the *anonymized* recording name (``os-<hash>-shape-<hash>``), never the real device name.
+        The title goes into the public issue URL, so it must not leak infrastructure data that the
+        JSON scrubbed.
+
+        Args:
+            anonymized_name (str): The anonymized recording name for the public issue title.
+
+        Returns:
+            str: The prefilled GitHub issue URL.
         """
         params = {
             "template": "data-shape.yml",

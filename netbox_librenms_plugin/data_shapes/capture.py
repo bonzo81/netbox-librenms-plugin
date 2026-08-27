@@ -105,9 +105,20 @@ def capture_device_recording(api, device_id, *, name=None, description="", meta=
         A LibreNMS server that does not honor the ``entPhysical*`` query params returns an empty
         filtered inventory but still populates ``/inventory/{id}/all``; production's
         ``get_inventory_filtered`` falls back to that endpoint + client-side filtering. Reproduce the
-        SAME entities under the FILTERED key here — which both ``compute_shape_signature`` and the
-        production replay read — otherwise a Virtual-Chassis device is silently captured as a plain
-        one. When the filtered query already returns data (the common case), nothing changes.
+        SAME entities under the FILTERED key here. Both ``compute_shape_signature`` and the
+        production replay read this key. Otherwise, a Virtual-Chassis device is silently captured as
+        a plain one. When the filtered query already returns data (the common case), nothing changes.
+
+        Args:
+            query_params (dict[str, str]): Query parameters for the filtered inventory request.
+            contained_in (str | int | None): Parent index for client-side filtering.
+            ent_class (str | None): Physical class for client-side filtering.
+
+        Returns:
+            list[dict]: Inventory entries from the filtered request or the client-side fallback.
+
+        Raises:
+            RuntimeError: The fallback inventory request receives no HTTP response or a 5xx response.
         """
         filtered_status, body = record(f"inventory/{device_id}", query_params)
         # record() skips storing the route on a transport failure (status outside 100–599), so track

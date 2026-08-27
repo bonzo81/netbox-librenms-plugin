@@ -51,9 +51,15 @@ def _os_family(os_name):
     """
     Return a coarse vendor family for an OS string (raw or pseudonymized), for similarity matching.
 
-    A recognized OS maps to its vendor (ios/iosxr → "cisco"); an unrecognized (niche) OS falls back
+    A recognized OS maps to its vendor (ios/iosxr maps to "cisco"). An unrecognized (niche) OS falls back
     to its own pseudonymized token, so two recordings of the same niche OS still relate to each
     other while different ones don't.
+
+    Args:
+        os_name (str | None): A raw or pseudonymized OS name.
+
+    Returns:
+        str | None: The vendor family, a pseudonymized OS token, or None for a missing OS name.
     """
     if not isinstance(os_name, str) or not os_name:
         return None
@@ -67,6 +73,13 @@ def _body(recording, predicate):
     A recorded ``[status, body]`` frame is unwrapped, but a NON-2xx frame yields ``None``: replay's
     real client drops a non-2xx response and sees no usable data, so the signature must not count a
     failed frame (e.g. a captured ``[500, {"transceivers": [...]}]``) as present data.
+
+    Args:
+        recording (dict): A recording that contains response route keys and bodies.
+        predicate (Callable[[str], bool]): A function that selects a response route key.
+
+    Returns:
+        object | None: The first matching successful response body, or None if no usable body exists.
     """
     for key, value in recording.get("responses", {}).items():
         if predicate(key):

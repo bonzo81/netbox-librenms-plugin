@@ -14,12 +14,19 @@ def port_has_vlan(port):
     """
     Return whether a port row carries real VLAN data (the signature's ``vlans`` axis predicate).
 
-    Keyed on the VALUE, not mere key presence: ``ifVlan`` ``None``/``""``/``0``/``"0"`` (LibreNMS's
-    no-/default-VLAN sentinels — ifVlan is string-valued JSON elsewhere in the client, so the
-    string ``"0"`` is the same sentinel as the int ``0``) do NOT count, only a real id or a
-    non-empty ``vlans`` list. The compressor's port fingerprint imports this so its VLAN axis stays
-    in lockstep with the signature (otherwise two same-shape ports — one with ``ifVlan: 0``/``None``
-    — could collapse to a representative whose value flips the signature's vlans axis).
+    Keyed on the VALUE, not mere key presence: ``ifVlan`` ``None``/``""``/``0``/``"0"`` are LibreNMS's
+    no-/default-VLAN sentinels and do NOT count. The ifVlan value is string-valued JSON elsewhere in
+    the client, so the string ``"0"`` is the same sentinel as the int ``0``. Only a real id or a
+    non-empty ``vlans`` list counts. The compressor's port fingerprint imports this function, so its
+    VLAN axis stays in lockstep with the signature. Otherwise, two same-shape ports (one with
+    ``ifVlan: 0`` or ``None``) could collapse to a representative whose value flips the signature's
+    vlans axis.
+
+    Args:
+        port (dict): A LibreNMS port row.
+
+    Returns:
+        bool: Whether the port carries a real VLAN id or a non-empty VLAN list.
     """
     return port.get("ifVlan") not in (None, "", 0, "0") or bool(port.get("vlans"))
 
@@ -106,6 +113,12 @@ def port_names(port):
     Every name-based detector reads BOTH fields: on an ifDescr-mode device the structured name
     (a ``.N`` sub-unit, a LAG name) lives in ifDescr while ifName carries an arbitrary label, so an
     ifName-only scan misses the shape entirely.
+
+    Args:
+        port (dict): A LibreNMS port row.
+
+    Returns:
+        list[str]: Non-empty string values from ``ifName`` and ``ifDescr``.
     """
     return [n for n in (port.get("ifName"), port.get("ifDescr")) if isinstance(n, str) and n]
 
@@ -123,6 +136,13 @@ def port_is_lag(port, compiled_lag_patterns):
 
     An ``ieee8023adLag`` ifType OR a name matching a configured per-OS LAG pattern. Reading ifType
     alone would classify a pattern-based LAG (e.g. Cisco "Po1", carried as propVirtual) as not-a-LAG.
+
+    Args:
+        port (dict): A LibreNMS port row.
+        compiled_lag_patterns (Iterable[re.Pattern]): Compiled per-OS LAG name patterns.
+
+    Returns:
+        bool: Whether the port's type or a known name identifies it as a LAG aggregate.
     """
     if port.get("ifType") == "ieee8023adLag":
         return True

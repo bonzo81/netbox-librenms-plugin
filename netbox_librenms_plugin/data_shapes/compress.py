@@ -75,6 +75,12 @@ def _transceiver_referenced(recording):
     Transceivers point at ports by ``port_id``; if compression drops those ports the replay is no
     longer a self-consistent LibreNMS dataset (the transceiver-merge can't map them to a port name),
     so they must be kept alongside the port_stack-referenced ones.
+
+    Args:
+        recording (dict): A recording that can contain transceiver responses.
+
+    Returns:
+        set[str]: Port ids referenced by captured transceivers, excluding 0 and ``"0"``.
     """
     tx_key = _route_key(recording, "/transceivers")
     referenced = set()
@@ -96,10 +102,16 @@ def _build_name_index(dict_ports):
     Index ports by every name they're known by (ifName + ifDescr), dropping AMBIGUOUS names.
 
     A name carried by two DIFFERENT ports (distinct port_ids) can't disambiguate which port a
-    base/sub-unit lookup means, so it's dropped entirely — mirroring the ambiguous-name drop in
+    base/sub-unit lookup means, so it is dropped entirely. This mirrors the ambiguous-name drop in
     ``resolve_port_relationships`` (whose old last-write-wins ``by_name`` would bind the wrong
     aggregate). Keying the same way here keeps compress's base-port retention consistent with what
     the resolver actually resolves.
+
+    Args:
+        dict_ports (list[dict]): Ports to index by ``ifName`` and ``ifDescr``.
+
+    Returns:
+        dict[str, dict]: Ports keyed by unambiguous names.
     """
     by_name: dict = {}
     ambiguous_names: set = set()
@@ -124,6 +136,11 @@ def _add_base_name_ports(dict_ports, by_name, keep_ids):
     name; dropping that base would change the resolved LAG/sub maps, so keep it too. Scan every
     known name (ifName + ifDescr), not just ifName, so an ifDescr-mode device whose ``.N`` marker
     lives in ifDescr still has its base port preserved.
+
+    Args:
+        dict_ports (list[dict]): Ports to scan for kept sub-unit names.
+        by_name (dict[str, dict]): Ports keyed by unambiguous names.
+        keep_ids (set[str]): Port ids to extend with resolved base ports.
     """
     changed = True
     while changed:
