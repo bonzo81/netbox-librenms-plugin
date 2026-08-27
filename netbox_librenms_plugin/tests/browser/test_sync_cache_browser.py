@@ -2751,39 +2751,35 @@ def _cable_row_sharing_its_identity_html():
     """
 
 
-def test_cable_verify_updates_the_row_that_owns_the_changed_select():
+def test_cable_verify_updates_the_row_that_owns_the_changed_select(page):
     """A row identity another loaded table also carries must not divert the verify."""
-    with playwright.sync_playwright() as runtime:
-        browser = runtime.chromium.launch(headless=True)
-        page = browser.new_page()
-        page.set_content(_cable_row_sharing_its_identity_html())
-        page.add_script_tag(path=str(SCRIPT_PATH))
-        page.evaluate(
-            """() => {
-                window.fetch = () => Promise.resolve({
-                    ok: true,
-                    json: () => Promise.resolve({
-                        status: 'success',
-                        formatted_row: {
-                            local_port: 'Ethernet1',
-                            remote_port: 'Ethernet2',
-                            remote_device: 'remote',
-                            cable_status: 'Connected',
-                            actions: '<button id="new-action">Resync</button>',
-                            can_create_cable: true
-                        }
-                    })
-                });
-                handleCableChange(document.getElementById('device_selection_7018'), '7');
-            }"""
-        )
+    page.set_content(_cable_row_sharing_its_identity_html())
+    page.add_script_tag(path=str(SCRIPT_PATH))
+    page.evaluate(
+        """() => {
+            window.fetch = () => Promise.resolve({
+                ok: true,
+                json: () => Promise.resolve({
+                    status: 'success',
+                    formatted_row: {
+                        local_port: 'Ethernet1',
+                        remote_port: 'Ethernet2',
+                        remote_device: 'remote',
+                        cable_status: 'Connected',
+                        actions: '<button id="new-action">Resync</button>',
+                        can_create_cable: true
+                    }
+                })
+            });
+            handleCableChange(document.getElementById('device_selection_7018'), '7');
+        }"""
+    )
 
-        page.wait_for_selector("#new-action", timeout=5000)
-        cable_row = page.locator("#librenms-cable-table-vc tr")
-        assert cable_row.locator('td[data-col="cable_status"]').inner_text() == "Connected"
-        interface_row = page.locator("#librenms-interface-table tr")
-        assert interface_row.locator('td[data-col="cable_status"]').inner_text() == "interface row"
-        browser.close()
+    page.wait_for_selector("#new-action", timeout=5000)
+    cable_row = page.locator("#librenms-cable-table-vc tr")
+    assert cable_row.locator('td[data-col="cable_status"]').inner_text() == "Connected"
+    interface_row = page.locator("#librenms-interface-table tr")
+    assert interface_row.locator('td[data-col="cable_status"]').inner_text() == "interface row"
 
 
 def _cable_row_html(*, with_actions_cell):
@@ -2847,7 +2843,6 @@ def test_cable_verify_completes_for_a_row_rendered_without_its_actions_cell(page
     assert page.evaluate("document.querySelector('input[name=\"select\"]').disabled") is False
 
 
-
 def test_cable_verify_updates_every_cell_of_a_complete_row(page):
     """The guarded update must still replace each cell a rendered row carries."""
     page.set_content(_cable_row_html(with_actions_cell=True))
@@ -2878,4 +2873,3 @@ def test_cable_verify_updates_every_cell_of_a_complete_row(page):
     assert page.locator('td[data-col="local_port"]').inner_text() == "Ethernet9"
     assert page.locator('td[data-col="remote_device"]').inner_text() == "other-remote"
     assert page.evaluate("window.warnings") == []
-
