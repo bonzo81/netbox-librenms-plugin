@@ -141,12 +141,7 @@ def test_signature_handles_null_meta():
 
 
 def test_signature_handles_non_dict_meta_and_lag_patterns():
-    """A truthy NON-dict meta/lag_patterns must degrade like null, not crash --validate.
-
-    recording_schema_errors doesn't constrain either key, so a community-submitted
-    `meta: "bad"` or `lag_patterns: []` reaches compute_shape_signature; `or {}` only
-    covers the falsy shapes.
-    """
+    """Truthy non-dict metadata and LAG patterns degrade like null without crashing validation."""
     rec = {
         "schema_version": 1,
         "name": "x",
@@ -195,12 +190,7 @@ def test_signature_oob_axis_reflects_meta_oob_id():
 
 
 def test_oob_and_non_oob_host_are_distinct_novelty_buckets():
-    """An OOB-controller capture must not be reported as covered by the plain-host shape.
-
-    linux-host and linux-host-oob share os/VC/LAG/sub-interface shape, so before OOB became a
-    structural axis the OOB capture classified as 'likely-covered' by the plain host (and vice
-    versa) — collapsing two genuinely different topologies into one novelty bucket.
-    """
+    """OOB and plain-host captures remain new against each other's otherwise identical shape manifests."""
     oob_sig = compute_shape_signature(load_recording("linux-host-oob"))
     plain_sig = compute_shape_signature(load_recording("linux-host"))
     assert oob_sig["oob"] is True
@@ -387,11 +377,7 @@ def test_signature_subinterface_detected_in_ifdescr():
 
 
 def test_signature_serial_axis_reflects_captured_sensors():
-    """Serial-port presence is a signature axis: a captured non-empty /resources/sensors list → serial True.
-
-    The capture pipeline synthesizes a /resources/sensors body carrying ONLY the device's serial
-    sensors, so any non-empty sensors list means the recording exercises the serial-port shape.
-    """
+    """Only a non-empty captured serial sensor list sets the serial signature axis."""
     base = {
         "schema_version": 1,
         "name": "x",
@@ -414,12 +400,7 @@ def test_signature_serial_axis_reflects_captured_sensors():
 
 
 def test_serial_and_non_serial_host_are_distinct_novelty_buckets():
-    """A serial-console capture must not be reported as covered by an otherwise-identical non-serial host.
-
-    Before serial became a structural axis, a device with recognized serial sensors and a plain
-    device of the same OS/VC/LAG/sub shape collapsed into one novelty bucket — so the first-ever
-    Avocent serial recording would be reported 'likely-covered' by a non-serial sibling.
-    """
+    """Serial and non-serial captures remain new against each other's otherwise identical shape manifests."""
     base = {
         "schema_version": 1,
         "name": "x",
@@ -449,13 +430,7 @@ def test_serial_and_non_serial_host_are_distinct_novelty_buckets():
 
 
 def test_classify_novelty_distinguishes_lag_detection_style():
-    """classify_novelty must CONSUME the lag.ieee8023ad axis the signature computes.
-
-    A pattern-only LAG (ieee8023ad=False) and an ifType LAG (ieee8023ad=True) of the same OS +
-    name_prefix + shape must not collapse: the 802.3ad-ifType style must not report the pattern-only
-    fallback as covered (they exercise different detection code). Before the fix, _structural_axes
-    dropped ieee8023ad, so the two were 'likely-covered' by each other.
-    """
+    """Novelty classification keeps pattern-based and IEEE 802.3ad LAG detection in distinct buckets."""
     pattern_lag = {
         "schema_version": 1,
         "name": "pat",
@@ -493,12 +468,7 @@ def test_classify_novelty_distinguishes_lag_detection_style():
 
 
 def test_signature_ignores_failed_response_frames():
-    """A recorded [status, body] frame for a non-2xx response must NOT contribute to the signature.
-
-    Replay's real client drops the non-2xx and sees no usable data, so counting the framed body
-    (a 500 that happens to carry a transceivers list, a 503 port_stack) would inflate the novelty
-    signature past what a replay of the same recording can reproduce.
-    """
+    """Non-2xx response frames cannot inflate the signature with data that replay discards."""
     rec = {
         "schema_version": 1,
         "name": "x",

@@ -78,11 +78,7 @@ def test_hostname_and_model_pseudonymized():
 
 
 def test_features_field_pseudonymized_like_version():
-    """The `features` field (Linux/IOS-XE OS-version string) must be pseudonymized to fw-<hash>.
-
-    Leaving it raw re-exposes the exact platform/version the os/sysObjectID/icon anonymization
-    deliberately hides, undercutting the capture's privacy contract.
-    """
+    """Verify that features uses an fw-<hash> pseudonym to hide the exact platform and version."""
     rec = {
         "schema_version": 1,
         "name": "synthetic",

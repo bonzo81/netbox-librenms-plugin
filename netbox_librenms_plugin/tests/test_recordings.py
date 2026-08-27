@@ -170,10 +170,7 @@ def test_get_ports_real_fetch_and_parse_via_recording(recording_server):
 
 @pytest.mark.parametrize("recording", _RECORDINGS, ids=_ids)
 def test_bundled_recording_carries_no_residual_pii(recording):
-    """Every committed recording must be anonymized — the PII safety-net finds nothing.
-
-    Guards against a maintainer accidentally committing a non-anonymized capture.
-    """
+    """Verify committed recordings remain anonymized and contain no residual PII."""
     from netbox_librenms_plugin.data_shapes.anonymize import find_pii
 
     assert find_pii(recording) == []
@@ -274,11 +271,7 @@ def test_make_recording_api_delegates_non_servers_config_to_real():
 
 
 def test_manifest_is_in_sync_with_bundled_recordings():
-    """data_shapes/recordings/manifest.json must match the bundled recordings.
-
-    Fails when a recording is added/changed without `librenms_recordings --rebuild-manifest`,
-    so the in-plugin novelty check never goes stale.
-    """
+    """Verify the manifest matches bundled recordings so novelty detection cannot become stale."""
     from netbox_librenms_plugin.data_shapes import recordings_store
     from netbox_librenms_plugin.data_shapes.signature import build_manifest
 
@@ -366,12 +359,7 @@ def _assert_transceivers(api, device_id, expected):
 
 
 def _assert_serial_ports(api, device_id, expected, sensor_types):
-    """Replay serial rows with the recording's OWN snapshot map (serial_type_patterns).
-
-    Recognition lives in the SerialSensorTypePattern table, so replaying against the live
-    table would tie a checked-in recording's outcome to local DB state; the embedded map
-    keeps the outcome self-sufficient (and this test DB-independent).
-    """
+    """Verify serial rows use the recording's serial_type_patterns map instead of live database state."""
     from netbox_librenms_plugin.serial_utils import map_sensors_to_serial_links
 
     ok, sensors = api.get_serial_port_sensors(device_id, sensor_types=sensor_types)

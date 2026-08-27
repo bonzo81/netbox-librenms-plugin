@@ -105,18 +105,7 @@ class _LibreNMSHandler(BaseHTTPRequestHandler):
 
 
 class MockLibreNMSServer:
-    """
-    Context-manager wrapper around a simple HTTP mock server.
-
-    Attributes:
-        url (str): Base URL for the mock server (e.g. "http://127.0.0.1:PORT").
-        routes (dict): Mapping of URL path → (status_code, body_dict) or callable.
-            Callable routes receive keyword arguments: method, path, query, headers, body
-            and must return (status_code, body_dict).
-            Routes can also be keyed as "METHOD /path" for method-specific matching,
-            or "/path?query" for query-specific matching.
-        requests (list): Every received request as a method/path/query/headers/body dict.
-    """
+    """Wrap a simple HTTP mock server with route registration and context management."""
 
     def __init__(self):
         self._server = ThreadingHTTPServer(("127.0.0.1", 0), _LibreNMSHandler)
@@ -134,13 +123,7 @@ class MockLibreNMSServer:
         self.url = f"http://127.0.0.1:{port}"
 
     def register(self, path: str, body, status: int = 200, method: str | None = None):
-        """
-        Register a mock response for a URL path.
-
-        If *method* is given the route is stored as ``"METHOD /path"`` and only
-        matches requests using that HTTP verb.  Omit *method* (or pass ``None``)
-        to match any verb on that path.
-        """
+        """Register a path response, optionally restricted to one HTTP method."""
         key = f"{method} {path}" if method else path
         if callable(body):
             self._server.routes[key] = body
@@ -255,23 +238,7 @@ class MockLibreNMSServer:
         )
 
     def load_recording(self, recording: dict):
-        """Register every response in a captured data-shape recording as a route.
-
-        A recording's ``responses`` map is keyed by request strings using the same
-        ``"METHOD /path?query"`` convention the handler matches against. Multiple
-        query variants of the same path (e.g. the two ``entPhysicalContainedIn``
-        inventory calls) are collapsed into a single callable route that selects the
-        variant whose recorded query parameters EXACTLY match the incoming request's
-        (full set equality, order-independent — not a subset/contains match). A
-        request whose params don't exactly match any recorded variant 404s rather
-        than falling back to a near match, so a replay drift surfaces instead of
-        silently serving the wrong variant.
-
-        Args:
-            recording (dict): Parsed recording with a ``responses`` mapping. Each
-                value is either a JSON body (served with HTTP 200) or a
-                ``[status, body]`` pair.
-        """
+        """Register recording responses with order-independent exact query matching for variants."""
         by_route: dict[tuple[str, str], list] = {}
         for key, value in recording.get("responses", {}).items():
             method, sep, rest = key.partition(" ")
@@ -301,15 +268,7 @@ class MockLibreNMSServer:
                 self.register(path, _recording_variant_handler(path, variants), method=method)
 
     def vc_inventory_callable(self, device_id: int, root_items: list, children_by_parent_index: dict):
-        """
-        Register a callable route for VC detection two-call pattern.
-
-        detect_virtual_chassis_from_inventory() calls get_inventory_filtered() twice:
-          1. entPhysicalContainedIn=0 → root items
-          2. entPhysicalClass=chassis&entPhysicalContainedIn=<parent_index> → member chassis items
-
-        children_by_parent_index: dict mapping parent index (int) → list of chassis items
-        """
+        """Register VC inventory responses for root and chassis-filtered child queries."""
         root = root_items
         children = children_by_parent_index
 
@@ -340,15 +299,7 @@ class MockLibreNMSServer:
 
 
 def _recording_variant_handler(path: str, variants: list):
-    """Build a route handler that picks the recorded query variant matching the request.
-
-    Args:
-        path (str): The request path the handler serves (used only in the 404 message).
-        variants (list): ``(query_dict, status, body)`` tuples for this path.
-
-    Returns:
-        A callable matching the mock server's route-handler signature.
-    """
+    """Build a route handler that returns only an exact recorded query variant."""
 
     def _handler(method, path, query, headers, body):
         incoming = {k: tuple(sorted(v if isinstance(v, list) else [v])) for k, v in (query or {}).items()}

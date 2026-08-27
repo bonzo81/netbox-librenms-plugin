@@ -16,12 +16,7 @@ def _port(port_id, name, iftype, **extra):
 
 
 def _large_recording():
-    """A recording exercising LAG (direct + base-name-resolved), a sub-interface, and 200 boring ports.
-
-    Relationship-bearing ports (101/102 direct LAG, 205/206 sub-interface, 301/303 junos-style LAG whose
-    physical members 300/302 are reached only by base-name resolution) sit among 200 near-identical
-    access ports that carry VLAN data but no relationships — pure cardinality the compressor should drop.
-    """
+    """Build a recording with direct and base-name LAGs, a sub-interface, and 200 redundant access ports."""
     ports = [
         _port(102, "lag-1", "ieee8023adLag"),  # LAG aggregate (first ieee8023adLag → name_prefix source)
         _port(101, "1/1/c1/1", "ethernetCsmacd"),  # its member
@@ -197,12 +192,7 @@ def test_compression_vlan_axis_stays_in_lockstep_with_signature():
 
 
 def test_fingerprint_detects_subinterface_named_in_ifdescr():
-    """_fingerprint must scan BOTH name fields (like the retention path's _port_names).
-
-    An ifDescr-mode sub-interface ('.N' in ifDescr, ifName blank) must fingerprint distinctly from a
-    non-subinterface — otherwise dedup could fold it into a non-sub representative, dropping the
-    base/sub port a downstream _port_names consumer (the resolver) needs.
-    """
+    """Verify that ifDescr-only sub-interfaces get a distinct fingerprint for resolver retention."""
     from netbox_librenms_plugin.data_shapes.compress import _fingerprint
 
     base = {"port_id": 1, "ifName": "", "ifType": "ethernetCsmacd", "ifDescr": "ge-1/0/0"}
@@ -214,14 +204,7 @@ def test_fingerprint_detects_subinterface_named_in_ifdescr():
 
 
 def _ifdescr_mode_recording():
-    """An ifDescr-mode junos recording: the structured ``.N`` names live in ifDescr, ifName is blank.
-
-    The aggregate's physical base ports (500 ``ge-1/0/0`` and 502 ``ae5``) are reached ONLY by
-    stripping the ``.N`` off the port_stack-referenced sub-units (501 ``ge-1/0/0.0`` and 503
-    ``ae5.0``) and looking the base up by name — a name that lives in ifDescr. The bases are ordered
-    AFTER the sub-units and share their fingerprints, so fingerprint-dedup drops them unless
-    _add_base_name_ports keeps them; an ifName-only scan misses them entirely.
-    """
+    """Build a Junos recording whose ifDescr base ports follow sub-units with matching fingerprints."""
     ports = [
         _port(501, "", "ethernetCsmacd", ifDescr="ge-1/0/0.0"),  # member sub-unit (port_stack ref)
         _port(503, "", "ieee8023adLag", ifDescr="ae5.0"),  # aggregate sub-unit (port_stack ref)

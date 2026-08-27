@@ -62,12 +62,7 @@ def _view_with_api(api):
 
 
 def _run_capture(view, server, device, *, query="?server_key=test"):
-    """Drive CaptureDataShapeView.get exercising the REAL rebind_api_for_server, get_librenms_id and
-    get_librenms_sync_device — no owned view/api method is patched. Only the plugin-config lookup (a
-    true external boundary, the NetBox settings registry) is patched, mapping the 'test' server to the
-    running mock URL, so the real rebind rebuilds a mock-bound client and the real get_librenms_id
-    reads the device's seeded librenms_id CF (scoped to the resolved server key).
-    """
+    """Run capture through real API rebind, ID lookup, and device sync with only config patched."""
     servers_config = {
         "test": {"librenms_url": server.url, "api_token": "test-token", "cache_timeout": 0, "verify_ssl": False}
     }
@@ -303,17 +298,7 @@ def test_capture_view_errors_on_mid_capture_transport_failure(recording_server):
 
 @pytest.mark.django_db
 def test_capture_view_denies_device_outside_users_object_scope(recording_server):
-    """Object-level authz: a user whose ``view_device`` grant is CONSTRAINED to other devices
-    must not capture an out-of-scope device by raw pk.
-
-    The model-level ``has_perm('dcim.view_device')`` gate the view runs first passes for ANY
-    constrained grant (NetBox checks constraints only when given an instance), so resolving the
-    id through the plain manager would leak another site's device shape — including the raw values
-    ``find_pii`` surfaces in the modal. The view must resolve through the restricted queryset so an
-    out-of-scope id 404s exactly like a nonexistent one (mirrors ip_addresses_view's
-    ``restrict_object_or_404``). Exercises REAL ObjectPermissions + ``.restrict`` — a mocked
-    ``has_perm`` would hide the missing object-scoping entirely.
-    """
+    """Verify a constrained model grant cannot bypass object scope through a raw device primary key."""
     from core.models import ObjectType
     from dcim.models import Device
     from django.http import Http404

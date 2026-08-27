@@ -20,11 +20,7 @@ pytestmark = pytest.mark.django_db
 
 
 class _StubApi:
-    """Minimal LibreNMS API serving recorded ``(status, body)`` per path — for capture-logic tests.
-
-    Lets a test inject a transport error (status 0) or differing OOB ports without an HTTP server.
-    No ``get_serial_port_sensors`` attribute, so capture skips the serial-sensor route.
-    """
+    """Serve controlled API responses without serial sensor support for capture logic tests."""
 
     def __init__(self, routes):
         self.routes = routes  # {path (no /api/v0/ prefix, no query): (status, body)}
@@ -35,12 +31,7 @@ class _StubApi:
 
 
 def _transceiver_serial_seed():
-    """A synthetic recording with a per-device transceivers route and an INSTANCE-WIDE sensors route.
-
-    The /resources/sensors body carries serial sensors for the target device (2000), a *different*
-    device (3000), and a non-serial sensor — so a capture can prove it records only the target
-    device's serial sensors (no cross-device leak, non-serial types filtered out).
-    """
+    """Build a seed with per-device transceivers and instance-wide target, unrelated, and non-serial sensors."""
     return {
         "schema_version": 1,
         "name": "transceiver-serial-seed",
@@ -201,12 +192,7 @@ def test_capture_serial_sensors_roundtrip_outcome(recording_server):
 
 
 def test_capture_embeds_serial_type_patterns(recording_server):
-    """The recording snapshots the serial recognition map, like lag_patterns.
-
-    Recognition lives in the SerialSensorTypePattern table, so without the snapshot a
-    recording captured under a custom map cannot reproduce its serial rows on a host with
-    different (or no) rows.
-    """
+    """Capture snapshots the serial recognition map so custom patterns remain reproducible."""
     from netbox_librenms_plugin.models import SerialSensorTypePattern
     from netbox_librenms_plugin.serial_utils import get_serial_sensor_type_patterns
 
@@ -220,13 +206,7 @@ def test_capture_embeds_serial_type_patterns(recording_server):
 
 
 def test_serial_roundtrip_survives_empty_pattern_table(recording_server):
-    """Replay with the recording's own map reproduces the source rows on a bare host.
-
-    The replay host's SerialSensorTypePattern table may be empty or different from the
-    capture host's; passing recording["serial_type_patterns"] through the API's
-    sensor_types injection point (and the mapper's) must make the recording
-    self-sufficient.
-    """
+    """A recording's serial recognition map reproduces source rows when the replay table is empty."""
     from netbox_librenms_plugin.models import SerialSensorTypePattern
 
     seed = _transceiver_serial_seed()
@@ -578,13 +558,7 @@ def test_capture_snapshots_os_scoped_lag_patterns():
 @pytest.mark.django_db
 @pytest.mark.parametrize("blank_os", ["", "   "])
 def test_capture_blank_os_embeds_no_lag_patterns(blank_os):
-    """A present-but-blank OS embeds NO patterns, mirroring compiled_patterns_for_os.
-
-    Production's ``compiled_patterns_for_os("")`` deliberately matches nothing, while
-    ``signature.py`` compiles every recorded pattern unscoped — so embedding all stored
-    patterns for a blank-OS device would fingerprint/replay pattern-LAG behavior that
-    production never applies to that device.
-    """
+    """A present but blank OS embeds no LAG patterns because production applies none."""
     from netbox_librenms_plugin.models import PortStackLagPattern
 
     PortStackLagPattern.objects.create(librenms_os="captest-blank", lag_name_pattern=r"^Po\d+$")
