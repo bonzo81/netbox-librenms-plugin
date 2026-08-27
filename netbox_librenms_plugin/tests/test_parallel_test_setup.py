@@ -90,11 +90,18 @@ def test_no_test_module_registers_a_session_wide_plugin():
 # Import root -> the distribution name that provides it.
 THIRD_PARTY_TEST_IMPORT_ROOTS = {
     "django": "django",
+    "packaging": "packaging",
     "playwright": "playwright",
     "pytest": "pytest",
     "requests": "requests",
     "xdist": "pytest-xdist",
     "yaml": "pyyaml",
+}
+
+# Gating NetBox ref -> the Django version its requirements.txt pins.
+NETBOX_REF_DJANGO_PINS = {
+    "v4.4.0": "5.2.5",
+    "v4.6.5": "6.0.7",
 }
 
 
@@ -119,6 +126,26 @@ def test_packages_the_test_suite_imports_directly_are_declared():
     )
 
     assert not undeclared, f"imported by the test suite but not declared in requirements_dev.txt: {undeclared}"
+
+
+def test_declared_django_range_covers_every_gating_netbox_release():
+    """The dev requirements are installed next to NetBox, so a narrower range downgrades its Django."""
+    from packaging.requirements import Requirement
+
+    workflow = yaml.safe_load((REPOSITORY_ROOT / ".github/workflows/test.yaml").read_text())
+    matrix = workflow["jobs"]["test-netbox"]["strategy"]["matrix"]["include"]
+    gating_refs = sorted({entry["netbox-ref"] for entry in matrix if not entry["experimental"]})
+    assert gating_refs, "the matrix scan found no gating NetBox ref, so the checks below would pass vacuously"
+
+    unmapped = [ref for ref in gating_refs if ref not in NETBOX_REF_DJANGO_PINS]
+    assert not unmapped, f"record the Django pin of each gating NetBox ref in NETBOX_REF_DJANGO_PINS: {unmapped}"
+
+    declared = (REPOSITORY_ROOT / "requirements_dev.txt").read_text().splitlines()
+    requirements = [Requirement(line) for line in declared if line and not line.startswith(("#", "-"))]
+    django = next(requirement for requirement in requirements if requirement.name.lower() == "django")
+
+    excluded = sorted(ref for ref in gating_refs if not django.specifier.contains(NETBOX_REF_DJANGO_PINS[ref]))
+    assert not excluded, f"{django} excludes the Django pin of {excluded}"
 
 
 def test_xdist_worker_gets_private_postgresql_and_redis_databases():
