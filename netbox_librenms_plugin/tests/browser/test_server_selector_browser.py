@@ -5,7 +5,6 @@ from types import SimpleNamespace
 from urllib.parse import parse_qs, urlparse
 
 from django.template import Context, Engine
-from playwright import sync_api as playwright
 
 
 def _render_server_selector(active_server_key):
@@ -68,7 +67,7 @@ def _render_cached_search_links():
     return template.render(Context({"cached_searches": searches}, use_l10n=False))
 
 
-def test_cached_search_labels_its_server_and_activates_that_server_when_opened():
+def test_cached_search_labels_its_server_and_activates_that_server_when_opened(page):
     """A cached-search click carries its server and complete search state."""
     base_url = "https://plugin.example.com/import/"
     destination = (
@@ -89,34 +88,30 @@ def test_cached_search_labels_its_server_and_activates_that_server_when_opened()
             return
         raise AssertionError(f"Unexpected browser request: {route.request.url}")
 
-    with playwright.sync_playwright() as runtime:
-        browser = runtime.chromium.launch(headless=True)
-        page = browser.new_page()
-        page.route("**/*", handle_route)
-        page.goto(base_url)
+    page.route("**/*", handle_route)
+    page.goto(base_url)
 
-        assert page.locator('[data-cached-server-key="primary"] .cached-search-server-label').inner_text() == (
-            "Primary LibreNMS"
-        )
-        assert page.locator('[data-cached-server-key="secondary"] .cached-search-server-label').inner_text() == (
-            "Secondary LibreNMS"
-        )
-        page.locator('[data-cached-server-key="primary"]').click()
-        page.wait_for_url(destination)
+    assert page.locator('[data-cached-server-key="primary"] .cached-search-server-label').inner_text() == (
+        "Primary LibreNMS"
+    )
+    assert page.locator('[data-cached-server-key="secondary"] .cached-search-server-label').inner_text() == (
+        "Secondary LibreNMS"
+    )
+    page.locator('[data-cached-server-key="primary"]').click()
+    page.wait_for_url(destination)
 
-        assert parse_qs(urlparse(page.url).query) == {
-            "server_key": ["primary"],
-            "apply_filters": ["1"],
-            "librenms_hostname": ["shared-edge"],
-            "use_sysname": ["1"],
-            "strip_domain": ["0"],
-        }
-        assert page.locator("#librenms-server-selector").get_attribute("data-active-server-key") == "primary"
-        assert page.locator("#search-results").inner_text() == "primary-shared-edge"
-        browser.close()
+    assert parse_qs(urlparse(page.url).query) == {
+        "server_key": ["primary"],
+        "apply_filters": ["1"],
+        "librenms_hostname": ["shared-edge"],
+        "use_sysname": ["1"],
+        "strip_domain": ["0"],
+    }
+    assert page.locator("#librenms-server-selector").get_attribute("data-active-server-key") == "primary"
+    assert page.locator("#search-results").inner_text() == "primary-shared-edge"
 
 
-def test_server_switch_keeps_the_tab_and_marks_the_destination_active():
+def test_server_switch_keeps_the_tab_and_marks_the_destination_active(page):
     """A selector click replaces transient state with the chosen server and current tab."""
     destination = "https://plugin.example.com/device/1/librenms-sync/?tab=modules&server_key=primary"
     initial_html = f"""
@@ -136,24 +131,20 @@ def test_server_switch_keeps_the_tab_and_marks_the_destination_active():
         <div id="librenms-sync-tabs" data-active-tab="modules"></div>
     """
 
-    with playwright.sync_playwright() as runtime:
-        browser = runtime.chromium.launch(headless=True)
-        page = browser.new_page()
-        page.route(destination, lambda route: route.fulfill(body=destination_html, content_type="text/html"))
-        page.set_content(initial_html)
+    page.route(destination, lambda route: route.fulfill(body=destination_html, content_type="text/html"))
+    page.set_content(initial_html)
 
-        page.locator("#switch-primary").click()
-        page.wait_for_url(destination)
+    page.locator("#switch-primary").click()
+    page.wait_for_url(destination)
 
-        query = parse_qs(urlparse(page.url).query)
-        assert query == {"tab": ["modules"], "server_key": ["primary"]}
-        assert page.locator("#librenms-server-selector").get_attribute("data-active-server-key") == "primary"
-        assert page.locator("#librenms-sync-tabs").get_attribute("data-active-tab") == "modules"
-        assert page.locator('[aria-current="true"]').inner_text() == "Primary LibreNMS"
-        browser.close()
+    query = parse_qs(urlparse(page.url).query)
+    assert query == {"tab": ["modules"], "server_key": ["primary"]}
+    assert page.locator("#librenms-server-selector").get_attribute("data-active-server-key") == "primary"
+    assert page.locator("#librenms-sync-tabs").get_attribute("data-active-tab") == "modules"
+    assert page.locator('[aria-current="true"]').inner_text() == "Primary LibreNMS"
 
 
-def test_import_server_switch_clears_search_and_keeps_the_installation_default():
+def test_import_server_switch_clears_search_and_keeps_the_installation_default(page):
     """An import selector click keeps only the new transient server in the destination URL."""
     base_url = "https://plugin.example.com/import/"
     initial_url = f"{base_url}?server_key=primary&apply_filters=1&librenms_hostname=old-search&job_id=42"
@@ -179,25 +170,21 @@ def test_import_server_switch_clears_search_and_keeps_the_installation_default()
             return
         raise AssertionError(f"Unexpected browser request: {route.request.url}")
 
-    with playwright.sync_playwright() as runtime:
-        browser = runtime.chromium.launch(headless=True)
-        page = browser.new_page()
-        page.route("**/*", handle_route)
-        page.goto(initial_url)
+    page.route("**/*", handle_route)
+    page.goto(initial_url)
 
-        page.get_by_role("link", name="Secondary LibreNMS").click()
-        page.wait_for_url(destination)
+    page.get_by_role("link", name="Secondary LibreNMS").click()
+    page.wait_for_url(destination)
 
-        query = parse_qs(urlparse(page.url).query)
-        assert query == {"server_key": ["secondary"]}
-        assert page.locator('[name="librenms_hostname"]').input_value() == ""
-        assert page.locator("#search-results").inner_text() == ""
-        assert page.locator("#librenms-server-selector").get_attribute("data-active-server-key") == "secondary"
-        assert installation_settings["selected_server"] == "primary"
-        browser.close()
+    query = parse_qs(urlparse(page.url).query)
+    assert query == {"server_key": ["secondary"]}
+    assert page.locator('[name="librenms_hostname"]').input_value() == ""
+    assert page.locator("#search-results").inner_text() == ""
+    assert page.locator("#librenms-server-selector").get_attribute("data-active-server-key") == "secondary"
+    assert installation_settings["selected_server"] == "primary"
 
 
-def test_stopped_import_filter_job_returns_to_the_active_server():
+def test_stopped_import_filter_job_returns_to_the_active_server(page):
     """A stopped background search clears filters but retains its transient server."""
     base_url = "https://plugin.example.com/import/"
     active_server_url = f"{base_url}?server_key=secondary"
@@ -239,21 +226,17 @@ def test_stopped_import_filter_job_returns_to_the_active_server():
             return
         raise AssertionError(f"Unexpected browser request: {route.request.url}")
 
-    with playwright.sync_playwright() as runtime:
-        browser = runtime.chromium.launch(headless=True)
-        page = browser.new_page()
-        page.route("**/*", handle_route)
-        page.goto(base_url)
-        page.add_script_tag(path=script_path)
+    page.route("**/*", handle_route)
+    page.goto(base_url)
+    page.add_script_tag(path=script_path)
 
-        page.locator("#librenms-import-filter-form").evaluate("form => form.requestSubmit()")
-        page.wait_for_url(active_server_url)
+    page.locator("#librenms-import-filter-form").evaluate("form => form.requestSubmit()")
+    page.wait_for_url(active_server_url)
 
-        assert page.url == active_server_url
-        browser.close()
+    assert page.url == active_server_url
 
 
-def test_preferred_star_is_reversible_without_changing_the_active_server():
+def test_preferred_star_is_reversible_without_changing_the_active_server(page):
     """Two star actions reverse preference while preserving transient active state."""
     action = "https://plugin.example.com/devices/1/preferred-server/"
     destination = "https://plugin.example.com/device/1/librenms-sync/?tab=modules&server_key=primary"
@@ -292,35 +275,31 @@ def test_preferred_star_is_reversible_without_changing_the_active_server():
             return
         raise AssertionError(f"Unexpected browser request: {route.request.url}")
 
-    with playwright.sync_playwright() as runtime:
-        browser = runtime.chromium.launch(headless=True)
-        page = browser.new_page()
-        page.on("dialog", lambda dialog: dialogs.append(dialog.message))
-        page.route("**/*", handle_route)
-        page.goto(destination)
+    page.on("dialog", lambda dialog: dialogs.append(dialog.message))
+    page.route("**/*", handle_route)
+    page.goto(destination)
 
-        page.locator("#set-primary-preferred").click()
-        page.wait_for_load_state()
-        assert page.locator("#librenms-connections").get_attribute("data-preferred-server-key") == "primary"
-        assert page.locator("#librenms-server-selector").get_attribute("data-active-server-key") == "primary"
+    page.locator("#set-primary-preferred").click()
+    page.wait_for_load_state()
+    assert page.locator("#librenms-connections").get_attribute("data-preferred-server-key") == "primary"
+    assert page.locator("#librenms-server-selector").get_attribute("data-active-server-key") == "primary"
 
-        page.locator("#set-secondary-preferred").click()
-        page.wait_for_load_state()
-        assert page.locator("#librenms-connections").get_attribute("data-preferred-server-key") == "secondary"
-        assert page.locator("#librenms-server-selector").get_attribute("data-active-server-key") == "primary"
-        assert submissions == [
-            {
-                "server_key": ["primary"],
-                "active_server_key": ["primary"],
-                "tab": ["modules"],
-                "object_type": ["device"],
-            },
-            {
-                "server_key": ["secondary"],
-                "active_server_key": ["primary"],
-                "tab": ["modules"],
-                "object_type": ["device"],
-            },
-        ]
-        assert dialogs == []
-        browser.close()
+    page.locator("#set-secondary-preferred").click()
+    page.wait_for_load_state()
+    assert page.locator("#librenms-connections").get_attribute("data-preferred-server-key") == "secondary"
+    assert page.locator("#librenms-server-selector").get_attribute("data-active-server-key") == "primary"
+    assert submissions == [
+        {
+            "server_key": ["primary"],
+            "active_server_key": ["primary"],
+            "tab": ["modules"],
+            "object_type": ["device"],
+        },
+        {
+            "server_key": ["secondary"],
+            "active_server_key": ["primary"],
+            "tab": ["modules"],
+            "object_type": ["device"],
+        },
+    ]
+    assert dialogs == []
