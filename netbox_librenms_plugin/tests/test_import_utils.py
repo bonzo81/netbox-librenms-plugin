@@ -11,13 +11,7 @@ import pytest
 
 
 def _matchable_filter_result():
-    """Return a mock queryset whose ``[:2]`` slice derives from ``.first.return_value``.
-
-    validate_device_for_import's unique-serial guard slices the queryset (``[:2]``, issue #101), so a
-    mocked ``.filter()`` result must honour that slice: a single match -> ``[match]``, no match -> ``[]``.
-    Callers set ``.first.return_value`` after constructing it (the slice reads it lazily). Centralized so
-    the slice contract lives in one place if the guard's slice size ever changes again.
-    """
+    """Return a mock queryset whose ``[:2]`` slice lazily follows ``first.return_value``."""
     result = MagicMock()
     result.__getitem__.side_effect = lambda _s: (
         [result.first.return_value] if result.first.return_value is not None else []
@@ -1206,13 +1200,7 @@ class TestDeviceNamingPreferencesLegacy:
 
 
 class TestNameMatchesWithNamingPreferencesLegacy:
-    """
-    Test that name_matches/name_sync_available respect naming preferences and VC patterns.
-
-    The name comparison should use the resolved name (result of _determine_device_name())
-    which accounts for use_sysname and strip_domain, not the raw LibreNMS sysName.
-    For VC members, it should also account for the VC naming pattern.
-    """
+    """Name matching applies ``use_sysname``, domain stripping, and virtual-chassis patterns to the resolved name."""
 
     COMMON_PATCHES = [
         "netbox_librenms_plugin.import_utils.device_operations.Site",
@@ -1263,12 +1251,7 @@ class TestNameMatchesWithNamingPreferencesLegacy:
         self.mock_site_model.objects.all.return_value = []
 
     def _setup_librenms_id_match(self, existing_device, as_vm=False):
-        """Configure mocks so that a device is found by librenms_id.
-
-        Uses a Q-aware side_effect so only filter() calls targeting a
-        ``librenms_id`` field return the existing device; other filter() calls
-        (e.g. name lookups, serial lookups) return an empty queryset.
-        """
+        """Configure Q-aware mocks so only ``librenms_id`` filters return the existing device."""
         from unittest.mock import MagicMock
 
         def _librenms_id_filter_side_effect(hit):
@@ -1636,13 +1619,7 @@ class TestSerialNumberMatching:
         assert result["existing_device"] == existing
 
     def test_serial_match_same_hostname_offers_link(self):
-        """A device whose name AND serial both match is found (by hostname) and shown as linkable.
-
-        With real rows the hostname match fires first (a device named "switch-01" is found by name),
-        so the match_type is "hostname"; the equal serial produces no conflict and the row is
-        surfaced as an unlinked, linkable existing device. (The pure serial-branch "link" decision
-        is covered against real rows by TestDetectSerialMatchRole.test_plain_link_when_names_match_and_unlinked.)
-        """
+        """Matching name and serial finds the device by hostname and offers its unlinked row for linking."""
         from netbox_librenms_plugin.tests.conftest import make_device
 
         existing = make_device("switch-01", serial="ABC123")
@@ -2087,12 +2064,7 @@ class TestNameMatchesWithNamingPreferences:
         assert result["naming_criteria"]["source"] == "hostname"
 
     def test_naming_criteria_source_sysname_when_sysname_disabled_but_hostname_empty(self):
-        """
-        When use_sysname=False and hostname is empty, source falls back to 'sysname'.
-
-        Before the fix, source was incorrectly reported as 'hostname' even
-        though the resolved name actually came from sysName.
-        """
+        """When ``use_sysname`` is false and hostname is empty, the naming source reports the ``sysName`` fallback."""
         from netbox_librenms_plugin.import_utils import validate_device_for_import
 
         self.mock_device.objects.filter.return_value.first.return_value = None
@@ -2340,13 +2312,7 @@ class TestDeviceConflictActionView:
         strip_domain=False,
         server_key="default",
     ):
-        """
-        Create a mock request with POST data and permission stubs.
-
-        The returned request should be bound to the view (view.request = request)
-        before calling view.post() so permission checks and business logic
-        operate on the same request object, matching real Django CBV behavior.
-        """
+        """Create a mock request with POST data and permission stubs for binding to the view."""
         request = MagicMock()
         request.user.has_perm.return_value = True
         # Always include both toggles so resolve_naming_preferences never falls through
@@ -3649,12 +3615,7 @@ class TestVCPositionHandling:
         assert result["members"][1]["position"] == 2
 
     def test_suggested_name_uses_position_directly(self):
-        """
-        Suggested name generation must use position directly (not position+1).
-
-        This test verifies that _generate_vc_member_name is called with the
-        already-1-based position value, not position+1.
-        """
+        """Suggested virtual-chassis member names use the already one-based position without incrementing it."""
         from netbox_librenms_plugin.import_utils.virtual_chassis import _generate_vc_member_name
 
         # position=1 should produce name with "1", not "2"
@@ -3666,12 +3627,7 @@ class TestVCPositionHandling:
         assert name == "switch-1-M2", f"Expected 'switch-1-M2', got '{name}'"
 
     def test_update_vc_member_suggested_names_no_off_by_one(self):
-        """
-        update_vc_member_suggested_names must use stored 1-based positions directly.
-
-        Previously bays_by_depth applied an extra +1 to positions that were
-        already 1-based, producing suggested names like "switch-M2" for position 1.
-        """
+        """Virtual-chassis member updates use stored one-based positions without an extra increment."""
         from unittest.mock import patch
 
         from netbox_librenms_plugin.import_utils.virtual_chassis import (
@@ -5153,11 +5109,7 @@ class TestRefreshExistingDeviceCrossModelIdWins:
         assert any("Both a VM and Device exist with hostname" in w for w in validation.get("warnings", []))
 
     def test_cross_model_warning_not_duplicated_across_refreshes(self):
-        """The cached validation dict is refreshed in place: the cross-model warning must not stack up.
-
-        Mirrors the stale ambiguous-id / hostname-serial blocker cleanup at the top of
-        _refresh_existing_device — pre-fix every refresh appended another copy.
-        """
+        """Repeated in-place refreshes keep only one cross-model ambiguity warning."""
         from netbox_librenms_plugin.import_utils.bulk_import import _refresh_existing_device
         from netbox_librenms_plugin.tests.conftest import make_device, make_vm
 
@@ -5210,9 +5162,7 @@ class TestRefreshExistingDeviceCrossModelIdWins:
         assert validation["existing_device"] == device
 
     def test_vm_fresh_match_populates_cluster_display(self):
-        """A late-found VM match must show the matched VM's actual cluster, mirroring the
-        device path's role display — device_validation_details.html renders
-        validation.cluster.cluster for existing VM rows."""
+        """A newly matched VM exposes its actual cluster for the validation details template."""
         from netbox_librenms_plugin.import_utils.bulk_import import _refresh_existing_device
         from netbox_librenms_plugin.tests.conftest import make_cluster, make_vm
 
@@ -5241,8 +5191,7 @@ class TestRefreshExistingDeviceCrossModelIdWins:
         assert validation["is_ready"] is False
 
     def test_vm_fresh_match_without_cluster_resets_stale_display(self):
-        """A matched clusterless VM must drop a stale cached cluster selection (keeping
-        available_clusters), not keep rendering the old choice."""
+        """A newly matched clusterless VM clears a stale cluster selection but keeps available clusters."""
         from virtualization.models import VirtualMachine
 
         from netbox_librenms_plugin.import_utils.bulk_import import _refresh_existing_device

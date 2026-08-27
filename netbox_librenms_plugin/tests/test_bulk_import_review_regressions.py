@@ -176,12 +176,7 @@ def test_collision_scope_handles_virtual_machines_with_real_permissions():
 
 @pytest.mark.django_db
 def test_background_collision_gate_uses_job_user_scope(monkeypatch):
-    """The real job runner scopes collision details and blocks device and VM imports.
-
-    The batch collides on two targets, one of them outside the job user's view grant. Only the
-    visible pk may appear: an unscoped resolution would name the hidden target as well, so the
-    scoping is what the pk list pins.
-    """
+    """Verify the real job runner blocks device and VM imports without exposing targets outside the user's view scope."""
     from core.models import Job
     from dcim.models import Device
     from virtualization.models import VirtualMachine

@@ -224,13 +224,7 @@ class TestSaveDevice:
 
     @pytest.mark.django_db
     def test_update_fields_device_type_rack_overflow_is_blocked(self):
-        """A taller device_type that overflows the device's rack slot must be rejected, not saved.
-
-        save(update_fields=["device_type"]) skips full_clean(), so NetBox's Device.clean()
-        rack-space check is bypassed. Re-validate just that rule: a 4U type at U40 in a 42U rack
-        (would need U40-43, but the rack ends at U42) must be blocked with an error response, and
-        the DB row must keep its original 1U type. Real Site/Rack/DeviceType/Device end to end.
-        """
+        """Changing to a 4U device type at U40 in a 42U rack is rejected when saving only ``device_type``."""
         from dcim.models import Device, DeviceRole, DeviceType, Manufacturer, Rack, Site
 
         from netbox_librenms_plugin.views.imports.actions import _save_device
@@ -295,12 +289,7 @@ class TestSaveDevice:
 
     @pytest.mark.django_db
     def test_update_fields_device_type_0u_at_rack_position_is_blocked(self):
-        """Device.clean() forbids a 0U device type at a rack position; the update_fields mirror must too.
-
-        get_available_units(u_height=0) contains every unit, so the space check alone passes
-        trivially — without the explicit 0U rule the write persists a rack-invariant violation
-        with a success toast.
-        """
+        """The update-fields check rejects a 0U device type at a rack position even when the space check passes."""
         from dcim.models import Device, DeviceRole, DeviceType, Manufacturer, Rack, Site
 
         from netbox_librenms_plugin.views.imports.actions import _save_device
@@ -331,11 +320,7 @@ class TestSaveDevice:
 
     @pytest.mark.django_db
     def test_update_fields_child_device_type_on_rack_face_is_blocked(self):
-        """Device.clean() forbids a child device type at a rack face; the update_fields mirror must too (a DeviceTypeMapping can map a hardware string to a blade/child type).
-
-        Face-without-position is the case the 0U rule can't catch (child types are 0U, so
-        with a position set the 0U rule fires first — matching Device.clean()'s own order).
-        """
+        """The update-fields check rejects a child device type on a rack face without a rack position."""
         from dcim.models import Device, DeviceRole, DeviceType, Manufacturer, Rack, Site
 
         from netbox_librenms_plugin.views.imports.actions import _save_device
@@ -2015,12 +2000,7 @@ class TestDeviceRackUpdateView:
 
 
 class TestRowUpdateViewsServerRebind:
-    """DeviceRole/Cluster/RackUpdateView must pin the client to the POSTed server_key.
-
-    The import page's row selects post the page's server_key (hx-vals); without the
-    rebind the lookup routes through the global selected server and re-validates/caches
-    the WRONG server's device for the row.
-    """
+    """Device role, cluster, and rack update views bind the client to the posted ``server_key``."""
 
     VIEWS = ["DeviceRoleUpdateView", "DeviceClusterUpdateView", "DeviceRackUpdateView"]
 
@@ -4675,12 +4655,7 @@ class TestSyncSerialMorePaths:
 
 
 class TestSyncSerialConflictGuard:
-    """Real-DB check of the sync_serial conflict guard under an actual conflict.
-
-    Writers of the same serial serialize on a transaction-scoped advisory lock keyed by
-    the serial value; the conflict lookup itself must NOT take a second row lock — with
-    own-device rows already held, two swap-direction requests would deadlock (A→B / B→A).
-    """
+    """Same-serial writers use an advisory lock without taking a deadlock-prone second row lock."""
 
     @pytest.mark.django_db
     def test_sync_serial_conflict_guard_uses_advisory_lock_not_row_lock(self):
@@ -5907,14 +5882,7 @@ class TestCreatePlatformAssignmentIndependence:
 
 
 class TestValidateAndApplySelectionsRevalidatesOnVmToDeviceFlip:
-    """validate_and_apply_selections must re-validate in device mode when a VM-requested row flips.
-
-    When the user submitted a cluster (VM mode) but validate_device_for_import binds an existing
-    Device by librenms_id/hostname/IP and flips import_as_vm back to False, the first pass skipped
-    VC detection / chassis-fallback device-type matching (api=None, include_vc_detection=False).
-    The helper must re-run validate_device_for_import in device mode so those apply to the device
-    the row actually resolved to.
-    """
+    """VM-to-device flips trigger device-mode revalidation so virtual-chassis detection and fallback matching run."""
 
     def test_flip_triggers_device_mode_revalidation(self):
         from netbox_librenms_plugin.views.imports.actions import DeviceImportHelperMixin
@@ -6334,11 +6302,7 @@ class TestBulkImportDevicesViewCollisionGate:
         assert response["HX-Redirect"] == f"{url_for('plugins:netbox_librenms_plugin:librenms_import')}?server_key={server_key}"
 
     def test_colliding_batch_non_htmx_message_is_object_neutral(self, settings, monkeypatch):
-        """The non-HTMX collision block toast says "NetBox object", not "NetBox device".
-
-        The gate covers VM rows too (vm_device_ids=vm_imports), so a VM-only batch must not
-        be mislabelled. This mirrors the deliberately neutral wording in ImportDevicesJob.
-        """
+        """The non-HTMX collision message uses ``NetBox object`` for batches that can contain VMs."""
         monkeypatch.setenv("NO_PROXY", "127.0.0.1,localhost")
         monkeypatch.setenv("no_proxy", "127.0.0.1,localhost")
         server_key = "bulk-collision-neutral-message"
@@ -6725,18 +6689,7 @@ class TestAddAsOOBViewPost:
         assert entry["oob"] == {"id": 17, "type": "oob"}
 
     def test_oob_link_written_to_vc_sync_device_not_selected_member(self):
-        """A non-sync VC member's OOB link must be stored on the resolved sync device.
-
-        LibreNMS treats a Virtual Chassis as one logical device: only the sync member
-        (get_librenms_sync_device) carries the host librenms_id, and every reader
-        (interfaces/cables/modules) resolves that member before get_librenms_oob. The
-        OOB candidate, however, is matched by the controller's shared chassis serial /
-        primary IP, so ``existing_device`` can be a *different*, non-sync member.
-
-        Writing the link to that raw member (the pre-fix behaviour) stores it where no
-        reader looks and — since the non-sync member holds no host id — orphans it under
-        no host link. The link (and its guards/lock/save) must target the sync device.
-        """
+        """An OOB link matched through a non-sync virtual-chassis member is stored on the resolved sync device."""
         from dcim.models import Device, VirtualChassis
 
         from netbox_librenms_plugin.utils import get_librenms_oob, get_librenms_sync_device
@@ -6784,13 +6737,7 @@ class TestAddAsOOBViewPost:
         assert get_librenms_oob(Device.objects.get(pk=selected_member.pk), server_key=self.server_key) is None
 
     def test_legacy_id_written_in_race_window_is_rejected_post_lock(self):
-        """TOCTOU: the legacy gate must be re-verified on the LOCKED row (mirrors DeviceConflictActionView's post-lock gate).
-
-        The unlocked gate reads the modal's in-memory snapshot; a legacy bare-int written
-        concurrently (valid on EVERY server as the documented universal fallback) would reach
-        set_librenms_oob, whose legacy-promotion branch silently namespaces it under this
-        server only — dropping the device's LibreNMS linkage on all others.
-        """
+        """The locked-row check rejects a legacy ID written during the race window before OOB link promotion."""
         from dcim.models import Device
 
         view = self._make_view()
@@ -7152,11 +7099,7 @@ class TestGetValidatedDeviceLibreDeviceReuse:
 
 @pytest.mark.django_db
 class TestPostActionRebindFailsClosed:
-    """PromoteToHost/Merge POST views are consolidated onto the fail-closed mixin rebind.
-
-    A blank server_key with a misconfigured default must surface a fragment error here instead of
-    leaving the lazy default client in place and 500ing on the first self.librenms_api access.
-    """
+    """Promote-to-host and merge POST views fail closed when a blank server key cannot resolve the default client."""
 
     def test_blank_key_with_misconfigured_default_returns_error(self):
         from netbox_librenms_plugin.views.imports.actions import PromoteToHostView
@@ -7421,13 +7364,7 @@ class TestPromoteToHostViewPost:
         assert conflicting_device.custom_field_data["librenms_id"][self.server_key] == {"id": 17}
 
     def test_failed_oob_attach_after_host_swap_leaves_db_untouched(self):
-        """A ValueError raised AFTER set_librenms_device_id already ran must not commit a partial swap.
-
-        set_librenms_device_id()/set_librenms_oob() mutate custom_field_data in memory only;
-        the transaction's single DB write is _save_device() at the end of the atomic block, so
-        the early error return commits nothing. Pins the no-partial-commit contract of the
-        promote flow (an invalid OOB type is the in-transaction ValueError source).
-        """
+        """An invalid OOB type after the in-memory host swap leaves the database unchanged."""
         view = self._make_view()
         existing_device = make_device("promote-badoob", librenms_cf={self.server_key: {"id": 10}})
         request = make_view_request(
@@ -8561,12 +8498,7 @@ class TestAttachOOBIp:
         assert not IPAddress.objects.filter(address__net_host="10.0.0.9").exists()
 
     def test_locks_candidate_row_with_select_for_update(self):
-        """The candidate IPAddress row must be locked, and only through the caller's change scope.
-
-        Asserting on the emitted SQL rather than on a patched manager: a mock records whichever
-        call the code happens to make, so it stayed green when the lock ran through an
-        unrestricted queryset and pinned rows the caller had no grant for.
-        """
+        """The candidate IP address row is locked through the caller's change-scoped queryset in the emitted SQL."""
         from django.db import connection, transaction
         from django.test.utils import CaptureQueriesContext
         from ipam.models import IPAddress
@@ -9233,11 +9165,7 @@ class TestMappingChangeScope:
         assert hidden.netbox_platform_id == old_platform.pk
 
     def test_device_type_mapping_inside_change_grant_is_updated(self):
-        """Control for the refusal above: an in-grant row still updates through the same path.
-
-        Without this, a regression that skips the mapping write entirely leaves the hidden row
-        unchanged too, so the refusal test alone cannot tell scoping from a dead update path.
-        """
+        """An in-scope device-type mapping still updates, proving the restricted path does not skip all writes."""
         from dcim.models import DeviceType
         from django.http import HttpResponse
 
@@ -9539,12 +9467,7 @@ class TestSerialActionsNormalizeAndLock:
 
 @pytest.mark.django_db
 class TestConflictActionsObjectScope:
-    """The conflict/OOB mutation endpoints must resolve the POSTed existing_device_id object-scoped.
-
-    require_object_permissions only asks ``user.has_perm("dcim.change_device")`` with no instance, so a
-    pk-constrained grant clears the gate. Without a restricted lookup the endpoint would then mutate any
-    device by raw pk.
-    """
+    """Conflict and out-of-band mutation endpoints resolve the posted ``existing_device_id`` with object scope."""
 
     _scoped_writer = staticmethod(_scoped_device_writer)
 
@@ -9771,12 +9694,7 @@ class TestMergeNetBoxDevicesViewDonorDerivation:
 
 @pytest.mark.django_db
 class TestPromoteAndMergeObjectScope:
-    """Promote and merge resolve client-supplied pks, so both must go through a restricted queryset.
-
-    ``require_object_permissions`` only asks the model-level ``dcim.change_device``, which a
-    pk-constrained grant satisfies; a raw lookup would then let it re-point the LibreNMS linkage of
-    any device.
-    """
+    """Promote and merge resolve client-supplied device IDs through a restricted queryset."""
 
     def _post_promote(self, user, target, **overrides):
         """Drive the real PromoteToHostView.post against *target* with only the LibreNMS seams patched."""
@@ -9979,11 +9897,7 @@ class TestPromoteAndMergeObjectScope:
 
 @pytest.mark.django_db
 class TestBulkImportPermGateRunsBeforeEnqueue:
-    """The import model-perm gate must run BEFORE the background job is dispatched.
-
-    Otherwise an unauthorized caller both enqueues a job that can only fail and is told
-    "Import job started", while the denial surfaces nowhere.
-    """
+    """The bulk import permission gate rejects unauthorized callers before it enqueues a background job."""
 
     def _make_view(self):
         from netbox_librenms_plugin.views.imports.actions import BulkImportDevicesView

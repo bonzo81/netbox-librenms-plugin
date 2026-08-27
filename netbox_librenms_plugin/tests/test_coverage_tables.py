@@ -27,10 +27,7 @@ import pytest
 
 
 def _make_device_import_table(data=None, order_by=None):
-    """
-    Instantiate DeviceImportTable with patched DB querysets.
-    Returns the table instance.
-    """
+    """Instantiate DeviceImportTable with patched database querysets."""
     from netbox_librenms_plugin.tables.device_status import DeviceImportTable
 
     mock_cluster_qs = MagicMock()
@@ -61,10 +58,7 @@ def _make_device_import_table(data=None, order_by=None):
 
 
 def _make_interface_table(device=None, interface_name_field="ifName", vlan_groups=None, server_key="default"):
-    """
-    Instantiate LibreNMSInterfaceTable with patched dependencies.
-    Returns the table instance.
-    """
+    """Instantiate LibreNMSInterfaceTable with patched dependencies."""
     from netbox_librenms_plugin.tables.interfaces import LibreNMSInterfaceTable
 
     mock_device = device or MagicMock()
@@ -533,12 +527,7 @@ class TestDeviceImportTableRenderNetboxCluster:
 
 
 class TestDeviceImportTableRowSelectsServerKey:
-    """The role/cluster/rack row selects must post the import page's server_key.
-
-    Their hx-posts reach DeviceRole/Cluster/RackUpdateView, which rebind to the POSTed
-    server_key; without an hx-vals carrying it the rebind falls back to the GLOBAL
-    selected server and re-validates/caches the wrong server's device for the row.
-    """
+    """Verify row selects post the page's server key to prevent validation and caching against the wrong server."""
 
     def _table(self, server_key="secondary"):
         from netbox_librenms_plugin.tables.device_status import DeviceImportTable
@@ -1965,12 +1954,7 @@ class TestRelationshipBadgeCompactLayout:
 
     @pytest.mark.django_db
     def test_name_field_does_not_leak_into_a_later_table(self):
-        """A non-default name field must not retarget the columns of the next table built.
-
-        ``base_columns`` and ``_meta`` are class attributes, and Table.__init__ deep-copies
-        base_columns only after ``__init__`` runs, so assigning to either before ``super()``
-        rewrote the accessor for every later table in the worker process, across requests.
-        """
+        """Verify a nondefault name field does not change the class columns used by later table instances."""
         from netbox_librenms_plugin.tables.interfaces import LibreNMSInterfaceTable
 
         with patch("netbox_librenms_plugin.tables.interfaces.get_interface_name_field", return_value="ifName"):
@@ -1994,12 +1978,7 @@ class TestRelationshipBadgeCompactLayout:
 
     @pytest.mark.django_db
     def test_unresolvable_owner_renders_badge_only_instead_of_failing_the_render(self):
-        """An unresolved owner must degrade this cell, not raise NoReverseMatch for the table.
-
-        ``_resolve_row_member_id`` returns "" when the table has no device context and the row's
-        interface carries no device id. ``reverse()`` with an empty object_id raises, which would
-        take down the whole table render instead of dropping one button.
-        """
+        """Verify a row with no resolvable owner renders its badge without raising NoReverseMatch for the table."""
         from netbox_librenms_plugin.tables.interfaces import LibreNMSInterfaceTable
         from netbox_librenms_plugin.tests.conftest import make_device, make_interface
 
@@ -3361,16 +3340,7 @@ class TestVCInterfaceTable:
 
     @pytest.mark.django_db
     def test_render_device_selection_logical_iface_defaults_to_viewed_member(self):
-        """
-        A not-yet-synced LOGICAL interface (Vlan2) on a real VC must default to the VIEWED member,
-        NOT the member whose vc_position happens to equal the name's trailing digit.
-
-        Real-DB: the digit in ``Vlan2`` is a VLAN id, not a member index — the name-position
-        heuristic must not run for logical types. Against the unfixed code (no ethernet/dotted
-        guard) this resolves to the position-2 member (wrong); the guard defaults it to the viewed
-        member. Uses real Devices in a real VirtualChassis so the vc_position map is genuinely
-        queried — a MagicMock member with a MagicMock vc_position hid this by never matching.
-        """
+        """Verify a logical interface's numeric suffix does not select the matching virtual chassis member position."""
         from netbox_librenms_plugin.tables.interfaces import VCInterfaceTable
         from netbox_librenms_plugin.tests.conftest import make_device, make_virtual_chassis
 
@@ -3389,10 +3359,7 @@ class TestVCInterfaceTable:
 
     @pytest.mark.django_db
     def test_render_device_selection_uses_name_heuristic_only_for_physical_rows(self):
-        """
-        The name-position heuristic applies to physical Ethernet rows. A dot does not prove that
-        a logical child belongs to the member encoded in its name.
-        """
+        """Verify a dot in a logical child name does not identify its virtual chassis member."""
         from netbox_librenms_plugin.tables.interfaces import VCInterfaceTable
         from netbox_librenms_plugin.tests.conftest import make_device, make_virtual_chassis
 
@@ -3907,11 +3874,7 @@ class TestVMTableHidesLagSyncButton:
 
 @pytest.mark.django_db
 class TestRenderLibreNMSId:
-    """render_librenms_id colours the LibreNMS-id cell by how the stored port_id compares to NetBox.
-
-    Restores real coverage (deleted on the parent/LAG UI work) using real Interface custom-field
-    reads — a mock netbox_interface would let the get_librenms_device_id contract drift silently.
-    """
+    """Verify render_librenms_id colors the cell by comparing the stored port ID with real NetBox interface data."""
 
     def test_no_exists_in_netbox_renders_red(self):
         table = _make_interface_table(server_key="default")

@@ -973,12 +973,7 @@ class TestImportDevicesJob:
 
     @staticmethod
     def _real_user(username, *vm_or_device_perms):
-        """Create a real NetBox user, granting perms the NetBox way (ObjectPermission).
-
-        NetBox's only enforcement backend is ObjectPermissionBackend, so Django's
-        ``user_permissions`` would not make ``has_perm`` pass — the gate must be
-        exercised through real ObjectPermission rows, not a mocked ``has_perm``.
-        """
+        """Create a real NetBox user with ObjectPermission rows for ObjectPermissionBackend enforcement."""
         from core.models import ObjectType
         from django.contrib.auth import get_user_model
         from users.models import ObjectPermission

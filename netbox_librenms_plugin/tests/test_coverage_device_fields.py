@@ -80,13 +80,7 @@ def _plugins_config(*, servers, librenms_url):
 
 @contextmanager
 def _before_restricted_read(view, action, *, on_call):
-    """Run *action* just before the view's *on_call*-th ``restricted_queryset`` call.
-
-    These views reach the DB only through that accessor, so wrapping it is how a test lands a
-    committed change from "another session" in a precise window without a second connection.
-    The queryset handed back is the real restricted one, and the call count is asserted so a
-    view that stops taking that path fails the test instead of silently skipping the race.
-    """
+    """Run action before the specified real restricted query and assert that the view reaches that read."""
     real = view.restricted_queryset
     calls = []
 
@@ -132,11 +126,7 @@ def _deleted_before_lock(view, obj):
 
 
 def _cf_changed_before_lock(view, obj, librenms_id):
-    """Rewrite *obj*'s librenms_id custom field in the window before the view locks it.
-
-    ``update()`` writes the column directly, so the change is committed the way another
-    session's would be, and the locked re-read is what surfaces it.
-    """
+    """Update an object's LibreNMS ID directly in the database before the view locks it."""
 
     def _change():
         type(obj).objects.filter(pk=obj.pk).update(custom_field_data={"librenms_id": librenms_id})
@@ -146,17 +136,7 @@ def _cf_changed_before_lock(view, obj, librenms_id):
 
 @contextmanager
 def _deleted_when_platform_saved(device):
-    """Issue a real DELETE for *device* the moment a Platform is saved.
-
-    ``CreateAndAssignPlatformView`` resolves the device once before its transaction and again
-    under ``select_for_update`` inside it, with the platform insert in between; hooking the
-    insert puts the DELETE in that window so the locked re-read misses the row.
-
-    This is NOT a faithful concurrent delete: the statement runs on the test's own connection
-    inside the view's transaction, so the view's ``set_rollback(True)`` unwinds it along with
-    the platform insert. A real other-session delete would already be committed and would
-    survive. What the test pins is the view's branch, not the other session's durability.
-    """
+    """Issue a same-transaction device DELETE when a platform is saved to test the locked re-read branch only."""
     from dcim.models import Device, Platform
     from django.db.models.signals import post_save
 
@@ -1355,13 +1335,7 @@ class TestCreateAndAssignPlatformView:
         assert message_texts(req, "success")
 
     def test_integrity_error_reuse_succeeds_for_an_add_only_user(self):
-        """The race winner must be reused by a user who may create but not view platforms.
-
-        This branch runs only when no platform existed at preflight, so the gate asked for
-        ("add", Platform) and never ("view", Platform). Re-reading the winner through a
-        view-restricted queryset returns none() for such a user and aborts an assign they were
-        authorized to perform.
-        """
+        """Verify an add-only user can reuse the race winner without platform view permission."""
         from dcim.models import Device, Platform
 
         device = make_device("plat-race-add-only")
@@ -2369,12 +2343,7 @@ class TestConvertLegacyLibreNMSIdViewPost:
         assert Device.objects.get(pk=dev.pk).custom_field_data["librenms_id"] == 99
 
     def test_conflict_with_another_object(self):
-        """Another device already owns this id for this server → refuse and roll back.
-
-        The bare-int form is a universal fallback, so the conflict query sees BOTH rows and
-        fails closed on ambiguity rather than naming the other owner. Either way the contract
-        that matters holds: no conversion, and neither row is touched.
-        """
+        """Verify a bare integer ID and a server-specific owner are ambiguous and leave both devices unchanged."""
         from dcim.models import Device
 
         dev = make_device("convert-loser", serial="SN-MATCH", librenms_cf=42)
