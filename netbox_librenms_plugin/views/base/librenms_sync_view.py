@@ -271,8 +271,13 @@ class BaseLibreNMSSyncView(
                 # LibreNMSAPI() and 500 the degraded render; the render key also keeps the page's
                 # forms scoped to the requested (gone) server so they fail closed server-side.
                 "server_key": render_server_key,
-                "v1v2form": AddToLIbreSNMPV1V2(prefix="v1v2") if show_add_device else None,
-                "v3form": AddToLIbreSNMPV3(prefix="v3") if show_add_device else None,
+                # Scope the poller-group choices to the same render key the hidden field carries:
+                # they used to come from the installation default on every page, so a non-default
+                # tab offered groups that belong to another server.
+                "v1v2form": AddToLIbreSNMPV1V2(prefix="v1v2", server_key=render_server_key)
+                if show_add_device
+                else None,
+                "v3form": AddToLIbreSNMPV3(prefix="v3", server_key=render_server_key) if show_add_device else None,
                 "librenms_device_id": self.librenms_id,
                 "found_in_librenms": librenms_info.get("found_in_librenms"),
                 "device_info_unavailable": device_info_unavailable,

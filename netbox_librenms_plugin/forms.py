@@ -78,22 +78,37 @@ def _get_librenms_server_choices():
     return choices
 
 
-def _get_librenms_poller_group_choices():
+def _get_librenms_poller_group_choices(server_key=None):
     """
-    Helper function to get poller group choices from LibreNMS API.
+    Get poller group choices from the LibreNMS server the caller is acting on.
+
     Shared between AddToLibreSNMPV1V2 and AddToLibreSNMPV3 forms (via BaseSNMPForm).
-    Results are cached to avoid repeated API calls on every form instantiation.
+    Results are cached per server key to avoid repeated API calls on every form
+    instantiation.
+
+    Args:
+        server_key (str | None): The server to read poller groups from. None uses the
+            installation default. A key that no longer resolves yields the default
+            choice alone, so a stale selection contacts no server at all.
+
+    Returns:
+        list[tuple[str, str]]: The (value, label) choices for the poller group field.
     """
     from django.core.cache import cache
 
-    from .librenms_api import LibreNMSAPI
+    from .librenms_api import build_librenms_api
 
     choices = [("0", "Default (0)")]
 
+    # Build through the fail-closed factory: a stale or unconfigured key returns None here
+    # instead of raising, and must not fall back to the installation default's groups. The
+    # broad catch keeps the page renderable when the whole LibreNMS config is unusable.
     try:
-        api = LibreNMSAPI()
+        api = build_librenms_api(server_key)
     except Exception:
         logger.exception("Failed to initialize LibreNMSAPI; using default poller group choices")
+        return choices
+    if api is None:
         return choices
 
     cache_key = f"librenms_poller_group_choices_{api.server_key}"
@@ -1063,9 +1078,9 @@ class BaseSNMPForm(forms.Form):
         help_text="Skip duplicate device and SNMP reachability checks (hostname must still be unique)",
     )
 
-    def __init__(self, *args, **kwargs):
+    def __init__(self, *args, server_key=None, **kwargs):
         super().__init__(*args, **kwargs)
-        self.fields["poller_group"].choices = _get_librenms_poller_group_choices()
+        self.fields["poller_group"].choices = _get_librenms_poller_group_choices(server_key)
 
 
 class AddToLibreSNMPV1V2(BaseSNMPForm):

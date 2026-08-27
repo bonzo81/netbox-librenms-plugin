@@ -87,6 +87,90 @@ def _enclosing_form(html, marker):
     return html[start:end]
 
 
+class TestAddDeviceFormsScopeToTheActiveServer:
+    """The Add-device forms build their choices from the server the page is scoped to."""
+
+    def _render_unknown_device(self, device, query, record):
+        """Render the page for a device LibreNMS does not know, so the Add-device forms appear."""
+        from django.contrib.auth import get_user_model
+
+        from netbox_librenms_plugin.views.object_sync.devices import DeviceLibreNMSSyncView
+
+        user = get_user_model().objects.filter(username="poller-scope-su").first()
+        if user is None:
+            user = get_user_model().objects.create_superuser(username="poller-scope-su")
+
+        request = RequestFactory().get(f"/x/{query}")
+        request.user = user
+        request.htmx = False
+        SessionMiddleware(lambda _request: None).process_request(request)
+
+        view = DeviceLibreNMSSyncView()
+        view.setup(request, pk=device.pk)
+        with (
+            patch(
+                "netbox_librenms_plugin.librenms_api.get_plugin_config",
+                side_effect=lambda _plugin, key, default=None: TWO_SERVERS if key == "servers" else default,
+            ),
+            # Not found in LibreNMS, so the page offers the Add-device forms.
+            patch("netbox_librenms_plugin.librenms_api.LibreNMSAPI.get_device_info", return_value=(False, None)),
+            patch("netbox_librenms_plugin.librenms_api.requests.get", side_effect=record),
+        ):
+            return view.get(request, pk=device.pk)
+
+    def test_poller_group_choices_come_from_the_active_server(self):
+        """A secondary-server page must not offer the default server's poller groups."""
+        from unittest.mock import MagicMock
+
+        from django.core.cache import cache
+
+        requested = []
+
+        def record(url, **_kwargs):
+            requested.append(url)
+            response = MagicMock()
+            response.status_code = 200
+            response.json.return_value = {"status": "ok", "get_poller_group": []}
+            return response
+
+        # The choices are cached per server key; clear so this render does the lookup.
+        cache.delete("librenms_poller_group_choices_secondary")
+        cache.delete("librenms_poller_group_choices_default")
+
+        device = make_device("poller-scope", librenms_cf={"secondary": 42})
+        self._render_unknown_device(device, "?server_key=secondary", record)
+
+        poller_requests = [url for url in requested if "poller_group" in url]
+        assert poller_requests, "the page never asked for poller groups, so the check below is vacuous"
+        default_url = TWO_SERVERS["default"]["librenms_url"]
+        assert not [url for url in poller_requests if url.startswith(default_url)], (
+            f"the secondary-server page asked the DEFAULT server for poller groups: {poller_requests}"
+        )
+
+    def test_a_stale_server_key_asks_no_server_for_poller_groups(self):
+        """The fail-closed page must not fall back to the installation default for its choices."""
+        from unittest.mock import MagicMock
+
+        from django.core.cache import cache
+
+        requested = []
+
+        def record(url, **_kwargs):
+            requested.append(url)
+            response = MagicMock()
+            response.status_code = 200
+            response.json.return_value = {"status": "ok", "get_poller_group": []}
+            return response
+
+        cache.delete("librenms_poller_group_choices_default")
+        device = make_device("poller-stale", librenms_cf={"secondary": 42})
+        self._render_unknown_device(device, "?server_key=ghost", record)
+
+        assert not [url for url in requested if "poller_group" in url], (
+            f"a stale server selection asked for poller groups anyway: {requested}"
+        )
+
+
 class TestSyncPageFormsCarryServerKey:
     """Rendered with ?server_key=secondary, every POST form must scope to it."""
 
