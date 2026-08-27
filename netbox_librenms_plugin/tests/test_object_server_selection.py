@@ -252,6 +252,26 @@ def test_a_malformed_stored_server_key_does_not_break_the_page(client, settings,
 
 
 @pytest.mark.django_db
+@pytest.mark.parametrize("requested_key", ["contains", "dc__west", "_preferred_server"])
+def test_a_malformed_requested_server_key_renders_the_blocked_page(client, settings, requested_key):
+    """A rejected ?server_key must not reach the marker reader, which raises on it."""
+    _configure_servers(settings)
+    device = make_device("malformed-server-key", librenms_cf={"secondary": {"id": 13408}})
+    client.force_login(make_superuser("object-server-malformed-user"))
+    url = reverse("plugins:netbox_librenms_plugin:device_librenms_sync", args=[device.pk])
+
+    with patch(
+        "netbox_librenms_plugin.librenms_api.requests.get",
+        side_effect=AssertionError("A rejected server key contacted LibreNMS"),
+    ) as requests_get:
+        response = client.get(url, {"server_key": requested_key})
+
+    requests_get.assert_not_called()
+    assert response.status_code == 200
+    assert b"is not an available mapping for this object" in response.content
+
+
+@pytest.mark.django_db
 def test_unconfigured_mapping_is_removable_but_not_selectable(client, settings):
     """A stale mapping remains visible for cleanup and cannot become an API target."""
     _configure_servers(settings)

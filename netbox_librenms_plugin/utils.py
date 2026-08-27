@@ -27,6 +27,7 @@ from netbox_librenms_plugin.server_mappings import (
     PREFERRED_SERVER_FIELD,
     SameServerIdentityConflict,
     StaleIdentityReplacement,
+    is_server_key,
     iter_server_mapping_entries,
     require_server_key,
 )
@@ -3459,11 +3460,16 @@ def build_migrated_context(obj, server_key: str = "default") -> dict:
         server_key (str): The LibreNMS server key the marker is namespaced under.
 
     Returns:
-        dict: ``{migrated_to_marker, migrated_to_winner}``. Both None when not in migrated mode (no
-            marker, or a corrupt self-pointing marker). ``migrated_to_winner`` is a lazy ``Device``
-            proxy (truthiness/attribute access resolves it; it proxies None if the winner row was
-            since deleted) — test it via truthiness in templates, not ``is None``.
+        dict: ``{migrated_to_marker, migrated_to_winner}``. Both None when not in migrated mode (a
+            rejected server key, no marker, or a corrupt self-pointing marker). ``migrated_to_winner``
+            is a lazy ``Device`` proxy (truthiness/attribute access resolves it; it proxies None if
+            the winner row was since deleted) — test it via truthiness in templates, not ``is None``.
     """
+    # Callers pass a request-supplied scope. Only mark_librenms_migrated() writes markers, and it
+    # validates the key first, so a rejected key can hold none — report migrated mode off instead
+    # of letting the marker reader raise on it.
+    if not is_server_key(server_key or "default"):
+        return {"migrated_to_marker": None, "migrated_to_winner": None}
     marker = get_migrated_to_marker(obj, server_key)
     # A self-pointing marker (winner == this donor) is corrupt: it would flip the donor's own sync
     # page into migrated mode resolving the "winner" to itself, hiding the ordinary sync controls.
