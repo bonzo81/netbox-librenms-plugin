@@ -1026,88 +1026,74 @@ class TestPostHandlerVC:
         assert captured["server_key"] == "good"  # "ghost" is unconfigured → session key used
 
     @pytest.mark.django_db
-    def test_vc_member_resolution_uses_the_selected_member(self):
-        """The posted member selection is used without name-based inference."""
+    def test_vc_member_resolution_uses_the_selected_member(self, client, settings):
+        """Verify resolves the local port on the posted member, not the one the port name implies."""
         import json
+        from copy import deepcopy
 
-        view = self._make_view()
-        view.request.user = _authorized_superuser("vcmember")
-        device = _real_cable_device("vcmember", vc=True)  # real VC device
+        from django.core.cache import cache
+        from django.urls import reverse
 
-        mock_request = MagicMock()
-        mock_request.body = json.dumps(
-            {
-                "device_id": device.pk,
-                "row_id": "10",
-                "server_key": "default",
-            }
-        ).encode()
+        from netbox_librenms_plugin.tests.conftest import make_superuser, make_virtual_chassis_members
+        from netbox_librenms_plugin.utils import get_librenms_sync_device
+        from netbox_librenms_plugin.views.object_sync.devices import DeviceCableTableView
 
-        mock_member = MagicMock()
-        mock_interface = MagicMock()
-        mock_interface.pk = 99
-        # librenms_id lookup returns the interface
-        mock_member.interfaces.filter.return_value.first.return_value = mock_interface
-
-        cached_links = {
-            "links": [
-                {
-                    "local_port_id": 10,
-                    "local_port": "Gi0/0",
-                    "remote_port": "Gi0/1",
-                    "remote_device": "switch-b",
-                    "remote_port_id": 20,
-                    "remote_device_id": 99,
-                }
-            ]
+        plugin_config = deepcopy(settings.PLUGINS_CONFIG)
+        plugin_config["netbox_librenms_plugin"]["servers"] = {
+            "default": {"librenms_url": "https://librenms.example.com", "api_token": "t", "verify_ssl": False}
         }
+        settings.PLUGINS_CONFIG = plugin_config
 
-        with (
-            patch(
-                "netbox_librenms_plugin.views.base.cables_view.get_librenms_sync_device",
-                return_value=device,
-            ),
-            patch("netbox_librenms_plugin.views.base.cables_view.cache") as mock_cache,
-            patch.object(view, "get_cache_key", return_value="test-key"),
-            patch(
-                "netbox_librenms_plugin.views.base.cables_view.get_virtual_chassis_member",
-                return_value=mock_member,
-            ) as mock_vc,
-            patch.object(
-                view,
-                "process_remote_device",
-                return_value={
-                    "local_port": "Gi0/0",
-                    "remote_port": "Gi0/1",
-                    "remote_device": "switch-b",
-                    "remote_port_id": 20,
-                    "remote_device_id": 99,
-                },
-            ) as mock_process_remote,
-            patch(
-                "netbox_librenms_plugin.views.base.cables_view.reverse",
-                return_value="/interface/99/",
-            ),
-            patch(
-                "netbox_librenms_plugin.views.base.cables_view.escape",
-                side_effect=lambda x: x,
-            ),
-        ):
-            mock_cache.get.return_value = cached_links
-            view.post(mock_request)
+        # Position 1 is what the port name "Ethernet1/1" implies; the dropdown posted position 2.
+        _vc, (inferred_member, selected_member) = make_virtual_chassis_members("cbv2-vcmember")
+        selected_member.custom_field_data["librenms_id"] = {"default": 101}
+        selected_member.save(update_fields=["custom_field_data"])
 
-        # Verify resolves the local port on the member the dropdown selected. Re-inferring a
-        # member from the port name would silently retarget the row away from that selection.
-        mock_vc.assert_not_called()
-        # Verify server_key is forwarded to process_remote_device
-        assert mock_process_remote.called
-        call_kwargs = mock_process_remote.call_args[1]
-        assert call_kwargs.get("server_key") == "default"
+        # Both members carry the same interface name AND the same LibreNMS port id, so only the
+        # posted selection can decide which one the row binds to.
+        inferred_interface = make_interface(inferred_member, "Ethernet1/1")
+        selected_interface = make_interface(selected_member, "Ethernet1/1")
+        _seed_lib_id(inferred_interface, 10)
+        _seed_lib_id(selected_interface, 10)
 
+        remote_device = make_device("cbv2-vcmember-remote", librenms_cf={"default": 99})
+        remote_interface = make_interface(remote_device, "Ethernet0/1")
+        _seed_lib_id(remote_interface, 20)
 
-# =============================================================================
-# TestPostHandlerInterfaceNotFound  — lines 534-561
-# =============================================================================
+        view = DeviceCableTableView()
+        sync_owner = get_librenms_sync_device(selected_member, server_key="default") or selected_member
+        cache.set(
+            view.get_cache_key(sync_owner, "links", "default"),
+            {
+                "links": [
+                    {
+                        "local_port_id": 10,
+                        "local_port": "Ethernet1/1",
+                        "remote_port": "Ethernet0/1",
+                        "remote_device": remote_device.name,
+                        "remote_port_id": 20,
+                        "remote_device_id": 99,
+                    }
+                ]
+            },
+            timeout=300,
+        )
+
+        client.force_login(make_superuser("cbv2-vcmember-user"))
+        response = client.post(
+            reverse("plugins:netbox_librenms_plugin:verify_cable"),
+            data=json.dumps({"device_id": selected_member.pk, "row_id": "10", "server_key": "default"}),
+            content_type="application/json",
+        )
+
+        assert response.status_code == 200
+        row = response.json()["formatted_row"]
+        # The posted member owns the row. Re-inferring from the port name would bind position 1.
+        assert row["expected_local_id"] == selected_interface.pk
+        assert row["expected_local_device_id"] == selected_member.pk
+        assert row["expected_local_id"] != inferred_interface.pk
+        # The posted server key reached the remote resolver, which matched by scoped LibreNMS id.
+        assert row["expected_remote_id"] == remote_interface.pk
 
 
 class TestPostHandlerInterfaceNotFound:
