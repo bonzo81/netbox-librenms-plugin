@@ -524,7 +524,9 @@ class SyncInterfacesView(
                             "LAG",
                             require_interface_source=True,  # VMInterface has no lag field
                         )
-                        if member_iface and member_iface.lag_id != agg_iface.pk:
+                        if member_iface and (
+                            member_iface.lag_id != agg_iface.pk or _lag_aggregate_needs_promotion(agg_iface)
+                        ):
                             if agg_iface.type != "lag" and "type" in excluded_columns:
                                 logger.warning(
                                     "Bulk sync: skipping LAG link %s -> %s because interface type is excluded",

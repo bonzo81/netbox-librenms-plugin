@@ -2218,6 +2218,73 @@ class TestSyncInterfacesViewPost:
         assert aggregate.type == "other"
         assert member.lag_id is None
 
+    def test_bulk_relink_repairs_an_aggregate_edited_back_to_a_non_lag_type(self):
+        """An already-linked member must still repair a stale aggregate type."""
+        from types import SimpleNamespace
+
+        from dcim.models import Device, Interface
+        from django.core.cache import cache
+
+        from netbox_librenms_plugin.utils import set_librenms_device_id
+        from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
+
+        device = make_device("bulk-lag-type-repair")
+        member = make_interface(device, "Ethernet1")
+        aggregate = make_interface(device, "Port-Channel1", iface_type="lag")
+        for interface, port_id in ((member, 10), (aggregate, 20)):
+            set_librenms_device_id(interface, port_id, "default")
+            interface.save()
+        member.lag = aggregate
+        member.save()
+        # NetBox permits this: Interface.clean() validates LAG membership from the member side
+        # only, so an aggregate that already has members can still be edited to a non-LAG type.
+        Interface.objects.filter(pk=aggregate.pk).update(type="1000base-t")
+        user = make_user_with_perms(
+            "bulk-lag-type-repair",
+            [("view", Device), ("add", Interface), ("change", Interface)],
+        )
+        request = _make_request(
+            post_data={
+                "select": ["10"],
+                "exclude_columns": ["vlans", "mac_address", "description", "mtu", "speed"],
+            },
+            user=user,
+        )
+        view = SyncInterfacesView()
+        view._librenms_api = SimpleNamespace(server_key="default")
+        cache_key = view.get_cache_key(device, "ports", "default")
+        cache.set(
+            cache_key,
+            {
+                "ports": [
+                    {
+                        "port_id": 10,
+                        "ifName": member.name,
+                        "ifType": "ethernetCsmacd",
+                        "ifAdminStatus": "up",
+                    },
+                    {
+                        "port_id": 20,
+                        "ifName": aggregate.name,
+                        "ifType": "ieee8023adLag",
+                        "ifAdminStatus": "up",
+                    },
+                ],
+                "port_stack_relationships": {"lag_members": {10: 20}, "sub_interfaces": {}},
+            },
+        )
+
+        try:
+            response = _post(view, request, object_type="device", object_id=device.pk)
+        finally:
+            cache.delete(cache_key)
+
+        assert response.status_code == 302
+        member.refresh_from_db()
+        aggregate.refresh_from_db()
+        assert member.lag_id == aggregate.pk
+        assert aggregate.type == "lag"
+
     def test_bulk_parent_link_resolves_a_unique_unbound_related_name(self):
         from types import SimpleNamespace
 
