@@ -2033,50 +2033,64 @@ class TestBaseInterfaceTableViewPost:
         mock_get_cache_key.assert_called_with(obj, "ports", "default")
         mock_get_last_fetched_key.assert_called_with(obj, "ports", "default")
 
-    def test_post_lag_inference_excludes_oob_ports(self):
+    def test_post_lag_inference_excludes_oob_ports(self, client, settings, mock_response_factory):
         """port_stack is scoped to the main device, so its lazy-fetch trigger must ignore OOB rows."""
-        view = self._make_view()
-        obj = _mock_obj()
-        request = _mock_request()
+        from copy import deepcopy
 
-        view._librenms_api.get_librenms_id.return_value = 42
+        from dcim.models import Interface
+        from django.core.cache import cache as real_cache
+        from django.urls import reverse
+
+        from netbox_librenms_plugin.views.object_sync.devices import DeviceInterfaceTableView
+
+        plugin_config = deepcopy(settings.PLUGINS_CONFIG)
+        plugin_config["netbox_librenms_plugin"]["servers"] = {
+            "default": {
+                "librenms_url": "https://librenms.example.com",
+                "api_token": "test-token",
+                "cache_timeout": 300,
+                "verify_ssl": True,
+            }
+        }
+        settings.PLUGINS_CONFIG = plugin_config
+
+        device = make_device(
+            "lag-inference-host",
+            librenms_cf={"default": {"id": 42, "oob": {"id": 99, "type": "oob"}}},
+        )
+        make_interface(device, "Gi0/0")
+        user = make_user_with_perms(
+            "lag-inference-viewer",
+            [("view", Device), ("view", Interface)],
+        )
+        client.force_login(user)
+
         # Host ports carry no LAG signal; the OOB controller exposes a LAG-typed port.
-        view._librenms_api.get_ports.side_effect = [
-            (True, {"ports": [{"port_id": 1, "ifName": "Gi0/0", "ifType": "ethernetCsmacd"}]}),
-            (True, {"ports": [{"port_id": 2, "ifName": "Po1", "ifType": "ieee8023adLag"}]}),
+        responses = [
+            mock_response_factory(json_data={"ports": [{"port_id": 1, "ifName": "Gi0/0", "ifType": "ethernetCsmacd"}]}),
+            mock_response_factory(json_data={"ports": [{"port_id": 2, "ifName": "Po1", "ifType": "ieee8023adLag"}]}),
         ]
+        url = reverse("plugins:netbox_librenms_plugin:device_interface_sync", kwargs={"pk": device.pk})
 
-        with (
-            patch.object(view, "get_object", return_value=obj),
-            patch.object(view, "get_redirect_url", return_value="/device/1/"),
-            patch.object(view, "_enrich_ports_with_vlan_data", side_effect=lambda ports, field: ports),
-            patch.object(view, "get_context_data", return_value={}),
-            patch.object(view, "get_cache_key", return_value="cache-key"),
-            patch.object(view, "get_last_fetched_key", return_value="last-key"),
-            patch("netbox_librenms_plugin.views.base.interfaces_view.get_interface_name_field", return_value="ifName"),
-            patch("netbox_librenms_plugin.views.base.interfaces_view.get_librenms_sync_device", return_value=obj),
-            patch("netbox_librenms_plugin.views.base.interfaces_view.get_librenms_oob", return_value={"id": 99}),
-            patch("netbox_librenms_plugin.views.base.interfaces_view.messages"),
-            patch("netbox_librenms_plugin.views.mixins.render") as mock_render,
-            patch("netbox_librenms_plugin.views.base.interfaces_view.cache") as mock_cache,
-            patch("netbox_librenms_plugin.views.base.interfaces_view.timezone"),
-        ):
-            mock_render.return_value = MagicMock()
-            view.post(request, pk=1)
+        with patch("netbox_librenms_plugin.librenms_api.requests.get", side_effect=responses) as mock_http_get:
+            response = client.post(url, {"server_key": "default", "interface_name_field": "ifName"})
+
+        assert response.status_code == 200
+        requested_urls = [call.args[0] for call in mock_http_get.call_args_list]
 
         # Prove the OOB path actually ran end-to-end first — otherwise the assertions below
         # would also pass if OOB ports were never fetched or merged (the whole point of the
         # filter being that there *was* an OOB LAG row to exclude).
-        view._librenms_api.get_ports.assert_any_call(99)  # OOB controller ports fetched
-        cached_snapshot = next(
-            call.args[1] for call in mock_cache.set.call_args_list if call.args and call.args[0] == "cache-key"
-        )
+        assert any(request_url.endswith("/api/v0/devices/99/ports") for request_url in requested_urls)
+        cache_key = DeviceInterfaceTableView().get_cache_key(device, "ports", "default")
+        cached_snapshot = real_cache.get(cache_key)
+        assert cached_snapshot is not None
         assert any(p.get("_source") == "oob" for p in cached_snapshot["ports"]), (
             "OOB row was never merged into the snapshot — the test would pass vacuously"
         )
 
         # The OOB LAG row does not trigger the main-device port_stack fetch.
-        view._librenms_api.get_port_stack.assert_not_called()
+        assert not any(request_url.endswith("/port_stack") for request_url in requested_urls)
 
 
 @pytest.mark.django_db
@@ -2850,7 +2864,7 @@ class TestBaseIPAddressTableViewCreateBaseIpEntry:
         """When no supported IP fields exist, the boundary rejects the row."""
         view = self._make_view()
         ip_entry = {"port_id": 1}  # No IP address fields
-        obj = MagicMock()
+        obj = Device(name="router")
 
         with pytest.raises(ValueError, match="no supported address fields"):
             view._create_base_ip_entry(ip_entry, obj, vrfs=[])

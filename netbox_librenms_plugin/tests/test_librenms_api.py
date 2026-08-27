@@ -12,6 +12,8 @@ import re
 import pytest
 import requests
 
+from netbox_librenms_plugin.tests.mock_librenms_server import librenms_mock_server
+
 
 from netbox_librenms_plugin.tests import test_librenms_api_helpers
 
@@ -2117,100 +2119,104 @@ class TestGetPortVlanDetailsResponseShape:
 # =============================================================================
 
 
+@pytest.fixture
+def librenms_server(monkeypatch):
+    """A real HTTP LibreNMS whose responses this test controls."""
+    monkeypatch.setenv("NO_PROXY", "127.0.0.1,localhost")
+    monkeypatch.setenv("no_proxy", "127.0.0.1,localhost")
+    with librenms_mock_server() as server:
+        yield server
+
+
 class TestGetPortStack:
     """Tests for LibreNMSAPI.get_port_stack()."""
 
-    def test_returns_mappings_list_on_success(self, mock_librenms_api):
+    def test_returns_mappings_list_on_success(self, mock_librenms_api, librenms_server):
         """get_port_stack returns (True, list) on HTTP 200."""
-        from unittest.mock import MagicMock, patch
-
-        fake_response = MagicMock()
-        fake_response.json.return_value = {
+        path = "/api/v0/devices/42/port_stack"
+        requests_seen = []
+        body = {
             "status": "ok",
             "mappings": [
                 {"high_port_id": 1, "low_port_id": 2, "high_ifIndex": 1, "low_ifIndex": 2},
             ],
         }
-        fake_response.raise_for_status = MagicMock()
-        with patch("netbox_librenms_plugin.librenms_api.requests.get", return_value=fake_response) as mock_get:
-            success, data = mock_librenms_api.get_port_stack(42)
+
+        def response(**request):
+            requests_seen.append(request)
+            return 200, body
+
+        librenms_server.register(path, response, method="GET")
+        mock_librenms_api.librenms_url = librenms_server.url
+
+        success, data = mock_librenms_api.get_port_stack(42)
 
         assert success is True
         assert data == [{"high_port_id": 1, "low_port_id": 2, "high_ifIndex": 1, "low_ifIndex": 2}]
-        mock_get.assert_called_once()
-        call_url = mock_get.call_args[0][0]
-        assert "/api/v0/devices/42/port_stack" in call_url
+        assert [(request["method"], request["path"]) for request in requests_seen] == [("GET", path)]
 
-    def test_returns_false_on_404(self, mock_librenms_api):
+    def test_returns_false_on_404(self, mock_librenms_api, librenms_server):
         """get_port_stack returns (False, error_str) when device not found."""
-        import requests as _requests
-        from unittest.mock import MagicMock, patch
+        librenms_server.register(
+            "/api/v0/devices/99/port_stack",
+            {"status": "error", "message": "Device does not exist"},
+            status=404,
+        )
+        mock_librenms_api.librenms_url = librenms_server.url
 
-        fake_resp = MagicMock()
-        fake_resp.status_code = 404
-        http_error = _requests.exceptions.HTTPError(response=fake_resp)
-        fake_resp.raise_for_status.side_effect = http_error
-        with patch("netbox_librenms_plugin.librenms_api.requests.get", return_value=fake_resp):
-            success, data = mock_librenms_api.get_port_stack(99)
+        success, data = mock_librenms_api.get_port_stack(99)
 
         assert success is False
         assert "not found" in data.lower()
 
     @pytest.mark.parametrize("payload", [{"status": "ok"}, {"status": "ok", "mappings": None}])
-    def test_missing_or_null_mappings_fails_closed(self, mock_librenms_api, payload):
+    def test_missing_or_null_mappings_fails_closed(self, mock_librenms_api, librenms_server, payload):
         """A successful response must contain the documented list-valued mappings field."""
-        from unittest.mock import MagicMock, patch
+        librenms_server.register("/api/v0/devices/5/port_stack", payload)
+        mock_librenms_api.librenms_url = librenms_server.url
 
-        fake_response = MagicMock()
-        fake_response.json.return_value = payload
-        fake_response.raise_for_status = MagicMock()
-        with patch("netbox_librenms_plugin.librenms_api.requests.get", return_value=fake_response):
-            success, data = mock_librenms_api.get_port_stack(5)
+        success, data = mock_librenms_api.get_port_stack(5)
 
         assert success is False
         assert "mappings" in data
 
-    def test_error_status_without_mappings_fails_not_empty(self, mock_librenms_api):
+    def test_error_status_without_mappings_fails_not_empty(self, mock_librenms_api, librenms_server):
         """An error payload that omits 'mappings' must fail, not normalise to (True, []), so a real API failure isn't masked as 'no LAG/parent relationships'."""
-        from unittest.mock import MagicMock, patch
+        librenms_server.register(
+            "/api/v0/devices/5/port_stack",
+            {"status": "error", "message": "device polling disabled"},
+        )
+        mock_librenms_api.librenms_url = librenms_server.url
 
-        fake_response = MagicMock()
-        fake_response.json.return_value = {"status": "error", "message": "device polling disabled"}
-        fake_response.raise_for_status = MagicMock()
-        with patch("netbox_librenms_plugin.librenms_api.requests.get", return_value=fake_response):
-            success, data = mock_librenms_api.get_port_stack(5)
+        success, data = mock_librenms_api.get_port_stack(5)
 
         assert success is False
         assert data == "device polling disabled"
 
-    def test_error_status_with_mappings_present_still_fails(self, mock_librenms_api):
+    def test_error_status_with_mappings_present_still_fails(self, mock_librenms_api, librenms_server):
         """An error payload that still carries mappings must honor the explicit error status before consuming them, so it fails rather than silently skipping valid sync."""
-        from unittest.mock import MagicMock, patch
+        librenms_server.register(
+            "/api/v0/devices/5/port_stack",
+            {"status": "error", "message": "stale poll", "mappings": []},
+        )
+        mock_librenms_api.librenms_url = librenms_server.url
 
-        fake_response = MagicMock()
-        fake_response.json.return_value = {
-            "status": "error",
-            "message": "stale poll",
-            "mappings": [],
-        }
-        fake_response.raise_for_status = MagicMock()
-        with patch("netbox_librenms_plugin.librenms_api.requests.get", return_value=fake_response):
-            success, data = mock_librenms_api.get_port_stack(5)
+        success, data = mock_librenms_api.get_port_stack(5)
 
         assert success is False
         assert data == "stale poll"
 
-    def test_non_string_status_fails_not_empty(self, mock_librenms_api):
+    def test_non_string_status_fails_not_empty(self, mock_librenms_api, librenms_server):
         """A non-string status like `false` is malformed and must fail, not be accepted as (True, [])."""
-        from unittest.mock import MagicMock, patch
-
-        fake_response = MagicMock()
         # {"status": false, "mappings": []} — only an absent status or "ok" is a genuine answer;
         # accepting this would silently suppress LAG/sub-interface relationship updates.
-        fake_response.json.return_value = {"status": False, "mappings": []}
-        fake_response.raise_for_status = MagicMock()
-        with patch("netbox_librenms_plugin.librenms_api.requests.get", return_value=fake_response):
-            success, data = mock_librenms_api.get_port_stack(5)
+        librenms_server.register(
+            "/api/v0/devices/5/port_stack",
+            {"status": False, "mappings": []},
+        )
+        mock_librenms_api.librenms_url = librenms_server.url
+
+        success, data = mock_librenms_api.get_port_stack(5)
 
         assert success is False
         assert "LibreNMS reported an error fetching port stack" in data
@@ -2244,29 +2250,23 @@ class TestGetPortStack:
         assert "Invalid JSON" in data
         assert "Error connecting" not in data
 
-    def test_malformed_mappings_fails_not_empty(self, mock_librenms_api):
+    def test_malformed_mappings_fails_not_empty(self, mock_librenms_api, librenms_server):
         """A non-list (or list-of-non-dicts) `mappings` is malformed, not 'no relationships'."""
-        from unittest.mock import MagicMock, patch
-
+        path = "/api/v0/devices/5/port_stack"
+        mock_librenms_api.librenms_url = librenms_server.url
         for bad in ({"mappings": {"oops": 1}}, {"mappings": ["not-a-dict", 2]}):
-            fake_response = MagicMock()
-            fake_response.raise_for_status = MagicMock()
-            fake_response.json.return_value = bad
-            with patch("netbox_librenms_plugin.librenms_api.requests.get", return_value=fake_response):
-                success, data = mock_librenms_api.get_port_stack(5)
+            librenms_server.register(path, bad)
+            success, data = mock_librenms_api.get_port_stack(5)
             assert success is False, f"{bad!r} should fail"
             assert "mappings" in data
 
-    def test_non_object_payload_fails_not_empty(self, mock_librenms_api):
+    def test_non_object_payload_fails_not_empty(self, mock_librenms_api, librenms_server):
         """A non-object top-level payload (list/string/null) is malformed, not 'no relationships'."""
-        from unittest.mock import MagicMock, patch
-
+        path = "/api/v0/devices/5/port_stack"
+        mock_librenms_api.librenms_url = librenms_server.url
         for bad in ([{"high_port_id": 1, "low_port_id": 2}], "oops", None):
-            fake_response = MagicMock()
-            fake_response.raise_for_status = MagicMock()
-            fake_response.json.return_value = bad
-            with patch("netbox_librenms_plugin.librenms_api.requests.get", return_value=fake_response):
-                success, data = mock_librenms_api.get_port_stack(5)
+            librenms_server.register(path, bad)
+            success, data = mock_librenms_api.get_port_stack(5)
             assert success is False, f"{bad!r} should fail"
             assert "non-object" in data
 

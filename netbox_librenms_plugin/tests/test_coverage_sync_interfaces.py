@@ -613,18 +613,26 @@ class TestInterfaceContextOOBRows:
         assert "idrac0" in {i["name"] for i in ctx["netbox_only_interfaces"]}
 
     def test_oob_row_does_not_hide_netbox_only_interface(self):
+        from django.core.cache import cache
+        from django.utils import timezone
+
         view = self._make_view()
         obj = self._host_with_idrac()
         cached = {"ports": [{"ifName": "idrac0", "_source": "oob", "port_id": 999}]}
         req = _make_request()
 
-        def cache_get(key):
-            return cached if key == "ports-key" else ({} if key == "ov-key" else None)
-
-        with patch("netbox_librenms_plugin.views.base.interfaces_view.cache") as mock_cache:
-            mock_cache.get.side_effect = cache_get
-            mock_cache.ttl.return_value = None
+        del view.get_cache_key
+        del view.get_last_fetched_key
+        del view.get_vlan_overrides_key
+        cache_key = view.get_cache_key(obj, "ports", "default")
+        last_fetched_key = view.get_last_fetched_key(obj, "ports", "default")
+        cache.set(cache_key, cached)
+        cache.set(last_fetched_key, timezone.now())
+        try:
             ctx = view.get_context_data(req, obj, "ifName", "default")
+        finally:
+            cache.delete(cache_key)
+            cache.delete(last_fetched_key)
 
         names = {i["name"] for i in ctx["netbox_only_interfaces"]}
         assert "idrac0" in names  # OOB row must not suppress the main-device interface
@@ -1578,37 +1586,61 @@ class TestInterfaceContextOOBRows:
 
     def test_malformed_port_stack_relationships_does_not_crash(self):
         """A cached snapshot whose port_stack_relationships is None / a non-dict (corruption, partial write, format migration) must fail soft, not AttributeError on the .get('lag_members') calls."""
+        from django.core.cache import cache
+        from django.utils import timezone
+
         view = self._make_view()
         obj = self._host_with_idrac()
         req = _make_request()
 
-        for bad in (None, ["not", "a", "dict"], "garbage"):
-            fresh = {
-                "ports": [{"ifName": "idrac0", "port_id": 999, "_source": "host"}],
-                "port_stack_relationships": bad,
-            }
-            with patch("netbox_librenms_plugin.views.base.interfaces_view.cache") as mock_cache:
-                mock_cache.get.return_value = None
-                mock_cache.ttl.return_value = None
-                ctx = view.get_context_data(req, obj, "ifName", "default", fresh_data=fresh)  # must not raise
-            assert "table" in ctx
+        del view.get_cache_key
+        del view.get_last_fetched_key
+        del view.get_vlan_overrides_key
+        cache_key = view.get_cache_key(obj, "ports", "default")
+        last_fetched_key = view.get_last_fetched_key(obj, "ports", "default")
+        try:
+            for bad in (None, ["not", "a", "dict"], "garbage"):
+                cached = {
+                    "ports": [{"ifName": "idrac0", "port_id": 999, "_source": "host"}],
+                    "port_stack_relationships": bad,
+                }
+                cache.set(cache_key, cached)
+                cache.set(last_fetched_key, timezone.now())
+                assert cache.get(cache_key) == cached
+                ctx = view.get_context_data(req, obj, "ifName", "default")  # must not raise
+                assert ctx["table"] is not None
+        finally:
+            cache.delete(cache_key)
+            cache.delete(last_fetched_key)
 
     def test_malformed_nested_relationship_maps_do_not_crash(self):
         """port_stack_relationships is a dict but its lag_members / sub_interfaces are None / non-dict (the present-but-None key defeats the .get(..., {}) default) — iterating .items() must fail soft, not AttributeError."""
+        from django.core.cache import cache
+        from django.utils import timezone
+
         view = self._make_view()
         obj = self._host_with_idrac()
         req = _make_request()
 
-        for bad in (None, ["not", "a", "dict"], "garbage", 42):
-            fresh = {
-                "ports": [{"ifName": "idrac0", "port_id": 999, "_source": "host"}],
-                "port_stack_relationships": {"lag_members": bad, "sub_interfaces": bad},
-            }
-            with patch("netbox_librenms_plugin.views.base.interfaces_view.cache") as mock_cache:
-                mock_cache.get.return_value = None
-                mock_cache.ttl.return_value = None
-                ctx = view.get_context_data(req, obj, "ifName", "default", fresh_data=fresh)  # must not raise
-            assert "table" in ctx
+        del view.get_cache_key
+        del view.get_last_fetched_key
+        del view.get_vlan_overrides_key
+        cache_key = view.get_cache_key(obj, "ports", "default")
+        last_fetched_key = view.get_last_fetched_key(obj, "ports", "default")
+        try:
+            for bad in (None, ["not", "a", "dict"], "garbage", 42):
+                cached = {
+                    "ports": [{"ifName": "idrac0", "port_id": 999, "_source": "host"}],
+                    "port_stack_relationships": {"lag_members": bad, "sub_interfaces": bad},
+                }
+                cache.set(cache_key, cached)
+                cache.set(last_fetched_key, timezone.now())
+                assert cache.get(cache_key) == cached
+                ctx = view.get_context_data(req, obj, "ifName", "default")  # must not raise
+                assert ctx["table"] is not None
+        finally:
+            cache.delete(cache_key)
+            cache.delete(last_fetched_key)
 
     def test_malformed_cached_port_snapshot_fails_closed(self):
         """A stale/corrupt cached ports snapshot (non-dict, or ports not a list of dicts) must be dropped and re-rendered empty, not 500 the sync tab — and the bad entry purged so a later render re-fetches."""
