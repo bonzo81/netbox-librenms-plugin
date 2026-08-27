@@ -7,20 +7,11 @@ import pytest
 from netbox_librenms_plugin.tests.cache_test_helpers import (
     drain_pending_commit_callbacks,
     seed_every_tab,
+    seed_inventory,
     snapshot_state,
 )
 from netbox_librenms_plugin.tests.view_test_helpers import make_request, make_view
 from netbox_librenms_plugin.tests.view_test_helpers import post as _post
-
-
-def _seed_inventory(view, device, inventory, *, librenms_id=None, server_key="default"):
-    """Write one inventory payload the way BaseModuleTableView.post writes it."""
-    from django.core.cache import cache
-
-    key = view.get_cache_key(device, "inventory", server_key=server_key)
-    payload = {"inventory": inventory, "librenms_id": librenms_id, "oob_librenms_id": None}
-    cache.set(key, payload, timeout=300)
-    return key
 
 
 @pytest.mark.django_db
@@ -74,7 +65,7 @@ class TestModuleActionsInvalidateEveryChangedDevice:
                 "entPhysicalContainedIn": 0,
             }
         ]
-        key = _seed_inventory(view, page_device, inventory, librenms_id=7)
+        key = seed_inventory(view, page_device, inventory, librenms_id=7)
         seeded = seed_every_tab(other_device)
 
         try:
@@ -187,7 +178,7 @@ class TestModuleActionsInvalidateEveryChangedDevice:
                 "entPhysicalContainedIn": 0,
             }
         ]
-        key = _seed_inventory(view, page_device, inventory, librenms_id=7)
+        key = seed_inventory(view, page_device, inventory, librenms_id=7)
         seeded = seed_every_tab(bystander)
 
         try:

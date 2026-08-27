@@ -38,6 +38,16 @@ def seed_every_tab(obj, server_key="default"):
     return keys
 
 
+def seed_inventory(view, device, inventory, *, librenms_id=None, server_key="default"):
+    """Write one inventory payload the way ``BaseModuleTableView.post`` writes it."""
+    from django.core.cache import cache
+
+    key = view.get_cache_key(device, "inventory", server_key=server_key)
+    payload = {"inventory": inventory, "librenms_id": librenms_id, "oob_librenms_id": None}
+    cache.set(key, payload, timeout=300)
+    return key
+
+
 def clear_snapshots(keys):
     """Delete snapshot keys seeded by a test."""
     from django.core.cache import cache

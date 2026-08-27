@@ -4,20 +4,11 @@ from types import SimpleNamespace
 
 import pytest
 
+from netbox_librenms_plugin.tests.cache_test_helpers import seed_inventory
 from netbox_librenms_plugin.tests.view_test_helpers import make_request, make_view, message_texts
 from netbox_librenms_plugin.tests.view_test_helpers import post as _post
 
 CACHE_MISS_TEXT = "No cached inventory data. Please refresh modules first."
-
-
-def _seed_inventory(view, device, inventory, *, librenms_id=None, server_key="default"):
-    """Write one inventory payload the way BaseModuleTableView.post writes it."""
-    from django.core.cache import cache
-
-    key = view.get_cache_key(device, "inventory", server_key=server_key)
-    payload = {"inventory": inventory, "librenms_id": librenms_id, "oob_librenms_id": None}
-    cache.set(key, payload, timeout=300)
-    return key
 
 
 @pytest.mark.django_db
@@ -47,7 +38,7 @@ class TestEmptyInventoryIsNotACacheMiss:
         )
         request = make_request("post", {"select": ["100"], "server_key": "default"}, user=user)
         view = make_view(InstallSelectedView, request, librenms_api=SimpleNamespace(server_key="default"))
-        key = _seed_inventory(view, device, [], librenms_id=7)
+        key = seed_inventory(view, device, [], librenms_id=7)
 
         try:
             _post(view, request, pk=device.pk)
@@ -111,7 +102,7 @@ class TestEmptyInventoryIsNotACacheMiss:
         )
         request = make_request("post", {"parent_index": "100", "server_key": "default"}, user=user)
         view = make_view(InstallBranchView, request, librenms_api=SimpleNamespace(server_key="default"))
-        key = _seed_inventory(view, device, [], librenms_id=7)
+        key = seed_inventory(view, device, [], librenms_id=7)
 
         try:
             _post(view, request, pk=device.pk)
@@ -178,7 +169,7 @@ class TestReplaceReadsAreStalenessChecked:
         )
         view = make_view(ReplaceModuleView, request, librenms_api=SimpleNamespace(server_key="default"))
         # The device is linked to LibreNMS id 7; the snapshot was built for id 999.
-        key = _seed_inventory(view, device, self._inventory(), librenms_id=999)
+        key = seed_inventory(view, device, self._inventory(), librenms_id=999)
 
         try:
             _post(view, request, pk=device.pk)
