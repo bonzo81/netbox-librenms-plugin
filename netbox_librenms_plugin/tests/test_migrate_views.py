@@ -1152,16 +1152,7 @@ class TestReconcileDonorDeviceIpFks:
         assert notes == []
 
     def test_transfer_survives_interface_moving_onto_winner_mid_check(self):
-        """A move ONTO the winner landing between the GFK read and the interface lock must not spuriously reject the transfer.
-
-        ip.assigned_object is read (and cached by the GenericForeignKey) before the owning
-        interface is locked; set_device_ip_fk re-reads that cache, so pre-fix the stale
-        pre-move snapshot (device_id != winner.pk) raised ValueError and rolled back an
-        otherwise-valid move — even though the locked-row gate had already validated the
-        CURRENT owner. The race is reproduced by patching the GFK descriptor to serve the
-        pre-move snapshot until the code refreshes it (the setter stores the override), the
-        same freshen-after-lock pattern TransferDeviceIPView already uses.
-        """
+        """A fresh locked interface owner overrides a stale GFK snapshot after the interface moves onto the winner."""
         from dcim.models import Interface
         from django.db import transaction
         from ipam.models import IPAddress
@@ -1339,11 +1330,7 @@ class TestSafeRefererFallback:
         assert _safe_referer(self._req(), fallback=None) == get_script_prefix()
 
     def test_referer_validation_delegates_to_shared_barrier(self):
-        """_safe_referer routes the CWE-601 Referer check through the shared validated_referer helper.
-
-        Patching the shared barrier (not a hand-copied inline copy) changes the outcome, so the two
-        redirect helpers can't drift on the open-redirect guard.
-        """
+        """_safe_referer delegates its open-redirect check to the shared validated_referer barrier."""
         from unittest.mock import patch
 
         from netbox_librenms_plugin.views.sync.migrate import _safe_referer
@@ -1400,12 +1387,7 @@ class TestNonHtmxFallbackRedirect:
 
 
 class TestMigratedTransferIpDeviceOnlyGate:
-    """The shipped librenms_sync_base.html must gate the migrated-donor transfer-IP buttons to Devices.
-
-    These POST to ``device_transfer_ip`` with ``pk=object.pk`` (a Device lookup), so they must not
-    render on a VM page. Assert against the real template SOURCE so the test fails if the guard is
-    dropped — not a hand-copied mini-template that can drift from what ships.
-    """
+    """The shipped template limits migrated-donor transfer-IP buttons to Device pages."""
 
     def _template_source(self):
         from pathlib import Path
@@ -1479,14 +1461,7 @@ class TestServerKeyFromRequest:
 
 @pytest.mark.django_db
 class TestMigratedContextServerKeyFallback:
-    """When the POSTed server_key fails to rebind (malformed/stale), the cable/IP/interface sync error
-    render must still resolve the migrated marker — under the SESSION key, not the failed posted key —
-    so a migrated donor's sync controls stay suppressed instead of being silently re-enabled.
-
-    Real-DB: a real donor+winner+marker and the real build_migrated_context exercise the resolution;
-    only the NetBox template render (needs full request context) and the external LibreNMS rebind are
-    stubbed. Asserts the actual resolved winner, not merely that the helper was called.
-    """
+    """Cable, IP, and interface error renders use the session key when a posted key cannot resolve a migrated donor."""
 
     _counter = 0
 
@@ -1844,12 +1819,7 @@ class TestMovableIpsForMigration:
 
 @pytest.mark.django_db
 class TestMigratedDonorRendersSyncTabs:
-    """A migrated (not-found) donor must render the sync tabs so the per-row Move-to-winner controls are reachable.
-
-    The merge clears the donor's active librenms_id, so it is never found_in_librenms; without gating the
-    tabs on migrated_to_marker too, the banner promises per-row interface/IP move actions that never render.
-    Full HTTP request -> view -> DB -> template, no LibreNMS API (librenms_id is None for a migrated donor).
-    """
+    """A full donor page renders sync tabs and reachable per-row move controls after migration clears its active ID."""
 
     def test_full_page_shows_tabs_and_reachable_ip_move_button(self, client):
         from django.contrib.auth import get_user_model
@@ -1904,11 +1874,7 @@ class TestDeviceIpLabelsSingleSource:
 
 @pytest.mark.django_db
 class TestMoveToWinnerConcurrencyHelpers:
-    """The move-to-winner resolve + lock/re-verify TOCTOU guards live in one shared pair of helpers.
-
-    Exercises _resolve_winner_or_fail and _lock_donor_winner_and_reverify directly (all three move
-    endpoints route through them) so the extracted concurrency guard is pinned in one place.
-    """
+    """All move-to-winner endpoints share winner resolution and locked migration revalidation helpers."""
 
     def _view(self):
         from netbox_librenms_plugin.views.sync.migrate import MoveInterfaceToWinnerView
@@ -1973,12 +1939,7 @@ class TestMoveToWinnerConcurrencyHelpers:
 
 @pytest.mark.django_db
 class TestMoveEndpointsObjectScope:
-    """The move-to-winner endpoints must resolve their URL pk through a restricted queryset.
-
-    NetBoxObjectPermissionMixin checks the required ``change`` perms at model level only, so a
-    constrained grant clears the gate; a raw ``get_object_or_404`` would then let it move an
-    interface, IP or device FK it can't see.
-    """
+    """Move-to-winner endpoints resolve each URL object through the user's restricted queryset."""
 
     @staticmethod
     def _writer(username, specs):

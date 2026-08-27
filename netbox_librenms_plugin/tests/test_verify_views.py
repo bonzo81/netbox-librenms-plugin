@@ -1507,16 +1507,7 @@ def _make_gate_vm(name="ipgate-vm"):
 
 @pytest.mark.django_db
 class TestSingleIPAddressVerifyObjectPermissionGate:
-    """SingleIPAddressVerifyView must gate POST on dcim.view_device.
-
-    The read-only verify endpoint resolves an arbitrary ``device_id`` from the
-    JSON body and returns that object's name, URL, and source snapshot. Without the gate a
-    caller with only plugin-view rights could probe and read back objects they
-    cannot see (mirrors the interface/module/cable verify views' hardening).
-
-    These exercise the REAL gate end-to-end: a real Device, a real (non-super)
-    user, real NetBox ObjectPermission grants and real ``has_perm`` — no mocks.
-    """
+    """SingleIPAddressVerifyView requires dcim.view_device before it reveals a JSON-selected device."""
 
     def _post(self, user, device_id, object_type=None):
         from netbox_librenms_plugin.views.base.ip_addresses_view import SingleIPAddressVerifyView
@@ -1630,11 +1621,7 @@ class TestSingleIPAddressVerifyObjectPermissionGate:
 
 @pytest.mark.django_db
 class TestSingleIPAddressVerifyServerKeyCacheNamespace:
-    """The verify POST must validate server_key before using it as a cache namespace.
-
-    A forged/unconfigured key must not let a caller address an arbitrary server-key cache
-    namespace; it falls back to a configured server (mirrors the sync/cable hardening).
-    """
+    """An unconfigured server key cannot select an arbitrary IP verification cache namespace."""
 
     def test_forged_server_key_falls_back_to_configured_namespace(self):
         from unittest.mock import patch
@@ -1739,12 +1726,7 @@ def _json_post(url, body, user):
 
 @pytest.mark.django_db
 class TestVerifyEndpointsServerKeyGuard:
-    """A forged/non-string server_key must fall back, not 500 (mirrors the cable/IP siblings).
-
-    A JSON array server_key is unhashable: routed into get_librenms_sync_device it reaches
-    cf_dict.get(["a"]) and raises TypeError, turning these endpoints into 500s where the
-    hardened siblings degrade. A forged string key must also never scope cache access.
-    """
+    """Verify endpoints reject forged or non-string server keys without a 500 or arbitrary cache access."""
 
     def test_interface_verify_unhashable_server_key_degrades(self):
         from netbox_librenms_plugin.views.object_sync.devices import SingleInterfaceVerifyView
@@ -1891,12 +1873,7 @@ class TestInterfaceVerifyMalformedPortsCache:
 
 @pytest.mark.django_db
 class TestVerifyViewObjectScope:
-    """A *constrained* view_device grant must not resolve out-of-scope devices in the verify views.
-
-    require_object_permissions_json only checks the model-level view_device perm, so a pk/site-scoped
-    grant clears the gate. The device lookup must then object-scope via restrict() so an out-of-scope
-    pk 404s instead of leaking that device's cached verify payload — even when its cache is warm.
-    """
+    """Verify views restrict device lookup so constrained grants cannot reveal cached data outside their object scope."""
 
     SERVER_KEY = "default"  # the only configured server in the test env
 
@@ -1977,12 +1954,7 @@ class TestVerifyViewObjectScope:
 
 @pytest.mark.django_db
 class TestSaveVlanGroupOverridesObjectScope:
-    """SaveVlanGroupOverridesView WRITES overrides, so it must object-scope the device too.
-
-    require_write_permission_json only checks plugin-wide write access, so a plugin-writer with a
-    *constrained* view_device grant could otherwise persist VLAN overrides for a device they can't
-    see. The lookup must go through restrict() so an out-of-scope pk 404s.
-    """
+    """SaveVlanGroupOverridesView blocks plugin writers from updating devices outside their view scope."""
 
     SERVER_KEY = "default"
 

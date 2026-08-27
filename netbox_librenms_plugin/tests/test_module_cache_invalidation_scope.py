@@ -199,12 +199,7 @@ class TestModuleActionsInvalidateEveryChangedDevice:
         assert all(remaining.values()), f"an untouched device lost its snapshots: {remaining}"
 
     def test_a_vc_sibling_keeps_the_shared_snapshot_the_acting_page_claimed(self, django_capture_on_commit_callbacks):
-        """The acting page's claim covers the snapshot its VC siblings share with it.
-
-        The modules tab is VC-shared, and a target device is always the page device or one of
-        its VC members, so a write-driven cleanup on the sibling would delete the very snapshot
-        the page transition keeps for the response being rendered.
-        """
+        """Verify that an acting page claim protects the module snapshot shared with its VC sibling."""
         from django.core.cache import cache
         from django.db import transaction
 

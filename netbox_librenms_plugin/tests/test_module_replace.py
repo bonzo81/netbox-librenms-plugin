@@ -224,12 +224,7 @@ class TestModuleMismatchPreviewView:
 
 @pytest.mark.django_db
 class TestModuleMismatchTypeMatchedBadge:
-    """The mismatch modal badges the LibreNMS model as matched when it resolves to the installed type.
-
-    DB-backed and rendering the REAL template (the sibling tests above patch render/resolve): builds a
-    real ModuleTypeMapping so a LibreNMS model string that DIFFERS from the NetBox type still resolves
-    to it — the user's serial-mismatch case where only text said "same type".
-    """
+    """Verify with real models and rendering that a mapped LibreNMS model gets the installed-type match badge."""
 
     def _build(self, *, installed_type_model, mapped_type_model, librenms_model, installed_serial, librenms_serial):
         from dcim.models import (

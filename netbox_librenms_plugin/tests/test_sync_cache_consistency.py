@@ -1113,11 +1113,7 @@ def test_configured_unmapped_server_action_invalidates_mapped_snapshots_without_
     client,
     settings,
 ):
-    """An unmapped action must not report cleanup failure and must invalidate mapped state.
-
-    The cleanup_failed assertion covers consequence (a). The snapshot and state assertions
-    cover consequence (b).
-    """
+    """An unmapped action must not report cleanup failure and must invalidate mapped state."""
     _configure_servers(settings)
     configured_server_keys = tuple(settings.PLUGINS_CONFIG["netbox_librenms_plugin"]["servers"])
     mapped_server_key, acting_server_key, *_remaining_server_keys = configured_server_keys
@@ -1185,11 +1181,7 @@ def test_configured_unmapped_server_action_invalidates_mapped_snapshots_without_
 )
 @pytest.mark.django_db(transaction=True)
 def test_request_transitions_for_different_servers_preserve_both_sources(settings):
-    """The request scheduler must preserve every scheduled server source snapshot.
-
-    No routed view currently schedules transitions for different servers in one request.
-    This test exercises the lowest reachable request scheduler seam.
-    """
+    """Verify at the lowest reachable seam that different server transitions preserve both sources when no routed view does."""
     _configure_servers(settings)
     configured_server_keys = tuple(settings.PLUGINS_CONFIG["netbox_librenms_plugin"]["servers"])
     first_source_server, second_source_server, idle_server = configured_server_keys
@@ -1236,11 +1228,7 @@ def test_request_transitions_for_different_servers_preserve_both_sources(setting
 
 @pytest.mark.django_db(transaction=True)
 def test_a_response_built_inside_the_transaction_reports_the_committed_cleanup(settings):
-    """A response serialized before commit must still report the cleanup that commit runs.
-
-    Under ATOMIC_REQUESTS, or any caller that wraps the view, schedule_mutation defers the
-    cleanup to commit, so the transition is still empty when the endpoint builds its response.
-    """
+    """Verify that a response built before commit reports cleanup deferred by ATOMIC_REQUESTS."""
     server_key = _configured_server_key(settings)
     device = make_device("cache-deferred-response", librenms_cf={server_key: {"id": 651}})
     interface = make_interface(device, "Ethernet1", iface_type="1000base-t")

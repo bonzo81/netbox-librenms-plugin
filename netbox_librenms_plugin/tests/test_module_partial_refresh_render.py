@@ -16,11 +16,7 @@ from netbox_librenms_plugin.tests.view_test_helpers import post as _post
 
 
 def _configured_server_key():
-    """Return a server key this deployment actually configures.
-
-    The names differ between the repository test configuration and a local devcontainer, so
-    hardcoding one passes in one place and fails in the other.
-    """
+    """Return the first configured server key because deployment key names differ."""
     from django.conf import settings
 
     servers = (settings.PLUGINS_CONFIG.get("netbox_librenms_plugin") or {}).get("servers") or {}

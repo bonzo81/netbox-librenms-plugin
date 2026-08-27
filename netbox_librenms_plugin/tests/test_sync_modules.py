@@ -3253,14 +3253,7 @@ class TestAncestorWalkGenericContainerModel:
 
 
 class TestParentRowIdxVsEntityIndex:
-    """
-    Regression: parent_row_idx must be used for table_data access, not parent_ent_idx.
-
-    Bug: parent_idx was first set to len(table_data) (a small row index), then
-    overwritten with item.get("entPhysicalIndex") (which can be millions).
-    table_data[parent_idx] then indexed the list with the large entity value,
-    causing IndexError or wrong-row mutations.
-    """
+    """Table access uses parent_row_idx so large entPhysicalIndex values cannot index table_data."""
 
     def test_has_installable_children_set_on_correct_row(self):
         """has_installable_children must land on table row 0, not on entity index 8_000_000."""
@@ -4152,14 +4145,7 @@ class TestMatchBayLogic:
         assert result is bay
 
     def test_vendor_two_segment_regex_does_not_grab_three_segment_path(self):
-        """Regression for #59: a narrow 2-segment vendor regex must NOT swallow a 3-segment
-        transceiver name; the more-specific 3-segment generic mapping must win.
-
-        ``_lookup_regex_bay_mapping`` uses ``fullmatch``, so a pattern with only two
-        slash-segments cannot consume a name with three.  Both mappings are passed in
-        together (mirroring real callers that have already merged scoped + global
-        regex mappings via ``_filter_mappings_by_manufacturer``).
-        """
+        """A two-segment vendor regex does not match a three-segment name, so the generic mapping wins."""
         from netbox_librenms_plugin.views.sync.modules import InstallBranchView
 
         child = {
@@ -4268,9 +4254,7 @@ class TestMatchBayLogic:
         assert result is None
 
     def test_normalized_candidate_matches_when_rules_preloaded(self):
-        """When module_bay normalization rules are supplied, _match_bay considers
-        normalized candidate names too — mirroring the table/UI matcher so installs
-        don't skip bays that appear matched in the UI."""
+        """Preloaded module-bay rules let _match_bay use normalized candidates as the table matcher does."""
         from netbox_librenms_plugin.views.sync.modules import InstallBranchView
 
         child = {
@@ -4863,12 +4847,7 @@ class TestUpdateModuleSerialViewBehavior:
 
 
 class TestBuildTableRowsBayCollisionDetection:
-    """_build_table_rows merges module-scoped bays into a deterministic flat dict.
-
-    When two modules expose bays with the same name the module with the lower PK
-    wins (first-match-wins with sorted module IDs).  Device-level bays always
-    take precedence over module-scoped bays.
-    """
+    """Bay-name collisions resolve deterministically: device bays win, then the lowest module PK."""
 
     def _make_bay(self, name, pk):
         from unittest.mock import MagicMock
@@ -5162,9 +5141,7 @@ class TestAddBayTemplateViewGetValidation:
 
 
 class TestAddBayTemplateViewMappingCheckbox:
-    """GET threads librenms_name/class into context and decides whether to
-    show the auto-create-mapping checkbox.  POST creates the mapping when the
-    user opts in and the NetBox name differs from the LibreNMS one."""
+    """GET exposes LibreNMS fields and POST optionally maps names that differ between LibreNMS and NetBox."""
 
     def _make_view(self):
         from netbox_librenms_plugin.views.sync.modules import AddBayTemplateView
@@ -5379,10 +5356,7 @@ class TestAddBayTemplateViewMappingCheckbox:
 
 
 class TestAddBayTemplateViewInstantiation:
-    """After saving a ModuleBayTemplate, the view materialises it onto every
-    existing Device/Module of the target so the resolver can match the new bay
-    immediately (NetBox only auto-creates bays from templates at first-create
-    time)."""
+    """Saved bay templates materialize on existing targets so the resolver can match each new bay immediately."""
 
     def test_instantiate_on_existing_device_type_creates_missing_bays(self):
         from netbox_librenms_plugin.views.sync.modules import AddBayTemplateView
@@ -5500,10 +5474,7 @@ class TestAddBayTemplateViewInstantiation:
 
 
 class TestDeriveMappingPattern:
-    """_derive_mapping_pattern maps each distinct LibreNMS digit value to a
-    capture group; the NetBox replacement may use any literals as long as
-    every NetBox digit value is present on the LibreNMS side and the
-    pattern round-trips."""
+    """Distinct LibreNMS digit values form groups if all NetBox digits occur there, and the pattern round-trips."""
 
     def _fn(self):
         from netbox_librenms_plugin.views.sync.modules import AddBayTemplateView
@@ -5908,8 +5879,7 @@ class TestAddBayTemplateViewRegexMapping:
         assert "Fix Device Type" in html
 
     def test_returns_empty_when_device_present_but_lacks_add_modulebaytemplate_perm(self):
-        """When a viewer can't add bay templates, the badge is hidden so it doesn't
-        act as a dead-end control. The HTMX modal would only return 403 for them."""
+        """The badge stays hidden when the viewer lacks add_modulebaytemplate permission and the modal would return 403."""
         table = self._table_with_device(device_pk=42, can_add_module_bay_template=False)
         html = str(
             table._render_fix_bay_template_badge(
@@ -6079,11 +6049,7 @@ class TestVCNormalizationReportView:
 
 
 class TestVCNormalizationE2E:
-    """End-to-end: production code path (get_module_template_interface_names → detect_vc_normalization_noop).
-
-    Exercises the real regex against vendor-realistic name shapes without DB
-    fixtures. Catches regressions if either piece changes how it processes names.
-    """
+    """The production normalization path applies its real regex to vendor name shapes from end to end."""
 
     @staticmethod
     def _device(vc_position=3, vc_id=11, member_positions=(1, 2, 3, 4)):
@@ -6272,11 +6238,7 @@ class TestPredictModuleInterfaceNamesSignal:
             predict_module_interface_names.disconnect(second)
 
     def test_failing_receiver_is_isolated(self, caplog):
-        """send_robust must isolate a raising receiver so adoption isn't broken.
-
-        A buggy third-party receiver that raises is logged and skipped; a later
-        well-behaved receiver still applies, and the raw names survive if none do.
-        """
+        """A failing receiver is logged and isolated so a later receiver can still override the raw names."""
         import logging
 
         from django.dispatch import receiver
@@ -6490,13 +6452,7 @@ class TestUpdateModuleInterfaceRedirectServerKey:
 
 
 class TestStandaloneAdoptionAcrossEveryComponentType:
-    """Every component NetBox can adopt must be authorized through the change-scoped queryset.
-
-    The adoption helper walks eight component specs, and each one resolves its template name
-    through ``_module_template_adoption_name``. Only interfaces and module bays were covered, so a
-    regression in any of the other six -- or in the version-dependent name resolution -- went
-    unnoticed. Drive all eight against the real ORM.
-    """
+    """All eight adoptable component types resolve names and use the change-scoped queryset against the real ORM."""
 
     BAY_POSITION = "A1"
 

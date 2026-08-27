@@ -473,12 +473,7 @@ class TestInterfaceVlanSync:
 
 
 class TestInterfaceCssClassGroupMatching:
-    """
-    Tests for group-aware VLAN CSS class functions in utils.py.
-
-    Verifies that VLAN group mismatch (same VID but different group) produces
-    orange (text-warning) instead of green (text-success).
-    """
+    """Verify that VLAN group mismatches use warning CSS instead of success CSS for matching VIDs."""
 
     # -- get_untagged_vlan_css_class --
 

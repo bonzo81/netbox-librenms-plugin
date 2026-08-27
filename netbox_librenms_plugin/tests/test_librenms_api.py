@@ -356,12 +356,7 @@ class TestLibreNMSAPIConnection:
 
 
 class TestLibreNMSAPIHttpMethods:
-    """
-    CRITICAL: Verify each API method uses the correct HTTP verb.
-
-    These tests prevent regression bugs where HTTP methods are accidentally
-    changed during refactoring (e.g., GET changed to DELETE).
-    """
+    """Verify that each API method keeps its required HTTP verb during refactoring."""
 
     @patch("netbox_librenms_plugin.librenms_api.requests.delete")
     @patch("netbox_librenms_plugin.librenms_api.requests.post")
@@ -1585,11 +1580,7 @@ class TestLibreNMSAPIErrorHandling:
 
     @patch("netbox_librenms_plugin.librenms_api.requests.get")
     def test_http_500_error_handling(self, mock_get, mock_librenms_config):
-        """A 500 says the server failed, not that the device is absent.
-
-        The status is read from the response rather than through raise_for_status(), so this
-        reaches the 500 branch instead of falling through to the malformed-payload branch.
-        """
+        """Verify that direct status handling classifies a 500 as server failure, not a missing device or malformed payload."""
         mock_get.return_value.status_code = 500
         mock_get.return_value.json.return_value = {
             "status": "error",
@@ -2350,14 +2341,7 @@ class TestResolvePortRelationships:
     """Tests for LibreNMSAPI.resolve_port_relationships()."""
 
     def test_resolves_a_verbatim_live_port_stack_entry(self, mock_librenms_api):
-        """A port_stack entry exactly as a live LibreNMS returns it must resolve.
-
-        Pinned to a real response, not a hand-written one: LibreNMS serves the ports_stack rows
-        verbatim, so an entry carries id/device_id/high_ifIndex/high_port_id/low_ifIndex/
-        low_port_id/ifStackStatus. The API docs advertise port_id_high/port_id_low instead, and
-        every synthetic fixture in this file once used that spelling, so production and its tests
-        agreed on a shape no server sends and every relationship resolved to nothing.
-        """
+        """Verify that a live port_stack row with high_port_id and low_port_id resolves correctly."""
         ports = [
             {"port_id": 6477, "ifName": "em0", "ifType": "ethernetCsmacd"},
             {"port_id": 6482, "ifName": "em0.0", "ifType": "propVirtual"},
@@ -2393,12 +2377,7 @@ class TestResolvePortRelationships:
         assert result["sub_interfaces"] == {}
 
     def test_nameless_lag_aggregate_resolved_by_iftype(self, mock_librenms_api):
-        """A nameless aggregate (ifType=ieee8023adLag, empty ifName/ifDescr) still resolves via ifType.
-
-        ifType alone authoritatively classifies a LAG aggregate, so a valid port_id with no name must
-        stay in the by_id lookup — otherwise the port_stack pair referencing it is skipped and the
-        member's LAG membership is silently dropped.
-        """
+        """Verify that ifType identifies a nameless LAG aggregate and preserves its membership."""
         ports = [
             {"port_id": 201, "ifName": "1/1/c1/1", "ifType": "ethernetCsmacd"},
             {"port_id": 202, "ifName": "", "ifDescr": "", "ifType": "ieee8023adLag"},  # nameless aggregate
@@ -3017,13 +2996,7 @@ class TestResolvePortRelationships:
         assert result["lag_members"] == {101: 102}
 
     def test_non_string_ifname_does_not_crash_and_resolves_by_iftype(self, mock_librenms_api):
-        """A non-string ifName must not crash the downstream string ops; membership still resolves by ifType.
-
-        The member's malformed name is irrelevant to LAG classification — the aggregate (502) is
-        authoritatively a LAG via ifType, and the port_stack pairs 501 to it — so the membership
-        resolves. The no-crash guarantee holds because every name op iterates _port_names (which
-        skips the non-string), never the raw ifName.
-        """
+        """Verify that a non-string member ifName does not block LAG resolution through the aggregate ifType."""
         ports = [
             {"port_id": 501, "ifName": 12345, "ifType": "ethernetCsmacd"},  # malformed: non-string
             {"port_id": 502, "ifName": "lag9", "ifType": "ieee8023adLag"},

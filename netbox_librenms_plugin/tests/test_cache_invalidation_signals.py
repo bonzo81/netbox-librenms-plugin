@@ -473,13 +473,7 @@ class TestABatchSurvivesASavepointRollback:
     """A rolled-back inner block must not suppress a later, real write."""
 
     def test_a_write_after_a_rolled_back_savepoint_still_invalidates(self, django_capture_on_commit_callbacks):
-        """The end of a batch cannot be inferred from the commit queue being empty.
-
-        A savepoint rollback removes only the callbacks registered inside it, so an unrelated
-        callback queued further out keeps the queue non-empty. Treating that as "the batch is
-        still live" would reuse a batch whose own hook has been discarded, and the device
-        written to after the rollback would never be cleaned up.
-        """
+        """Verify that an unrelated outer commit callback does not hide a discarded batch hook."""
         from django.db import transaction
 
         from netbox_librenms_plugin.tests.conftest import install_module, make_device, make_module_bay
@@ -517,12 +511,7 @@ class TestARolledBackInnerWriteIsNotFlushed:
     """An uncommitted write must not clear anybody's cache."""
 
     def test_an_inner_rollback_does_not_invalidate_its_own_device(self, django_capture_on_commit_callbacks):
-        """A batch belongs to the savepoint scope that opened it.
-
-        Django removes only the callbacks registered inside a rolled-back savepoint. An owner
-        recorded there has to ride that block's own hook, or an enclosing batch would carry it
-        to commit and clear the caches of a device whose write never landed.
-        """
+        """Verify that an inner rollback cannot add its uncommitted owner to an outer invalidation batch."""
         from django.db import transaction
 
         from netbox_librenms_plugin.tests.conftest import install_module, make_device, make_module_bay
@@ -640,12 +629,7 @@ class TestAWriteOutsideATransactionStillInvalidates:
     """Autocommit runs the commit hook immediately, so the batch must be filled first."""
 
     def test_an_autocommit_write_invalidates_its_owner(self):
-        """Outside an atomic block Django runs on_commit inline, not at some later commit.
-
-        Registering the hook before recording the owner therefore flushes an empty batch and
-        the write is never cleaned up. Every other test here wraps its writes in
-        transaction.atomic(), which is exactly why none of them can see this.
-        """
+        """Verify that an autocommit write records its owner before Django runs ``on_commit`` inline."""
         from netbox_librenms_plugin.tests.conftest import install_module, make_device, make_module_bay
 
         device = make_device("autocommit-write", librenms_cf={SERVER_KEY: 7})
@@ -664,17 +648,7 @@ class TestAWriteOutsideATransactionStillInvalidates:
 
 
 class TestEverySchedulingViewTakesTheClaim:
-    """A view that schedules a transition must also claim its page.
-
-    Without the claim, write signals invalidate the synchronization subject for the view's own write,
-    deleting the source snapshot the transition preserves and the response is about to render.
-    Missing the mixin is silent, so it is checked rather than remembered.
-
-    The claim is read from the imported class, because issubclass answers it the way Python
-    does: an alias, a dotted base, a shadowed import or a repeated class name cannot hide it.
-    Only the call is read from the source, because a call site is a source-level fact. The
-    names that count as a call are derived from the one real scheduler rather than listed.
-    """
+    """Verify that each imported scheduling view claims its page, including aliases and scheduler wrappers."""
 
     SCHEDULER = "schedule_request_cache_mutation"
 
@@ -691,20 +665,13 @@ class TestEverySchedulingViewTakesTheClaim:
         ]
 
     def _module_source(self, module):
-        """Return a module's source, read from its file.
-
-        Not inspect.getsource: an empty file has no lines, and on Python 3.12 that is an
-        OSError rather than an empty string. views/sync/__init__.py is empty.
-        """
+        """Read a module's source from its file so an empty Python 3.12 module returns an empty string."""
         from pathlib import Path
 
         return Path(module.__file__).read_text()
 
     def _view_classes(self):
-        """Return every class the views package defines, nested ones included.
-
-        A class is taken from the module that defines it, so a re-export is not a second entry.
-        """
+        """Return every class defined in the views package, including nested classes but excluding re-exports."""
         import inspect
 
         found = set()
@@ -725,12 +692,7 @@ class TestEverySchedulingViewTakesTheClaim:
                 yield from self._nested_classes(obj)
 
     def _scheduler_names(self, trees=None):
-        """Return the scheduler and every name in the views package that reaches it.
-
-        Wrapping the scheduler in a helper is an established pattern here, so the set is derived
-        from the one real scheduler instead of listed: a new wrapper, an import alias or an
-        assignment cannot fall outside a set it builds itself.
-        """
+        """Derive the scheduler and every package name that reaches it through wrappers, aliases, or assignments."""
         import ast
 
         if trees is None:
@@ -846,12 +808,7 @@ class TestEverySchedulingViewTakesTheClaim:
         assert not unclaimed, "these views schedule a transition without claiming their page: " + ", ".join(unclaimed)
 
     def test_server_guarded_scheduling_views_drop_the_claim_without_a_server(self):
-        """A guarded scheduler must not suppress the write signal when its guard is false.
-
-        This is a drift alarm over the shapes present today, not a proof. It cannot see a view
-        that returns early on a missing server key. The behaviour is proven end to end in
-        test_sync_cache_consistency.py.
-        """
+        """Check current guarded scheduler shapes for claim release; an end-to-end test proves early returns."""
         names = self._scheduler_names()
         guarded = {
             cls
@@ -903,11 +860,7 @@ class TestEverySchedulingViewTakesTheClaim:
         )
 
     def test_the_check_can_actually_find_a_scheduling_view(self):
-        """Positive control, so an import or parse change cannot make the check vacuous.
-
-        These six name the views themselves rather than a count, and between them they reach the
-        scheduler directly, through the module wrapper and through the winner wrapper.
-        """
+        """Verify the scan finds six known views across direct, module-wrapper, and winner-wrapper scheduler calls."""
         names = self._scheduler_names()
         scheduling = {cls.__qualname__ for cls in self._view_classes() if self._schedules(cls, names)}
         expected = {

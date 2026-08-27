@@ -205,8 +205,7 @@ class TestGetLibreNMSIdDictServerKey:
                 mock_get_id.assert_called_once_with(obj, "default", auto_save=False)
 
     def test_get_librenms_id_zero_is_valid(self):
-        """Regression: librenms_id == 0 must be returned directly without falling through to API lookup.
-        The code uses 'is not None' guards, so 0 is a valid cached/stored ID."""
+        """Verify that zero remains a valid stored LibreNMS ID and does not trigger an API lookup."""
         api = _make_api()
 
         obj = MagicMock()

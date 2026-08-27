@@ -43,15 +43,7 @@ def get(view, request, **kwargs):
 
 
 def grant(user, action, model, *, constraints=None, name=None):
-    """Grant *user* ``action`` on *model* through a real ObjectPermission.
-
-    Pass *constraints* to make the grant a CONSTRAINED one: the model-level ``has_perm`` the
-    gate asks (no instance) still passes, while ``restrict()`` narrows to the matching rows.
-    That is the only way to reproduce the authorization hole the object-scoped lookups close.
-
-    Returns:
-        The user re-read from the DB, so the permission cache reflects the new grant.
-    """
+    """Grant a real object permission, optionally constrained, and return the user with a fresh permission cache."""
     from core.models import ObjectType
     from django.contrib.auth import get_user_model
     from users.models import ObjectPermission
@@ -67,19 +59,7 @@ def grant(user, action, model, *, constraints=None, name=None):
 
 
 def make_user_with_perms(username, perm_specs, *, constraints=None, plugin_write=True):
-    """Create a real non-superuser granted exactly *perm_specs*.
-
-    Args:
-        username: Username for the new user.
-        perm_specs: Iterable of ``(action, model)`` pairs to grant.
-        constraints: Applied to every grant in *perm_specs*, making them constrained (see
-            :func:`grant`). The plugin grants below stay unconstrained.
-        plugin_write: Also grant the plugin's view+change permissions, which every write view
-            demands before it looks at the object permissions. Set False to exercise that gate.
-
-    Returns:
-        The user, re-read so its permission cache is current.
-    """
+    """Create a real non-superuser with exact, optionally constrained grants and optional plugin write access."""
     from django.apps import apps
     from django.contrib.auth import get_user_model
 
@@ -107,23 +87,7 @@ def plugin_perms():
 
 
 def make_request(method="post", data=None, *, user=None, path="/", **factory_kwargs):
-    """Build a real Django request with a real user and a working messages framework.
-
-    ``RequestFactory`` skips the session and message middleware, so both are attached here:
-    without them ``messages.error(request, ...)`` raises instead of recording, and a test would
-    have to patch the whole ``messages`` module (which then proves nothing about what the user
-    is actually told).
-
-    Args:
-        method: ``"post"``, ``"get"`` or any other RequestFactory method name.
-        data: Request body / query data.
-        user: The request user; defaults to a real superuser.
-        path: Request path.
-        **factory_kwargs: Passed through to the RequestFactory method (e.g. ``content_type``).
-
-    Returns:
-        The request, with ``request._messages`` readable via :func:`messages_on`.
-    """
+    """Build a real Django request with a user, session, and working message storage."""
     from django.contrib.messages.storage.fallback import FallbackStorage
     from django.contrib.sessions.backends.db import SessionStore
     from django.test import RequestFactory
@@ -136,12 +100,7 @@ def make_request(method="post", data=None, *, user=None, path="/", **factory_kwa
 
 
 def _message_level(name):
-    """Map ``"error"``/``"warning"``/``"info"``/``"success"`` to the messages constant.
-
-    Levels, not tag strings: NetBox remaps ERROR's tag to ``"danger"``, so filtering on
-    ``level_tag == "error"`` silently matches nothing and every assertion built on it passes
-    vacuously.
-    """
+    """Map a message name to its level constant because NetBox remaps error tags to ``danger``."""
     from django.contrib import messages
 
     levels = {
@@ -180,12 +139,7 @@ def missing_pk(model, offset=1000):
 
 
 def trusted_module_inventory_payload(device, inventory, *, server_key="default", librenms_id=1):
-    """Build a module inventory payload bound to the device's current LibreNMS mapping.
-
-    Positive-path tests must use the same device fingerprint that the production cache writer
-    stores. This helper supports real NetBox devices and the older real-shape substitutes still
-    used by narrow module tests.
-    """
+    """Build a module inventory payload bound to the device's verified current LibreNMS mapping."""
     from netbox_librenms_plugin.utils import get_librenms_device_id, set_librenms_device_id
 
     if not isinstance(device.custom_field_data, dict):
@@ -209,15 +163,7 @@ def trusted_module_inventory_payload(device, inventory, *, server_key="default",
 
 
 def assert_locked_before_update(captured, table):
-    """Assert *table* was locked with ``SELECT ... FOR UPDATE`` before it was updated.
-
-    Asserting only that a lock exists passes even when the lock runs after the write, which is
-    the ordering the lock is there to guarantee.
-
-    Args:
-        captured: A ``CaptureQueriesContext`` that wrapped the code under test.
-        table: Database table name, for example ``"ipam_ipaddress"``.
-    """
+    """Verify that exactly one ``SELECT ... FOR UPDATE`` locks *table* before its update."""
     statements = [q["sql"] for q in captured.captured_queries]
     quoted_table = f'"{table.lower()}"'
     locks = [i for i, sql in enumerate(statements) if quoted_table in sql.lower() and "for update" in sql.lower()]
@@ -236,22 +182,7 @@ def assert_locked_before_update(captured, table):
 
 
 def make_view(view_class, request=None, *, librenms_api=None, **attrs):
-    """Instantiate *view_class* for real and bind *request* the way ``dispatch()`` does.
-
-    Only the LibreNMS client is substitutable: it is the one true external boundary these views
-    touch. Everything else (permission gate, ``restrict()``, ORM, messages) stays real.
-
-    Args:
-        view_class: The view class under test.
-        request: Request to bind; defaults to a superuser POST.
-        librenms_api: Stub bound as ``_librenms_api``. Defaults to a MagicMock whose
-            ``server_key`` is ``"default"``. Pass ``False`` to leave the attribute unset so the
-            lazy real-client construction runs.
-        **attrs: Extra attributes set on the view after setup.
-
-    Returns:
-        The view instance, with ``self.request`` bound.
-    """
+    """Instantiate and bind a real view while substituting only its external LibreNMS client."""
     from unittest.mock import MagicMock
 
     view = view_class()

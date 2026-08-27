@@ -155,12 +155,7 @@ def reverse_fragment(url_name):
 
 
 class TestSyncPageMisconfiguredDefaultDegrades:
-    """A misconfigured default server must degrade the sync page, not 500 it.
-
-    resolve_get_render_server_key deliberately swallows the construction error
-    (build_librenms_api(None) → None); get() must not re-enter the lazy
-    librenms_api property, which would reconstruct LibreNMSAPI() and re-raise it.
-    """
+    """Verify that a broken default degrades the sync page without lazy API client reconstruction or a 500."""
 
     def test_get_with_broken_default_renders_degraded_page(self):
         from django.contrib.auth import get_user_model
@@ -196,14 +191,7 @@ class TestSyncPageMisconfiguredDefaultDegrades:
         assert "not configured correctly" in response.content.decode()
 
     def test_get_with_stale_server_key_and_broken_default_renders_degraded_page(self):
-        """A stale ?server_key combined with a broken default must also degrade, not 500.
-
-        The unresolved path deliberately skips get()'s degraded-render return (the page
-        must still render, e.g. the migrated banner scoped to the requested key), so it
-        reaches get_context_data() with NO client bound. Every server_key read there must
-        use the resolved render key / active_server_key fallback — a lazy librenms_api
-        touch reconstructs LibreNMSAPI() and re-raises the misconfiguration as a 500.
-        """
+        """Verify that a stale server key with a broken default renders through the active key fallback without a 500."""
         from django.contrib.auth import get_user_model
         from django.contrib.messages.storage.fallback import FallbackStorage
 
@@ -324,12 +312,7 @@ class TestUpdateDeviceLocationRebindsServer:
 
 @pytest.mark.django_db
 class TestInterfaceSyncRefreshButtonDeduped:
-    """The Refresh Interfaces button is rendered ONCE with the object-type-correct hx-post URL.
-
-    The device and VM buttons previously duplicated the whole button + hx-vals verbatim; the
-    template now resolves the URL per type and renders a single button, so the shared hx-vals
-    (pagination + server_key forwarding) lives in one place.
-    """
+    """Verify that one Refresh Interfaces button uses the object-specific URL and shared pagination and server values."""
 
     def _render(self, obj):
         from unittest.mock import MagicMock

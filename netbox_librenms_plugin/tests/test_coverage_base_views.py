@@ -741,12 +741,7 @@ class TestBaseCableTableViewEnrichLocalPort:
         assert "local_port_url" not in link
 
     def test_oob_row_never_binds_a_host_interface(self):
-        """A merged OOB LLDP row (context-only) must not resolve against the HOST device.
-
-        Its local port lives on the OOB CONTROLLER; a shared name (or colliding stored
-        librenms_id) would otherwise bind a host interface and render a wrong
-        local_port_url + cable state — even though sync and actions already refuse OOB rows.
-        """
+        """A merged OOB context row cannot bind a host interface with a shared name or LibreNMS ID."""
         view = self._make_view()
         obj = make_device("cable-dev-oob-collide")
         make_interface(obj, "eth0")  # host interface sharing the OOB controller's port name
@@ -2086,15 +2081,7 @@ class TestBaseInterfaceTableViewPost:
 
 @pytest.mark.django_db
 class TestBaseInterfaceTablePostCoercesLibreNMSId:
-    """post() must coerce whatever get_librenms_id() hands back before trusting it.
-
-    get_librenms_id() resolves through three paths — the librenms_id custom field, the
-    device-id cache, and live API discovery. The custom-field and discovery paths already
-    coerce (reject bool/zero/non-numeric), but the *cache* path returns its value verbatim.
-    A poisoned cache holding ``True`` therefore reaches the view as a truthy non-int that
-    ``int(True)`` would silently turn into device id ``1`` — fetching a stranger's ports.
-    The view must fail closed on it BEFORE get_ports().
-    """
+    """post() rejects a cached True device ID before get_ports() can fetch device 1."""
 
     def _real_api(self):
         from netbox_librenms_plugin.librenms_api import LibreNMSAPI
@@ -3828,14 +3815,7 @@ class TestSingleCableVerifyViewPermissionGate:
 # ---------------------------------------------------------------------------
 @pytest.mark.django_db
 class TestCableLinksDataCoercesLibreNMSId:
-    """get_links_data() must coerce whatever get_librenms_id() hands back before fetching links.
-
-    The id-cache path returns its value verbatim (the custom-field/discovery paths already
-    coerce), so a poisoned cache holding ``True`` reaches the cables view as a truthy non-int
-    that ``int(True)`` would silently turn into device id ``1`` — fetching a stranger's links
-    and ports. The view must fail closed on it BEFORE get_device_links()/get_ports(), mirroring
-    the interfaces-POST contract (TestBaseInterfaceTablePostCoercesLibreNMSId).
-    """
+    """get_links_data() rejects a cached True device ID before it fetches device 1 links or ports."""
 
     def _real_api(self):
         from netbox_librenms_plugin.librenms_api import LibreNMSAPI
@@ -3888,12 +3868,7 @@ class TestCableLinksDataCoercesLibreNMSId:
 
 @pytest.mark.django_db
 class TestIPSyncFetchFailureKeepsMoveCard:
-    """On a LibreNMS fetch failure the IP-sync error re-render still surfaces movable_ips.
-
-    The per-row "Move IP addresses to <winner>" moves are pure NetBox operations, so a migrated
-    donor must keep the move card when LibreNMS is briefly unreachable — the card is gated on
-    ip_sync.movable_ips, which every other exit provides.
-    """
+    """A LibreNMS fetch failure keeps the NetBox-only IP move card for a migrated donor."""
 
     def _view(self):
         from netbox_librenms_plugin.views.object_sync.devices import DeviceIPAddressTableView
@@ -3941,11 +3916,7 @@ class TestIPSyncFetchFailureKeepsMoveCard:
 
 @pytest.mark.django_db
 class TestIPSyncRebindFailureKeepsMoveCard:
-    """On a stale/unconfigured POSTed server_key the IP-sync rebind-failure re-render must still surface movable_ips — the same move card the fetch-failure and success branches keep.
-
-    The card is gated on ip_sync.movable_ips; omitting it (as this branch did) made a migrated
-    donor's "Move IP addresses to <winner>" card vanish whenever the POSTed server_key went stale.
-    """
+    """A stale server key rebind failure keeps the migrated donor's NetBox-only IP move card."""
 
     def _view(self):
         from netbox_librenms_plugin.views.object_sync.devices import DeviceIPAddressTableView
@@ -3998,12 +3969,7 @@ class TestIPSyncRebindFailureKeepsMoveCard:
 
 @pytest.mark.django_db
 class TestRenderSyncPartialInjectsWritePermission:
-    """render_sync_partial injects has_write_permission from the request user at the shared chokepoint, so a migrated donor's 'Move to winner' controls render on every HTMX re-render, not just a full page reload.
-
-    Only modules_view (which renders directly) passed the flag; the interface/IP branches route
-    through render_sync_partial and omitted it, silently collapsing every move button to the
-    disabled read-only branch even for a user with change permission.
-    """
+    """render_sync_partial keeps migrated-donor move controls enabled on each permitted HTMX re-render."""
 
     def _ip_view(self, *, superuser):
         from core.models import ObjectType
@@ -4102,12 +4068,7 @@ class TestVCInterfaceRenderMemberResolutionNotPerPort:
         return view
 
     def test_render_query_count_invariant_to_port_count(self):
-        """Rendering 2 vs 8 cached ports issues the SAME number of queries (no per-port member lookup).
-
-        get_virtual_chassis_member was the only per-port DB query in the cached-render loop; passing
-        the prebuilt {vc_position: member} map makes it O(1), so the query count no longer scales
-        with the number of ports.
-        """
+        """Rendering two or eight cached ports issues the same query count without per-port member lookups."""
         from dcim.models import Interface
         from django.core.cache import cache as dj_cache
         from django.db import connection
@@ -4156,13 +4117,7 @@ class TestVCInterfaceRenderMemberResolutionNotPerPort:
 
 @pytest.mark.django_db
 class TestEnrichPortLagParentNameFallback:
-    """Relationship name fallback must honor the user-selected name field.
-
-    The displayed LAG/parent name comes from port.get(interface_name_field) and
-    The relationship signal already scans {ifName, ifDescr, interface_name_field}; the
-    match fallback (no stored librenms_id on either side) compared ifName/ifDescr
-    only, so an ifAlias-driven deployment misreported a genuine match as mismatch.
-    """
+    """LAG and parent name fallbacks honor the selected interface name field when they classify matches."""
 
     def test_lag_match_via_interface_name_field_alias(self):
         from netbox_librenms_plugin.interface_relationships import RelationshipMaps, enrich_port_relationships
@@ -4212,10 +4167,7 @@ class TestEnrichPortLagParentStatusSymmetry:
     """LAG and parent must classify sync status identically across all 5 branches (the invariant the shared helper guarantees)."""
 
     def _status(self, kind, *, lnms_has_rel, nb_related, n):
-        """Enrich a fresh port for ONE relationship kind and return its sync status.
-
-        kind: "lag" | "parent". nb_related: None | "matching" | "nonmatching".
-        """
+        """Enrich one LAG or parent relationship and return its sync status."""
         from netbox_librenms_plugin.interface_relationships import RelationshipMaps, enrich_port_relationships
         from netbox_librenms_plugin.utils import set_librenms_device_id
 

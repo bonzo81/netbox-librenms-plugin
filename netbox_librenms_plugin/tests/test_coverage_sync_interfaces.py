@@ -1556,10 +1556,7 @@ class TestInterfaceContextOOBRows:
         assert source.parent_id is None
 
     def test_fresh_data_renders_without_reading_cache(self):
-        """On the OOB-ports-fetch-failure path the (partial) cache is deleted, so
-        get_context_data must render from the in-memory fresh_data snapshot instead of
-        reading the now-empty cache — otherwise the table renders empty under a
-        "showing host interfaces" banner."""
+        """Fresh data renders the partial OOB snapshot after the failed fetch deletes its cache entry."""
         view = self._make_view()
         obj = self._host_with_idrac()
         fresh = {"ports": [{"ifName": "idrac0", "_source": "oob", "port_id": 999}]}
@@ -1980,13 +1977,7 @@ class TestInterfaceContextVirtualChassisOwner:
 
 class TestSyncInterfacesViewPost:
     def test_integrity_error_at_the_outer_commit_is_reported_not_a_500(self):
-        """An IntegrityError escaping the outer atomic must redirect with an error, not propagate.
-
-        The relationship pass catches IntegrityError around an inner savepoint. Postgres validates
-        Django's DEFERRABLE INITIALLY DEFERRED foreign keys at the OUTERMOST commit, so a
-        concurrently deleted related row surfaces past that handler. Injected here because a real
-        deferred violation needs a concurrent deletion inside the commit window.
-        """
+        """A deferred foreign-key IntegrityError at the outer atomic commit redirects instead of returning a 500."""
         from types import SimpleNamespace
 
         from django.core.cache import cache
@@ -3581,12 +3572,7 @@ class TestSyncInterfacesViewPost:
 
 
 class TestSyncInterfacesViewServerKeyAndRedirect:
-    """Issue #107: interface_name_field must be URL-escaped in the post-sync redirect.
-
-    The POSTed server_key rebind / fail-closed behavior (#108/#109) is covered by
-    test_coverage_sync_views.TestSyncInterfacesViewServerRebind, which exercises the same
-    rebind_api_for_server seam SyncInterfacesView.post actually uses.
-    """
+    """Post-sync redirect URLs escape interface_name_field values."""
 
     def _make_view(self):
         from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
@@ -4084,12 +4070,7 @@ class TestSyncInterfacesViewSyncInterfaceVlans:
         assert list(interface.tagged_vlans.all()) == [existing_vlan]
 
     def test_non_numeric_cached_vid_is_dropped_instead_of_aborting_the_sync(self):
-        """A non-numeric VLAN id in the cached payload must not raise out of the sync.
-
-        ``get_cached_ports_data`` only checks that each port is a dict, so the value reaches the
-        int() coercions. A ValueError here aborts the enclosing sync transaction after other
-        rows have already applied their changes.
-        """
+        """A nonnumeric cached VLAN ID is dropped without aborting the sync or a valid VLAN update."""
         from ipam.models import VLAN
 
         from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
@@ -4309,12 +4290,7 @@ class TestSyncLagAndParentRelationships:
         assert hidden_agg.type == "1000base-t"
 
     def test_non_dict_relationships_fails_soft_not_attributeerror(self, db):
-        """
-        A truthy but non-dict ``relationships`` (a list from a corrupt / partial-write cache) must
-        fail soft. The local ``if not relationships`` guard only catches FALSY values, so the
-        unfixed bulk path called ``relationships.get(...)`` on the list and raised AttributeError;
-        the shared ``normalize_relationship_maps`` coerces it to ``{}`` so the sync is skipped.
-        """
+        """A truthy non-dict relationship cache value fails soft instead of raising AttributeError."""
         device = self._make_device()
         member = self._iface(device, "Gi0/2", 11)
         ports_data = [{"ifName": "Gi0/2", "port_id": 11}]
@@ -5154,13 +5130,7 @@ class TestPromoteLagAggregateShared:
 
 @pytest.mark.django_db
 class TestRelationshipSyncObjectScope:
-    """The LAG/parent endpoints write both ends, so their resolution must run through a restricted
-    queryset.
-
-    NetBoxObjectPermissionMixin asks ``has_perm`` without an instance, so a CONSTRAINED
-    ``change_interface`` grant clears the POST gate; an unrestricted interface index would then let
-    it set ``lag``/``parent`` on interfaces it cannot see.
-    """
+    """LAG and parent endpoint resolution restricts both interfaces to the user's object scope."""
 
     @staticmethod
     def _writer(username, specs):

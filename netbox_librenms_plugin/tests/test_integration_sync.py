@@ -76,13 +76,7 @@ class TestLibreNMSAPIPortsFetch:
     """LibreNMSAPI.get_ports() correctly parses mock server responses."""
 
     def test_get_ports_returns_dict_with_ports_key(self, mock_server):
-        """
-        get_ports() returns a parsed dict and sends the required query parameters.
-
-        A callable route is used so we can capture the outgoing query string and
-        assert that both the ``columns`` field list and ``with=vlans`` are present —
-        if either is ever dropped, the sync page will silently lose data.
-        """
+        """Verify that get_ports returns parsed ports and sends both columns and with=vlans query parameters."""
         captured_query: dict = {}
         ports_body = {
             "status": "ok",
@@ -312,12 +306,7 @@ class TestLibreNMSAPIInventory:
 
 
 class TestLibreNMSAPIDiscovery:
-    """
-    LibreNMSAPI device-ID discovery: lookup by IP and hostname fallback.
-
-    Covers get_device_id_by_ip(), get_device_id_by_hostname(), and the
-    get_librenms_id() fallback chain (IP → DNS name → hostname).
-    """
+    """Verify device discovery by IP, DNS name, and hostname fallback."""
 
     _DEVICE_RESPONSE = {
         "status": "ok",

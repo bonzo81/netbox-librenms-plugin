@@ -175,18 +175,10 @@ class TestGenericViewPermissionWiring:
 
 
 class TestRequiredObjectPermissionsWiring:
-    """
-    POST-only sync views that modify NetBox objects must declare required_object_permissions
-    and include the NetBoxObjectPermissionMixin (and LibreNMSPermissionMixin) in their MRO."""
+    """POST-only sync views declare required object permissions and include both permission mixins."""
 
     def _assert_has_mixins(self, view_class):
-        """
-        Assert that *view_class* includes both permission mixins in its MRO.
-
-        Checking the MRO (not just runtime behaviour) guarantees that the permission
-        enforcement is wired at the class level — a missing mixin would silently skip
-        all permission checks even if the tests otherwise pass.
-        """
+        """The view MRO includes both permission mixins so it cannot skip class-level permission enforcement."""
         from netbox_librenms_plugin.views.mixins import LibreNMSPermissionMixin, NetBoxObjectPermissionMixin
 
         assert NetBoxObjectPermissionMixin in view_class.__mro__, (
@@ -314,9 +306,7 @@ class TestRequiredObjectPermissionsWiring:
 
 
 class TestViewPropertyLazyInit:
-    """
-    Verify that _librenms_api starts as None (lazy, not eager-init) and that
-    the librenms_api property descriptor exists on the class."""
+    """The LibreNMS API starts as None, and its property descriptor exists on the class."""
 
     def test_librenms_api_mixin_property_is_defined_on_class(self):
         from netbox_librenms_plugin.views.mixins import LibreNMSAPIMixin
@@ -336,12 +326,7 @@ class TestViewPropertyLazyInit:
         assert dummy._librenms_api is None
 
     def test_sync_interfaces_has_librenms_api_property_via_class(self):
-        """BaseLibreNMSSyncView must expose librenms_api through its MRO.
-
-        SyncInterfacesView gains LibreNMSAPIMixin in the view-fixes PR; on the
-        current upstream/develop baseline we verify the property via
-        BaseLibreNMSSyncView, which inherits the mixin unconditionally.
-        """
+        """BaseLibreNMSSyncView exposes librenms_api through its MRO on the current upstream baseline."""
         from netbox_librenms_plugin.views.base.librenms_sync_view import BaseLibreNMSSyncView
 
         assert any("librenms_api" in vars(cls) for cls in BaseLibreNMSSyncView.__mro__)
@@ -500,45 +485,7 @@ class TestSingleCableVerifyServerKey:
 
 
 class TestGatedViewsResolveThroughRestrictedQuerysets:
-    """A gated view must not resolve an object by raw pk.
-
-    NetBoxObjectPermissionMixin asks ``has_perm`` WITHOUT an instance, so a CONSTRAINED grant (a
-    site-scoped change_device, say) clears the gate; a plain ``get_object_or_404`` behind it then
-    reads or writes an object outside that grant. This is a RECURRING defect class — the same
-    finding has landed on the cable remote picker, the LAG/parent relationship sync, the
-    move-to-winner endpoints and the LibreNMS location push — so it is enforced mechanically here
-    instead of case by case.
-
-    "Gated" means the class declares ``required_object_permissions`` (by assignment or annotation,
-    statically or per-request) OR calls one of the ``require_*_permission(s)`` gates: a view gated
-    only by the plugin write permission reaches objects by raw pk just as easily.
-
-    Two forms are flagged: the PRIMARY lookup (``get_object_or_404(Model, pk=...)``) and the
-    SECONDARY one (``Model.objects.get(pk=...)`` / ``.filter(pk=...)``), which is where the same
-    defect kept reappearing after the primary lookups were scoped — on the module move/serial
-    endpoints, the interface delete targets and the OOB interface reuse.
-
-    What counts is where the id came from, and a deliberate re-lock must SAY so: call
-    ``relock_scoped_row(Model, pk=donor.oob_ip_id)``. That is not a ``<Model>.objects`` chain, so it
-    never reaches this rule, and every call is greppable. Scoping happened where the source object
-    was resolved, and restricting the re-read would instead demand a permission the view's gate
-    never required: ``restrict()`` returns ``none()`` for a user who lacks the model-level grant, so
-    a change-only caller would silently lose rows out of a lock set and be told the object "no
-    longer exists".
-
-    Until 2026-08 the rule instead exempted any ``pk=<expr>.<name>_id``. That read a SPELLING as
-    provenance: it silenced a legitimate re-lock keyed by a local, while waving through
-    ``Device.objects.get(pk=payload.device_id)`` on a request-derived object. Both directions were
-    wrong, so the heuristic is gone.
-
-    Scope and limits, stated because this rule is a lint and not a proof: a class gated only
-    through an INHERITED base is not seen (that is how the routed sync pages resolved any device by
-    pk; :class:`TestRoutedSyncPagesScopeTheirObject` now covers them behaviourally); module-level
-    helpers are not seen at all; a manager reached through an alias or ``_default_manager``, a
-    ``**kwargs``/``Q()`` lookup, or a natural-key lookup all pass; bulk ``pk__in=<collection>``
-    locks are not covered; and a ``.filter(pk=...).exists()`` probe is exempt because it reads no
-    object data and is how ``_required_perms_for_object`` decides WHICH permission to demand.
-    """
+    """Gated views use restricted querysets because a constrained grant does not grant access to every object."""
 
     GATE_CALLS = frozenset(
         {
@@ -678,12 +625,7 @@ class TestGatedViewsResolveThroughRestrictedQuerysets:
         return offenders
 
     def test_no_lexically_gated_view_resolves_an_object_by_raw_pk(self):
-        """No class declaring a gate in its own body resolves an object by raw pk.
-
-        This is a lint over one spelling, NOT proof that every view is scoped: a class gated only
-        through an inherited base is invisible here (see TestRoutedSyncPagesScopeTheirObject, which
-        covers the routed pages behaviourally), and so are module-level helpers.
-        """
+        """The lexical scan flags raw primary-key lookups in directly gated classes but does not cover inherited gates."""
         offenders = sorted(self._scan())
         assert not offenders, (
             "view(s) resolving an object by raw pk — a constrained grant clears the gate and then "
@@ -704,11 +646,7 @@ class TestGatedViewsResolveThroughRestrictedQuerysets:
         assert self._scan_tree(ast.parse(source), "<fixture>"), "the scan no longer flags a raw pk lookup"
 
     def test_the_scan_flags_a_tainted_attribute(self):
-        """Guard the guard: an `*_id` ATTRIBUTE is not proof of provenance.
-
-        The retired exemption accepted any ``pk=<expr>.<name>_id``, so a request-derived attribute
-        passed silently. Only relock_scoped_row marks a lookup as a deliberate re-lock now.
-        """
+        """The scan treats request-derived `*_id` attributes as tainted unless relock_scoped_row marks a re-lock."""
         import ast
 
         source = (
@@ -891,11 +829,7 @@ class TestGatedViewsResolveThroughRestrictedQuerysets:
 
 
 class TestPostedSelectionsFailClosed:
-    """Prevent an explicit object selection from degrading to an absent selection.
-
-    The scanner recognizes assignments from ``request.POST.get()`` and attribute-based local
-    helper calls. It does not model subscription reads, ``request.data``, or module-level callers.
-    """
+    """Explicit selections fail closed for request.POST.get assignments and local attribute helper calls."""
 
     LOOKUP_ERRORS = frozenset({"DoesNotExist", "ObjectDoesNotExist", "TypeError", "ValueError"})
 
@@ -1371,12 +1305,7 @@ class TestScopedRowLocks:
 
 @pytest.mark.django_db
 class TestGatedViewsRefuseOutOfScopeObjects:
-    """The behavioural half of the guard above: a CONSTRAINED grant must not reach another object.
-
-    One representative view per family (device-field write, owner-scoped sync, module install) is
-    driven through the REAL gate and the REAL restrict(), so the structural scan cannot pass while
-    the runtime behaviour is broken.
-    """
+    """Real gates and restricted querysets keep representative view families within constrained grants."""
 
     @staticmethod
     def _user(username, model_grants):
@@ -1958,21 +1887,7 @@ class TestGatedViewsRefuseOutOfScopeObjects:
 
 
 class TestCacheKeysAreServerScoped:
-    """Every production cache key is namespaced by the LibreNMS server it belongs to.
-
-    Multi-server scoping is the most repeated finding class in this stack's review history: a
-    reader or writer that drops ``server_key`` silently addresses the DEFAULT server's namespace,
-    so a refresh on server B renders an empty table, or one server's snapshot lands where another
-    server's readers look. Every site was fixed one at a time; this keeps the class from returning.
-
-    The helpers take ``server_key`` last, so a call is scoped when it passes the keyword or enough
-    positional arguments to reach it.
-
-    Scope and limits: only direct attribute calls are matched, so a helper passed as a callable and
-    invoked under a local name (``modules.py`` hands ``self.get_cache_key`` to
-    ``_resolve_single_install_binding_item``) escapes the scan, and a call forwarding ``**kwargs``
-    is taken on trust — its contents are not inspected. Both remain a review matter.
-    """
+    """Production cache-key calls include server_key so every LibreNMS server uses its own namespace."""
 
     # helper name -> number of positional args needed to reach server_key
     HELPERS = {"get_cache_key": 3, "get_last_fetched_key": 3, "get_vlan_overrides_key": 2}
@@ -2027,16 +1942,7 @@ class TestCacheKeysAreServerScoped:
 
 
 class TestRoutedSyncPagesScopeTheirObject:
-    """A routed sync page must not resolve an object the caller's grant excludes.
-
-    ``LibreNMSPermissionMixin`` extends Django's ``PermissionRequiredMixin``, which only checks the
-    model-level plugin permission and never evaluates NetBox object-permission constraints. The base
-    table views then resolve the URL pk with a raw ``get_object_or_404``, so a CONSTRAINED
-    ``dcim.view_device`` grant never narrows the lookup and the page renders any device by pk.
-
-    The static scan in :class:`TestGatedViewsResolveThroughRestrictedQuerysets` cannot see this: it
-    only considers classes that declare a gate lexically, and these classes declare none.
-    """
+    """Routed sync pages restrict URL lookups because plugin permissions do not enforce object constraints."""
 
     ROUTED_DEVICE_PAGES = (
         ("object_sync.devices", "DeviceInterfaceTableView"),

@@ -1328,19 +1328,7 @@ class TestMergeTransceiverDataPortIdentity:
 
 
 def _linecard_inventory():
-    """
-    Minimal inventory modelling the prod-lab03-sw4 scenario:
-
-    Linecard(slot 3)  [WS-X4908, module, top-level]
-      X2 Port 2       [container, no model]
-        Converter 3/2 [CVR-X2-SFP, other] — INSTALLED in NetBox
-          SFP slot     [container, no model]
-            GE3/11    [GLC-TE, port, serial=MTC213403BB]
-      X2 Port 4       [container, no model]
-        Converter 3/4 [CVR-X2-SFP, other] — NOT installed in NetBox
-          SFP slot 4  [container, no model]
-            GE3/15    [GLC-T, port, serial=MTC19330SQC]
-    """
+    """Return linecard inventory with installed and uninstalled sibling converters."""
     return [
         {
             "entPhysicalIndex": 1,
@@ -1468,21 +1456,7 @@ def _run_build_context_real(view, inventory_data, device):
 
 @pytest.mark.django_db
 class TestBayDepthScopeWithUninstalledParent:
-    """
-    Regression tests for the stale bays_by_depth bug.
-
-    Scenario: two converters at depth-1 share the same parent linecard.
-    Converter 3/2 IS installed (it has SFP child bays).
-    Converter 3/4 is NOT installed (no SFP child bays exist yet in NetBox).
-
-    Bug: bays_by_depth[2] is set when processing Converter 3/2, and NOT
-    cleared when processing Converter 3/4.  GigabitEthernet3/15 (depth-2
-    child of Converter 3/4) then inherits the stale SFP scope and gets
-    "Serial Mismatch" instead of "No Bay".
-
-    Fix: when a matched bay has no installed module, set bays_by_depth[depth+1]
-    to {} to prevent leakage to subsequent siblings at the same depth.
-    """
+    """Verify an uninstalled converter clears stale child-bay scope between sibling converters."""
 
     def _build_rows(self):
         view = _make_view()
@@ -1505,12 +1479,7 @@ class TestBayDepthScopeWithUninstalledParent:
         )
 
     def test_glc_t_under_uninstalled_converter_is_no_bay_not_serial_mismatch(self):
-        """
-        GLC-T under the uninstalled Converter 3/4 must show 'No Bay'.
-
-        Before the fix, bays_by_depth[2] retains the SFP scope from
-        Converter 3/2 and GigabitEthernet3/15 incorrectly gets 'Serial Mismatch'.
-        """
+        """Verify an uninstalled converter yields "No Bay" instead of a stale "Serial Mismatch"."""
         rows = self._build_rows()
         row = self._row(rows, "GigabitEthernet3/15")
         assert row is not None, "GigabitEthernet3/15 row not found"
@@ -1538,9 +1507,7 @@ class TestBayDepthScopeWithUninstalledParent:
         assert row["status"] == "Installed", f"Expected 'Installed' but got {row['status']!r} for installed converter"
 
     def test_no_stale_scope_across_multiple_siblings(self):
-        """
-        bays_by_depth is reset for EACH sibling, so the second uninstalled
-        converter does not leak into a third converter's children."""
+        """Verify child-bay scope resets for each sibling converter."""
         # Add a second installed converter at X2 Port 6 and verify its SFP
         # also shows correct status, unaffected by the reset for X2 Port 4.
         inventory = _linecard_inventory() + [
@@ -1609,28 +1576,7 @@ class TestBayDepthScopeWithUninstalledParent:
 
 
 def _prod_inventory_ws_x4908():
-    """
-    Inventory shape captured from a live Cisco WS-X4908-10GE linecard
-    (NetBox device prod-lab03-sw4 / LibreNMS production:7).
-
-    Real LibreNMS naming with anonymized indices:
-        chassis "Switch System"
-          container "Slot 3"               [no model]
-            module "Linecard(slot 3)"      [WS-X4908-10GE]
-              container "Port Container 3/2"   [no model, relPos=3]
-                other "Converter 3/2"          [CVR-X2-SFP, relPos=1]
-                  container "Port Container 3/11" [no model, relPos=9]
-                    port "GigabitEthernet3/11"   [GLC-TE, relPos=1]
-                  container "Port Container 3/12" [no model, relPos=10]
-                    port "GigabitEthernet3/12"   [GLC-T, relPos=1]
-
-    Distinct from `_linecard_inventory` whose container names ("Slot 3",
-    "X2 Port 2", "SFP slot") match NetBox bays directly and never exercise
-    the contrib regex paths.  This fixture forces matching through:
-      - `^Linecard\\(slot (\\d+)\\)$` regex for the linecard itself
-      - `^Port Container (\\d+)/(\\d+)$` regex for X2 slot resolution
-      - positional fallback for SFP transceivers inside the CVR
-    """
+    """Return Cisco WS-X4908-10GE inventory that exercises regex and positional bay matching."""
     return [
         {
             "entPhysicalIndex": 1,
@@ -1785,14 +1731,7 @@ class TestProdShapeWS4908Matching:
         )
 
     def test_ge_matches_sfp1_via_positional_fallback(self):
-        """
-        `GigabitEthernet3/11` (first port-container child of Converter 3/2) matches
-        `SFP 1` on the CVR module via positional fallback.
-
-        The positional fallback indexes by **sibling order within the parent CVR**,
-        not by global port number — `Port Container 3/11` is the 1st child of
-        Converter 3/2, so it maps to `SFP 1`.
-        """
+        """Verify positional fallback maps the first converter child to SFP 1 by sibling order."""
         rows = self._build_rows()
         row = self._row(rows, "GigabitEthernet3/11")
         assert row is not None, "GigabitEthernet3/11 row not found"
@@ -1812,15 +1751,7 @@ class TestProdShapeWS4908Matching:
         )
 
     def test_ge_no_bay_when_cvr_not_installed_in_netbox(self):
-        """
-        When the CVR is matched (X2 Port 2) but no module is installed there in
-        NetBox, the deeper SFP scope is empty and GE inside the CVR shows 'No Bay'.
-
-        This is the original confusion that triggered the reverted commit
-        (216fb84): 'GE3/11 doesn't match a bay' was actually 'CVR module not
-        installed in NetBox' — the fix is to install the module, not to walk
-        ancestor names looking for a wrong bay to land on.
-        """
+        """Verify a matched bay without an installed converter leaves its child transceiver with no bay."""
         rows = self._build_rows(cvr_installed=False)
         row = self._row(rows, "GigabitEthernet3/11")
         assert row is not None, "GigabitEthernet3/11 row not found"
@@ -1831,28 +1762,7 @@ class TestProdShapeWS4908Matching:
         assert row["status"] == "No Bay", f"Expected status='No Bay' but got {row['status']!r}"
 
     def test_no_cvr_entry_does_not_match_via_grandparent_walking(self):
-        """
-        Regression guard for reverted commit 216fb84.
-
-        Some Cisco devices expose only the Port-Container chain in ENTITY-MIB
-        (no Converter entry between linecard and port).  The hierarchy is:
-
-            Linecard(slot 3)
-              Port Container 3/2          [no model — skipped, no row]
-                Port Container 3/11       [no model — skipped, no row]
-                  GigabitEthernet3/11     [GLC-TE]
-
-        Because both intermediate containers are model-less, no row updates the
-        bay scope and GE3/11 inherits the linecard's bays as scope.  In this
-        scope:
-          - immediate-parent regex `Port Container 3/11` → `X2 Port 11` (no such bay)
-          - grandparent regex `Port Container 3/2` → `X2 Port 2` (the bay holding
-            the CVR module, not a transceiver bay)
-
-        Correct behavior: no bay match.  The reverted commit's "walk all
-        ancestors" logic resolved GE3/11 to `X2 Port 2`, semantically landing
-        the transceiver in the parent module's slot.
-        """
+        """Verify a transceiver does not match its converter bay through model-less ancestor containers."""
         no_cvr_inventory = [
             {
                 "entPhysicalIndex": 1,
@@ -1926,44 +1836,7 @@ class TestProdShapeWS4908Matching:
 
 
 class TestPositionalMatchScaffoldingChain:
-    """
-    Regression coverage for `_match_bay_by_position` walking through deep
-    Cisco IOS-XR scaffolding (module ancestors with model="N/A").
-
-    Captured shape from a Cisco ASR-9904 (NetBox device prod-lab03d-ra1.lab,
-    LibreNMS production:30) — TenGigE ports inside a 24x10GE linecard:
-
-        chassis "Rack 0"                        [ASR-9904]
-          container "Rack 0-Line Card Slot 0"   [no model]
-            module "0/0"                        [A9K-24X10GE-1G-TR]
-              module "0/0-Motherboard"          [N/A]
-                module "0/0-Slice 0"            [N/A]
-                  module "0/0-Slice 0 EZChip"   [N/A]
-                    module "Slice 0 SFP Port Module #N"  [N/A]
-                      container "0/0-SFP+ bay N"        [N/A]
-                        module "TenGigE0/0/0/N"          [SFP-10G-SR]
-
-    The 0/0 linecard's serial accidentally matches the device serial
-    (LibreNMS reports it that way for some IOS-XR units), which fires the
-    `Embedded RP / fixed-chassis system board` ignore rule with
-    action=transparent.  As a result the linecard is hidden and every
-    TenGigE port is promoted to top-level — matched against the device's
-    bays {Slot 0, Slot 1, Slot 2, Slot 3}.
-
-    Bug pre-fix: the positional walk in `_match_bay_by_position` skipped
-    every modelless ancestor regardless of class, eventually landing
-    container_idx on `Motherboard` (the deepest item before the real-model
-    `0/0`).  Every TenGigE port walked to the same Motherboard, took
-    position=1 inside `0/0`'s children, and matched `Slot 1` on the chassis
-    — the bay where the RSP0 line card belongs.  Clicking install would
-    place SFP transceivers into the chassis line-card slots.
-
-    Fix: stop the walk on a non-container ancestor without a real model.
-    Modelless modules ("Motherboard", "Slice 0", "EZChip" et al.) are
-    scaffolding, not bay positions; treating them as walk-through containers
-    silently collapses sibling counts.  After the fix the positional matcher
-    returns None and the row shows "No Bay".
-    """
+    """Verify positional fallback stops at model-less module scaffolding before chassis bays."""
 
     def _scaffolding_inventory(self):
         return [
@@ -2136,11 +2009,7 @@ class TestPositionalMatchScaffoldingChain:
         return None
 
     def test_tengig_does_not_match_chassis_slot_via_scaffolding_walk(self):
-        """
-        TenGigE ports at the bottom of a model="N/A" module chain must NOT be
-        positional-matched to a chassis bay.  Pre-fix, every TenGigE walked
-        through Motherboard/Slice/EZChip and landed on Slot 1 (the RSP bay).
-        """
+        """Verify TenGigE ports below model-less modules do not match a chassis bay."""
         rows = self._build_rows()
         for name in ("TenGigE0/0/0/0", "TenGigE0/0/0/1"):
             row = self._row(rows, name)
@@ -2154,10 +2023,7 @@ class TestPositionalMatchScaffoldingChain:
             )
 
     def test_tengig_shows_no_bay_when_only_scaffolding_above(self):
-        """
-        With no real position-container chain and no bay templates on the
-        scaffolding modules' types, transceivers should resolve to 'No Bay'.
-        """
+        """Verify transceivers below model-less module scaffolding show "No Bay"."""
         rows = self._build_rows()
         row = self._row(rows, "TenGigE0/0/0/0")
         assert row is not None
@@ -2169,10 +2035,7 @@ class TestPositionalMatchScaffoldingChain:
         )
 
     def test_tengig_siblings_resolve_independently(self):
-        """
-        Each TenGigE port must be evaluated independently.  Pre-fix all ports
-        collapsed to the same `container_idx` and got identical (wrong) bays.
-        """
+        """Verify sibling TenGigE ports do not collapse to duplicate bay assignments."""
         rows = self._build_rows()
         bays = {r.get("name"): r.get("module_bay") for r in rows if r.get("name", "").startswith("TenGigE")}
         # Either both resolve to "-" (no bay) or to distinct bays.  They must
@@ -3043,13 +2906,7 @@ class TestCheckIgnoreRules:
         assert self._check(item, chassis, [rule], device_serial="FOC2418NHRK") == "transparent"
 
     def test_serial_matches_device_skipped_when_parent_is_container(self):
-        """
-        serial_matches_device: does NOT match when parent is a container
-        (e.g. ASR-9904 line card whose serial happens to equal the device
-        serial — the linecard is contained in a 'Line Card Slot N' container,
-        not the chassis).  Treating it as transparent would silently promote
-        its TenGigE children to chassis-level bay matching.
-        """
+        """Verify serial_matches_device does not promote an item below a container to chassis-level matching."""
         rule = self._rule(match_type="serial_matches_device", pattern="", action="transparent")
         item = {"entPhysicalName": "0/0", "entPhysicalSerialNum": "FOC2349N4UN"}
         slot_container = {"entPhysicalName": "Rack 0-Line Card Slot 0", "entPhysicalClass": "container"}
@@ -3272,11 +3129,7 @@ class TestCollectDescendantsIgnoreRules:
 
 
 class TestPositionalMatchClassAware:
-    """
-    Positional fallback only tries bay-name patterns appropriate for the item's
-    hardware class.  Without this, items like fans and PSUs land in chassis
-    line-card "Slot N" bays just because the slot number happens to align.
-    """
+    """Verify positional fallback only matches bay names that suit the hardware class."""
 
     @staticmethod
     def _walk(item_class, slot_num, bays):
@@ -3559,8 +3412,7 @@ class TestSuggestBayMapping:
         assert sug is None
 
     def test_no_suggestion_when_scope_preserved(self):
-        """Suppress suggestions for sub-items whose scope was inherited from
-        an unmatched ancestor — the bays in scope are at the wrong level."""
+        """Verify inherited bays at the wrong hierarchy level do not produce mapping suggestions."""
         from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
 
         item = {"entPhysicalName": "TenGigE0/0/0/0", "entPhysicalClass": "module"}
@@ -3601,10 +3453,7 @@ class TestSuggestBayMapping:
         assert sug is None
 
     def test_suggests_letter_trail_for_carrier_child_bays(self):
-        """`Slot A` should map to `CPM A` via a letter-capturing regex even
-        when prefix tokens differ (`Slot` vs `CPM`). This is the common
-        follow-up after the user installs a controller-card carrier whose
-        empty child bays are letter-named."""
+        """Verify a letter trail maps Slot A to CPM A even when the prefixes differ."""
         from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
 
         item = {"entPhysicalName": "Slot A", "entPhysicalClass": "cpmModule"}
@@ -3631,10 +3480,7 @@ class TestSuggestBayMapping:
 
 
 class TestSuggestBayMappingFromDescr:
-    """`_suggest_bay_mapping` falls back to a description-based regex when the
-    LibreNMS name is just a model number with no positional info — e.g. Juniper
-    'JNP304-LMIC16-BASE' with description 'MIC: ... @ 0/0/*' should suggest a
-    mapping that targets the existing 'MIC 0' bay."""
+    """Verify description-based regex suggestions target existing bays when item names lack position data."""
 
     def test_juniper_mic_descr_yields_mapping(self):
         from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
@@ -3682,10 +3528,7 @@ class TestSuggestBayMappingFromDescr:
         assert sug is None
 
     def test_descr_fallback_preferred_over_none_for_module_class(self):
-        """When name-based heuristic finds no candidate AND the item is a
-        normal module class (not container), descr fallback should still fire
-        — useful for vendor inventories that put the model in entPhysicalName
-        but classify the row as 'module'."""
+        """Verify description fallback works for module items whose names contain only model data."""
         from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
 
         item = {
@@ -3699,12 +3542,7 @@ class TestSuggestBayMappingFromDescr:
         assert sug["example_bay"] == "MIC 1"
 
     def test_descr_trail_fallback_for_juniper_fan_tray_controller(self):
-        """Juniper fan trays carry the model in entPhysicalName ('JNP10008-FTC2')
-        and the human-readable position in entPhysicalDescr ('Fan Tray Controller 0').
-        The class+slot descr regex doesn't match, but the trailing-number heuristic
-        on the description should still surface a usable mapping suggestion that
-        targets the existing 'Fan Tray 0' bay (mapping evaluation already considers
-        entPhysicalDescr, so this resolves at lookup time)."""
+        """Verify a fan description's trailing number suggests the matching fan tray bay."""
         from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
 
         item = {
@@ -3729,10 +3567,7 @@ class TestSuggestBayMappingFromDescr:
         assert m.expand(sug["netbox_bay_name"]) == "Fan Tray 0"
 
     def test_descr_trail_fallback_skipped_when_descr_equals_name(self):
-        """If entPhysicalName already carries positional info and the
-        name-based heuristic still failed (e.g. no bay shares the trail),
-        the descr-trail fallback should not produce a suggestion when descr
-        is identical to name — the name-based pass was authoritative."""
+        """Verify description-trail fallback stays off when the description equals the authoritative name."""
         from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
 
         item = {
@@ -3745,9 +3580,7 @@ class TestSuggestBayMappingFromDescr:
         assert sug is None
 
     def test_descr_trail_fallback_respects_class_filter(self):
-        """The descr-trail fallback receives the already-class-filtered candidate
-        list, so a fan whose descr ends in '0' must not be mapped onto a 'Slot 0'
-        line-card bay."""
+        """Verify description-trail fallback does not map a fan to a line-card bay."""
         from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
 
         item = {
@@ -3927,8 +3760,7 @@ class TestBuildRowModelWarning:
         assert "UNKNOWN-MODEL" in row.get("model_warning", "")
 
     def test_no_type_row_carries_module_type_create_prefill(self):
-        """A No Type row exposes a `module_type_create` dict so the table can
-        render the "Add Module Type" button linking to NetBox's native form."""
+        """Verify a "No Type" row includes data for the NetBox module-type creation form."""
         view = self._view()
         bay = MagicMock()
         bay.name = "Slot 1"
@@ -3976,8 +3808,7 @@ class TestBuildRowModelWarning:
         assert "model_warning" not in row
 
     def test_no_bay_row_carries_model_suggestion_when_trailing_number_matches(self):
-        """A No Bay row whose item name shares a trailing number with a bay
-        in scope gets a `model_suggestion` field consumable by the table."""
+        """Verify a "No Bay" row includes a mapping suggestion when its number matches a bay."""
         view = self._view()
         view._match_module_bay = MagicMock(return_value=None)
         bay = MagicMock()
@@ -3995,8 +3826,7 @@ class TestBuildRowModelWarning:
         assert sug["netbox_bay_name"] == r"Slot \1"
 
     def test_scope_uninstalled_no_bay_row_recommends_install_parent(self):
-        """When scope is empty due to an uninstalled ancestor, the warning
-        text instructs the user to install the parent module first."""
+        """Verify an empty scope from an uninstalled ancestor recommends installing the parent module."""
         view = self._view()
         view._match_module_bay = MagicMock(return_value=None)
         item = {
@@ -4016,8 +3846,7 @@ class TestBuildRowModelWarning:
         assert "install the parent module first" in row.get("model_warning", "").lower()
 
     def test_no_bay_empty_parent_bays_sets_no_bay_reason(self):
-        """When parent module is installed but has no bay templates, _build_row
-        tags the row with no_bay_reason='empty_parent_bays'."""
+        """Verify an installed parent without bay templates sets no_bay_reason to empty_parent_bays."""
         from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
 
         view = object.__new__(BaseModuleTableView)
@@ -4044,8 +3873,7 @@ class TestBuildRowModelWarning:
         assert row.get("no_bay_reason") == "empty_parent_bays"
 
     def test_no_bay_empty_parent_bays_through_intermediate_container(self):
-        """Even with scope_preserved=True (intermediate unmatched container),
-        no_bay_reason is still set when scope_empty_installed_bays=True."""
+        """Verify preserved scope still records an installed parent's missing bay templates."""
         from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
 
         view = object.__new__(BaseModuleTableView)
@@ -4199,8 +4027,7 @@ class TestBuildRowModelWarning:
 
 
 class TestModelIncompleteFlag:
-    """_append_rows_for_item_context sets model_incomplete on parent when
-    installed module has no bay templates and children show no_bay_reason."""
+    """Verify a parent is marked model_incomplete when its installed module lacks child bay templates."""
 
     def _make_parent_row(self, **kwargs):
         row = {
@@ -4960,11 +4787,7 @@ class TestBuildRowIntegratedDedupe:
 
 
 class TestScopePreservedAcrossIntegratedContainer:
-    """Children of an integrated container (e.g. Nokia MDA inside XIOM) must inherit
-    the integrating ancestor's bay scope WITHOUT being marked scope_preserved=True
-    — otherwise their _build_row call suppresses bay-mapping suggestions even though
-    the scope is at the correct hierarchical level.
-    """
+    """Verify an integrated container passes its bay scope to children without marking the scope as preserved."""
 
     def test_port_under_integrated_mda_gets_scope_preserved_false(self):
         """Regression: ports under integrated MDA used to lose mapping suggestions."""
@@ -5597,11 +5420,7 @@ class TestGetContextDataOOBCacheFingerprint:
         assert ctx["table"] is None
 
     def test_invalidates_when_main_id_poisoned_bool(self):
-        """A poisoned True custom-field id must not pass the fingerprint (True == 1 in Python).
-
-        post() coerces and fails closed on this exact state; the GET compare must mirror it
-        instead of serving the id-1 snapshot for a linkage post() would refuse.
-        """
+        """Verify a Boolean main device ID invalidates the cache instead of matching integer 1."""
         from unittest.mock import MagicMock, patch
 
         view = _make_view()
@@ -5622,11 +5441,7 @@ class TestGetContextDataOOBCacheFingerprint:
         view._build_context.assert_not_called()
 
     def test_keeps_cache_when_main_id_stored_as_string(self):
-        """A string-backed custom-field id ("10") must fingerprint-match the cached int 10.
-
-        Same normalization the OOB side already does — without it every GET wrongly treats
-        the snapshot as stale and the module table renders empty until a manual refresh.
-        """
+        """Verify a string main device ID matches the equivalent cached integer ID."""
         from unittest.mock import MagicMock, patch
 
         view = _make_view()
@@ -5647,12 +5462,7 @@ class TestGetContextDataOOBCacheFingerprint:
         mock_cache.delete.assert_not_called()
 
     def test_invalidates_when_oob_link_corrupt(self):
-        """A linked-but-corrupt OOB id must invalidate, not collapse to the no-OOB fingerprint.
-
-        post() takes the partial-outcome path (never caches) for this state; the GET compare
-        must not quietly serve a prior no-OOB snapshot while the device nominally has an OOB
-        controller linked.
-        """
+        """Verify a corrupt linked OOB ID invalidates the cache instead of matching a missing OOB link."""
         from unittest.mock import MagicMock, patch
 
         view = _make_view()
@@ -5721,14 +5531,7 @@ class TestGetContextDataOOBCacheFingerprint:
 
 @pytest.mark.django_db
 class TestInterfacePortIdActiveServerScope:
-    """_get_interface_port_id must read the interface's port_id under the ACTIVE server key.
-
-    The module verify path (SingleModuleVerifyView) sets ``_active_server_key`` to the POSTed
-    server but leaves the API bound to the default client. With the multi-server dict CF form an
-    interface stores different port_ids per server, so reading under the default-bound client's
-    key (instead of ``_active_server_key``) returns the wrong server's port_id — and the verify
-    row's interface index then disagrees with the interface match, which uses the active key.
-    """
+    """Verify interface port IDs use the active server key during module verification."""
 
     @pytest.fixture(autouse=True)
     def _configure_default_server(self, settings):

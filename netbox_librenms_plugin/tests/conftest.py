@@ -33,12 +33,7 @@ def _isolated_cache_config(caches_config):
 
 @pytest.fixture(autouse=True)
 def _isolate_test_cache(settings):
-    """Run every test in a unique namespace inside its worker cache database.
-
-    The isolated settings assign each pytest worker its own Redis database. A unique key
-    prefix then isolates individual tests without changing that worker assignment or clearing
-    another test process's cache.
-    """
+    """Give each test a unique namespace inside its pytest worker's cache database."""
     settings.CACHES = _isolated_cache_config(settings.CACHES)
     yield
 
@@ -58,20 +53,7 @@ def django_db_modify_db_settings(django_db_modify_db_settings):
 
 @pytest.fixture(autouse=True)
 def _clear_device_info_cache(_isolate_test_cache):
-    """Flush the plugin's caches between tests.
-
-    NetBox uses Redis, which (unlike the test DB) is NOT rolled back between tests, while
-    primary keys ARE reused after each rollback. Every plugin cache key is built from a model
-    name and a pk (``CacheMixin.get_cache_key`` → ``librenms_links_device_7_default``), so a
-    value cached by one test is read by the next test that draws the same pk, with entirely
-    different data behind it.
-
-    ``_isolate_test_cache`` already gives this test its own key prefix, so clearing the whole
-    namespace is exact: it cannot reach another test or the dev server. That covers the
-    ``librenms_*`` render caches, ``get_device_info()``'s short-lived lookup cache and the
-    ``import_device_data_*`` keys the bulk-import collision gate reads through
-    ``cache.get_many`` before it falls back to the stubbed ``get_device_info``.
-    """
+    """Clear each test's isolated Redis namespace because transaction rollbacks reuse primary keys."""
     from django.core.cache import cache
 
     clear_test_cache(cache)
@@ -174,16 +156,7 @@ def restore_seeded_state(*, force):
 
 @pytest.fixture(autouse=True)
 def _restore_migration_seeded_rows(request):
-    """Restore the rows that a transactional test's flush removes.
-
-    ``django_db(transaction=True)`` truncates every table, including rows a data migration
-    created, so LAG detection loses its per-OS name patterns and every later test in the run
-    sees an empty recognition table.
-
-    The flush runs in the ``transactional_db`` teardown, which finalizes AFTER this fixture, so
-    the restore has to happen on the way in. A non-transactional test runs inside a transaction
-    that is rolled back, so seeding here is visible to it and leaves nothing behind.
-    """
+    """Restore data-migration seeds before tests after a transactional test flushes them."""
     # Gate on the marker, not on request.fixturenames: pytest-django pulls "db" in dynamically
     # from its own autouse fixture, so it is still absent from the closure at this point.
     global _transactional_seed_restore_required
@@ -209,12 +182,7 @@ def _restore_migration_seeded_rows(request):
 
 @pytest.fixture(scope="session", autouse=True)
 def _reseed_after_transactional_flush(django_db_setup, django_db_blocker):
-    """Leave the reused database seeded for the next run.
-
-    The last transactional test flushes on its way out, after every function-scoped fixture has
-    finalized. Without this the seeded rows stay missing in the reused database and the next run
-    starts with LAG pattern detection silently disabled.
-    """
+    """Restore data-migration seeds before and after a reused-database run."""
 
     from django.db import connection
 
@@ -478,15 +446,7 @@ def delete_keeping_pk(obj):
 
 
 def make_superuser(username="review-su"):
-    """Return an ACTUAL active superuser for permission-sensitive view tests.
-
-    ``User.objects.first()`` can hand back a pre-seeded non-superuser (DB-ordering dependent),
-    which would run the test under the wrong principal and cover the wrong branch. This filters
-    explicitly for an active superuser, and otherwise get_or_creates one — reusing and correcting
-    a pre-existing inactive/non-superuser row of the same username rather than tripping the
-    unique-username constraint a bare create() would hit. NetBox's User model has no is_staff
-    field; only is_superuser/is_active gate access here.
-    """
+    """Return an active superuser without relying on database ordering or an ``is_staff`` field."""
     from django.contrib.auth import get_user_model
 
     User = get_user_model()
