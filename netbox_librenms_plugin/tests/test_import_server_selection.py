@@ -8,57 +8,15 @@ from uuid import uuid4
 
 import pytest
 from django.urls import reverse
-from requests import Response
 
 from netbox_librenms_plugin.models import LibreNMSSettings
 from netbox_librenms_plugin.tests.conftest import make_superuser
-
-
-def _configure_servers(settings):
-    plugin_config = deepcopy(settings.PLUGINS_CONFIG)
-    plugin_config["netbox_librenms_plugin"]["servers"] = {
-        "primary": {
-            "display_name": "Primary LibreNMS",
-            "librenms_url": "https://primary.example.com",
-            "api_token": "test-token",
-        },
-        "secondary": {
-            "display_name": "Secondary LibreNMS",
-            "librenms_url": "https://secondary.example.com",
-            "api_token": "test-token",
-        },
-    }
-    settings.PLUGINS_CONFIG = plugin_config
-
-
-def _selector_html(html):
-    start = html.index('id="librenms-server-selector"')
-    return html[start : html.index("</ul>", start)]
-
-
-def _json_response(url, payload):
-    response = Response()
-    response.status_code = 200
-    response.url = url
-    response.headers["Content-Type"] = "application/json"
-    response._content = json.dumps(payload).encode()
-    return response
-
-
-def _import_device(device_id, hostname):
-    return {
-        "device_id": device_id,
-        "hostname": hostname,
-        "sysName": hostname,
-        "location": "",
-        "hardware": "",
-        "os": "linux",
-        "type": "server",
-        "serial": "",
-        "ip": None,
-        "disabled": 0,
-        "status": 1,
-    }
+from netbox_librenms_plugin.tests.import_server_helpers import (
+    configure_servers,
+    json_response,
+    librenms_device,
+    selector_html,
+)
 
 
 def _librenms_request_server_key(request_url):
@@ -141,7 +99,7 @@ def test_cached_search_aggregation_omits_expired_stale_and_removed_server_metada
 @pytest.mark.django_db
 def test_import_starts_on_installation_default_and_offers_transient_server_switches(client, settings):
     """The import selector lists configured servers without changing installation settings."""
-    _configure_servers(settings)
+    configure_servers(settings)
     installation_settings, _created = LibreNMSSettings.objects.update_or_create(
         pk=1,
         defaults={"selected_server": "primary"},
@@ -154,7 +112,7 @@ def test_import_starts_on_installation_default_and_offers_transient_server_switc
     def librenms_response(request_url, **_kwargs):
         requested_urls.append(request_url)
         if request_url == "https://primary.example.com/api/v0/resources/locations":
-            return _json_response(request_url, {"status": "ok", "locations": []})
+            return json_response(request_url, {"status": "ok", "locations": []})
         raise AssertionError(f"Unexpected LibreNMS request: {request_url}")
 
     with patch("netbox_librenms_plugin.librenms_api.requests.get", side_effect=librenms_response):
@@ -163,7 +121,7 @@ def test_import_starts_on_installation_default_and_offers_transient_server_switc
     assert response.status_code == 200
     assert requested_urls == ["https://primary.example.com/api/v0/resources/locations"]
     html = response.content.decode()
-    selector = _selector_html(html)
+    selector = selector_html(html)
     assert 'data-active-server-key="primary"' in html
     assert 'aria-current="true"' in selector
     assert "Primary LibreNMS" in selector
@@ -177,7 +135,7 @@ def test_import_starts_on_installation_default_and_offers_transient_server_switc
 @pytest.mark.django_db
 def test_import_switches_transient_server_without_search_and_clear_keeps_it(client, settings):
     """Switch and Clear discard search state while retaining the transient server."""
-    _configure_servers(settings)
+    configure_servers(settings)
     installation_settings, _created = LibreNMSSettings.objects.update_or_create(
         pk=1,
         defaults={"selected_server": "primary"},
@@ -189,7 +147,7 @@ def test_import_switches_transient_server_without_search_and_clear_keeps_it(clie
     def librenms_response(request_url, **_kwargs):
         requested_urls.append(request_url)
         if request_url == "https://secondary.example.com/api/v0/resources/locations":
-            return _json_response(request_url, {"status": "ok", "locations": []})
+            return json_response(request_url, {"status": "ok", "locations": []})
         raise AssertionError(f"Unexpected LibreNMS request: {request_url}")
 
     with patch("netbox_librenms_plugin.librenms_api.requests.get", side_effect=librenms_response):
@@ -214,7 +172,7 @@ def test_import_switches_transient_server_without_search_and_clear_keeps_it(clie
 )
 def test_import_rejects_invalid_server_without_querying_a_fallback(client, settings, server_key):
     """Invalid transient server input cannot start a search on another server."""
-    _configure_servers(settings)
+    configure_servers(settings)
     LibreNMSSettings.objects.update_or_create(pk=1, defaults={"selected_server": "primary"})
     client.force_login(make_superuser(f"invalid-import-server-{type(server_key).__name__}"))
     import_url = reverse("plugins:netbox_librenms_plugin:librenms_import")
@@ -257,7 +215,7 @@ def test_import_follow_up_rejects_invalid_server_without_querying_a_fallback(
     server_key,
 ):
     """Confirmation and import actions require one exact configured server key."""
-    _configure_servers(settings)
+    configure_servers(settings)
     installation_settings, _created = LibreNMSSettings.objects.update_or_create(
         pk=1,
         defaults={"selected_server": "primary"},
@@ -285,7 +243,7 @@ def test_import_follow_up_rejects_invalid_server_without_querying_a_fallback(
 @pytest.mark.django_db
 def test_non_htmx_import_follow_up_keeps_invalid_server_fail_closed_after_redirect(client, settings):
     """An invalid follow-up server cannot fall back after a full-page redirect."""
-    _configure_servers(settings)
+    configure_servers(settings)
     LibreNMSSettings.objects.update_or_create(pk=1, defaults={"selected_server": "primary"})
     client.force_login(make_superuser("invalid-follow-up-redirect"))
     action_url = reverse("plugins:netbox_librenms_plugin:bulk_import_devices")
@@ -319,7 +277,7 @@ def test_validation_details_rejects_invalid_server_without_querying_a_fallback(
     server_key,
 ):
     """A validation modal requires one exact configured server key."""
-    _configure_servers(settings)
+    configure_servers(settings)
     LibreNMSSettings.objects.update_or_create(pk=1, defaults={"selected_server": "primary"})
     client.force_login(make_superuser(f"invalid-validation-server-{type(server_key).__name__}"))
     validation_url = reverse(
@@ -341,7 +299,7 @@ def test_validation_details_rejects_invalid_server_without_querying_a_fallback(
 @pytest.mark.django_db
 def test_virtual_chassis_details_queries_only_its_transient_server(client, settings):
     """A Virtual Chassis modal remains pinned to the import result server."""
-    _configure_servers(settings)
+    configure_servers(settings)
     LibreNMSSettings.objects.update_or_create(pk=1, defaults={"selected_server": "primary"})
     client.force_login(make_superuser("secondary-vc-details-viewer"))
     vc_url = reverse(
@@ -353,12 +311,12 @@ def test_virtual_chassis_details_queries_only_its_transient_server(client, setti
     def librenms_response(request_url, **_kwargs):
         requested_urls.append(request_url)
         if request_url == "https://secondary.example.com/api/v0/devices/46193":
-            return _json_response(
+            return json_response(
                 request_url,
-                {"status": "ok", "devices": [_import_device(46193, "secondary-vc-edge")]},
+                {"status": "ok", "devices": [librenms_device(46193, "secondary-vc-edge")]},
             )
         if request_url.startswith("https://secondary.example.com/api/v0/inventory/46193"):
-            return _json_response(request_url, {"status": "ok", "inventory": []})
+            return json_response(request_url, {"status": "ok", "inventory": []})
         raise AssertionError(f"Unexpected LibreNMS request: {request_url}")
 
     with patch("netbox_librenms_plugin.librenms_api.requests.get", side_effect=librenms_response):
@@ -383,7 +341,7 @@ def test_completed_filter_job_rejects_invalid_server_without_querying_a_fallback
     """Persisted job metadata cannot fall back to another configured server."""
     from core.models import Job
 
-    _configure_servers(settings)
+    configure_servers(settings)
     LibreNMSSettings.objects.update_or_create(pk=1, defaults={"selected_server": "primary"})
     user = make_superuser(f"invalid-job-server-{type(server_key).__name__}")
     client.force_login(user)
@@ -416,7 +374,7 @@ def test_completed_filter_job_rejects_invalid_server_without_querying_a_fallback
 @pytest.mark.django_db
 def test_synchronous_import_search_and_cache_are_scoped_to_the_active_server(client, settings):
     """Identical filters on two servers return and cache only each server's rows."""
-    _configure_servers(settings)
+    configure_servers(settings)
     LibreNMSSettings.objects.update_or_create(pk=1, defaults={"selected_server": "primary"})
     client.force_login(make_superuser("scoped-import-searcher"))
     import_url = reverse("plugins:netbox_librenms_plugin:librenms_import")
@@ -430,25 +388,25 @@ def test_synchronous_import_search_and_cache_are_scoped_to_the_active_server(cli
     def librenms_response(request_url, **_kwargs):
         requested_urls.append(request_url)
         if request_url.endswith("/api/v0/resources/locations"):
-            return _json_response(
+            return json_response(
                 request_url,
                 {"status": "ok", "locations": [{"id": 1, "location": "Test Lab"}]},
             )
         if request_url.endswith("/api/v0/devices"):
             if _librenms_request_server_key(request_url) == "primary":
-                devices = [_import_device(46101, "primary-edge")]
+                devices = [librenms_device(46101, "primary-edge")]
             else:
-                devices = [_import_device(46102, "secondary-edge")]
-            return _json_response(request_url, {"status": "ok", "devices": devices})
+                devices = [librenms_device(46102, "secondary-edge")]
+            return json_response(request_url, {"status": "ok", "devices": devices})
         if request_url.endswith("/api/v0/devices/46101"):
-            return _json_response(request_url, {"status": "ok", "devices": [_import_device(46101, "primary-edge")]})
+            return json_response(request_url, {"status": "ok", "devices": [librenms_device(46101, "primary-edge")]})
         if request_url.endswith("/api/v0/devices/46102"):
-            return _json_response(
+            return json_response(
                 request_url,
-                {"status": "ok", "devices": [_import_device(46102, "secondary-edge")]},
+                {"status": "ok", "devices": [librenms_device(46102, "secondary-edge")]},
             )
         if "/api/v0/inventory/" in request_url:
-            return _json_response(request_url, {"status": "ok", "inventory": []})
+            return json_response(request_url, {"status": "ok", "inventory": []})
         raise AssertionError(f"Unexpected LibreNMS request: {request_url}")
 
     responses = {}
@@ -506,7 +464,7 @@ def test_synchronous_import_search_and_cache_are_scoped_to_the_active_server(cli
 @pytest.mark.django_db
 def test_cached_search_navigation_restores_its_server_and_naming_namespace(client, settings):
     """Opening a cached search restores its server and naming options without a new query."""
-    _configure_servers(settings)
+    configure_servers(settings)
     LibreNMSSettings.objects.update_or_create(pk=1, defaults={"selected_server": "primary"})
     client.force_login(make_superuser("cached-search-navigator"))
     import_url = reverse("plugins:netbox_librenms_plugin:librenms_import")
@@ -517,18 +475,18 @@ def test_cached_search_navigation_restores_its_server_and_naming_namespace(clien
         requested_urls.append(request_url)
         server_key = _librenms_request_server_key(request_url)
         device_id = 46111 if server_key == "primary" else 46112
-        device = _import_device(device_id, f"{server_key}-shared-edge")
+        device = librenms_device(device_id, f"{server_key}-shared-edge")
         if request_url.endswith("/api/v0/resources/locations"):
-            return _json_response(
+            return json_response(
                 request_url,
                 {"status": "ok", "locations": [{"id": 1, "location": f"{server_key.title()} Lab"}]},
             )
         if request_url.endswith("/api/v0/devices"):
-            return _json_response(request_url, {"status": "ok", "devices": [device]})
+            return json_response(request_url, {"status": "ok", "devices": [device]})
         if request_url.endswith(f"/api/v0/devices/{device_id}"):
-            return _json_response(request_url, {"status": "ok", "devices": [device]})
+            return json_response(request_url, {"status": "ok", "devices": [device]})
         if "/api/v0/inventory/" in request_url:
-            return _json_response(request_url, {"status": "ok", "inventory": []})
+            return json_response(request_url, {"status": "ok", "inventory": []})
         raise AssertionError(f"Unexpected LibreNMS request: {request_url}")
 
     with patch("netbox_librenms_plugin.librenms_api.requests.get", side_effect=librenms_response):
@@ -584,7 +542,7 @@ def test_cached_search_navigation_restores_its_server_and_naming_namespace(clien
 @pytest.mark.django_db
 def test_import_clear_controls_preserve_other_server_cache_namespaces(client, settings):
     """Clear preserves all searches, while Clear cache refreshes only the active namespace."""
-    _configure_servers(settings)
+    configure_servers(settings)
     LibreNMSSettings.objects.update_or_create(pk=1, defaults={"selected_server": "primary"})
     client.force_login(make_superuser("cached-search-clearer"))
     import_url = reverse("plugins:netbox_librenms_plugin:librenms_import")
@@ -603,20 +561,20 @@ def test_import_clear_controls_preserve_other_server_cache_namespaces(client, se
         else:
             device_id = 46122
             hostname = "secondary-original-edge"
-        device = _import_device(device_id, hostname)
+        device = librenms_device(device_id, hostname)
         if request_url.endswith("/api/v0/resources/locations"):
-            return _json_response(
+            return json_response(
                 request_url,
                 {"status": "ok", "locations": [{"id": 1, "location": f"{server_key.title()} Lab"}]},
             )
         if request_url.endswith("/api/v0/devices"):
             if server_key == "primary" and primary_generation["empty"]:
-                return _json_response(request_url, {"status": "ok", "devices": []})
-            return _json_response(request_url, {"status": "ok", "devices": [device]})
+                return json_response(request_url, {"status": "ok", "devices": []})
+            return json_response(request_url, {"status": "ok", "devices": [device]})
         if request_url.endswith(f"/api/v0/devices/{device_id}"):
-            return _json_response(request_url, {"status": "ok", "devices": [device]})
+            return json_response(request_url, {"status": "ok", "devices": [device]})
         if "/api/v0/inventory/" in request_url:
-            return _json_response(request_url, {"status": "ok", "inventory": []})
+            return json_response(request_url, {"status": "ok", "inventory": []})
         raise AssertionError(f"Unexpected LibreNMS request: {request_url}")
 
     with patch("netbox_librenms_plugin.librenms_api.requests.get", side_effect=librenms_response):
@@ -705,7 +663,7 @@ def test_completed_filter_job_results_are_private_to_the_job_owner(client, setti
 
     from netbox_librenms_plugin.import_utils import get_validated_device_cache_key
 
-    _configure_servers(settings)
+    configure_servers(settings)
     LibreNMSSettings.objects.update_or_create(pk=1, defaults={"selected_server": "primary"})
     user_model = get_user_model()
     owner = user_model.objects.create(username="private-job-owner", is_superuser=True, is_active=True)
@@ -713,7 +671,7 @@ def test_completed_filter_job_results_are_private_to_the_job_owner(client, setti
     import_url = reverse("plugins:netbox_librenms_plugin:librenms_import")
     device_id = 46105
     filters = {"hostname": "private-job-result"}
-    cached_device = _import_device(device_id, "private-job-result")
+    cached_device = librenms_device(device_id, "private-job-result")
     cache_key = get_validated_device_cache_key(
         server_key="secondary",
         filters=filters,
@@ -744,7 +702,7 @@ def test_completed_filter_job_results_are_private_to_the_job_owner(client, setti
             "https://primary.example.com/api/v0/resources/locations",
             "https://secondary.example.com/api/v0/resources/locations",
         }:
-            return _json_response(request_url, {"status": "ok", "locations": []})
+            return json_response(request_url, {"status": "ok", "locations": []})
         raise AssertionError(f"Unexpected LibreNMS request: {request_url}")
 
     try:
@@ -770,7 +728,7 @@ def test_non_superuser_job_url_falls_back_to_synchronous_server_search(client, s
     from netbox_librenms_plugin.import_utils import get_validated_device_cache_key
     from netbox_librenms_plugin.tests.view_test_helpers import make_user_with_perms
 
-    _configure_servers(settings)
+    configure_servers(settings)
     LibreNMSSettings.objects.update_or_create(pk=1, defaults={"selected_server": "primary"})
     user = make_user_with_perms("non-superuser-job-requester", [("view", Device)])
     import_url = reverse("plugins:netbox_librenms_plugin:librenms_import")
@@ -784,7 +742,7 @@ def test_non_superuser_job_url_falls_back_to_synchronous_server_search(client, s
         use_sysname=True,
         strip_domain=False,
     )
-    cache.set(cache_key, _import_device(job_device_id, "private-non-superuser-job-result"), timeout=300)
+    cache.set(cache_key, librenms_device(job_device_id, "private-non-superuser-job-result"), timeout=300)
     job = Job.objects.create(
         name="Non-superuser transient server filter job",
         user=user,
@@ -805,19 +763,19 @@ def test_non_superuser_job_url_falls_back_to_synchronous_server_search(client, s
     def librenms_response(request_url, **_kwargs):
         requested_urls.append(request_url)
         if request_url.endswith("/api/v0/resources/locations"):
-            return _json_response(request_url, {"status": "ok", "locations": []})
+            return json_response(request_url, {"status": "ok", "locations": []})
         if request_url == "https://primary.example.com/api/v0/devices":
-            return _json_response(
+            return json_response(
                 request_url,
-                {"status": "ok", "devices": [_import_device(46107, "non-superuser-sync-result")]},
+                {"status": "ok", "devices": [librenms_device(46107, "non-superuser-sync-result")]},
             )
         if request_url == "https://primary.example.com/api/v0/devices/46107":
-            return _json_response(
+            return json_response(
                 request_url,
-                {"status": "ok", "devices": [_import_device(46107, "non-superuser-sync-result")]},
+                {"status": "ok", "devices": [librenms_device(46107, "non-superuser-sync-result")]},
             )
         if request_url.startswith("https://primary.example.com/api/v0/inventory/46107"):
-            return _json_response(request_url, {"status": "ok", "inventory": []})
+            return json_response(request_url, {"status": "ok", "inventory": []})
         raise AssertionError(f"Unexpected LibreNMS request: {request_url}")
 
     try:
@@ -849,7 +807,7 @@ def test_completed_filter_job_rebinds_results_and_follow_up_forms_to_its_server(
     """A completed job remains authoritative when its result URL omits server_key."""
     from core.models import Job
 
-    _configure_servers(settings)
+    configure_servers(settings)
     LibreNMSSettings.objects.update_or_create(pk=1, defaults={"selected_server": "primary"})
     user = make_superuser("import-job-server-owner")
     client.force_login(user)
@@ -859,14 +817,14 @@ def test_completed_filter_job_rebinds_results_and_follow_up_forms_to_its_server(
     def librenms_response(request_url, **_kwargs):
         requested_urls.append(request_url)
         if request_url == "https://secondary.example.com/api/v0/resources/locations":
-            return _json_response(request_url, {"status": "ok", "locations": []})
+            return json_response(request_url, {"status": "ok", "locations": []})
         if request_url == "https://secondary.example.com/api/v0/devices":
-            return _json_response(
+            return json_response(
                 request_url,
-                {"status": "ok", "devices": [_import_device(46103, "secondary-job-edge")]},
+                {"status": "ok", "devices": [librenms_device(46103, "secondary-job-edge")]},
             )
         if request_url.startswith("https://secondary.example.com/api/v0/inventory/46103"):
-            return _json_response(request_url, {"status": "ok", "inventory": []})
+            return json_response(request_url, {"status": "ok", "inventory": []})
         raise AssertionError(f"Unexpected LibreNMS request: {request_url}")
 
     with patch("netbox_librenms_plugin.librenms_api.requests.get", side_effect=librenms_response):
@@ -919,7 +877,7 @@ def test_background_filter_job_uses_and_records_its_transient_server(settings):
     from netbox_librenms_plugin.import_utils import get_import_device_cache_key
     from netbox_librenms_plugin.jobs import FilterDevicesJob
 
-    _configure_servers(settings)
+    configure_servers(settings)
     LibreNMSSettings.objects.update_or_create(pk=1, defaults={"selected_server": "primary"})
     user = make_superuser("import-background-server-owner")
     requested_urls = []
@@ -927,12 +885,12 @@ def test_background_filter_job_uses_and_records_its_transient_server(settings):
     def librenms_response(request_url, **_kwargs):
         requested_urls.append(request_url)
         if request_url == "https://secondary.example.com/api/v0/devices":
-            return _json_response(
+            return json_response(
                 request_url,
-                {"status": "ok", "devices": [_import_device(46104, "secondary-background-edge")]},
+                {"status": "ok", "devices": [librenms_device(46104, "secondary-background-edge")]},
             )
         if request_url.startswith("https://secondary.example.com/api/v0/inventory/46104"):
-            return _json_response(request_url, {"status": "ok", "inventory": []})
+            return json_response(request_url, {"status": "ok", "inventory": []})
         raise AssertionError(f"Unexpected LibreNMS request: {request_url}")
 
     job = Job.objects.create(
@@ -969,7 +927,7 @@ def test_queued_job_rejects_a_server_key_that_is_no_longer_configured(settings, 
 
     from netbox_librenms_plugin.jobs import FilterDevicesJob, ImportDevicesJob
 
-    _configure_servers(settings)
+    configure_servers(settings)
     user = make_superuser(f"stale-{job_kind}-job-server-owner")
     job = Job.objects.create(
         name=f"Stale transient server {job_kind} job",

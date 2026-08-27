@@ -16,28 +16,12 @@ from netbox_librenms_plugin.tests.conftest import (
     make_virtual_chassis_members,
     make_vm,
 )
-from netbox_librenms_plugin.tests.test_object_server_selection import (
-    _device_info_response,
-    _json_response,
+from netbox_librenms_plugin.tests.import_server_helpers import (
+    configure_servers,
+    device_info_response,
+    json_response,
 )
 from netbox_librenms_plugin.tests.view_test_helpers import grant, make_user_with_perms
-
-
-def _configure_servers(settings):
-    plugin_config = deepcopy(settings.PLUGINS_CONFIG)
-    plugin_config["netbox_librenms_plugin"]["servers"] = {
-        "primary": {
-            "display_name": "Primary LibreNMS",
-            "librenms_url": "https://primary.example.com",
-            "api_token": "test-token",
-        },
-        "secondary": {
-            "display_name": "Secondary LibreNMS",
-            "librenms_url": "https://secondary.example.com",
-            "api_token": "test-token",
-        },
-    }
-    settings.PLUGINS_CONFIG = plugin_config
 
 
 def _message_texts(response):
@@ -46,7 +30,7 @@ def _message_texts(response):
 
 def _device_page_response(request_url, device):
     if request_url.endswith(f"/api/v0/devices/{device.cf['librenms_id']['primary']['id']}"):
-        return _device_info_response(
+        return device_info_response(
             request_url,
             device.cf["librenms_id"]["primary"]["id"],
             device.name,
@@ -57,7 +41,7 @@ def _device_page_response(request_url, device):
 @pytest.mark.django_db
 def test_preference_post_changes_only_preference_and_keeps_transient_server(client, settings):
     """The star action stores preference without changing the active page server."""
-    _configure_servers(settings)
+    configure_servers(settings)
     device = make_device(
         "set-object-preference",
         librenms_cf={"primary": {"id": 13501}, "secondary": {"id": 13502}},
@@ -92,7 +76,7 @@ def test_preference_post_changes_only_preference_and_keeps_transient_server(clie
 @pytest.mark.django_db
 def test_preference_post_supports_virtual_machines(client, settings):
     """A VM owns and stores its preferred server in the same mapping field."""
-    _configure_servers(settings)
+    configure_servers(settings)
     vm = make_vm("set-vm-preference")
     vm.custom_field_data["librenms_id"] = {"primary": 13503, "secondary": 13504}
     vm.save(update_fields=["custom_field_data"])
@@ -118,7 +102,7 @@ def test_preference_post_supports_virtual_machines(client, settings):
 @pytest.mark.django_db
 def test_preference_post_requires_change_scope_on_mapping_owner(client, settings):
     """A constrained Device grant cannot change an owner outside its scope."""
-    _configure_servers(settings)
+    configure_servers(settings)
     owner = make_device(
         "preference-outside-scope",
         librenms_cf={"primary": 13505, "secondary": 13506},
@@ -144,7 +128,7 @@ def test_preference_post_requires_change_scope_on_mapping_owner(client, settings
 @pytest.mark.django_db
 def test_preference_post_requires_plugin_write_permission(client, settings):
     """Object change permission alone cannot write plugin-owned preference metadata."""
-    _configure_servers(settings)
+    configure_servers(settings)
     owner = make_device(
         "preference-without-plugin-write",
         librenms_cf={"primary": 13524, "secondary": 13525},
@@ -168,7 +152,7 @@ def test_preference_post_requires_plugin_write_permission(client, settings):
 @pytest.mark.django_db
 def test_preference_post_revalidates_mapping_after_lock(client, settings):
     """The locked row, not an earlier page state, decides whether a preference is valid."""
-    _configure_servers(settings)
+    configure_servers(settings)
     owner = make_device(
         "preference-locked-state",
         librenms_cf={"primary": 13507, "secondary": 13508},
@@ -201,7 +185,7 @@ def test_preference_post_revalidates_mapping_after_lock(client, settings):
 @pytest.mark.django_db
 def test_single_mapping_remains_implicit_without_stored_preference(client, settings):
     """A preference cannot be stored when only one usable mapping remains."""
-    _configure_servers(settings)
+    configure_servers(settings)
     owner = make_device("implicit-single-server", librenms_cf={"primary": 13509})
     client.force_login(make_superuser("single-preference-writer"))
 
@@ -216,7 +200,7 @@ def test_single_mapping_remains_implicit_without_stored_preference(client, setti
 
     with patch(
         "netbox_librenms_plugin.librenms_api.requests.get",
-        side_effect=lambda url, **_kwargs: _device_info_response(url, 13509, owner.name),
+        side_effect=lambda url, **_kwargs: device_info_response(url, 13509, owner.name),
     ):
         page = client.get(reverse("plugins:netbox_librenms_plugin:device_librenms_sync", args=[owner.pk]))
     assert page.status_code == 200
@@ -227,7 +211,7 @@ def test_single_mapping_remains_implicit_without_stored_preference(client, setti
 @pytest.mark.django_db
 def test_active_and_preferred_servers_render_as_distinct_states(client, settings):
     """The active check and preferred star can point at different mappings."""
-    _configure_servers(settings)
+    configure_servers(settings)
     owner = make_device(
         "active-versus-preferred",
         librenms_cf={
@@ -258,7 +242,7 @@ def test_active_and_preferred_servers_render_as_distinct_states(client, settings
 @pytest.mark.django_db
 def test_view_only_user_sees_preference_but_not_star_controls(client, settings):
     """Preference is visible to a viewer, but only an authorized writer gets controls."""
-    _configure_servers(settings)
+    configure_servers(settings)
     owner = make_device(
         "view-only-preference",
         librenms_cf={
@@ -291,7 +275,7 @@ def test_view_only_user_sees_preference_but_not_star_controls(client, settings):
 @pytest.mark.django_db
 def test_vc_member_page_uses_mapping_owner_for_preference_form(client, settings):
     """A VC member page submits preference changes to the member that owns the mappings."""
-    _configure_servers(settings)
+    configure_servers(settings)
     _chassis, (owner, viewed_member) = make_virtual_chassis_members("preference-owner", count=2)
     owner.custom_field_data["librenms_id"] = {
         "primary": {"id": 13514},
@@ -302,9 +286,9 @@ def test_vc_member_page_uses_mapping_owner_for_preference_form(client, settings)
 
     def response_for_vc(request_url, **_kwargs):
         if request_url.endswith("/api/v0/devices/13514"):
-            return _device_info_response(request_url, 13514, viewed_member.name)
+            return device_info_response(request_url, 13514, viewed_member.name)
         if request_url.endswith("/api/v0/inventory/13514/all"):
-            return _json_response(request_url, {"status": "ok", "inventory": []})
+            return json_response(request_url, {"status": "ok", "inventory": []})
         raise AssertionError(f"Unexpected LibreNMS request: {request_url}")
 
     with patch("netbox_librenms_plugin.librenms_api.requests.get", side_effect=response_for_vc):
@@ -327,7 +311,7 @@ def test_invalid_or_missing_preference_warns_and_get_does_not_mutate(
     stored_preference,
 ):
     """Fallback is explicit and a GET never repairs preference metadata."""
-    _configure_servers(settings)
+    configure_servers(settings)
     mapping = {"primary": {"id": 13517}, "secondary": {"id": 13518}}
     if stored_preference is not None:
         mapping["_preferred_server"] = stored_preference
@@ -351,7 +335,7 @@ def test_invalid_or_missing_preference_warns_and_get_does_not_mutate(
 @pytest.mark.django_db
 def test_unconfigured_preferred_mapping_warns_and_falls_back_without_mutation(client, settings):
     """A preference that still has an identity but no configured server is invalid."""
-    _configure_servers(settings)
+    configure_servers(settings)
     mapping = {
         "primary": {"id": 13526},
         "secondary": {"id": 13527},
@@ -377,7 +361,7 @@ def test_unconfigured_preferred_mapping_warns_and_falls_back_without_mutation(cl
 @pytest.mark.django_db
 def test_only_unusable_mapping_requires_selection_without_get_mutation(client, settings):
     """An unmapped default cannot replace an unusable preferred object mapping."""
-    _configure_servers(settings)
+    configure_servers(settings)
     mapping = {
         "retired": {"id": 13529},
         "_preferred_server": "retired",
@@ -407,7 +391,7 @@ def test_removing_mapping_clears_preference_when_it_is_removed_or_only_one_mappi
     preferred_removed,
 ):
     """Removal keeps the mapping and preference metadata consistent in one write."""
-    _configure_servers(settings)
+    configure_servers(settings)
     preferred_key = "retired" if preferred_removed else "primary"
     owner = make_device(
         f"remove-preferred-{preferred_removed}",
