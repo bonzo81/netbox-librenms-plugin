@@ -156,31 +156,26 @@ class TestGetActiveCachedSearches:
         assert len(result) == 1
         assert result[0]["display_filters"]["type"] == "Network"
 
-    @patch("netbox_librenms_plugin.import_utils.cache.cache")
-    def test_missing_filters_key_is_omitted(self, mock_cache):
+    def test_missing_filters_key_is_omitted(self):
         from datetime import datetime, timezone
 
-        from netbox_librenms_plugin.import_utils.cache import get_active_cached_searches
+        from django.core.cache import cache
+
+        from netbox_librenms_plugin.import_utils.cache import get_active_cached_searches, get_cache_metadata_key
 
         now = datetime.now(timezone.utc)
         cached_at = now.isoformat()
-
-        def mock_get(key, default=None):
-            if "cache_index" in key:
-                return ["search_key"]
-            if "librenms_locations_choices" in key:
-                return None
-            if key == "search_key":
-                metadata = _cached_search_metadata(cached_at, {"hostname": "edge"})
-                metadata.pop("filters")
-                return metadata
-            return default
-
-        mock_cache.get.side_effect = mock_get
+        filters = {"hostname": "edge"}
+        metadata_key = get_cache_metadata_key("default", filters, False)
+        cache_index_key = "librenms_cache_index_default"
+        metadata = _cached_search_metadata(cached_at, filters)
+        metadata.pop("filters")
+        cache.set(metadata_key, metadata, timeout=300)
+        cache.set(cache_index_key, [metadata_key], timeout=300)
 
         result = get_active_cached_searches("default")
         assert result == []
-        mock_cache.set.assert_called_once()
+        assert cache.get(cache_index_key) == []
 
     @patch("netbox_librenms_plugin.import_utils.cache.cache")
     def test_timezone_naive_cached_at_normalized_to_utc(self, mock_cache):

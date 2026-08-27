@@ -2561,19 +2561,37 @@ class TestDeviceConflictActionViewVMGuard:
         view.request = MagicMock()
         return view
 
-    def test_device_only_action_for_vm_renders_htmx_error_toast(self):
+    @pytest.mark.django_db
+    def test_device_only_action_for_vm_renders_htmx_error_toast(self, client, settings):
         """A VM cannot run a Device-only serial action."""
-        view = self._make_view()
-        request = _make_request(
-            post={
-                "action": "update_serial",
-                "existing_device_id": "1",
-                "existing_device_type": "virtualmachine",
-            }
+        from django.urls import reverse
+        from virtualization.models import VirtualMachine
+
+        from netbox_librenms_plugin.tests.import_server_helpers import configure_servers
+        from netbox_librenms_plugin.tests.view_test_helpers import make_user_with_perms
+
+        configure_servers(settings)
+        vm = make_vm("vm-device-only-action")
+        user = make_user_with_perms(
+            "vm-device-only-action-user",
+            [("change", VirtualMachine)],
+        )
+        client.force_login(user)
+        url = reverse(
+            "plugins:netbox_librenms_plugin:device_conflict_action",
+            kwargs={"device_id": 1},
         )
 
-        with patch.object(view, "require_all_permissions", return_value=None):
-            response = view.post(request, device_id=1)
+        response = client.post(
+            url,
+            {
+                "action": "update_serial",
+                "existing_device_id": vm.pk,
+                "existing_device_type": "virtualmachine",
+                "server_key": "secondary",
+            },
+            headers={"HX-Request": "true"},
+        )
 
         assert response.status_code == 200
         assert response.headers.get("HX-Reswap") == "none"
