@@ -79,6 +79,14 @@ def _device_sync_redirect(request, pk, server_key):
     from ``rebind_api_for_server`` (not a raw POST value), so it is reflected directly; a None key
     (a stale/removed server) redirects to the bare tab. ``redirect_with_server_key`` still gates the
     final URL on the open-redirect barrier (CWE-601).
+
+    Args:
+        request (HttpRequest): The current HTTP request.
+        pk (int): The NetBox device primary key.
+        server_key (str | None): The resolved LibreNMS server key.
+
+    Returns:
+        HttpResponseRedirect: The redirect to the device sync tab.
     """
     url = reverse("plugins:netbox_librenms_plugin:device_librenms_sync", kwargs={"pk": pk})
     return redirect_with_server_key(request, url, server_key)

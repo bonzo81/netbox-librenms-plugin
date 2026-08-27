@@ -17,6 +17,12 @@ def _build_filter_hash(filters: dict) -> str:
     Removes None values (preserves valid falsy values like 0 and False),
     sorts by key, and returns the first 16 hex characters of the SHA-256
     digest of the JSON-serialized result.
+
+    Args:
+        filters (dict): The filter values to hash.
+
+    Returns:
+        str: The first 16 hexadecimal characters of the stable SHA-256 digest.
     """
     return hashlib.sha256(
         json.dumps({k: v for k, v in filters.items() if v is not None}, sort_keys=True, separators=(",", ":")).encode()

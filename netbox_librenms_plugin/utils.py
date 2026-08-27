@@ -40,11 +40,15 @@ _ASCII_POSITIVE_INTEGER_RE = re.compile(r"^[ \t\r\n\f\v]*\+?[0-9]{1,19}[ \t\r\n\
 
 
 def acquire_advisory_transaction_lock(lock_identity: str, *, using: str | None = None) -> None:
-    """Acquire one stable PostgreSQL advisory lock for the current transaction.
+    """
+    Acquire one stable PostgreSQL advisory lock for the current transaction.
 
     Args:
-        lock_identity: Stable string hashed into the advisory lock key.
-        using: Database alias that owns the transaction. Defaults to the default alias.
+        lock_identity (str): Stable string hashed into the advisory lock key.
+        using (str | None): Database alias that owns the transaction. Defaults to the default alias.
+
+    Raises:
+        RuntimeError: If the selected database connection has no open transaction.
     """
     # Resolve the alias the caller's transaction.atomic(using=...) opened; the default
     # connection can be in autocommit, where the lock would release immediately.
@@ -353,10 +357,16 @@ def normalize_relationship_maps(relationships) -> tuple[dict, dict]:
     readers and writer cannot drift.
 
     Fails soft against a corrupt / partial-write / format-migrated cache: a None or non-dict
-    ``relationships`` (e.g. a list) — or a present-but-None / non-dict nested ``lag_members`` /
-    ``sub_interfaces`` — collapses to ``{}`` so ``.items()`` never raises ``AttributeError``. Keys
+    ``relationships`` (e.g. a list), or a present-but-None / non-dict nested ``lag_members`` /
+    ``sub_interfaces``, collapses to ``{}`` so ``.items()`` never raises ``AttributeError``. Keys
     and values are normalized via :func:`normalize_librenms_port_id` so int-keyed lookups never miss
     stringified JSON values. An edge is dropped unless both endpoint IDs are valid.
+
+    Args:
+        relationships (object): Cached relationship mapping to normalize.
+
+    Returns:
+        tuple[dict[int, int], dict[int, int]]: Normalized lag member and sub-interface maps.
     """
     if not isinstance(relationships, dict):
         relationships = {}
@@ -457,13 +467,26 @@ def resolve_interface_row_device(
     members_by_id: dict | None = None,
     return_device_on_failure: bool = True,
 ) -> Device | None:
-    """Resolve a LibreNMS interface row to its likely Virtual Chassis member.
+    """
+    Resolve a LibreNMS interface row to its likely Virtual Chassis member.
 
     Prefer a unique interface already bound to the stable LibreNMS port ID. For an unbound
     physical Ethernet row, use the member position encoded in the interface name. Do not apply
     that heuristic to logical rows or sub-interfaces because their number is not reliably a
     chassis position. Set ``return_device_on_failure`` to false when a writer must reject a row
     whose owner has no stable evidence.
+
+    Args:
+        device (Device): Device that LibreNMS represents as the logical chassis.
+        port (dict): LibreNMS interface row to resolve.
+        interface_name_field (str): Port field that contains the selected interface name.
+        interfaces_by_port_id (dict | None): Interfaces indexed by stable LibreNMS port ID.
+        members_by_position (dict | None): Virtual Chassis members indexed by position.
+        members_by_id (dict | None): Virtual Chassis members indexed by primary key.
+        return_device_on_failure (bool): Return ``device`` when no stable owner can be resolved.
+
+    Returns:
+        Device | None: Resolved Virtual Chassis member, the fallback device, or ``None``.
     """
     if not getattr(device, "virtual_chassis", None):
         return device
@@ -692,6 +715,14 @@ def predict_module_interface_rename(device: Device, module, names) -> list[str]:
     instantiations. Used to recognise when a standalone interface is the renamed
     twin of a module's raw interface (the rename a naming plugin would apply but
     skipped because the target name was already taken).
+
+    Args:
+        device (Device): Device that owns the module interfaces.
+        module (object): Module supplied to interface-name prediction receivers.
+        names (list[str]): Interface names to send to prediction receivers.
+
+    Returns:
+        list[str]: Predicted names in the same order as the input names.
     """
     from netbox_librenms_plugin.signals import predict_module_interface_names
 
@@ -741,7 +772,8 @@ def predict_module_interface_rename(device: Device, module, names) -> list[str]:
 
 
 def detect_vc_normalization_noop(device: Device, module) -> Optional[dict]:
-    """Return a diagnostic dict when VC member-name rewriting would no-op for this module.
+    """
+    Return a diagnostic dict when VC member-name rewriting would no-op for this module.
 
     "No-op" here means: the device is a VC member but none of the module's
     instantiated template names match the VC member-position regex, so
@@ -754,6 +786,13 @@ def detect_vc_normalization_noop(device: Device, module) -> Optional[dict]:
       - The module has no instantiatable templates
       - At least one instantiated name matches the regex (rewriting is working
         or unnecessary)
+
+    Args:
+        device (Device): Device that owns the module.
+        module (object): Module whose interface templates are checked.
+
+    Returns:
+        Optional[dict]: Diagnostic details, or ``None`` when normalization is not a no-op.
     """
     vc_position = getattr(device, "vc_position", None)
     vc_id = getattr(device, "virtual_chassis_id", None)
@@ -811,11 +850,18 @@ _OPTIONAL_SUFFIX = " _(optional, you can remove this line)_"
 
 
 def build_vc_normalization_report(diagnostic: dict) -> str:
-    """Render a VC-normalization no-op diagnostic as a markdown blob for a GitHub issue.
+    """
+    Render a VC-normalization no-op diagnostic as a markdown blob for a GitHub issue.
 
     Catalog identifiers (manufacturer/device type/module type/bay name) get an
     "(optional, you can remove this line)" suffix so users who treat their HW
     inventory as confidential can strip them before pasting.
+
+    Args:
+        diagnostic (dict): VC-normalization diagnostic details.
+
+    Returns:
+        str: Markdown report for a GitHub issue.
     """
     import sys
 
@@ -1011,6 +1057,11 @@ def save_user_pref(request, path, value):
     through would mutate that process-wide dict: this user's choice would then become the
     default every later-created user inherits, and the fallback every preference-less user
     reads. Copy the row's data first so the write stays with this user.
+
+    Args:
+        request (HttpRequest): Request for the user whose preference is saved.
+        path (str): Preference path to set.
+        value (object): Preference value to save.
     """
     if hasattr(request, "user") and hasattr(request.user, "config"):
         user_config = request.user.config
@@ -1030,10 +1081,18 @@ def is_truthy_parameter(value) -> bool:
 
 
 def read_request_toggle(request, keys):
-    """Return the first key's POST value, else its GET value, else None.
+    """
+    Return the first key's POST value, else its GET value, else None.
 
     One reader for every POST-then-GET toggle in this module, so the accepted vocabulary
     cannot drift between them.
+
+    Args:
+        request (HttpRequest): Request that contains the toggle values.
+        keys (Iterable[str]): Toggle keys in precedence order.
+
+    Returns:
+        str | None: First matching toggle value, or ``None`` when no key is present.
     """
     post_value = next((request.POST.get(key) for key in keys if key in request.POST), None)
     if post_value is not None:
@@ -1042,13 +1101,17 @@ def read_request_toggle(request, keys):
 
 
 def resolve_naming_preferences(request) -> tuple[bool, bool]:
-    """Resolve use_sysname/strip_domain: POST/GET toggle → user pref → plugin settings.
+    """
+    Resolve use_sysname/strip_domain: POST/GET toggle → user pref → plugin settings.
 
     This is the single source of truth for naming preference resolution,
     used by the import page, sync page, and sync action views.
 
+    Args:
+        request (HttpRequest): Request used to resolve toggle and user preference values.
+
     Returns:
-        (use_sysname, strip_domain) booleans.
+        tuple[bool, bool]: The ``use_sysname`` and ``strip_domain`` values.
     """
     from netbox_librenms_plugin.models import LibreNMSSettings
 
@@ -1092,18 +1155,26 @@ def same_host(a, b) -> bool:
 
 
 def resolve_create_missing_interfaces(request) -> bool:
-    """Resolve the "create a missing NetBox interface before assigning the IP" flag.
+    """
+    Resolve the "create a missing NetBox interface before assigning the IP" flag.
 
     POST wins, then GET, then ``False`` (opt-in). The IP-sync template renders the toggle
     from this value, so a table refresh restores what the user selected instead of
     silently reverting to off.
+
+    Args:
+        request (HttpRequest): Request used to resolve the toggle value.
+
+    Returns:
+        bool: Whether missing NetBox interfaces can be created before IP assignment.
     """
     value = read_request_toggle(request, ("create-missing-interfaces-toggle", "create_missing_interfaces"))
     return is_truthy_parameter(value) if value is not None else False
 
 
 def resolve_set_primary_ip(request) -> bool:
-    """Resolve the "set Primary IP from the LibreNMS management IP" flag.
+    """
+    Resolve the "set Primary IP from the LibreNMS management IP" flag.
 
     Cascade (mirrors :func:`resolve_naming_preferences`, minus a settings
     default since this is a per-sync action choice):
@@ -1117,6 +1188,12 @@ def resolve_set_primary_ip(request) -> bool:
     When enabled, :class:`SyncIPAddressesView` sets ``primary_ip4``/``primary_ip6``
     on the device/VM for the synced IP that matches the LibreNMS management IP,
     provided that IP ends up assigned to one of the object's interfaces.
+
+    Args:
+        request (HttpRequest): Request used to resolve the toggle and user preference values.
+
+    Returns:
+        bool: Whether the matching synced management IP can become the primary IP.
     """
     value = read_request_toggle(request, ("set-primary-ip-toggle", "set_primary_ip-toggle", "set_primary_ip"))
     if value is not None:
@@ -1152,21 +1229,38 @@ def _remember_interface_name_per_platform(request: HttpRequest) -> bool:
 
 
 def interface_field_limit(field_name, model=None):
-    """Return the column length NetBox declares for one interface field.
+    """
+    Return the column length NetBox declares for one interface field.
 
     Read from the model's own field so the bound cannot drift, the same way
     :func:`coerce_interface_mtu` reads ``INTERFACE_MTU_MIN``/``MAX``. Pass the concrete
     writer model rather than trusting Interface and VMInterface to stay equal.
+
+    Args:
+        field_name (str): Interface model field to inspect.
+        model (type | None): Concrete interface model. Defaults to ``Interface``.
+
+    Returns:
+        int | None: Maximum field length, or ``None`` when the field has no length limit.
     """
     return (model or Interface)._meta.get_field(field_name).max_length
 
 
 def syncable_interface_name(port, interface_name_field, model=None):
-    """Return the LibreNMS name usable as a NetBox interface name, or ``None``.
+    """
+    Return the LibreNMS name usable as a NetBox interface name, or ``None``.
 
     ``save()`` runs no validators and Django never truncates a CharField, so an over-long name
     reaches Postgres as a ``DataError``. Truncating instead would collide on the
     ``(device, name)`` unique constraint, so an unstorable name makes the row unsyncable.
+
+    Args:
+        port (dict): LibreNMS port row.
+        interface_name_field (str): Port field that contains the selected interface name.
+        model (type | None): Concrete interface model. Defaults to ``Interface``.
+
+    Returns:
+        str | None: Valid interface name, or ``None`` when NetBox cannot store it.
     """
     name = port.get(interface_name_field)
     if not isinstance(name, str) or not name.strip():
@@ -1177,10 +1271,19 @@ def syncable_interface_name(port, interface_name_field, model=None):
 
 
 def interface_name_rejection_reason(port, interface_name_field, model=None):
-    """Return why the LibreNMS name cannot be synced, or ``None`` when it can.
+    """
+    Return why the LibreNMS name cannot be synced, or ``None`` when it can.
 
     The two cases read very differently to a user, so the caller reports them apart rather
     than telling someone their 80-character interface name is blank.
+
+    Args:
+        port (dict): LibreNMS port row.
+        interface_name_field (str): Port field that contains the selected interface name.
+        model (type | None): Concrete interface model. Defaults to ``Interface``.
+
+    Returns:
+        str | None: Rejection reason, or ``None`` when the name can be synced.
     """
     name = port.get(interface_name_field)
     if not isinstance(name, str) or not name.strip():
@@ -1192,10 +1295,22 @@ def interface_name_rejection_reason(port, interface_name_field, model=None):
 
 
 def bounded_interface_text(field_name, value, model=None):
-    """Return *value* clipped to the column NetBox declares for *field_name*.
+    """
+    Return *value* clipped to the column NetBox declares for *field_name*.
 
     Refuses ``name``: an over-long name has to make the row unsyncable, because a truncated
     one collides with its siblings on the ``(device, name)`` unique constraint.
+
+    Args:
+        field_name (str): Interface field that will store the value.
+        value (str): Text to clip to the field limit.
+        model (type | None): Concrete interface model. Defaults to ``Interface``.
+
+    Returns:
+        str: Original or clipped field value.
+
+    Raises:
+        ValueError: If ``field_name`` is ``name``.
     """
     if field_name == "name":
         raise ValueError("An interface name must not be truncated; use syncable_interface_name().")
@@ -1204,11 +1319,18 @@ def bounded_interface_text(field_name, value, model=None):
 
 
 def coerce_interface_mtu(value) -> int | None:
-    """Return an MTU inside NetBox's accepted range, or None.
+    """
+    Return an MTU inside NetBox's accepted range, or None.
 
     ``save()`` does not run field validators, so an out-of-range or non-numeric ``ifMtu`` from
     LibreNMS would otherwise reach the column unchecked. NetBox pins the bounds in
     ``dcim.constants``; they are read from there so the two cannot drift.
+
+    Args:
+        value (object): Candidate LibreNMS MTU value.
+
+    Returns:
+        int | None: Valid NetBox MTU, or ``None`` when the value is invalid or outside the accepted range.
     """
     from dcim.constants import INTERFACE_MTU_MAX, INTERFACE_MTU_MIN
 
@@ -2292,19 +2414,21 @@ def set_librenms_device_id(obj, device_id, server_key: str = "default"):
 def add_librenms_server_mapping(
     obj, device_id, server_key: str, *, configured_server_keys, confirmed_replacement_of: int | None = None
 ) -> None:
-    """Add one import mapping while preserving the object's established server choice.
+    """
+    Add one import mapping while preserving the object's established server choice.
 
     The first mapping stays implicit. When this call adds a second usable mapping and the
     object has no stored preference, the previous sole mapping becomes preferred. The caller
     must hold a row lock so this read-modify-write uses current object state.
 
     Args:
-        obj: Locked Device or VirtualMachine receiving the mapping.
-        device_id: LibreNMS device ID for ``server_key``.
-        server_key: Active import server key.
-        configured_server_keys: Server keys that are currently usable.
-        confirmed_replacement_of: Host ID the caller confirmed replacing on ``server_key``. It is
-            compared against the locked row, so a confirmation issued for different state fails.
+        obj (Device | VirtualMachine): Locked object receiving the mapping.
+        device_id (int | str): LibreNMS device ID for ``server_key``.
+        server_key (str): Active import server key.
+        configured_server_keys (Iterable[str]): Server keys that are currently usable.
+        confirmed_replacement_of (int | None): Host ID the caller confirmed replacing on
+            ``server_key``. It is compared against the locked row, so a confirmation issued for
+            different state fails.
 
     Raises:
         ValueError: If the custom-field container is not a server mapping or uses the legacy format.
@@ -2811,12 +2935,15 @@ _NETBOX_VERSION_PREFIX_RE = re.compile(r"^(\d+)\.(\d+)\.(\d+)")
 
 
 def _get_netbox_version_tuple():
-    """Return the running NetBox version as a (major, minor, patch) int tuple,
-    or ``None`` when it cannot be determined.
+    """
+    Return the running NetBox version as a (major, minor, patch) int tuple, or ``None`` when it cannot be determined.
 
     Tolerates trailing build metadata (``-dev``, ``-Docker-3.2.0``, ``+local``,
     ``.dev1``, etc.) by extracting the leading three numeric components and
     ignoring anything past them.
+
+    Returns:
+        tuple[int, int, int] | None: Parsed NetBox version, or ``None`` when it cannot be determined.
     """
     try:
         from netbox.settings import RELEASE
@@ -2831,12 +2958,16 @@ def _get_netbox_version_tuple():
 
 
 def netbox_clean_reads_parent_virtual_chassis():
-    """Return True when the running NetBox raises ``AttributeError`` while validating a
+    """
+    Return True when the running NetBox raises ``AttributeError`` while validating a
     parent interface on another virtual chassis member.
 
     NetBox 4.4.0 (issue #20197) dereferences ``self.parent.virtual_chassis`` in
     ``Interface.clean()``; 4.4.1 fixed it. When the version cannot be detected we keep the
     tolerance, so an undetectable release cannot turn a known core defect into a 500.
+
+    Returns:
+        bool: Whether the running NetBox needs tolerance for the parent validation defect.
     """
     version = _get_netbox_version_tuple()
     if version is None:
@@ -2862,7 +2993,8 @@ def netbox_relocates_module_subtree():
 
 
 def netbox_resolves_module_token_per_leaf():
-    """Return True when the running NetBox resolves a single ``{module}`` token
+    """
+    Return True when the running NetBox resolves a single ``{module}`` token
     in a modular component template to the leaf module bay's position.
 
     NetBox 4.5.6 (issue #20467) changed single-token resolution to use the
@@ -2872,8 +3004,11 @@ def netbox_resolves_module_token_per_leaf():
     applies.
 
     When the version cannot be detected we assume the fix is present
-    (permissive default) — the plugin pins NetBox >= 4.4 and we don't want
+    (permissive default). The plugin pins NetBox >= 4.4 and we don't want
     to surface false positives on releases newer than this code knows about.
+
+    Returns:
+        bool: Whether NetBox resolves the token to the leaf module bay's position.
     """
     version = _get_netbox_version_tuple()
     if version is None:
@@ -3551,11 +3686,12 @@ def has_nested_name_conflict(module_type, module_bay, sibling_counts=None):
 
 
 class _ModuleTypeIndex(dict):
-    """Dict mapping LibreNMS keys → ``ModuleType``, plus manufacturer-scoped overrides.
+    """
+    This dict maps LibreNMS keys to ``ModuleType`` objects and stores manufacturer-scoped overrides.
 
     Behaves exactly like a plain ``dict`` for the global key space (model/part_number
     plus any global ``ModuleTypeMapping`` rows), but additionally exposes
-    ``mfr_mappings`` — a dict keyed by ``(manufacturer_pk, librenms_model)`` populated
+    ``mfr_mappings``, a dict keyed by ``(manufacturer_pk, librenms_model)`` populated
     from manufacturer-scoped ``ModuleTypeMapping`` rows. ``resolve_module_type`` probes
     the manufacturer-scoped key first so vendor-specific overrides win for matching
     devices without leaking into other vendors' lookups.
@@ -3587,6 +3723,10 @@ def _module_types_index_version():
     not bump ``last_updated`` (``auto_now``); such an edit leaves the fingerprint unchanged and
     the cached index stale until the row count changes or the worker restarts. The plugin only
     ever mutates these models via ``save()``, so this affects external bulk-update tooling only.
+
+    Returns:
+        tuple[tuple[int, str], tuple[int, str], tuple[int, str]]: Fingerprints for module types,
+            interface templates, and module type mappings.
     """
     from dcim.models import InterfaceTemplate, ModuleType
 
@@ -3608,13 +3748,16 @@ def get_module_types_indexed() -> dict:
     Return the module-type index, rebuilt only when its inputs change.
 
     The underlying build loads every ModuleType (with interface templates) and
-    ModuleTypeMapping — per-render work that dominates the module-sync render once
-    the rule-lookup cost is removed. Cache it keyed on a cheap fingerprint of those
+    ModuleTypeMapping. This per-render work dominates the module-sync render once
+    the rule-lookup cost is removed. The cache uses a cheap fingerprint of those
     tables so repeat renders reuse it.
 
     Thread-safe: the (version, index) pair is read as one atomic tuple reference on the fast
     path, and rebuilds happen under a lock so concurrent renders neither rebuild redundantly nor
     observe a torn version/index swap.
+
+    Returns:
+        dict: Module types indexed by LibreNMS lookup keys.
     """
     global _MODULE_TYPES_INDEX_CACHE
 
@@ -3641,8 +3784,11 @@ def _build_module_types_index() -> dict:
     explicit overrides win when the same string appears in both.
 
     Manufacturer-scoped ``ModuleTypeMapping`` rows are kept out of the main
-    index — they live under ``mfr_mappings`` keyed by ``(manufacturer_pk,
+    index. They live under ``mfr_mappings`` keyed by ``(manufacturer_pk,
     librenms_model)`` so they apply only to devices of that vendor.
+
+    Returns:
+        dict: Module types indexed by global keys and manufacturer-scoped overrides.
     """
     from dcim.models import ModuleType
 
@@ -3720,10 +3866,13 @@ def get_module_type_ambiguities() -> dict:
     and the underlying index ignores manufacturer too.
 
     There is no companion ``get_module_type_mapping_ambiguities`` helper: see
-    the note in ``get_module_types_indexed`` — ``ModuleTypeMapping``'s
+    the note in ``get_module_types_indexed``. ``ModuleTypeMapping``'s
     conditional UniqueConstraint pair (``unique_module_type_mapping`` and
     ``unique_module_type_mapping_global``) makes mapping-vs-mapping
     collisions structurally impossible.
+
+    Returns:
+        dict[str, list]: Ambiguous lookup keys mapped to their candidate ModuleTypes.
     """
     from dcim.models import ModuleType
 
@@ -3750,6 +3899,9 @@ def get_generic_module_types_indexed() -> dict:
     ModuleTypes share the same ``model``/``part_number`` value the key is dropped from the
     index so callers cannot auto-pick an arbitrary row. The user must disambiguate via an
     explicit ``ModuleTypeMapping``.
+
+    Returns:
+        dict: Generic module types indexed by unambiguous model and part number values.
     """
     from dcim.models import ModuleType
 
@@ -3780,6 +3932,13 @@ def preload_normalization_rules(scope: str, manufacturer=None) -> dict:
     Returns a dict mapping ``(scope, manufacturer_pk_or_None)`` → list of rules.
     Pass this dict as ``preloaded_rules`` to :func:`apply_normalization_rules` and
     :func:`resolve_module_type` to avoid repeated DB queries inside loops.
+
+    Args:
+        scope (str): Normalization rule scope to preload.
+        manufacturer (Manufacturer | None): Optional manufacturer whose scoped rules are loaded first.
+
+    Returns:
+        dict: Rule lists indexed by scope and optional manufacturer primary key.
     """
     from netbox_librenms_plugin.models import NormalizationRule
 
@@ -3890,7 +4049,15 @@ def resolve_module_type(
     before falling back to the global index. This lets vendor-specific overrides
     win without polluting lookups for other vendors.
 
-    Returns the matched ModuleType or None.
+    Args:
+        model_name (str): LibreNMS model name to resolve.
+        module_types (dict): Primary module type lookup index.
+        manufacturer (Manufacturer | None): Optional manufacturer for scoped rules and mappings.
+        norm_rules (dict | None): Preloaded normalization rules that avoid repeated database queries.
+        generic_fallback (dict | None): Generic manufacturer index used when the primary lookup has no match.
+
+    Returns:
+        ModuleType | None: Matched ModuleType, or ``None`` when no lookup path matches.
     """
     if not model_name:
         return None

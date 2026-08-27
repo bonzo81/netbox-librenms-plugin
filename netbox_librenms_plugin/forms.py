@@ -54,7 +54,11 @@ logger = logging.getLogger(__name__)
 def _get_librenms_server_choices():
     """
     Helper function to get server choices from plugin configuration.
+
     Shared between ServerConfigForm and other forms that need server selection.
+
+    Returns:
+        list[tuple[str, str]]: The configured server values and display labels.
     """
     choices = []
 
@@ -237,6 +241,12 @@ class ImportSettingsForm(NetBoxModelForm):
         The pattern is used as a suffix appended to the master device name.
         Valid placeholders: {position}, {serial}
         At least one is required for uniqueness.
+
+        Returns:
+            str | None: The validated pattern, or the unchanged empty value.
+
+        Raises:
+            forms.ValidationError: If the pattern has an invalid placeholder or format.
         """
         pattern = self.cleaned_data.get("vc_member_name_pattern")
 
@@ -1484,12 +1494,14 @@ class DeviceImportConfigForm(forms.Form):
         """
         Initialize form with LibreNMS device data and validation results.
 
-        Accepts additional kwargs:
-        - libre_device: LibreNMS device dictionary
-        - validation: Validation result dictionary
-        - suggested_site: Pre-selected site
-        - suggested_device_type: Pre-selected device type
-        - suggested_role: Pre-selected device role
+        Args:
+            *args (tuple): Positional arguments for the parent form.
+            **kwargs (dict): Keyword arguments for the parent form. Accepts these additional values:
+                libre_device: LibreNMS device dictionary
+                validation: Validation result dictionary
+                suggested_site: Pre-selected site
+                suggested_device_type: Pre-selected device type
+                suggested_role: Pre-selected device role
         """
         # Extract custom kwargs
         libre_device = kwargs.pop("libre_device", {})

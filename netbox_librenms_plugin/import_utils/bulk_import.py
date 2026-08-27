@@ -73,6 +73,12 @@ def _is_job_cancelled(job) -> bool:
     Checks RQ/Redis state only (reflects stop API calls immediately).
     On Redis connectivity issues or a missing RQ job, returns False to avoid
     false cancellation. Unexpected exceptions are logged and also return False.
+
+    Args:
+        job (object): The background job context that contains the RQ job identifier.
+
+    Returns:
+        bool: True if the RQ job has failed or stopped, otherwise False.
     """
     from django_rq import get_queue
     from redis.exceptions import RedisError
@@ -815,6 +821,11 @@ def _refresh_existing_device(validation: dict, libre_device: dict = None, server
 
     When existing_device is None (wasn't found at cache time), re-check if the device
     was imported since caching by looking up librenms_id or hostname.
+
+    Args:
+        validation (dict): The cached validation state, mutated in place.
+        libre_device (dict | None): The LibreNMS device data used to re-evaluate the match.
+        server_key (str): The active LibreNMS server key.
     """
     existing = validation.get("existing_device")
     if existing and hasattr(existing, "pk"):
@@ -983,6 +994,14 @@ def _refresh_existing_device(validation: dict, libre_device: dict = None, server
             validate_device_for_import() path): when a value matches >1 object, return
             ``(None, True)`` so the caller blocks the row instead of binding ``.first()`` to an
             arbitrary one.
+
+            Args:
+                m (type): The Device or VirtualMachine model to search.
+                value (str): The device name to match.
+
+            Returns:
+                tuple[object | None, bool]: The single matching object, if any, and whether the name
+                    is ambiguous.
             """
             matches = list(m.objects.filter(name__iexact=value)[:2])
             if len(matches) > 1:

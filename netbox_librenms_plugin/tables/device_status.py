@@ -118,8 +118,11 @@ class DeviceImportTable(tables.Table):
 
         The role/cluster/rack selects hx-post to DeviceRole/Cluster/RackUpdateView, which
         rebind to the POSTed server_key before re-fetching/re-validating the row. Without
-        this value the rebind falls back to the global selected server — with overlapping
+        this value the rebind falls back to the global selected server. With overlapping
         device_ids across servers that live-fetches and caches the WRONG server's device.
+
+        Returns:
+            str: The escaped hx-vals attribute, or an empty string when no server key is set.
         """
         server_key = getattr(self, "server_key", None)
         if not server_key:
@@ -219,7 +222,15 @@ class DeviceImportTable(tables.Table):
     def render_selection(self, value, record):
         """
         Render selection checkbox.
+
         Disabled if device can't be imported.
+
+        Args:
+            value (object): The column value.
+            record (dict): The LibreNMS device and its validation state.
+
+        Returns:
+            SafeString: The rendered selection checkbox HTML.
         """
         validation = record.get("_validation", {})
         can_import = validation.get("can_import", False)
@@ -245,9 +256,17 @@ class DeviceImportTable(tables.Table):
     def render_netbox_cluster(self, value, record):
         """
         Render cluster selection dropdown.
+
         Default is "-- Device (not VM) --" (empty value).
         If a cluster is selected, the device will be imported as a VM.
         If no cluster is selected, the device will be imported as a Device.
+
+        Args:
+            value (object): The column value.
+            record (dict): The LibreNMS device and its validation state.
+
+        Returns:
+            SafeString: The rendered cluster selection HTML.
         """
         device_id = record.get("device_id")
         validation = record.get("_validation", {})
@@ -313,8 +332,16 @@ class DeviceImportTable(tables.Table):
     def render_netbox_role(self, value, record):
         """
         Render role selection dropdown.
+
         For Devices: Role is required
         For VMs: Role is optional
+
+        Args:
+            value (object): The column value.
+            record (dict): The LibreNMS device and its validation state.
+
+        Returns:
+            SafeString: The rendered role selection HTML.
         """
         device_id = record.get("device_id")
         validation = record.get("_validation", {})
@@ -381,8 +408,16 @@ class DeviceImportTable(tables.Table):
     def render_netbox_rack(self, value, record):
         """
         Render rack selection dropdown (optional).
+
         Shows racks for the matched site in "Location - Rack" format.
         Only shown for devices (not VMs) and when site is matched.
+
+        Args:
+            value (object): The column value.
+            record (dict): The LibreNMS device and its validation state.
+
+        Returns:
+            SafeString: The rendered rack selection HTML.
         """
         device_id = record.get("device_id")
         validation = record.get("_validation", {})
@@ -456,8 +491,16 @@ class DeviceImportTable(tables.Table):
     def render_actions(self, value, record):
         """
         Render action buttons for import using HTMX.
+
         Shows Import button if can import, otherwise shows Preview/Configure.
         Permission checks are handled by backend require_write_permission() which shows toast.
+
+        Args:
+            value (object): The column value.
+            record (dict): The LibreNMS device and its validation state.
+
+        Returns:
+            SafeString: The rendered import action HTML.
         """
         validation = record.get("_validation", {})
         device_id = record.get("device_id")

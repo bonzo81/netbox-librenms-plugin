@@ -397,7 +397,8 @@ def _flag_ambiguous_librenms_id(result, librenms_id, exc):
 
 
 def _detect_serial_match_role(existing_by_serial, existing_link, hostname, serial, libre_device, server_key):
-    """Decide the role an incoming LibreNMS device plays against a NetBox device matched by serial.
+    """
+    Decide the role an incoming LibreNMS device plays against a NetBox device matched by serial.
 
     Pure decision step for the serial-match branch of :func:`validate_device_for_import`:
     reads NetBox/LibreNMS state but does **not** mutate ``result``. Computes whether the
@@ -407,12 +408,16 @@ def _detect_serial_match_role(existing_by_serial, existing_link, hostname, seria
     ``promote_to_host``, ``serial_role_choice_available``, ``warnings``).
 
     Args:
-        existing_by_serial: the NetBox Device matched by serial.
-        existing_link: ``_describe_existing_librenms_link`` dict for *existing_by_serial*.
-        hostname: the incoming LibreNMS hostname (already resolved).
-        serial: the incoming serial (for warning text only).
-        libre_device: the raw LibreNMS device payload.
-        server_key: active LibreNMS server key.
+        existing_by_serial (Device): The NetBox Device matched by serial.
+        existing_link (dict | None): The ``_describe_existing_librenms_link`` result for
+            *existing_by_serial*.
+        hostname (str): The incoming LibreNMS hostname (already resolved).
+        serial (str): The incoming serial (for warning text only).
+        libre_device (dict): The raw LibreNMS device payload.
+        server_key (str): The active LibreNMS server key.
+
+    Returns:
+        dict: The keyword arguments for :func:`apply_oob_detection_result`.
     """
     # Compute both possible roles for the incoming LibreNMS device against
     # the existing NetBox device, then pick a heuristic default. The UI
