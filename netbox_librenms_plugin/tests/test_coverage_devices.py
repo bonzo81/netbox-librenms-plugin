@@ -1578,6 +1578,27 @@ class TestDeviceCableTableView:
         assert result is mock_table
         mock_cable_table.assert_called_once_with([], device=obj)
 
+    @pytest.mark.django_db
+    def test_get_table_returns_vc_cable_table_scoped_to_viewable_members(self):
+        """A chassis device gets the VC table, and only members the request may view are actionable."""
+        from dcim.models import Device
+
+        from netbox_librenms_plugin.tables.cables import VCCableTable
+        from netbox_librenms_plugin.tests.conftest import make_virtual_chassis_members
+        from netbox_librenms_plugin.tests.view_test_helpers import make_request, make_user_with_perms
+        from netbox_librenms_plugin.views.object_sync.devices import DeviceCableTableView
+
+        virtual_chassis, (first_member, second_member) = make_virtual_chassis_members("cable-vc-table")
+        view = DeviceCableTableView()
+        view.setup(make_request("get", user=make_user_with_perms("cable-vc-table-user", [("view", Device)])))
+
+        table = view.get_table([], first_member)
+
+        assert isinstance(table, VCCableTable)
+        # allowed_vc_member_ids reaches the table as the cached member set it filters rows against.
+        assert {member.pk for member in table._vc_members} == {first_member.pk, second_member.pk}
+        assert first_member.virtual_chassis_id == virtual_chassis.pk
+
 
 class TestDeviceModuleTableView:
     """Tests for DeviceModuleTableView."""
