@@ -197,6 +197,7 @@ class PortStackLagPatternSerializer(NetBoxModelSerializer):
         brief_fields = ("id", "url", "display", "librenms_os", "lag_name_pattern", "description")
 
 
+@extend_schema_serializer(component_name="LibreNMSSerialSensorTypePattern")
 class SerialSensorTypePatternSerializer(NetBoxModelSerializer):
     """Serialize SerialSensorTypePattern model for REST API."""
 
