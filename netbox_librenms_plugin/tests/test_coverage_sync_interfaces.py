@@ -1998,7 +1998,7 @@ class TestInterfaceContextVirtualChassisOwner:
 
         assert clear_response.status_code == 302
         interface.refresh_from_db()
-        assert interface.mode == ""
+        assert interface.mode is None
         assert interface.untagged_vlan_id is None
 
 

@@ -1448,8 +1448,8 @@ class VlanAssignmentMixin:
         elif untagged_vid:
             interface.mode = "access"
         else:
-            # No VLANs - clear mode
-            interface.mode = ""
+            # NetBox stores "no mode" as NULL, so clearing to "" would report a change every sync.
+            interface.mode = None
 
         # Set untagged VLAN
         untagged_set = None

@@ -339,230 +339,174 @@ class TestLibreNMSAPIMixinGetContextData:
 
 
 class TestGetVlanGroupsForDeviceInnerBranches:
-    """Cover lines 368-387: region, site-group, location, rack branches."""
+    """Cover the region, site-group, location and rack branches of get_vlan_groups_for_devices."""
 
     def _make_mixin(self):
         from netbox_librenms_plugin.views.mixins import VlanAssignmentMixin
 
         return object.__new__(VlanAssignmentMixin)
 
-    def test_site_with_region_triggers_region_scope_query(self):
-        """When device.site has a region, region-scoped VLAN groups are queried."""
+    @staticmethod
+    def _scoped_group(name, scope):
+        """Create a VLAN group scoped to one object, or a global group when scope is None."""
+        from django.contrib.contenttypes.models import ContentType
+        from ipam.models import VLANGroup
+
+        slug = name.lower().replace(" ", "-")
+        if scope is None:
+            return VLANGroup.objects.create(name=name, slug=slug)
+        return VLANGroup.objects.create(
+            name=name,
+            slug=slug,
+            scope_type=ContentType.objects.get_for_model(type(scope)),
+            scope_id=scope.pk,
+        )
+
+    @pytest.mark.django_db
+    def test_region_ancestors_are_searched(self):
+        """A group scoped to the site's parent region is returned, so the region walk must run."""
+        from dcim.models import Region, Site
+
+        from netbox_librenms_plugin.tests.conftest import make_device
+
         mixin = self._make_mixin()
+        parent_region = Region.objects.create(name="Scope parent region", slug="scope-parent-region")
+        child_region = Region.objects.create(name="Scope child region", slug="scope-child-region", parent=parent_region)
+        other_region = Region.objects.create(name="Scope other region", slug="scope-other-region")
+        device = make_device("scope-region-device")
+        device.site = Site.objects.create(name="Scope region site", slug="scope-region-site", region=child_region)
+        device.save(update_fields=["site"])
 
-        region = MagicMock()
-        region.parent = None
+        parent_group = self._scoped_group("Scope parent region group", parent_region)
+        other_group = self._scoped_group("Scope other region group", other_region)
 
-        site = MagicMock()
-        site.pk = 1
-        site.region = region
-        site.group = None
+        groups = mixin.get_vlan_groups_for_device(device)
 
-        device = MagicMock()
-        device.site = site
-        device.location = None
-        device.rack = None
+        assert parent_group in groups
+        assert other_group not in groups
 
-        scope_calls = []
+    @pytest.mark.django_db
+    def test_site_group_ancestors_are_searched(self):
+        """A group scoped to the site group's parent is returned, so the site-group walk must run."""
+        from dcim.models import Site, SiteGroup
 
-        def fake_scope(model_cls, objects):
-            scope_calls.append(model_cls)
-            return []
+        from netbox_librenms_plugin.tests.conftest import make_device
 
-        with (
-            patch("dcim.models.Site") as MockSite,
-            patch("dcim.models.Region") as MockRegion,
-            patch("dcim.models.SiteGroup"),
-            patch("dcim.models.Location"),
-            patch("dcim.models.Rack"),
-            patch("ipam.models.VLANGroup") as MockVLANGroup,
-            patch.object(mixin, "_get_vlan_groups_for_scope", side_effect=fake_scope),
-            patch.object(mixin, "_get_ancestors", return_value=[region]),
-        ):
-            MockVLANGroup.objects.filter.return_value = []
-            mixin.get_vlan_groups_for_device(device)
-
-        # Both Site and Region model classes should have been passed to _get_vlan_groups_for_scope
-        assert MockSite in scope_calls, "Site should be queried for VLAN groups"
-        assert MockRegion in scope_calls, "Region should be queried for VLAN groups"
-
-    def test_site_with_group_triggers_site_group_scope_query(self):
-        """When device.site has a group, site-group-scoped VLAN groups are queried."""
         mixin = self._make_mixin()
+        parent_site_group = SiteGroup.objects.create(name="Scope parent sitegroup", slug="scope-parent-sitegroup")
+        child_site_group = SiteGroup.objects.create(
+            name="Scope child sitegroup", slug="scope-child-sitegroup", parent=parent_site_group
+        )
+        other_site_group = SiteGroup.objects.create(name="Scope other sitegroup", slug="scope-other-sitegroup")
+        device = make_device("scope-sitegroup-device")
+        device.site = Site.objects.create(
+            name="Scope sitegroup site", slug="scope-sitegroup-site", group=child_site_group
+        )
+        device.save(update_fields=["site"])
 
-        site_group = MagicMock()
-        site_group.parent = None
+        parent_group = self._scoped_group("Scope parent sitegroup group", parent_site_group)
+        other_group = self._scoped_group("Scope other sitegroup group", other_site_group)
 
-        site = MagicMock()
-        site.pk = 5
-        site.region = None
-        site.group = site_group
+        groups = mixin.get_vlan_groups_for_device(device)
 
-        device = MagicMock()
-        device.site = site
-        device.location = None
-        device.rack = None
+        assert parent_group in groups
+        assert other_group not in groups
 
-        scope_calls = []
+    @pytest.mark.django_db
+    def test_location_ancestors_are_searched(self):
+        """A group scoped to the device location's parent is returned, so the location walk must run."""
+        from dcim.models import Location
 
-        def fake_scope(model_cls, objects):
-            scope_calls.append((model_cls, list(objects)))
-            return []
+        from netbox_librenms_plugin.tests.conftest import make_device
 
-        with (
-            patch("dcim.models.Site"),
-            patch("dcim.models.Region"),
-            patch("dcim.models.SiteGroup") as MockSiteGroup,
-            patch("dcim.models.Location"),
-            patch("dcim.models.Rack"),
-            patch("ipam.models.VLANGroup") as MockVLANGroup,
-            patch.object(mixin, "_get_vlan_groups_for_scope", side_effect=fake_scope),
-            patch.object(mixin, "_get_ancestors", return_value=[site_group]),
-        ):
-            MockVLANGroup.objects.filter.return_value = []
-            mixin.get_vlan_groups_for_device(device)
-
-        # SiteGroup ancestors should have been processed
-        assert len(scope_calls) >= 1
-        # Verify the SiteGroup model class and ancestor objects were passed to _get_vlan_groups_for_scope
-        assert any(c[0] is MockSiteGroup for c in scope_calls)
-        assert any(c[0] is MockSiteGroup and c[1] == [site_group] for c in scope_calls)
-
-    def test_device_with_location_triggers_location_scope_query(self):
-        """When device.location is set, location-scoped VLAN groups are queried."""
         mixin = self._make_mixin()
+        device = make_device("scope-location-device")
+        parent_location = Location.objects.create(
+            name="Scope parent location", slug="scope-parent-location", site=device.site, status="active"
+        )
+        child_location = Location.objects.create(
+            name="Scope child location",
+            slug="scope-child-location",
+            site=device.site,
+            status="active",
+            parent=parent_location,
+        )
+        sibling_location = Location.objects.create(
+            name="Scope sibling location", slug="scope-sibling-location", site=device.site, status="active"
+        )
+        device.location = child_location
+        device.save(update_fields=["location"])
 
-        location = MagicMock()
-        location.parent = None
+        parent_group = self._scoped_group("Scope parent location group", parent_location)
+        sibling_group = self._scoped_group("Scope sibling location group", sibling_location)
 
-        device = MagicMock()
-        device.site = None
-        device.location = location
-        device.rack = None
+        groups = mixin.get_vlan_groups_for_device(device)
 
-        scope_calls = []
+        assert parent_group in groups
+        assert sibling_group not in groups
 
-        def fake_scope(model_cls, objects):
-            scope_calls.append((model_cls, list(objects)))
-            return []
+    @pytest.mark.django_db
+    def test_rack_scoped_groups_are_returned(self):
+        """A group scoped to the device's rack is returned; another rack's group is not."""
+        from dcim.models import Rack
 
-        with (
-            patch("dcim.models.Site"),
-            patch("dcim.models.Region"),
-            patch("dcim.models.SiteGroup"),
-            patch("dcim.models.Location") as MockLocation,
-            patch("dcim.models.Rack"),
-            patch("ipam.models.VLANGroup") as MockVLANGroup,
-            patch.object(mixin, "_get_vlan_groups_for_scope", side_effect=fake_scope),
-            patch.object(mixin, "_get_ancestors", return_value=[location]),
-        ):
-            MockVLANGroup.objects.filter.return_value = []
-            mixin.get_vlan_groups_for_device(device)
+        from netbox_librenms_plugin.tests.conftest import make_device
 
-        assert len(scope_calls) >= 1
-        # Verify the Location model class was passed to _get_vlan_groups_for_scope
-        assert any(c[0] is MockLocation for c in scope_calls)
-
-    def test_device_with_rack_triggers_rack_scope_query(self):
-        """When device.rack is set, rack-scoped VLAN groups are queried."""
         mixin = self._make_mixin()
-
-        rack = MagicMock()
-        rack.pk = 7
-
-        device = MagicMock()
-        device.site = None
-        device.location = None
+        device = make_device("scope-rack-device")
+        rack = Rack.objects.create(name="Scope rack", site=device.site, status="active")
+        other_rack = Rack.objects.create(name="Scope other rack", site=device.site, status="active")
         device.rack = rack
+        device.save(update_fields=["rack"])
 
-        scope_calls = []
+        rack_group = self._scoped_group("Scope rack group", rack)
+        other_group = self._scoped_group("Scope other rack group", other_rack)
 
-        def fake_scope(model_cls, objects):
-            scope_calls.append((model_cls, list(objects)))
-            return []
+        groups = mixin.get_vlan_groups_for_device(device)
 
-        with (
-            patch("dcim.models.Site"),
-            patch("dcim.models.Region"),
-            patch("dcim.models.SiteGroup"),
-            patch("dcim.models.Location"),
-            patch("dcim.models.Rack") as MockRack,
-            patch("ipam.models.VLANGroup") as MockVLANGroup,
-            patch.object(mixin, "_get_vlan_groups_for_scope", side_effect=fake_scope),
-        ):
-            MockVLANGroup.objects.filter.return_value = []
-            mixin.get_vlan_groups_for_device(device)
+        assert rack_group in groups
+        assert other_group not in groups
 
-        # Rack must appear in the objects for one of the calls
-        rack_calls = [objects for (_cls, objects) in scope_calls if rack in objects]
-        assert len(rack_calls) >= 1
-        # Verify the Rack model class was passed to _get_vlan_groups_for_scope
-        assert any(c[0] is MockRack for c in scope_calls)
+    @pytest.mark.django_db
+    def test_every_scope_of_one_device_is_collected_and_sorted(self):
+        """One device carrying all five scopes collects a group from each, plus the global groups."""
+        from dcim.models import Location, Rack, Region, Site, SiteGroup
 
-    def test_all_scope_branches_combined(self):
-        """Device with site+region+sitegroup+location+rack hits all scope branches."""
+        from netbox_librenms_plugin.tests.conftest import make_device
+
         mixin = self._make_mixin()
-
-        region = MagicMock()
-        region.parent = None
-
-        site_group = MagicMock()
-        site_group.parent = None
-
-        location = MagicMock()
-        location.parent = None
-
-        rack = MagicMock()
-        rack.pk = 3
-
-        site = MagicMock()
-        site.pk = 1
-        site.region = region
-        site.group = site_group
-
-        device = MagicMock()
+        region = Region.objects.create(name="Combined region", slug="combined-region")
+        site_group = SiteGroup.objects.create(name="Combined sitegroup", slug="combined-sitegroup")
+        site = Site.objects.create(name="Combined site", slug="combined-site", region=region, group=site_group)
+        device = make_device("scope-combined-device")
         device.site = site
+        device.save(update_fields=["site"])
+        location = Location.objects.create(
+            name="Combined location", slug="combined-location", site=site, status="active"
+        )
+        rack = Rack.objects.create(name="Combined rack", site=site, status="active")
         device.location = location
         device.rack = rack
+        device.save(update_fields=["location", "rack"])
 
-        scope_calls_by_class = []
+        expected = {
+            self._scoped_group("Combined site group", site),
+            self._scoped_group("Combined region group", region),
+            self._scoped_group("Combined sitegroup group", site_group),
+            self._scoped_group("Combined location group", location),
+            self._scoped_group("Combined rack group", rack),
+            self._scoped_group("Combined global group", None),
+        }
+        unrelated = self._scoped_group(
+            "Combined unrelated site group",
+            Site.objects.create(name="Combined unrelated site", slug="combined-unrelated-site"),
+        )
 
-        def fake_scope(model_cls, objects):
-            scope_calls_by_class.append(model_cls)
-            return []
+        groups = mixin.get_vlan_groups_for_device(device)
 
-        site_group_ancestor = MagicMock()
-        site_group_ancestor.parent = None
-        location_ancestor = MagicMock()
-        location_ancestor.parent = None
-
-        def fake_ancestors(obj):
-            # Return distinct ancestors per branch so site-group and location paths are exercised
-            if obj is site_group:
-                return [site_group_ancestor]
-            if obj is location:
-                return [location_ancestor]
-            return [region]
-
-        with (
-            patch("dcim.models.Site") as MockSite,
-            patch("dcim.models.Region") as MockRegion,
-            patch("dcim.models.SiteGroup") as MockSiteGroup,
-            patch("dcim.models.Location") as MockLocation,
-            patch("dcim.models.Rack") as MockRack,
-            patch("ipam.models.VLANGroup") as MockVLANGroup,
-            patch.object(mixin, "_get_vlan_groups_for_scope", side_effect=fake_scope),
-            patch.object(mixin, "_get_ancestors", side_effect=fake_ancestors),
-        ):
-            MockVLANGroup.objects.filter.return_value = []
-            mixin.get_vlan_groups_for_device(device)
-
-        # All 5 scope types must have been queried
-        assert MockSite in scope_calls_by_class, "Site branch not hit"
-        assert MockRegion in scope_calls_by_class, "Region branch not hit"
-        assert MockSiteGroup in scope_calls_by_class, "SiteGroup branch not hit"
-        assert MockLocation in scope_calls_by_class, "Location branch not hit"
-        assert MockRack in scope_calls_by_class, "Rack branch not hit"
+        assert expected.issubset(set(groups))
+        assert unrelated not in groups
+        assert [group.name.lower() for group in groups] == sorted(group.name.lower() for group in groups)
 
 
 # =============================================================================
@@ -571,118 +515,93 @@ class TestGetVlanGroupsForDeviceInnerBranches:
 
 
 class TestBuildVlanLookupMaps:
-    """Tests for VlanAssignmentMixin._build_vlan_lookup_maps (lines 406-442)."""
+    """Tests for VlanAssignmentMixin._build_vlan_lookup_maps."""
 
     def _make_mixin(self):
         from netbox_librenms_plugin.views.mixins import VlanAssignmentMixin
 
         return object.__new__(VlanAssignmentMixin)
 
-    def test_empty_groups_returns_empty_maps(self):
-        """No groups and no global VLANs produces empty maps."""
-        mixin = self._make_mixin()
+    @staticmethod
+    def _make_group(name):
+        from ipam.models import VLANGroup
 
-        with patch("ipam.models.VLAN") as MockVLAN:
-            MockVLAN.objects.filter.return_value.select_related.return_value = []
-            maps = mixin._build_vlan_lookup_maps([])
+        return VLANGroup.objects.create(name=name, slug=name.lower().replace(" ", "-"))
+
+    @staticmethod
+    def _make_vlan(vid, name, group=None):
+        from ipam.models import VLAN
+
+        return VLAN.objects.create(vid=vid, name=name, group=group)
+
+    @pytest.mark.django_db
+    def test_no_groups_and_no_global_vlans_produces_empty_maps(self):
+        """A VLAN that belongs to an unrequested group leaves every map empty."""
+        mixin = self._make_mixin()
+        self._make_vlan(700, "MAPS-UNREQUESTED", self._make_group("Maps unrequested"))
+
+        maps = mixin._build_vlan_lookup_maps([])
 
         assert maps["vid_to_groups"] == {}
         assert maps["vid_group_to_vlan"] == {}
         assert maps["vid_to_vlans"] == {}
         assert maps["vid_name_to_vlan"] == {}
 
-    def test_group_vlan_indexed_in_all_maps(self):
-        """A VLAN within a group is added to all four lookup structures."""
+    @pytest.mark.django_db
+    def test_group_vlan_is_indexed_in_all_maps(self):
+        """A VLAN inside a requested group lands in all four lookup structures."""
         mixin = self._make_mixin()
+        group = self._make_group("Maps corp")
+        vlan = self._make_vlan(100, "CORP-DATA", group)
 
-        group = MagicMock()
-        group.pk = 10
+        maps = mixin._build_vlan_lookup_maps([group])
 
-        vlan = MagicMock()
-        vlan.vid = 100
-        vlan.group = group
-        vlan.name = "CORP-DATA"
+        assert maps["vid_to_groups"][100] == [group]
+        assert maps["vid_group_to_vlan"][(100, group.pk)] == vlan
+        assert maps["vid_to_vlans"][100] == [vlan]
+        assert maps["vid_name_to_vlan"][(100, "CORP-DATA")] == vlan
 
-        with patch("ipam.models.VLAN") as MockVLAN:
-            # First call = group VLANs (needs .select_related()), second call = global VLANs
-            first_qs = MagicMock()
-            first_qs.select_related.return_value = [vlan]
-            MockVLAN.objects.filter.side_effect = [first_qs, []]
-            maps = mixin._build_vlan_lookup_maps([group])
-
-        assert 100 in maps["vid_to_groups"]
-        assert group in maps["vid_to_groups"][100]
-        assert maps["vid_group_to_vlan"][(100, 10)] is vlan
-        assert vlan in maps["vid_to_vlans"][100]
-        assert maps["vid_name_to_vlan"][(100, "CORP-DATA")] is vlan
-
-    def test_global_vlan_indexed_with_none_group(self):
-        """A global VLAN (no group) uses None as group key."""
+    @pytest.mark.django_db
+    def test_global_vlan_is_indexed_under_a_none_group(self):
+        """A group-less VLAN is keyed on None and stays out of the ambiguity map."""
         mixin = self._make_mixin()
+        vlan = self._make_vlan(200, "MGMT")
 
-        vlan = MagicMock()
-        vlan.vid = 200
-        vlan.group = None
-        vlan.name = "MGMT"
+        maps = mixin._build_vlan_lookup_maps([])
 
-        with patch("ipam.models.VLAN") as MockVLAN:
-            first_qs = MagicMock()
-            first_qs.select_related.return_value = []
-            MockVLAN.objects.filter.side_effect = [first_qs, [vlan]]
-            maps = mixin._build_vlan_lookup_maps([])
-
-        assert maps["vid_group_to_vlan"][(200, None)] is vlan
-        assert vlan in maps["vid_to_vlans"][200]
-        # Global VLANs should not appear in vid_to_groups
+        assert maps["vid_group_to_vlan"][(200, None)] == vlan
+        assert maps["vid_to_vlans"][200] == [vlan]
         assert 200 not in maps["vid_to_groups"]
 
-    def test_multiple_groups_same_vid_both_tracked(self):
-        """Same VID in two groups: both groups appear in vid_to_groups."""
+    @pytest.mark.django_db
+    def test_same_vid_in_two_groups_tracks_both(self):
+        """One VID present in two requested groups records both groups for ambiguity detection."""
         mixin = self._make_mixin()
+        group_a = self._make_group("Maps group a")
+        group_b = self._make_group("Maps group b")
+        vlan_a = self._make_vlan(50, "VLAN50-A", group_a)
+        vlan_b = self._make_vlan(50, "VLAN50-B", group_b)
 
-        group_a = MagicMock()
-        group_a.pk = 1
-        group_b = MagicMock()
-        group_b.pk = 2
+        maps = mixin._build_vlan_lookup_maps([group_a, group_b])
 
-        vlan_a = MagicMock()
-        vlan_a.vid = 50
-        vlan_a.group = group_a
-        vlan_a.name = "VLAN50-A"
+        assert set(maps["vid_to_groups"][50]) == {group_a, group_b}
+        assert maps["vid_group_to_vlan"][(50, group_a.pk)] == vlan_a
+        assert maps["vid_group_to_vlan"][(50, group_b.pk)] == vlan_b
 
-        vlan_b = MagicMock()
-        vlan_b.vid = 50
-        vlan_b.group = group_b
-        vlan_b.name = "VLAN50-B"
-
-        with patch("ipam.models.VLAN") as MockVLAN:
-            first_qs = MagicMock()
-            first_qs.select_related.return_value = [vlan_a, vlan_b]
-            MockVLAN.objects.filter.side_effect = [first_qs, []]
-            maps = mixin._build_vlan_lookup_maps([group_a, group_b])
-
-        assert group_a in maps["vid_to_groups"][50]
-        assert group_b in maps["vid_to_groups"][50]
-        assert maps["vid_group_to_vlan"][(50, 1)] is vlan_a
-        assert maps["vid_group_to_vlan"][(50, 2)] is vlan_b
-
-    def test_filter_called_with_group_pks(self):
-        """_build_vlan_lookup_maps queries VLAN with the correct group PKs."""
+    @pytest.mark.django_db
+    def test_only_the_requested_groups_are_loaded(self):
+        """A VLAN in a group the caller did not ask for is left out of every map."""
         mixin = self._make_mixin()
+        requested = self._make_group("Maps requested")
+        skipped = self._make_group("Maps skipped")
+        wanted = self._make_vlan(11, "WANTED", requested)
+        unwanted = self._make_vlan(22, "UNWANTED", skipped)
 
-        group1 = MagicMock()
-        group1.pk = 11
-        group2 = MagicMock()
-        group2.pk = 22
+        maps = mixin._build_vlan_lookup_maps([requested])
 
-        with patch("ipam.models.VLAN") as MockVLAN:
-            MockVLAN.objects.filter.return_value.select_related.return_value = []
-            mixin._build_vlan_lookup_maps([group1, group2])
-
-        # First filter call should include the group PKs
-        first_call = MockVLAN.objects.filter.call_args_list[0]
-        assert "group__pk__in" in first_call[1]
-        assert set(first_call[1]["group__pk__in"]) == {11, 22}
+        assert maps["vid_to_vlans"] == {11: [wanted]}
+        assert unwanted not in maps["vid_to_vlans"].get(22, [])
+        assert (22, skipped.pk) not in maps["vid_group_to_vlan"]
 
 
 # =============================================================================
@@ -1132,172 +1051,148 @@ class TestFindVlanInGroupFallback:
 # =============================================================================
 
 
+@pytest.mark.django_db
 class TestUpdateInterfaceVlanAssignmentBranches:
-    """Cover lines 634 (access), 643 (empty), 653 (untagged set), 666 (clear untagged)."""
+    """Cover the mode, untagged and tagged branches of _update_interface_vlan_assignment."""
 
     def _make_mixin(self):
         from netbox_librenms_plugin.views.mixins import VlanAssignmentMixin
 
         return object.__new__(VlanAssignmentMixin)
 
-    def _make_interface(self):
-        iface = MagicMock()
-        iface.tagged_vlans = MagicMock()
-        return iface
+    def _fixture(self, tag, *, vlans=()):
+        """Return a mixin, a real interface, a VLAN group and the lookup maps over *vlans*."""
+        from ipam.models import VLAN, VLANGroup
 
-    def test_access_mode_set_for_untagged_only_no_tagged(self):
-        """Sets interface.mode = 'access' when only untagged VID present (line 634)."""
+        from netbox_librenms_plugin.tests.conftest import make_device, make_interface
+
         mixin = self._make_mixin()
-        iface = self._make_interface()
-        vlan = MagicMock()
+        interface = make_interface(make_device(f"vlan-assign-{tag}"), "eth0")
+        group = VLANGroup.objects.create(name=f"Assign {tag}", slug=f"assign-{tag}")
+        created = [VLAN.objects.create(vid=vid, name=name, group=group) for vid, name in vlans]
+        return mixin, interface, group, mixin._build_vlan_lookup_maps([group]), created
 
-        lookup_maps = {
-            "vid_group_to_vlan": {(100, None): vlan},
-            "vid_to_vlans": {100: [vlan]},
-        }
+    def test_untagged_only_sets_access_mode(self):
+        """One untagged VID and no tagged VIDs puts the interface in access mode."""
+        mixin, interface, group, maps, (vlan,) = self._fixture("access", vlans=[(100, "ACCESS-100")])
 
         result = mixin._update_interface_vlan_assignment(
-            iface,
-            {"untagged_vlan": 100, "tagged_vlans": []},
-            {},
-            lookup_maps,
+            interface, {"untagged_vlan": 100, "tagged_vlans": []}, {"100": str(group.pk)}, maps
         )
 
-        assert iface.mode == "access"
+        interface.refresh_from_db()
+        assert interface.mode == "access"
+        assert interface.untagged_vlan == vlan
         assert result["mode_set"] == "access"
+        assert result["untagged_set"] == vlan
 
-    def test_empty_mode_set_when_no_vlans_at_all(self):
-        """Sets interface.mode = '' when no untagged or tagged VLANs (line 643)."""
-        mixin = self._make_mixin()
-        iface = self._make_interface()
-
-        lookup_maps = {"vid_group_to_vlan": {}, "vid_to_vlans": {}}
-
-        result = mixin._update_interface_vlan_assignment(
-            iface,
-            {"untagged_vlan": None, "tagged_vlans": []},
-            {},
-            lookup_maps,
+    def test_tagged_vids_set_tagged_mode_and_the_membership(self):
+        """Tagged VIDs win over the untagged VID when the mode is chosen."""
+        mixin, interface, group, maps, (untagged, tagged) = self._fixture(
+            "tagged", vlans=[(10, "UNTAGGED-10"), (20, "TAGGED-20")]
         )
 
-        assert iface.mode == ""
-        assert result["mode_set"] == ""
-
-    def test_untagged_vlan_assigned_to_interface_when_found(self):
-        """interface.untagged_vlan is set to the resolved VLAN object (line 653)."""
-        mixin = self._make_mixin()
-        iface = self._make_interface()
-        vlan = MagicMock()
-
-        lookup_maps = {
-            "vid_group_to_vlan": {(200, None): vlan},
-            "vid_to_vlans": {200: [vlan]},
-        }
-
         result = mixin._update_interface_vlan_assignment(
-            iface,
-            {"untagged_vlan": 200, "tagged_vlans": []},
-            {},
-            lookup_maps,
+            interface,
+            {"untagged_vlan": 10, "tagged_vlans": [20]},
+            {"10": str(group.pk), "20": str(group.pk)},
+            maps,
         )
 
-        assert iface.untagged_vlan is vlan
-        assert result["untagged_set"] is vlan
-        iface.save.assert_called()
+        interface.refresh_from_db()
+        assert interface.mode == "tagged"
+        assert interface.untagged_vlan == untagged
+        assert list(interface.tagged_vlans.all()) == [tagged]
+        assert result["tagged_set"] == [tagged]
+        assert result["changed"] is True
 
-    def test_untagged_vlan_set_none_when_no_untagged_vid(self):
-        """interface.untagged_vlan = None when untagged_vid is None (line 666)."""
-        mixin = self._make_mixin()
-        iface = self._make_interface()
-
-        lookup_maps = {"vid_group_to_vlan": {}, "vid_to_vlans": {}}
+    def test_no_vlans_clears_a_mode_the_interface_already_had(self):
+        """An interface that had a mode loses it when LibreNMS reports no VLANs."""
+        mixin, interface, group, maps, (vlan,) = self._fixture("clear-mode", vlans=[(30, "OLD-30")])
+        interface.mode = "access"
+        interface.untagged_vlan = vlan
+        interface.save()
 
         result = mixin._update_interface_vlan_assignment(
-            iface,
-            {"untagged_vlan": None, "tagged_vlans": []},
-            {},
-            lookup_maps,
+            interface, {"untagged_vlan": None, "tagged_vlans": []}, {}, maps
         )
 
-        assert iface.untagged_vlan is None
+        interface.refresh_from_db()
+        assert interface.mode is None
+        assert interface.untagged_vlan is None
+        assert result["mode_set"] is None
         assert result["untagged_set"] is None
-        iface.save.assert_called()
+        assert result["changed"] is True
+
+    def test_an_unchanged_interface_is_not_written(self):
+        """A payload matching what NetBox already holds reports no change."""
+        mixin, interface, group, maps, _ = self._fixture("unchanged")
+
+        result = mixin._update_interface_vlan_assignment(
+            interface, {"untagged_vlan": None, "tagged_vlans": []}, {}, maps
+        )
+
+        assert result["changed"] is False
+        assert result["mode_set"] is None
+        assert result["untagged_set"] is None
 
     def test_existing_tagged_vlans_are_cleared_when_the_payload_has_none(self):
         """Remove existing tagged VLANs when LibreNMS reports no tagged VIDs."""
-        mixin = self._make_mixin()
-        iface = self._make_interface()
-        iface.tagged_vlans.values_list.return_value = [101]
-
-        lookup_maps = {"vid_group_to_vlan": {}, "vid_to_vlans": {}}
+        mixin, interface, group, maps, (vlan,) = self._fixture("clear-tagged", vlans=[(101, "TAGGED-101")])
+        interface.mode = "tagged"
+        interface.save()
+        interface.tagged_vlans.set([vlan])
+        assert list(interface.tagged_vlans.all()) == [vlan]
 
         result = mixin._update_interface_vlan_assignment(
-            iface,
-            {"untagged_vlan": None, "tagged_vlans": []},
-            {},
-            lookup_maps,
+            interface, {"untagged_vlan": None, "tagged_vlans": []}, {}, maps
         )
 
-        iface.tagged_vlans.clear.assert_called_once_with()
-        iface.tagged_vlans.set.assert_not_called()
-        iface.tagged_vlans.remove.assert_not_called()
+        interface.refresh_from_db()
+        assert list(interface.tagged_vlans.all()) == []
         assert result["tagged_set"] == []
         assert result["changed"] is True
 
-    def test_backward_compat_single_group_id_string(self):
-        """Non-dict vlan_group_map (legacy single group ID) is handled correctly."""
-        mixin = self._make_mixin()
-        iface = self._make_interface()
-        vlan = MagicMock()
+    def test_a_non_dict_group_map_is_read_as_one_group_id(self):
+        """A bare group id stands in for the per-VID map and decides which duplicate VID wins."""
+        from ipam.models import VLAN, VLANGroup
 
-        lookup_maps = {
-            "vid_group_to_vlan": {(100, 5): vlan},
-            "vid_to_vlans": {100: [vlan]},
-        }
-
-        # Pass a string (backward compat for single group ID)
-        result = mixin._update_interface_vlan_assignment(
-            iface,
-            {"untagged_vlan": 100, "tagged_vlans": []},
-            "5",  # non-dict, single group id
-            lookup_maps,
-        )
-
-        assert result["untagged_set"] is vlan
-
-    def test_missing_untagged_vlan_added_to_missing_list(self):
-        """If untagged VID not found, it's in missing_vlans and untagged_vlan stays None."""
-        mixin = self._make_mixin()
-        iface = self._make_interface()
-
-        lookup_maps = {"vid_group_to_vlan": {}, "vid_to_vlans": {}}
+        mixin, interface, decoy_group, _maps, (decoy,) = self._fixture("single-group", vlans=[(100, "DECOY-100")])
+        wanted_group = VLANGroup.objects.create(name="Assign single-group wanted", slug="assign-single-wanted")
+        wanted = VLAN.objects.create(vid=100, name="WANTED-100", group=wanted_group)
+        # Both groups hold VID 100, so only the group id passed in can pick the right one.
+        maps = mixin._build_vlan_lookup_maps([decoy_group, wanted_group])
 
         result = mixin._update_interface_vlan_assignment(
-            iface,
-            {"untagged_vlan": 999, "tagged_vlans": []},
-            {},
-            lookup_maps,
+            interface, {"untagged_vlan": 100, "tagged_vlans": []}, str(wanted_group.pk), maps
         )
 
-        assert 999 in result["missing_vlans"]
-        assert iface.untagged_vlan is None
+        assert result["untagged_set"] == wanted
+        assert result["untagged_set"] != decoy
+        interface.refresh_from_db()
+        assert interface.untagged_vlan == wanted
 
-    def test_return_dict_has_all_keys(self):
-        """Return dict always contains mode_set, untagged_set, tagged_set, missing_vlans."""
-        mixin = self._make_mixin()
-        iface = self._make_interface()
-
-        lookup_maps = {"vid_group_to_vlan": {}, "vid_to_vlans": {}}
+    def test_an_unknown_untagged_vid_is_reported_missing(self):
+        """A VID absent from NetBox is reported and leaves the interface without an untagged VLAN."""
+        mixin, interface, _group, maps, _ = self._fixture("missing")
 
         result = mixin._update_interface_vlan_assignment(
-            iface,
-            {"untagged_vlan": None, "tagged_vlans": []},
-            {},
-            lookup_maps,
+            interface, {"untagged_vlan": 999, "tagged_vlans": []}, {}, maps
         )
 
-        for key in ("mode_set", "untagged_set", "tagged_set", "missing_vlans"):
-            assert key in result
+        interface.refresh_from_db()
+        assert result["missing_vlans"] == [999]
+        assert interface.untagged_vlan is None
+
+    def test_the_result_reports_every_key(self):
+        """The caller always receives the full result contract."""
+        mixin, interface, _group, maps, _ = self._fixture("contract")
+
+        result = mixin._update_interface_vlan_assignment(
+            interface, {"untagged_vlan": None, "tagged_vlans": []}, {}, maps
+        )
+
+        assert set(result) == {"mode_set", "untagged_set", "tagged_set", "missing_vlans", "changed"}
 
 
 class TestRenderServerKeyDegradation:
