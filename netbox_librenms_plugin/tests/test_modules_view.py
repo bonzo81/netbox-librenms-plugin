@@ -947,535 +947,635 @@ class TestMergeTransceiverDataPortIdentity:
         assert inventory[0]["_librenms_ifdescr"] == "Te1/1/1"
         assert port_requests == []
 
-    def test_post_fetches_ports_once_and_reuses_payload(self):
-        view = _make_view()
-        view.model = MagicMock()
-        obj = MagicMock()
-        request = MagicMock()
 
-        # No POSTed keys → get(key, default) must honour the caller's default (QueryDict
-        # semantics); a blanket return_value=None would break default-fallback paths.
-        request.POST.get.side_effect = lambda key, default=None: (
-            default
-        )  # no POSTed server_key → rebind keeps session API
-        view.get_object = MagicMock(return_value=obj)
-        view._get_sync_device = MagicMock(return_value=obj)
-        view.has_write_permission = MagicMock(return_value=True)
-        view._build_context = MagicMock(
-            return_value={
-                "table": None,
-                "object": obj,
-                "cache_expiry": None,
-                "server_key": view._librenms_api.server_key,
-            }
+def _two_server_keys(settings, server, prefix):
+    """Configure two real servers on the stub and return their keys."""
+    config = {"librenms_url": server.url, "api_token": "test-token", "verify_ssl": False}
+    primary, secondary = f"{prefix}-primary", f"{prefix}-secondary"
+    configure_servers(settings, {primary: dict(config), secondary: dict(config)})
+    return primary, secondary
+
+
+def _mapped_device(name, server_key, librenms_id=777):
+    """Create a real device carrying a real LibreNMS mapping under *server_key*."""
+    from netbox_librenms_plugin.tests.conftest import make_device
+    from netbox_librenms_plugin.utils import set_librenms_device_id
+
+    device = make_device(name)
+    set_librenms_device_id(device, librenms_id, server_key)
+    device.save(update_fields=["custom_field_data"])
+    return device
+
+
+def _seed_snapshot(view, device, server_key, *, inventory=None, librenms_id=777, oob_librenms_id=None):
+    """Store a real inventory snapshot in the real cache and return its key and payload."""
+    from django.core.cache import cache
+
+    from netbox_librenms_plugin.tests.view_test_helpers import trusted_module_inventory_payload
+
+    payload = trusted_module_inventory_payload(
+        device,
+        [{"entPhysicalIndex": 12}] if inventory is None else inventory,
+        server_key=server_key,
+        librenms_id=librenms_id,
+    )
+    payload["oob_librenms_id"] = oob_librenms_id
+    cache_key = view.get_cache_key(device, "inventory", server_key=server_key)
+    cache.set(cache_key, payload)
+    return cache_key, payload
+
+
+@pytest.mark.django_db
+class TestPostInventoryRefresh:
+    """Inventory refreshes must persist only complete snapshots for the active server."""
+
+    @pytest.fixture
+    def server_keys(self, settings, librenms_server):
+        return _two_server_keys(settings, librenms_server, "inventory")
+
+    @staticmethod
+    def _register_successful_refresh(librenms_server, inventory=None, transceivers=None, ports=None):
+        librenms_server.register(
+            "/api/v0/inventory/777/all",
+            {"status": "ok", "inventory": inventory if inventory is not None else []},
+            method="GET",
+        )
+        librenms_server.register(
+            "/api/v0/devices/777/transceivers",
+            {"status": "ok", "transceivers": transceivers if transceivers is not None else []},
+            method="GET",
+        )
+        librenms_server.register(
+            "/api/v0/devices/777/ports",
+            {"status": "ok", "ports": ports if ports is not None else []},
+            method="GET",
         )
 
-        view._librenms_api.get_librenms_id.return_value = 777
-        view._librenms_api.get_device_inventory.return_value = (True, [])
-        view._librenms_api.get_device_transceivers.return_value = (True, [])
-        ports_payload = {"ports": []}
-        view._librenms_api.get_ports.return_value = (True, ports_payload)
+    def test_post_fetches_ports_once_and_reuses_payload(self, librenms_server, server_keys):
+        from django.core.cache import cache
 
-        with (
-            patch("netbox_librenms_plugin.views.base.modules_view.cache"),
-            patch("netbox_librenms_plugin.views.base.modules_view.messages"),
-            patch("netbox_librenms_plugin.views.mixins.render", return_value=MagicMock()),
-            patch.object(view, "_merge_transceiver_data", wraps=view._merge_transceiver_data) as mock_merge,
-            patch.object(
-                view, "_enrich_inventory_port_identity", wraps=view._enrich_inventory_port_identity
-            ) as mock_enrich,
-        ):
-            view.post(request, pk=1)
+        from netbox_librenms_plugin.tests.view_test_helpers import make_request, message_texts, post
+        from netbox_librenms_plugin.views.object_sync.devices import DeviceModuleTableView
 
-        assert view._librenms_api.get_ports.call_count == 1
-        assert mock_merge.call_args.kwargs.get("ports_data") == ports_payload
-        assert mock_enrich.call_args.kwargs.get("ports_data") == ports_payload
+        server_key, _ = server_keys
+        device = _mapped_device("module-refresh-port-reuse", server_key)
+        inventory = [
+            {
+                "entPhysicalIndex": 1,
+                "entPhysicalName": "Gi0/1",
+                "entPhysicalDescr": "Host port",
+                "entPhysicalClass": "port",
+                "entPhysicalModelName": "HOST-PORT",
+                "entPhysicalSerialNum": "PORT-1",
+                "entPhysicalContainedIn": 0,
+            }
+        ]
+        transceivers = [
+            {
+                "entity_physical_index": 2,
+                "model": "SFP-10G-SR",
+                "serial": "TX-2",
+                "type": "SFP",
+                "port_id": 42,
+            }
+        ]
+        port_requests = []
 
-    def test_post_treats_non_list_inventory_as_fetch_failure(self):
-        """get_device_inventory is an external boundary: a success flag with a non-list payload (e.g. an error dict) is treated as a fetch failure."""
-        view = _make_view()
-        view.model = MagicMock()
-        obj = MagicMock()
-        request = MagicMock()
-        request.POST.get.side_effect = lambda key, default=None: default
-        view.get_object = MagicMock(return_value=obj)
-        view._get_sync_device = MagicMock(return_value=obj)
-        view.has_write_permission = MagicMock(return_value=True)
-        view._librenms_api.get_librenms_id.return_value = 777
-        # success=True but the payload is a dict, not list[dict].
-        view._librenms_api.get_device_inventory.return_value = (True, {"error": "weird shape"})
+        def ports_route(**request_data):
+            port_requests.append(request_data)
+            return 200, {
+                "status": "ok",
+                "ports": [
+                    {"port_id": 10, "ifName": "Gi0/1", "ifDescr": "Host port"},
+                    {"port_id": 42, "ifName": "Gi0/2", "ifDescr": "Transceiver port"},
+                ],
+            }
 
-        with (
-            patch("netbox_librenms_plugin.views.base.modules_view.cache") as mock_cache,
-            patch("netbox_librenms_plugin.views.base.modules_view.messages") as mock_messages,
-            patch("netbox_librenms_plugin.views.mixins.render", return_value=MagicMock()),
-            patch("netbox_librenms_plugin.utils.build_migrated_context", return_value={}),
-        ):
-            view.post(request, pk=1)
+        librenms_server.register(
+            "/api/v0/inventory/777/all",
+            {"status": "ok", "inventory": inventory},
+            method="GET",
+        )
+        librenms_server.register(
+            "/api/v0/devices/777/transceivers",
+            {"status": "ok", "transceivers": transceivers},
+            method="GET",
+        )
+        librenms_server.register("/api/v0/devices/777/ports", ports_route, method="GET")
 
-        # Failure branch: error surfaced, stale inventory cache cleared, and the ports fetch
-        # (which only runs after a *valid* inventory) is never reached.
-        mock_messages.error.assert_called_once()
-        # _make_view() fixes get_cache_key() to "test_cache_key"; assert the exact key so the
-        # failure path can't silently start deleting the wrong cache entry.
-        mock_cache.delete.assert_called_once_with("test_cache_key")
-        view._librenms_api.get_ports.assert_not_called()
+        view = DeviceModuleTableView()
+        request = make_request("post", {"server_key": server_key})
+        response = post(view, request, pk=device.pk)
 
-    def test_post_stale_server_key_resolves_migrated_context_with_session_key(self):
-        """When the POSTed server_key is stale (rebind fails), the migrated context must resolve under the session/active key — NOT the stale posted key (which would miss the marker and re-enable a donor's sync controls)."""
-        view = _make_view()
-        obj = MagicMock()
-        request = MagicMock()
-        # A NON-EMPTY but stale/unconfigured key is posted (rebind returns None for it).
-        request.POST.get.side_effect = lambda key, default=None: {"server_key": "ghost-server"}.get(key, default)
-        view.get_object = MagicMock(return_value=obj)
-        view.rebind_api_for_server = MagicMock(return_value=None)  # stale key → rebind fails
-        view.has_write_permission = MagicMock(return_value=False)
-        view.partial_template_name = "x.html"
+        assert response.status_code == 200
+        assert len(port_requests) == 1
+        cached = cache.get(view.get_cache_key(device, "inventory", server_key=server_key))
+        main_item = next(item for item in cached["inventory"] if item["entPhysicalIndex"] == 1)
+        transceiver_item = next(item for item in cached["inventory"] if item["entPhysicalIndex"] == 2)
+        assert main_item["_librenms_port_id"] == 10
+        assert transceiver_item["_librenms_port_id"] == 42
+        assert transceiver_item["_librenms_ifname"] == "Gi0/2"
+        assert message_texts(request, "success") == ["Inventory data refreshed successfully."]
 
-        with (
-            patch("netbox_librenms_plugin.views.base.modules_view.messages"),
-            patch(
-                "netbox_librenms_plugin.utils.build_migrated_context",
-                return_value={"migrated_to_marker": None},
-            ) as mock_migrated,
-            patch("netbox_librenms_plugin.views.mixins.render", return_value="rendered"),
-        ):
-            result = view.post(request, pk=1)
+    def test_post_treats_non_list_inventory_as_fetch_failure(self, librenms_server, server_keys):
+        """get_device_inventory is an external boundary. A non-list inventory body is a fetch failure."""
+        from django.core.cache import cache
 
-        # Resolved under the session/active server key ("test-server"), NOT the stale "ghost-server".
-        mock_migrated.assert_called_once_with(obj, "test-server")
-        assert result == "rendered"
+        from netbox_librenms_plugin.tests.view_test_helpers import make_request, message_texts, post
+        from netbox_librenms_plugin.views.object_sync.devices import DeviceModuleTableView
 
-    def test_post_treats_non_dict_inventory_entry_as_fetch_failure(self):
-        """A list payload that carries non-dict entries (e.g. None) is treated as a fetch failure."""
-        view = _make_view()
-        view.model = MagicMock()
-        obj = MagicMock()
-        request = MagicMock()
-        request.POST.get.side_effect = lambda key, default=None: default
-        view.get_object = MagicMock(return_value=obj)
-        view._get_sync_device = MagicMock(return_value=obj)
-        view.has_write_permission = MagicMock(return_value=True)
-        view._librenms_api.get_librenms_id.return_value = 777
-        # success=True and a list, but one element is not a dict.
-        view._librenms_api.get_device_inventory.return_value = (True, [{"entPhysicalIndex": 1}, None])
+        server_key, _ = server_keys
+        device = _mapped_device("module-refresh-non-list-inventory", server_key)
+        view = DeviceModuleTableView()
+        cache_key, _ = _seed_snapshot(view, device, server_key)
+        port_requests = _count_port_requests(librenms_server, 777)
+        librenms_server.register(
+            "/api/v0/inventory/777/all",
+            {"status": "ok", "inventory": {"error": "weird shape"}},
+            method="GET",
+        )
 
-        with (
-            patch("netbox_librenms_plugin.views.base.modules_view.cache") as mock_cache,
-            patch("netbox_librenms_plugin.views.base.modules_view.messages") as mock_messages,
-            patch("netbox_librenms_plugin.views.mixins.render", return_value=MagicMock()),
-            patch("netbox_librenms_plugin.utils.build_migrated_context", return_value={}),
-        ):
-            view.post(request, pk=1)
+        request = make_request("post", {"server_key": server_key})
+        response = post(view, request, pk=device.pk)
 
-        mock_messages.error.assert_called_once()
-        mock_cache.delete.assert_called_once_with("test_cache_key")
-        view._librenms_api.get_ports.assert_not_called()  # bad inventory short-circuits before ports fetch
+        assert response.status_code == 200
+        assert message_texts(request, "error") == [
+            "Failed to fetch inventory from LibreNMS; see server logs for details."
+        ]
+        assert cache.get(cache_key) is None
+        assert port_requests == []
 
-    def test_get_context_data_rejects_malformed_cached_inventory(self):
+    def test_post_stale_server_key_resolves_migrated_context_with_session_key(self, server_keys):
+        """When the POSTed server_key is stale, resolve migrated context under the active session key. Using the stale key would miss the marker and re-enable a donor's sync controls."""
+        from unittest.mock import patch
+
+        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+        from netbox_librenms_plugin.tests.conftest import make_device
+        from netbox_librenms_plugin.tests.view_test_helpers import make_request, message_texts, post
+        from netbox_librenms_plugin.utils import build_migrated_context, mark_librenms_migrated
+        from netbox_librenms_plugin.views.object_sync.devices import DeviceModuleTableView
+
+        active_key, _ = server_keys
+        donor = make_device("module-refresh-stale-server-donor")
+        winner = make_device("module-refresh-stale-server-winner")
+        mark_librenms_migrated(donor, winner.pk, active_key)
+        donor.save(update_fields=["custom_field_data"])
+        view = DeviceModuleTableView()
+        view._librenms_api = LibreNMSAPI(server_key=active_key)
+        request = make_request("post", {"server_key": "retired-inventory-server"})
+
+        # The empty-table fragment does not render the migrated marker. Observe only the pure
+        # context builder call while the real resolver, view, request, device, and renderer run.
+        with patch(
+            "netbox_librenms_plugin.utils.build_migrated_context",
+            wraps=build_migrated_context,
+        ) as migrated_context_spy:
+            response = post(view, request, pk=donor.pk)
+
+        assert response.status_code == 200
+        migrated_context_spy.assert_called_once_with(donor, active_key)
+        assert view.active_server_key == active_key
+        assert message_texts(request, "error") == ["Selected LibreNMS server is no longer configured."]
+
+    def test_post_treats_non_dict_inventory_entry_as_fetch_failure(self, librenms_server, server_keys):
+        """A list payload that carries non-dict entries, such as None, is a fetch failure."""
+        from django.core.cache import cache
+
+        from netbox_librenms_plugin.tests.view_test_helpers import make_request, message_texts, post
+        from netbox_librenms_plugin.views.object_sync.devices import DeviceModuleTableView
+
+        server_key, _ = server_keys
+        device = _mapped_device("module-refresh-non-dict-inventory", server_key)
+        view = DeviceModuleTableView()
+        cache_key, _ = _seed_snapshot(view, device, server_key)
+        port_requests = _count_port_requests(librenms_server, 777)
+        librenms_server.register(
+            "/api/v0/inventory/777/all",
+            {"status": "ok", "inventory": [{"entPhysicalIndex": 1}, None]},
+            method="GET",
+        )
+
+        request = make_request("post", {"server_key": server_key})
+        response = post(view, request, pk=device.pk)
+
+        assert response.status_code == 200
+        assert message_texts(request, "error") == [
+            "Failed to fetch inventory from LibreNMS; see server logs for details."
+        ]
+        assert cache.get(cache_key) is None
+        assert port_requests == []
+
+    def test_get_context_data_rejects_malformed_cached_inventory(self, server_keys):
         """post() now fails closed on malformed inventory before caching, but a stale pre-fix cache entry like {"inventory": [None]} can still be read."""
-        view = _make_view()
-        obj = MagicMock()
-        view._get_sync_device = MagicMock(return_value=obj)
-        # Pin the librenms_id + OOB fingerprint so they MATCH the cached payload and don't trigger
-        # an earlier cache invalidation — otherwise the test would pass for the wrong reason (the
-        # id/oob mismatch deleting the cache before the malformed-inventory guard is even reached).
-        view._librenms_api.get_librenms_id.return_value = 1
-        view._build_context = MagicMock()  # must NOT be reached for a malformed payload
-        request = MagicMock()
-        request.GET = {}  # real query dict (no server_key) so the GET-rebind guard doesn't early-return
+        from django.core.cache import cache
 
-        with (
-            patch("netbox_librenms_plugin.views.base.modules_view.cache") as mock_cache,
-            patch("netbox_librenms_plugin.views.base.modules_view.get_librenms_oob", return_value=None),
-        ):
-            mock_cache.get.return_value = {"inventory": [None], "librenms_id": 1}
-            result = view.get_context_data(request, obj)
+        from netbox_librenms_plugin.tests.view_test_helpers import bind_and_call, make_request
+        from netbox_librenms_plugin.views.object_sync.devices import DeviceModuleTableView
 
-        view._build_context.assert_not_called()
-        mock_cache.delete.assert_called_once_with("test_cache_key")
+        server_key, _ = server_keys
+        device = _mapped_device("module-cache-malformed-inventory", server_key, librenms_id=1)
+        view = DeviceModuleTableView()
+        cache_key = view.get_cache_key(device, "inventory", server_key=server_key)
+        # Keep both identity fingerprints valid. This makes the malformed inventory guard the
+        # only reason the snapshot is removed.
+        cache.set(cache_key, {"inventory": [None], "librenms_id": 1, "oob_librenms_id": None})
+        request = make_request("get", {"server_key": server_key})
+
+        result = bind_and_call(view, request, "get_context_data", obj=device)
+
+        assert cache.get(cache_key) is None
         assert result["table"] is None
-        assert result["object"] is obj
+        assert result["object"].pk == device.pk
+        assert result["server_key"] == server_key
 
-    def test_get_context_data_keys_cache_on_resolved_scoped_server(self):
-        """The cache read keys on the scoped server RETURNED by the resolver, not the bound api.server_key (equal only via the rebind side effect)."""
-        view = _make_view()
-        obj = MagicMock()
-        view._get_sync_device = MagicMock(return_value=obj)
-        view._librenms_api.get_librenms_id.return_value = 1
-        view._build_context = MagicMock()
-        request = MagicMock()
-        request.GET = {}
-        # Simulate the regression the finding guards against: the resolver returns a scoped server
-        # but does NOT rebind the bound client (which stays "test-server"). The cache key must
-        # follow the RESOLVED scoped server, not the now-stale bound api.server_key.
-        view.resolve_get_render_server_key = MagicMock(return_value=("scoped-srv", False))
+    def test_get_context_data_keys_cache_on_resolved_scoped_server(self, server_keys):
+        """The cache read keys on the scoped server returned by the resolver, not the previously bound API server."""
+        from django.core.cache import cache
 
-        with (
-            patch("netbox_librenms_plugin.views.base.modules_view.cache") as mock_cache,
-            patch("netbox_librenms_plugin.views.base.modules_view.get_librenms_oob", return_value=None),
-        ):
-            mock_cache.get.return_value = {"inventory": [None], "librenms_id": 1}
-            view.get_context_data(request, obj)
-
-        view.get_cache_key.assert_called_once_with(obj, "inventory", server_key="scoped-srv")
-
-    def test_get_context_data_scopes_sync_device_to_resolved_server(self):
-        """The VC sync-device resolution is scoped to the RESOLVED server explicitly, not left to rely on the rebind side effect."""
-        view = _make_view()
-        obj = MagicMock()
-        view._get_sync_device = MagicMock(return_value=obj)
-        view._librenms_api.get_librenms_id.return_value = 1
-        view._build_context = MagicMock()
-        request = MagicMock()
-        request.GET = {}
-        # Resolver returns a scoped server WITHOUT rebinding the bound client (the regression case).
-        view.resolve_get_render_server_key = MagicMock(return_value=("scoped-srv", False))
-
-        with (
-            patch("netbox_librenms_plugin.views.base.modules_view.cache") as mock_cache,
-            patch("netbox_librenms_plugin.views.base.modules_view.get_librenms_oob", return_value=None),
-        ):
-            mock_cache.get.return_value = {"inventory": [None], "librenms_id": 1}
-            view.get_context_data(request, obj)
-
-        # _get_sync_device must receive the resolved scoped server, not be called unscoped.
-        view._get_sync_device.assert_called_once_with(obj, server_key="scoped-srv")
-
-    def test_post_warns_when_ports_fetch_fails(self):
-        view = _make_view()
-        view.model = MagicMock()
-        obj = MagicMock()
-        request = MagicMock()
-
-        # No POSTed keys → get(key, default) must honour the caller's default (QueryDict
-        # semantics); a blanket return_value=None would break default-fallback paths.
-        request.POST.get.side_effect = lambda key, default=None: (
-            default
-        )  # no POSTed server_key → rebind keeps session API
-        view.get_object = MagicMock(return_value=obj)
-        view._get_sync_device = MagicMock(return_value=obj)
-        view.has_write_permission = MagicMock(return_value=True)
-        view._build_context = MagicMock(
-            return_value={
-                "table": None,
-                "object": obj,
-                "cache_expiry": None,
-                "server_key": view._librenms_api.server_key,
-            }
+        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+        from netbox_librenms_plugin.tests.view_test_helpers import (
+            bind_and_call,
+            make_request,
+            trusted_module_inventory_payload,
         )
+        from netbox_librenms_plugin.views.object_sync.devices import DeviceModuleTableView
 
-        view._librenms_api.get_librenms_id.return_value = 777
-        view._librenms_api.get_device_inventory.return_value = (True, [])
-        view._librenms_api.get_device_transceivers.return_value = (True, [])
-        view._librenms_api.get_ports.return_value = (False, "ports api unavailable")
+        bound_key, scoped_key = server_keys
+        device = _mapped_device("module-cache-scoped-server", scoped_key, librenms_id=1)
+        view = DeviceModuleTableView()
+        view._librenms_api = LibreNMSAPI(server_key=bound_key)
+        payload = trusted_module_inventory_payload(device, [], server_key=scoped_key, librenms_id=1)
+        scoped_cache_key = view.get_cache_key(device, "inventory", server_key=scoped_key)
+        cache.set(scoped_cache_key, payload)
+        request = make_request("get", {"server_key": scoped_key})
 
-        with (
-            patch("netbox_librenms_plugin.views.base.modules_view.cache"),
-            patch("netbox_librenms_plugin.views.base.modules_view.messages") as mock_messages,
-            patch("netbox_librenms_plugin.views.mixins.render", return_value=MagicMock()),
-        ):
-            view.post(request, pk=1)
+        result = bind_and_call(view, request, "get_context_data", obj=device)
 
-        mock_messages.warning.assert_called_once_with(
-            request,
+        assert result["table"] is not None
+        assert result["server_key"] == scoped_key
+        assert view.librenms_api.server_key == scoped_key
+        assert cache.get(scoped_cache_key) == payload
+
+    def test_get_context_data_scopes_sync_device_to_resolved_server(self, server_keys):
+        """The VC sync-device resolution uses the resolved server explicitly. It must not rely on the prior API binding."""
+        from django.core.cache import cache
+
+        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+        from netbox_librenms_plugin.tests.conftest import make_virtual_chassis_members
+        from netbox_librenms_plugin.tests.view_test_helpers import (
+            bind_and_call,
+            make_request,
+            trusted_module_inventory_payload,
+        )
+        from netbox_librenms_plugin.utils import set_librenms_device_id
+        from netbox_librenms_plugin.views.object_sync.devices import DeviceModuleTableView
+
+        bound_key, scoped_key = server_keys
+        _, members = make_virtual_chassis_members("module-cache-scoped-vc", count=2)
+        bound_device, scoped_device = members
+        set_librenms_device_id(bound_device, 701, bound_key)
+        bound_device.save(update_fields=["custom_field_data"])
+        payload = trusted_module_inventory_payload(scoped_device, [], server_key=scoped_key, librenms_id=777)
+        view = DeviceModuleTableView()
+        view._librenms_api = LibreNMSAPI(server_key=bound_key)
+        scoped_cache_key = view.get_cache_key(scoped_device, "inventory", server_key=scoped_key)
+        cache.set(scoped_cache_key, payload)
+        request = make_request("get", {"server_key": scoped_key})
+
+        result = bind_and_call(view, request, "get_context_data", obj=bound_device)
+
+        assert result["table"] is not None
+        assert result["server_key"] == scoped_key
+        assert cache.get(scoped_cache_key) == payload
+        assert cache.get(view.get_cache_key(bound_device, "inventory", server_key=scoped_key)) is None
+
+    def test_post_warns_when_ports_fetch_fails(self, librenms_server, server_keys):
+        from django.core.cache import cache
+
+        from netbox_librenms_plugin.tests.view_test_helpers import make_request, message_texts, post
+        from netbox_librenms_plugin.views.object_sync.devices import DeviceModuleTableView
+
+        server_key, _ = server_keys
+        device = _mapped_device("module-refresh-ports-failure", server_key)
+        view = DeviceModuleTableView()
+        cache_key, _ = _seed_snapshot(view, device, server_key)
+        self._register_successful_refresh(librenms_server)
+        librenms_server.register(
+            "/api/v0/devices/777/ports",
+            {"status": "error", "message": "ports api unavailable"},
+            status=503,
+            method="GET",
+        )
+        request = make_request("post", {"server_key": server_key})
+
+        response = post(view, request, pk=device.pk)
+
+        assert response.status_code == 200
+        assert cache.get(cache_key) is None
+        assert message_texts(request, "warning") == [
             "Inventory refresh was incomplete: port metadata fetch failed, so no module rows were"
-            " loaded. Refresh Modules to try again. See server logs for details.",
+            " loaded. Refresh Modules to try again. See server logs for details."
+        ]
+        assert message_texts(request, "success") == []
+
+    def test_post_treats_malformed_ports_payload_as_fetch_failure(self, librenms_server, server_keys):
+        """get_ports() can return success with a dict whose "ports" is missing, None, or contains non-dict entries. Port-id enrichment would otherwise silently do nothing."""
+        from django.core.cache import cache
+
+        from netbox_librenms_plugin.tests.view_test_helpers import make_request, message_texts, post
+        from netbox_librenms_plugin.views.object_sync.devices import DeviceModuleTableView
+
+        server_key, _ = server_keys
+        device = _mapped_device("module-refresh-malformed-ports", server_key)
+        view = DeviceModuleTableView()
+        cache_key, _ = _seed_snapshot(view, device, server_key)
+        self._register_successful_refresh(librenms_server)
+        # get_ports() returns the decoded JSON body verbatim. This malformed payload reaches post().
+        librenms_server.register(
+            "/api/v0/devices/777/ports",
+            {"status": "ok", "ports": None},
+            method="GET",
         )
-        mock_messages.success.assert_not_called()
+        request = make_request("post", {"server_key": server_key})
 
-    def test_post_treats_malformed_ports_payload_as_fetch_failure(self):
-        """get_ports() returning success with a dict whose "ports" is missing/None (or carries non-dict entries) makes port-id enrichment silently no-op."""
-        view = _make_view()
-        view.model = MagicMock()
-        obj = MagicMock()
-        request = MagicMock()
-        request.POST.get.side_effect = lambda key, default=None: default
-        view.get_object = MagicMock(return_value=obj)
-        view._get_sync_device = MagicMock(return_value=obj)
-        view.has_write_permission = MagicMock(return_value=True)
-        view._build_context = MagicMock(
-            return_value={"table": None, "object": obj, "cache_expiry": None, "server_key": "default"}
-        )
+        response = post(view, request, pk=device.pk)
 
-        view._librenms_api.get_librenms_id.return_value = 777
-        view._librenms_api.get_device_inventory.return_value = (True, [])
-        view._librenms_api.get_device_transceivers.return_value = (True, [])
-        # success=True and a dict, but "ports" is None (not a list of dicts) → malformed.
-        view._librenms_api.get_ports.return_value = (True, {"ports": None})
-
-        with (
-            patch("netbox_librenms_plugin.views.base.modules_view.cache") as mock_cache,
-            patch("netbox_librenms_plugin.views.base.modules_view.messages") as mock_messages,
-            patch("netbox_librenms_plugin.views.mixins.render", return_value=MagicMock()),
-            patch("netbox_librenms_plugin.views.base.modules_view.get_librenms_oob", return_value=None),
-        ):
-            view.post(request, pk=1)
-
-        mock_cache.set.assert_not_called()  # degraded snapshot not persisted as complete
-        mock_cache.delete.assert_called_once_with("test_cache_key")
-        mock_messages.warning.assert_called_once_with(
-            request,
+        assert response.status_code == 200
+        assert cache.get(cache_key) is None
+        assert message_texts(request, "warning") == [
             "Inventory refresh was incomplete: port metadata fetch failed, so no module rows were"
-            " loaded. Refresh Modules to try again. See server logs for details.",
+            " loaded. Refresh Modules to try again. See server logs for details."
+        ]
+        assert message_texts(request, "success") == []
+
+    def test_post_skips_cache_on_oob_inventory_failure(self, librenms_server, server_keys):
+        """When the OOB inventory fetch fails, do not cache the main-only snapshot under the current OOB fingerprint. Otherwise get_context_data() accepts it as complete, and the OOB rows and warning vanish until TTL or manual refresh."""
+        from django.core.cache import cache
+
+        from netbox_librenms_plugin.tests.view_test_helpers import make_request, message_texts, post
+        from netbox_librenms_plugin.utils import set_librenms_oob
+        from netbox_librenms_plugin.views.object_sync.devices import DeviceModuleTableView
+
+        server_key, _ = server_keys
+        device = _mapped_device("module-refresh-oob-failure", server_key)
+        set_librenms_oob(device, 999, server_key, oob_type="idrac9")
+        device.save(update_fields=["custom_field_data"])
+        view = DeviceModuleTableView()
+        cache_key, _ = _seed_snapshot(view, device, server_key, oob_librenms_id=999)
+        self._register_successful_refresh(librenms_server)
+        librenms_server.register(
+            "/api/v0/inventory/999/all",
+            {"status": "error", "message": "oob inventory unavailable"},
+            status=503,
+            method="GET",
         )
-        mock_messages.success.assert_not_called()
+        request = make_request("post", {"server_key": server_key})
 
-    def test_post_skips_cache_on_oob_inventory_failure(self):
-        """When the OOB inventory fetch fails, the main-only snapshot must NOT be cached under the current oob fingerprint — otherwise get_context_data() accepts it as complete and the OOB rows (and warning) vanish until TTL/manual refresh."""
-        view = _make_view()
-        view.model = MagicMock()
-        obj = MagicMock()
-        request = MagicMock()
-        request.POST.get.side_effect = lambda key, default=None: default
+        response = post(view, request, pk=device.pk)
 
-        view.get_object = MagicMock(return_value=obj)
-        view._get_sync_device = MagicMock(return_value=obj)
-        view.has_write_permission = MagicMock(return_value=True)
-        view._build_context = MagicMock(
-            return_value={"table": None, "object": obj, "cache_expiry": None, "server_key": "default"}
+        assert response.status_code == 200
+        assert cache.get(cache_key) is None
+        warnings = message_texts(request, "warning")
+        assert warnings == [
+            "Inventory refresh was incomplete: OOB controller inventory fetch failed, so no module rows"
+            " were loaded. Refresh Modules to try again. See server logs for details."
+        ]
+        # The toast must stay generic. Internal LibreNMS ids belong only in the server log.
+        warning = warnings[0]
+        assert "777" not in warning and "999" not in warning and "OOB id" not in warning
+        assert message_texts(request, "success") == []
+
+    def test_post_treats_non_dict_oob_inventory_entry_as_fetch_failure(self, librenms_server, server_keys):
+        """The OOB inventory merge offsets indices and sets item["_source"] on every entry. A response with non-dict elements, such as None, must fail before that merge."""
+        from django.core.cache import cache
+
+        from netbox_librenms_plugin.tests.view_test_helpers import make_request, message_texts, post
+        from netbox_librenms_plugin.utils import set_librenms_oob
+        from netbox_librenms_plugin.views.object_sync.devices import DeviceModuleTableView
+
+        server_key, _ = server_keys
+        device = _mapped_device("module-refresh-oob-non-dict", server_key)
+        set_librenms_oob(device, 999, server_key, oob_type="idrac9")
+        device.save(update_fields=["custom_field_data"])
+        view = DeviceModuleTableView()
+        cache_key, _ = _seed_snapshot(view, device, server_key, oob_librenms_id=999)
+        self._register_successful_refresh(librenms_server)
+        librenms_server.register(
+            "/api/v0/inventory/999/all",
+            {"status": "ok", "inventory": [{"entPhysicalIndex": 1}, None]},
+            method="GET",
         )
+        request = make_request("post", {"server_key": server_key})
 
-        view._librenms_api.get_librenms_id.return_value = 777
-        view._librenms_api.get_device_transceivers.return_value = (True, [])
-        view._librenms_api.get_ports.return_value = (True, {"ports": []})
-        # Main inventory succeeds; the linked OOB controller's inventory fails.
-        view._librenms_api.get_device_inventory.side_effect = lambda dev_id: (
-            (True, []) if dev_id == 777 else (False, "oob inventory unavailable")
+        response = post(view, request, pk=device.pk)
+
+        assert response.status_code == 200
+        assert cache.get(cache_key) is None
+        assert message_texts(request, "warning") == [
+            "Inventory refresh was incomplete: OOB controller inventory fetch failed, so no module rows"
+            " were loaded. Refresh Modules to try again. See server logs for details."
+        ]
+        assert message_texts(request, "success") == []
+
+    def test_post_corrupt_oob_id_fails_closed(self, librenms_server, server_keys):
+        """A linked OOB controller whose stored id is Boolean or non-numeric must fail closed like the interfaces and cables tabs. Do not fetch the garbage id or cache a host-only snapshot. Warn the user instead. A falsy check would conflate this state with no OOB link and silently drop the controller rows until TTL."""
+        from django.core.cache import cache
+
+        from netbox_librenms_plugin.tests.view_test_helpers import make_request, message_texts, post
+        from netbox_librenms_plugin.views.object_sync.devices import DeviceModuleTableView
+
+        server_key, _ = server_keys
+        device = _mapped_device("module-refresh-corrupt-oob", server_key)
+        view = DeviceModuleTableView()
+        cache_key, stale_payload = _seed_snapshot(view, device, server_key)
+        # The custom field is user-editable through the NetBox UI and API, so a corrupt value is real state.
+        device.custom_field_data["librenms_id"][server_key] = {
+            "id": 777,
+            "oob": {"id": "not-a-number", "type": "oob"},
+        }
+        device.save(update_fields=["custom_field_data"])
+        cache.set(cache_key, stale_payload)
+        self._register_successful_refresh(librenms_server)
+        corrupt_oob_requests = []
+
+        def corrupt_oob_route(**request_data):
+            corrupt_oob_requests.append(request_data)
+            return 200, {"status": "ok", "inventory": []}
+
+        librenms_server.register(
+            "/api/v0/inventory/not-a-number/all",
+            corrupt_oob_route,
+            method="GET",
         )
+        request = make_request("post", {"server_key": server_key})
 
-        with (
-            patch("netbox_librenms_plugin.views.base.modules_view.cache") as mock_cache,
-            patch("netbox_librenms_plugin.views.base.modules_view.messages") as mock_messages,
-            patch("netbox_librenms_plugin.views.mixins.render", return_value=MagicMock()),
-            patch("netbox_librenms_plugin.views.base.modules_view.get_librenms_oob", return_value={"id": 999}),
-        ):
-            view.post(request, pk=1)
+        response = post(view, request, pk=device.pk)
 
-        mock_cache.set.assert_not_called()  # no partial snapshot persisted
-        mock_cache.delete.assert_called_once_with("test_cache_key")  # the active device's stale entry cleared
-        mock_messages.warning.assert_called_once()  # user is told the OOB inventory fetch failed
-        mock_messages.success.assert_not_called()  # warning, not success
-        # The toast must stay generic — internal LibreNMS ids (777 / OOB 999) belong only in
-        # the server log, not the UI.
-        warn_msg = mock_messages.warning.call_args[0][1]
-        assert "777" not in warn_msg and "999" not in warn_msg and "OOB id" not in warn_msg
+        assert response.status_code == 200
+        assert corrupt_oob_requests == []
+        assert cache.get(cache_key) is None
+        assert message_texts(request, "warning") == [
+            "Inventory refresh was incomplete: OOB controller inventory fetch failed, so no module rows"
+            " were loaded. Refresh Modules to try again. See server logs for details."
+        ]
+        assert message_texts(request, "success") == []
 
-    def test_post_treats_non_dict_oob_inventory_entry_as_fetch_failure(self):
-        """The OOB inventory merge offsets indices and sets item["_source"] on every entry, so a success flag with non-dict elements (e.g. None) is treated as a fetch failure."""
-        view = _make_view()
-        view.model = MagicMock()
-        obj = MagicMock()
-        request = MagicMock()
-        request.POST.get.side_effect = lambda key, default=None: default
+    def test_post_poisoned_bool_librenms_id_fails_closed(self, librenms_server, server_keys):
+        """A poisoned Boolean device id must never be fired at LibreNMS. post() fails closed and drops the stale snapshot."""
+        from django.core.cache import cache
 
-        view.get_object = MagicMock(return_value=obj)
-        view._get_sync_device = MagicMock(return_value=obj)
-        view.has_write_permission = MagicMock(return_value=True)
-        view._build_context = MagicMock(
-            return_value={"table": None, "object": obj, "cache_expiry": None, "server_key": "default"}
+        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+        from netbox_librenms_plugin.tests.conftest import make_device
+        from netbox_librenms_plugin.tests.view_test_helpers import make_request, message_texts, post
+        from netbox_librenms_plugin.views.object_sync.devices import DeviceModuleTableView
+
+        server_key, _ = server_keys
+        device = make_device("module-refresh-poisoned-bool")
+        api = LibreNMSAPI(server_key=server_key)
+        # The device-id cache path returns its value verbatim, which is why the Boolean guard exists.
+        cache.set(api._get_cache_key(device, server_key=server_key), True)
+        view = DeviceModuleTableView()
+        cache_key = view.get_cache_key(device, "inventory", server_key=server_key)
+        cache.set(cache_key, {"inventory": [], "librenms_id": 1, "oob_librenms_id": None})
+        inventory_requests = []
+
+        def any_inventory_route(**request_data):
+            inventory_requests.append(request_data)
+            return 200, {"status": "ok", "inventory": []}
+
+        for poisoned_path in ("/api/v0/inventory/True/all", "/api/v0/inventory/1/all"):
+            librenms_server.register(poisoned_path, any_inventory_route, method="GET")
+        request = make_request("post", {"server_key": server_key})
+
+        response = post(view, request, pk=device.pk)
+
+        assert response.status_code == 200
+        assert inventory_requests == []
+        assert cache.get(cache_key) is None
+        assert message_texts(request) == ["Device not found in LibreNMS."]
+
+    def test_post_no_oob_linked_stays_clean_success(self, librenms_server, server_keys):
+        """No OOB link means get_librenms_oob returns None. This is not a failure. Show a clean success toast and cache the snapshot."""
+        from django.core.cache import cache
+
+        from netbox_librenms_plugin.tests.view_test_helpers import make_request, message_texts, post
+        from netbox_librenms_plugin.views.object_sync.devices import DeviceModuleTableView
+
+        server_key, _ = server_keys
+        device = _mapped_device("module-refresh-no-oob", server_key)
+        self._register_successful_refresh(librenms_server)
+        view = DeviceModuleTableView()
+        request = make_request("post", {"server_key": server_key})
+
+        response = post(view, request, pk=device.pk)
+
+        assert response.status_code == 200
+        assert message_texts(request, "success") == ["Inventory data refreshed successfully."]
+        assert message_texts(request, "warning") == []
+        assert cache.get(view.get_cache_key(device, "inventory", server_key=server_key)) == {
+            "inventory": [],
+            "librenms_id": 777,
+            "oob_librenms_id": None,
+        }
+
+    def test_post_treats_non_int_oob_index_as_fetch_failure(self, librenms_server, server_keys):
+        """An OOB inventory row with a non-int entPhysicalIndex fails closed. It must not raise an offset TypeError or cache a partial snapshot."""
+        from django.core.cache import cache
+
+        from netbox_librenms_plugin.tests.view_test_helpers import make_request, message_texts, post
+        from netbox_librenms_plugin.utils import set_librenms_oob
+        from netbox_librenms_plugin.views.object_sync.devices import DeviceModuleTableView
+
+        server_key, _ = server_keys
+        device = _mapped_device("module-refresh-oob-string-index", server_key)
+        set_librenms_oob(device, 999, server_key, oob_type="idrac9")
+        device.save(update_fields=["custom_field_data"])
+        view = DeviceModuleTableView()
+        cache_key, _ = _seed_snapshot(view, device, server_key, oob_librenms_id=999)
+        self._register_successful_refresh(librenms_server)
+        # The offset arithmetic would evaluate "5" + offset and return HTTP 500 without the guard.
+        librenms_server.register(
+            "/api/v0/inventory/999/all",
+            {
+                "status": "ok",
+                "inventory": [{"entPhysicalIndex": "5", "entPhysicalName": "oob-fan"}],
+            },
+            method="GET",
         )
+        request = make_request("post", {"server_key": server_key})
 
-        view._librenms_api.get_librenms_id.return_value = 777
-        view._librenms_api.get_device_transceivers.return_value = (True, [])
-        view._librenms_api.get_ports.return_value = (True, {"ports": []})
-        # Main inventory succeeds; the OOB controller returns success but a malformed list.
-        view._librenms_api.get_device_inventory.side_effect = lambda dev_id: (
-            (True, []) if dev_id == 777 else (True, [{"entPhysicalIndex": 1}, None])
+        response = post(view, request, pk=device.pk)
+
+        assert response.status_code == 200
+        assert cache.get(cache_key) is None
+        assert message_texts(request, "warning") == [
+            "Inventory refresh was incomplete: OOB controller inventory fetch failed, so no module rows"
+            " were loaded. Refresh Modules to try again. See server logs for details."
+        ]
+        assert message_texts(request, "success") == []
+
+    def test_get_context_data_oob_fingerprint_equates_int_and_string(self, server_keys):
+        """A cached int OOB id and a current string id with the same value compare equal. Do not invalidate the snapshot."""
+        from django.core.cache import cache
+
+        from netbox_librenms_plugin.tests.view_test_helpers import (
+            bind_and_call,
+            make_request,
+            trusted_module_inventory_payload,
         )
+        from netbox_librenms_plugin.utils import set_librenms_oob
+        from netbox_librenms_plugin.views.object_sync.devices import DeviceModuleTableView
 
-        with (
-            patch("netbox_librenms_plugin.views.base.modules_view.cache") as mock_cache,
-            patch("netbox_librenms_plugin.views.base.modules_view.messages") as mock_messages,
-            patch("netbox_librenms_plugin.views.mixins.render", return_value=MagicMock()),
-            patch("netbox_librenms_plugin.views.base.modules_view.get_librenms_oob", return_value={"id": 999}),
-        ):
-            view.post(request, pk=1)
+        server_key, _ = server_keys
+        device = _mapped_device("module-cache-oob-string-id", server_key, librenms_id=1)
+        set_librenms_oob(device, 5, server_key, oob_type="idrac9")
+        device.save(update_fields=["custom_field_data"])
+        payload = trusted_module_inventory_payload(device, [], server_key=server_key, librenms_id=1)
+        payload["oob_librenms_id"] = 5
+        view = DeviceModuleTableView()
+        cache_key = view.get_cache_key(device, "inventory", server_key=server_key)
+        cache.set(cache_key, payload)
+        # The custom field is user-editable, and the UI or API can store the numeric id as a string.
+        device.custom_field_data["librenms_id"][server_key]["oob"]["id"] = "5"
+        device.save(update_fields=["custom_field_data"])
+        cache.set(cache_key, payload)
+        request = make_request("get", {"server_key": server_key})
 
-        mock_cache.set.assert_not_called()  # no partial snapshot persisted
-        mock_cache.delete.assert_called_once_with("test_cache_key")
-        mock_messages.warning.assert_called_once()  # malformed OOB inventory treated as a fetch failure
-        mock_messages.success.assert_not_called()
+        result = bind_and_call(view, request, "get_context_data", obj=device)
 
-    def test_post_corrupt_oob_id_fails_closed(self):
-        """A linked OOB controller whose stored id is corrupt (bool/non-numeric) must fail CLOSED like the interfaces/cables tabs: no fetch with the garbage id, but a warning and NO cached host-only snapshot — a bare falsy check would conflate it with 'no OOB linked' and silently drop the controller's rows until TTL."""
-        view = _make_view()
-        view.model = MagicMock()
-        obj = MagicMock()
-        request = MagicMock()
-        request.POST.get.side_effect = lambda key, default=None: default
+        assert result["table"] is not None
+        assert result["server_key"] == server_key
+        assert cache.get(cache_key) == payload
 
-        view.get_object = MagicMock(return_value=obj)
-        view._get_sync_device = MagicMock(return_value=obj)
-        view.has_write_permission = MagicMock(return_value=True)
-        view._build_context = MagicMock(
-            return_value={"table": None, "object": obj, "cache_expiry": None, "server_key": "default"}
+    def test_post_skips_cache_on_transceiver_failure(self, librenms_server, server_keys):
+        """A transceiver-enrichment failure drops synthetic transceiver rows. Do not cache the truncated inventory, for the same reason as an OOB failure."""
+        from django.core.cache import cache
+
+        from netbox_librenms_plugin.tests.view_test_helpers import make_request, message_texts, post
+        from netbox_librenms_plugin.views.object_sync.devices import DeviceModuleTableView
+
+        server_key, _ = server_keys
+        device = _mapped_device("module-refresh-transceiver-failure", server_key)
+        view = DeviceModuleTableView()
+        cache_key, _ = _seed_snapshot(view, device, server_key)
+        self._register_successful_refresh(librenms_server)
+        librenms_server.register(
+            "/api/v0/devices/777/transceivers",
+            {"status": "error", "message": "transceiver fetch failed"},
+            status=503,
+            method="GET",
         )
+        request = make_request("post", {"server_key": server_key})
 
-        view._librenms_api.get_librenms_id.return_value = 777
-        view._librenms_api.get_device_transceivers.return_value = (True, [])
-        view._librenms_api.get_ports.return_value = (True, {"ports": []})
-        # Only the main device (777) is a valid id; a second call with a garbage OOB id would
-        # return failure and trip the OOB-failed path.
-        view._librenms_api.get_device_inventory.side_effect = lambda dev_id: (
-            (True, []) if dev_id == 777 else (False, "should never be called")
-        )
+        response = post(view, request, pk=device.pk)
 
-        with (
-            patch("netbox_librenms_plugin.views.base.modules_view.cache") as mock_cache,
-            patch("netbox_librenms_plugin.views.base.modules_view.messages") as mock_messages,
-            # post() renders here via modules_view.render; a higher branch refactors that to
-            # render_sync_partial() (mixins.render). Patch both (create=True) so this test stays
-            # robust as it rides up the stack regardless of which render site post() uses.
-            patch("netbox_librenms_plugin.views.base.modules_view.render", return_value=MagicMock(), create=True),
-            patch("netbox_librenms_plugin.views.mixins.render", return_value=MagicMock(), create=True),
-            patch(
-                "netbox_librenms_plugin.views.base.modules_view.get_librenms_oob",
-                return_value={"id": "not-a-number"},
-            ),
-        ):
-            view.post(request, pk=1)
-
-        # The garbage id is never fired at get_device_inventory...
-        view._librenms_api.get_device_inventory.assert_called_once_with(777)
-        # ...but the user is warned and the host-only snapshot is NOT cached as complete.
-        mock_messages.warning.assert_called_once()
-        mock_messages.success.assert_not_called()
-        mock_cache.set.assert_not_called()
-        mock_cache.delete.assert_called_once_with("test_cache_key")
-
-    def test_post_no_oob_linked_stays_clean_success(self):
-        """No OOB linked at all (get_librenms_oob returns None) is NOT a failure: clean success toast and the snapshot is cached."""
-        view = _make_view()
-        view.model = MagicMock()
-        obj = MagicMock()
-        request = MagicMock()
-        request.POST.get.side_effect = lambda key, default=None: default
-
-        view.get_object = MagicMock(return_value=obj)
-        view._get_sync_device = MagicMock(return_value=obj)
-        view.has_write_permission = MagicMock(return_value=True)
-        view._build_context = MagicMock(
-            return_value={"table": None, "object": obj, "cache_expiry": None, "server_key": "default"}
-        )
-
-        view._librenms_api.get_librenms_id.return_value = 777
-        view._librenms_api.get_device_transceivers.return_value = (True, [])
-        view._librenms_api.get_ports.return_value = (True, {"ports": []})
-        view._librenms_api.get_device_inventory.return_value = (True, [])
-
-        with (
-            patch("netbox_librenms_plugin.views.base.modules_view.cache") as mock_cache,
-            patch("netbox_librenms_plugin.views.base.modules_view.messages") as mock_messages,
-            patch("netbox_librenms_plugin.views.base.modules_view.render", return_value=MagicMock(), create=True),
-            patch("netbox_librenms_plugin.views.mixins.render", return_value=MagicMock(), create=True),
-            patch("netbox_librenms_plugin.views.base.modules_view.get_librenms_oob", return_value=None),
-        ):
-            view.post(request, pk=1)
-
-        mock_messages.success.assert_called_once()
-        mock_messages.warning.assert_not_called()
-        assert mock_cache.set.call_args[0][1]["oob_librenms_id"] is None
-
-    def test_post_treats_non_int_oob_index_as_fetch_failure(self):
-        """An OOB inventory row with a non-int entPhysicalIndex fails closed (no offset TypeError, no cache)."""
-        view = _make_view()
-        view.model = MagicMock()
-        obj = MagicMock()
-        request = MagicMock()
-        request.POST.get.side_effect = lambda key, default=None: default
-
-        view.get_object = MagicMock(return_value=obj)
-        view._get_sync_device = MagicMock(return_value=obj)
-        view.has_write_permission = MagicMock(return_value=True)
-        view._build_context = MagicMock(
-            return_value={"table": None, "object": obj, "cache_expiry": None, "server_key": "default"}
-        )
-
-        view._librenms_api.get_librenms_id.return_value = 777
-        view._librenms_api.get_device_transceivers.return_value = (True, [])
-        view._librenms_api.get_ports.return_value = (True, {"ports": []})
-        # Main inventory OK; OOB returns a row whose entPhysicalIndex is a string — the offset
-        # arithmetic ("5" + offset) would TypeError and 500 the tab without the guard.
-        view._librenms_api.get_device_inventory.side_effect = lambda dev_id: (
-            (True, []) if dev_id == 777 else (True, [{"entPhysicalIndex": "5", "entPhysicalName": "oob-fan"}])
-        )
-
-        with (
-            patch("netbox_librenms_plugin.views.base.modules_view.cache") as mock_cache,
-            patch("netbox_librenms_plugin.views.base.modules_view.messages") as mock_messages,
-            # Patch both render sites (create=True) — see test_post_ignores_non_numeric_oob_id:
-            # a higher branch moves post()'s render to render_sync_partial() (mixins.render).
-            patch("netbox_librenms_plugin.views.base.modules_view.render", return_value=MagicMock(), create=True),
-            patch("netbox_librenms_plugin.views.mixins.render", return_value=MagicMock(), create=True),
-            patch("netbox_librenms_plugin.views.base.modules_view.get_librenms_oob", return_value={"id": 999}),
-        ):
-            view.post(request, pk=1)  # must not raise
-
-        mock_cache.set.assert_not_called()  # no partial snapshot persisted
-        mock_messages.warning.assert_called_once()  # malformed OOB indices treated as a fetch failure
-        mock_messages.success.assert_not_called()
-
-    def test_get_context_data_oob_fingerprint_equates_int_and_string(self):
-        """Cached int oob id and a current string id of the same value compare equal — cache not wrongly invalidated."""
-        view = _make_view()
-        obj = MagicMock()
-        view._get_sync_device = MagicMock(return_value=obj)
-        view._librenms_api.get_librenms_id.return_value = 1
-        sentinel = {"table": "built", "object": obj}
-        view._build_context = MagicMock(return_value=sentinel)
-        request = MagicMock()
-        request.GET = {}
-
-        with (
-            patch("netbox_librenms_plugin.views.base.modules_view.cache") as mock_cache,
-            # Stored fingerprint is the coerced int 5; the live OOB CF reads back the string "5".
-            patch("netbox_librenms_plugin.views.base.modules_view.get_librenms_oob", return_value={"id": "5"}),
-        ):
-            mock_cache.get.return_value = {
-                "inventory": [{"entPhysicalIndex": 1}],
-                "librenms_id": 1,
-                "oob_librenms_id": 5,
-            }
-            result = view.get_context_data(request, obj)
-
-        # int 5 == coerce("5") → fingerprint matches → cache kept → real context built.
-        view._build_context.assert_called_once()
-        assert result is sentinel
-        mock_cache.delete.assert_not_called()
-
-    def test_post_skips_cache_on_transceiver_failure(self):
-        """A transceiver-enrichment failure drops the synthetic transceiver rows, so the truncated inventory must NOT be cached — same reasoning as the OOB-failure case."""
-        view = _make_view()
-        view.model = MagicMock()
-        obj = MagicMock()
-        request = MagicMock()
-        request.POST.get.side_effect = lambda key, default=None: default
-
-        view.get_object = MagicMock(return_value=obj)
-        view._get_sync_device = MagicMock(return_value=obj)
-        view.has_write_permission = MagicMock(return_value=True)
-        view._build_context = MagicMock(
-            return_value={"table": None, "object": obj, "cache_expiry": None, "server_key": "default"}
-        )
-
-        view._librenms_api.get_librenms_id.return_value = 777
-        view._librenms_api.get_ports.return_value = (True, {"ports": []})
-        # Main (and OOB) inventory succeed, but the transceiver API fails → txr_error.
-        view._librenms_api.get_device_inventory.return_value = (True, [])
-        view._librenms_api.get_device_transceivers.return_value = (False, "transceiver fetch failed")
-
-        with (
-            patch("netbox_librenms_plugin.views.base.modules_view.cache") as mock_cache,
-            patch("netbox_librenms_plugin.views.base.modules_view.messages"),
-            patch("netbox_librenms_plugin.views.mixins.render", return_value=MagicMock()),
-            patch("netbox_librenms_plugin.views.base.modules_view.get_librenms_oob", return_value=None),
-        ):
-            view.post(request, pk=1)
-
-        mock_cache.set.assert_not_called()  # truncated (transceiver-less) snapshot not persisted
-        mock_cache.delete.assert_called_once_with("test_cache_key")
+        assert response.status_code == 200
+        assert cache.get(cache_key) is None
+        assert message_texts(request, "warning") == [
+            "Inventory refresh was incomplete: transceiver fetch failed, so no module rows were loaded."
+            " Refresh Modules to try again. See server logs for details."
+        ]
+        assert message_texts(request, "success") == []
 
 
 # ---------------------------------------------------------------------------
@@ -5529,160 +5629,172 @@ class TestRenderActionsPortIdentityFields:
         assert '<i class="mdi mdi-download"></i> Install' not in html
 
 
+@pytest.mark.django_db
 class TestGetContextDataOOBCacheFingerprint:
     """get_context_data must invalidate cached inventory when the linked OOB controller changes (re-link / unlink), not only when the main id changes."""
 
-    def test_invalidates_when_oob_relinked(self):
-        from unittest.mock import MagicMock, patch
+    @pytest.fixture
+    def server_keys(self, settings, librenms_server):
+        return _two_server_keys(settings, librenms_server, "fingerprint")
 
-        view = _make_view()
-        obj = MagicMock(pk=1)
-        view._get_sync_device = MagicMock(return_value=obj)
-        view._librenms_api.get_librenms_id = MagicMock(return_value=10)
-        view._build_context = MagicMock()
-        cached = {"inventory": [{"x": 1}], "librenms_id": 10, "oob_librenms_id": 5}
-        with (
-            patch("netbox_librenms_plugin.views.base.modules_view.cache") as mock_cache,
-            patch("netbox_librenms_plugin.views.base.modules_view.get_librenms_oob", return_value={"id": 7}),
-        ):
-            mock_cache.get.return_value = cached
-            # GET={} → no server_key in the query, so rebind_api_for_server reuses the cached
-            # (mocked) _librenms_api instead of building a new client.
-            ctx = view.get_context_data(MagicMock(GET={}), obj)
+    def test_invalidates_when_oob_relinked(self, server_keys):
+        from django.core.cache import cache
 
-        mock_cache.delete.assert_called_once_with("test_cache_key")
-        assert ctx["table"] is None
-        view._build_context.assert_not_called()
+        from netbox_librenms_plugin.tests.view_test_helpers import bind_and_call, make_request
+        from netbox_librenms_plugin.utils import set_librenms_oob
+        from netbox_librenms_plugin.views.object_sync.devices import DeviceModuleTableView
 
-    def test_invalidates_when_oob_unlinked(self):
-        from unittest.mock import MagicMock, patch
+        server_key, _ = server_keys
+        device = _mapped_device("module-cache-oob-relinked", server_key)
+        set_librenms_oob(device, 999, server_key, oob_type="idrac9")
+        device.save(update_fields=["custom_field_data"])
+        view = DeviceModuleTableView()
+        cache_key, _ = _seed_snapshot(view, device, server_key, oob_librenms_id=998)
+        request = make_request("get", {"server_key": server_key})
 
-        view = _make_view()
-        obj = MagicMock(pk=1)
-        view._get_sync_device = MagicMock(return_value=obj)
-        view._librenms_api.get_librenms_id = MagicMock(return_value=10)
-        view._build_context = MagicMock()
-        cached = {"inventory": [{"x": 1}], "librenms_id": 10, "oob_librenms_id": 5}
-        with (
-            patch("netbox_librenms_plugin.views.base.modules_view.cache") as mock_cache,
-            patch("netbox_librenms_plugin.views.base.modules_view.get_librenms_oob", return_value=None),
-        ):
-            mock_cache.get.return_value = cached
-            # GET={} → no server_key in the query, so rebind_api_for_server reuses the cached
-            # (mocked) _librenms_api instead of building a new client.
-            ctx = view.get_context_data(MagicMock(GET={}), obj)
+        context = bind_and_call(view, request, "get_context_data", obj=device)
 
-        mock_cache.delete.assert_called_once_with("test_cache_key")
-        assert ctx["table"] is None
+        assert cache.get(cache_key) is None
+        assert context["table"] is None
+        assert context["server_key"] == server_key
 
-    def test_invalidates_when_main_id_poisoned_bool(self):
+    def test_invalidates_when_oob_unlinked(self, server_keys):
+        from django.core.cache import cache
+
+        from netbox_librenms_plugin.tests.view_test_helpers import bind_and_call, make_request
+        from netbox_librenms_plugin.views.object_sync.devices import DeviceModuleTableView
+
+        server_key, _ = server_keys
+        device = _mapped_device("module-cache-oob-unlinked", server_key)
+        view = DeviceModuleTableView()
+        cache_key, _ = _seed_snapshot(view, device, server_key, oob_librenms_id=999)
+        request = make_request("get", {"server_key": server_key})
+
+        context = bind_and_call(view, request, "get_context_data", obj=device)
+
+        assert cache.get(cache_key) is None
+        assert context["table"] is None
+        assert context["server_key"] == server_key
+
+    def test_invalidates_when_main_id_poisoned_bool(self, server_keys):
         """Verify a Boolean main device ID invalidates the cache instead of matching integer 1."""
-        from unittest.mock import MagicMock, patch
+        from django.core.cache import cache
 
-        view = _make_view()
-        obj = MagicMock(pk=1)
-        view._get_sync_device = MagicMock(return_value=obj)
-        view._librenms_api.get_librenms_id = MagicMock(return_value=True)
-        view._build_context = MagicMock()
-        cached = {"inventory": [{"x": 1}], "librenms_id": 1, "oob_librenms_id": None}
-        with (
-            patch("netbox_librenms_plugin.views.base.modules_view.cache") as mock_cache,
-            patch("netbox_librenms_plugin.views.base.modules_view.get_librenms_oob", return_value=None),
-        ):
-            mock_cache.get.return_value = cached
-            ctx = view.get_context_data(MagicMock(GET={}), obj)
+        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+        from netbox_librenms_plugin.tests.conftest import make_device
+        from netbox_librenms_plugin.tests.view_test_helpers import bind_and_call, make_request
+        from netbox_librenms_plugin.views.object_sync.devices import DeviceModuleTableView
 
-        mock_cache.delete.assert_called_once_with("test_cache_key")
-        assert ctx["table"] is None
-        view._build_context.assert_not_called()
+        server_key, _ = server_keys
+        device = make_device("module-cache-poisoned-bool")
+        api = LibreNMSAPI(server_key=server_key)
+        # The device-id cache path returns its value verbatim, which is why the Boolean guard exists.
+        cache.set(api._get_cache_key(device, server_key=server_key), True)
+        view = DeviceModuleTableView()
+        cache_key = view.get_cache_key(device, "inventory", server_key=server_key)
+        cache.set(cache_key, {"inventory": [], "librenms_id": 1, "oob_librenms_id": None})
+        request = make_request("get", {"server_key": server_key})
 
-    def test_keeps_cache_when_main_id_stored_as_string(self):
+        context = bind_and_call(view, request, "get_context_data", obj=device)
+
+        assert cache.get(cache_key) is None
+        assert context["table"] is None
+        assert context["server_key"] == server_key
+
+    def test_keeps_cache_when_main_id_stored_as_string(self, server_keys):
         """Verify a string main device ID matches the equivalent cached integer ID."""
-        from unittest.mock import MagicMock, patch
+        from django.core.cache import cache
 
-        view = _make_view()
-        obj = MagicMock(pk=1)
-        view._get_sync_device = MagicMock(return_value=obj)
-        view._librenms_api.get_librenms_id = MagicMock(return_value="10")
-        view._build_context = MagicMock(return_value={"built": True})
-        cached = {"inventory": [{"x": 1}], "librenms_id": 10, "oob_librenms_id": None}
-        request = MagicMock(GET={})
-        with (
-            patch("netbox_librenms_plugin.views.base.modules_view.cache") as mock_cache,
-            patch("netbox_librenms_plugin.views.base.modules_view.get_librenms_oob", return_value=None),
-        ):
-            mock_cache.get.return_value = cached
-            ctx = view.get_context_data(request, obj)
+        from netbox_librenms_plugin.tests.view_test_helpers import bind_and_call, make_request
+        from netbox_librenms_plugin.views.object_sync.devices import DeviceModuleTableView
 
-        assert ctx == {"built": True}
-        mock_cache.delete.assert_not_called()
+        server_key, _ = server_keys
+        device = _mapped_device("module-cache-string-main-id", server_key)
+        view = DeviceModuleTableView()
+        cache_key, payload = _seed_snapshot(view, device, server_key)
+        device.custom_field_data["librenms_id"][server_key] = "777"
+        device.save(update_fields=["custom_field_data"])
+        cache.set(cache_key, payload)
+        request = make_request("get", {"server_key": server_key})
 
-    def test_invalidates_when_oob_link_corrupt(self):
+        context = bind_and_call(view, request, "get_context_data", obj=device)
+
+        assert context["table"] is not None
+        assert context["server_key"] == server_key
+        assert cache.get(cache_key) == payload
+
+    def test_invalidates_when_oob_link_corrupt(self, server_keys):
         """Verify a corrupt linked OOB ID invalidates the cache instead of matching a missing OOB link."""
-        from unittest.mock import MagicMock, patch
+        from django.core.cache import cache
 
-        view = _make_view()
-        obj = MagicMock(pk=1)
-        view._get_sync_device = MagicMock(return_value=obj)
-        view._librenms_api.get_librenms_id = MagicMock(return_value=10)
-        view._build_context = MagicMock()
-        cached = {"inventory": [{"x": 1}], "librenms_id": 10, "oob_librenms_id": None}
-        with (
-            patch("netbox_librenms_plugin.views.base.modules_view.cache") as mock_cache,
-            patch("netbox_librenms_plugin.views.base.modules_view.get_librenms_oob", return_value={"id": "garbage"}),
-        ):
-            mock_cache.get.return_value = cached
-            ctx = view.get_context_data(MagicMock(GET={}), obj)
+        from netbox_librenms_plugin.tests.view_test_helpers import bind_and_call, make_request
+        from netbox_librenms_plugin.views.object_sync.devices import DeviceModuleTableView
 
-        mock_cache.delete.assert_called_once_with("test_cache_key")
-        assert ctx["table"] is None
-        view._build_context.assert_not_called()
+        server_key, _ = server_keys
+        device = _mapped_device("module-cache-corrupt-oob", server_key)
+        view = DeviceModuleTableView()
+        cache_key, stale_payload = _seed_snapshot(view, device, server_key)
+        # The custom field is user-editable through the NetBox UI and API, so a corrupt value is real state.
+        device.custom_field_data["librenms_id"][server_key] = {
+            "id": 777,
+            "oob": {"id": "garbage", "type": "oob"},
+        }
+        device.save(update_fields=["custom_field_data"])
+        cache.set(cache_key, stale_payload)
+        request = make_request("get", {"server_key": server_key})
 
-    def test_keeps_cache_when_oob_unchanged(self):
-        from unittest.mock import MagicMock, patch
+        context = bind_and_call(view, request, "get_context_data", obj=device)
 
-        view = _make_view()
-        obj = MagicMock(pk=1)
-        view._get_sync_device = MagicMock(return_value=obj)
-        view._librenms_api.get_librenms_id = MagicMock(return_value=10)
-        view._build_context = MagicMock(return_value={"built": True})
-        cached = {"inventory": [{"x": 1}], "librenms_id": 10, "oob_librenms_id": 5}
-        request = MagicMock(GET={})  # no server_key → rebind reuses the cached (mocked) _librenms_api
-        with (
-            patch("netbox_librenms_plugin.views.base.modules_view.cache") as mock_cache,
-            patch("netbox_librenms_plugin.views.base.modules_view.get_librenms_oob", return_value={"id": 5}),
-        ):
-            mock_cache.get.return_value = cached
-            ctx = view.get_context_data(request, obj)
+        assert cache.get(cache_key) is None
+        assert context["table"] is None
+        assert context["server_key"] == server_key
 
-        # The reuse contract: the unchanged-fingerprint path must rebuild from the cached
-        # inventory snapshot, not some other payload. It also forwards the already-resolved
-        # sync_device AND the resolved server_key (so _build_context keys on the scoped server
-        # explicitly, not the rebind side effect) — matching post()'s call shape.
-        view._build_context.assert_called_once_with(
-            request, obj, cached["inventory"], server_key="test-server", sync_device=obj
-        )
-        assert ctx == {"built": True}
-        # Lock in the "cache preserved when OOB linkage is unchanged" contract: the
-        # unchanged-fingerprint path must rebuild from cache without deleting it.
-        mock_cache.delete.assert_not_called()
+    def test_keeps_cache_when_oob_unchanged(self, server_keys):
+        from django.core.cache import cache
 
-    def test_get_context_data_rebinds_to_request_server_key(self):
-        """The GET render must rebind to the active server from the request query so the cache read keys on the same server post() wrote under (else a non-default-server tab cache-misses and the OOB guard no-ops)."""
-        from unittest.mock import MagicMock, patch
+        from netbox_librenms_plugin.tests.view_test_helpers import bind_and_call, make_request
+        from netbox_librenms_plugin.utils import set_librenms_oob
+        from netbox_librenms_plugin.views.object_sync.devices import DeviceModuleTableView
 
-        view = _make_view()
-        obj = MagicMock(pk=1)
-        view._get_sync_device = MagicMock(return_value=obj)
-        view.rebind_api_for_server = MagicMock(return_value="prod")
-        request = MagicMock()
-        request.GET = {"server_key": "prod"}
+        server_key, _ = server_keys
+        device = _mapped_device("module-cache-oob-unchanged", server_key)
+        set_librenms_oob(device, 999, server_key, oob_type="idrac9")
+        device.save(update_fields=["custom_field_data"])
+        view = DeviceModuleTableView()
+        cache_key, payload = _seed_snapshot(view, device, server_key, oob_librenms_id=999)
+        request = make_request("get", {"server_key": server_key})
 
-        with patch("netbox_librenms_plugin.views.base.modules_view.cache") as mock_cache:
-            mock_cache.get.return_value = None  # cache miss → early return after the rebind
-            view.get_context_data(request, obj)
+        context = bind_and_call(view, request, "get_context_data", obj=device)
 
-        view.rebind_api_for_server.assert_called_once_with("prod")
+        # The unchanged fingerprint path must rebuild from the cached inventory snapshot. It
+        # forwards the resolved sync device and server key, matching post()'s call shape.
+        assert context["table"] is not None
+        assert context["object"].pk == device.pk
+        assert context["server_key"] == server_key
+        # Preserve the cache when the OOB linkage is unchanged.
+        assert cache.get(cache_key) == payload
+
+    def test_get_context_data_rebinds_to_request_server_key(self, server_keys):
+        """The GET render must rebind to the active server from the request query so the cache read keys on the same server post() wrote under. Otherwise a non-default-server tab cache-misses and the OOB guard does nothing."""
+        from django.core.cache import cache
+
+        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+        from netbox_librenms_plugin.tests.view_test_helpers import bind_and_call, make_request
+        from netbox_librenms_plugin.views.object_sync.devices import DeviceModuleTableView
+
+        bound_key, requested_key = server_keys
+        device = _mapped_device("module-cache-get-rebind", requested_key)
+        view = DeviceModuleTableView()
+        view._librenms_api = LibreNMSAPI(server_key=bound_key)
+        request = make_request("get", {"server_key": requested_key})
+        requested_cache_key = view.get_cache_key(device, "inventory", server_key=requested_key)
+        assert cache.get(requested_cache_key) is None
+
+        context = bind_and_call(view, request, "get_context_data", obj=device)
+
+        assert view.librenms_api.server_key == requested_key
+        assert context["table"] is None
+        assert context["server_key"] == requested_key
 
 
 @pytest.mark.django_db
