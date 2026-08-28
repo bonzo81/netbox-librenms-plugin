@@ -13,7 +13,11 @@ import requests
 
 from netbox_librenms_plugin.data_shapes.recordings_store import load_recording
 from netbox_librenms_plugin.tests.conftest import make_recording_api
-from netbox_librenms_plugin.tests.mock_librenms_server import DEFAULT_STUB_RECORDINGS, LibreNMSStubServer
+from netbox_librenms_plugin.tests.mock_librenms_server import (
+    DEFAULT_STUB_RECORDINGS,
+    MAX_REQUEST_BODY_BYTES,
+    LibreNMSStubServer,
+)
 
 TOKEN = "dev-stub-token"
 RECORDING_NAMES = DEFAULT_STUB_RECORDINGS
@@ -603,5 +607,106 @@ def test_stub_starts_when_a_recording_holds_a_non_dict_port():
         ip_response = _request(server, "GET", f"/api/v0/devices/{device_id}/ip")
         assert ip_response.status_code == 200
         assert ip_response.json() == expected_addresses
+    finally:
+        server.stop()
+
+
+def test_stub_loads_a_recording_whose_response_keys_carry_no_verb():
+    """load_recording reads a verbless key as GET, so route derivation must read it the same way."""
+    recording = copy.deepcopy(load_recording("linux-host"))
+    device_id = recording["device_id"]
+    recording["responses"] = {key.removeprefix("GET "): value for key, value in recording["responses"].items()}
+    assert all(" " not in key for key in recording["responses"])
+
+    server = LibreNMSStubServer(recordings=[recording], api_token=TOKEN).start()
+    try:
+        device = _request(server, "GET", f"/api/v0/devices/{device_id}")
+        ports = _request(server, "GET", f"/api/v0/devices/{device_id}/ports")
+
+        assert device.status_code == 200, device.text
+        assert device.json()["devices"][0]["device_id"] == device_id
+        assert ports.status_code == 200, ports.text
+        assert ports.json()["ports"]
+    finally:
+        server.stop()
+
+
+def test_stub_stops_answering_patch_on_a_hostname_a_rename_superseded():
+    """A superseded alias must lose its write route, not just its read route."""
+    server = _start_stub()
+    try:
+        original = _request(server, "GET", "/api/v0/devices/32").json()["devices"][0]
+        old_hostname = original["hostname"]
+        # Only a hostname that is not also the sysName or the IP is superseded by the rename.
+        assert old_hostname not in (original["sysName"], original["ip"])
+        renamed = f"renamed-{old_hostname}"
+        rename = _request(server, "PATCH", "/api/v0/devices/32", json={"field": "hostname", "data": renamed})
+        assert rename.status_code == 200, rename.text
+
+        stale_read = _request(server, "GET", f"/api/v0/devices/{old_hostname}")
+        stale_write = _request(
+            server,
+            "PATCH",
+            f"/api/v0/devices/{old_hostname}",
+            json={"field": "notes", "data": "written through a dead alias"},
+        )
+
+        assert stale_read.status_code == 404
+        assert stale_write.status_code == 404, stale_write.text
+        current = _request(server, "GET", f"/api/v0/devices/{renamed}").json()["devices"][0]
+        assert current["hostname"] == renamed
+        assert current.get("notes") != "written through a dead alias"
+    finally:
+        server.stop()
+
+
+def _raw_headers_only_post(server, *, content_length, token, timeout=5):
+    """Send POST headers that declare a body, send no body, and return the status line."""
+    host, _, port = server.url.removeprefix("http://").partition(":")
+    request = (
+        "POST /api/v0/devices HTTP/1.1\r\n"
+        f"Host: {host}:{port}\r\n"
+        f"X-Auth-Token: {token}\r\n"
+        f"Content-Length: {content_length}\r\n"
+        "Connection: close\r\n\r\n"
+    ).encode()
+    with socket.create_connection((host, int(port)), timeout=timeout) as client:
+        client.settimeout(timeout)
+        client.sendall(request)
+        received = b""
+        while chunk := client.recv(4096):
+            received += chunk
+    lines = received.decode(errors="replace").splitlines()
+    return lines[0] if lines else ""
+
+
+def test_stub_refuses_a_wrong_token_before_reading_the_declared_body():
+    """An unauthenticated caller must not hold a handler thread open on a body it never sends."""
+    server = _start_stub()
+    try:
+        status_line = _raw_headers_only_post(
+            server,
+            content_length=MAX_REQUEST_BODY_BYTES,
+            token=f"not-{TOKEN}",
+            timeout=5,
+        )
+
+        assert "401" in status_line, status_line
+    finally:
+        server.stop()
+
+
+def test_stub_refuses_an_oversized_body_before_reading_it():
+    """A declared length past the cap must be answered, not allocated."""
+    server = _start_stub()
+    try:
+        status_line = _raw_headers_only_post(
+            server,
+            content_length=MAX_REQUEST_BODY_BYTES + 1,
+            token=TOKEN,
+            timeout=5,
+        )
+
+        assert "413" in status_line, status_line
     finally:
         server.stop()
