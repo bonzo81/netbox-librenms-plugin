@@ -137,7 +137,7 @@ class TestBaseLibreNMSSyncViewGet:
         assert response.context["librenms_device_id"] == 42
 
     def test_get_unresolved_server_key_fails_closed(self, client, settings):
-        """Stale ?server_key fails closed: no default-server librenms_id, VC delegation skipped."""
+        """Stale ?server_key fails closed: the blocked shell renders with no librenms_id resolved."""
         _virtual_chassis, members = make_virtual_chassis_members("get-stale", count=2)
         viewed_member, mapped_member = members
         mapped_member.custom_field_data["librenms_id"] = {"default": 99}
@@ -154,11 +154,17 @@ class TestBaseLibreNMSSyncViewGet:
 
         assert response.status_code == 200
         assert response.context["server_key"] == "ghost"
-        assert response.context["lookup_device_pk"] == viewed_member.pk
-        assert response.context["librenms_device_id"] is None
+        # A key that is not a usable mapping renders the server-selection shell rather than the
+        # ordinary page, so the object's own mappings are listed for the user to pick from and the
+        # page points at the device that owns them.
+        assert response.context["server_selection_blocked"] is True
+        assert response.context["lookup_device_pk"] == mapped_member.pk
+        assert [mapping.server_key for mapping in response.context["all_server_mappings"]] == ["default"]
+        # Failing closed is unchanged: nothing resolved an id for the requested server. The blocked
+        # shell omits librenms_device_id entirely rather than carrying a null one.
+        assert response.context.get("librenms_device_id") is None
         assert response.context["has_librenms_id"] is False
         assert response.context.get("is_vc_member") is None
-        assert response.context["all_server_mappings"] is None
 
     def test_get_vc_member_always_delegates_to_sync_device(self, client, settings):
         """VC member: no own librenms_id - get_librenms_sync_device returns VC primary."""
