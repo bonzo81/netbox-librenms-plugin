@@ -1,10 +1,12 @@
 """Coverage tests for views/imports/actions.py missing lines."""
 
 from unittest.mock import MagicMock, patch
+from types import SimpleNamespace as Namespace
 
 import pytest
 from django.contrib.auth.models import AnonymousUser
 from django.test import RequestFactory
+from django.urls import reverse as url_for
 
 from netbox_librenms_plugin.tests.conftest import (
     make_device,
@@ -12,6 +14,15 @@ from netbox_librenms_plugin.tests.conftest import (
     make_ip,
     make_superuser,
     make_vm,
+)
+from netbox_librenms_plugin.tests.mock_librenms_server import librenms_mock_server as run_librenms_server
+from netbox_librenms_plugin.tests.test_modules_view import configure_servers as configure_test_servers
+from netbox_librenms_plugin.tests.view_test_helpers import (
+    grant as grant_view_permission,
+    make_request as make_view_request,
+    make_user_with_perms as make_view_user,
+    message_texts as view_message_texts,
+    post as post_view,
 )
 
 
@@ -45,19 +56,6 @@ def _make_request(post=None, get=None, headers=None, user_is_superuser=False):
     req.user.is_superuser = user_is_superuser
     req.headers = headers or {}
     return req
-
-
-def _import_authorized_user():
-    """A stand-in user authorized for device/VM import (``has_perm`` → True).
-
-    The synchronous import view authorizes the model add/change perms before the collision
-    pre-check (mirroring ImportDevicesJob), so a collision-gate test must supply an authorized
-    user — the gate runs downstream of authorization.
-    """
-    user = MagicMock()
-    user.has_perm.return_value = True
-    user.is_superuser = False
-    return user
 
 
 def _make_api():
@@ -4257,663 +4255,668 @@ class TestBulkImportConfirmPartialExpiry:
         assert call_count[0] == 2
 
 
+@pytest.mark.django_db
 class TestBulkImportDevicesViewBasicPaths:
     """Tests for BulkImportDevicesView early paths (lines 498-763)."""
 
-    def _make_view(self):
+    @staticmethod
+    def _make_view(settings, server_key):
         from netbox_librenms_plugin.views.imports.actions import BulkImportDevicesView
 
-        view = object.__new__(BulkImportDevicesView)
-        view._librenms_api = _make_api()
-        return view
+        configure_test_servers(
+            settings,
+            {
+                server_key: {
+                    "librenms_url": "https://librenms.example.test",
+                    "api_token": "test-token",
+                    "verify_ssl": False,
+                }
+            },
+        )
+        return BulkImportDevicesView()
 
-    def test_no_devices_selected_returns_400(self):
+    @staticmethod
+    def _device_import_user(username):
+        from dcim.models import Device
+
+        return make_view_user(username, [("add", Device), ("change", Device)])
+
+    def test_user_without_plugin_write_is_denied_before_any_import(self, settings):
+        """A user lacking the plugin change permission must be turned away by the real gate.
+
+        Every other denial test in this file injects an HttpResponse into
+        require_write_permission and then asserts the view returned it, which cannot fail while
+        has_write_permission is broken. This one supplies a real unauthorized user instead, so
+        deleting the gate turns it red.
+        """
+        from dcim.models import Device
+        from django.apps import apps
+        from django.urls import get_script_prefix
+
+        server_key = "bulk-basic-denied"
+        view = self._make_view(settings, server_key)
+        # Real Device and plugin-view grants leave only PERM_CHANGE_PLUGIN ungranted.
+        user = make_view_user("bulk-basic-denied-user", [("add", Device), ("change", Device)], plugin_write=False)
+        settings_model = apps.get_model("netbox_librenms_plugin", "LibreNMSSettings")
+        user = grant_view_permission(user, "view", settings_model)
+        request = make_view_request("post", {"server_key": server_key, "select": ["1"]}, user=user)
+
+        with (
+            patch("netbox_librenms_plugin.views.imports.actions.bulk_import_devices") as mock_device_import,
+            patch("netbox_librenms_plugin.views.imports.actions.bulk_import_vms") as mock_vm_import,
+        ):
+            response = post_view(view, request)
+
+        assert response.status_code == 302
+        assert response["Location"] == get_script_prefix()
+        assert "You do not have permission to perform this action." in view_message_texts(request, "error")
+        mock_device_import.assert_not_called()
+        mock_vm_import.assert_not_called()
+
+    def test_no_devices_selected_returns_400(self, settings):
         """No device IDs on the HTMX path → bare 400 (non-HTMX redirects instead)."""
-        view = self._make_view()
-        request = _make_request(post={}, headers={"HX-Request": "true"})
-        request.POST.getlist = MagicMock(return_value=[])
+        server_key = "bulk-basic-empty"
+        view = self._make_view(settings, server_key)
+        user = make_view_user("bulk-basic-empty-user", [])
+        request = make_view_request(
+            "post",
+            {"server_key": server_key},
+            user=user,
+            HTTP_HX_REQUEST="true",
+        )
 
-        with patch.object(view, "require_write_permission", return_value=None):
-            with patch("netbox_librenms_plugin.views.imports.actions.messages"):
-                response = view.post(request)
+        response = post_view(view, request)
 
         assert response.status_code == 400
+        assert response.content == b"No devices selected"
+        assert view_message_texts(request, "error") == []
 
-    def test_invalid_device_id_returns_400(self):
+    def test_invalid_device_id_returns_400(self, settings):
         """Non-integer device_id on the HTMX path → bare 400 (non-HTMX redirects instead)."""
-        view = self._make_view()
-        request = _make_request(post={}, headers={"HX-Request": "true"})
-        request.POST.getlist = MagicMock(return_value=["not-an-int"])
+        server_key = "bulk-basic-invalid-id"
+        view = self._make_view(settings, server_key)
+        user = make_view_user("bulk-basic-invalid-id-user", [])
+        request = make_view_request(
+            "post",
+            {"server_key": server_key, "select": ["not-an-int"]},
+            user=user,
+            HTTP_HX_REQUEST="true",
+        )
 
-        with patch.object(view, "require_write_permission", return_value=None):
-            with patch("netbox_librenms_plugin.views.imports.actions.messages"):
-                response = view.post(request)
+        response = post_view(view, request)
 
         assert response.status_code == 400
+        assert response.content == b"Invalid device identifier"
+        assert view_message_texts(request, "error") == []
 
-    def test_sync_mode_import_runs(self):
+    def test_sync_mode_import_runs(self, settings):
         """Lines 498-763: synchronous import path runs without crashing."""
-        view = self._make_view()
-        request = _make_request(post={"select": ["1"]})
-        request.POST.getlist = MagicMock(return_value=["1"])
-        request.user = MagicMock()
-        request.user.is_superuser = False  # Forces sync mode
-        request.POST.get = MagicMock(return_value=None)
-        request.headers = {}
+        server_key = "bulk-basic-sync"
+        view = self._make_view(settings, server_key)
+        user = self._device_import_user("bulk-basic-sync-user")
+        request = make_view_request(
+            "post",
+            {"server_key": server_key, "select": ["1"]},
+            user=user,  # A non-superuser forces sync mode.
+        )
 
         import_result = {"success": [], "failed": [], "skipped": [], "virtual_chassis_created": 0}
 
-        with patch.object(view, "require_write_permission", return_value=None):
-            with patch(
-                "netbox_librenms_plugin.views.imports.actions.resolve_naming_preferences", return_value=(True, False)
-            ):
-                with patch(
-                    "netbox_librenms_plugin.views.imports.actions.bulk_import_devices", return_value=import_result
-                ):
-                    with patch(
-                        "netbox_librenms_plugin.views.imports.actions.bulk_import_vms",
-                        return_value={"success": [], "failed": [], "skipped": []},
-                    ):
-                        with patch(
-                            "netbox_librenms_plugin.views.imports.actions.fetch_device_with_cache",
-                            return_value={"device_id": 1, "hostname": "r01"},
-                        ):
-                            with patch(
-                                "netbox_librenms_plugin.views.imports.actions.validate_device_for_import",
-                                return_value={"status": "importable"},
-                            ):
-                                with patch("netbox_librenms_plugin.views.imports.actions.messages"):
-                                    with patch(
-                                        "netbox_librenms_plugin.views.imports.actions.extract_device_selections",
-                                        return_value={"cluster_id": None, "role_id": None, "rack_id": None},
-                                    ):
-                                        with patch(
-                                            "netbox_librenms_plugin.views.imports.actions.redirect",
-                                            return_value=MagicMock(status_code=302),
-                                        ) as mock_redirect:
-                                            view.post(request)
+        with patch(
+            "netbox_librenms_plugin.views.imports.actions.bulk_import_devices",
+            return_value=import_result,
+        ) as mock_import:
+            response = post_view(view, request)
 
         # Non-HTMX request redirects
-        mock_redirect.assert_called()
+        mock_import.assert_called_once()
+        assert response.status_code == 302
+        assert response["Location"] == url_for("plugins:netbox_librenms_plugin:librenms_import")
 
     def test_background_mode_returns_job_json(self):
         """Background mode: should_use_background_job returns True for superuser."""
-        view = self._make_view()
+        from netbox_librenms_plugin.views.imports.actions import BulkImportDevicesView
+
+        view = BulkImportDevicesView()
         # Just test the should_use_background_job_for_import helper
-        request = _make_request(post={"use_background_job": "on"})
-        request.user = MagicMock()
-        request.user.is_superuser = True
+        request = make_view_request(
+            "post",
+            {"use_background_job": "on"},
+            user=make_superuser("bulk-basic-background-user"),
+        )
         result = view.should_use_background_job_for_import(request)
         assert result is True
 
-    def test_sync_import_uses_return_url_vc_flag(self):
+    def test_sync_import_uses_return_url_vc_flag(self, settings):
         """VC detection flag from return_url is propagated to sync bulk import."""
-        view = self._make_view()
-        request = _make_request(
-            post={
+        server_key = "bulk-basic-return-url"
+        view = self._make_view(settings, server_key)
+        user = self._device_import_user("bulk-basic-return-url-user")
+        request = make_view_request(
+            "post",
+            {
+                "server_key": server_key,
                 "select": ["1"],
                 "return_url": "/plugins/librenms_plugin/librenms-import/?enable_vc_detection=true",
-            }
+            },
+            user=user,
         )
-        request.POST.getlist = MagicMock(return_value=["1"])
-        request.user = MagicMock()
-        request.user.is_superuser = False
-        request.headers = {}
 
         import_result = {"success": [], "failed": [], "skipped": [], "virtual_chassis_created": 0}
 
-        with patch.object(view, "require_write_permission", return_value=None):
-            with patch(
-                "netbox_librenms_plugin.views.imports.actions.resolve_naming_preferences", return_value=(True, False)
-            ):
-                with patch(
-                    "netbox_librenms_plugin.views.imports.actions.fetch_device_with_cache",
-                    return_value={"device_id": 1, "hostname": "r01"},
-                ):
-                    with patch(
-                        "netbox_librenms_plugin.views.imports.actions.bulk_import_devices",
-                        return_value=import_result,
-                    ) as mock_bulk_import:
-                        with patch(
-                            "netbox_librenms_plugin.views.imports.actions.bulk_import_vms",
-                            return_value={"success": [], "failed": [], "skipped": []},
-                        ):
-                            with patch("netbox_librenms_plugin.views.imports.actions.messages"):
-                                with patch(
-                                    "netbox_librenms_plugin.views.imports.actions.redirect",
-                                    return_value=MagicMock(status_code=302),
-                                ):
-                                    view.post(request)
+        with patch(
+            "netbox_librenms_plugin.views.imports.actions.bulk_import_devices",
+            return_value=import_result,
+        ) as mock_bulk_import:
+            response = post_view(view, request)
 
-        assert mock_bulk_import.called
+        mock_bulk_import.assert_called_once()
         assert mock_bulk_import.call_args.kwargs["sync_options"]["vc_detection_enabled"] is True
+        assert response.status_code == 302
+        assert response["Location"] == url_for("plugins:netbox_librenms_plugin:librenms_import")
 
 
+@pytest.mark.django_db
 class TestBulkImportDevicesMorePaths:
     """Additional paths in BulkImportDevicesView (lines 516-693, 701-758)."""
 
-    def _make_view(self):
+    @staticmethod
+    def _make_view(settings, server_key, server_url="https://librenms.example.test"):
         from netbox_librenms_plugin.views.imports.actions import BulkImportDevicesView
 
-        view = object.__new__(BulkImportDevicesView)
-        view._librenms_api = _make_api()
-        return view
+        configure_test_servers(
+            settings,
+            {
+                server_key: {
+                    "librenms_url": server_url,
+                    "api_token": "test-token",
+                    "verify_ssl": False,
+                }
+            },
+        )
+        return BulkImportDevicesView()
 
-    def _make_base_request(self, device_ids, extra_post=None):
-        request = _make_request(post={})
-        dict(extra_post or {})
-        request.POST.getlist = MagicMock(return_value=device_ids)
-        request.user = MagicMock()
-        request.user.is_superuser = False
-        request.POST.get = MagicMock(return_value=None)
-        request.headers = {}
-        return request
+    @staticmethod
+    def _device_import_user(username):
+        from dcim.models import Device
 
-    def test_invalid_cluster_value_logs_warning(self):
+        return make_view_user(username, [("add", Device), ("change", Device)])
+
+    @staticmethod
+    def _vm_import_user(username):
+        from virtualization.models import VirtualMachine
+
+        return make_view_user(username, [("add", VirtualMachine)])
+
+    def _make_base_request(
+        self,
+        settings,
+        device_ids,
+        user,
+        extra_post=None,
+        *,
+        server_key,
+        server_url="https://librenms.example.test",
+        htmx=False,
+    ):
+        view = self._make_view(settings, server_key, server_url)
+        data = {**(extra_post or {}), "server_key": server_key, "select": device_ids}
+        factory_kwargs = {"HTTP_HX_REQUEST": "true"} if htmx else {}
+        request = make_view_request("post", data, user=user, **factory_kwargs)
+        return view, request
+
+    def test_invalid_cluster_value_logs_warning(self, settings, caplog):
         """Lines 522-526: invalid cluster_value → warning, continue."""
-        view = self._make_view()
-        request = self._make_base_request(["1"])
+        user = self._device_import_user("bulk-more-invalid-cluster-user")
+        view, request = self._make_base_request(
+            settings,
+            ["1"],
+            user,
+            {"cluster_1": "not-int"},
+            server_key="bulk-more-invalid-cluster",
+        )
         # cluster_1 is set to invalid value
-        request.POST.get = MagicMock(side_effect=lambda k, d=None: "not-int" if k == "cluster_1" else None)
+        with (
+            patch(
+                "netbox_librenms_plugin.views.imports.actions.bulk_import_devices",
+                return_value={"success": [], "failed": [], "skipped": [], "virtual_chassis_created": 0},
+            ) as mock_device_import,
+            patch("netbox_librenms_plugin.views.imports.actions.bulk_import_vms") as mock_vm_import,
+        ):
+            response = post_view(view, request)
 
-        with patch.object(view, "require_write_permission", return_value=None):
-            with patch(
-                "netbox_librenms_plugin.views.imports.actions.resolve_naming_preferences", return_value=(True, False)
-            ):
-                with patch(
-                    "netbox_librenms_plugin.views.imports.actions.bulk_import_devices",
-                    return_value={"success": [], "failed": [], "skipped": [], "virtual_chassis_created": 0},
-                ):
-                    with patch(
-                        "netbox_librenms_plugin.views.imports.actions.bulk_import_vms",
-                        return_value={"success": [], "failed": [], "skipped": []},
-                    ):
-                        with patch(
-                            "netbox_librenms_plugin.views.imports.actions.fetch_device_with_cache",
-                            return_value={"device_id": 1},
-                        ):
-                            with patch("netbox_librenms_plugin.views.imports.actions.messages"):
-                                with patch(
-                                    "netbox_librenms_plugin.views.imports.actions.redirect", return_value=MagicMock()
-                                ) as mock_redirect:
-                                    view.post(request)
+        assert "Ignoring invalid cluster/role id for VM import of device 1" in caplog.text
+        # The device never lands in vm_imports because the int() raised, so post() falls through
+        # and imports it as a DEVICE. The selected cluster is silently dropped.
+        assert mock_device_import.call_args.kwargs["device_ids"] == [1]
+        mock_vm_import.assert_not_called()
+        assert response.status_code == 302
+        assert response["Location"] == url_for("plugins:netbox_librenms_plugin:librenms_import")
 
-        mock_redirect.assert_called()
-
-    def test_valid_role_and_rack_values_applied(self):
+    def test_valid_role_and_rack_values_applied(self, settings):
         """Lines 531-552: valid role_id and rack_id → parsed into mappings."""
-        view = self._make_view()
-        request = self._make_base_request(["1"])
+        from dcim.models import Rack
 
-        # role_1=2, rack_1=3
-        def get_side_effect(k, d=None):
-            if k == "role_1":
-                return "2"
-            if k == "rack_1":
-                return "3"
-            return None
+        mapped_device = make_device("bulk-more-mapping-source")
+        rack = Rack.objects.create(name="Bulk More Rack", site=mapped_device.site, status="active")
+        user = self._device_import_user("bulk-more-valid-mapping-user")
 
-        request.POST.get = MagicMock(side_effect=get_side_effect)
+        # Submit real role and rack primary keys.
+        view, request = self._make_base_request(
+            settings,
+            ["1"],
+            user,
+            {"role_1": str(mapped_device.role_id), "rack_1": str(rack.pk)},
+            server_key="bulk-more-valid-mapping",
+        )
 
-        with patch.object(view, "require_write_permission", return_value=None):
-            with patch(
-                "netbox_librenms_plugin.views.imports.actions.resolve_naming_preferences", return_value=(True, False)
-            ):
-                with patch(
-                    "netbox_librenms_plugin.views.imports.actions.bulk_import_devices",
-                    return_value={"success": [], "failed": [], "skipped": [], "virtual_chassis_created": 0},
-                ):
-                    with patch(
-                        "netbox_librenms_plugin.views.imports.actions.bulk_import_vms",
-                        return_value={"success": [], "failed": [], "skipped": []},
-                    ):
-                        with patch(
-                            "netbox_librenms_plugin.views.imports.actions.fetch_device_with_cache",
-                            return_value={"device_id": 1},
-                        ):
-                            with patch("netbox_librenms_plugin.views.imports.actions.messages"):
-                                with patch(
-                                    "netbox_librenms_plugin.views.imports.actions.redirect", return_value=MagicMock()
-                                ) as mock_redirect:
-                                    view.post(request)
+        with patch(
+            "netbox_librenms_plugin.views.imports.actions.bulk_import_devices",
+            return_value={"success": [], "failed": [], "skipped": [], "virtual_chassis_created": 0},
+        ) as mock_import:
+            response = post_view(view, request)
 
-        mock_redirect.assert_called()
+        mock_import.assert_called_once()
+        assert mock_import.call_args.kwargs["manual_mappings_per_device"] == {
+            1: {"device_role_id": mapped_device.role_id, "rack_id": rack.pk}
+        }
+        assert response.status_code == 302
+        assert response["Location"] == url_for("plugins:netbox_librenms_plugin:librenms_import")
 
-    def test_vc_detection_disabled_in_post_is_passed_to_device_import(self):
+    def test_vc_detection_disabled_in_post_is_passed_to_device_import(self, settings):
         """vc_detection_enabled=off from POST must propagate to bulk import call."""
-        view = self._make_view()
-        request = self._make_base_request(["1"])
-        request.POST.get = MagicMock(side_effect=lambda k, d=None: "off" if k == "enable_vc_detection" else None)
+        user = self._device_import_user("bulk-more-vc-off-user")
+        view, request = self._make_base_request(
+            settings,
+            ["1"],
+            user,
+            {"enable_vc_detection": "off"},
+            server_key="bulk-more-vc-off",
+        )
 
-        with patch.object(view, "require_write_permission", return_value=None):
-            with patch(
-                "netbox_librenms_plugin.views.imports.actions.resolve_naming_preferences", return_value=(True, False)
-            ):
-                with patch(
-                    "netbox_librenms_plugin.views.imports.actions.bulk_import_devices",
-                    return_value={"success": [], "failed": [], "skipped": [], "virtual_chassis_created": 0},
-                ) as mock_bulk_import:
-                    with patch(
-                        "netbox_librenms_plugin.views.imports.actions.bulk_import_vms",
-                        return_value={"success": [], "failed": [], "skipped": []},
-                    ):
-                        with patch(
-                            "netbox_librenms_plugin.views.imports.actions.fetch_device_with_cache",
-                            return_value={"device_id": 1},
-                        ):
-                            with patch("netbox_librenms_plugin.views.imports.actions.messages"):
-                                with patch(
-                                    "netbox_librenms_plugin.views.imports.actions.redirect", return_value=MagicMock()
-                                ):
-                                    view.post(request)
+        with patch(
+            "netbox_librenms_plugin.views.imports.actions.bulk_import_devices",
+            return_value={"success": [], "failed": [], "skipped": [], "virtual_chassis_created": 0},
+        ) as mock_bulk_import:
+            response = post_view(view, request)
 
         call_kwargs = mock_bulk_import.call_args.kwargs
         assert call_kwargs["sync_options"]["vc_detection_enabled"] is False
+        assert response.status_code == 302
+        assert response["Location"] == url_for("plugins:netbox_librenms_plugin:librenms_import")
 
-    def test_invalid_role_and_rack_values_log_warning(self):
+    def test_invalid_role_and_rack_values_log_warning(self, settings, caplog):
         """Lines 534-535, 544-546: invalid role_id/rack_id → warning."""
-        view = self._make_view()
-        request = self._make_base_request(["1"])
+        user = self._device_import_user("bulk-more-invalid-mapping-user")
+        view, request = self._make_base_request(
+            settings,
+            ["1"],
+            user,
+            {"role_1": "not-int", "rack_1": "not-int"},
+            server_key="bulk-more-invalid-mapping",
+        )
 
-        def get_side_effect(k, d=None):
-            if k == "role_1":
-                return "not-int"
-            if k == "rack_1":
-                return "not-int"
-            return None
+        with patch(
+            "netbox_librenms_plugin.views.imports.actions.bulk_import_devices",
+            return_value={"success": [], "failed": [], "skipped": [], "virtual_chassis_created": 0},
+        ) as mock_import:
+            response = post_view(view, request)
 
-        request.POST.get = MagicMock(side_effect=get_side_effect)
+        assert "Ignoring invalid role id 'not-int' for device 1" in caplog.text
+        assert "Ignoring invalid rack id 'not-int' for device 1" in caplog.text
+        mock_import.assert_called_once()
+        assert mock_import.call_args.kwargs["manual_mappings_per_device"] == {}
+        assert response.status_code == 302
+        assert response["Location"] == url_for("plugins:netbox_librenms_plugin:librenms_import")
 
-        with patch.object(view, "require_write_permission", return_value=None):
-            with patch(
-                "netbox_librenms_plugin.views.imports.actions.resolve_naming_preferences", return_value=(True, False)
-            ):
-                with patch(
-                    "netbox_librenms_plugin.views.imports.actions.bulk_import_devices",
-                    return_value={"success": [], "failed": [], "skipped": [], "virtual_chassis_created": 0},
-                ):
-                    with patch(
-                        "netbox_librenms_plugin.views.imports.actions.bulk_import_vms",
-                        return_value={"success": [], "failed": [], "skipped": []},
-                    ):
-                        with patch(
-                            "netbox_librenms_plugin.views.imports.actions.fetch_device_with_cache",
-                            return_value={"device_id": 1},
-                        ):
-                            with patch("netbox_librenms_plugin.views.imports.actions.messages"):
-                                with patch(
-                                    "netbox_librenms_plugin.views.imports.actions.redirect", return_value=MagicMock()
-                                ) as mock_redirect:
-                                    view.post(request)
-
-        mock_redirect.assert_called()
-
-    def test_import_with_success_messages(self):
+    def test_import_with_success_messages(self, settings, monkeypatch):
         """Lines 683, 688, 693: success/fail/skipped messages."""
-        view = self._make_view()
-        request = self._make_base_request(["1"])
-        request.POST.get = MagicMock(return_value=None)
+        monkeypatch.setenv("NO_PROXY", "127.0.0.1,localhost")
+        monkeypatch.setenv("no_proxy", "127.0.0.1,localhost")
+        server_key = "bulk-more-summary-messages"
+        user = self._device_import_user("bulk-more-summary-user")
+        skipped_device = make_device("bulk-more-summary-skipped")
+        with run_librenms_server() as server:
+            server.device_info_response(
+                device_id=11,
+                hostname="bulk-more-summary-success",
+                serial="",
+                ip="198.18.0.11",
+            )
+            server.device_info_response(device_id=12, hostname="bulk-more-summary-failed", serial="", ip="198.18.0.12")
+            server.device_info_response(device_id=13, hostname=skipped_device.name, serial="", ip="198.18.0.13")
+            view, request = self._make_base_request(
+                settings,
+                ["11", "12", "13"],
+                user,
+                server_key=server_key,
+                server_url=server.url,
+            )
 
-        mock_device = MagicMock()
-        mock_device.pk = 1
+            def import_with_mixed_outcomes(**_kwargs):
+                successful_device = make_device(
+                    "bulk-more-summary-success",
+                    librenms_cf={server_key: {"id": 11}},
+                )
+                return {
+                    "success": [{"device_id": 11, "device": successful_device}],
+                    "failed": [{"device_id": 12, "error": "failed"}],
+                    "skipped": [{"device_id": 13}],
+                    "virtual_chassis_created": 0,
+                }
 
-        with patch.object(view, "require_write_permission", return_value=None):
             with patch(
-                "netbox_librenms_plugin.views.imports.actions.resolve_naming_preferences", return_value=(True, False)
+                "netbox_librenms_plugin.views.imports.actions.bulk_import_devices",
+                side_effect=import_with_mixed_outcomes,
             ):
-                with patch(
-                    "netbox_librenms_plugin.views.imports.actions.bulk_import_devices",
-                    return_value={
-                        "success": [{"device_id": 1, "device": mock_device}],
-                        "failed": [{"device_id": 1, "error": "failed"}],
-                        "skipped": [{"device_id": 1}],
-                        "virtual_chassis_created": 0,
-                    },
-                ):
-                    with patch(
-                        "netbox_librenms_plugin.views.imports.actions.bulk_import_vms",
-                        return_value={"success": [], "failed": [], "skipped": []},
-                    ):
-                        with patch(
-                            "netbox_librenms_plugin.views.imports.actions.fetch_device_with_cache", return_value=None
-                        ):
-                            with patch("netbox_librenms_plugin.views.imports.actions.messages") as mock_messages:
-                                with patch(
-                                    "netbox_librenms_plugin.views.imports.actions.redirect", return_value=MagicMock()
-                                ):
-                                    view.post(request)
+                response = post_view(view, request)
 
-        mock_messages.success.assert_called()
-        mock_messages.error.assert_called()
-        mock_messages.warning.assert_called()
+        sent_messages = view_message_texts(request)
+        assert "Successfully imported 1 LibreNMS device" in sent_messages
+        assert "Failed to import 1 device" in sent_messages
+        assert "Skipped 1 existing device" in sent_messages
+        assert response.status_code == 302
+        assert response["Location"] == url_for("plugins:netbox_librenms_plugin:librenms_import")
 
-    def test_vm_import_triggers_bulk_import_vms(self):
+    def test_vm_import_triggers_bulk_import_vms(self, settings):
         """Line 651-668: vm_imports non-empty → bulk_import_vms called."""
-        view = self._make_view()
-        request = self._make_base_request(["1"])
+        existing_vm = make_vm("bulk-more-vm-seed")
+        user = self._vm_import_user("bulk-more-vm-user")
 
-        # cluster_1=5 → device 1 is a VM
-        def get_side_effect(k, d=None):
-            if k == "cluster_1":
-                return "5"
-            return None
+        # A real cluster selection makes device 1 a VM.
+        view, request = self._make_base_request(
+            settings,
+            ["1"],
+            user,
+            {"cluster_1": str(existing_vm.cluster_id)},
+            server_key="bulk-more-vm",
+        )
 
-        request.POST.get = MagicMock(side_effect=get_side_effect)
+        with patch(
+            "netbox_librenms_plugin.views.imports.actions.bulk_import_vms",
+            return_value={"success": [], "failed": [], "skipped": []},
+        ) as mock_vm_import:
+            response = post_view(view, request)
 
-        with patch.object(view, "require_write_permission", return_value=None):
-            with patch(
-                "netbox_librenms_plugin.views.imports.actions.resolve_naming_preferences", return_value=(True, False)
-            ):
-                with patch(
-                    "netbox_librenms_plugin.views.imports.actions.bulk_import_devices",
-                    return_value={"success": [], "failed": [], "skipped": [], "virtual_chassis_created": 0},
-                ):
-                    with patch(
-                        "netbox_librenms_plugin.views.imports.actions.bulk_import_vms",
-                        return_value={"success": [], "failed": [], "skipped": []},
-                    ) as mock_vm_import:
-                        with patch(
-                            "netbox_librenms_plugin.views.imports.actions.fetch_device_with_cache",
-                            return_value={"device_id": 1},
-                        ):
-                            with patch("netbox_librenms_plugin.views.imports.actions.messages"):
-                                with patch(
-                                    "netbox_librenms_plugin.views.imports.actions.redirect", return_value=MagicMock()
-                                ):
-                                    view.post(request)
+        mock_vm_import.assert_called_once()
+        assert mock_vm_import.call_args.args[0] == {1: {"cluster_id": existing_vm.cluster_id}}
+        assert response.status_code == 302
+        assert response["Location"] == url_for("plugins:netbox_librenms_plugin:librenms_import")
 
-        mock_vm_import.assert_called()
-
-    def test_htmx_request_returns_oob_rows(self):
+    def test_htmx_request_returns_oob_rows(self, settings, monkeypatch):
         """Lines 701-761: HTMX request → returns OOB row HTML."""
-        view = self._make_view()
-        request = self._make_base_request(["1"])
-        request.headers = {"HX-Request": "true"}
-        request.POST.get = MagicMock(return_value=None)
+        monkeypatch.setenv("NO_PROXY", "127.0.0.1,localhost")
+        monkeypatch.setenv("no_proxy", "127.0.0.1,localhost")
+        server_key = "bulk-more-htmx-row"
+        imported = {}
+        with run_librenms_server() as server:
+            server.device_info_response(
+                device_id=21,
+                hostname="bulk-more-htmx-device",
+                serial="",
+                ip="198.18.0.21",
+            )
+            user = self._device_import_user("bulk-more-htmx-user")
+            view, request = self._make_base_request(
+                settings,
+                ["21"],
+                user,
+                server_key=server_key,
+                server_url=server.url,
+                htmx=True,
+            )
 
-        mock_device = MagicMock()
-        mock_device.pk = 1
+            def import_device(**_kwargs):
+                imported_device = make_device(
+                    "bulk-more-htmx-device",
+                    librenms_cf={server_key: {"id": 21}},
+                )
+                imported["device"] = imported_device
+                return {
+                    "success": [{"device_id": 21, "device": imported_device}],
+                    "failed": [],
+                    "skipped": [],
+                    "virtual_chassis_created": 0,
+                }
 
-        libre_device = {"device_id": 1, "hostname": "r01"}
-
-        with patch.object(view, "require_write_permission", return_value=None):
             with patch(
-                "netbox_librenms_plugin.views.imports.actions.resolve_naming_preferences", return_value=(True, False)
+                "netbox_librenms_plugin.views.imports.actions.bulk_import_devices",
+                side_effect=import_device,
             ):
-                with patch(
-                    "netbox_librenms_plugin.views.imports.actions.bulk_import_devices",
-                    return_value={
-                        "success": [{"device_id": 1, "device": mock_device}],
-                        "failed": [],
-                        "skipped": [],
-                        "virtual_chassis_created": 0,
-                    },
-                ):
-                    with patch(
-                        "netbox_librenms_plugin.views.imports.actions.bulk_import_vms",
-                        return_value={"success": [], "failed": [], "skipped": []},
-                    ):
-                        with patch(
-                            "netbox_librenms_plugin.views.imports.actions.fetch_device_with_cache",
-                            return_value=libre_device,
-                        ):
-                            with patch(
-                                "netbox_librenms_plugin.views.imports.actions.validate_device_for_import",
-                                return_value={"status": "imported"},
-                            ):
-                                with patch("netbox_librenms_plugin.views.imports.actions.cache"):
-                                    with patch(
-                                        "netbox_librenms_plugin.views.imports.actions.get_import_device_cache_key",
-                                        return_value="key",
-                                    ):
-                                        with patch(
-                                            "netbox_librenms_plugin.views.imports.actions.DeviceImportTable",
-                                            return_value=MagicMock(),
-                                        ):
-                                            with patch(
-                                                "netbox_librenms_plugin.views.imports.actions.render"
-                                            ) as mock_render:
-                                                mock_render.return_value.content = b"<tr>row</tr>"
-                                                with patch("netbox_librenms_plugin.views.imports.actions.messages"):
-                                                    response = view.post(request)
+                response = post_view(view, request)
 
+        imported_device = imported["device"]
         assert response.status_code == 200
-        assert b"row" in response.content or response.content == b"\n".join([b"<tr>row</tr>"])
+        assert response["HX-Trigger"] == '{"closeModal": null}'
+        assert b'hx-swap-oob="true"' in response.content
+        assert imported_device.name.encode() in response.content
+        assert b"Successfully imported 1 LibreNMS device" in response.content
+        assert view_message_texts(request) == []
 
-    def test_permission_denied_during_import_redirects(self):
+    def test_permission_denied_during_import_redirects(self, settings):
         """Lines 659-668: PermissionDenied during import → redirect."""
-        view = self._make_view()
-        request = self._make_base_request(["1"])
-        request.POST.get = MagicMock(return_value=None)
-        request.headers = {}
+        user = self._device_import_user("bulk-more-import-denied-user")
+        view, request = self._make_base_request(
+            settings,
+            ["1"],
+            user,
+            server_key="bulk-more-import-denied",
+        )
 
         from django.core.exceptions import PermissionDenied as DjPD
 
-        with patch.object(view, "require_write_permission", return_value=None):
-            with patch(
-                "netbox_librenms_plugin.views.imports.actions.resolve_naming_preferences", return_value=(True, False)
-            ):
-                with patch(
-                    "netbox_librenms_plugin.views.imports.actions.bulk_import_devices",
-                    side_effect=DjPD("No permission"),
-                ):
-                    with patch(
-                        "netbox_librenms_plugin.views.imports.actions.fetch_device_with_cache",
-                        return_value={"device_id": 1},
-                    ):
-                        with patch("netbox_librenms_plugin.views.imports.actions.messages"):
-                            with patch(
-                                "netbox_librenms_plugin.views.imports.actions.redirect", return_value=MagicMock()
-                            ) as mock_redirect:
-                                view.post(request)
+        with patch(
+            "netbox_librenms_plugin.views.imports.actions.bulk_import_devices",
+            side_effect=DjPD("No permission"),
+        ):
+            response = post_view(view, request)
 
-        mock_redirect.assert_called()
+        assert view_message_texts(request, "error") == ["No permission"]
+        assert response.status_code == 302
+        assert response["Location"] == url_for("plugins:netbox_librenms_plugin:librenms_import")
 
-    def test_background_no_workers_falls_back_to_sync(self):
+    def test_background_no_workers_falls_back_to_sync(self, settings):
         """Line 612-615: background requested but no workers → sync fallback."""
-        view = self._make_view()
-        request = self._make_base_request(["1"])
-        request.user.is_superuser = True
-        request.POST.get = MagicMock(side_effect=lambda k, d=None: "on" if k == "use_background_job" else None)
+        view, request = self._make_base_request(
+            settings,
+            ["1"],
+            make_superuser("bulk-more-no-workers-user"),
+            {"use_background_job": "on"},
+            server_key="bulk-more-no-workers",
+        )
 
-        with patch.object(view, "require_write_permission", return_value=None):
-            with patch(
-                "netbox_librenms_plugin.views.imports.actions.resolve_naming_preferences", return_value=(True, False)
-            ):
-                with patch(
-                    "netbox_librenms_plugin.views.imports.actions.bulk_import_devices",
-                    return_value={"success": [], "failed": [], "skipped": [], "virtual_chassis_created": 0},
-                ):
-                    with patch(
-                        "netbox_librenms_plugin.views.imports.actions.bulk_import_vms",
-                        return_value={"success": [], "failed": [], "skipped": []},
-                    ):
-                        with patch(
-                            "netbox_librenms_plugin.views.imports.actions.fetch_device_with_cache",
-                            return_value={"device_id": 1},
-                        ):
-                            with patch("netbox_librenms_plugin.views.imports.actions.messages"):
-                                with patch(
-                                    "netbox_librenms_plugin.views.imports.actions.redirect", return_value=MagicMock()
-                                ) as mock_redirect:
-                                    with patch("utilities.rqworker.get_workers_for_queue", return_value=0):
-                                        view.post(request)
+        with (
+            patch(
+                "netbox_librenms_plugin.views.imports.actions.bulk_import_devices",
+                return_value={"success": [], "failed": [], "skipped": [], "virtual_chassis_created": 0},
+            ) as mock_import,
+            patch("utilities.rqworker.get_workers_for_queue", return_value=0),
+        ):
+            response = post_view(view, request)
 
-        mock_redirect.assert_called()
+        mock_import.assert_called_once()
+        warnings = view_message_texts(request, "warning")
+        assert any("Background job requested but no workers available" in message for message in warnings)
+        assert response.status_code == 302
+        assert response["Location"] == url_for("plugins:netbox_librenms_plugin:librenms_import")
 
 
+@pytest.mark.django_db
 class TestBulkImportEdgePaths:
     """Tests for remaining BulkImportDevicesView edge paths."""
 
-    def _make_view(self):
+    @staticmethod
+    def _make_view(settings, server_key):
         from netbox_librenms_plugin.views.imports.actions import BulkImportDevicesView
 
-        view = object.__new__(BulkImportDevicesView)
-        view._librenms_api = _make_api()
-        return view
+        configure_test_servers(
+            settings,
+            {
+                server_key: {
+                    "librenms_url": "https://librenms.example.test",
+                    "api_token": "test-token",
+                    "verify_ssl": False,
+                }
+            },
+        )
+        return BulkImportDevicesView()
 
-    def test_cluster_with_role_applies_role_to_vm(self):
+    @staticmethod
+    def _device_import_user(username):
+        from dcim.models import Device
+
+        return make_view_user(username, [("add", Device), ("change", Device)])
+
+    @staticmethod
+    def _vm_import_user(username):
+        from virtualization.models import VirtualMachine
+
+        return make_view_user(username, [("add", VirtualMachine)])
+
+    def test_cluster_with_role_applies_role_to_vm(self, settings):
         """Line 521: cluster + role for VM import."""
-        view = self._make_view()
-        request = _make_request(post={})
-        request.POST.getlist = MagicMock(return_value=["1"])
-        request.user = MagicMock()
-        request.user.is_superuser = False
-        request.headers = {}
+        server_key = "bulk-edge-vm-role"
+        view = self._make_view(settings, server_key)
+        existing_vm = make_vm("bulk-edge-vm-seed")
+        role_source = make_device("bulk-edge-role-source")
+        user = self._vm_import_user("bulk-edge-vm-role-user")
+        request = make_view_request(
+            "post",
+            {
+                "server_key": server_key,
+                "select": ["1"],
+                "cluster_1": str(existing_vm.cluster_id),
+                "role_1": str(role_source.role_id),
+            },
+            user=user,
+        )
 
-        def get_side_effect(k, d=None):
-            if k == "cluster_1":
-                return "5"
-            if k == "role_1":
-                return "3"
-            return None
-
-        request.POST.get = MagicMock(side_effect=get_side_effect)
-
-        with patch.object(view, "require_write_permission", return_value=None):
-            with patch(
-                "netbox_librenms_plugin.views.imports.actions.resolve_naming_preferences", return_value=(True, False)
-            ):
-                with patch(
-                    "netbox_librenms_plugin.views.imports.actions.bulk_import_devices",
-                    return_value={"success": [], "failed": [], "skipped": [], "virtual_chassis_created": 0},
-                ):
-                    with patch(
-                        "netbox_librenms_plugin.views.imports.actions.bulk_import_vms",
-                        return_value={"success": [], "failed": [], "skipped": []},
-                    ) as mock_vm:
-                        with patch(
-                            "netbox_librenms_plugin.views.imports.actions.fetch_device_with_cache",
-                            return_value={"device_id": 1},
-                        ):
-                            with patch("netbox_librenms_plugin.views.imports.actions.messages"):
-                                with patch(
-                                    "netbox_librenms_plugin.views.imports.actions.redirect", return_value=MagicMock()
-                                ):
-                                    view.post(request)
+        with patch(
+            "netbox_librenms_plugin.views.imports.actions.bulk_import_vms",
+            return_value={"success": [], "failed": [], "skipped": []},
+        ) as mock_vm:
+            response = post_view(view, request)
 
         # VM import should have been called with role
-        mock_vm.assert_called()
+        mock_vm.assert_called_once()
+        assert mock_vm.call_args.args[0] == {
+            1: {
+                "cluster_id": existing_vm.cluster_id,
+                "device_role_id": role_source.role_id,
+            }
+        }
+        assert response.status_code == 302
+        assert response["Location"] == url_for("plugins:netbox_librenms_plugin:librenms_import")
 
-    def test_permission_denied_htmx_returns_htmx_redirect(self):
+    def test_permission_denied_htmx_returns_htmx_redirect(self, settings):
         """Line 664: PermissionDenied during import with HX-Request → HX-Redirect."""
-        view = self._make_view()
-        request = _make_request(post={})
-        request.POST.getlist = MagicMock(return_value=["1"])
-        request.user = MagicMock()
-        request.user.is_superuser = False
-        request.headers = {"HX-Request": "true"}
-        request.POST.get = MagicMock(return_value=None)
+        server_key = "bulk-edge-htmx-denied"
+        view = self._make_view(settings, server_key)
+        user = self._device_import_user("bulk-edge-htmx-denied-user")
+        request = make_view_request(
+            "post",
+            {"server_key": server_key, "select": ["1"]},
+            user=user,
+            HTTP_HX_REQUEST="true",
+        )
 
         from django.core.exceptions import PermissionDenied as DjPD
 
-        with patch.object(view, "require_write_permission", return_value=None):
-            with patch(
-                "netbox_librenms_plugin.views.imports.actions.resolve_naming_preferences", return_value=(True, False)
-            ):
-                with patch(
-                    "netbox_librenms_plugin.views.imports.actions.fetch_device_with_cache",
-                    return_value={"device_id": 1, "hostname": "test-device"},
-                ):
-                    with patch(
-                        "netbox_librenms_plugin.views.imports.actions.bulk_import_devices",
-                        side_effect=DjPD("No permission"),
-                    ):
-                        with patch("netbox_librenms_plugin.views.imports.actions.messages"):
-                            response = view.post(request)
+        with patch(
+            "netbox_librenms_plugin.views.imports.actions.bulk_import_devices",
+            side_effect=DjPD("No permission"),
+        ):
+            response = post_view(view, request)
 
-        assert response.headers.get("HX-Redirect") is not None
+        assert response.status_code == 200
+        assert response["HX-Redirect"] == url_for("plugins:netbox_librenms_plugin:librenms_import")
+        assert view_message_texts(request, "error") == ["No permission"]
 
-    def test_background_with_workers_enqueues_job(self):
+    def test_background_with_workers_enqueues_job(self, settings):
         """Lines 575-611: background with workers available → enqueue job."""
-        view = self._make_view()
-        request = _make_request(post={})
-        request.POST.getlist = MagicMock(return_value=["1"])
-        request.user = MagicMock()
-        request.user.is_superuser = True
-        request.headers = {}
+        server_key = "bulk-edge-background"
+        view = self._make_view(settings, server_key)
+        request = make_view_request(
+            "post",
+            {
+                "server_key": server_key,
+                "select": ["1"],
+                "use_background_job": "on",
+                "use_sysname": "on",
+            },
+            user=make_superuser("bulk-edge-background-user"),
+        )
 
-        def get_side_effect(k, d=None):
-            if k == "use_background_job":
-                return "on"
-            return None
+        mock_job = Namespace(pk=123, job_id="uuid-456")
 
-        request.POST.get = MagicMock(side_effect=get_side_effect)
-
-        mock_job = MagicMock()
-        mock_job.pk = 123
-        mock_job.job_id = "uuid-456"
-
-        with patch.object(view, "require_write_permission", return_value=None):
-            with patch(
-                "netbox_librenms_plugin.views.imports.actions.resolve_naming_preferences", return_value=(True, False)
-            ):
-                with patch("utilities.rqworker.get_workers_for_queue", return_value=2):
-                    with patch(
-                        "netbox_librenms_plugin.views.imports.actions.fetch_device_with_cache",
-                        return_value={"device_id": 1},
-                    ):
-                        with patch("netbox_librenms_plugin.views.imports.actions.messages"):
-                            with patch(
-                                "netbox_librenms_plugin.views.imports.actions.redirect", return_value=MagicMock()
-                            ) as mock_redirect:
-                                # Patch ImportDevicesJob at the point it's imported inside post()
-                                with patch("netbox_librenms_plugin.jobs.ImportDevicesJob") as MockJob:
-                                    MockJob.enqueue.return_value = mock_job
-                                    result = view.post(request)
+        with (
+            patch("utilities.rqworker.get_workers_for_queue", return_value=2),
+            # Patch ImportDevicesJob at the point it is imported inside post().
+            patch(
+                "netbox_librenms_plugin.jobs.ImportDevicesJob.enqueue",
+                return_value=mock_job,
+            ) as mock_enqueue,
+        ):
+            result = post_view(view, request)
 
         # Pin the regression this test is named for: the background path must actually
         # enqueue the job, not merely take some redirecting branch.
-        MockJob.enqueue.assert_called_once()
-        mock_redirect.assert_called()
+        mock_enqueue.assert_called_once()
         # The redirect response must actually be returned, not just produced.
-        assert result is mock_redirect.return_value
+        assert result.status_code == 302
+        assert result["Location"] == url_for("plugins:netbox_librenms_plugin:librenms_import")
 
         # ...and the enqueued job must carry the request's inputs forward, not be enqueued
         # empty: the selected device id (parsed to int), the active server namespace, and
         # the resolved sync options. Otherwise the background import silently does nothing.
-        enqueue_kwargs = MockJob.enqueue.call_args.kwargs
+        enqueue_kwargs = mock_enqueue.call_args.kwargs
         assert enqueue_kwargs["device_ids"] == [1]
-        assert enqueue_kwargs["server_key"] == "default"
+        assert enqueue_kwargs["server_key"] == server_key
         assert enqueue_kwargs["sync_options"]["use_sysname"] is True
+        assert any("Import job started for 1 device" in message for message in view_message_texts(request, "info"))
 
-    def test_cold_cache_seed_does_not_fetch_from_librenms_before_enqueue(self):
+    def test_cold_cache_seed_does_not_fetch_from_librenms_before_enqueue(self, settings):
         """On a cold cache + background path, the pre-enqueue seed reads the Django cache only (no fetch_device_with_cache, which HTTP-fetches on a miss) and enqueues an empty libre_devices_cache."""
-        view = self._make_view()
-        request = _make_request(post={})
-        request.POST.getlist = MagicMock(return_value=["1"])
-        request.user = MagicMock()
-        request.user.is_superuser = True
-        request.headers = {}
-        request.POST.get = MagicMock(side_effect=lambda k, d=None: "on" if k == "use_background_job" else None)
+        from django.core.cache import cache
 
-        mock_job = MagicMock(pk=123, job_id="uuid-cold")
+        from netbox_librenms_plugin.views.imports.actions import get_import_device_cache_key
+
+        server_key = "bulk-edge-cold-cache"
+        view = self._make_view(settings, server_key)
+        request = make_view_request(
+            "post",
+            {
+                "server_key": server_key,
+                "select": ["1"],
+                "use_background_job": "on",
+                "use_sysname": "on",
+            },
+            user=make_superuser("bulk-edge-cold-cache-user"),
+        )
+
+        mock_job = Namespace(pk=123, job_id="uuid-cold")
+        cache.delete(get_import_device_cache_key(1, server_key))
 
         with (
-            patch.object(view, "require_write_permission", return_value=None),
-            patch(
-                "netbox_librenms_plugin.views.imports.actions.resolve_naming_preferences",
-                return_value=(True, False),
-            ),
             patch("utilities.rqworker.get_workers_for_queue", return_value=2),
             # Cold cache: every import-device key misses. The pre-enqueue seed batches its reads
-            # via cache.get_many (one round-trip for N devices), so stub that too.
-            patch("netbox_librenms_plugin.views.imports.actions.cache.get", return_value=None),
-            patch("netbox_librenms_plugin.views.imports.actions.cache.get_many", return_value={}),
+            # via cache.get_many (one round-trip for N devices).
             # The HTTP-fetching helper must NOT be reached by the pre-enqueue seed.
             patch("netbox_librenms_plugin.views.imports.actions.fetch_device_with_cache") as mock_fetch,
-            patch("netbox_librenms_plugin.views.imports.actions.messages"),
-            patch("netbox_librenms_plugin.views.imports.actions.redirect", return_value=MagicMock()),
-            patch("netbox_librenms_plugin.jobs.ImportDevicesJob") as MockJob,
+            patch(
+                "netbox_librenms_plugin.jobs.ImportDevicesJob.enqueue",
+                return_value=mock_job,
+            ) as mock_enqueue,
         ):
-            MockJob.enqueue.return_value = mock_job
-            view.post(request)
+            response = post_view(view, request)
 
         # The seed read the Django cache directly and never reached the API-fetching helper.
         mock_fetch.assert_not_called()
         # Cold cache → nothing pre-warmed; the async job fetches misses itself.
-        MockJob.enqueue.assert_called_once()
-        assert MockJob.enqueue.call_args.kwargs["libre_devices_cache"] == {}
+        mock_enqueue.assert_called_once()
+        assert mock_enqueue.call_args.kwargs["libre_devices_cache"] == {}
+        assert response.status_code == 302
+        assert response["Location"] == url_for("plugins:netbox_librenms_plugin:librenms_import")
 
 
 @pytest.mark.django_db
@@ -5699,129 +5702,157 @@ class TestBulkImportConfirmCollisions:
 class TestBulkImportDevicesViewCollisionGate:
     """The direct-import view re-runs the collision check the confirm preview can be bypassed on."""
 
-    def _make_view(self):
+    @staticmethod
+    def _make_view(settings, server_key, server_url="https://librenms.example.test"):
         from netbox_librenms_plugin.views.imports.actions import BulkImportDevicesView
 
-        view = object.__new__(BulkImportDevicesView)
-        view._librenms_api = _make_api()
-        return view
+        configure_test_servers(
+            settings,
+            {
+                server_key: {
+                    "librenms_url": server_url,
+                    "api_token": "test-token",
+                    "verify_ssl": False,
+                }
+            },
+        )
+        return BulkImportDevicesView()
 
-    def test_clean_batch_passes_gate_and_imports(self):
+    @staticmethod
+    def _device_import_user(username):
+        from dcim.models import Device
+
+        return make_view_user(
+            username,
+            [("view", Device), ("add", Device), ("change", Device)],
+        )
+
+    def test_clean_batch_passes_gate_and_imports(self, settings, monkeypatch):
         """Two rows resolving to distinct real devices clear the gate and reach the importer."""
-        view = self._make_view()
-        request = _make_request(post={"select": ["1", "2"]})
-        request.POST.getlist = MagicMock(return_value=["1", "2"])
-        request.user = _import_authorized_user()
-
-        make_device("gate-clean-a")
-        make_device("gate-clean-b")
-        libre = {
-            1: {"device_id": 1, "sysName": "gate-clean-a", "hostname": "gate-clean-a"},
-            2: {"device_id": 2, "sysName": "gate-clean-b", "hostname": "gate-clean-b"},
+        monkeypatch.setenv("NO_PROXY", "127.0.0.1,localhost")
+        monkeypatch.setenv("no_proxy", "127.0.0.1,localhost")
+        server_key = "bulk-collision-clean"
+        clean_a = make_device("gate-clean-a")
+        clean_b = make_device("gate-clean-b")
+        user = self._device_import_user("bulk-collision-clean-user")
+        import_result = {
+            "success": [
+                {"device_id": 1, "device": clean_a},
+                {"device_id": 2, "device": clean_b},
+            ],
+            "failed": [],
+            "skipped": [],
+            "virtual_chassis_created": 0,
         }
-        view._librenms_api.get_device_info = lambda did, *a, **k: (True, libre[did]) if did in libre else (False, None)
-        import_result = {"success": [], "failed": [], "skipped": [], "virtual_chassis_created": 0}
-        with (
-            patch.object(view, "require_write_permission", return_value=None),
-            patch(
-                "netbox_librenms_plugin.views.imports.actions.resolve_naming_preferences", return_value=(True, False)
-            ),
-            patch(
-                "netbox_librenms_plugin.views.imports.actions.fetch_device_with_cache",
-                side_effect=lambda did, _api: libre.get(did),
-            ),
-            patch(
-                "netbox_librenms_plugin.views.imports.actions.bulk_import_devices", return_value=import_result
-            ) as mock_import,
-            patch(
-                "netbox_librenms_plugin.views.imports.actions.bulk_import_vms",
-                return_value={"success": [], "failed": [], "skipped": []},
-            ),
-            patch("netbox_librenms_plugin.views.imports.actions.messages"),
-            patch("netbox_librenms_plugin.views.imports.actions.redirect", return_value=MagicMock(status_code=302)),
-        ):
-            view.post(request)
+        with run_librenms_server() as server:
+            server.device_info_response(
+                device_id=1,
+                hostname=clean_a.name,
+                serial="gate-clean-serial-a",
+                ip="198.18.1.1",
+            )
+            server.device_info_response(
+                device_id=2,
+                hostname=clean_b.name,
+                serial="gate-clean-serial-b",
+                ip="198.18.1.2",
+            )
+            view = self._make_view(settings, server_key, server.url)
+            request = make_view_request(
+                "post",
+                {"server_key": server_key, "select": ["1", "2"]},
+                user=user,
+            )
+            with patch(
+                "netbox_librenms_plugin.views.imports.actions.bulk_import_devices",
+                return_value=import_result,
+            ) as mock_import:
+                response = post_view(view, request)
 
         # Gate cleared (distinct devices) → the importer ran.
         mock_import.assert_called_once()
+        assert response.status_code == 302
+        assert response["Location"] == url_for("plugins:netbox_librenms_plugin:librenms_import")
 
-    def test_background_batch_defers_collision_precheck_to_job(self):
-        """A batch routed to a background job must NOT run the collision pre-check synchronously — it's deferred to ImportDevicesJob (which re-runs it), so the request doesn't pay the validation cost. The job is enqueued and the sync detector is never called."""
-        view = self._make_view()
-        request = _make_request(
-            post={"select": ["1", "2"], "use_background_job": "on"},
-            headers={"HX-Request": "true"},
-            user_is_superuser=True,
+    def test_background_batch_defers_collision_precheck_to_job(self, settings):
+        """A batch routed to a background job must NOT run the collision pre-check synchronously. It is deferred to ImportDevicesJob (which re-runs it), so the request does not pay the validation cost. The job is enqueued and the sync detector is never called."""
+        from netbox_librenms_plugin.views.imports.actions import detect_collisions_for_device_ids
+
+        server_key = "bulk-collision-background"
+        view = self._make_view(settings, server_key)
+        request = make_view_request(
+            "post",
+            {
+                "server_key": server_key,
+                "select": ["1", "2"],
+                "use_background_job": "on",
+            },
+            user=make_superuser("bulk-collision-background-user"),
+            HTTP_HX_REQUEST="true",
         )
-        request.POST.getlist = MagicMock(return_value=["1", "2"])
 
-        libre = {
-            1: {"device_id": 1, "sysName": "bg-a", "hostname": "bg-a"},
-            2: {"device_id": 2, "sysName": "bg-b", "hostname": "bg-b"},
-        }
         with (
-            patch.object(view, "require_write_permission", return_value=None),
-            patch(
-                "netbox_librenms_plugin.views.imports.actions.resolve_naming_preferences", return_value=(True, False)
-            ),
-            patch(
-                "netbox_librenms_plugin.views.imports.actions.fetch_device_with_cache",
-                side_effect=lambda did, _api, **_kw: libre.get(did),
-            ),
             patch("utilities.rqworker.get_workers_for_queue", return_value=1),
             patch(
                 "netbox_librenms_plugin.jobs.ImportDevicesJob.enqueue",
-                return_value=MagicMock(pk=4242, job_id="job-4242"),
+                return_value=Namespace(pk=4242, job_id="job-4242"),
             ) as mock_enqueue,
-            patch("netbox_librenms_plugin.views.imports.actions.detect_collisions_for_device_ids") as mock_detect,
-            patch("netbox_librenms_plugin.views.imports.actions.messages"),
+            patch(
+                "netbox_librenms_plugin.views.imports.actions.detect_collisions_for_device_ids",
+                wraps=detect_collisions_for_device_ids,
+            ) as mock_detect,
         ):
-            response = view.post(request)
+            response = post_view(view, request)
 
         # The job is enqueued and the synchronous collision pre-check is skipped entirely (deferred).
         mock_enqueue.assert_called_once()
         mock_detect.assert_not_called()
         assert response.status_code == 200
+        assert response["HX-Redirect"] == url_for("plugins:netbox_librenms_plugin:librenms_import")
 
-    def test_colliding_batch_non_htmx_message_is_object_neutral(self):
+    def test_colliding_batch_non_htmx_message_is_object_neutral(self, settings, monkeypatch):
         """The non-HTMX collision block toast says "NetBox object", not "NetBox device".
 
         The gate covers VM rows too (vm_device_ids=vm_imports), so a VM-only batch must not
-        be mislabelled — mirrors the deliberately neutral wording in ImportDevicesJob.
+        be mislabelled. This mirrors the deliberately neutral wording in ImportDevicesJob.
         """
-        view = self._make_view()
+        monkeypatch.setenv("NO_PROXY", "127.0.0.1,localhost")
+        monkeypatch.setenv("no_proxy", "127.0.0.1,localhost")
+        server_key = "bulk-collision-neutral-message"
+        colliding_device = make_device("gate-collide-plain")
+        user = self._device_import_user("bulk-collision-neutral-message-user")
         # No HX-Request header → the messages.error + redirect branch.
-        request = _make_request(post={"select": ["1", "2"]})
-        request.POST.getlist = MagicMock(return_value=["1", "2"])
-        request.user = _import_authorized_user()
-
-        make_device("gate-collide-plain")
-        libre = {
-            1: {"device_id": 1, "sysName": "gate-collide-plain", "hostname": "gate-collide-plain"},
-            2: {"device_id": 2, "sysName": "gate-collide-plain", "hostname": "gate-collide-plain"},
-        }
-        view._librenms_api.get_device_info = lambda did, *a, **k: (True, libre[did]) if did in libre else (False, None)
-        with (
-            patch.object(view, "require_write_permission", return_value=None),
-            patch(
-                "netbox_librenms_plugin.views.imports.actions.resolve_naming_preferences", return_value=(True, False)
-            ),
-            patch(
-                "netbox_librenms_plugin.views.imports.actions.fetch_device_with_cache",
-                side_effect=lambda did, _api: libre.get(did),
-            ),
-            patch("netbox_librenms_plugin.views.imports.actions.bulk_import_devices") as mock_import,
-            patch("netbox_librenms_plugin.views.imports.actions.messages") as mock_messages,
-            patch("netbox_librenms_plugin.views.imports.actions.redirect", return_value=MagicMock(status_code=302)),
-        ):
-            view.post(request)
+        with run_librenms_server() as server:
+            server.device_info_response(
+                device_id=1,
+                hostname=colliding_device.name,
+                serial="",
+                ip="198.18.1.10",
+            )
+            server.device_info_response(
+                device_id=2,
+                hostname=colliding_device.name,
+                serial="",
+                ip="198.18.1.11",
+            )
+            view = self._make_view(settings, server_key, server.url)
+            request = make_view_request(
+                "post",
+                {"server_key": server_key, "select": ["1", "2"]},
+                user=user,
+            )
+            with patch("netbox_librenms_plugin.views.imports.actions.bulk_import_devices") as mock_import:
+                response = post_view(view, request)
 
         mock_import.assert_not_called()
-        mock_messages.error.assert_called_once()
-        toast = mock_messages.error.call_args[0][1]
+        errors = view_message_texts(request, "error")
+        assert len(errors) == 1
+        toast = errors[0]
         assert "NetBox object" in toast
         assert "NetBox device" not in toast
         assert "colliding device" not in toast
+        assert response.status_code == 302
+        assert response["Location"] == url_for("plugins:netbox_librenms_plugin:librenms_import")
 
 
 # ---------------------------------------------------------------------------
