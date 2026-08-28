@@ -1530,73 +1530,172 @@ class TestRowUpdateViewsServerRebind:
 
 
 @pytest.mark.django_db
+@pytest.mark.django_db
 class TestDeviceConflictActionView:
     """DeviceConflictActionView.post — input guards + real-DB lookup paths."""
 
+    @pytest.fixture(autouse=True)
+    def _configure_librenms_server(self, request, settings, monkeypatch):
+        monkeypatch.setenv("NO_PROXY", "127.0.0.1,localhost")
+        monkeypatch.setenv("no_proxy", "127.0.0.1,localhost")
+        self.server_key = f"conflict-{request.node.name}".replace("_", "-").replace("[", "-").replace("]", "")
+        with run_librenms_server() as server:
+            configure_test_servers(
+                settings,
+                {
+                    self.server_key: {
+                        "librenms_url": server.url,
+                        "api_token": "test-token",
+                        "verify_ssl": False,
+                    }
+                },
+            )
+            self.librenms_server = server
+            yield
+
     def _make_view(self):
+        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
         from netbox_librenms_plugin.views.imports.actions import DeviceConflictActionView
 
-        view = object.__new__(DeviceConflictActionView)
-        view._librenms_api = _make_api()
-        view.request = MagicMock()
-        view.require_write_permission = MagicMock(return_value=None)
-        view.require_object_permissions = MagicMock(return_value=None)
+        view = DeviceConflictActionView()
+        view._librenms_api = LibreNMSAPI(server_key=self.server_key)
         return view
 
-    def test_no_permission_returns_error(self):
+    def _register_device(self, device_id, hostname, *, serial=""):
+        self.librenms_server.device_info_response(
+            device_id=device_id,
+            hostname=hostname,
+            hardware="Test chassis",
+            os="ios",
+            serial=serial,
+            ip="",
+        )
+        self.librenms_server.vc_inventory_callable(device_id, [], {})
+
+    @pytest.mark.parametrize("htmx", [False, True], ids=["regular", "htmx"])
+    def test_no_permission_returns_error(self, htmx):
+        from dcim.models import Device
+        from django.urls import get_script_prefix
+
         view = self._make_view()
-        error_resp = MagicMock()
-        view.require_write_permission = MagicMock(return_value=error_resp)
-        result = view.post(MagicMock(), device_id=1)
-        assert result is error_resp
+        existing_device = make_device(
+            "conflict-denied",
+            librenms_cf={self.server_key: {"id": 10}},
+        )
+        self._register_device(17, existing_device.name)
+        user = make_view_user(
+            f"conflict-denied-{'htmx' if htmx else 'regular'}-user",
+            [("change", Device)],
+            plugin_write=False,
+        )
+        factory_kwargs = {"HTTP_HX_REQUEST": "true"} if htmx else {}
+        request = make_view_request(
+            "post",
+            {
+                "server_key": self.server_key,
+                "action": "link",
+                "existing_device_id": str(existing_device.pk),
+            },
+            user=user,
+            **factory_kwargs,
+        )
+        device_count = Device.objects.count()
+
+        response = post_view(view, request, device_id=17)
+
+        if htmx:
+            assert response.status_code == 200
+            assert response.content == b""
+            assert response["HX-Redirect"] == get_script_prefix()
+        else:
+            assert response.status_code == 302
+            assert response["Location"] == get_script_prefix()
+        assert view_message_texts(request, "error") == ["You do not have permission to perform this action."]
+        assert Device.objects.count() == device_count
+        reloaded = Device.objects.get(pk=existing_device.pk)
+        assert reloaded.custom_field_data["librenms_id"][self.server_key] == {"id": 10}
 
     def test_missing_action_renders_htmx_error_toast(self):
         view = self._make_view()
-        request = _make_request(post={"existing_device_id": "1"})
-        result = view.post(request, device_id=1)
+        request = make_view_request(
+            "post",
+            {"server_key": self.server_key, "existing_device_id": "1"},
+            user=make_view_user("conflict-missing-action-user", []),
+            HTTP_HX_REQUEST="true",
+        )
+        result = post_view(view, request, device_id=1)
         assert result.status_code == 200
         assert result.headers.get("HX-Reswap") == "none"
         assert b"Missing action or existing_device_id" in result.content
 
     def test_missing_existing_device_id_renders_htmx_error_toast(self):
         view = self._make_view()
-        request = _make_request(post={"action": "link"})
-        result = view.post(request, device_id=1)
+        request = make_view_request(
+            "post",
+            {"server_key": self.server_key, "action": "link"},
+            user=make_view_user("conflict-missing-device-user", []),
+            HTTP_HX_REQUEST="true",
+        )
+        result = post_view(view, request, device_id=1)
         assert result.status_code == 200
         assert result.headers.get("HX-Reswap") == "none"
         assert b"Missing action or existing_device_id" in result.content
 
     def test_vm_with_unsupported_action_renders_htmx_error_toast(self):
         view = self._make_view()
-        request = _make_request(
-            post={
+        request = make_view_request(
+            "post",
+            {
+                "server_key": self.server_key,
                 "action": "link",
                 "existing_device_id": "5",
                 "existing_device_type": "virtualmachine",
-            }
+            },
+            user=make_view_user("conflict-unsupported-vm-user", []),
+            HTTP_HX_REQUEST="true",
         )
-        result = view.post(request, device_id=1)
+        result = post_view(view, request, device_id=1)
         assert result.status_code == 200
         assert result.headers.get("HX-Reswap") == "none"
         assert b"is not supported for virtual machines" in result.content
 
     def test_existing_device_not_found_renders_htmx_error_toast(self):
+        from dcim.models import Device
+
         # A pk that isn't in the DB → a real Device.objects.get miss, not a stubbed raise.
         view = self._make_view()
-        request = _make_request(post={"action": "link", "existing_device_id": "987654321"})
-        result = view.post(request, device_id=1)
+        request = make_view_request(
+            "post",
+            {
+                "server_key": self.server_key,
+                "action": "link",
+                "existing_device_id": "987654321",
+            },
+            user=make_view_user("conflict-missing-row-user", [("change", Device)]),
+            HTTP_HX_REQUEST="true",
+        )
+        result = post_view(view, request, device_id=1)
         assert result.status_code == 200
         assert result.headers.get("HX-Reswap") == "none"
         assert b"Existing device not found" in result.content
 
     def test_unknown_action_renders_htmx_error_toast(self):
+        from dcim.models import Device
+
         view = self._make_view()
         existing_device = make_device("conflict-unknown-action")
-        view.get_validated_device_with_selections = MagicMock(
-            return_value=({"device_id": 1, "serial": "-"}, {"existing_device": existing_device}, {})
+        self._register_device(1, existing_device.name)
+        request = make_view_request(
+            "post",
+            {
+                "server_key": self.server_key,
+                "action": "unknown_action",
+                "existing_device_id": str(existing_device.pk),
+            },
+            user=make_view_user("conflict-unknown-action-user", [("change", Device)]),
+            HTTP_HX_REQUEST="true",
         )
-        request = _make_request(post={"action": "unknown_action", "existing_device_id": str(existing_device.pk)})
-        result = view.post(request, device_id=1)
+        result = post_view(view, request, device_id=1)
 
         assert result.status_code == 200
         assert result.headers.get("HX-Reswap") == "none"
@@ -6177,67 +6276,148 @@ class TestSetLibreNMSOOBGenericSentinel:
 class TestAddAsOOBViewPost:
     """View-level tests for AddAsOOBView.post() — HTTP interface + OOB sentinel regression."""
 
+    @pytest.fixture(autouse=True)
+    def _configure_librenms_server(self, request, settings, monkeypatch):
+        monkeypatch.setenv("NO_PROXY", "127.0.0.1,localhost")
+        monkeypatch.setenv("no_proxy", "127.0.0.1,localhost")
+        self.server_key = f"add-oob-{request.node.name}".replace("_", "-").replace("[", "-").replace("]", "")
+        with run_librenms_server() as server:
+            configure_test_servers(
+                settings,
+                {
+                    self.server_key: {
+                        "librenms_url": server.url,
+                        "api_token": "test-token",
+                        "verify_ssl": False,
+                    }
+                },
+            )
+            self.librenms_server = server
+            yield
+
     def _make_view(self):
+        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
         from netbox_librenms_plugin.views.imports.actions import AddAsOOBView
 
-        view = object.__new__(AddAsOOBView)
-        view.kwargs = {}
-        view._librenms_api = _make_api()
-        view.request = MagicMock()
-
-        # Default: write permission granted
-        view.require_write_permission = MagicMock(return_value=None)
-        # Default: object permissions granted
-        view.require_object_permissions = MagicMock(return_value=None)
+        view = AddAsOOBView()
+        view._librenms_api = LibreNMSAPI(server_key=self.server_key)
         return view
+
+    def _register_oob_device(self, device_id, hostname, *, serial, ip="", generic=False):
+        self.librenms_server.device_info_response(
+            device_id=device_id,
+            hostname=hostname,
+            hardware="Test chassis" if generic else "Test OOB controller",
+            os="ios" if generic else "idrac",
+            serial=serial,
+            ip=ip,
+        )
+        self.librenms_server.vc_inventory_callable(device_id, [], {})
+
+    @staticmethod
+    def _device_writer(username, extra_perms=()):
+        from dcim.models import Device
+
+        return make_view_user(username, [("change", Device), *extra_perms])
+
+    @staticmethod
+    def _post_after_validation(view, request, device_id, mutation):
+        """Run a real validation, then inject one deterministic concurrent database write."""
+        validate = view.get_validated_device_with_selections
+
+        def validate_then_mutate(*args, **kwargs):
+            result = validate(*args, **kwargs)
+            mutation()
+            return result
+
+        with patch.object(view, "get_validated_device_with_selections", side_effect=validate_then_mutate):
+            return post_view(view, request, device_id=device_id)
 
     def test_missing_existing_device_id_returns_htmx_error(self):
         """POST without existing_device_id returns HTMX error."""
         view = self._make_view()
-        request = _make_request(post={})
+        request = make_view_request(
+            "post",
+            {"server_key": self.server_key},
+            user=make_view_user("oob-missing-device-user", []),
+            HTTP_HX_REQUEST="true",
+        )
 
-        response = view.post(request, device_id=1)
+        response = post_view(view, request, device_id=1)
 
         assert response.status_code == 200
         assert b"Missing existing_device_id" in response.content
         assert response["HX-Reswap"] == "none"
 
-    def test_write_permission_denied_returns_error(self):
+    @pytest.mark.parametrize("htmx", [False, True], ids=["regular", "htmx"])
+    def test_write_permission_denied_returns_error(self, htmx):
         """When write permission is denied, view returns that error immediately."""
-        from django.http import HttpResponse
+        from dcim.models import Device
+        from django.urls import get_script_prefix
 
         view = self._make_view()
-        perm_error = HttpResponse("Forbidden", status=403)
-        view.require_write_permission = MagicMock(return_value=perm_error)
+        existing_device = make_device(
+            "oob-denied-host",
+            serial="OOB-DENIED-SERIAL",
+            librenms_cf={self.server_key: {"id": 10}},
+        )
+        self._register_oob_device(17, "oob-denied-controller", serial=existing_device.serial)
+        user = make_view_user(
+            f"oob-denied-{'htmx' if htmx else 'regular'}-user",
+            [("change", Device)],
+            plugin_write=False,
+        )
+        factory_kwargs = {"HTTP_HX_REQUEST": "true"} if htmx else {}
+        request = make_view_request(
+            "post",
+            {"server_key": self.server_key, "existing_device_id": str(existing_device.pk)},
+            user=user,
+            **factory_kwargs,
+        )
+        device_count = Device.objects.count()
 
-        request = _make_request(post={"existing_device_id": "1"})
-        response = view.post(request, device_id=1)
+        response = post_view(view, request, device_id=17)
 
-        assert response.status_code == 403
+        if htmx:
+            assert response.status_code == 200
+            assert response.content == b""
+            assert response["HX-Redirect"] == get_script_prefix()
+        else:
+            assert response.status_code == 302
+            assert response["Location"] == get_script_prefix()
+        assert view_message_texts(request, "error") == ["You do not have permission to perform this action."]
+        assert Device.objects.count() == device_count
+        reloaded = Device.objects.get(pk=existing_device.pk)
+        assert reloaded.custom_field_data["librenms_id"][self.server_key] == {"id": 10}
 
     def test_invalid_existing_device_id_returns_htmx_error(self):
         """POST with a non-integer existing_device_id returns HTMX error — the failure is the int() conversion, which raises before any ORM lookup, so the manager is never hit."""
         view = self._make_view()
-        request = _make_request(post={"existing_device_id": "not-a-number"})
+        request = make_view_request(
+            "post",
+            {"server_key": self.server_key, "existing_device_id": "not-a-number"},
+            user=self._device_writer("oob-invalid-device-user"),
+            HTTP_HX_REQUEST="true",
+        )
 
-        with patch("dcim.models.Device") as mock_device:
-            # DoesNotExist must be a real exception so the view's except tuple is valid; the
-            # manager itself is NOT stubbed to raise — int("not-a-number") fails first.
-            mock_device.DoesNotExist = type("DoesNotExist", (Exception,), {})
-            response = view.post(request, device_id=1)
+        # int("not-a-number") fails before the real restricted queryset can fetch a row.
+        response = post_view(view, request, device_id=1)
 
         assert response.status_code == 200
         assert b"Existing device not found" in response.content
         assert response["HX-Reswap"] == "none"
-        # The malformed id is rejected before any DB lookup.
-        mock_device.objects.restrict.return_value.get.assert_not_called()
 
     def test_device_does_not_exist_returns_htmx_error(self):
         """POST with an existing_device_id that isn't in the DB returns HTMX error — driven by a real ORM miss on an absent pk, not a stubbed manager raising DoesNotExist."""
         view = self._make_view()
-        request = _make_request(post={"existing_device_id": "987654321"})
+        request = make_view_request(
+            "post",
+            {"server_key": self.server_key, "existing_device_id": "987654321"},
+            user=self._device_writer("oob-missing-row-user"),
+            HTTP_HX_REQUEST="true",
+        )
 
-        response = view.post(request, device_id=1)
+        response = post_view(view, request, device_id=1)
 
         assert response.status_code == 200
         assert b"Existing device not found" in response.content
@@ -6247,12 +6427,23 @@ class TestAddAsOOBViewPost:
         """When validation has no oob_candidate, view returns an HTMX error."""
         view = self._make_view()
         existing_device = make_device("oob-nocand")
-        request = _make_request(post={"existing_device_id": str(existing_device.pk)})
-
-        view.get_validated_device_with_selections = MagicMock(
-            return_value=({"device_id": 99}, {"oob_candidate": None}, {})
+        self.librenms_server.device_info_response(
+            device_id=99,
+            hostname=existing_device.name,
+            hardware="Test chassis",
+            os="ios",
+            serial="",
+            ip="",
         )
-        response = view.post(request, device_id=99)
+        self.librenms_server.vc_inventory_callable(99, [], {})
+        request = make_view_request(
+            "post",
+            {"server_key": self.server_key, "existing_device_id": str(existing_device.pk)},
+            user=self._device_writer("oob-no-candidate-user"),
+            HTTP_HX_REQUEST="true",
+        )
+
+        response = post_view(view, request, device_id=99)
 
         assert response.status_code == 200
         assert b"No OOB candidate" in response.content
@@ -6261,14 +6452,21 @@ class TestAddAsOOBViewPost:
     def test_device_id_mismatch_returns_htmx_error(self):
         """When oob_candidate device pk does not match existing_device_id, returns HTMX error."""
         view = self._make_view()
-        existing_device = make_device("oob-existing", librenms_cf={"default": {"id": 10}})
-        other_device = make_device("oob-other")  # the oob_candidate points at a different device
-        request = _make_request(post={"existing_device_id": str(existing_device.pk)})
-
-        view.get_validated_device_with_selections = MagicMock(
-            return_value=({"device_id": 50}, {"oob_candidate": {"device": other_device, "type": "oob"}}, {})
+        existing_device = make_device(
+            "oob-existing",
+            librenms_cf={self.server_key: {"id": 10}},
         )
-        response = view.post(request, device_id=50)
+        # The real serial match resolves the OOB candidate to a different device.
+        other_device = make_device("oob-other", serial="OOB-MISMATCH-SERIAL")
+        self._register_oob_device(50, "oob-other-controller", serial=other_device.serial)
+        request = make_view_request(
+            "post",
+            {"server_key": self.server_key, "existing_device_id": str(existing_device.pk)},
+            user=self._device_writer("oob-device-mismatch-user"),
+            HTTP_HX_REQUEST="true",
+        )
+
+        response = post_view(view, request, device_id=50)
 
         assert response.status_code == 200
         assert b"mismatch" in response.content.lower() or b"Device ID mismatch" in response.content
@@ -6278,13 +6476,16 @@ class TestAddAsOOBViewPost:
         """Device with legacy bare-int librenms_id is rejected with convert-first message."""
         view = self._make_view()
         # Legacy bare-int librenms_id (not the expected per-server dict structure).
-        existing_device = make_device("oob-legacy", librenms_cf=42)
-        request = _make_request(post={"existing_device_id": str(existing_device.pk)})
-
-        view.get_validated_device_with_selections = MagicMock(
-            return_value=({"device_id": 77}, {"oob_candidate": {"device": existing_device, "type": "oob"}}, {})
+        existing_device = make_device("oob-legacy", serial="OOB-LEGACY-SERIAL", librenms_cf=42)
+        self._register_oob_device(77, "oob-legacy-controller", serial=existing_device.serial)
+        request = make_view_request(
+            "post",
+            {"server_key": self.server_key, "existing_device_id": str(existing_device.pk)},
+            user=self._device_writer("oob-legacy-user"),
+            HTTP_HX_REQUEST="true",
         )
-        response = view.post(request, device_id=77)
+
+        response = post_view(view, request, device_id=77)
 
         assert response.status_code == 200
         assert b"legacy" in response.content.lower()
@@ -6294,10 +6495,15 @@ class TestAddAsOOBViewPost:
         """When get_validated_device_with_selections returns no libre_device, returns HTMX error."""
         view = self._make_view()
         existing_device = make_device("oob-nolibre")
-        request = _make_request(post={"existing_device_id": str(existing_device.pk)})
+        request = make_view_request(
+            "post",
+            {"server_key": self.server_key, "existing_device_id": str(existing_device.pk)},
+            user=self._device_writer("oob-libre-missing-user"),
+            HTTP_HX_REQUEST="true",
+        )
 
-        view.get_validated_device_with_selections = MagicMock(return_value=(None, None, None))
-        response = view.post(request, device_id=1)
+        # The stub has no route for device 1, so the real API returns no LibreNMS device.
+        response = post_view(view, request, device_id=1)
 
         assert response.status_code == 200
         assert b"not found" in response.content.lower()
@@ -6306,34 +6512,38 @@ class TestAddAsOOBViewPost:
     def test_happy_path_oob_sentinel_links_and_refreshes(self):
         """End-to-end happy path with type=='oob': the real concurrency guards and ``set_librenms_oob`` run, the link is persisted via the real ``_save_device`` / ``transaction.atomic`` + ``select_for_update`` path, and a non-error validationRefresh response is returned."""
         from dcim.models import Device
-        from django.http import HttpResponse
 
         view = self._make_view()
-        view._librenms_api.server_key = "secondary"
 
-        # Host id 10 already linked under "secondary"; the OOB-IP sub-flow is skipped because
+        # Host id 10 is already linked under this test's server key. The OOB-IP sub-flow is skipped because
         # the candidate carries no ip below.
-        existing_device = make_device("oob-happy", librenms_cf={"secondary": {"id": 10}})
-        request = _make_request(post={"existing_device_id": str(existing_device.pk)})
+        existing_device = make_device(
+            "oob-happy",
+            serial="OOB-HAPPY-SERIAL",
+            librenms_cf={self.server_key: {"id": 10}},
+        )
 
         # Distinct host id (10) vs incoming OOB controller id (17): pins that the *incoming*
         # id lands in oob.id, not a reused host id.
-        libre_device = {"device_id": 17}
-        validation = {"oob_candidate": {"device": existing_device, "type": "oob", "ip": None}}
-        view.get_validated_device_with_selections = MagicMock(return_value=(libre_device, validation, {}))
-        view.render_device_row = MagicMock(return_value=HttpResponse("row"))
+        self._register_oob_device(17, "controller-node", serial=existing_device.serial, generic=True)
+        request = make_view_request(
+            "post",
+            {"server_key": self.server_key, "existing_device_id": str(existing_device.pk)},
+            user=self._device_writer("oob-happy-user"),
+            HTTP_HX_REQUEST="true",
+        )
 
-        response = view.post(request, device_id=17)
+        response = post_view(view, request, device_id=17)
 
         # Non-error response on the success path.
         assert response.status_code == 200
         assert "validationRefresh" in response.get("HX-Trigger", "")
-        view.render_device_row.assert_called_once()
+        assert b"controller-node" in response.content
 
-        # The real set_librenms_oob + _save_device persisted under "secondary": reload from
+        # The real set_librenms_oob + _save_device persisted under the active key: reload from
         # the DB and confirm the incoming controller id (17) landed in oob with the generic
         # sentinel type, while the host id (10) is preserved.
-        entry = Device.objects.get(pk=existing_device.pk).custom_field_data["librenms_id"]["secondary"]
+        entry = Device.objects.get(pk=existing_device.pk).custom_field_data["librenms_id"][self.server_key]
         assert entry["id"] == 10
         assert entry["oob"] == {"id": 17, "type": "oob"}
 
@@ -6351,39 +6561,39 @@ class TestAddAsOOBViewPost:
         no host link. The link (and its guards/lock/save) must target the sync device.
         """
         from dcim.models import Device, VirtualChassis
-        from django.http import HttpResponse
 
         from netbox_librenms_plugin.utils import get_librenms_oob, get_librenms_sync_device
 
         view = self._make_view()
-        view._librenms_api.server_key = "secondary"
 
         vc = VirtualChassis.objects.create(name="vc-oob-sync")
-        # Sync member: the ONLY member with a host librenms_id for "secondary" — priority 1 of
+        # Sync member: the ONLY member with a host librenms_id for this server key. It is priority 1 of
         # get_librenms_sync_device. Position 1 so it also iterates first.
-        sync_member = make_device("vc-oob-sync-a", librenms_cf={"secondary": {"id": 10}})
+        sync_member = make_device("vc-oob-sync-a", librenms_cf={self.server_key: {"id": 10}})
         sync_member.virtual_chassis = vc
         sync_member.vc_position = 1
         sync_member.save()
 
         # The user-selected member the modal matched as the OOB candidate: no host librenms_id
         # of its own, so it is NOT the sync device.
-        selected_member = make_device("vc-oob-sync-b")
+        selected_member = make_device("vc-oob-sync-b", serial="VC-OOB-SELECTED-SERIAL")
         selected_member.virtual_chassis = vc
         selected_member.vc_position = 2
         selected_member.save()
 
         # Ground truth: resolution really points from the selected member to the sync member.
-        assert get_librenms_sync_device(selected_member, server_key="secondary").pk == sync_member.pk
+        assert get_librenms_sync_device(selected_member, server_key=self.server_key).pk == sync_member.pk
 
-        request = _make_request(post={"existing_device_id": str(selected_member.pk)})
-        libre_device = {"device_id": 17}  # incoming OOB controller id (distinct from host id 10)
+        # Incoming OOB controller id 17 is distinct from host id 10.
+        self._register_oob_device(17, "controller-node", serial=selected_member.serial, generic=True)
+        request = make_view_request(
+            "post",
+            {"server_key": self.server_key, "existing_device_id": str(selected_member.pk)},
+            user=self._device_writer("vc-oob-sync-user"),
+            HTTP_HX_REQUEST="true",
+        )
         # ip=None keeps the OOB-IP sub-flow out of scope; this test pins the linkage target only.
-        validation = {"oob_candidate": {"device": selected_member, "type": "oob", "ip": None}}
-        view.get_validated_device_with_selections = MagicMock(return_value=(libre_device, validation, {}))
-        view.render_device_row = MagicMock(return_value=HttpResponse("row"))
-
-        response = view.post(request, device_id=17)
+        response = post_view(view, request, device_id=17)
 
         assert response.status_code == 200
         assert "validationRefresh" in response.get("HX-Trigger", "")
@@ -6391,10 +6601,10 @@ class TestAddAsOOBViewPost:
         # The link landed on the SYNC member, nested under its existing host id, so readers
         # (which resolve the sync device) can see it.
         sync_reloaded = Device.objects.get(pk=sync_member.pk)
-        assert get_librenms_oob(sync_reloaded, server_key="secondary") == {"id": 17, "type": "oob"}
-        assert sync_reloaded.custom_field_data["librenms_id"]["secondary"]["id"] == 10  # host id kept
+        assert get_librenms_oob(sync_reloaded, server_key=self.server_key) == {"id": 17, "type": "oob"}
+        assert sync_reloaded.custom_field_data["librenms_id"][self.server_key]["id"] == 10  # host id kept
         # The selected non-sync member got NO orphan OOB link written to it.
-        assert get_librenms_oob(Device.objects.get(pk=selected_member.pk), server_key="secondary") is None
+        assert get_librenms_oob(Device.objects.get(pk=selected_member.pk), server_key=self.server_key) is None
 
     def test_legacy_id_written_in_race_window_is_rejected_post_lock(self):
         """TOCTOU: the legacy gate must be re-verified on the LOCKED row (mirrors DeviceConflictActionView's post-lock gate).
@@ -6407,28 +6617,25 @@ class TestAddAsOOBViewPost:
         from dcim.models import Device
 
         view = self._make_view()
-        view._librenms_api.server_key = "secondary"
+        existing_device = make_device(
+            "oob-legacy-race",
+            serial="OOB-LEGACY-RACE-SERIAL",
+            librenms_cf={self.server_key: {"id": 10}},
+        )
+        self._register_oob_device(17, "controller-node", serial=existing_device.serial, generic=True)
+        request = make_view_request(
+            "post",
+            {"server_key": self.server_key, "existing_device_id": str(existing_device.pk)},
+            user=self._device_writer("oob-legacy-race-user"),
+            HTTP_HX_REQUEST="true",
+        )
 
-        existing_device = make_device("oob-legacy-race", librenms_cf={"secondary": {"id": 10}})
-
-        libre_device = {"device_id": 17}
-        validation = {"oob_candidate": {"device": existing_device, "type": "oob", "ip": None}}
-
-        def _racing_validation(_device_id, _request):
-            # Lands AFTER the view's unlocked fetch (its in-memory snapshot still carries the
-            # dict form, so the unlocked gate passes) and BEFORE the select_for_update
-            # re-fetch — the exact race window.
+        def write_legacy_mapping():
+            # This lands after the real unlocked validation and before the select_for_update
+            # re-fetch. The unlocked in-memory instance still carries the dict form.
             Device.objects.filter(pk=existing_device.pk).update(custom_field_data={"librenms_id": 42})
-            return (libre_device, validation, {})
 
-        view.get_validated_device_with_selections = MagicMock(side_effect=_racing_validation)
-        request = _make_request(post={"existing_device_id": str(existing_device.pk)})
-        # Success-path row re-render is not under test; the discriminator is the CF state.
-        from django.http import HttpResponse
-
-        view.render_device_row = MagicMock(return_value=HttpResponse("row"))
-
-        response = view.post(request, device_id=17)
+        response = self._post_after_validation(view, request, 17, write_legacy_mapping)
 
         assert response.status_code == 200
         assert b"legacy" in response.content.lower()
@@ -6438,52 +6645,38 @@ class TestAddAsOOBViewPost:
 
     def test_save_device_error_marks_transaction_rollback(self):
         """_save_device returns an error response (it doesn't raise), so the view must mark the transaction rollback-only before returning — otherwise any Interface/IPAddress created earlier in the atomic block by the OOB-attach would commit."""
+        from dcim.models import Device
+        from django.db import transaction
         from django.http import HttpResponse
 
         view = self._make_view()
-        request = _make_request(post={"existing_device_id": "5"})
-
-        existing_device = MagicMock()
-        existing_device.pk = 5
-        existing_device.name = "host-a"
-        existing_device.oob_ip_id = 1  # skip the OOB-IP sub-flow; the save-failure path is the target
-        existing_device.custom_field_data = {"librenms_id": {"default": {"id": 10}}}
-        # Not a VC member: get_librenms_sync_device() returns it directly, so the locked row is
-        # this device (a bare MagicMock's virtual_chassis is truthy and would misdirect resolution).
-        existing_device.virtual_chassis = None
-        locked_device = MagicMock()
-        locked_device.pk = 5
-        locked_device.name = "host-a"
-        locked_device.oob_ip_id = 1
-        locked_device.custom_field_data = {"librenms_id": {"default": {"id": 10}}}
-
-        # Distinct host id (10) vs incoming OOB controller id (17), per the host/OOB split.
-        libre_device = {"device_id": 17}
-        validation = {"oob_candidate": {"device": existing_device, "type": "oob", "ip": None}}
-        view.get_validated_device_with_selections = MagicMock(return_value=(libre_device, validation, {}))
+        existing_device = make_device(
+            "oob-save-error",
+            serial="OOB-SAVE-ERROR-SERIAL",
+            librenms_cf={self.server_key: {"id": 10}},
+        )
+        self._register_oob_device(17, "controller-node", serial=existing_device.serial, generic=True)
+        request = make_view_request(
+            "post",
+            {"server_key": self.server_key, "existing_device_id": str(existing_device.pk)},
+            user=self._device_writer("oob-save-error-user"),
+            HTTP_HX_REQUEST="true",
+        )
 
         err_resp = HttpResponse("save failed", status=400)
         with (
-            patch("dcim.models.Device") as mock_device,
-            patch("netbox_librenms_plugin.views.imports.actions.transaction") as mock_tx,
             patch("netbox_librenms_plugin.views.imports.actions._save_device", return_value=err_resp),
-            patch("netbox_librenms_plugin.views.imports.actions.cache"),
-            patch("netbox_librenms_plugin.views.imports.actions.messages"),
-            patch("netbox_librenms_plugin.utils.get_librenms_device_id", return_value=10) as mock_get,
-            patch("netbox_librenms_plugin.utils.find_by_librenms_id", return_value=None) as mock_find,
+            patch(
+                "netbox_librenms_plugin.views.imports.actions.transaction.set_rollback",
+                wraps=transaction.set_rollback,
+            ) as rollback_spy,
         ):
-            mock_device.DoesNotExist = Exception
-            # The sync-device re-read under lock goes through restrict(user, action) too, so
-            # restrict() hands back the same manager and both stubs below apply.
-            mock_device.objects.restrict.return_value = mock_device.objects
-            mock_device.objects.get.return_value = existing_device
-            mock_device.objects.select_for_update.return_value.get.return_value = locked_device
-            response = view.post(request, device_id=17)
+            response = post_view(view, request, device_id=17)
 
         assert response is err_resp
-        mock_tx.set_rollback.assert_called_once_with(True)
-        assert mock_find.call_args.args[1:] == (17, "default")
-        mock_get.assert_called_once_with(locked_device, server_key="default", auto_save=False)
+        rollback_spy.assert_called_once_with(True)
+        entry = Device.objects.get(pk=existing_device.pk).custom_field_data["librenms_id"][self.server_key]
+        assert entry == {"id": 10}
 
     def test_save_failure_rolls_back_created_interface_and_ip(self):
         """End-to-end: when ``_save_device`` reports failure mid-attach, the real ``transaction.set_rollback(True)`` must discard the Interface AND IPAddress that the OOB-IP sub-flow created earlier in the SAME atomic block — otherwise those rows would commit even though the OOB link/IP never persisted."""
@@ -6494,27 +6687,39 @@ class TestAddAsOOBViewPost:
         view = self._make_view()
         # Real device, host id 10 linked, no oob_ip yet → the OOB-IP sub-flow runs and creates
         # a brand-new interface + IP before _save_device is reached.
-        existing_device = make_device("oob-rollback", librenms_cf={"default": {"id": 10}})
+        existing_device = make_device(
+            "oob-rollback",
+            serial="OOB-ROLLBACK-SERIAL",
+            librenms_cf={self.server_key: {"id": 10}},
+        )
         assert existing_device.oob_ip_id is None
-        request = _make_request(
-            post={
+        self._register_oob_device(
+            17,
+            "controller-node",
+            serial=existing_device.serial,
+            ip="10.99.99.9",
+            generic=True,
+        )
+        request = make_view_request(
+            "post",
+            {
+                "server_key": self.server_key,
                 "existing_device_id": str(existing_device.pk),
                 "oob_interface_id": "__new__",
                 "oob_new_interface_name": "idrac0",
-            }
+            },
+            user=self._device_writer(
+                "oob-rollback-user",
+                (("add", Interface), ("add", IPAddress)),
+            ),
+            HTTP_HX_REQUEST="true",
         )
-
-        # Incoming OOB controller id 17 carries an IP → drives the interface/IP creation path.
-        libre_device = {"device_id": 17}
-        validation = {"oob_candidate": {"device": existing_device, "type": "oob", "ip": "10.99.99.9"}}
-        view.get_validated_device_with_selections = MagicMock(return_value=(libre_device, validation, {}))
-        view.render_device_row = MagicMock(return_value=HttpResponse("row"))
 
         err_resp = HttpResponse("save failed", status=400)
         # Patch ONLY the device persist step; the atomic block, select_for_update, interface +
         # IP creation, set_device_ip_fk, and set_rollback all run for real.
         with patch("netbox_librenms_plugin.views.imports.actions._save_device", return_value=err_resp):
-            response = view.post(request, device_id=17)
+            response = post_view(view, request, device_id=17)
 
         # The view returns the save error unchanged…
         assert response is err_resp
@@ -6522,99 +6727,121 @@ class TestAddAsOOBViewPost:
         assert not Interface.objects.filter(device=existing_device, name="idrac0").exists()
         assert not IPAddress.objects.filter(address__net_host="10.99.99.9").exists()
         # The OOB link was never persisted either (cf reloaded from the DB has no oob sub-block).
-        entry = Device.objects.get(pk=existing_device.pk).custom_field_data["librenms_id"]["default"]
+        entry = Device.objects.get(pk=existing_device.pk).custom_field_data["librenms_id"][self.server_key]
         assert "oob" not in entry
 
     def test_existing_different_oob_ip_kept_but_user_warned(self):
         """A different existing oob_ip is kept, but a deferred WARNING tells the user it was not changed."""
         from dcim.models import Device
-        from django.contrib import messages as dj_messages
-        from django.http import HttpResponse
 
         view = self._make_view()
         # Real device already carrying an OOB IP (10.50.50.50) on one of its interfaces.
-        existing_device = make_device("oob-haship", librenms_cf={"default": {"id": 10}})
+        existing_device = make_device(
+            "oob-haship",
+            serial="OOB-HAS-IP-SERIAL",
+            librenms_cf={self.server_key: {"id": 10}},
+        )
         iface = make_interface(existing_device, "mgmt0")
         existing_ip = make_ip("10.50.50.50/24", assigned_object=iface)
         existing_device.oob_ip = existing_ip
         existing_device.save()
         assert existing_device.oob_ip_id is not None
 
-        request = _make_request(post={"existing_device_id": str(existing_device.pk)})
-
         # Incoming OOB controller carries a DIFFERENT ip (10.99.99.9).
-        libre_device = {"device_id": 17}
-        validation = {"oob_candidate": {"device": existing_device, "type": "oob", "ip": "10.99.99.9"}}
-        view.get_validated_device_with_selections = MagicMock(return_value=(libre_device, validation, {}))
-        view.render_device_row = MagicMock(return_value=HttpResponse("row"))
+        self._register_oob_device(
+            17,
+            "controller-node",
+            serial=existing_device.serial,
+            ip="10.99.99.9",
+            generic=True,
+        )
+        request = make_view_request(
+            "post",
+            {"server_key": self.server_key, "existing_device_id": str(existing_device.pk)},
+            user=self._device_writer("oob-existing-ip-user"),
+            HTTP_HX_REQUEST="true",
+        )
 
-        response = view.post(request, device_id=17)
+        response = post_view(view, request, device_id=17)
 
         assert response.status_code == 200
         # The OOB link still committed (the attach itself succeeds)…
-        entry = Device.objects.get(pk=existing_device.pk).custom_field_data["librenms_id"]["default"]
+        entry = Device.objects.get(pk=existing_device.pk).custom_field_data["librenms_id"][self.server_key]
         assert entry["oob"] == {"id": 17, "type": "oob"}
         # …the existing oob_ip was NOT overwritten…
         assert Device.objects.get(pk=existing_device.pk).oob_ip_id == existing_ip.pk
         # …and a deferred WARNING naming both the un-applied controller IP and the kept one
-        # was surfaced (real messages.add_message -> request._messages.add).
-        warn_calls = [c for c in request._messages.add.call_args_list if c.args[0] == dj_messages.WARNING]
-        assert warn_calls, "expected a deferred WARNING about the un-applied OOB IP"
-        body = warn_calls[0].args[1]
-        assert "10.99.99.9" in body and "10.50.50.50" in body
+        # was surfaced through the real messages framework.
+        warnings = view_message_texts(request, "warning")
+        assert len(warnings) == 1
+        assert "10.99.99.9" in warnings[0] and "10.50.50.50" in warnings[0]
 
     def test_existing_oob_ip_equal_in_different_textual_form_no_warning(self):
         """An existing OOB IP equal to the controller's — just a different IPv6 textual form — must NOT warn."""
         from dcim.models import Device
-        from django.contrib import messages as dj_messages
-        from django.http import HttpResponse
 
         view = self._make_view()
         # Existing OOB IP stored in COMPRESSED IPv6 form.
-        existing_device = make_device("oob-samehost-v6", librenms_cf={"default": {"id": 10}})
+        existing_device = make_device(
+            "oob-samehost-v6",
+            serial="OOB-SAME-HOST-V6-SERIAL",
+            librenms_cf={self.server_key: {"id": 10}},
+        )
         iface = make_interface(existing_device, "mgmt0")
         existing_ip = make_ip("2001:db8::1/64", assigned_object=iface)
         existing_device.oob_ip = existing_ip
         existing_device.save()
 
-        request = _make_request(post={"existing_device_id": str(existing_device.pk)})
-
         # Controller reports the SAME address in fully-EXPANDED form (textually different, same host).
-        libre_device = {"device_id": 17}
-        validation = {
-            "oob_candidate": {
-                "device": existing_device,
-                "type": "oob",
-                "ip": "2001:0db8:0000:0000:0000:0000:0000:0001",
-            }
-        }
-        view.get_validated_device_with_selections = MagicMock(return_value=(libre_device, validation, {}))
-        view.render_device_row = MagicMock(return_value=HttpResponse("row"))
+        self._register_oob_device(
+            17,
+            "controller-node",
+            serial=existing_device.serial,
+            ip="2001:0db8:0000:0000:0000:0000:0000:0001",
+            generic=True,
+        )
+        request = make_view_request(
+            "post",
+            {"server_key": self.server_key, "existing_device_id": str(existing_device.pk)},
+            user=self._device_writer("oob-same-host-v6-user"),
+            HTTP_HX_REQUEST="true",
+        )
 
-        response = view.post(request, device_id=17)
+        response = post_view(view, request, device_id=17)
 
         assert response.status_code == 200
         # The OOB link still committed, the existing oob_ip kept…
         assert Device.objects.get(pk=existing_device.pk).oob_ip_id == existing_ip.pk
         # …and NO "different OOB IP" warning was surfaced (the addresses are the same host).
-        warn_bodies = [c.args[1] for c in request._messages.add.call_args_list if c.args[0] == dj_messages.WARNING]
-        assert not any("different OOB IP" in body for body in warn_bodies), warn_bodies
+        warnings = view_message_texts(request, "warning")
+        assert not any("different OOB IP" in body for body in warnings), warnings
 
     def test_aborts_when_librenms_id_owned_by_another_device(self):
         """The incoming OOB controller id must not already belong to another NetBox device."""
         from dcim.models import Device
 
         view = self._make_view()
-        existing_device = make_device("host-a", librenms_cf={"default": {"id": 10}})
-        # A *different* real device already owns LibreNMS id 17 (e.g. imported standalone).
-        make_device("<script>the-idrac</script>", librenms_cf={"default": {"id": 17}})
-        request = _make_request(post={"existing_device_id": str(existing_device.pk)})
+        existing_device = make_device(
+            "host-a",
+            serial="OOB-OWNER-RACE-SERIAL",
+            librenms_cf={self.server_key: {"id": 10}},
+        )
+        # A different real device gains LibreNMS id 17 after validation.
+        conflicting_device = make_device("<script>the-idrac</script>")
+        self._register_oob_device(17, "controller-node", serial=existing_device.serial, generic=True)
+        request = make_view_request(
+            "post",
+            {"server_key": self.server_key, "existing_device_id": str(existing_device.pk)},
+            user=self._device_writer("oob-owner-race-user"),
+            HTTP_HX_REQUEST="true",
+        )
 
-        libre_device = {"device_id": 17}
-        validation = {"oob_candidate": {"device": existing_device, "type": "oob", "ip": None}}
-        view.get_validated_device_with_selections = MagicMock(return_value=(libre_device, validation, {}))
+        def claim_incoming_id():
+            Device.objects.filter(pk=conflicting_device.pk).update(
+                custom_field_data={"librenms_id": {self.server_key: {"id": 17}}}
+            )
 
-        response = view.post(request, device_id=17)
+        response = self._post_after_validation(view, request, 17, claim_incoming_id)
 
         # HTMX error toast (200 + HX-Reswap:none) naming the conflicting device.
         assert response.status_code == 200
@@ -6622,28 +6849,41 @@ class TestAddAsOOBViewPost:
         assert b"already linked to &#x27;&lt;script&gt;the-idrac&lt;/script&gt;&#x27;" in response.content
         assert b"&amp;lt;script&amp;gt;" not in response.content
         # Nothing attached: the host device's entry gained no oob sub-block.
-        assert "oob" not in Device.objects.get(pk=existing_device.pk).custom_field_data["librenms_id"]["default"]
+        entry = Device.objects.get(pk=existing_device.pk).custom_field_data["librenms_id"][self.server_key]
+        assert entry == {"id": 10}
+        conflict_entry = Device.objects.get(pk=conflicting_device.pk).custom_field_data["librenms_id"][self.server_key]
+        assert conflict_entry == {"id": 17}
 
     def test_aborts_when_incoming_id_is_own_host_id(self):
         """A concurrent re-link could make this device's host id equal the incoming OOB id; attaching it as OOB would store the same id in both slots (self host/OOB conflict)."""
         from dcim.models import Device
 
         view = self._make_view()
-        # The device's own host id already equals the incoming OOB controller id (17).
-        existing_device = make_device("host-a", librenms_cf={"default": {"id": 17}})
-        request = _make_request(post={"existing_device_id": str(existing_device.pk)})
+        existing_device = make_device(
+            "host-a",
+            serial="OOB-SELF-RACE-SERIAL",
+            librenms_cf={self.server_key: {"id": 10}},
+        )
+        self._register_oob_device(17, "controller-node", serial=existing_device.serial, generic=True)
+        request = make_view_request(
+            "post",
+            {"server_key": self.server_key, "existing_device_id": str(existing_device.pk)},
+            user=self._device_writer("oob-self-race-user"),
+            HTTP_HX_REQUEST="true",
+        )
 
-        libre_device = {"device_id": 17}
-        validation = {"oob_candidate": {"device": existing_device, "type": "oob", "ip": None}}
-        view.get_validated_device_with_selections = MagicMock(return_value=(libre_device, validation, {}))
+        def relink_host_to_incoming_id():
+            Device.objects.filter(pk=existing_device.pk).update(
+                custom_field_data={"librenms_id": {self.server_key: {"id": 17}}}
+            )
 
-        response = view.post(request, device_id=17)
+        response = self._post_after_validation(view, request, 17, relink_host_to_incoming_id)
 
         assert response.status_code == 200
         assert response["HX-Reswap"] == "none"
         assert b"this device&#x27;s host link" in response.content
         # No oob sub-block was written, and the host id is untouched.
-        entry = Device.objects.get(pk=existing_device.pk).custom_field_data["librenms_id"]["default"]
+        entry = Device.objects.get(pk=existing_device.pk).custom_field_data["librenms_id"][self.server_key]
         assert entry == {"id": 17}
 
     def test_aborts_when_locked_oob_type_changed_concurrently(self):
@@ -6651,25 +6891,31 @@ class TestAddAsOOBViewPost:
         from dcim.models import Device
 
         view = self._make_view()
-        # The device already has OOB id 17 typed "ilo" (set by a concurrent request).
         existing_device = make_device(
             "host-a",
-            librenms_cf={"default": {"id": 10, "oob": {"id": 17, "type": "ilo"}}},
+            serial="OOB-TYPE-RACE-SERIAL",
+            librenms_cf={self.server_key: {"id": 10}},
         )
-        request = _make_request(post={"existing_device_id": str(existing_device.pk)})
+        self._register_oob_device(17, "controller-node", serial=existing_device.serial, generic=True)
+        request = make_view_request(
+            "post",
+            {"server_key": self.server_key, "existing_device_id": str(existing_device.pk)},
+            user=self._device_writer("oob-type-race-user"),
+            HTTP_HX_REQUEST="true",
+        )
 
-        libre_device = {"device_id": 17}
-        # This modal re-detected the same controller (17) as "idrac".
-        validation = {"oob_candidate": {"device": existing_device, "type": "idrac", "ip": None}}
-        view.get_validated_device_with_selections = MagicMock(return_value=(libre_device, validation, {}))
+        def change_oob_type():
+            Device.objects.filter(pk=existing_device.pk).update(
+                custom_field_data={"librenms_id": {self.server_key: {"id": 10, "oob": {"id": 17, "type": "ilo"}}}}
+            )
 
-        response = view.post(request, device_id=17)
+        response = self._post_after_validation(view, request, 17, change_oob_type)
 
         assert response.status_code == 200
         assert response["HX-Reswap"] == "none"
         assert b"modified concurrently" in response.content
-        # The stored type is preserved (not overwritten with the stale modal's "idrac").
-        oob = Device.objects.get(pk=existing_device.pk).custom_field_data["librenms_id"]["default"]["oob"]
+        # The stored type is preserved (not overwritten with the stale modal's "oob").
+        oob = Device.objects.get(pk=existing_device.pk).custom_field_data["librenms_id"][self.server_key]["oob"]
         assert oob == {"id": 17, "type": "ilo"}
 
 
@@ -6758,51 +7004,133 @@ class TestPostActionRebindFailsClosed:
 class TestPromoteToHostViewPost:
     """View-level tests for PromoteToHostView.post() — HTTP interface + OOB sentinel regression."""
 
+    @pytest.fixture(autouse=True)
+    def _configure_librenms_server(self, request, settings, monkeypatch):
+        monkeypatch.setenv("NO_PROXY", "127.0.0.1,localhost")
+        monkeypatch.setenv("no_proxy", "127.0.0.1,localhost")
+        self.server_key = f"promote-{request.node.name}".replace("_", "-").replace("[", "-").replace("]", "")
+        with run_librenms_server() as server:
+            configure_test_servers(
+                settings,
+                {
+                    self.server_key: {
+                        "librenms_url": server.url,
+                        "api_token": "test-token",
+                        "verify_ssl": False,
+                    }
+                },
+            )
+            self.librenms_server = server
+            yield
+
     def _make_view(self):
+        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
         from netbox_librenms_plugin.views.imports.actions import PromoteToHostView
 
-        view = object.__new__(PromoteToHostView)
-        view.kwargs = {}
-        view.request = MagicMock()
-        view._librenms_api = _make_api()
-        view.require_write_permission = MagicMock(return_value=None)
-        view.require_object_permissions = MagicMock(return_value=None)
+        view = PromoteToHostView()
+        view._librenms_api = LibreNMSAPI(server_key=self.server_key)
         return view
+
+    def _register_host_device(self, device_id, hostname, *, serial):
+        self.librenms_server.device_info_response(
+            device_id=device_id,
+            hostname=hostname,
+            hardware="Test chassis",
+            os="ios",
+            serial=serial,
+            ip="",
+        )
+        self.librenms_server.vc_inventory_callable(device_id, [], {})
+
+    @staticmethod
+    def _device_writer(username, extra_perms=()):
+        from dcim.models import Device
+
+        return make_view_user(username, [("change", Device), *extra_perms])
+
+    @staticmethod
+    def _post_after_validation(view, request, device_id, mutation):
+        """Run a real validation, then inject one deterministic concurrent database write."""
+        validate = view.get_validated_device_with_selections
+
+        def validate_then_mutate(*args, **kwargs):
+            result = validate(*args, **kwargs)
+            mutation()
+            return result
+
+        with patch.object(view, "get_validated_device_with_selections", side_effect=validate_then_mutate):
+            return post_view(view, request, device_id=device_id)
 
     def test_missing_existing_device_id_returns_htmx_error(self):
         """POST without existing_device_id returns an HTMX error before any ORM lookup."""
         view = self._make_view()
-        request = _make_request(post={})
+        request = make_view_request(
+            "post",
+            {"server_key": self.server_key},
+            user=make_view_user("promote-missing-device-user", []),
+            HTTP_HX_REQUEST="true",
+        )
 
-        response = view.post(request, device_id=1)
+        response = post_view(view, request, device_id=1)
 
         assert response.status_code == 200
         assert b"Missing existing_device_id" in response.content
         assert response["HX-Reswap"] == "none"
 
-    def test_write_permission_denied_returns_error(self):
+    @pytest.mark.parametrize("htmx", [False, True], ids=["regular", "htmx"])
+    def test_write_permission_denied_returns_error(self, htmx):
         """When write permission is denied, the view returns that error immediately."""
-        from django.http import HttpResponse
+        from dcim.models import Device
+        from django.urls import get_script_prefix
 
         view = self._make_view()
-        perm_error = HttpResponse("Forbidden", status=403)
-        view.require_write_permission = MagicMock(return_value=perm_error)
+        existing_device = make_device(
+            "promote-denied-controller",
+            serial="PROMOTE-DENIED-SERIAL",
+            librenms_cf={self.server_key: {"id": 10}},
+        )
+        self._register_host_device(17, "promote-denied-host", serial=existing_device.serial)
+        user = make_view_user(
+            f"promote-denied-{'htmx' if htmx else 'regular'}-user",
+            [("change", Device)],
+            plugin_write=False,
+        )
+        factory_kwargs = {"HTTP_HX_REQUEST": "true"} if htmx else {}
+        request = make_view_request(
+            "post",
+            {"server_key": self.server_key, "existing_device_id": str(existing_device.pk)},
+            user=user,
+            **factory_kwargs,
+        )
+        device_count = Device.objects.count()
 
-        request = _make_request(post={"existing_device_id": "1"})
-        response = view.post(request, device_id=1)
+        response = post_view(view, request, device_id=17)
 
-        assert response.status_code == 403
+        if htmx:
+            assert response.status_code == 200
+            assert response.content == b""
+            assert response["HX-Redirect"] == get_script_prefix()
+        else:
+            assert response.status_code == 302
+            assert response["Location"] == get_script_prefix()
+        assert view_message_texts(request, "error") == ["You do not have permission to perform this action."]
+        assert Device.objects.count() == device_count
+        reloaded = Device.objects.get(pk=existing_device.pk)
+        assert reloaded.custom_field_data["librenms_id"][self.server_key] == {"id": 10}
 
     def test_no_promote_candidate_returns_htmx_error(self):
         """When validation has no promote_to_host, the endpoint reports promotion N/A."""
         view = self._make_view()
         existing_device = make_device("promote-nocand")
-        request = _make_request(post={"existing_device_id": str(existing_device.pk)})
-
-        view.get_validated_device_with_selections = MagicMock(
-            return_value=({"device_id": 17}, {"promote_to_host": None}, {})
+        self._register_host_device(17, existing_device.name, serial="")
+        request = make_view_request(
+            "post",
+            {"server_key": self.server_key, "existing_device_id": str(existing_device.pk)},
+            user=self._device_writer("promote-no-candidate-user"),
+            HTTP_HX_REQUEST="true",
         )
-        response = view.post(request, device_id=17)
+
+        response = post_view(view, request, device_id=17)
 
         assert response.status_code == 200
         assert b"Promotion is not applicable" in response.content
@@ -6811,14 +7139,24 @@ class TestPromoteToHostViewPost:
     def test_device_id_mismatch_returns_htmx_error(self):
         """When the validation's existing_device pk does not match the posted existing_device_id, the view rejects the stale modal."""
         view = self._make_view()
-        existing_device = make_device("promote-existing", librenms_cf={"default": {"id": 10}})
-        other_device = make_device("promote-other")
-        request = _make_request(post={"existing_device_id": str(existing_device.pk)})
+        existing_device = make_device(
+            "promote-existing",
+            librenms_cf={self.server_key: {"id": 20}},
+        )
+        other_device = make_device(
+            "promote-other-controller",
+            serial="PROMOTE-MISMATCH-SERIAL",
+            librenms_cf={self.server_key: {"id": 10}},
+        )
+        self._register_host_device(17, "promote-other-host", serial=other_device.serial)
+        request = make_view_request(
+            "post",
+            {"server_key": self.server_key, "existing_device_id": str(existing_device.pk)},
+            user=self._device_writer("promote-device-mismatch-user"),
+            HTTP_HX_REQUEST="true",
+        )
 
-        promote = {"existing_libre_id": 10, "existing_oob_type": "oob"}
-        validation = {"promote_to_host": promote, "existing_device": other_device}
-        view.get_validated_device_with_selections = MagicMock(return_value=({"device_id": 17}, validation, {}))
-        response = view.post(request, device_id=17)
+        response = post_view(view, request, device_id=17)
 
         assert response.status_code == 200
         assert b"mismatch" in response.content.lower()
@@ -6827,15 +7165,18 @@ class TestPromoteToHostViewPost:
     def test_legacy_librenms_id_returns_htmx_error(self):
         """A device with a legacy bare-int librenms_id is rejected with a convert-first message."""
         view = self._make_view()
-        existing_device = make_device("promote-legacy", librenms_cf=42)
-        request = _make_request(post={"existing_device_id": str(existing_device.pk)})
+        existing_device = make_device("promote-legacy", serial="PROMOTE-LEGACY-SERIAL", librenms_cf=42)
+        self._register_host_device(17, "promote-legacy-host", serial=existing_device.serial)
+        request = make_view_request(
+            "post",
+            {"server_key": self.server_key, "existing_device_id": str(existing_device.pk)},
+            user=self._device_writer("promote-legacy-user"),
+            HTTP_HX_REQUEST="true",
+        )
 
         # existing_libre_id matches the legacy host id (42) so earlier guards pass and the
         # legacy-form check is the failure point.
-        promote = {"existing_libre_id": 42, "existing_oob_type": "oob"}
-        validation = {"promote_to_host": promote, "existing_device": existing_device}
-        view.get_validated_device_with_selections = MagicMock(return_value=({"device_id": 17}, validation, {}))
-        response = view.post(request, device_id=17)
+        response = post_view(view, request, device_id=17)
 
         assert response.status_code == 200
         assert b"legacy" in response.content.lower()
@@ -6844,29 +7185,53 @@ class TestPromoteToHostViewPost:
     def test_boolean_existing_libre_id_rejected(self):
         """A boolean existing_libre_id (corrupt CF) must fail closed, not coerce to 1/0 via int()."""
         view = self._make_view()
-        existing_device = make_device("promote-bool", librenms_cf={"default": {"id": 10}})
-        request = _make_request(post={"existing_device_id": str(existing_device.pk)})
+        existing_device = make_device("promote-bool", librenms_cf={self.server_key: {"id": 10}})
+        request = make_view_request(
+            "post",
+            {"server_key": self.server_key, "existing_device_id": str(existing_device.pk)},
+            user=self._device_writer("promote-boolean-id-user"),
+            HTTP_HX_REQUEST="true",
+        )
 
+        # The production validator cannot emit a boolean existing_libre_id. Keep the pre-existing
+        # synthetic validation payload so this defensive boundary remains covered.
         promote = {"existing_libre_id": True, "existing_oob_type": "oob"}
         validation = {"promote_to_host": promote, "existing_device": existing_device}
-        view.get_validated_device_with_selections = MagicMock(return_value=({"device_id": 17}, validation, {}))
-        response = view.post(request, device_id=17)
+        with patch.object(
+            view,
+            "get_validated_device_with_selections",
+            return_value=({"device_id": 17}, validation, {}),
+        ):
+            response = post_view(view, request, device_id=17)
 
         assert response.status_code == 200
         assert b"Invalid existing LibreNMS id" in response.content
 
     def test_promote_rejected_when_new_host_id_already_linked_elsewhere(self):
         """When another device already owns the incoming host id, promotion aborts (exercises the deterministic-order conflict lock)."""
-        view = self._make_view()
-        existing_device = make_device("promote-src", librenms_cf={"default": {"id": 10}})
-        # Another NetBox device already linked to the incoming host id 17.
-        make_device("<script>promote-conflict</script>", librenms_cf={"default": {"id": 17}})
-        request = _make_request(post={"existing_device_id": str(existing_device.pk)})
+        from dcim.models import Device
 
-        promote = {"existing_libre_id": 10, "existing_oob_type": "oob"}
-        validation = {"promote_to_host": promote, "existing_device": existing_device}
-        view.get_validated_device_with_selections = MagicMock(return_value=({"device_id": 17}, validation, {}))
-        response = view.post(request, device_id=17)
+        view = self._make_view()
+        existing_device = make_device(
+            "promote-src-controller",
+            serial="PROMOTE-CONFLICT-RACE-SERIAL",
+            librenms_cf={self.server_key: {"id": 10}},
+        )
+        conflicting_device = make_device("<script>promote-conflict</script>")
+        self._register_host_device(17, "promote-src-host", serial=existing_device.serial)
+        request = make_view_request(
+            "post",
+            {"server_key": self.server_key, "existing_device_id": str(existing_device.pk)},
+            user=self._device_writer("promote-conflict-race-user"),
+            HTTP_HX_REQUEST="true",
+        )
+
+        def claim_incoming_id():
+            Device.objects.filter(pk=conflicting_device.pk).update(
+                custom_field_data={"librenms_id": {self.server_key: {"id": 17}}}
+            )
+
+        response = self._post_after_validation(view, request, 17, claim_incoming_id)
 
         assert response.status_code == 200
         assert b"already linked to" in response.content
@@ -6874,7 +7239,9 @@ class TestPromoteToHostViewPost:
         assert b"&amp;lt;script&amp;gt;" not in response.content
         # The source device must be left unchanged (still host id 10, no OOB).
         existing_device.refresh_from_db()
-        assert existing_device.custom_field_data["librenms_id"]["default"] == {"id": 10}
+        assert existing_device.custom_field_data["librenms_id"][self.server_key] == {"id": 10}
+        conflicting_device.refresh_from_db()
+        assert conflicting_device.custom_field_data["librenms_id"][self.server_key] == {"id": 17}
 
     def test_failed_oob_attach_after_host_swap_leaves_db_untouched(self):
         """A ValueError raised AFTER set_librenms_device_id already ran must not commit a partial swap.
@@ -6885,33 +7252,55 @@ class TestPromoteToHostViewPost:
         promote flow (an invalid OOB type is the in-transaction ValueError source).
         """
         view = self._make_view()
-        existing_device = make_device("promote-badoob", librenms_cf={"default": {"id": 10}})
-        request = _make_request(post={"existing_device_id": str(existing_device.pk)})
+        existing_device = make_device("promote-badoob", librenms_cf={self.server_key: {"id": 10}})
+        request = make_view_request(
+            "post",
+            {"server_key": self.server_key, "existing_device_id": str(existing_device.pk)},
+            user=self._device_writer("promote-invalid-oob-user"),
+            HTTP_HX_REQUEST="true",
+        )
 
         # No OOB keyword substring (OOB_TYPE_PATTERN) and not the "oob" sentinel, so
         # set_librenms_oob raises ValueError inside the transaction — after the host swap.
+        # The production validator normalizes this value, so keep the pre-existing synthetic
+        # payload to exercise the defensive transaction boundary.
         promote = {"existing_libre_id": 10, "existing_oob_type": "management-card"}
         validation = {"promote_to_host": promote, "existing_device": existing_device}
-        view.get_validated_device_with_selections = MagicMock(return_value=({"device_id": 17}, validation, {}))
-        response = view.post(request, device_id=17)
+        with patch.object(
+            view,
+            "get_validated_device_with_selections",
+            return_value=({"device_id": 17}, validation, {}),
+        ):
+            response = post_view(view, request, device_id=17)
 
         assert response.status_code == 200
         assert b"Invalid promotion data" in response.content
         # The in-memory host swap (10 -> 17) must NOT have been persisted: the row still
         # holds the original host id and gained no oob sub-object.
         existing_device.refresh_from_db()
-        assert existing_device.custom_field_data["librenms_id"]["default"] == {"id": 10}
+        assert existing_device.custom_field_data["librenms_id"][self.server_key] == {"id": 10}
 
     def test_existing_link_already_points_at_incoming_device_returns_error(self):
         """If the existing link already equals the incoming LibreNMS id there is nothing to promote — the view must say so rather than self-demoting the same id into OOB."""
         view = self._make_view()
-        existing_device = make_device("promote-noop", librenms_cf={"default": {"id": 17}})
-        request = _make_request(post={"existing_device_id": str(existing_device.pk)})
+        existing_device = make_device("promote-noop", librenms_cf={self.server_key: {"id": 17}})
+        request = make_view_request(
+            "post",
+            {"server_key": self.server_key, "existing_device_id": str(existing_device.pk)},
+            user=self._device_writer("promote-noop-user"),
+            HTTP_HX_REQUEST="true",
+        )
 
+        # A real validation resolves this row directly by device_id and does not offer promotion.
+        # Keep the pre-existing synthetic payload to cover this defensive equality guard.
         promote = {"existing_libre_id": 17, "existing_oob_type": "oob"}
         validation = {"promote_to_host": promote, "existing_device": existing_device}
-        view.get_validated_device_with_selections = MagicMock(return_value=({"device_id": 17}, validation, {}))
-        response = view.post(request, device_id=17)
+        with patch.object(
+            view,
+            "get_validated_device_with_selections",
+            return_value=({"device_id": 17}, validation, {}),
+        ):
+            response = post_view(view, request, device_id=17)
 
         assert response.status_code == 200
         assert b"already points at this LibreNMS device" in response.content
@@ -6920,40 +7309,46 @@ class TestPromoteToHostViewPost:
     def test_happy_path_generic_oob_sentinel_promotes_and_demotes_link(self):
         """End-to-end VIEW-level regression for issue #89: POST to PromoteToHostView with the generic 'oob' sentinel as the existing controller type."""
         from dcim.models import Device
-        from django.http import HttpResponse
 
         view = self._make_view()
         # Existing device is currently linked to LibreNMS id 10 (the controller, occupying the
         # host slot pre-promote); the incoming real host is id 17.
-        existing_device = make_device("promote-happy", librenms_cf={"default": {"id": 10}})
-        request = _make_request(post={"existing_device_id": str(existing_device.pk)})
+        existing_device = make_device(
+            "promote-happy",
+            serial="PROMOTE-HAPPY-SERIAL",
+            librenms_cf={self.server_key: {"id": 10}},
+        )
+        self._register_host_device(17, "promote-happy-host", serial=existing_device.serial)
+        request = make_view_request(
+            "post",
+            {"server_key": self.server_key, "existing_device_id": str(existing_device.pk)},
+            user=self._device_writer("promote-happy-user"),
+            HTTP_HX_REQUEST="true",
+        )
 
-        libre_device = {"device_id": 17}
-        promote = {"existing_libre_id": 10, "existing_oob_type": "oob"}
-        validation = {"promote_to_host": promote, "existing_device": existing_device}
-        view.get_validated_device_with_selections = MagicMock(return_value=(libre_device, validation, {}))
-        view.render_device_row = MagicMock(return_value=HttpResponse("row"))
-
-        response = view.post(request, device_id=17)
+        response = post_view(view, request, device_id=17)
 
         # Success path: validation modal refresh, no error swap.
         assert response.status_code == 200
         assert "validationRefresh" in response.get("HX-Trigger", "")
-        view.render_device_row.assert_called_once()
+        assert b"promote-happy-host" in response.content
 
         # Reload from the DB: host id swapped to 17, previous link (10) demoted to the OOB
         # slot with the generic sentinel type.
-        entry = Device.objects.get(pk=existing_device.pk).custom_field_data["librenms_id"]["default"]
+        entry = Device.objects.get(pk=existing_device.pk).custom_field_data["librenms_id"][self.server_key]
         assert entry["id"] == 17
         assert entry["oob"] == {"id": 10, "type": "oob"}
 
     def test_override_platform_manufacturer_mismatch_rejected(self):
         """An override platform whose manufacturer differs from the device type's is rejected (update_fields skips full_clean, so the cross-field invariant is enforced explicitly), and nothing is committed."""
         from dcim.models import Device, Manufacturer, Platform
-        from django.http import HttpResponse
 
         view = self._make_view()
-        existing_device = make_device("promote-badplat", librenms_cf={"default": {"id": 10}})
+        existing_device = make_device(
+            "promote-badplat",
+            serial="PROMOTE-BAD-PLATFORM-SERIAL",
+            librenms_cf={self.server_key: {"id": 10}},
+        )
         # A platform under a DIFFERENT manufacturer than the device's device_type.
         other_mfr, _ = Manufacturer.objects.get_or_create(name="OtherMfr-3001", slug="othermfr-3001")
         bad_platform, _ = Platform.objects.get_or_create(
@@ -6961,16 +7356,19 @@ class TestPromoteToHostViewPost:
         )
         assert bad_platform.manufacturer_id != existing_device.device_type.manufacturer_id
 
-        request = _make_request(
-            post={"existing_device_id": str(existing_device.pk), "override_platform_id": str(bad_platform.pk)}
+        self._register_host_device(17, "promote-bad-platform-host", serial=existing_device.serial)
+        request = make_view_request(
+            "post",
+            {
+                "server_key": self.server_key,
+                "existing_device_id": str(existing_device.pk),
+                "override_platform_id": str(bad_platform.pk),
+            },
+            user=self._device_writer("promote-bad-platform-user", (("view", Platform),)),
+            HTTP_HX_REQUEST="true",
         )
-        libre_device = {"device_id": 17}
-        promote = {"existing_libre_id": 10, "existing_oob_type": "oob"}
-        validation = {"promote_to_host": promote, "existing_device": existing_device}
-        view.get_validated_device_with_selections = MagicMock(return_value=(libre_device, validation, {}))
-        view.render_device_row = MagicMock(return_value=HttpResponse("row"))
 
-        response = view.post(request, device_id=17)
+        response = post_view(view, request, device_id=17)
 
         # Rejected by the SHARED _platform_device_type_mismatch() check inside _save_device()
         # (not a now-removed inline duplicate); the promote is not committed.
@@ -6979,33 +7377,43 @@ class TestPromoteToHostViewPost:
         assert b"update the platform first" in response.content
         reloaded = Device.objects.get(pk=existing_device.pk)
         assert reloaded.platform_id is None  # the bad override was never persisted
-        assert reloaded.custom_field_data["librenms_id"]["default"] == {"id": 10}  # host swap not committed
+        assert reloaded.custom_field_data["librenms_id"][self.server_key] == {"id": 10}  # host swap not committed
 
     def test_aborts_when_incoming_host_id_owned_by_another_device(self):
         """The incoming host id must not already belong to another NetBox device."""
         from dcim.models import Device
-        from django.http import HttpResponse
 
         view = self._make_view()
-        existing_device = make_device("promote-host", librenms_cf={"default": {"id": 10}})
-        # A different real device already owns LibreNMS id 17.
-        make_device("promote-thief", librenms_cf={"default": {"id": 17}})
-        request = _make_request(post={"existing_device_id": str(existing_device.pk)})
+        existing_device = make_device(
+            "promote-host-controller",
+            serial="PROMOTE-OWNER-RACE-SERIAL",
+            librenms_cf={self.server_key: {"id": 10}},
+        )
+        # A different real device gains LibreNMS id 17 after validation.
+        conflicting_device = make_device("promote-thief")
+        self._register_host_device(17, "promote-host", serial=existing_device.serial)
+        request = make_view_request(
+            "post",
+            {"server_key": self.server_key, "existing_device_id": str(existing_device.pk)},
+            user=self._device_writer("promote-owner-race-user"),
+            HTTP_HX_REQUEST="true",
+        )
 
-        libre_device = {"device_id": 17}
-        promote = {"existing_libre_id": 10, "existing_oob_type": "oob"}
-        validation = {"promote_to_host": promote, "existing_device": existing_device}
-        view.get_validated_device_with_selections = MagicMock(return_value=(libre_device, validation, {}))
-        view.render_device_row = MagicMock(return_value=HttpResponse("row"))
+        def claim_incoming_id():
+            Device.objects.filter(pk=conflicting_device.pk).update(
+                custom_field_data={"librenms_id": {self.server_key: {"id": 17}}}
+            )
 
-        response = view.post(request, device_id=17)
+        response = self._post_after_validation(view, request, 17, claim_incoming_id)
 
         assert response.status_code == 200
         assert response["HX-Reswap"] == "none"
         assert b"already linked to &#x27;promote-thief&#x27;" in response.content
         # Nothing committed: the host slot is unchanged and no OOB slot was written.
-        entry = Device.objects.get(pk=existing_device.pk).custom_field_data["librenms_id"]["default"]
+        entry = Device.objects.get(pk=existing_device.pk).custom_field_data["librenms_id"][self.server_key]
         assert entry == {"id": 10}
+        conflict_entry = Device.objects.get(pk=conflicting_device.pk).custom_field_data["librenms_id"][self.server_key]
+        assert conflict_entry == {"id": 17}
 
 
 @pytest.mark.django_db
