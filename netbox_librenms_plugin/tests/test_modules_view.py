@@ -2410,6 +2410,7 @@ class TestDetermineStatus:
         assert view._determine_status(None, None, "S1") == "No Bay"
 
 
+@pytest.mark.django_db
 class TestBuildRowSerialMismatch:
     """Tests for serial mismatch detection and can_update_serial flag in _build_row."""
 
@@ -2420,22 +2421,29 @@ class TestBuildRowSerialMismatch:
         view._device_manufacturer = None
         return view
 
-    def _make_bay(self, installed_serial=None, module_type_id=5):
-        """Create a mock bay with an optionally installed module."""
-        bay = MagicMock()
-        bay.pk = 10
-        bay.name = "Slot 1"
-        bay.get_absolute_url.return_value = "/dcim/module-bays/10/"
-        if installed_serial is not None:
-            module = MagicMock()
-            module.pk = 42
-            module.serial = installed_serial
-            module.module_type_id = module_type_id
-            module.get_absolute_url.return_value = "/dcim/modules/42/"
-            bay.installed_module = module
+    def _make_installed_rows(
+        self,
+        installed_serial,
+        *,
+        installed_model="XCM-7s-b",
+        matched_model="XCM-7s-b",
+    ):
+        """Create a real device-level bay, installed module, and matched module type."""
+        from netbox_librenms_plugin.tests.conftest import (
+            install_module,
+            make_device_with_module_bays,
+            make_module_type,
+        )
+
+        device = make_device_with_module_bays("build-row-serial", ["Slot 1"])
+        installed = install_module(device, "Slot 1", installed_model, serial=installed_serial)
+        if installed_model == matched_model:
+            matched_type = installed.module_type
         else:
-            bay.installed_module = None
-        return bay
+            matched_type = make_module_type(matched_model)
+        module_bays = {bay.name: bay for bay in device.modulebays.filter(module__isnull=True)}
+        module_types = {matched_type.model: matched_type}
+        return installed, module_bays, module_types
 
     def _make_item(self, model_name="XCM-7s-b", serial="NS225161205"):
         return {
@@ -2461,23 +2469,14 @@ class TestBuildRowSerialMismatch:
     def test_serial_match_sets_installed_status(self):
         """When ENTITY-MIB serial matches NetBox serial, status is Installed."""
         view = self._view()
-        bay = self._make_bay(installed_serial="NS225161205")
-        matched_type = MagicMock()
-        matched_type.model = "XCM-7s-b"
-        matched_type.pk = 5
-        matched_type.get_absolute_url.return_value = "/dcim/module-types/5/"
+        _installed, module_bays, module_types = self._make_installed_rows("NS225161205")
 
-        with (
-            patch.object(view, "_match_module_bay", return_value=bay),
-            patch("netbox_librenms_plugin.utils.apply_normalization_rules", return_value="XCM-7s-b"),
-            patch("netbox_librenms_plugin.utils.has_nested_name_conflict", return_value=False),
-        ):
-            row = view._build_row(
-                self._make_item(serial="NS225161205"),
-                {},
-                {"Slot 1": bay},
-                {"XCM-7s-b": matched_type},
-            )
+        row = view._build_row(
+            self._make_item(serial="NS225161205"),
+            {},
+            module_bays,
+            module_types,
+        )
 
         assert row["status"] == "Installed"
         assert "row_class" not in row
@@ -2485,103 +2484,78 @@ class TestBuildRowSerialMismatch:
 
     def test_installed_row_sets_update_interface_when_template_matches_exist(self):
         """Installed non-port rows expose Update Interface when standalone template matches exist."""
-        view = self._view()
-        bay = self._make_bay(installed_serial="NS225161205")
-        matched_type = MagicMock()
-        matched_type.model = "XCM-7s-b"
-        matched_type.pk = 5
-        matched_type.get_absolute_url.return_value = "/dcim/module-types/5/"
+        from dcim.models import Interface, InterfaceTemplate
 
-        with (
-            patch.object(view, "_match_module_bay", return_value=bay),
-            patch.object(view, "_count_adoptable_template_interfaces", return_value=2),
-            patch("netbox_librenms_plugin.utils.apply_normalization_rules", return_value="XCM-7s-b"),
-            patch("netbox_librenms_plugin.utils.has_nested_name_conflict", return_value=False),
-        ):
-            row = view._build_row(
-                self._make_item(serial="NS225161205"),
-                {},
-                {"Slot 1": bay},
-                {"XCM-7s-b": matched_type},
-            )
+        view = self._view()
+        installed, module_bays, module_types = self._make_installed_rows("NS225161205")
+        for name in ("TenGigabitEthernet1/1/1", "TenGigabitEthernet1/1/2"):
+            InterfaceTemplate.objects.create(module_type=installed.module_type, name=name, type="other")
+            Interface.objects.create(device=installed.device, name=name, type="other")
+
+        row = view._build_row(
+            self._make_item(serial="NS225161205"),
+            {},
+            module_bays,
+            module_types,
+        )
 
         assert row["status"] == "Installed"
         assert row["can_update_interface_binding"] is True
         assert row["adoptable_interface_count"] == 2
 
     def test_count_adoptable_template_interfaces_uses_vc_aware_names(self):
+        from dcim.models import Interface, InterfaceTemplate
+
+        from netbox_librenms_plugin.tests.conftest import (
+            install_module,
+            make_module_bay,
+            make_virtual_chassis_members,
+        )
+
         view = self._view()
-        device = MagicMock()
-        device.vc_position = 3
-        device.virtual_chassis_id = 11
-        device.virtual_chassis = MagicMock()
-        device.virtual_chassis.members.values_list.return_value = [1, 2, 3]
+        _virtual_chassis, members = make_virtual_chassis_members("build-row-vc", count=3)
+        device = members[2]
+        make_module_bay(device, "Slot 1")
+        module = install_module(device, "Slot 1", "VC-AWARE-MODULE")
+        InterfaceTemplate.objects.create(
+            module_type=module.module_type,
+            name="TenGigabitEthernet1/1/1",
+            type="other",
+        )
+        Interface.objects.create(device=device, name="TenGigabitEthernet3/1/1", type="other")
 
-        module = MagicMock()
-        module.device = device
-        template = MagicMock()
-        instantiated = MagicMock()
-        instantiated.name = "TenGigabitEthernet1/1/1"
-        template.instantiate.return_value = instantiated
-        module.module_type.interfacetemplates.all.return_value = [template]
-
-        with patch("dcim.models.Interface") as mock_interface:
-            mock_interface.objects.filter.return_value.count.return_value = 1
-            result = view._count_adoptable_template_interfaces(module)
+        result = view._count_adoptable_template_interfaces(module)
 
         assert result == 1
-        mock_interface.objects.filter.assert_called_once_with(
-            device=device,
-            module__isnull=True,
-            name__in=["TenGigabitEthernet3/1/1"],
-        )
 
     def test_serial_mismatch_sets_can_update_serial(self):
         """When serials differ, can_update_serial=True and installed_module_id set."""
         view = self._view()
-        bay = self._make_bay(installed_serial="TESTSRL")
-        matched_type = MagicMock()
-        matched_type.model = "XCM-7s-b"
-        matched_type.pk = 5
-        matched_type.get_absolute_url.return_value = "/dcim/module-types/5/"
+        installed, module_bays, module_types = self._make_installed_rows("TESTSRL")
 
-        with (
-            patch.object(view, "_match_module_bay", return_value=bay),
-            patch("netbox_librenms_plugin.utils.apply_normalization_rules", return_value="XCM-7s-b"),
-            patch("netbox_librenms_plugin.utils.has_nested_name_conflict", return_value=False),
-        ):
-            row = view._build_row(
-                self._make_item(serial="NS225161205"),
-                {},
-                {"Slot 1": bay},
-                {"XCM-7s-b": matched_type},
-            )
+        row = view._build_row(
+            self._make_item(serial="NS225161205"),
+            {},
+            module_bays,
+            module_types,
+        )
 
         assert row["status"] == "Serial Mismatch"
         assert "row_class" not in row
         assert row.get("can_update_serial") is True
-        assert row.get("installed_module_id") == 42
+        assert row.get("installed_module_id") == installed.pk
 
     def test_empty_netbox_serial_flags_mismatch(self):
         """When NetBox serial is empty but LibreNMS has one, status is Serial Mismatch."""
         view = self._view()
-        bay = self._make_bay(installed_serial="")
-        matched_type = MagicMock()
-        matched_type.model = "XCM-7s-b"
-        matched_type.pk = 5
-        matched_type.get_absolute_url.return_value = "/dcim/module-types/5/"
+        _installed, module_bays, module_types = self._make_installed_rows("")
 
-        with (
-            patch.object(view, "_match_module_bay", return_value=bay),
-            patch("netbox_librenms_plugin.utils.apply_normalization_rules", return_value="XCM-7s-b"),
-            patch("netbox_librenms_plugin.utils.has_nested_name_conflict", return_value=False),
-        ):
-            row = view._build_row(
-                self._make_item(serial="NS225161205"),
-                {},
-                {"Slot 1": bay},
-                {"XCM-7s-b": matched_type},
-            )
+        row = view._build_row(
+            self._make_item(serial="NS225161205"),
+            {},
+            module_bays,
+            module_types,
+        )
 
         assert row["status"] == "Serial Mismatch"
         assert row.get("can_update_serial")
@@ -2592,29 +2566,20 @@ class TestBuildRowSerialMismatch:
         view = self._view()
         # This bay+type would produce a "Serial Mismatch"/"Installed" match for a host row,
         # so a regression that drops the early return would surface a host status here.
-        bay = self._make_bay(installed_serial="TESTSRL")
-        matched_type = MagicMock()
-        matched_type.model = "XCM-7s-b"
-        matched_type.pk = 5
-        matched_type.get_absolute_url.return_value = "/dcim/module-types/5/"
+        _installed, module_bays, module_types = self._make_installed_rows("TESTSRL")
 
         oob_item = self._make_item(serial="NS225161205")
         oob_item["_source"] = "oob"
+        assert view._match_module_bay(oob_item, {}, module_bays) is module_bays["Slot 1"]
 
-        with (
-            patch.object(view, "_match_module_bay", return_value=bay) as mock_match_bay,
-            patch("netbox_librenms_plugin.utils.apply_normalization_rules", return_value="XCM-7s-b"),
-            patch("netbox_librenms_plugin.utils.has_nested_name_conflict", return_value=False),
-        ):
-            row = view._build_row(
-                oob_item,
-                {},
-                {"Slot 1": bay},
-                {"XCM-7s-b": matched_type},
-            )
+        row = view._build_row(
+            oob_item,
+            {},
+            module_bays,
+            module_types,
+        )
 
         # Host matching never ran, so the row carries neutral bay/type/status and no actions.
-        mock_match_bay.assert_not_called()
         assert row["_source"] == "oob"
         assert row["status"] == "OOB"
         assert row["module_bay"] == "-"
@@ -2632,58 +2597,40 @@ class TestBuildRowSerialMismatch:
         view = self._view()
         oob_item = self._make_item(serial="NS225161205")
         oob_item["_source"] = "oob"
+        oob_item["entPhysicalContainedIn"] = 1
+        ancestor = {
+            "entPhysicalName": "P",
+            "entPhysicalIndex": 1,
+            "entPhysicalClass": "xioModule",
+            "entPhysicalModelName": "XCM-7s-b",
+            "entPhysicalSerialNum": "NS225161205",
+            "entPhysicalContainedIn": 0,
+        }
+        index_map = {1: ancestor, 100: oob_item}
+        assert view._find_integrating_ancestor(oob_item, index_map) is ancestor
 
-        with (
-            patch.object(
-                view, "_find_integrating_ancestor", return_value={"entPhysicalName": "P", "entPhysicalIndex": 1}
-            ) as mock_anc,
-            patch.object(view, "_match_module_bay", return_value=None) as mock_match_bay,
-        ):
-            row = view._build_row(oob_item, {}, {}, {})
+        row = view._build_row(oob_item, index_map, {}, {})
 
         assert row["status"] == "OOB"
         assert row["_source"] == "oob"
         # OOB returns before the integrated-child check even consults the ancestor.
-        mock_anc.assert_not_called()
-        mock_match_bay.assert_not_called()
-
-    def _common_patches(self, view, bay, matched_type_name):
-        """Return a stack of common patches for _build_row helper calls."""
-        from unittest.mock import patch
-
-        return [
-            patch.object(view, "_match_module_bay", return_value=bay),
-            patch("netbox_librenms_plugin.utils.apply_normalization_rules", return_value=matched_type_name),
-            patch("netbox_librenms_plugin.utils.has_nested_name_conflict", return_value=False),
-        ]
-
-    def _make_matched_type(self, model_name, pk=5):
-        matched_type = MagicMock()
-        matched_type.model = model_name
-        matched_type.pk = pk
-        matched_type.get_absolute_url.return_value = f"/dcim/module-types/{pk}/"
-        return matched_type
 
     def test_type_mismatch_sets_type_mismatch_status(self):
         """When installed module type differs from LibreNMS type, status is Type Mismatch."""
         view = self._view()
-        bay = self._make_bay(installed_serial="S1")
-        # Installed type pk=99, matched type pk=5 — different
-        bay.installed_module.module_type_id = 99
-        matched_type = self._make_matched_type("XCM-7s-b", pk=5)
+        # The installed and matched rows use different real module types.
+        _installed, module_bays, module_types = self._make_installed_rows(
+            "S1",
+            installed_model="INSTALLED-XCM-7S-B",
+            matched_model="XCM-7s-b",
+        )
 
-        patches = self._common_patches(view, bay, "XCM-7s-b")
-        from contextlib import ExitStack
-
-        with ExitStack() as stack:
-            for p in patches:
-                stack.enter_context(p)
-            row = view._build_row(
-                self._make_item(model_name="XCM-7s-b", serial="NS225161205"),
-                {},
-                {"Slot 1": bay},
-                {"XCM-7s-b": matched_type},
-            )
+        row = view._build_row(
+            self._make_item(model_name="XCM-7s-b", serial="NS225161205"),
+            {},
+            module_bays,
+            module_types,
+        )
 
         assert row["status"] == "Type Mismatch"
         assert "row_class" not in row
@@ -2691,45 +2638,33 @@ class TestBuildRowSerialMismatch:
     def test_type_mismatch_sets_can_replace(self):
         """Type Mismatch row has can_replace=True and installed_module_id set."""
         view = self._view()
-        bay = self._make_bay(installed_serial="S1")
-        bay.installed_module.module_type_id = 99
-        matched_type = self._make_matched_type("XCM-7s-b", pk=5)
+        installed, module_bays, module_types = self._make_installed_rows(
+            "S1",
+            installed_model="INSTALLED-XCM-7S-B",
+            matched_model="XCM-7s-b",
+        )
 
-        patches = self._common_patches(view, bay, "XCM-7s-b")
-        from contextlib import ExitStack
-
-        with ExitStack() as stack:
-            for p in patches:
-                stack.enter_context(p)
-            row = view._build_row(
-                self._make_item(model_name="XCM-7s-b", serial="NS225161205"),
-                {},
-                {"Slot 1": bay},
-                {"XCM-7s-b": matched_type},
-            )
+        row = view._build_row(
+            self._make_item(model_name="XCM-7s-b", serial="NS225161205"),
+            {},
+            module_bays,
+            module_types,
+        )
 
         assert row.get("can_replace") is True
-        assert row.get("installed_module_id") == 42
+        assert row.get("installed_module_id") == installed.pk
 
     def test_serial_mismatch_also_sets_can_replace(self):
         """Serial Mismatch rows also get can_replace=True (same type)."""
         view = self._view()
-        bay = self._make_bay(installed_serial="TESTSRL")
-        bay.installed_module.module_type_id = 5
-        matched_type = self._make_matched_type("XCM-7s-b", pk=5)
+        _installed, module_bays, module_types = self._make_installed_rows("TESTSRL")
 
-        patches = self._common_patches(view, bay, "XCM-7s-b")
-        from contextlib import ExitStack
-
-        with ExitStack() as stack:
-            for p in patches:
-                stack.enter_context(p)
-            row = view._build_row(
-                self._make_item(serial="NS225161205"),
-                {},
-                {"Slot 1": bay},
-                {"XCM-7s-b": matched_type},
-            )
+        row = view._build_row(
+            self._make_item(serial="NS225161205"),
+            {},
+            module_bays,
+            module_types,
+        )
 
         assert row["status"] == "Serial Mismatch"
         assert row.get("can_replace") is True
@@ -2738,22 +2673,14 @@ class TestBuildRowSerialMismatch:
     def test_same_type_same_serial_no_replace(self):
         """Clean Installed row has neither can_replace nor can_update_serial."""
         view = self._view()
-        bay = self._make_bay(installed_serial="NS225161205")
-        bay.installed_module.module_type_id = 5
-        matched_type = self._make_matched_type("XCM-7s-b", pk=5)
+        _installed, module_bays, module_types = self._make_installed_rows("NS225161205")
 
-        patches = self._common_patches(view, bay, "XCM-7s-b")
-        from contextlib import ExitStack
-
-        with ExitStack() as stack:
-            for p in patches:
-                stack.enter_context(p)
-            row = view._build_row(
-                self._make_item(serial="NS225161205"),
-                {},
-                {"Slot 1": bay},
-                {"XCM-7s-b": matched_type},
-            )
+        row = view._build_row(
+            self._make_item(serial="NS225161205"),
+            {},
+            module_bays,
+            module_types,
+        )
 
         assert row["status"] == "Installed"
         assert not row.get("can_replace")
@@ -2762,22 +2689,14 @@ class TestBuildRowSerialMismatch:
     def test_librenms_dash_serial_with_empty_installed_gives_installed(self):
         """LibreNMS serial '-' normalizes to empty; both empty -> Installed, not mismatch."""
         view = self._view()
-        bay = self._make_bay(installed_serial="")
-        bay.installed_module.module_type_id = 5
-        matched_type = self._make_matched_type("XCM-7s-b", pk=5)
+        _installed, module_bays, module_types = self._make_installed_rows("")
 
-        patches = self._common_patches(view, bay, "XCM-7s-b")
-        from contextlib import ExitStack
-
-        with ExitStack() as stack:
-            for p in patches:
-                stack.enter_context(p)
-            row = view._build_row(
-                self._make_item(serial="-"),
-                {},
-                {"Slot 1": bay},
-                {"XCM-7s-b": matched_type},
-            )
+        row = view._build_row(
+            self._make_item(serial="-"),
+            {},
+            module_bays,
+            module_types,
+        )
 
         assert row["status"] == "Installed"
         assert "row_class" not in row
@@ -2786,22 +2705,14 @@ class TestBuildRowSerialMismatch:
     def test_librenms_dash_serial_with_real_installed_gives_installed(self):
         """LibreNMS serial '-' normalizes to empty; only NetBox has serial -> no mismatch."""
         view = self._view()
-        bay = self._make_bay(installed_serial="REAL123")
-        bay.installed_module.module_type_id = 5
-        matched_type = self._make_matched_type("XCM-7s-b", pk=5)
+        _installed, module_bays, module_types = self._make_installed_rows("REAL123")
 
-        patches = self._common_patches(view, bay, "XCM-7s-b")
-        from contextlib import ExitStack
-
-        with ExitStack() as stack:
-            for p in patches:
-                stack.enter_context(p)
-            row = view._build_row(
-                self._make_item(serial="-"),
-                {},
-                {"Slot 1": bay},
-                {"XCM-7s-b": matched_type},
-            )
+        row = view._build_row(
+            self._make_item(serial="-"),
+            {},
+            module_bays,
+            module_types,
+        )
 
         assert row["status"] == "Installed"
         assert "row_class" not in row
@@ -3976,6 +3887,7 @@ class TestNoTypeWarningHints:
         assert msg  # non-empty string
 
 
+@pytest.mark.django_db
 class TestBuildRowModelWarning:
     """`_build_row` populates `model_warning` for No Bay / No Type rows."""
 
@@ -3986,95 +3898,81 @@ class TestBuildRowModelWarning:
         v._device_manufacturer = None
         return v
 
+    def _make_rows(self, *, bay_names=(), model_names=()):
+        """Create real device-level bays and module types for one row-building test."""
+        from netbox_librenms_plugin.tests.conftest import make_device_with_module_bays, make_module_type
+
+        device = make_device_with_module_bays("build-row-model-warning", bay_names)
+        module_bays = {bay.name: bay for bay in device.modulebays.filter(module__isnull=True)}
+        module_types = {
+            model: make_module_type(model, manufacturer=device.device_type.manufacturer) for model in model_names
+        }
+        return device, module_bays, module_types
+
     def test_no_bay_row_gets_model_warning(self):
         view = self._view()
-        view._match_module_bay = MagicMock(return_value=None)
+        _device, module_bays, module_types = self._make_rows(
+            bay_names=("Slot 1",),
+            model_names=("ASR-FAN",),
+        )
         item = {"entPhysicalName": "0/FT0", "entPhysicalClass": "fan", "entPhysicalModelName": "ASR-FAN"}
-        with (
-            patch("netbox_librenms_plugin.utils.has_nested_name_conflict", return_value=False),
-            patch("netbox_librenms_plugin.utils.resolve_module_type", return_value=MagicMock(model="ASR-FAN", pk=1)),
-        ):
-            row = view._build_row(item, {}, {"Slot 1": MagicMock()}, {"ASR-FAN": MagicMock(pk=1)})
+        row = view._build_row(item, {}, module_bays, module_types)
         assert row["status"] == "No Bay"
         assert "model_warning" in row
         assert row["model_warning"], "expected non-empty hint"
 
     def test_no_type_row_gets_model_warning(self):
         view = self._view()
-        bay = MagicMock()
-        bay.name = "Slot 1"
-        bay.installed_module = None
-        bay.get_absolute_url.return_value = "/b"
-        view._match_module_bay = MagicMock(return_value=bay)
-        item = {"entPhysicalName": "X", "entPhysicalClass": "module", "entPhysicalModelName": "UNKNOWN-MODEL"}
-        with (
-            patch("netbox_librenms_plugin.utils.has_nested_name_conflict", return_value=False),
-            patch("netbox_librenms_plugin.utils.resolve_module_type", return_value=None),
-        ):
-            row = view._build_row(item, {}, {}, {})
+        _device, module_bays, _module_types = self._make_rows(bay_names=("Slot 1",))
+        item = {
+            "entPhysicalName": "Slot 1",
+            "entPhysicalClass": "module",
+            "entPhysicalModelName": "UNKNOWN-MODEL",
+        }
+        row = view._build_row(item, {}, module_bays, {})
         assert row["status"] == "No Type"
         assert "UNKNOWN-MODEL" in row.get("model_warning", "")
 
     def test_no_type_row_carries_module_type_create_prefill(self):
         """Verify a "No Type" row includes data for the NetBox module-type creation form."""
         view = self._view()
-        bay = MagicMock()
-        bay.name = "Slot 1"
-        bay.installed_module = None
-        bay.get_absolute_url.return_value = "/b"
-        view._match_module_bay = MagicMock(return_value=bay)
-        manufacturer = MagicMock()
-        manufacturer.pk = 99
+        device, module_bays, _module_types = self._make_rows(bay_names=("Slot 1",))
+        manufacturer = device.device_type.manufacturer
         item = {
-            "entPhysicalName": "X",
+            "entPhysicalName": "Slot 1",
             "entPhysicalClass": "module",
             "entPhysicalModelName": "X2-10GB-LR",
             "entPhysicalDescr": "10Gbase-LR",
         }
-        with (
-            patch("netbox_librenms_plugin.utils.has_nested_name_conflict", return_value=False),
-            patch("netbox_librenms_plugin.utils.resolve_module_type", return_value=None),
-        ):
-            row = view._build_row(item, {}, {}, {}, manufacturer=manufacturer)
+        row = view._build_row(item, {}, module_bays, {}, manufacturer=manufacturer)
         assert row["status"] == "No Type"
         create = row.get("module_type_create")
         assert create is not None
         assert create["model"] == "X2-10GB-LR"
         assert create["part_number"] == "X2-10GB-LR"
-        assert create["manufacturer"] == 99
+        assert create["manufacturer"] == manufacturer.pk
         assert create["description"] == "10Gbase-LR"
 
     def test_matched_row_has_no_model_warning(self):
         view = self._view()
-        bay = MagicMock()
-        bay.name = "Slot 1"
-        bay.installed_module = None
-        bay.get_absolute_url.return_value = "/b"
-        view._match_module_bay = MagicMock(return_value=bay)
-        mt = MagicMock(pk=10)
-        mt.model = "M"
-        mt.get_absolute_url.return_value = "/mt"
-        item = {"entPhysicalName": "X", "entPhysicalClass": "module", "entPhysicalModelName": "M"}
-        with (
-            patch("netbox_librenms_plugin.utils.has_nested_name_conflict", return_value=False),
-            patch("netbox_librenms_plugin.utils.resolve_module_type", return_value=mt),
-        ):
-            row = view._build_row(item, {}, {"Slot 1": bay}, {"M": mt})
+        _device, module_bays, module_types = self._make_rows(
+            bay_names=("Slot 1",),
+            model_names=("M",),
+        )
+        item = {"entPhysicalName": "Slot 1", "entPhysicalClass": "module", "entPhysicalModelName": "M"}
+        row = view._build_row(item, {}, module_bays, module_types)
         assert row["status"] == "Matched"
         assert "model_warning" not in row
 
     def test_no_bay_row_carries_model_suggestion_when_trailing_number_matches(self):
         """Verify a "No Bay" row includes a mapping suggestion when its number matches a bay."""
         view = self._view()
-        view._match_module_bay = MagicMock(return_value=None)
-        bay = MagicMock()
-        bay.name = "Slot 0"
+        _device, module_bays, module_types = self._make_rows(
+            bay_names=("Slot 0",),
+            model_names=("X",),
+        )
         item = {"entPhysicalName": "0/0", "entPhysicalClass": "module", "entPhysicalModelName": "X"}
-        with (
-            patch("netbox_librenms_plugin.utils.has_nested_name_conflict", return_value=False),
-            patch("netbox_librenms_plugin.utils.resolve_module_type", return_value=MagicMock(model="X", pk=1)),
-        ):
-            row = view._build_row(item, {}, {"Slot 0": bay}, {"X": MagicMock(pk=1)})
+        row = view._build_row(item, {}, module_bays, module_types)
         assert row["status"] == "No Bay"
         sug = row.get("model_suggestion")
         assert sug is not None
@@ -4084,100 +3982,72 @@ class TestBuildRowModelWarning:
     def test_scope_uninstalled_no_bay_row_recommends_install_parent(self):
         """Verify an empty scope from an uninstalled ancestor recommends installing the parent module."""
         view = self._view()
-        view._match_module_bay = MagicMock(return_value=None)
+        _device, module_bays, module_types = self._make_rows(model_names=("SFP-X",))
         item = {
             "entPhysicalName": "TenGigE0/0/0/0",
             "entPhysicalClass": "module",
             "entPhysicalModelName": "SFP-X",
         }
-        with (
-            patch("netbox_librenms_plugin.utils.has_nested_name_conflict", return_value=False),
-            patch(
-                "netbox_librenms_plugin.utils.resolve_module_type",
-                return_value=MagicMock(model="SFP-X", pk=1),
-            ),
-        ):
-            row = view._build_row(item, {}, {}, {"SFP-X": MagicMock(pk=1)}, scope_uninstalled=True)
+        row = view._build_row(item, {}, module_bays, module_types, scope_uninstalled=True)
         assert row["status"] == "No Bay"
         assert "install the parent module first" in row.get("model_warning", "").lower()
 
     def test_no_bay_empty_parent_bays_sets_no_bay_reason(self):
         """Verify an installed parent without bay templates sets no_bay_reason to empty_parent_bays."""
-        from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
-
-        view = object.__new__(BaseModuleTableView)
-        view._device_manufacturer = None
-        view._match_module_bay = MagicMock(return_value=None)
+        view = self._view()
+        _device, module_bays, module_types = self._make_rows(model_names=("SFP-10G-SR",))
         item = {
             "entPhysicalName": "TenGigE0/0/0/0",
             "entPhysicalClass": "module",
             "entPhysicalModelName": "SFP-10G-SR",
         }
-        with (
-            patch("netbox_librenms_plugin.utils.has_nested_name_conflict", return_value=False),
-            patch("netbox_librenms_plugin.utils.resolve_module_type", return_value=MagicMock(model="SFP-10G-SR", pk=1)),
-        ):
-            # scope_empty_installed_bays=True: installed parent has no bay templates
-            row = view._build_row(
-                item,
-                {},
-                {},
-                {"SFP-10G-SR": MagicMock(pk=1)},
-                scope_empty_installed_bays=True,
-            )
+        # scope_empty_installed_bays=True: installed parent has no bay templates
+        row = view._build_row(
+            item,
+            {},
+            module_bays,
+            module_types,
+            scope_empty_installed_bays=True,
+        )
         assert row["status"] == "No Bay"
         assert row.get("no_bay_reason") == "empty_parent_bays"
 
     def test_no_bay_empty_parent_bays_through_intermediate_container(self):
         """Verify preserved scope still records an installed parent's missing bay templates."""
-        from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
-
-        view = object.__new__(BaseModuleTableView)
-        view._device_manufacturer = None
-        view._match_module_bay = MagicMock(return_value=None)
+        view = self._view()
+        _device, module_bays, module_types = self._make_rows(model_names=("SFP-10G-SR",))
         item = {
             "entPhysicalName": "TenGigE0/0/0/0",
             "entPhysicalClass": "module",
             "entPhysicalModelName": "SFP-10G-SR",
         }
-        with (
-            patch("netbox_librenms_plugin.utils.has_nested_name_conflict", return_value=False),
-            patch("netbox_librenms_plugin.utils.resolve_module_type", return_value=MagicMock(model="SFP-10G-SR", pk=1)),
-        ):
-            row = view._build_row(
-                item,
-                {},
-                {},
-                {"SFP-10G-SR": MagicMock(pk=1)},
-                scope_preserved=True,
-                scope_empty_installed_bays=True,
-            )
+        row = view._build_row(
+            item,
+            {},
+            module_bays,
+            module_types,
+            scope_preserved=True,
+            scope_empty_installed_bays=True,
+        )
         assert row["status"] == "No Bay"
         assert row.get("no_bay_reason") == "empty_parent_bays"
 
     def test_no_bay_port_child_uses_interface_child_reason(self):
         """Port-class child rows under empty installed-parent scope should not be tagged as missing bay templates."""
-        from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
-
-        view = object.__new__(BaseModuleTableView)
-        view._device_manufacturer = None
-        view._match_module_bay = MagicMock(return_value=None)
+        view = self._view()
+        _device, module_bays, module_types = self._make_rows(model_names=("SFP-10G-SR",))
         item = {
             "entPhysicalName": "Ethernet1/1",
             "entPhysicalClass": "port",
             "entPhysicalModelName": "SFP-10G-SR",
         }
-        with (
-            patch("netbox_librenms_plugin.utils.has_nested_name_conflict", return_value=False),
-            patch("netbox_librenms_plugin.utils.resolve_module_type", return_value=MagicMock(model="SFP-10G-SR", pk=1)),
-        ):
-            row = view._build_row(
-                item,
-                {},
-                {},
-                {"SFP-10G-SR": MagicMock(pk=1)},
-                scope_empty_installed_bays=True,
-            )
+        row = view._build_row(
+            item,
+            {},
+            module_bays,
+            module_types,
+            scope_empty_installed_bays=True,
+        )
         assert row["status"] == "No Bay"
         assert row.get("no_bay_reason") == "interface_child"
         assert "matching child bay is missing in netbox" in row.get("model_warning", "").lower()
@@ -4185,20 +4055,13 @@ class TestBuildRowModelWarning:
     def test_port_row_sets_can_install_and_interface_hint_when_bay_matches(self):
         """Matched port rows expose install action and preserve best interface label hint."""
         view = self._view()
-        bay = MagicMock()
-        bay.name = "SFP 1"
-        bay.installed_module = None
-        bay.pk = 10
-        bay.get_absolute_url.return_value = "/dcim/module-bays/10/"
-        view._match_module_bay = MagicMock(return_value=bay)
-
-        module_type = MagicMock()
-        module_type.model = "SFP-10G-SR"
-        module_type.pk = 200
-        module_type.get_absolute_url.return_value = "/dcim/module-types/200/"
+        _device, module_bays, module_types = self._make_rows(
+            bay_names=("SFP 1",),
+            model_names=("SFP-10G-SR",),
+        )
 
         item = {
-            "entPhysicalName": "Port-Unknown",
+            "entPhysicalName": "SFP 1",
             "entPhysicalClass": "port",
             "entPhysicalModelName": "SFP-10G-SR",
             "_librenms_ifname": "Te1/1/1",
@@ -4206,11 +4069,7 @@ class TestBuildRowModelWarning:
             "_librenms_port_id": 1234,
         }
 
-        with (
-            patch("netbox_librenms_plugin.utils.has_nested_name_conflict", return_value=False),
-            patch("netbox_librenms_plugin.utils.resolve_module_type", return_value=module_type),
-        ):
-            row = view._build_row(item, {}, {"SFP 1": bay}, {"SFP-10G-SR": module_type})
+        row = view._build_row(item, {}, module_bays, module_types)
 
         assert row["can_install"] is True
         assert row["interface_name_hint"] == "Te1/1/1"
@@ -4220,64 +4079,44 @@ class TestBuildRowModelWarning:
 
     def test_no_bay_default_scope_empty_flag_does_not_set_reason(self):
         """Without scope_empty_installed_bays, plain empty scope gives no reason tag."""
-        from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
-
-        view = object.__new__(BaseModuleTableView)
-        view._device_manufacturer = None
-        view._match_module_bay = MagicMock(return_value=None)
+        view = self._view()
+        _device, module_bays, module_types = self._make_rows(model_names=("SFP-10G-SR",))
         item = {
             "entPhysicalName": "TenGigE0/0/0/0",
             "entPhysicalClass": "module",
             "entPhysicalModelName": "SFP-10G-SR",
         }
-        with (
-            patch("netbox_librenms_plugin.utils.has_nested_name_conflict", return_value=False),
-            patch("netbox_librenms_plugin.utils.resolve_module_type", return_value=MagicMock(model="SFP-10G-SR", pk=1)),
-        ):
-            # Default scope_empty_installed_bays=False — could be unmatched ancestor
-            row = view._build_row(item, {}, {}, {"SFP-10G-SR": MagicMock(pk=1)})
+        # Default scope_empty_installed_bays=False could be an unmatched ancestor.
+        row = view._build_row(item, {}, module_bays, module_types)
         assert row["status"] == "No Bay"
         assert "no_bay_reason" not in row
 
     def test_no_bay_with_bays_in_scope_does_not_set_no_bay_reason(self):
         """When module_bays is non-empty (just no match), no_bay_reason is absent."""
-        from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
-
-        view = object.__new__(BaseModuleTableView)
-        view._device_manufacturer = None
-        view._match_module_bay = MagicMock(return_value=None)
-        bay = MagicMock()
-        bay.name = "Slot 1"
+        view = self._view()
+        _device, module_bays, module_types = self._make_rows(
+            bay_names=("Slot 1",),
+            model_names=("X",),
+        )
         item = {
             "entPhysicalName": "0/5",
             "entPhysicalClass": "module",
             "entPhysicalModelName": "X",
         }
-        with (
-            patch("netbox_librenms_plugin.utils.has_nested_name_conflict", return_value=False),
-            patch("netbox_librenms_plugin.utils.resolve_module_type", return_value=MagicMock(model="X", pk=1)),
-        ):
-            row = view._build_row(item, {}, {"Slot 1": bay}, {"X": MagicMock(pk=1)})
+        row = view._build_row(item, {}, module_bays, module_types)
         assert row["status"] == "No Bay"
         assert "no_bay_reason" not in row
 
     def test_no_bay_scope_uninstalled_does_not_set_no_bay_reason(self):
         """scope_uninstalled=True is a different root cause; no_bay_reason absent."""
-        from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
-
-        view = object.__new__(BaseModuleTableView)
-        view._device_manufacturer = None
-        view._match_module_bay = MagicMock(return_value=None)
+        view = self._view()
+        _device, module_bays, module_types = self._make_rows(model_names=("SFP-X",))
         item = {
             "entPhysicalName": "TenGigE0/0/0/0",
             "entPhysicalClass": "module",
             "entPhysicalModelName": "SFP-X",
         }
-        with (
-            patch("netbox_librenms_plugin.utils.has_nested_name_conflict", return_value=False),
-            patch("netbox_librenms_plugin.utils.resolve_module_type", return_value=MagicMock(model="SFP-X", pk=1)),
-        ):
-            row = view._build_row(item, {}, {}, {"SFP-X": MagicMock(pk=1)}, scope_uninstalled=True)
+        row = view._build_row(item, {}, module_bays, module_types, scope_uninstalled=True)
         assert row["status"] == "No Bay"
         assert "no_bay_reason" not in row
 
