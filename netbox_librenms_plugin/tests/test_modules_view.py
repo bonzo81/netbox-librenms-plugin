@@ -5,13 +5,69 @@ Focuses on the bay-scope tracking in _build_context and the serial
 comparison logic in _build_row.
 """
 
+from copy import deepcopy
 from unittest.mock import MagicMock, patch
 
 import pytest
 
+from netbox_librenms_plugin.tests.mock_librenms_server import librenms_mock_server
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def librenms_server(monkeypatch):
+    """Provide a real HTTP LibreNMS server with test-specific responses."""
+    monkeypatch.setenv("NO_PROXY", "127.0.0.1,localhost")
+    monkeypatch.setenv("no_proxy", "127.0.0.1,localhost")
+    with librenms_mock_server() as server:
+        yield server
+
+
+def configure_servers(settings, servers):
+    """Replace the configured servers and preserve the remaining plugin settings."""
+    plugin_config = deepcopy(settings.PLUGINS_CONFIG)
+    plugin_settings = plugin_config["netbox_librenms_plugin"]
+    plugin_settings["servers"] = servers
+    plugin_settings.pop("librenms_url", None)
+    plugin_settings.pop("api_token", None)
+    settings.PLUGINS_CONFIG = plugin_config
+
+
+def _real_api_view(settings, server, *, librenms_id):
+    """Build a table view that uses a real LibreNMS HTTP client."""
+    from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+    from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
+
+    configure_servers(
+        settings,
+        {
+            "test-server": {
+                "librenms_url": server.url,
+                "api_token": "test-token",
+                "verify_ssl": False,
+            }
+        },
+    )
+    view = object.__new__(BaseModuleTableView)
+    view._device_manufacturer = None
+    view.librenms_id = librenms_id
+    view._librenms_api = LibreNMSAPI(server_key="test-server")
+    return view
+
+
+def _count_port_requests(server, librenms_id):
+    """Register a ports route that records every hit so a test can prove no fetch happened."""
+    hits = []
+
+    def route(**request):
+        hits.append(request)
+        return 404, {"status": "error", "message": "No ports response configured"}
+
+    server.register(f"/api/v0/devices/{librenms_id}/ports", route, method="GET")
+    return hits
 
 
 def _make_view():
@@ -502,49 +558,65 @@ class TestFpcSlotMatchesOnSlashedPositions:
         assert BaseModuleTableView._fpc_slot_matches("QSFP @ 0/0/1", bay) is False
 
 
+@pytest.mark.django_db
 class TestMergeTransceiverDataPortIdentity:
     """Transceiver merge should preserve stable port identity metadata."""
 
-    def test_malformed_transceiver_payload_returns_error_without_crashing(self):
-        """A truthy success with a non-list payload (or a list of non-dicts) must surface as an error string — not 500 on txr.get(...) — so the caller skips the cache and warns."""
-        from copy import deepcopy
-
-        view = _make_view()
-        view.librenms_id = 100
+    def test_invalid_transceiver_http_bodies_return_errors_without_mutating_inventory(self, settings, librenms_server):
+        """Surface a malformed transceiver body as an error string so the caller skips the cache and warns."""
+        view = _real_api_view(settings, librenms_server, librenms_id=100)
         seed = [{"entPhysicalIndex": 1, "entPhysicalName": "Gi0/1"}]
 
-        def assert_malformed(payload):
+        def assert_malformed(body, expected_error):
             # Deep-copy the seed so a mutation of the SHARED inner dict by _merge_transceiver_data
             # can't also mutate `seed` and make the "untouched" assertion pass vacuously.
             candidate = deepcopy(seed)
-            view._librenms_api.get_device_transceivers.return_value = (True, payload)
+            librenms_server.register(
+                "/api/v0/devices/100/transceivers",
+                body,
+                method="GET",
+            )
             inventory, error = view._merge_transceiver_data(candidate)
-            assert inventory == seed  # untouched, compared against the pristine seed
-            assert error and "malformed transceiver payload" in error
+            assert inventory == seed
+            assert error == expected_error
 
-        assert_malformed({"unexpected": "dict"})  # dict payload under success=True
-        assert_malformed([{"entity_physical_index": 2}, "bad"])  # list with a non-dict entry
-        # empty NON-list payload ({}) is also malformed — it must NOT be treated as a successful
-        # "no transceivers" response (which would cache a degraded snapshot). Regression for the
-        # emptiness check running before the type check: {} is falsy, so the old order mislabeled it.
-        assert_malformed({})
-
-    def test_synthetic_item_includes_port_identity_metadata(self):
-        view = _make_view()
-        view.librenms_id = 100
-        view._librenms_api.get_device_transceivers.return_value = (
-            True,
-            [
-                {
-                    "entity_physical_index": 200,
-                    "model": "SFP-10G-SR",
-                    "serial": "TX-200",
-                    "type": "SFP",
-                    "port_id": 42,
-                }
-            ],
+        unexpected_format = "Unexpected transceivers response format for device 100"
+        assert_malformed(
+            {"status": "ok", "transceivers": {"unexpected": "dict"}},
+            unexpected_format,
         )
-        view._librenms_api.get_ports.return_value = (True, {"ports": [{"port_id": 42, "ifName": "Te1/0/1"}]})
+        assert_malformed(
+            {
+                "status": "ok",
+                "transceivers": [{"entity_physical_index": 2}, "bad"],
+            },
+            "Malformed transceiver entry in response for device 100",
+        )
+        assert_malformed({"status": "ok"}, unexpected_format)
+
+    def test_synthetic_item_includes_port_identity_metadata(self, settings, librenms_server):
+        view = _real_api_view(settings, librenms_server, librenms_id=100)
+        librenms_server.register(
+            "/api/v0/devices/100/transceivers",
+            {
+                "status": "ok",
+                "transceivers": [
+                    {
+                        "entity_physical_index": 200,
+                        "model": "SFP-10G-SR",
+                        "serial": "TX-200",
+                        "type": "SFP",
+                        "port_id": 42,
+                    }
+                ],
+            },
+            method="GET",
+        )
+        librenms_server.register(
+            "/api/v0/devices/100/ports",
+            {"status": "ok", "ports": [{"port_id": 42, "ifName": "Te1/0/1"}]},
+            method="GET",
+        )
 
         inventory, error = view._merge_transceiver_data([])
 
@@ -556,22 +628,29 @@ class TestMergeTransceiverDataPortIdentity:
         assert item["_librenms_ifname"] == "Te1/0/1"
         assert item["entPhysicalName"] == "Te1/0/1"
 
-    def test_existing_inventory_item_gets_port_identity_metadata(self):
-        view = _make_view()
-        view.librenms_id = 101
-        view._librenms_api.get_device_transceivers.return_value = (
-            True,
-            [
-                {
-                    "entity_physical_index": 300,
-                    "model": "",
-                    "serial": "",
-                    "type": "SFP",
-                    "port_id": 99,
-                }
-            ],
+    def test_existing_inventory_item_gets_port_identity_metadata(self, settings, librenms_server):
+        view = _real_api_view(settings, librenms_server, librenms_id=101)
+        librenms_server.register(
+            "/api/v0/devices/101/transceivers",
+            {
+                "status": "ok",
+                "transceivers": [
+                    {
+                        "entity_physical_index": 300,
+                        "model": "",
+                        "serial": "",
+                        "type": "SFP",
+                        "port_id": 99,
+                    }
+                ],
+            },
+            method="GET",
         )
-        view._librenms_api.get_ports.return_value = (True, {"ports": [{"port_id": 99, "ifName": "Eth2/1"}]})
+        librenms_server.register(
+            "/api/v0/devices/101/ports",
+            {"status": "ok", "ports": [{"port_id": 99, "ifName": "Eth2/1"}]},
+            method="GET",
+        )
         inventory_seed = [
             {
                 "entPhysicalIndex": 300,
@@ -591,15 +670,30 @@ class TestMergeTransceiverDataPortIdentity:
         assert item["_librenms_port_id"] == 99
         assert item["_librenms_ifname"] == "Eth2/1"
 
-    def test_numeric_transceiver_serial_is_coerced_to_a_string(self):
-        """An all-digit transceiver serial can arrive as an int; the merge must coerce it before stripping instead of raising."""
-        view = _make_view()
-        view.librenms_id = 104
-        view._librenms_api.get_device_transceivers.return_value = (
-            True,
-            [{"entity_physical_index": 400, "model": "SFP-10G-SR", "serial": 987654, "type": "SFP", "port_id": 8}],
+    def test_numeric_transceiver_serial_is_coerced_to_a_string(self, settings, librenms_server):
+        """An all-digit transceiver serial arrives as an int; the merge must coerce it before stripping instead of raising."""
+        view = _real_api_view(settings, librenms_server, librenms_id=104)
+        librenms_server.register(
+            "/api/v0/devices/104/transceivers",
+            {
+                "status": "ok",
+                "transceivers": [
+                    {
+                        "entity_physical_index": 400,
+                        "model": "SFP-10G-SR",
+                        "serial": 987654,
+                        "type": "SFP",
+                        "port_id": 8,
+                    }
+                ],
+            },
+            method="GET",
         )
-        view._librenms_api.get_ports.return_value = (True, {"ports": [{"port_id": 8, "ifName": "Eth4/1"}]})
+        librenms_server.register(
+            "/api/v0/devices/104/ports",
+            {"status": "ok", "ports": [{"port_id": 8, "ifName": "Eth4/1"}]},
+            method="GET",
+        )
 
         inventory, error = view._merge_transceiver_data([])
 
@@ -607,15 +701,30 @@ class TestMergeTransceiverDataPortIdentity:
         assert len(inventory) == 1
         assert inventory[0]["entPhysicalSerialNum"] == "987654"
 
-    def test_zero_transceiver_serial_is_preserved(self):
+    def test_zero_transceiver_serial_is_preserved(self, settings, librenms_server):
         """A transceiver serial of JSON number 0 is a real serial and must survive as "0", not be dropped as falsey."""
-        view = _make_view()
-        view.librenms_id = 104
-        view._librenms_api.get_device_transceivers.return_value = (
-            True,
-            [{"entity_physical_index": 401, "model": "SFP-10G-SR", "serial": 0, "type": "SFP", "port_id": 9}],
+        view = _real_api_view(settings, librenms_server, librenms_id=104)
+        librenms_server.register(
+            "/api/v0/devices/104/transceivers",
+            {
+                "status": "ok",
+                "transceivers": [
+                    {
+                        "entity_physical_index": 401,
+                        "model": "SFP-10G-SR",
+                        "serial": 0,
+                        "type": "SFP",
+                        "port_id": 9,
+                    }
+                ],
+            },
+            method="GET",
         )
-        view._librenms_api.get_ports.return_value = (True, {"ports": [{"port_id": 9, "ifName": "Eth5/1"}]})
+        librenms_server.register(
+            "/api/v0/devices/104/ports",
+            {"status": "ok", "ports": [{"port_id": 9, "ifName": "Eth5/1"}]},
+            method="GET",
+        )
 
         inventory, error = view._merge_transceiver_data([])
 
@@ -623,15 +732,30 @@ class TestMergeTransceiverDataPortIdentity:
         assert len(inventory) == 1
         assert inventory[0]["entPhysicalSerialNum"] == "0"
 
-    def test_numeric_transceiver_model_and_type_are_coerced_to_strings(self):
+    def test_numeric_transceiver_model_and_type_are_coerced_to_strings(self, settings, librenms_server):
         """An all-digit model/type arrives as a JSON number too; stripping it raw would 500 the modules refresh."""
-        view = _make_view()
-        view.librenms_id = 105
-        view._librenms_api.get_device_transceivers.return_value = (
-            True,
-            [{"entity_physical_index": 402, "model": 1000, "serial": "TX-402", "type": 40, "port_id": 10}],
+        view = _real_api_view(settings, librenms_server, librenms_id=105)
+        librenms_server.register(
+            "/api/v0/devices/105/transceivers",
+            {
+                "status": "ok",
+                "transceivers": [
+                    {
+                        "entity_physical_index": 402,
+                        "model": 1000,
+                        "serial": "TX-402",
+                        "type": 40,
+                        "port_id": 10,
+                    }
+                ],
+            },
+            method="GET",
         )
-        view._librenms_api.get_ports.return_value = (True, {"ports": [{"port_id": 10, "ifName": "Eth6/1"}]})
+        librenms_server.register(
+            "/api/v0/devices/105/ports",
+            {"status": "ok", "ports": [{"port_id": 10, "ifName": "Eth6/1"}]},
+            method="GET",
+        )
 
         inventory, error = view._merge_transceiver_data([])
 
@@ -640,15 +764,30 @@ class TestMergeTransceiverDataPortIdentity:
         assert inventory[0]["entPhysicalModelName"] == "1000"
         assert inventory[0]["entPhysicalDescr"] == "40"
 
-    def test_numeric_entity_values_on_the_existing_item_are_coerced(self):
+    def test_numeric_entity_values_on_the_existing_item_are_coerced(self, settings, librenms_server):
         """The ENTITY-MIB side of the merge can carry numeric model/serial values as well."""
-        view = _make_view()
-        view.librenms_id = 106
-        view._librenms_api.get_device_transceivers.return_value = (
-            True,
-            [{"entity_physical_index": 403, "model": "SFP-10G-SR", "serial": "TX-403", "type": "SFP", "port_id": 11}],
+        view = _real_api_view(settings, librenms_server, librenms_id=106)
+        librenms_server.register(
+            "/api/v0/devices/106/transceivers",
+            {
+                "status": "ok",
+                "transceivers": [
+                    {
+                        "entity_physical_index": 403,
+                        "model": "SFP-10G-SR",
+                        "serial": "TX-403",
+                        "type": "SFP",
+                        "port_id": 11,
+                    }
+                ],
+            },
+            method="GET",
         )
-        view._librenms_api.get_ports.return_value = (True, {"ports": [{"port_id": 11, "ifName": "Eth7/1"}]})
+        librenms_server.register(
+            "/api/v0/devices/106/ports",
+            {"status": "ok", "ports": [{"port_id": 11, "ifName": "Eth7/1"}]},
+            method="GET",
+        )
         inventory_seed = [
             {
                 "entPhysicalIndex": 403,
@@ -668,17 +807,30 @@ class TestMergeTransceiverDataPortIdentity:
         assert inventory[0]["entPhysicalModelName"] == 1000
         assert inventory[0]["entPhysicalSerialNum"] == 4242
 
-    def test_string_index_matches_int_transceiver_index_no_duplicate(self):
-        # LibreNMS may report the ENTITY index as a string ("300") while the transceiver API
-        # returns it as an int (300). Without normalization the merge misses the existing ENTITY
-        # row and caches a duplicate synthetic transceiver; coercing both sides to int matches it.
-        view = _make_view()
-        view.librenms_id = 103
-        view._librenms_api.get_device_transceivers.return_value = (
-            True,
-            [{"entity_physical_index": 300, "model": "SFP-10G-SR", "serial": "TX-300", "type": "SFP", "port_id": 7}],
+    def test_string_index_matches_int_transceiver_index_no_duplicate(self, settings, librenms_server):
+        """LibreNMS may report the ENTITY index as a string while the transceiver API returns an int; coercing both sides matches the existing row instead of caching a duplicate."""
+        view = _real_api_view(settings, librenms_server, librenms_id=103)
+        librenms_server.register(
+            "/api/v0/devices/103/transceivers",
+            {
+                "status": "ok",
+                "transceivers": [
+                    {
+                        "entity_physical_index": 300,
+                        "model": "SFP-10G-SR",
+                        "serial": "TX-300",
+                        "type": "SFP",
+                        "port_id": 7,
+                    }
+                ],
+            },
+            method="GET",
         )
-        view._librenms_api.get_ports.return_value = (True, {"ports": [{"port_id": 7, "ifName": "Eth3/1"}]})
+        librenms_server.register(
+            "/api/v0/devices/103/ports",
+            {"status": "ok", "ports": [{"port_id": 7, "ifName": "Eth3/1"}]},
+            method="GET",
+        )
         inventory_seed = [
             {
                 "entPhysicalIndex": "300",  # string index from ENTITY-MIB
@@ -698,20 +850,21 @@ class TestMergeTransceiverDataPortIdentity:
         assert item["entPhysicalModelName"] == "SFP-10G-SR"
         assert item["_librenms_port_id"] == 7
 
-    def test_enrich_inventory_port_identity_backfills_port_rows_from_ports_api(self):
-        view = _make_view()
-        view.librenms_id = 102
-        view._librenms_api.get_ports.return_value = (
-            True,
+    def test_enrich_inventory_port_identity_backfills_port_rows_from_ports_api(self, settings, librenms_server):
+        view = _real_api_view(settings, librenms_server, librenms_id=102)
+        librenms_server.register(
+            "/api/v0/devices/102/ports",
             {
+                "status": "ok",
                 "ports": [
                     {
                         "port_id": 56284,
                         "ifName": "TenGigabitEthernet1/1/1",
                         "ifDescr": "Te1/1/1",
                     }
-                ]
+                ],
             },
+            method="GET",
         )
 
         inventory = [
@@ -728,17 +881,18 @@ class TestMergeTransceiverDataPortIdentity:
         assert inventory[0]["_librenms_ifname"] == "TenGigabitEthernet1/1/1"
         assert inventory[0]["_librenms_ifdescr"] == "Te1/1/1"
 
-    def test_enrich_inventory_port_identity_skips_ambiguous_labels(self):
-        view = _make_view()
-        view.librenms_id = 103
-        view._librenms_api.get_ports.return_value = (
-            True,
+    def test_enrich_inventory_port_identity_skips_ambiguous_labels(self, settings, librenms_server):
+        view = _real_api_view(settings, librenms_server, librenms_id=103)
+        librenms_server.register(
+            "/api/v0/devices/103/ports",
             {
+                "status": "ok",
                 "ports": [
                     {"port_id": 10, "ifName": "Te1/1/1", "ifDescr": "Uplink A"},
                     {"port_id": 11, "ifName": "Te1/1/1", "ifDescr": "Uplink B"},
-                ]
+                ],
             },
+            method="GET",
         )
 
         inventory = [{"entPhysicalClass": "port", "entPhysicalName": "Te1/1/1"}]
@@ -747,10 +901,9 @@ class TestMergeTransceiverDataPortIdentity:
 
         assert "_librenms_port_id" not in inventory[0]
 
-    def test_build_port_name_map_uses_provided_ports_payload_without_api_fetch(self):
-        view = _make_view()
-        view.librenms_id = 104
-        view._librenms_api.get_ports.side_effect = AssertionError("get_ports should not be called")
+    def test_build_port_name_map_uses_provided_ports_payload_without_api_fetch(self, settings, librenms_server):
+        view = _real_api_view(settings, librenms_server, librenms_id=104)
+        port_requests = _count_port_requests(librenms_server, 104)
 
         port_map = view._build_port_name_map(
             [{"port_id": 42}],
@@ -767,11 +920,13 @@ class TestMergeTransceiverDataPortIdentity:
 
         assert port_map[42]["ifName"] == "Te1/0/1"
         assert port_map[42]["ifDescr"] == "TenGigabitEthernet1/0/1"
+        assert port_requests == []
 
-    def test_enrich_inventory_port_identity_uses_provided_ports_payload_without_api_fetch(self):
-        view = _make_view()
-        view.librenms_id = 105
-        view._librenms_api.get_ports.side_effect = AssertionError("get_ports should not be called")
+    def test_enrich_inventory_port_identity_uses_provided_ports_payload_without_api_fetch(
+        self, settings, librenms_server
+    ):
+        view = _real_api_view(settings, librenms_server, librenms_id=105)
+        port_requests = _count_port_requests(librenms_server, 105)
 
         inventory = [{"entPhysicalClass": "port", "entPhysicalName": "Te1/1/1"}]
         view._enrich_inventory_port_identity(
@@ -790,6 +945,7 @@ class TestMergeTransceiverDataPortIdentity:
         assert inventory[0]["_librenms_port_id"] == 56284
         assert inventory[0]["_librenms_ifname"] == "TenGigabitEthernet1/1/1"
         assert inventory[0]["_librenms_ifdescr"] == "Te1/1/1"
+        assert port_requests == []
 
     def test_post_fetches_ports_once_and_reuses_payload(self):
         view = _make_view()
