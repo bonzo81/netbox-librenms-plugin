@@ -522,6 +522,97 @@ class TestIsLegacyLibreNMSIdPositivity:
             assert is_legacy_librenms_id(value) is False, value
 
 
+@pytest.mark.django_db
+class TestLibreNMSIdAcceptedFormsContract:
+    """Pin which stored librenms_id forms the reader and the lookup each accept.
+
+    Two different definitions of "a numeric id" are in use, and they are not the same:
+
+    * the reader ``get_librenms_device_id`` and the classifier ``is_legacy_librenms_id``
+      parse a top-level string with a bare ``int()``;
+    * ``coerce_librenms_id`` and the ``build_librenms_id_qs`` predicates behind
+      ``find_by_librenms_id`` require ASCII digits.
+
+    Their overlap is the deliberate legacy tolerance: surrounding ASCII whitespace, a
+    leading ``+``, leading zeros. Anything the reader accepts BEYOND that overlap resolves
+    for the reader while no query can find the row, so a guard built on
+    ``find_by_librenms_id`` cannot see it.
+
+    These tests CHARACTERISE that split rather than endorse it. Narrowing the reader was
+    tried and reverted: it only makes sense together with narrowing the classifier, and
+    once both are narrow ``set_librenms_device_id`` treats the value as corrupt and resets
+    the field, destroying a mapping the reader still resolves. Any change to either side
+    must break these tests and be a deliberate decision.
+    """
+
+    # Stored form -> id it resolves to. Accepted by BOTH sides.
+    TOLERATED = [(42, 42), ("42", 42), (" 42 ", 42), ("+42", 42), ("007", 7)]
+    # Stored form -> id the READER resolves. The lookup cannot match any of these.
+    READER_ONLY = [("4_2", 42), ("\u0661\u0662", 12), ("\uff11\uff12", 12), ("\u00a042", 42)]
+
+    @pytest.mark.parametrize("stored,resolved", TOLERATED, ids=lambda v: repr(v))
+    def test_tolerated_forms_resolve_and_are_findable(self, stored, resolved):
+        """The legacy tolerance set: the reader resolves it and a real query finds the row."""
+        from dcim.models import Device
+
+        from netbox_librenms_plugin.utils import coerce_librenms_id, find_by_librenms_id, get_librenms_device_id
+
+        device = _dev(stored)
+
+        assert get_librenms_device_id(device, "default", auto_save=False) == resolved
+        assert coerce_librenms_id(stored) == resolved
+        assert find_by_librenms_id(Device, resolved, "default") == device
+
+    @pytest.mark.parametrize("stored,resolved", READER_ONLY, ids=lambda v: repr(v))
+    def test_reader_only_forms_resolve_but_no_query_finds_them(self, stored, resolved):
+        """Forms only a bare int() accepts: the reader resolves them, the lookup is blind to them."""
+        from dcim.models import Device
+
+        from netbox_librenms_plugin.utils import coerce_librenms_id, find_by_librenms_id, get_librenms_device_id
+
+        device = _dev(stored)
+
+        # The reader binds the row to an id ...
+        assert get_librenms_device_id(device, "default", auto_save=False) == resolved
+        # ... that no predicate can match, so every lookup-based guard is blind to it.
+        assert coerce_librenms_id(stored) is None
+        assert find_by_librenms_id(Device, resolved, "default") is None
+
+    @pytest.mark.parametrize("stored,resolved", READER_ONLY, ids=lambda v: repr(v))
+    def test_a_reader_pass_with_auto_save_heals_the_row(self, stored, resolved):
+        """The split closes itself: one read with auto_save rewrites the value as a plain int.
+
+        This is why the split is tolerable in practice. A row only stays invisible to the
+        lookup while nothing has read it through the normalising path.
+        """
+        from dcim.models import Device
+
+        from netbox_librenms_plugin.utils import find_by_librenms_id, get_librenms_device_id
+
+        device = _dev(stored)
+        assert find_by_librenms_id(Device, resolved, "default") is None
+
+        assert get_librenms_device_id(device, "default") == resolved
+
+        device.refresh_from_db()
+        assert device.custom_field_data["librenms_id"] == resolved
+        assert find_by_librenms_id(Device, resolved, "default") == device
+
+    @pytest.mark.parametrize("stored,_resolved", TOLERATED + READER_ONLY, ids=lambda v: repr(v))
+    def test_the_classifier_tracks_the_reader_not_the_lookup(self, stored, _resolved):
+        """is_legacy_librenms_id must agree with the reader, because set_librenms_device_id gates on it.
+
+        Whenever the reader resolves a bare value, the classifier has to call it legacy, or
+        set_librenms_device_id falls through to its corrupt-string branch and resets the
+        custom field to an empty dict.
+        """
+        from netbox_librenms_plugin.utils import get_librenms_device_id, is_legacy_librenms_id
+
+        reader_resolves = get_librenms_device_id(_dev(stored), "default", auto_save=False) is not None
+
+        assert is_legacy_librenms_id(stored) is reader_resolves
+
+
 class TestMigrateLegacyRejectsNonPositive:
     """migrate_legacy_librenms_id must never canonicalise a non-positive id into the JSON form."""
 
