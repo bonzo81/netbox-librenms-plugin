@@ -4282,102 +4282,163 @@ class TestBuildRowModelWarning:
         assert "no_bay_reason" not in row
 
 
+@pytest.mark.django_db
 class TestModelIncompleteFlag:
-    """Verify a parent is marked model_incomplete when its installed module lacks child bay templates."""
+    """Verify the real inventory path flags incomplete installed module types."""
 
-    def _make_parent_row(self, **kwargs):
-        row = {
-            "librenms_name": "0/0",
-            "status": "Installed",
-            "module_bay": "Slot 0",
-            "module_bay_id": 1,
+    @staticmethod
+    def _row(rows, name):
+        return next(row for row in rows if row["name"] == name)
+
+    def test_first_missing_child_bay_flags_the_installed_module_type(self, settings, librenms_server):
+        """The first qualifying child supplies all incomplete-model metadata."""
+        from netbox_librenms_plugin.tests.conftest import (
+            install_module,
+            make_device_with_module_bays,
+            make_module_type,
+        )
+
+        device = make_device_with_module_bays("model-incomplete", ["Slot 1"])
+        installed_module = install_module(device, "Slot 1", "PARENT-MODULE", serial="PARENT-SERIAL")
+        make_module_type("CHILD-MODULE-A")
+        make_module_type("CHILD-MODULE-B")
+        inventory = [
+            {
+                "entPhysicalIndex": 1,
+                "entPhysicalName": "Slot 1",
+                "entPhysicalModelName": "PARENT-MODULE",
+                "entPhysicalClass": "module",
+                "entPhysicalDescr": "Installed parent module",
+                "entPhysicalContainedIn": 0,
+                "entPhysicalSerialNum": "PARENT-SERIAL",
+                "entPhysicalParentRelPos": 1,
+            },
+            {
+                "entPhysicalIndex": 2,
+                "entPhysicalName": "Daughter Bay 1",
+                "entPhysicalModelName": "CHILD-MODULE-A",
+                "entPhysicalClass": "module",
+                "entPhysicalDescr": "First daughter module",
+                "entPhysicalContainedIn": 1,
+                "entPhysicalSerialNum": "CHILD-SERIAL-A",
+                "entPhysicalParentRelPos": 1,
+            },
+            {
+                "entPhysicalIndex": 3,
+                "entPhysicalName": "Backup Socket B",
+                "entPhysicalModelName": "CHILD-MODULE-B",
+                "entPhysicalClass": "module",
+                "entPhysicalDescr": "Second daughter module",
+                "entPhysicalContainedIn": 1,
+                "entPhysicalSerialNum": "CHILD-SERIAL-B",
+                "entPhysicalParentRelPos": 2,
+            },
+        ]
+
+        view = _real_api_view(settings, librenms_server, librenms_id=101)
+        rows = _run_build_context_real(view, inventory, device)
+        parent_row = self._row(rows, "Slot 1")
+        first_child_row = self._row(rows, "Daughter Bay 1")
+        second_child_row = self._row(rows, "Backup Socket B")
+        module_type = installed_module.module_type
+
+        assert first_child_row["no_bay_reason"] == "empty_parent_bays"
+        assert second_child_row["no_bay_reason"] == "empty_parent_bays"
+        assert parent_row["model_incomplete"] is True
+        assert parent_row["model_incomplete_url"] == module_type.get_absolute_url()
+        assert parent_row["model_incomplete_name"] == str(module_type)
+        assert parent_row["model_incomplete_target_pk"] == module_type.pk
+        assert parent_row["model_incomplete_suggestion"] == {
+            "name": "Daughter Bay 1",
+            "position": "1",
+            "label": "First daughter module",
+            "librenms_name": "Daughter Bay 1",
+            "librenms_class": "module",
         }
-        row.update(kwargs)
-        return row
 
-    def test_model_incomplete_set_when_child_has_no_bay_reason(self):
-        """Parent is flagged model_incomplete when child rows have no_bay_reason='empty_parent_bays'."""
-        parent_row = self._make_parent_row()
-        child_row = {
-            "librenms_name": "TenGigE0/0/0/0",
-            "status": "No Bay",
-            "no_bay_reason": "empty_parent_bays",
-        }
-        table_data = [parent_row, child_row]
-        parent_row_idx = 0
+    def test_nonqualifying_child_does_not_flag_the_installed_module_type(self, settings, librenms_server):
+        """A child without the missing-parent-bays reason leaves the model unflagged."""
+        from netbox_librenms_plugin.tests.conftest import (
+            install_module,
+            make_device_with_module_bays,
+            make_module_type,
+        )
 
-        mt = MagicMock()
-        mt.get_absolute_url.return_value = "/dcim/module-types/5/"
-        mt.__str__ = lambda self: "A9K-24X10GE-1G-TR"
-        installed_module = MagicMock()
-        installed_module.module_type = mt
+        device = make_device_with_module_bays("model-complete-reason", ["Slot 1"])
+        install_module(device, "Slot 1", "PARENT-MODULE", serial="PARENT-SERIAL")
+        make_module_type("CHILD-OPTIC")
+        inventory = [
+            {
+                "entPhysicalIndex": 1,
+                "entPhysicalName": "Slot 1",
+                "entPhysicalModelName": "PARENT-MODULE",
+                "entPhysicalClass": "module",
+                "entPhysicalContainedIn": 0,
+                "entPhysicalSerialNum": "PARENT-SERIAL",
+            },
+            {
+                "entPhysicalIndex": 2,
+                "entPhysicalName": "Ethernet1/1",
+                "entPhysicalModelName": "CHILD-OPTIC",
+                "entPhysicalClass": "port",
+                "entPhysicalContainedIn": 1,
+                "entPhysicalSerialNum": "CHILD-SERIAL",
+            },
+        ]
 
-        # Simulate the flagging logic from _append_rows_for_item_context
-        child_bays = {}
-        if installed_module and not child_bays:
-            has_no_bay_children = any(
-                table_data[i].get("no_bay_reason") == "empty_parent_bays"
-                for i in range(parent_row_idx + 1, len(table_data))
-            )
-            if has_no_bay_children:
-                mt_ = installed_module.module_type
-                table_data[parent_row_idx]["model_incomplete"] = True
-                table_data[parent_row_idx]["model_incomplete_url"] = mt_.get_absolute_url()
-                table_data[parent_row_idx]["model_incomplete_name"] = str(mt_)
+        view = _real_api_view(settings, librenms_server, librenms_id=102)
+        rows = _run_build_context_real(view, inventory, device)
+        parent_row = self._row(rows, "Slot 1")
+        child_row = self._row(rows, "Ethernet1/1")
 
-        assert table_data[0].get("model_incomplete") is True
-        assert "/dcim/module-types/5/" in table_data[0].get("model_incomplete_url", "")
+        # Port children use a separate reason because they need interface bay handling.
+        assert child_row["no_bay_reason"] == "interface_child"
+        assert not any(key.startswith("model_incomplete") for key in parent_row)
 
-    def test_model_incomplete_not_set_when_no_children_with_no_bay_reason(self):
-        """If children don't have no_bay_reason, parent stays unflagged even if child_bays empty."""
-        parent_row = self._make_parent_row()
-        child_row = {
-            "librenms_name": "TenGigE0/0/0/0",
-            "status": "Installed",
-        }
-        table_data = [parent_row, child_row]
-        parent_row_idx = 0
+    def test_child_bay_templates_leave_the_installed_module_type_unflagged(self, settings, librenms_server):
+        """An installed module type with child bay templates stays unflagged."""
+        from netbox_librenms_plugin.tests.conftest import (
+            install_module,
+            make_device_with_module_bays,
+            make_module_type,
+        )
 
-        mt = MagicMock()
-        installed_module = MagicMock()
-        installed_module.module_type = mt
-        child_bays = {}
+        device = make_device_with_module_bays("model-with-child-bays", ["Slot 1"])
+        install_module(
+            device,
+            "Slot 1",
+            "PARENT-MODULE",
+            serial="PARENT-SERIAL",
+            child_bays=["Child Bay 1"],
+        )
+        make_module_type("CHILD-MODULE")
+        inventory = [
+            {
+                "entPhysicalIndex": 1,
+                "entPhysicalName": "Slot 1",
+                "entPhysicalModelName": "PARENT-MODULE",
+                "entPhysicalClass": "module",
+                "entPhysicalContainedIn": 0,
+                "entPhysicalSerialNum": "PARENT-SERIAL",
+            },
+            {
+                "entPhysicalIndex": 2,
+                "entPhysicalName": "Missing Bay 2",
+                "entPhysicalModelName": "CHILD-MODULE",
+                "entPhysicalClass": "module",
+                "entPhysicalContainedIn": 1,
+                "entPhysicalSerialNum": "CHILD-SERIAL",
+            },
+        ]
 
-        if installed_module and not child_bays:
-            has_no_bay_children = any(
-                table_data[i].get("no_bay_reason") == "empty_parent_bays"
-                for i in range(parent_row_idx + 1, len(table_data))
-            )
-            if has_no_bay_children:
-                table_data[parent_row_idx]["model_incomplete"] = True
+        view = _real_api_view(settings, librenms_server, librenms_id=103)
+        rows = _run_build_context_real(view, inventory, device)
+        parent_row = self._row(rows, "Slot 1")
+        child_row = self._row(rows, "Missing Bay 2")
 
-        assert "model_incomplete" not in table_data[0]
-
-    def test_model_incomplete_not_set_when_child_bays_nonempty(self):
-        """If the installed module DOES have bays in scope, no model_incomplete flag."""
-        parent_row = self._make_parent_row()
-        child_row = {
-            "librenms_name": "TenGigE0/0/0/0",
-            "status": "No Bay",
-            "no_bay_reason": "empty_parent_bays",
-        }
-        table_data = [parent_row, child_row]
-        parent_row_idx = 0
-
-        mt = MagicMock()
-        installed_module = MagicMock()
-        installed_module.module_type = mt
-        child_bays = {"Bay 0": MagicMock()}  # non-empty
-
-        if installed_module and not child_bays:
-            has_no_bay_children = any(
-                table_data[i].get("no_bay_reason") == "empty_parent_bays"
-                for i in range(parent_row_idx + 1, len(table_data))
-            )
-            if has_no_bay_children:
-                table_data[parent_row_idx]["model_incomplete"] = True
-
-        assert "model_incomplete" not in table_data[0]
+        assert child_row["status"] == "No Bay"
+        assert "no_bay_reason" not in child_row
+        assert not any(key.startswith("model_incomplete") for key in parent_row)
 
 
 class TestRenderStatusNoBayOnParent:
@@ -4643,58 +4704,101 @@ class TestMatchedInterfaceLinking:
         assert "padding-left:20px" in html
 
 
+@pytest.mark.django_db
 class TestDeviceTypeIncompleteFlag:
-    """device_type_incomplete is set on top-level No Bay rows with no suggestion."""
+    """Verify the real inventory path flags incomplete device types."""
 
-    def _make_view_and_row(self, status, model_suggestion=None):
-        """Return (view, table_data, parent_row_idx) after calling the flag logic."""
-        row = {"status": status}
-        if model_suggestion:
-            row["model_suggestion"] = model_suggestion
-        device_type = MagicMock()
-        device_type.get_absolute_url.return_value = "/dcim/device-types/7/"
-        device_type.__str__ = lambda self: "ASR-9904"
-        selected_device = MagicMock()
-        selected_device.device_type = device_type
-        return row, selected_device
+    @staticmethod
+    def _row(rows, name):
+        return next(row for row in rows if row["name"] == name)
 
-    def test_no_bay_without_suggestion_sets_device_type_incomplete(self):
-        row, selected_device = self._make_view_and_row("No Bay")
-        # Simulate the flag logic from _append_rows_for_item_context
-        if row.get("status") == "No Bay" and "model_suggestion" not in row:
-            dt = getattr(selected_device, "device_type", None)
-            if dt:
-                row["device_type_incomplete"] = True
-                row["device_type_incomplete_url"] = dt.get_absolute_url()
-                row["device_type_incomplete_name"] = str(dt)
-        assert row.get("device_type_incomplete") is True
-        assert row.get("device_type_incomplete_url") == "/dcim/device-types/7/"
+    def test_fan_without_a_candidate_bay_flags_the_device_type(self, settings, librenms_server):
+        """A fan that cannot map to a slot bay supplies all device-type metadata."""
+        from netbox_librenms_plugin.tests.conftest import make_device_with_module_bays, make_module_type
 
-    def test_no_bay_with_suggestion_does_not_set_flag(self):
-        suggestion = {"librenms_name": r"^0/(\d+)$", "netbox_bay_name": r"Slot \1"}
-        row, selected_device = self._make_view_and_row("No Bay", model_suggestion=suggestion)
-        if row.get("status") == "No Bay" and "model_suggestion" not in row:
-            dt = getattr(selected_device, "device_type", None)
-            if dt:
-                row["device_type_incomplete"] = True
-        assert "device_type_incomplete" not in row
+        device = make_device_with_module_bays("device-type-incomplete", ["Slot 0"])
+        make_module_type("FAN-MODULE")
+        inventory = [
+            {
+                "entPhysicalIndex": 1,
+                "entPhysicalName": "0/FT0",
+                "entPhysicalModelName": "FAN-MODULE",
+                "entPhysicalClass": "fan",
+                "entPhysicalDescr": "Primary fan tray",
+                "entPhysicalContainedIn": 0,
+                "entPhysicalSerialNum": "FAN-SERIAL",
+            }
+        ]
 
-    def test_installed_row_does_not_set_flag(self):
-        row, selected_device = self._make_view_and_row("Installed")
-        if row.get("status") == "No Bay" and "model_suggestion" not in row:
-            dt = getattr(selected_device, "device_type", None)
-            if dt:
-                row["device_type_incomplete"] = True
-        assert "device_type_incomplete" not in row
+        view = _real_api_view(settings, librenms_server, librenms_id=201)
+        rows = _run_build_context_real(view, inventory, device)
+        row = self._row(rows, "0/FT0")
+        device_type = device.device_type
 
-    def test_no_device_type_attribute_does_not_raise(self):
-        row = {"status": "No Bay"}
-        selected_device = MagicMock(spec=[])  # no device_type attr
-        if row.get("status") == "No Bay" and "model_suggestion" not in row:
-            dt = getattr(selected_device, "device_type", None)
-            if dt:
-                row["device_type_incomplete"] = True
-        assert "device_type_incomplete" not in row
+        assert row["status"] == "No Bay"
+        assert "model_suggestion" not in row
+        assert row["device_type_incomplete"] is True
+        assert row["device_type_incomplete_url"] == device_type.get_absolute_url()
+        assert row["device_type_incomplete_name"] == str(device_type)
+        assert row["device_type_incomplete_target_pk"] == device_type.pk
+        assert row["device_type_incomplete_suggestion"] == {
+            "name": "0/FT0",
+            "position": "0",
+            "label": "Primary fan tray",
+            "librenms_name": "0/FT0",
+            "librenms_class": "fan",
+        }
+
+    def test_fan_bay_suggestion_leaves_the_device_type_unflagged(self, settings, librenms_server):
+        """A fan-named bay yields a mapping suggestion instead of an incomplete flag."""
+        from netbox_librenms_plugin.tests.conftest import make_device_with_module_bays, make_module_type
+
+        device = make_device_with_module_bays("device-type-suggestion", ["Fan Tray 0"])
+        make_module_type("FAN-MODULE")
+        inventory = [
+            {
+                "entPhysicalIndex": 1,
+                "entPhysicalName": "0/FT0",
+                "entPhysicalModelName": "FAN-MODULE",
+                "entPhysicalClass": "fan",
+                "entPhysicalDescr": "Primary fan tray",
+                "entPhysicalContainedIn": 0,
+                "entPhysicalSerialNum": "FAN-SERIAL",
+            }
+        ]
+
+        view = _real_api_view(settings, librenms_server, librenms_id=202)
+        rows = _run_build_context_real(view, inventory, device)
+        row = self._row(rows, "0/FT0")
+
+        assert row["status"] == "No Bay"
+        assert row["model_suggestion"]["netbox_bay_name"] == r"Fan Tray \1"
+        assert not any(key.startswith("device_type_incomplete") for key in row)
+
+    def test_installed_fan_leaves_the_device_type_unflagged(self, settings, librenms_server):
+        """An installed inventory row does not mark its device type incomplete."""
+        from netbox_librenms_plugin.tests.conftest import install_module, make_device_with_module_bays
+
+        device = make_device_with_module_bays("device-type-installed", ["Fan Tray 0"])
+        install_module(device, "Fan Tray 0", "FAN-MODULE", serial="FAN-SERIAL")
+        inventory = [
+            {
+                "entPhysicalIndex": 1,
+                "entPhysicalName": "Fan Tray 0",
+                "entPhysicalModelName": "FAN-MODULE",
+                "entPhysicalClass": "fan",
+                "entPhysicalDescr": "Primary fan tray",
+                "entPhysicalContainedIn": 0,
+                "entPhysicalSerialNum": "FAN-SERIAL",
+            }
+        ]
+
+        view = _real_api_view(settings, librenms_server, librenms_id=203)
+        rows = _run_build_context_real(view, inventory, device)
+        row = self._row(rows, "Fan Tray 0")
+
+        assert row["status"] == "Installed"
+        assert not any(key.startswith("device_type_incomplete") for key in row)
 
 
 class TestRenderStatusDeviceTypeIncomplete:
