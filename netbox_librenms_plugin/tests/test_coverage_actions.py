@@ -9,6 +9,7 @@ from django.test import RequestFactory
 from django.urls import reverse as url_for
 
 from netbox_librenms_plugin.tests.conftest import (
+    make_cluster,
     make_device,
     make_interface,
     make_ip,
@@ -4465,8 +4466,13 @@ class TestBulkImportDevicesMorePaths:
         request = make_view_request("post", data, user=user, **factory_kwargs)
         return view, request
 
-    def test_invalid_cluster_value_logs_warning(self, settings, caplog):
-        """Lines 522-526: invalid cluster_value → warning, continue."""
+    def test_invalid_cluster_value_fails_closed_and_imports_nothing(self, settings):
+        """An unparseable cluster id must abort the batch, not quietly import the row as a Device.
+
+        The row never reaches vm_imports when int() raises, so falling through would import it
+        through the device path with the requested cluster discarded. It would also shift the
+        permission check from add_virtualmachine to add_device.
+        """
         user = self._device_import_user("bulk-more-invalid-cluster-user")
         view, request = self._make_base_request(
             settings,
@@ -4475,23 +4481,64 @@ class TestBulkImportDevicesMorePaths:
             {"cluster_1": "not-int"},
             server_key="bulk-more-invalid-cluster",
         )
-        # cluster_1 is set to invalid value
         with (
-            patch(
-                "netbox_librenms_plugin.views.imports.actions.bulk_import_devices",
-                return_value={"success": [], "failed": [], "skipped": [], "virtual_chassis_created": 0},
-            ) as mock_device_import,
+            patch("netbox_librenms_plugin.views.imports.actions.bulk_import_devices") as mock_device_import,
             patch("netbox_librenms_plugin.views.imports.actions.bulk_import_vms") as mock_vm_import,
         ):
             response = post_view(view, request)
 
-        assert "Ignoring invalid cluster/role id for VM import of device 1" in caplog.text
-        # The device never lands in vm_imports because the int() raised, so post() falls through
-        # and imports it as a DEVICE. The selected cluster is silently dropped.
-        assert mock_device_import.call_args.kwargs["device_ids"] == [1]
+        mock_device_import.assert_not_called()
         mock_vm_import.assert_not_called()
         assert response.status_code == 302
         assert response["Location"] == url_for("plugins:netbox_librenms_plugin:librenms_import")
+        assert "Invalid cluster or role selection supplied" in view_message_texts(request, "error")
+
+    def test_invalid_cluster_value_fails_closed_on_the_htmx_path(self, settings):
+        """The HTMX path gets a bare 400, matching the other invalid-input responses in this view."""
+        user = self._device_import_user("bulk-more-invalid-cluster-htmx-user")
+        view, request = self._make_base_request(
+            settings,
+            ["1"],
+            user,
+            {"cluster_1": "not-int"},
+            server_key="bulk-more-invalid-cluster-htmx",
+            htmx=True,
+        )
+        with (
+            patch("netbox_librenms_plugin.views.imports.actions.bulk_import_devices") as mock_device_import,
+            patch("netbox_librenms_plugin.views.imports.actions.bulk_import_vms") as mock_vm_import,
+        ):
+            response = post_view(view, request)
+
+        mock_device_import.assert_not_called()
+        mock_vm_import.assert_not_called()
+        assert response.status_code == 400
+
+    def test_invalid_role_on_a_valid_cluster_still_imports_the_vm(self, settings, caplog):
+        """A bad role id next to a valid cluster keeps the VM import and drops only the role."""
+        user = self._vm_import_user("bulk-more-invalid-role-user")
+        cluster = make_cluster("bulk-more-invalid-role-cluster")
+        view, request = self._make_base_request(
+            settings,
+            ["1"],
+            user,
+            {"cluster_1": str(cluster.pk), "role_1": "not-int"},
+            server_key="bulk-more-invalid-role",
+        )
+        with (
+            patch("netbox_librenms_plugin.views.imports.actions.bulk_import_devices") as mock_device_import,
+            patch(
+                "netbox_librenms_plugin.views.imports.actions.bulk_import_vms",
+                return_value={"success": [], "failed": [], "skipped": []},
+            ) as mock_vm_import,
+        ):
+            response = post_view(view, request)
+
+        assert "Ignoring invalid role id 'not-int' for VM import of device 1" in caplog.text
+        # bulk_import_vms takes vm_imports positionally; the role was dropped, the cluster kept.
+        assert mock_vm_import.call_args.args[0] == {1: {"cluster_id": cluster.pk}}
+        mock_device_import.assert_not_called()
+        assert response.status_code == 302
 
     def test_valid_role_and_rack_values_applied(self, settings):
         """Lines 531-552: valid role_id and rack_id → parsed into mappings."""

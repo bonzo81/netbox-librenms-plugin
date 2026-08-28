@@ -1089,16 +1089,33 @@ class BulkImportDevicesView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
             # If cluster is selected, this is a VM import
             if cluster_value:
                 try:
-                    vm_imports[device_id] = {"cluster_id": int(cluster_value)}
-                    # VMs can also have roles
-                    role_value = request.POST.get(f"role_{device_id}")
-                    if role_value:
-                        vm_imports[device_id]["device_role_id"] = int(role_value)
+                    cluster_id = int(cluster_value)
                 except (TypeError, ValueError):
+                    # Fail closed. Falling through would leave the row out of vm_imports and
+                    # import it as a plain Device with the requested cluster discarded, and it
+                    # would swap the required permission from add_virtualmachine to add_device.
                     logger.warning(
-                        "Ignoring invalid cluster/role id for VM import of device %s",
+                        "Rejecting invalid cluster id '%s' for VM import of device %s",
+                        cluster_value,
                         device_id,
                     )
+                    if is_htmx:
+                        return HttpResponse("Invalid cluster or role selection", status=400)
+                    messages.error(request, "Invalid cluster or role selection supplied")
+                    return redirect("plugins:netbox_librenms_plugin:librenms_import")
+                vm_imports[device_id] = {"cluster_id": cluster_id}
+                # VMs can also have roles. A bad role only drops the role: the VM is still
+                # created under the cluster the user picked, so the object type does not change.
+                role_value = request.POST.get(f"role_{device_id}")
+                if role_value:
+                    try:
+                        vm_imports[device_id]["device_role_id"] = int(role_value)
+                    except (TypeError, ValueError):
+                        logger.warning(
+                            "Ignoring invalid role id '%s' for VM import of device %s",
+                            role_value,
+                            device_id,
+                        )
                 continue  # Skip device-specific mappings for VMs
 
             # Device import mappings
