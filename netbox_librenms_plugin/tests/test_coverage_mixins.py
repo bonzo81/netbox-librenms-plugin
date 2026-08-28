@@ -698,297 +698,264 @@ class TestSelectMostSpecificGroupPriorityPaths:
 
         return object.__new__(VlanAssignmentMixin)
 
+    @pytest.mark.django_db
     def test_returns_none_when_groups_empty(self):
         """Returns None immediately when groups list is empty (line 472)."""
+        from netbox_librenms_plugin.tests.conftest import make_device
+
         mixin = self._make_mixin()
-        device = MagicMock()
+        device = make_device("priority-empty-groups")
         result = mixin._select_most_specific_group([], device)
         assert result is None
 
+    @pytest.mark.django_db
     def test_returns_none_when_device_is_none(self):
         """Returns None immediately when device is None (line 472)."""
+        from ipam.models import VLANGroup
+
         mixin = self._make_mixin()
-        group = MagicMock()
+        group = VLANGroup.objects.create(name="Priority no device", slug="priority-no-device")
         result = mixin._select_most_specific_group([group], None)
         assert result is None
 
+    @pytest.mark.django_db
     def test_rack_priority_path_executed(self):
         """Rack group beats site and global groups (highest priority)."""
+        from dcim.models import Rack, Site
+        from django.contrib.contenttypes.models import ContentType
+        from ipam.models import VLANGroup
+
+        from netbox_librenms_plugin.tests.conftest import make_device
+
         mixin = self._make_mixin()
-
-        rack = MagicMock()
-        rack.pk = 5
-
-        site = MagicMock()
-        site.pk = 1
-        site.group = None
-        site.region = None
-
-        rack_ct = MagicMock()
-        rack_ct.pk = 10
-        site_ct = MagicMock()
-        site_ct.pk = 11
-
-        rack_group = MagicMock()
-        rack_group.scope_type = rack_ct
-        rack_group.scope_id = 5
-
-        site_group_grp = MagicMock()
-        site_group_grp.scope_type = site_ct
-        site_group_grp.scope_id = 1
-
-        global_group = MagicMock()
-        global_group.scope_type = None
-
-        device = MagicMock()
+        device = make_device("priority-rack-device")
+        rack = Rack.objects.create(name="Priority rack", site=device.site, status="active")
         device.rack = rack
-        device.location = None
-        device.site = site
+        device.save(update_fields=["rack"])
 
-        def ct_for_model(model):
-            import dcim.models as dm
+        rack_group = VLANGroup.objects.create(
+            name="Priority rack group",
+            slug="priority-rack-group",
+            scope_type=ContentType.objects.get_for_model(Rack),
+            scope_id=rack.pk,
+        )
+        site_group = VLANGroup.objects.create(
+            name="Priority site competitor",
+            slug="priority-site-competitor",
+            scope_type=ContentType.objects.get_for_model(Site),
+            scope_id=device.site.pk,
+        )
+        global_group = VLANGroup.objects.create(name="Priority global competitor", slug="priority-global-competitor")
 
-            if model is dm.Rack:
-                return rack_ct
-            if model is dm.Site:
-                return site_ct
-            return MagicMock(pk=99)
-
-        with (
-            patch("django.contrib.contenttypes.models.ContentType") as MockCT,
-        ):
-            MockCT.objects.get_for_model.side_effect = ct_for_model
-            result = mixin._select_most_specific_group([site_group_grp, global_group, rack_group], device)
+        result = mixin._select_most_specific_group([site_group, global_group, rack_group], device)
 
         # rack_group must win over site and global groups
-        assert result is rack_group
+        assert result == rack_group
 
+    @pytest.mark.django_db
     def test_location_priority_path_executed(self):
         """Device with location executes location priority path (lines 487-490)."""
+        from dcim.models import Location
+        from django.contrib.contenttypes.models import ContentType
+        from ipam.models import VLANGroup
+
+        from netbox_librenms_plugin.tests.conftest import make_device
+
         mixin = self._make_mixin()
+        device = make_device("priority-location-device")
+        parent_location = Location.objects.create(
+            name="Priority parent location",
+            slug="priority-parent-location",
+            site=device.site,
+            status="active",
+        )
+        child_location = Location.objects.create(
+            name="Priority child location",
+            slug="priority-child-location",
+            site=device.site,
+            status="active",
+            parent=parent_location,
+        )
+        device.location = child_location
+        device.save(update_fields=["location"])
 
-        parent_loc = MagicMock()
-        parent_loc.pk = 20
-        parent_loc.parent = None
+        location_type = ContentType.objects.get_for_model(Location)
+        child_group = VLANGroup.objects.create(
+            name="Priority child location group",
+            slug="priority-child-location-group",
+            scope_type=location_type,
+            scope_id=child_location.pk,
+        )
+        parent_group = VLANGroup.objects.create(
+            name="Priority parent location group",
+            slug="priority-parent-location-group",
+            scope_type=location_type,
+            scope_id=parent_location.pk,
+        )
 
-        child_loc = MagicMock()
-        child_loc.pk = 21
-        child_loc.parent = parent_loc
-
-        loc_ct = MagicMock()
-        loc_ct.pk = 2
-
-        child_group = MagicMock()
-        child_group.scope_type = loc_ct
-        child_group.scope_id = 21
-
-        parent_group = MagicMock()
-        parent_group.scope_type = loc_ct
-        parent_group.scope_id = 20
-
-        device = MagicMock()
-        device.rack = None
-        device.location = child_loc
-        device.site = None
-
-        with (
-            patch("dcim.models.Rack"),
-            patch("dcim.models.Location"),
-            patch("dcim.models.Site"),
-            patch("dcim.models.SiteGroup"),
-            patch("dcim.models.Region"),
-            patch("django.contrib.contenttypes.models.ContentType") as MockCT,
-            patch.object(mixin, "_get_ancestors", return_value=[child_loc, parent_loc]),
-        ):
-            MockCT.objects.get_for_model.return_value = loc_ct
-            result = mixin._select_most_specific_group([child_group, parent_group], device)
+        result = mixin._select_most_specific_group([parent_group, child_group], device)
 
         # Child location (first in ancestry) has lower priority number = more specific
-        assert result is child_group
+        assert result == child_group
 
+    @pytest.mark.django_db
+    def test_ancestor_location_group_beats_a_global_group(self):
+        """Only the ancestor walk can find a group scoped to the device's PARENT location."""
+        from dcim.models import Location
+        from django.contrib.contenttypes.models import ContentType
+        from ipam.models import VLANGroup
+
+        from netbox_librenms_plugin.tests.conftest import make_device
+
+        mixin = self._make_mixin()
+        device = make_device("ancestor-location-device")
+        parent_location = Location.objects.create(
+            name="Ancestor parent location",
+            slug="ancestor-parent-location",
+            site=device.site,
+            status="active",
+        )
+        child_location = Location.objects.create(
+            name="Ancestor child location",
+            slug="ancestor-child-location",
+            site=device.site,
+            status="active",
+            parent=parent_location,
+        )
+        device.location = child_location
+        device.save(update_fields=["location"])
+
+        # The device sits in the child; the only location-scoped group is on the parent.
+        parent_group = VLANGroup.objects.create(
+            name="Ancestor parent location group",
+            slug="ancestor-parent-location-group",
+            scope_type=ContentType.objects.get_for_model(Location),
+            scope_id=parent_location.pk,
+        )
+        global_group = VLANGroup.objects.create(name="Ancestor global group", slug="ancestor-global-group")
+
+        result = mixin._select_most_specific_group([global_group, parent_group], device)
+
+        assert result == parent_group
+
+    @pytest.mark.django_db
     def test_site_priority_path_executed(self):
         """Device with site (no rack/location) executes site priority path (lines 500-503)."""
+        from dcim.models import Site
+        from django.contrib.contenttypes.models import ContentType
+        from ipam.models import VLANGroup
+
+        from netbox_librenms_plugin.tests.conftest import make_device
+
         mixin = self._make_mixin()
+        device = make_device("priority-site-device")
+        site_group = VLANGroup.objects.create(
+            name="Priority site group",
+            slug="priority-site-group",
+            scope_type=ContentType.objects.get_for_model(Site),
+            scope_id=device.site.pk,
+        )
+        global_group = VLANGroup.objects.create(name="Priority site global", slug="priority-site-global")
 
-        site = MagicMock()
-        site.pk = 7
-        site.region = None
-        site.group = None
-
-        site_ct = MagicMock()
-        site_ct.pk = 3
-
-        site_group = MagicMock()
-        site_group.scope_type = site_ct
-        site_group.scope_id = 7
-
-        # Competing global group (less specific — scope_type=None)
-        global_group = MagicMock()
-        global_group.scope_type = None
-
-        device = MagicMock()
-        device.rack = None
-        device.location = None
-        device.site = site
-
-        with (
-            patch("dcim.models.Rack"),
-            patch("dcim.models.Location"),
-            patch("dcim.models.Site"),
-            patch("dcim.models.SiteGroup"),
-            patch("dcim.models.Region"),
-            patch("django.contrib.contenttypes.models.ContentType") as MockCT,
-        ):
-            MockCT.objects.get_for_model.return_value = site_ct
-            result = mixin._select_most_specific_group([global_group, site_group], device)
+        result = mixin._select_most_specific_group([global_group, site_group], device)
 
         # site-scoped group wins over global group
-        assert result is site_group
+        assert result == site_group
 
+    @pytest.mark.django_db
     def test_region_priority_path_executed(self):
         """Device with site.region executes region hierarchy path (lines 507-510)."""
+        from dcim.models import Region, Site
+        from django.contrib.contenttypes.models import ContentType
+        from ipam.models import VLANGroup
+
+        from netbox_librenms_plugin.tests.conftest import make_device
+
         mixin = self._make_mixin()
-
-        region = MagicMock()
-        region.pk = 15
-        region.parent = None
-
-        site = MagicMock()
-        site.pk = 8
-        site.region = region
-        site.group = None
-
-        region_ct = MagicMock()
-        region_ct.pk = 4
-
-        site_ct = MagicMock()
-        site_ct.pk = 3
-
-        region_group = MagicMock()
-        region_group.scope_type = region_ct
-        region_group.scope_id = 15
-
-        # Competing global group (less specific — scope_type=None)
-        global_group = MagicMock()
-        global_group.scope_type = None
-
-        device = MagicMock()
-        device.rack = None
-        device.location = None
+        region = Region.objects.create(name="Priority region", slug="priority-region")
+        site = Site.objects.create(
+            name="Priority region site",
+            slug="priority-region-site",
+            status="active",
+            region=region,
+        )
+        device = make_device("priority-region-device")
         device.site = site
+        device.save(update_fields=["site"])
 
-        with (
-            patch("dcim.models.Rack") as MockRack,
-            patch("dcim.models.Location") as MockLocation,
-            patch("dcim.models.Site") as MockSite,
-            patch("dcim.models.SiteGroup") as MockSiteGroup,
-            patch("dcim.models.Region") as MockRegion,
-            patch("django.contrib.contenttypes.models.ContentType") as MockCT,
-            patch.object(mixin, "_get_ancestors", return_value=[region]),
-        ):
-            ct_map = {
-                id(MockRack): MagicMock(pk=99),
-                id(MockLocation): MagicMock(pk=2),
-                id(MockSite): site_ct,
-                id(MockSiteGroup): MagicMock(pk=5),
-                id(MockRegion): region_ct,
-            }
-            MockCT.objects.get_for_model.side_effect = lambda m: ct_map[id(m)]
-            result = mixin._select_most_specific_group([global_group, region_group], device)
+        region_group = VLANGroup.objects.create(
+            name="Priority region group",
+            slug="priority-region-group",
+            scope_type=ContentType.objects.get_for_model(Region),
+            scope_id=region.pk,
+        )
+        global_group = VLANGroup.objects.create(name="Priority region global", slug="priority-region-global")
+
+        result = mixin._select_most_specific_group([global_group, region_group], device)
 
         # region-scoped group wins over global group
-        assert result is region_group
+        assert result == region_group
 
+    @pytest.mark.django_db
     def test_global_scope_group_lowest_priority(self):
         """Global scope group (scope_type=None) loses to any scoped group."""
+        from dcim.models import Site
+        from django.contrib.contenttypes.models import ContentType
+        from ipam.models import VLANGroup
+
+        from netbox_librenms_plugin.tests.conftest import make_device
+
         mixin = self._make_mixin()
+        device = make_device("priority-global-device")
+        global_group = VLANGroup.objects.create(name="Priority global group", slug="priority-global-group")
+        site_group = VLANGroup.objects.create(
+            name="Priority global site competitor",
+            slug="priority-global-site-competitor",
+            scope_type=ContentType.objects.get_for_model(Site),
+            scope_id=device.site.pk,
+        )
 
-        global_group = MagicMock()
-        global_group.scope_type = None  # global
-
-        site = MagicMock()
-        site.pk = 5
-        site.region = None
-        site.group = None
-
-        site_ct = MagicMock()
-        site_ct.pk = 3
-
-        site_group = MagicMock()
-        site_group.scope_type = site_ct
-        site_group.scope_id = 5
-
-        device = MagicMock()
-        device.rack = None
-        device.location = None
-        device.site = site
-
-        with (
-            patch("dcim.models.Rack"),
-            patch("dcim.models.Location"),
-            patch("dcim.models.Site"),
-            patch("dcim.models.SiteGroup"),
-            patch("dcim.models.Region"),
-            patch("django.contrib.contenttypes.models.ContentType") as MockCT,
-        ):
-            MockCT.objects.get_for_model.return_value = site_ct
-            result = mixin._select_most_specific_group([global_group, site_group], device)
+        result = mixin._select_most_specific_group([global_group, site_group], device)
 
         # site-scoped group wins over global (global has lowest priority)
-        assert result is site_group
+        assert result == site_group
 
+    @pytest.mark.django_db
     def test_site_group_priority_path_executed(self):
         """Device with site.group executes site-group hierarchy path."""
+        from dcim.models import Site, SiteGroup
+        from django.contrib.contenttypes.models import ContentType
+        from ipam.models import VLANGroup
+
+        from netbox_librenms_plugin.tests.conftest import make_device
+
         mixin = self._make_mixin()
-
-        sg = MagicMock()
-        sg.pk = 30
-        sg.parent = None
-
-        site = MagicMock()
-        site.pk = 9
-        site.region = None
-        site.group = sg
-
-        sg_ct = MagicMock()
-        sg_ct.pk = 5
-
-        site_ct = MagicMock()
-        site_ct.pk = 3
-
-        sg_group = MagicMock()
-        sg_group.scope_type = sg_ct
-        sg_group.scope_id = 30
-
-        # Competing global group (less specific)
-        global_group = MagicMock()
-        global_group.scope_type = None
-
-        device = MagicMock()
-        device.rack = None
-        device.location = None
+        site_group_scope = SiteGroup.objects.create(name="Priority site group scope", slug="priority-site-group-scope")
+        site = Site.objects.create(
+            name="Priority grouped site",
+            slug="priority-grouped-site",
+            status="active",
+            group=site_group_scope,
+        )
+        device = make_device("priority-site-group-device")
         device.site = site
+        device.save(update_fields=["site"])
 
-        def mock_get_for_model(model_cls):
-            name = str(getattr(model_cls, "__name__", model_cls))
-            if "SiteGroup" in name:
-                return sg_ct
-            return site_ct
+        site_group = VLANGroup.objects.create(
+            name="Priority scoped site group",
+            slug="priority-scoped-site-group",
+            scope_type=ContentType.objects.get_for_model(SiteGroup),
+            scope_id=site_group_scope.pk,
+        )
+        global_group = VLANGroup.objects.create(
+            name="Priority site group global",
+            slug="priority-site-group-global",
+        )
 
-        with (
-            patch("dcim.models.Rack"),
-            patch("dcim.models.Location"),
-            patch("dcim.models.Site"),
-            patch("dcim.models.SiteGroup"),
-            patch("dcim.models.Region"),
-            patch("django.contrib.contenttypes.models.ContentType") as MockCT,
-            patch.object(mixin, "_get_ancestors", return_value=[sg]),
-        ):
-            MockCT.objects.get_for_model.side_effect = mock_get_for_model
-            result = mixin._select_most_specific_group([global_group, sg_group], device)
+        result = mixin._select_most_specific_group([global_group, site_group], device)
 
         # site-group-scoped group wins over global group
-        assert result is sg_group
+        assert result == site_group
 
 
 # =============================================================================
@@ -1004,79 +971,106 @@ class TestGetVlanGroupsForScope:
 
         return object.__new__(VlanAssignmentMixin)
 
-    def test_empty_objects_returns_none_queryset(self):
+    @pytest.mark.django_db
+    def test_empty_objects_returns_none_queryset(self, django_assert_num_queries):
         """Empty objects list → VLANGroup.objects.none() (line 568)."""
+        from dcim.models import Site
+        from django.contrib.contenttypes.models import ContentType
+        from ipam.models import VLANGroup
+
         mixin = self._make_mixin()
+        site = Site.objects.create(name="Empty scope site", slug="empty-scope-site")
+        VLANGroup.objects.create(
+            name="Empty scope existing group",
+            slug="empty-scope-existing-group",
+            scope_type=ContentType.objects.get_for_model(Site),
+            scope_id=site.pk,
+        )
 
-        with (
-            patch("django.contrib.contenttypes.models.ContentType"),
-            patch("ipam.models.VLANGroup") as MockVLANGroup,
-        ):
-            MockVLANGroup.objects.none.return_value = []
-            mixin._get_vlan_groups_for_scope(MagicMock(), [])
+        result = mixin._get_vlan_groups_for_scope(Site, [])
 
-        MockVLANGroup.objects.none.assert_called_once()
+        with django_assert_num_queries(0):
+            assert list(result) == []
 
-    def test_all_none_pks_returns_none_queryset(self):
+    @pytest.mark.django_db
+    def test_all_none_pks_returns_none_queryset(self, django_assert_num_queries):
         """Objects with only None PKs → VLANGroup.objects.none() (line 574)."""
+        from dcim.models import Site
+        from django.contrib.contenttypes.models import ContentType
+        from ipam.models import VLANGroup
+
         mixin = self._make_mixin()
+        saved_site = Site.objects.create(name="Saved scope site", slug="saved-scope-site")
+        VLANGroup.objects.create(
+            name="Saved scope existing group",
+            slug="saved-scope-existing-group",
+            scope_type=ContentType.objects.get_for_model(Site),
+            scope_id=saved_site.pk,
+        )
+        unsaved_site = Site(name="Unsaved scope site", slug="unsaved-scope-site")
 
-        obj = MagicMock()
-        obj.pk = None
+        result = mixin._get_vlan_groups_for_scope(Site, [unsaved_site])
 
-        with (
-            patch("django.contrib.contenttypes.models.ContentType") as MockCT,
-            patch("ipam.models.VLANGroup") as MockVLANGroup,
-        ):
-            MockCT.objects.get_for_model.return_value = MagicMock()
-            MockVLANGroup.objects.none.return_value = []
-            mixin._get_vlan_groups_for_scope(MagicMock(), [obj])
+        with django_assert_num_queries(0):
+            assert list(result) == []
 
-        MockVLANGroup.objects.none.assert_called_once()
-
+    @pytest.mark.django_db
     def test_valid_objects_queries_vlan_groups(self):
         """Valid objects list queries VLANGroup with correct scope args (line 576)."""
+        from dcim.models import Site
+        from django.contrib.contenttypes.models import ContentType
+        from ipam.models import VLANGroup
+
         mixin = self._make_mixin()
+        site = Site.objects.create(name="Valid scope site", slug="valid-scope-site")
+        other_site = Site.objects.create(name="Other valid scope site", slug="other-valid-scope-site")
+        site_type = ContentType.objects.get_for_model(Site)
+        expected_group = VLANGroup.objects.create(
+            name="Valid scope group",
+            slug="valid-scope-group",
+            scope_type=site_type,
+            scope_id=site.pk,
+        )
+        VLANGroup.objects.create(
+            name="Other valid scope group",
+            slug="other-valid-scope-group",
+            scope_type=site_type,
+            scope_id=other_site.pk,
+        )
+        VLANGroup.objects.create(name="Valid scope global group", slug="valid-scope-global-group")
 
-        obj = MagicMock()
-        obj.pk = 10
+        result = mixin._get_vlan_groups_for_scope(Site, [site])
 
-        ct = MagicMock()
-        ct.pk = 99
-        expected = [MagicMock()]
+        assert list(result) == [expected_group]
 
-        with (
-            patch("django.contrib.contenttypes.models.ContentType") as MockCT,
-            patch("ipam.models.VLANGroup") as MockVLANGroup,
-        ):
-            MockCT.objects.get_for_model.return_value = ct
-            MockVLANGroup.objects.filter.return_value = expected
-            result = mixin._get_vlan_groups_for_scope(MagicMock(), [obj])
-
-        MockVLANGroup.objects.filter.assert_called_once_with(scope_type=ct, scope_id__in=[10])
-        assert result is expected
-
+    @pytest.mark.django_db
     def test_mixed_none_and_valid_pks_excludes_none(self):
         """Objects with mixed None/valid PKs: only valid PKs used in filter."""
+        from dcim.models import Site
+        from django.contrib.contenttypes.models import ContentType
+        from ipam.models import VLANGroup
+
         mixin = self._make_mixin()
+        valid_site = Site.objects.create(name="Mixed valid scope site", slug="mixed-valid-scope-site")
+        other_site = Site.objects.create(name="Mixed other scope site", slug="mixed-other-scope-site")
+        unsaved_site = Site(name="Mixed unsaved scope site", slug="mixed-unsaved-scope-site")
+        site_type = ContentType.objects.get_for_model(Site)
+        expected_group = VLANGroup.objects.create(
+            name="Mixed valid scope group",
+            slug="mixed-valid-scope-group",
+            scope_type=site_type,
+            scope_id=valid_site.pk,
+        )
+        VLANGroup.objects.create(
+            name="Mixed other scope group",
+            slug="mixed-other-scope-group",
+            scope_type=site_type,
+            scope_id=other_site.pk,
+        )
 
-        obj_none = MagicMock()
-        obj_none.pk = None
-        obj_valid = MagicMock()
-        obj_valid.pk = 5
+        result = mixin._get_vlan_groups_for_scope(Site, [unsaved_site, valid_site])
 
-        ct = MagicMock()
-
-        with (
-            patch("django.contrib.contenttypes.models.ContentType") as MockCT,
-            patch("ipam.models.VLANGroup") as MockVLANGroup,
-        ):
-            MockCT.objects.get_for_model.return_value = ct
-            MockVLANGroup.objects.filter.return_value = []
-            mixin._get_vlan_groups_for_scope(MagicMock(), [obj_none, obj_valid])
-
-        call_kwargs = MockVLANGroup.objects.filter.call_args[1]
-        assert call_kwargs["scope_id__in"] == [5]
+        assert list(result) == [expected_group]
 
 
 # =============================================================================
@@ -1092,45 +1086,45 @@ class TestFindVlanInGroupFallback:
 
         return object.__new__(VlanAssignmentMixin)
 
+    @pytest.mark.django_db
     def test_fallback_to_first_vlan_when_no_group_or_global_match(self):
         """When no group or global VLAN exists for a VID, first from vid_to_vlans is returned."""
-        mixin = self._make_mixin()
+        from ipam.models import VLAN, VLANGroup
 
-        any_vlan = MagicMock()
-        lookup_maps = {
-            "vid_group_to_vlan": {},  # no group or global match
-            "vid_to_vlans": {100: [any_vlan]},
-        }
+        mixin = self._make_mixin()
+        group = VLANGroup.objects.create(name="Fallback VLAN group", slug="fallback-vlan-group")
+        any_vlan = VLAN.objects.create(vid=100, name="Fallback VLAN", group=group)
+        lookup_maps = mixin._build_vlan_lookup_maps([group])
 
         result = mixin._find_vlan_in_group(100, None, lookup_maps)
 
-        assert result is any_vlan
+        assert result == any_vlan
 
+    @pytest.mark.django_db
     def test_returns_none_when_vid_not_in_vid_to_vlans(self):
         """Returns None when VID has no entries at all."""
-        mixin = self._make_mixin()
+        from ipam.models import VLAN, VLANGroup
 
-        lookup_maps = {
-            "vid_group_to_vlan": {},
-            "vid_to_vlans": {},
-        }
+        mixin = self._make_mixin()
+        group = VLANGroup.objects.create(name="Missing VID group", slug="missing-vid-group")
+        VLAN.objects.create(vid=100, name="Present VLAN", group=group)
+        lookup_maps = mixin._build_vlan_lookup_maps([group])
 
         result = mixin._find_vlan_in_group(999, None, lookup_maps)
         assert result is None
 
+    @pytest.mark.django_db
     def test_invalid_group_id_skips_group_lookup_and_falls_back(self):
         """Non-integer vlan_group_id raises ValueError → falls back to global/any."""
-        mixin = self._make_mixin()
+        from ipam.models import VLAN
 
-        global_vlan = MagicMock()
-        lookup_maps = {
-            "vid_group_to_vlan": {(100, None): global_vlan},
-            "vid_to_vlans": {100: [global_vlan]},
-        }
+        mixin = self._make_mixin()
+        global_vlan = VLAN.objects.create(vid=100, name="Global fallback VLAN")
+        lookup_maps = mixin._build_vlan_lookup_maps([])
 
         result = mixin._find_vlan_in_group(100, "not-a-number", lookup_maps)
 
-        assert result is global_vlan
+        assert result == global_vlan
 
 
 # =============================================================================
