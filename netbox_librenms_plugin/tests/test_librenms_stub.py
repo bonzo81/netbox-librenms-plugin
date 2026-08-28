@@ -195,6 +195,35 @@ def test_stub_supports_librenms_device_filters_and_lookup_aliases():
         server.stop()
 
 
+def test_stub_patches_a_device_by_hostname_with_a_scalar_field():
+    """LibreNMS accepts a scalar field/data pair on any device alias, so the stub must too."""
+    server = _start_stub()
+    try:
+        target = _request(server, "GET", "/api/v0/devices/1000").json()["devices"][0]
+        response = _request(
+            server,
+            "PATCH",
+            f"/api/v0/devices/{target['hostname']}",
+            json={"field": "notes", "data": "kept online"},
+        )
+
+        assert response.status_code == 200, response.text
+        updated = _request(server, "GET", "/api/v0/devices/1000").json()["devices"][0]
+        assert updated["notes"] == "kept online"
+    finally:
+        server.stop()
+
+
+def test_stub_refuses_a_recording_without_a_device_response():
+    """A recording the stub cannot derive routes from must fail loudly, not start half-built."""
+    import pytest
+
+    recording = {"device_id": 4242, "responses": {}}
+
+    with pytest.raises(ValueError, match="no usable"):
+        LibreNMSStubServer(recordings=[recording], api_token=TOKEN)
+
+
 def test_stub_derives_the_oob_controller_device_from_the_recorded_host_pair():
     recording = load_recording("linux-host-oob")
     server = LibreNMSStubServer(recordings=[recording], api_token=TOKEN).start()
