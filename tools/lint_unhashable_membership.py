@@ -344,11 +344,22 @@ def collect_container_names(paths):
         changed = False
         for path, imported_names in imports_by_path.items():
             for source_path, source_name, target_name in imported_names:
-                if source_path is None or source_name not in names_by_path[source_path]:
+                if source_path is None:
                     continue
-                if target_name not in names_by_path[path]:
-                    names_by_path[path].add(target_name)
-                    changed = True
+                if source_name in names_by_path[source_path]:
+                    if target_name not in names_by_path[path]:
+                        names_by_path[path].add(target_name)
+                        changed = True
+                # Importing a class carries its class-qualified containers too: `from m import
+                # Choices` makes `Choices.NAMES` readable here, under the local alias.
+                source_prefix = f"{source_name}."
+                for qualified in tuple(names_by_path[source_path]):
+                    if not qualified.startswith(source_prefix):
+                        continue
+                    local = f"{target_name}.{qualified[len(source_prefix) :]}"
+                    if local not in names_by_path[path]:
+                        names_by_path[path].add(local)
+                        changed = True
             for source_path, qualifier in module_imports_by_path[path]:
                 if source_path is None:
                     continue

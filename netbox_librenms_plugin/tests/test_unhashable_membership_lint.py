@@ -159,6 +159,36 @@ def test_an_aliased_constant_imported_from_another_module_is_still_resolved(tmp_
     assert findings, "an imported alias must not hide the finding"
 
 
+def test_a_class_qualified_container_imported_from_another_module_is_still_resolved(tmp_path):
+    """Importing the class must carry its class-qualified container names with it."""
+    findings = _scan(
+        tmp_path,
+        'from extra_0 import Choices\n\n\ndef f(cached):\n    return cached.get("x") in Choices.NAMES\n',
+        extra_sources=['class Choices:\n    NAMES = frozenset({"ifName"})\n'],
+    )
+    assert findings, "an imported class must not hide the finding on its own attribute"
+
+
+def test_an_aliased_class_qualified_container_is_still_resolved(tmp_path):
+    """An import alias on the class must rewrite the qualifier, not drop the container."""
+    findings = _scan(
+        tmp_path,
+        'from extra_0 import Choices as Names\n\n\ndef f(cached):\n    return cached.get("x") in Names.NAMES\n',
+        extra_sources=['class Choices:\n    NAMES = frozenset({"ifName"})\n'],
+    )
+    assert findings, "an aliased class must not hide the finding on its own attribute"
+
+
+def test_an_imported_class_does_not_lend_its_container_type_to_an_unrelated_attribute(tmp_path):
+    """Only the attributes the class actually defines are containers."""
+    findings = _scan(
+        tmp_path,
+        'from extra_0 import Choices\n\n\ndef f(cached):\n    return cached.get("x") in Choices.OTHER\n',
+        extra_sources=['class Choices:\n    NAMES = frozenset({"ifName"})\n'],
+    )
+    assert not findings, "an attribute the class never defines must not be treated as a container"
+
+
 def test_an_annotated_container_constant_is_still_resolved(tmp_path):
     """A type annotation must not hide a module-level container constant."""
     findings = _scan(
