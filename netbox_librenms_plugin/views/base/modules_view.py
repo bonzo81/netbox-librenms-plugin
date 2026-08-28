@@ -88,8 +88,8 @@ def _oob_item_offsettable(item: dict) -> bool:
     offset, so both must be an int (or absent / the 0 root). A non-int from a malformed
     OOB payload would raise ``TypeError`` (e.g. ``"5" + offset``) and cause the
     module tab to return HTTP 500.
-    Used to fail the whole OOB fetch closed to a host-only snapshot, the same way the
-    non-dict element guard does, rather than crash the offset loop.
+    Used to fail the whole OOB fetch closed to a host-only snapshot rather than crash the
+    offset loop. get_device_inventory already guarantees the container and element types.
 
     Args:
         item (dict): The OOB inventory item to check.
@@ -420,15 +420,9 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
 
         success, inventory_data = self.librenms_api.get_device_inventory(self.librenms_id)
 
-        # get_device_inventory() is an external API boundary: a success flag with a
-        # non-list payload (dict/string/None on a malformed response) — or a list that
-        # carries non-dict entries (e.g. [None], ["bad"]) — must be treated as a fetch
-        # failure, otherwise the iterate/mutate below turns a refresh into a 500.
-        if (
-            not success
-            or not isinstance(inventory_data, list)
-            or any(not isinstance(item, dict) for item in inventory_data)
-        ):
+        # get_device_inventory only reports success for a list of dicts, so a malformed payload
+        # already arrives as a failure here (see its Returns contract).
+        if not success:
             cache.delete(self.get_cache_key(sync_device, "inventory", server_key=server_key))
             SyncCacheConsistency(obj).mark_refresh_failure(
                 SyncTab.MODULES,
@@ -503,16 +497,10 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
             )
         elif oob_id:
             oob_success, oob_inventory = self.librenms_api.get_device_inventory(oob_id)
-            # Same element-shape guard as the main inventory above: a list with non-dict
-            # entries — or dicts whose entPhysicalIndex/entPhysicalContainedIn aren't ints —
-            # would crash the index-offset/merge loop below (TypeError on "5" + offset), so
-            # fail closed to a host-only snapshot rather than 500 the tab.
-            if (
-                oob_success
-                and isinstance(oob_inventory, list)
-                and all(isinstance(item, dict) for item in oob_inventory)
-                and all(_oob_item_offsettable(item) for item in oob_inventory)
-            ):
+            # get_device_inventory guarantees a list of dicts on success, but not the TYPE of
+            # entPhysicalIndex/entPhysicalContainedIn: a numeric string would crash the offset
+            # loop below (TypeError on "5" + offset), so fail closed to a host-only snapshot.
+            if oob_success and all(_oob_item_offsettable(item) for item in oob_inventory):
                 main_max_idx = max(
                     (idx for item in inventory_data if (idx := item.get("entPhysicalIndex")) is not None),
                     default=0,
@@ -1200,37 +1188,17 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         # Flag device type as incomplete when a top-level item has no bay and
         # no mapping suggestion — the device type is likely missing bay templates
         # for that class of component (fan tray, PSU, etc.).
+        # _build_row already ran the same pure _suggest_bay_mapping(item, all_bays,
+        # scope_preserved=False) and only omits model_suggestion when it returned nothing, so
+        # there is no second suggestion to recover here.
         if row.get("status") == "No Bay" and "model_suggestion" not in row:
-            # Before flagging device-type as incomplete, check whether any
-            # bay among the carriers already installed at device level (i.e.
-            # module-scoped child bays) would yield a mapping suggestion.
-            # This handles the common "user installed a carrier card whose
-            # children are letter-named (Slot A → CPM A) and now needs a
-            # ModuleBayMapping" follow-up flow.
-            fallback_suggestion = self._suggest_bay_mapping(item, target_context["all_bays"], scope_preserved=False)
-            if fallback_suggestion:
-                # Pre-fill the suggestion with this device's manufacturer so
-                # the new ModuleBayMapping is auto-scoped to the vendor — the
-                # user can clear it in the form to make it global.
-                if self._current_manufacturer_id:
-                    fallback_suggestion.setdefault("manufacturer", self._current_manufacturer_id)
-                    if self._current_manufacturer_name:
-                        fallback_suggestion.setdefault("manufacturer_name", self._current_manufacturer_name)
-                row["model_suggestion"] = fallback_suggestion
-                # Refresh the warning so the tooltip text reflects the new
-                # suggestion instead of the previous "no candidate" message.
-                row["model_warning"] = self._build_no_bay_warning(item, target_context["all_bays"], fallback_suggestion)
-                # Drop the carrier-install hint badge: a concrete mapping
-                # suggestion is more actionable than "Possible Carrier?".
-                row.pop("holder_hint_present", None)
-            else:
-                device_type = getattr(selected_device, "device_type", None)
-                if device_type:
-                    row["device_type_incomplete"] = True
-                    row["device_type_incomplete_url"] = device_type.get_absolute_url()
-                    row["device_type_incomplete_name"] = str(device_type)
-                    row["device_type_incomplete_target_pk"] = device_type.pk
-                    row["device_type_incomplete_suggestion"] = self._derive_bay_template_suggestion(item)
+            device_type = getattr(selected_device, "device_type", None)
+            if device_type:
+                row["device_type_incomplete"] = True
+                row["device_type_incomplete_url"] = device_type.get_absolute_url()
+                row["device_type_incomplete_name"] = str(device_type)
+                row["device_type_incomplete_target_pk"] = device_type.pk
+                row["device_type_incomplete_suggestion"] = self._derive_bay_template_suggestion(item)
 
         # Determine child bay scope based on parent match state
         parent_module_id = None
@@ -1398,14 +1366,8 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         success, transceivers = self.librenms_api.get_device_transceivers(self.librenms_id)
         if not success:
             return inventory_data, str(transceivers) if transceivers else "unknown error"
-        # A truthy success flag with a malformed payload (a dict, or a list carrying non-dict
-        # entries) would 500 on the txr.get(...) access below. Treat it as a fetch error so the
-        # caller skips the snapshot cache and warns, matching the inventory/ports/OOB guards.
-        # This must precede the emptiness check: an empty non-list like {} is falsy, so checking
-        # `not transceivers` first would mislabel it as a successful "no transceivers" response
-        # and cache a degraded snapshot.
-        if not isinstance(transceivers, list) or any(not isinstance(txr, dict) for txr in transceivers):
-            return inventory_data, f"malformed transceiver payload (got {type(transceivers).__name__})"
+        # get_device_transceivers only reports success for a list of dicts, so the payload shape
+        # is already settled here (see its Returns contract).
         if not transceivers:
             return inventory_data, None
 

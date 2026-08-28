@@ -1258,7 +1258,9 @@ class LibreNMSAPI:
             device_id: LibreNMS device ID
 
         Returns:
-            tuple: (success: bool, data: list)
+            tuple: (success: bool, data: list). On success ``data`` is always a list of dicts —
+                callers may rely on that and must not re-check the container/element types. The
+                VALUE types inside each dict are not validated.
 
         Example inventory item:
             {
@@ -1301,7 +1303,8 @@ class LibreNMSAPI:
             device_id: LibreNMS device ID
 
         Returns:
-            tuple: (success: bool, data: list)
+            tuple: (success: bool, data: list). On success ``data`` is always a list of dicts —
+                callers may rely on that and must not re-check the container/element types.
 
         Example transceiver item:
             {
