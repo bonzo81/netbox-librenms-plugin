@@ -139,34 +139,32 @@ def test_capture_serial_sensors_excludes_other_devices(recording_server):
     assert all(s["sensor_type"] == "acsSerialPortTable" for s in recorded)
 
 
-def test_capture_serial_sensors_bypasses_stale_cache(recording_server):
-    """Capture must read sensors fresh, never a stale per-server cache left by an earlier refresh."""
-    from django.core.cache import cache
-
+def test_capture_serial_sensors_reads_the_server_every_time(recording_server):
+    """Capture must fetch sensors from the server, so a recording always holds the current shape."""
     seed = _transceiver_serial_seed()  # server serves sensors 1 & 2 for device 2000
-    _server, api = recording_server(seed)
+    server, api = recording_server(seed)
 
-    # Poison the per-server serial-sensor cache with a subset that does NOT match what the server
-    # now serves. A cached read would record this stale sensor into the recording instead of the
-    # device's current shape.
-    stale = [
-        {
-            "sensor_id": 777,
-            "device_id": 2000,
-            "sensor_type": "acsSerialPortTable",
-            "sensor_index": "acsSerialPortTableStatus.99",
-            "sensor_descr": "STALE Status",
-            "sensor_class": "state",
-        }
-    ]
-    cache.set(f"librenms_serial_sensors_{api.server_key}", stale, timeout=300)
+    sensors_status, sensors_body = server.routes["GET /api/v0/resources/sensors"]
+    hits = []
+
+    def _counting_sensors(method, path, query, headers, body):
+        hits.append(path)
+        return sensors_status, sensors_body
+
+    server.register("/api/v0/resources/sensors", _counting_sensors, method="GET")
+
+    # An earlier refresh in the same process must not let the capture skip the server.
+    ok, _ = api.get_serial_port_sensors(2000)
+    assert ok
+    assert len(hits) == 1
+    hits.clear()
 
     captured = capture_device_recording(api, 2000)
 
+    # The capture asked the server itself rather than reusing the previous read.
+    assert hits == ["/api/v0/resources/sensors"]
     recorded = {s["sensor_id"] for s in captured["responses"]["GET /api/v0/resources/sensors"]["sensors"]}
-    # The capture pulled FRESH server data (sensors 1 & 2), not the poisoned cache entry (777).
     assert recorded == {1, 2}
-    assert 777 not in recorded
 
 
 def test_capture_serial_sensors_roundtrip_outcome(recording_server):

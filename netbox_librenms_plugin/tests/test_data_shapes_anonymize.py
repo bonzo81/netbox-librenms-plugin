@@ -222,7 +222,10 @@ def test_find_pii_does_not_echo_secret_value_after_redaction():
 
     secret_findings = [f for f in findings if f["path"].endswith("snmp_authkey")]
     # The secret key is reported exactly once, redacted — never recursed into and re-flagged.
-    assert secret_findings == [{"path": secret_findings[0]["path"], "kind": "credential", "value": "<redacted>"}]
+    assert len(secret_findings) == 1, findings
+    assert secret_findings[0]["kind"] == "credential"
+    assert secret_findings[0]["value"] == "<redacted>"
+    assert secret_findings[0]["path"].endswith("snmp_authkey")
     # The raw secret value is never echoed (neither verbatim nor as an "email" finding).
     assert not any(f["value"] == "admin@corp.example.com" for f in findings)
     assert not any(f["kind"] == "email" for f in findings)
@@ -243,7 +246,10 @@ def test_find_pii_redacts_nested_secret_container_without_echoing_children():
 
     secret_findings = [f for f in findings if "snmp_community" in f["path"]]
     # The secret container is reported exactly once, redacted — never recursed into.
-    assert secret_findings == [{"path": secret_findings[0]["path"], "kind": "credential", "value": "<redacted>"}]
+    assert len(secret_findings) == 1, findings
+    assert secret_findings[0]["kind"] == "credential"
+    assert secret_findings[0]["value"] == "<redacted>"
+    assert "snmp_community" in secret_findings[0]["path"]
     # No child PII leaks out of the redacted secret.
     assert not any(f["value"] == "admin@corp.example.com" for f in findings)
     assert not any(f["kind"] == "email" for f in findings)
