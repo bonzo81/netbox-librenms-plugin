@@ -11,21 +11,49 @@ Targets:
   - VlanAssignmentMixin._update_interface_vlan_assignment (lines 634, 643, 653, 666)
 """
 
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
+
+
+def configure_servers(settings, servers):
+    """Replace the plugin's configured LibreNMS servers, leaving the rest of PLUGINS_CONFIG intact."""
+    from copy import deepcopy
+
+    plugin_config = deepcopy(settings.PLUGINS_CONFIG)
+    plugin_settings = plugin_config["netbox_librenms_plugin"]
+    plugin_settings["servers"] = servers
+    plugin_settings.pop("librenms_url", None)
+    plugin_settings.pop("api_token", None)
+    settings.PLUGINS_CONFIG = plugin_config
+
+
+def server_entry(key, *, display_name=None):
+    """Return a usable server mapping, so build_librenms_api() binds a client for *key*."""
+    return {
+        "librenms_url": f"http://{key}.librenms.test",
+        "api_token": f"token-{key}",
+        "display_name": display_name or key.title(),
+    }
 
 
 class TestCacheRemainingTtl:
     """cache_remaining_ttl centralises the django-redis-only cache.ttl() guard."""
 
-    def test_returns_value_when_backend_exposes_ttl(self):
+    @pytest.mark.django_db
+    def test_returns_the_remaining_ttl_of_a_real_cache_entry(self):
+        """NetBox runs on django-redis, so the live cache answers ttl() with the seconds left."""
+        from django.core.cache import cache
+
         from netbox_librenms_plugin.utils import cache_remaining_ttl
 
-        backend = MagicMock()
-        backend.ttl.return_value = 123
-        assert cache_remaining_ttl(backend, "some-key") == 123
-        backend.ttl.assert_called_once_with("some-key")
+        cache.set("ttl-probe", "value", 120)
+        try:
+            remaining = cache_remaining_ttl(cache, "ttl-probe")
+        finally:
+            cache.delete("ttl-probe")
+
+        assert 0 < remaining <= 120
 
     def test_returns_none_when_backend_lacks_ttl(self):
         from netbox_librenms_plugin.utils import cache_remaining_ttl
@@ -44,6 +72,7 @@ class TestCacheRemainingTtl:
 # =============================================================================
 
 
+@pytest.mark.django_db
 class TestLibreNMSAPIMixinActiveServerKey:
     """LibreNMSAPIMixin.active_server_key: the bound client's key or 'default', never building a client."""
 
@@ -52,18 +81,25 @@ class TestLibreNMSAPIMixinActiveServerKey:
 
         return object.__new__(LibreNMSAPIMixin)
 
-    def test_returns_bound_client_server_key(self):
-        m = self._mixin()
-        m._librenms_api = MagicMock(server_key="prod")
-        assert m.active_server_key == "prod"
+    def test_returns_bound_client_server_key(self, settings):
+        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
 
-    def test_returns_default_without_building_client_when_unbound(self):
-        """On the rebind-fail render path no client is bound; the property must return 'default' WITHOUT constructing a LibreNMSAPI (the lazy librenms_api property would, and can raise on a misconfigured default)."""
-        m = self._mixin()
-        m._librenms_api = None
-        with patch("netbox_librenms_plugin.views.mixins.LibreNMSAPI") as mock_api_cls:
-            assert m.active_server_key == "default"
-        mock_api_cls.assert_not_called()
+        configure_servers(settings, {"prod": server_entry("prod")})
+        mixin = self._mixin()
+        mixin._librenms_api = LibreNMSAPI(server_key="prod")
+
+        assert mixin.active_server_key == "prod"
+
+    def test_returns_default_without_building_client_when_unbound(self, settings):
+        """The rebind-fail render path has no client bound; the property must answer without building one."""
+        # No usable server at all: the lazy librenms_api property would raise here, so a
+        # "default" answer proves the property was never consulted.
+        configure_servers(settings, {})
+        mixin = self._mixin()
+        mixin._librenms_api = None
+
+        assert mixin.active_server_key == "default"
+        assert mixin._librenms_api is None
 
 
 @pytest.mark.django_db
@@ -160,126 +196,140 @@ class TestBuildMigratedContextLazyWinner:
         assert self._winner_lookups(cap, donor.pk) == []  # suppression is in-memory
 
 
+@pytest.mark.django_db
 class TestLibreNMSAPIMixinRebindApiForServer:
     """LibreNMSAPIMixin.rebind_api_for_server: POST-scoped API client for base views."""
 
-    def _mixin(self, session_key="default"):
+    def _mixin(self, bound_key=None):
+        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
         from netbox_librenms_plugin.views.mixins import LibreNMSAPIMixin
 
-        m = object.__new__(LibreNMSAPIMixin)
-        m._librenms_api = MagicMock(server_key=session_key)
-        return m
+        mixin = object.__new__(LibreNMSAPIMixin)
+        mixin._librenms_api = None if bound_key is None else LibreNMSAPI(server_key=bound_key)
+        return mixin
 
-    def test_empty_key_keeps_session_api(self):
-        """No POSTed key → returns the session server key and does not rebind."""
-        m = self._mixin("default")
-        original = m._librenms_api
-        assert m.rebind_api_for_server("") == "default"
-        assert m.rebind_api_for_server(None) == "default"
-        assert m._librenms_api is original  # unchanged
+    def test_empty_key_keeps_session_api(self, settings):
+        """No POSTed key: return the bound client's key and leave the client in place."""
+        configure_servers(settings, {"default": server_entry("default"), "prod": server_entry("prod")})
+        mixin = self._mixin("default")
+        original = mixin._librenms_api
 
-    def test_valid_key_rebinds_and_returns_key(self):
-        m = self._mixin("default")
-        new_api = MagicMock(server_key="prod")
-        with patch("netbox_librenms_plugin.librenms_api.build_librenms_api", return_value=new_api) as mock_build:
-            result = m.rebind_api_for_server("prod")
-        mock_build.assert_called_once_with("prod")
+        assert mixin.rebind_api_for_server("") == "default"
+        assert mixin.rebind_api_for_server(None) == "default"
+        assert mixin._librenms_api is original
+
+    def test_valid_key_rebinds_and_returns_key(self, settings):
+        configure_servers(settings, {"default": server_entry("default"), "prod": server_entry("prod")})
+        mixin = self._mixin("default")
+        original = mixin._librenms_api
+
+        result = mixin.rebind_api_for_server("prod")
+
         assert result == "prod"
-        assert m._librenms_api is new_api  # rebound
+        assert mixin._librenms_api is not original
+        assert mixin._librenms_api.server_key == "prod"
 
-    def test_returns_resolved_key_not_raw_post_value(self):
-        """build_librenms_api may normalize the posted key (e.g. resolve an alias); the mixin must return the resolved key, not the raw POST value."""
-        m = self._mixin("default")
-        resolved_api = MagicMock(server_key="primary")
-        with patch("netbox_librenms_plugin.librenms_api.build_librenms_api", return_value=resolved_api):
-            result = m.rebind_api_for_server("default")
-        assert result == "primary"  # resolved key, not the raw posted "default"
-        assert m._librenms_api is resolved_api
+    def test_returns_resolved_key_not_raw_post_value(self, settings):
+        """With no 'default' configured the auto-default falls back, so the resolved key differs."""
+        configure_servers(settings, {"primary": server_entry("primary")})
+        mixin = self._mixin("primary")
 
-    def test_unknown_key_returns_none_without_rebinding(self):
-        """A stale/tampered key (build returns None) → None, API left untouched."""
-        m = self._mixin("default")
-        original = m._librenms_api
-        with patch("netbox_librenms_plugin.librenms_api.build_librenms_api", return_value=None):
-            assert m.rebind_api_for_server("ghost") is None
-        assert m._librenms_api is original
+        result = mixin.rebind_api_for_server("default")
 
-    def test_empty_key_no_cached_api_builds_default(self):
-        """No POSTed key and no cached client → build the default via build_librenms_api(None), cache it, and return its key — never touching the LibreNMSAPI() property directly."""
-        from netbox_librenms_plugin.views.mixins import LibreNMSAPIMixin
+        assert result == "primary"
+        assert mixin._librenms_api.server_key == "primary"
 
-        m = object.__new__(LibreNMSAPIMixin)
-        m._librenms_api = None
-        default_api = MagicMock(server_key="default")
-        with patch("netbox_librenms_plugin.librenms_api.build_librenms_api", return_value=default_api) as mock_build:
-            assert m.rebind_api_for_server("") == "default"
-        mock_build.assert_called_once_with(None)
-        assert m._librenms_api is default_api  # cached for reuse
+    def test_unknown_key_returns_none_without_rebinding(self, settings):
+        """A stale or tampered key leaves the bound client untouched."""
+        configure_servers(settings, {"default": server_entry("default")})
+        mixin = self._mixin("default")
+        original = mixin._librenms_api
 
-    def test_empty_key_misconfigured_default_returns_none(self):
-        """No POSTed key, no cached client, and the default server is misconfigured (build_librenms_api returns None) → fail closed with None instead of raising."""
-        from netbox_librenms_plugin.views.mixins import LibreNMSAPIMixin
+        assert mixin.rebind_api_for_server("ghost") is None
+        assert mixin._librenms_api is original
 
-        m = object.__new__(LibreNMSAPIMixin)
-        m._librenms_api = None
-        with patch("netbox_librenms_plugin.librenms_api.build_librenms_api", return_value=None):
-            assert m.rebind_api_for_server("") is None
-        assert m._librenms_api is None
+    def test_empty_key_no_cached_api_builds_default(self, settings):
+        """No POSTed key and no cached client builds the default and caches it for reuse."""
+        configure_servers(settings, {"default": server_entry("default")})
+        mixin = self._mixin()
+
+        assert mixin.rebind_api_for_server("") == "default"
+        assert mixin._librenms_api is not None
+        assert mixin._librenms_api.server_key == "default"
+
+    def test_empty_key_misconfigured_default_returns_none(self, settings):
+        """A default that cannot be bound fails closed with None instead of raising."""
+        configure_servers(settings, {"default": {"librenms_url": "", "api_token": ""}})
+        mixin = self._mixin()
+
+        assert mixin.rebind_api_for_server("") is None
+        assert mixin._librenms_api is None
 
 
+@pytest.mark.django_db
 class TestLibreNMSAPIMixinResolveGetRenderServerKey:
     """LibreNMSAPIMixin.resolve_get_render_server_key: GET-render cache-scope resolution."""
 
-    class _Req:
-        """Minimal request stand-in exposing only ``GET`` (a dict supports ``.get``)."""
+    @staticmethod
+    def _request(server_key=None):
+        from django.test import RequestFactory
 
-        def __init__(self, server_key=None):
-            self.GET = {} if server_key is None else {"server_key": server_key}
+        query = {} if server_key is None else {"server_key": server_key}
+        return RequestFactory().get("/", query)
 
     def _mixin(self):
         from netbox_librenms_plugin.views.mixins import LibreNMSAPIMixin
 
-        m = object.__new__(LibreNMSAPIMixin)
-        m._librenms_api = None
-        return m
+        mixin = object.__new__(LibreNMSAPIMixin)
+        mixin._librenms_api = None
+        return mixin
 
-    def test_blank_key_misconfigured_default_does_not_rebuild_client(self):
-        """Blank key + no cached client + misconfigured default degrades to None scope without rebuilding."""
-        m = self._mixin()
-        with (
-            patch("netbox_librenms_plugin.librenms_api.build_librenms_api", return_value=None),
-            patch("netbox_librenms_plugin.views.mixins.LibreNMSAPI") as mock_api_cls,
-        ):
-            scoped, unresolved = m.resolve_get_render_server_key(self._Req())
-        mock_api_cls.assert_not_called()  # the lazy property must never reconstruct the default
-        assert m._librenms_api is None  # left unbound, not a freshly-built client
+    def test_blank_key_misconfigured_default_does_not_rebuild_client(self, settings):
+        """A blank key with an unbindable default degrades to no scope and leaves the client unbound."""
+        configure_servers(settings, {"default": {"librenms_url": "", "api_token": ""}})
+        mixin = self._mixin()
+
+        scoped, unresolved = mixin.resolve_get_render_server_key(self._request())
+
+        assert mixin._librenms_api is None
         assert unresolved is False
         assert scoped is None
 
-    def test_blank_key_reads_cached_client_key_without_rebuild(self):
-        """Blank key with a cached client returns that client's key, read directly without rebuilding."""
-        m = self._mixin()
-        m._librenms_api = MagicMock(server_key="prod")
-        with patch("netbox_librenms_plugin.views.mixins.LibreNMSAPI") as mock_api_cls:
-            scoped, unresolved = m.resolve_get_render_server_key(self._Req())
-        mock_api_cls.assert_not_called()
+    def test_blank_key_reads_cached_client_key_without_rebuild(self, settings):
+        """A blank key returns the already-bound client's key rather than rebuilding one."""
+        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+
+        configure_servers(settings, {"default": server_entry("default"), "prod": server_entry("prod")})
+        mixin = self._mixin()
+        mixin._librenms_api = LibreNMSAPI(server_key="prod")
+        original = mixin._librenms_api
+
+        scoped, unresolved = mixin.resolve_get_render_server_key(self._request())
+
+        assert mixin._librenms_api is original
         assert unresolved is False
         assert scoped == "prod"
 
-    def test_unknown_requested_key_flags_unresolved(self):
-        """A non-blank server_key that no longer resolves returns (requested, True)."""
-        m = self._mixin()
-        with patch("netbox_librenms_plugin.librenms_api.build_librenms_api", return_value=None):
-            scoped, unresolved = m.resolve_get_render_server_key(self._Req("ghost"))
+    def test_unknown_requested_key_flags_unresolved(self, settings):
+        """A named server that no longer resolves is reported back as unresolved."""
+        configure_servers(settings, {"default": server_entry("default")})
+        mixin = self._mixin()
+
+        scoped, unresolved = mixin.resolve_get_render_server_key(self._request("ghost"))
+
         assert (scoped, unresolved) == ("ghost", True)
 
 
+@pytest.mark.django_db
 class TestLibreNMSAPIMixinGetContextData:
-    """Tests for LibreNMSAPIMixin.get_context_data (lines 275-282)."""
+    """LibreNMSAPIMixin.get_context_data merges the active server's info into the view context."""
 
-    def test_get_context_data_super_succeeds(self):
-        """When super().get_context_data() works, it merges with server info."""
+    def test_get_context_data_super_succeeds(self, settings):
+        """A cooperating base class keeps its context, with the server info merged in."""
+        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
         from netbox_librenms_plugin.views.mixins import LibreNMSAPIMixin
+
+        configure_servers(settings, {"default": server_entry("default", display_name="Default")})
 
         class FakeBase:
             def get_context_data(self, **kwargs):
@@ -289,48 +339,45 @@ class TestLibreNMSAPIMixinGetContextData:
             pass
 
         view = ConcreteView()
-        view._librenms_api = MagicMock()
-        view._librenms_api.server_key = "default"
+        view._librenms_api = LibreNMSAPI(server_key="default")
 
-        with patch.object(view, "get_server_info", return_value={"display_name": "Default"}):
-            ctx = view.get_context_data(extra="value")
+        ctx = view.get_context_data(extra="value")
 
         assert ctx["from_super"] is True
         assert ctx["extra"] == "value"
-        assert "librenms_server_info" in ctx
-        assert ctx["librenms_server_info"] == {"display_name": "Default"}
+        assert ctx["librenms_server_info"]["display_name"] == "Default"
+        assert ctx["librenms_server_info"]["server_key"] == "default"
 
-    def test_get_context_data_attribute_error_falls_back_to_kwargs(self):
-        """When super().get_context_data() raises AttributeError, kwargs used as context."""
+    def test_get_context_data_attribute_error_falls_back_to_kwargs(self, settings):
+        """With no cooperating base class the kwargs become the context."""
+        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
         from netbox_librenms_plugin.views.mixins import LibreNMSAPIMixin
 
-        # object.__new__ ensures no base class has get_context_data,
-        # so super() will raise AttributeError inside the method.
+        configure_servers(settings, {"default": server_entry("default")})
+        # object.__new__ leaves no base get_context_data, so super() raises AttributeError inside.
         mixin = object.__new__(LibreNMSAPIMixin)
-        mixin._librenms_api = MagicMock()
-        mixin._librenms_api.server_key = "default"
+        mixin._librenms_api = LibreNMSAPI(server_key="default")
 
-        with patch.object(mixin, "get_server_info", return_value={"url": "http://example.com"}):
-            ctx = mixin.get_context_data(foo="bar", num=42)
+        ctx = mixin.get_context_data(foo="bar", num=42)
 
         assert ctx["foo"] == "bar"
         assert ctx["num"] == 42
-        assert "librenms_server_info" in ctx
-        assert ctx["librenms_server_info"]["url"] == "http://example.com"
+        assert ctx["librenms_server_info"]["url"] == "http://default.librenms.test"
 
-    def test_get_context_data_empty_kwargs_still_adds_server_info(self):
-        """With no kwargs and AttributeError fallback, server info is still added."""
+    def test_get_context_data_empty_kwargs_still_adds_server_info(self, settings):
+        """Server info is added even when the fallback context starts empty."""
+        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
         from netbox_librenms_plugin.views.mixins import LibreNMSAPIMixin
 
+        configure_servers(settings, {"prod": server_entry("prod", display_name="Production")})
         mixin = object.__new__(LibreNMSAPIMixin)
-        mixin._librenms_api = MagicMock()
-        mixin._librenms_api.server_key = "default"
+        mixin._librenms_api = LibreNMSAPI(server_key="prod")
 
-        server_info = {"display_name": "Default Server", "is_legacy": True}
-        with patch.object(mixin, "get_server_info", return_value=server_info):
-            ctx = mixin.get_context_data()
+        ctx = mixin.get_context_data()
 
-        assert ctx == {"librenms_server_info": server_info}
+        assert set(ctx) == {"librenms_server_info"}
+        assert ctx["librenms_server_info"]["display_name"] == "Production"
+        assert ctx["librenms_server_info"]["is_legacy"] is False
 
 
 # =============================================================================
@@ -1220,11 +1267,14 @@ class TestRenderServerKeyDegradation:
         assert BaseIPAddressTableView._render_server_key is LibreNMSAPIMixin._render_server_key
         assert BaseCableTableView._render_server_key is LibreNMSAPIMixin._render_server_key
 
-    def test_sync_page_subclass_keeps_render_server_key_method_callable(self):
+    @pytest.mark.django_db
+    def test_sync_page_subclass_keeps_render_server_key_method_callable(self, settings):
         """A real sync-page subclass must not shadow the mixin's render-key resolver."""
+        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
         from netbox_librenms_plugin.views.object_sync.devices import DeviceLibreNMSSyncView
 
+        configure_servers(settings, {"active": server_entry("active")})
         view = DeviceLibreNMSSyncView()
-        view._librenms_api = MagicMock(server_key="active")
+        view._librenms_api = LibreNMSAPI(server_key="active")
 
         assert view._render_server_key() == "active"
