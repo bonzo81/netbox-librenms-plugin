@@ -21,6 +21,10 @@ from urllib.parse import parse_qs, quote, urlparse
 
 from netbox_librenms_plugin.data_shapes.envelope import unwrap_response
 
+# The stub only ever receives small JSON writes, so a declared body past this cap is a
+# mistake or an abuse and is refused before a byte is read.
+MAX_REQUEST_BODY_BYTES = 1 << 20
+
 
 class _RawResponse:
     """One response body that the test server must not JSON-encode."""
@@ -63,9 +67,7 @@ class _LibreNMSHandler(BaseHTTPRequestHandler):
             self._send_json(200, {"status": "ok"})
             return
 
-        api_token = self.server.api_token  # type: ignore[attr-defined]
-        if api_token and self.headers.get("X-Auth-Token") != api_token:
-            self._send_json(401, {"status": "error", "message": "Unauthorized"})
+        if self._reject_unauthenticated():
             return
 
         routes = self.server.routes  # type: ignore[attr-defined]
@@ -105,7 +107,21 @@ class _LibreNMSHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self._handle_request("GET")
 
+    def _reject_unauthenticated(self):
+        """Send 401 and report True when the request carries no valid token."""
+        api_token = self.server.api_token  # type: ignore[attr-defined]
+        if not api_token or urlparse(self.path).path == "/healthz":
+            return False
+        if self.headers.get("X-Auth-Token") == api_token:
+            return False
+        self._send_json(401, {"status": "error", "message": "Unauthorized"})
+        return True
+
     def _handle_request_with_body(self, method):
+        # Both checks run before read(), so a caller cannot hold a handler thread or its memory
+        # on a body the stub would never accept.
+        if self._reject_unauthenticated():
+            return
         try:
             length = int(self.headers.get("Content-Length", 0))
         except (TypeError, ValueError):
@@ -113,6 +129,9 @@ class _LibreNMSHandler(BaseHTTPRequestHandler):
         if length < 0:
             # A negative length is truthy, so read() would block until the client disconnects.
             self._send_json(400, {"status": "error", "message": "Invalid Content-Length"})
+            return
+        if length > MAX_REQUEST_BODY_BYTES:
+            self._send_json(413, {"status": "error", "message": "Request body too large"})
             return
         raw_body = self.rfile.read(length) if length else b""
         try:
@@ -268,10 +287,7 @@ class MockLibreNMSServer:
         """Register recording responses with order-independent exact query matching for variants."""
         by_route: dict[tuple[str, str], list] = {}
         for key, value in recording.get("responses", {}).items():
-            method, sep, rest = key.partition(" ")
-            if not sep:  # No verb prefix → default to GET on the whole key.
-                method, rest = "GET", key
-            path, _, query = rest.partition("?")
+            method, path, query = _split_recording_key(key)
             # Keep the FULL value set per key (sorted) so a repeated param like ?a=1&a=2 is a
             # distinct shape from ?a=1 — collapsing to v[0] would let them false-match.
             qdict = {k: tuple(sorted(v)) for k, v in parse_qs(query, keep_blank_values=True).items()} if query else {}
@@ -333,6 +349,15 @@ DEFAULT_STUB_RECORDINGS = (
 DEFAULT_RECORDINGS_DIR = Path(__file__).resolve().parents[1] / "data_shapes" / "recordings"
 
 
+def _split_recording_key(key):
+    """Split a recording response key into its method, path and query, defaulting a bare key to GET."""
+    method, separator, rest = key.partition(" ")
+    if not separator:  # No verb prefix -> the whole key is a GET route.
+        method, rest = "GET", key
+    path, _, query = rest.partition("?")
+    return method, path, query
+
+
 def _unwrap_recorded_response(value):
     """Return the JSON body from a recording response value."""
     if isinstance(value, list) and len(value) == 2 and isinstance(value[0], int):
@@ -381,7 +406,7 @@ class LibreNMSStubServer(MockLibreNMSServer):
     def _find_response(recording, route):
         """Return the first recorded body whose request key has the given route."""
         for key, value in recording.get("responses", {}).items():
-            request_route = key.partition(" ")[2].split("?", 1)[0]
+            _, request_route, _ = _split_recording_key(key)
             if request_route == route:
                 return _unwrap_recorded_response(value)
         return None
@@ -463,7 +488,7 @@ class LibreNMSStubServer(MockLibreNMSServer):
         inventory = []
         seen_inventory = set()
         for key, value in recording.get("responses", {}).items():
-            route = key.partition(" ")[2].split("?", 1)[0]
+            _, route, _ = _split_recording_key(key)
             if route not in (f"/api/v0/inventory/{device_id}", f"/api/v0/inventory/{device_id}/all"):
                 continue
             body = _unwrap_recorded_response(value)
@@ -571,6 +596,7 @@ class LibreNMSStubServer(MockLibreNMSServer):
         for alias_key in old_alias_keys - alias_keys:
             self._aliases.pop(alias_key, None)
             self.routes.pop(f"GET /api/v0/devices/{alias_key}", None)
+            self.routes.pop(f"PATCH /api/v0/devices/{alias_key}", None)
 
         for alias_key in alias_keys:
             self._aliases[alias_key] = device_id
