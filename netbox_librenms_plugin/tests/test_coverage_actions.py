@@ -2890,389 +2890,752 @@ class TestDeviceConflictActionMissingExisting:
         assert response["HX-Reswap"] == "none"
 
 
-class TestDeviceConflictActionMorePaths:
-    """Additional paths for DeviceConflictActionView."""
+@pytest.mark.django_db
+class TestDeviceConflictActionBranches:
+    """DeviceConflictActionView guard and action branches through real integration seams."""
+
+    @pytest.fixture(autouse=True)
+    def _configure_librenms_server(self, request, settings, monkeypatch):
+        monkeypatch.setenv("NO_PROXY", "127.0.0.1,localhost")
+        monkeypatch.setenv("no_proxy", "127.0.0.1,localhost")
+        self.server_key = f"branches-{request.node.name}".replace("_", "-").replace("[", "-").replace("]", "")
+        with run_librenms_server() as server:
+            configure_test_servers(
+                settings,
+                {
+                    self.server_key: {
+                        "librenms_url": server.url,
+                        "api_token": "test-token",
+                        "verify_ssl": False,
+                    }
+                },
+            )
+            self.librenms_server = server
+            yield
 
     def _make_view(self):
+        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
         from netbox_librenms_plugin.views.imports.actions import DeviceConflictActionView
 
-        view = object.__new__(DeviceConflictActionView)
-        view._librenms_api = _make_api()
-        view.request = MagicMock()
+        view = DeviceConflictActionView()
+        view._librenms_api = LibreNMSAPI(server_key=self.server_key)
         return view
 
-    def _base_patches(self, view, mock_existing, libre_device, validation):
-        """Return a context with common patches applied."""
-        from contextlib import ExitStack
+    def _register_device(self, device_id, hostname, *, serial="", hardware="Branches unmatched chassis", os=""):
+        self.librenms_server.device_info_response(
+            device_id=device_id,
+            hostname=hostname,
+            hardware=hardware,
+            os=os,
+            serial=serial,
+            ip="",
+        )
+        self.librenms_server.vc_inventory_callable(device_id, [], {})
 
-        return ExitStack()
+    def _request(self, action, device, username, **extra_post):
+        from dcim.models import Device
 
-    def test_unknown_action_renders_htmx_error_toast(self):
-        """Line 1338: unknown action renders htmx error toast (200)."""
-        view = self._make_view()
-        request = _make_request(
-            post={
-                "action": "unknown_action_xyz",
-                "existing_device_id": "1",
-            }
+        return make_view_request(
+            "post",
+            {
+                "server_key": self.server_key,
+                "action": action,
+                "existing_device_id": str(device.pk),
+                **extra_post,
+            },
+            user=make_view_user(username, [("change", Device)]),
+            HTTP_HX_REQUEST="true",
         )
 
-        mock_existing = MagicMock()
-        mock_existing.pk = 1
-        libre_device = {"device_id": 42, "hostname": "r01"}
-        validation = {
-            "existing_device": mock_existing,
-            "device_type_mismatch": False,
-        }
+    @staticmethod
+    def _post_after_validation(view, request, device_id, mutation, *, before_revalidation=False):
+        """Inject one state change after validation or immediately before the post-action re-validation."""
+        validate = view.get_validated_device_with_selections
+        validation_calls = 0
 
-        with patch.object(view, "require_all_permissions", return_value=None):
-            with patch("dcim.models.Device") as MockDevice:
-                MockDevice.objects.restrict.return_value.get.return_value = mock_existing
-                MockDevice.DoesNotExist = Exception
-                with patch.object(view, "require_object_permissions", return_value=None):
-                    with patch.object(
-                        view, "get_validated_device_with_selections", return_value=(libre_device, validation, {})
-                    ):
-                        response = view.post(request, device_id=42)
+        def validate_around_mutation(*args, **kwargs):
+            nonlocal validation_calls
+            validation_calls += 1
+            if before_revalidation and validation_calls == 2:
+                mutation()
+            result = validate(*args, **kwargs)
+            if not before_revalidation and validation_calls == 1:
+                mutation()
+            return result
+
+        with patch.object(view, "get_validated_device_with_selections", side_effect=validate_around_mutation):
+            return post_view(view, request, device_id=device_id)
+
+    @staticmethod
+    def _assert_htmx_error(response, message):
+        from html import unescape
 
         assert response.status_code == 200
         assert response.headers.get("HX-Reswap") == "none"
-        assert b"Unknown action: unknown_action_xyz" in response.content
+        assert message in unescape(response.content.decode())
 
-    def test_force_required_without_force_renders_htmx_error_toast(self):
-        """Lines 1044/1047-1048: device_type_mismatch + force required but not provided."""
-        view = self._make_view()
-        request = _make_request(
-            post={
-                "action": "link",
-                "existing_device_id": "1",
-            }
-        )
-
-        mock_existing = MagicMock()
-        mock_existing.pk = 1
-        libre_device = {"device_id": 42, "hostname": "r01"}
-        validation = {
-            "existing_device": mock_existing,
-            "device_type_mismatch": True,  # Mismatch
-        }
-
-        with patch.object(view, "require_all_permissions", return_value=None):
-            with patch("dcim.models.Device") as MockDevice:
-                MockDevice.objects.restrict.return_value.get.return_value = mock_existing
-                MockDevice.DoesNotExist = Exception
-                with patch.object(view, "require_object_permissions", return_value=None):
-                    with patch.object(
-                        view, "get_validated_device_with_selections", return_value=(libre_device, validation, {})
-                    ):
-                        response = view.post(request, device_id=42)
-
+    @staticmethod
+    def _assert_success(response):
         assert response.status_code == 200
-        assert response.headers.get("HX-Reswap") == "none"
-        assert b"Device type mismatch detected" in response.content
+        assert response["HX-Trigger"] == "closeModal"
+        assert response.content.strip()
 
-    def test_validated_existing_pk_mismatch_renders_htmx_error_toast(self):
-        """Line 1027: validated_existing.pk != existing_device.pk → htmx error toast (200)."""
+    def test_rejects_a_missing_validated_conflict_target(self):
+        from dcim.models import Device
+
         view = self._make_view()
-        request = _make_request(
-            post={
-                "action": "link",
-                "existing_device_id": "1",
-            }
+        target = make_device("branches-missing-validation-target")
+        self._register_device(42, "branches-missing-validation-source")
+        request = self._request(
+            "link",
+            target,
+            "branches-missing-validation-user",
         )
 
-        mock_existing = MagicMock()
-        mock_existing.pk = 1
+        response = post_view(view, request, device_id=42)
 
-        validated_existing = MagicMock()
-        validated_existing.pk = 99  # Different pk!
+        self._assert_htmx_error(response, "Missing validated conflict target")
+        reloaded = Device.objects.get(pk=target.pk)
+        assert reloaded.name == "branches-missing-validation-target"
+        assert "librenms_id" not in reloaded.custom_field_data
 
-        libre_device = {"device_id": 42, "hostname": "r01"}
-        validation = {
-            "existing_device": validated_existing,  # Different pk
-            "device_type_mismatch": False,
-        }
+    def test_rejects_a_posted_device_that_differs_from_the_validated_target(self):
+        from dcim.models import Device
 
-        with patch.object(view, "require_all_permissions", return_value=None):
-            with patch("dcim.models.Device") as MockDevice:
-                MockDevice.objects.restrict.return_value.get.return_value = mock_existing
-                MockDevice.DoesNotExist = Exception
-                with patch.object(view, "require_object_permissions", return_value=None):
-                    with patch.object(
-                        view, "get_validated_device_with_selections", return_value=(libre_device, validation, {})
-                    ):
-                        response = view.post(request, device_id=42)
-
-        assert response.status_code == 200
-        assert response.headers.get("HX-Reswap") == "none"
-        assert b"Device ID mismatch" in response.content
-
-    def test_validated_existing_none_renders_htmx_error_toast(self):
-        """Line 1025: validated_existing is None → htmx error toast (200)."""
         view = self._make_view()
-        request = _make_request(
-            post={
-                "action": "link",
-                "existing_device_id": "1",
-            }
+        target = make_device("branches-mismatch-posted-target")
+        validated_target = make_device("branches-mismatch-validated-target")
+        self._register_device(42, validated_target.name)
+        request = self._request(
+            "link",
+            target,
+            "branches-mismatch-user",
         )
 
-        mock_existing = MagicMock()
-        mock_existing.pk = 1
+        response = post_view(view, request, device_id=42)
 
-        libre_device = {"device_id": 42, "hostname": "r01"}
-        validation = {
-            "existing_device": None,  # No existing device validated
-            "device_type_mismatch": False,
-        }
+        self._assert_htmx_error(
+            response,
+            "Device ID mismatch: existing_device_id does not match validated device",
+        )
+        reloaded = Device.objects.get(pk=target.pk)
+        assert reloaded.name == "branches-mismatch-posted-target"
+        assert "librenms_id" not in reloaded.custom_field_data
 
-        with patch.object(view, "require_all_permissions", return_value=None):
-            with patch("dcim.models.Device") as MockDevice:
-                MockDevice.objects.restrict.return_value.get.return_value = mock_existing
-                MockDevice.DoesNotExist = Exception
-                with patch.object(view, "require_object_permissions", return_value=None):
-                    with patch.object(
-                        view, "get_validated_device_with_selections", return_value=(libre_device, validation, {})
-                    ):
-                        response = view.post(request, device_id=42)
+    def test_rejects_a_validated_vm_with_the_same_pk_as_the_posted_device(self):
+        from dcim.models import Device
+        from virtualization.models import VirtualMachine
 
-        assert response.status_code == 200
-        assert response.headers.get("HX-Reswap") == "none"
-        assert b"Missing validated conflict target" in response.content
-
-    def test_require_object_permissions_fails(self):
-        """Line 1014: require_object_permissions returns error."""
         view = self._make_view()
-        request = _make_request(
-            post={
-                "action": "link",
-                "existing_device_id": "1",
-            }
+        target = make_device("branches-type-mismatch-device-target")
+        assert not VirtualMachine.objects.filter(pk=target.pk).exists()
+        validated_target = VirtualMachine.objects.create(
+            pk=target.pk,
+            name="branches-type-mismatch-vm-target",
+            cluster=make_cluster("branches-type-mismatch-cluster"),
+            status="active",
+        )
+        self._register_device(42, validated_target.name)
+        request = self._request(
+            "sync_name",
+            target,
+            "branches-type-mismatch-user",
         )
 
-        mock_existing = MagicMock()
-        from django.http import HttpResponse
+        response = post_view(view, request, device_id=42)
 
-        perm_error = HttpResponse("Permission denied", status=403)
+        self._assert_htmx_error(
+            response,
+            "Device ID mismatch: existing_device_id does not match validated device",
+        )
+        assert Device.objects.get(pk=target.pk).name == "branches-type-mismatch-device-target"
+        assert VirtualMachine.objects.get(pk=validated_target.pk).name == "branches-type-mismatch-vm-target"
 
-        with patch.object(view, "require_all_permissions", return_value=None):
-            with patch("dcim.models.Device") as MockDevice:
-                MockDevice.objects.restrict.return_value.get.return_value = mock_existing
-                MockDevice.DoesNotExist = Exception
-                with patch.object(view, "require_object_permissions", return_value=perm_error):
-                    response = view.post(request, device_id=1)
+    def test_requires_force_for_an_action_that_uses_a_mismatched_device_type(self):
+        from dcim.models import Device, DeviceType
 
-        assert response.status_code == 403
-
-    def test_migrate_not_flagged_renders_htmx_error_toast(self):
-        """Line 1252-1255: migrate_librenms_id with unflagged device → htmx error toast (200)."""
         view = self._make_view()
-        request = _make_request(
-            post={
-                "action": "migrate_librenms_id",
-                "existing_device_id": "1",
-            }
+        target = make_device("branches-force-required-target")
+        reported_type = DeviceType.objects.create(
+            manufacturer=target.device_type.manufacturer,
+            model="Branches Force Required Type",
+            slug="branches-force-required-type",
+            part_number="BRANCHES-FORCE-HARDWARE",
+        )
+        self._register_device(
+            42,
+            target.name,
+            hardware=reported_type.part_number,
+        )
+        request = self._request(
+            "link",
+            target,
+            "branches-force-required-user",
         )
 
-        mock_existing = MagicMock()
-        mock_existing.pk = 1
+        response = post_view(view, request, device_id=42)
 
-        libre_device = {"device_id": 42, "hostname": "r01"}
-        validation = {
-            "existing_device": mock_existing,
-            "device_type_mismatch": False,
-            "librenms_id_needs_migration": False,  # NOT flagged for migration
-        }
+        self._assert_htmx_error(
+            response,
+            "Device type mismatch detected. Check the force checkbox to proceed.",
+        )
+        reloaded = Device.objects.get(pk=target.pk)
+        assert reloaded.device_type_id != reported_type.pk
+        assert "librenms_id" not in reloaded.custom_field_data
 
-        with patch.object(view, "require_all_permissions", return_value=None):
-            with patch("dcim.models.Device") as MockDevice:
-                MockDevice.objects.restrict.return_value.get.return_value = mock_existing
-                MockDevice.DoesNotExist = Exception
-                with patch.object(view, "require_object_permissions", return_value=None):
-                    with patch.object(
-                        view, "get_validated_device_with_selections", return_value=(libre_device, validation, {})
-                    ):
-                        response = view.post(request, device_id=42)
+    def test_rejects_an_invalid_device_id_from_the_live_payload(self):
+        from dcim.models import Device
 
-        assert response.status_code == 200
-        assert response.headers.get("HX-Reswap") == "none"
-        assert b"already in JSON format" in response.content
-
-    def test_migrate_already_json_format_renders_htmx_error_toast(self):
-        """Lines 1260-1265: cf_value already dict → htmx error toast (200)."""
         view = self._make_view()
-        request = _make_request(
-            post={
-                "action": "migrate_librenms_id",
-                "existing_device_id": "1",
-            }
+        target = make_device("branches-invalid-payload-id-target")
+        invalid_payload_id = "invalid-device-id"
+        self.librenms_server.register(
+            "/api/v0/devices/42",
+            {
+                "status": "ok",
+                "devices": [
+                    {
+                        "device_id": invalid_payload_id,
+                        "hostname": target.name,
+                        "hardware": "Branches invalid ID chassis",
+                        "os": "",
+                        "serial": "",
+                        "sysName": target.name,
+                        "ip": "",
+                        "version": "",
+                        "features": "-",
+                        "location": "-",
+                    }
+                ],
+            },
+        )
+        # fetch_device_with_cache accepts a live dictionary without re-checking its own device_id.
+        # Validation can therefore bind the real row by hostname before the action rejects the bad ID.
+        self.librenms_server.vc_inventory_callable(invalid_payload_id, [], {})
+        request = self._request(
+            "link",
+            target,
+            "branches-invalid-payload-id-user",
         )
 
-        mock_existing = MagicMock()
-        mock_existing.pk = 1
-        mock_existing.custom_field_data = {"librenms_id": {"default": 42}}  # Already dict
+        response = post_view(view, request, device_id=42)
 
-        libre_device = {"device_id": 42, "hostname": "r01"}
-        validation = {
-            "existing_device": mock_existing,
-            "device_type_mismatch": False,
-            "librenms_id_needs_migration": True,
-        }
+        self._assert_htmx_error(response, "Invalid or missing LibreNMS device_id in payload")
+        reloaded = Device.objects.get(pk=target.pk)
+        assert reloaded.name == "branches-invalid-payload-id-target"
+        assert "librenms_id" not in reloaded.custom_field_data
 
-        with patch.object(view, "require_all_permissions", return_value=None):
-            with patch("dcim.models.Device") as MockDevice:
-                MockDevice.objects.restrict.return_value.get.return_value = mock_existing
-                MockDevice.DoesNotExist = Exception
-                with patch.object(view, "require_object_permissions", return_value=None):
-                    with patch.object(
-                        view, "get_validated_device_with_selections", return_value=(libre_device, validation, {})
-                    ):
-                        response = view.post(request, device_id=42)
+    def test_rejects_a_legacy_mapping_inside_the_lock(self):
+        from dcim.models import Device
 
-        assert response.status_code == 200
-        assert response.headers.get("HX-Reswap") == "none"
-        assert b"already in JSON format" in response.content
-
-    def test_migrate_id_mismatch_renders_htmx_error_toast(self):
-        """Line 1272-1275: cf_int != librenms_id → htmx error toast (200)."""
         view = self._make_view()
-        request = _make_request(
-            post={
-                "action": "migrate_librenms_id",
-                "existing_device_id": "1",
-            }
+        target = make_device("branches-legacy-link-target", librenms_cf=42)
+        self._register_device(42, target.name)
+        request = self._request(
+            "link",
+            target,
+            "branches-legacy-link-user",
         )
 
-        mock_existing = MagicMock()
-        mock_existing.pk = 1
-        mock_existing.custom_field_data = {"librenms_id": 99}  # Different from librenms_id=42
+        response = post_view(view, request, device_id=42)
 
-        libre_device = {"device_id": 42, "hostname": "r01"}
-        validation = {
-            "existing_device": mock_existing,
-            "device_type_mismatch": False,
-            "librenms_id_needs_migration": True,
-        }
+        self._assert_htmx_error(
+            response,
+            "Device has a legacy bare-integer librenms_id; use 'Convert mapping' "
+            "to migrate to the multi-server format before linking.",
+        )
+        reloaded = Device.objects.get(pk=target.pk)
+        assert reloaded.name == "branches-legacy-link-target"
+        assert reloaded.custom_field_data["librenms_id"] == 42
 
-        with patch.object(view, "require_all_permissions", return_value=None):
-            with patch("dcim.models.Device") as MockDevice:
-                MockDevice.objects.restrict.return_value.get.return_value = mock_existing
-                MockDevice.DoesNotExist = Exception
-                with patch.object(view, "require_object_permissions", return_value=None):
-                    with patch.object(
-                        view, "get_validated_device_with_selections", return_value=(libre_device, validation, {})
-                    ):
-                        response = view.post(request, device_id=42)
+    def test_link_sets_the_name_mapping_and_device_type_then_renders_the_row(self):
+        from dcim.models import Device, DeviceType
 
-        assert response.status_code == 200
-        assert response.headers.get("HX-Reswap") == "none"
-        assert b"does not match the active device ID" in response.content
-
-    def test_sync_device_type_no_match_renders_htmx_error_toast(self):
-        """Line 1241: sync_device_type with no HW match → htmx error toast (200)."""
         view = self._make_view()
-        request = _make_request(
-            post={
-                "action": "sync_device_type",
-                "existing_device_id": "1",
-            }
+        target = make_device("branches-link-target", serial="BRANCHES-LINK-SERIAL")
+        reported_type = DeviceType.objects.create(
+            manufacturer=target.device_type.manufacturer,
+            model="Branches Link Type",
+            slug="branches-link-type",
+            part_number="BRANCHES-LINK-HARDWARE",
+        )
+        self._register_device(
+            42,
+            "branches-link-source-name",
+            serial="BRANCHES-LINK-SERIAL",
+            hardware=reported_type.part_number,
+        )
+        request = self._request(
+            "link",
+            target,
+            "branches-link-user",
+            force="on",
         )
 
-        mock_existing = MagicMock()
-        mock_existing.pk = 1
+        response = post_view(view, request, device_id=42)
 
-        libre_device = {"device_id": 42, "hostname": "r01", "hardware": "Unknown HW"}
-        validation = {
-            "existing_device": mock_existing,
-            "device_type_mismatch": False,
-        }
+        self._assert_success(response)
+        reloaded = Device.objects.get(pk=target.pk)
+        assert reloaded.name == "branches-link-source-name"
+        assert reloaded.device_type_id == reported_type.pk
+        assert reloaded.custom_field_data["librenms_id"] == {self.server_key: 42}
 
-        with patch.object(view, "require_all_permissions", return_value=None):
-            with patch("dcim.models.Device") as MockDevice:
-                MockDevice.objects.restrict.return_value.get.return_value = mock_existing
-                MockDevice.DoesNotExist = Exception
-                with patch.object(view, "require_object_permissions", return_value=None):
-                    with patch.object(
-                        view, "get_validated_device_with_selections", return_value=(libre_device, validation, {})
-                    ):
-                        with patch(
-                            "netbox_librenms_plugin.utils.match_librenms_hardware_to_device_type",
-                            return_value={"matched": False},
-                        ):
-                            response = view.post(request, device_id=42)
+    def test_update_sets_the_name_serial_mapping_and_device_type_then_renders_the_row(self):
+        from dcim.models import Device, DeviceType
 
-        assert response.status_code == 200
-        assert response.headers.get("HX-Reswap") == "none"
-        assert b"No matching device type for" in response.content
-
-    def test_sync_platform_no_os_renders_htmx_error_toast(self):
-        """Line 1227: sync_platform with empty OS → htmx error toast (200)."""
         view = self._make_view()
-        request = _make_request(
-            post={
-                "action": "sync_platform",
-                "existing_device_id": "1",
-            }
+        target = make_device(
+            "branches-update-target",
+            serial="BRANCHES-UPDATE-OLD",
+            librenms_cf={self.server_key: 42},
+        )
+        reported_type = DeviceType.objects.create(
+            manufacturer=target.device_type.manufacturer,
+            model="Branches Update Type",
+            slug="branches-update-type",
+            part_number="BRANCHES-UPDATE-HARDWARE",
+        )
+        self._register_device(
+            42,
+            "branches-update-source-name",
+            serial="BRANCHES-UPDATE-NEW",
+            hardware=reported_type.part_number,
+        )
+        request = self._request(
+            "update",
+            target,
+            "branches-update-user",
+            force="on",
         )
 
-        mock_existing = MagicMock()
-        mock_existing.pk = 1
+        response = post_view(view, request, device_id=42)
 
-        libre_device = {"device_id": 42, "hostname": "r01", "os": ""}  # Empty OS
-        validation = {
-            "existing_device": mock_existing,
-            "device_type_mismatch": False,
-        }
+        self._assert_success(response)
+        reloaded = Device.objects.get(pk=target.pk)
+        assert reloaded.name == "branches-update-source-name"
+        assert reloaded.serial == "BRANCHES-UPDATE-NEW"
+        assert reloaded.device_type_id == reported_type.pk
+        assert reloaded.custom_field_data["librenms_id"] == {self.server_key: 42}
 
-        with patch.object(view, "require_all_permissions", return_value=None):
-            with patch("dcim.models.Device") as MockDevice:
-                MockDevice.objects.restrict.return_value.get.return_value = mock_existing
-                MockDevice.DoesNotExist = Exception
-                with patch.object(view, "require_object_permissions", return_value=None):
-                    with patch.object(
-                        view, "get_validated_device_with_selections", return_value=(libre_device, validation, {})
-                    ):
-                        response = view.post(request, device_id=42)
+    def test_update_reports_a_real_serial_conflict(self):
+        from dcim.models import Device
 
-        assert response.status_code == 200
-        assert response.headers.get("HX-Reswap") == "none"
-        assert b"No OS info from LibreNMS" in response.content
-
-    def test_sync_platform_not_found_in_netbox(self):
-        """Line 1225: sync_platform platform not in NetBox → htmx error toast (200)."""
         view = self._make_view()
-        request = _make_request(
-            post={
-                "action": "sync_platform",
-                "existing_device_id": "1",
-            }
+        target = make_device(
+            "branches-update-conflict-target",
+            serial="BRANCHES-UPDATE-CONFLICT-OLD",
+            librenms_cf={self.server_key: 42},
+        )
+        conflict = make_device(
+            "branches-update-conflict-owner",
+            serial="BRANCHES-UPDATE-CONFLICT-NEW",
+        )
+        self._register_device(
+            42,
+            "branches-update-conflict-source",
+            serial=conflict.serial,
+        )
+        request = self._request(
+            "update",
+            target,
+            "branches-update-conflict-user",
         )
 
-        mock_existing = MagicMock()
-        mock_existing.pk = 1
+        response = post_view(view, request, device_id=42)
 
-        libre_device = {"device_id": 42, "hostname": "r01", "os": "ios"}
-        validation = {
-            "existing_device": mock_existing,
-            "device_type_mismatch": False,
-        }
+        self._assert_htmx_error(
+            response,
+            f"Serial conflict: '{conflict.serial}' is already assigned to device '{conflict.name}' (ID: {conflict.pk})",
+        )
+        reloaded = Device.objects.get(pk=target.pk)
+        assert reloaded.name == "branches-update-conflict-target"
+        assert reloaded.serial == "BRANCHES-UPDATE-CONFLICT-OLD"
+        assert reloaded.custom_field_data["librenms_id"] == {self.server_key: 42}
 
-        with patch.object(view, "require_all_permissions", return_value=None):
-            with patch("dcim.models.Device") as MockDevice:
-                MockDevice.objects.restrict.return_value.get.return_value = mock_existing
-                MockDevice.DoesNotExist = Exception
-                with patch.object(view, "require_object_permissions", return_value=None):
-                    with patch.object(
-                        view, "get_validated_device_with_selections", return_value=(libre_device, validation, {})
-                    ):
-                        with patch(
-                            "netbox_librenms_plugin.utils.find_matching_platform", return_value={"found": False}
-                        ):
-                            response = view.post(request, device_id=42)
+    def test_update_serial_sets_the_serial_mapping_and_device_type_then_renders_the_row(self):
+        from dcim.models import Device, DeviceType
 
-        assert response.status_code == 200
-        assert response.headers.get("HX-Reswap") == "none"
-        assert b"not found in NetBox" in response.content
+        view = self._make_view()
+        target = make_device(
+            "branches-update-serial-target",
+            serial="BRANCHES-UPDATE-SERIAL-OLD",
+            librenms_cf={self.server_key: 42},
+        )
+        reported_type = DeviceType.objects.create(
+            manufacturer=target.device_type.manufacturer,
+            model="Branches Update Serial Type",
+            slug="branches-update-serial-type",
+            part_number="BRANCHES-UPDATE-SERIAL-HARDWARE",
+        )
+        self._register_device(
+            42,
+            "branches-update-serial-source",
+            serial="BRANCHES-UPDATE-SERIAL-NEW",
+            hardware=reported_type.part_number,
+        )
+        request = self._request(
+            "update_serial",
+            target,
+            "branches-update-serial-user",
+            force="on",
+        )
+
+        response = post_view(view, request, device_id=42)
+
+        self._assert_success(response)
+        reloaded = Device.objects.get(pk=target.pk)
+        assert reloaded.name == "branches-update-serial-target"
+        assert reloaded.serial == "BRANCHES-UPDATE-SERIAL-NEW"
+        assert reloaded.device_type_id == reported_type.pk
+        assert reloaded.custom_field_data["librenms_id"] == {self.server_key: 42}
+
+    def test_update_serial_reports_a_real_serial_conflict(self):
+        from dcim.models import Device
+
+        view = self._make_view()
+        target = make_device(
+            "branches-update-serial-conflict-target",
+            serial="BRANCHES-UPDATE-SERIAL-CONFLICT-OLD",
+            librenms_cf={self.server_key: 42},
+        )
+        conflict = make_device(
+            "branches-update-serial-conflict-owner",
+            serial="BRANCHES-UPDATE-SERIAL-CONFLICT-NEW",
+        )
+        self._register_device(
+            42,
+            "branches-update-serial-conflict-source",
+            serial=conflict.serial,
+        )
+        request = self._request(
+            "update_serial",
+            target,
+            "branches-update-serial-conflict-user",
+        )
+
+        response = post_view(view, request, device_id=42)
+
+        self._assert_htmx_error(
+            response,
+            f"Serial conflict: '{conflict.serial}' is already assigned to device '{conflict.name}' (ID: {conflict.pk})",
+        )
+        reloaded = Device.objects.get(pk=target.pk)
+        assert reloaded.name == "branches-update-serial-conflict-target"
+        assert reloaded.serial == "BRANCHES-UPDATE-SERIAL-CONFLICT-OLD"
+        assert reloaded.custom_field_data["librenms_id"] == {self.server_key: 42}
+
+    def test_sync_name_sets_the_name_then_renders_the_row(self):
+        from dcim.models import Device
+
+        view = self._make_view()
+        target = make_device(
+            "branches-sync-name-target",
+            librenms_cf={self.server_key: 42},
+        )
+        self._register_device(42, "branches-sync-name-source")
+        request = self._request(
+            "sync_name",
+            target,
+            "branches-sync-name-user",
+        )
+
+        response = post_view(view, request, device_id=42)
+
+        self._assert_success(response)
+        reloaded = Device.objects.get(pk=target.pk)
+        assert reloaded.name == "branches-sync-name-source"
+        assert reloaded.custom_field_data["librenms_id"] == {self.server_key: 42}
+
+    @pytest.mark.django_db(transaction=True)
+    def test_sync_name_reports_a_real_database_name_collision(self):
+        from dcim.models import Device
+
+        view = self._make_view()
+        target = make_device(
+            "branches-sync-name-collision-target",
+            librenms_cf={self.server_key: 42},
+        )
+        conflict = make_device("branches-sync-name-collision-owner")
+        self._register_device(42, conflict.name)
+        request = self._request(
+            "sync_name",
+            target,
+            "branches-sync-name-collision-user",
+        )
+
+        # NetBox has a database UniqueConstraint on Lower("name") plus site and tenant,
+        # with a second site/name constraint for tenant-less devices. Because sync_name
+        # uses update_fields, it skips full_clean and the real UPDATE raises IntegrityError.
+        response = post_view(view, request, device_id=42)
+
+        self._assert_htmx_error(
+            response,
+            "Could not save: a database integrity constraint was violated.",
+        )
+        reloaded = Device.objects.get(pk=target.pk)
+        assert reloaded.name == "branches-sync-name-collision-target"
+        assert Device.objects.get(pk=conflict.pk).name == "branches-sync-name-collision-owner"
+
+    def test_update_type_reports_when_validation_has_no_librenms_device_type(self):
+        from dcim.models import Device
+
+        view = self._make_view()
+        target = make_device("branches-update-type-missing-target")
+        original_type_id = target.device_type_id
+        self._register_device(42, target.name)
+        request = self._request(
+            "update_type",
+            target,
+            "branches-update-type-missing-user",
+        )
+
+        response = post_view(view, request, device_id=42)
+
+        self._assert_htmx_error(response, "No LibreNMS device type available to update")
+        assert Device.objects.get(pk=target.pk).device_type_id == original_type_id
+
+    def test_sync_serial_sets_the_serial_then_renders_the_row(self):
+        from dcim.models import Device
+
+        view = self._make_view()
+        target = make_device(
+            "branches-sync-serial-target",
+            serial="BRANCHES-SYNC-SERIAL-OLD",
+        )
+        self._register_device(
+            42,
+            target.name,
+            serial="BRANCHES-SYNC-SERIAL-NEW",
+        )
+        request = self._request(
+            "sync_serial",
+            target,
+            "branches-sync-serial-user",
+        )
+
+        response = post_view(view, request, device_id=42)
+
+        self._assert_success(response)
+        assert Device.objects.get(pk=target.pk).serial == "BRANCHES-SYNC-SERIAL-NEW"
+
+    def test_sync_serial_reports_when_librenms_has_no_valid_serial(self):
+        from dcim.models import Device
+
+        view = self._make_view()
+        target = make_device(
+            "branches-sync-serial-empty-target",
+            serial="BRANCHES-SYNC-SERIAL-KEEP",
+        )
+        self._register_device(42, target.name, serial="-")
+        request = self._request(
+            "sync_serial",
+            target,
+            "branches-sync-serial-empty-user",
+        )
+
+        response = post_view(view, request, device_id=42)
+
+        self._assert_htmx_error(response, "No valid serial from LibreNMS")
+        assert Device.objects.get(pk=target.pk).serial == "BRANCHES-SYNC-SERIAL-KEEP"
+
+    def test_sync_serial_reports_when_the_row_is_deleted_before_the_lock(self):
+        from dcim.models import Device
+
+        view = self._make_view()
+        target = make_device("branches-sync-serial-deleted-target")
+        target_pk = target.pk
+        self._register_device(
+            42,
+            target.name,
+            serial="BRANCHES-SYNC-SERIAL-DELETED",
+        )
+        request = self._request(
+            "sync_serial",
+            target,
+            "branches-sync-serial-deleted-user",
+        )
+
+        response = self._post_after_validation(
+            view,
+            request,
+            42,
+            lambda: Device.objects.filter(pk=target_pk).delete(),
+        )
+
+        self._assert_htmx_error(
+            response,
+            "Device no longer exists; it may have been deleted concurrently.",
+        )
+        assert not Device.objects.filter(pk=target_pk).exists()
+
+    def test_sync_platform_sets_the_platform_then_renders_the_row(self):
+        from dcim.models import Device, Platform
+
+        view = self._make_view()
+        target = make_device("branches-sync-platform-target")
+        platform = Platform.objects.create(
+            name="branches-sync-platform-os",
+            slug="branches-sync-platform-os",
+        )
+        self._register_device(
+            42,
+            target.name,
+            os=platform.name,
+        )
+        request = self._request(
+            "sync_platform",
+            target,
+            "branches-sync-platform-user",
+        )
+
+        response = post_view(view, request, device_id=42)
+
+        self._assert_success(response)
+        assert Device.objects.get(pk=target.pk).platform_id == platform.pk
+
+    def test_sync_platform_reports_when_no_platform_matches(self):
+        from dcim.models import Device
+
+        view = self._make_view()
+        target = make_device("branches-sync-platform-missing-target")
+        librenms_os = "branches-sync-platform-missing-os"
+        self._register_device(
+            42,
+            target.name,
+            os=librenms_os,
+        )
+        request = self._request(
+            "sync_platform",
+            target,
+            "branches-sync-platform-missing-user",
+        )
+
+        response = post_view(view, request, device_id=42)
+
+        self._assert_htmx_error(
+            response,
+            f"Platform '{librenms_os}' not found in NetBox",
+        )
+        assert Device.objects.get(pk=target.pk).platform_id is None
+
+    def test_sync_platform_reports_real_case_insensitive_platform_ambiguity(self):
+        from dcim.models import Device, Platform
+
+        view = self._make_view()
+        target = make_device("branches-sync-platform-ambiguous-target")
+        librenms_os = "branches-sync-platform-ambiguous-os"
+        Platform.objects.create(
+            name=librenms_os,
+            slug="branches-sync-platform-ambiguous-lower",
+        )
+        Platform.objects.create(
+            name=librenms_os.upper(),
+            slug="branches-sync-platform-ambiguous-upper",
+        )
+        # Platform names are unique case-sensitively. Both real rows therefore exist, while
+        # find_matching_platform uses name__iexact and reports the pair as ambiguous.
+        self._register_device(
+            42,
+            target.name,
+            os=librenms_os,
+        )
+        request = self._request(
+            "sync_platform",
+            target,
+            "branches-sync-platform-ambiguous-user",
+        )
+
+        response = post_view(view, request, device_id=42)
+
+        self._assert_htmx_error(
+            response,
+            f"Multiple Platforms match OS '{librenms_os}' — resolve the conflict in Platforms",
+        )
+        assert Device.objects.get(pk=target.pk).platform_id is None
+
+    def test_sync_device_type_sets_the_matching_real_type_then_renders_the_row(self):
+        from dcim.models import Device, DeviceType
+
+        view = self._make_view()
+        target = make_device("branches-sync-device-type-target")
+        matched_type = DeviceType.objects.create(
+            manufacturer=target.device_type.manufacturer,
+            model="Branches Sync Device Type",
+            slug="branches-sync-device-type",
+            part_number="BRANCHES-SYNC-DEVICE-TYPE-HARDWARE",
+        )
+        self._register_device(
+            42,
+            target.name,
+            hardware=matched_type.part_number,
+        )
+        request = self._request(
+            "sync_device_type",
+            target,
+            "branches-sync-device-type-user",
+        )
+
+        response = post_view(view, request, device_id=42)
+
+        self._assert_success(response)
+        assert Device.objects.get(pk=target.pk).device_type_id == matched_type.pk
+
+    def test_sync_device_type_reports_when_no_real_type_matches(self):
+        from dcim.models import Device
+
+        view = self._make_view()
+        target = make_device("branches-sync-device-type-missing-target")
+        hardware = "BRANCHES-NO-MATCHING-DEVICE-TYPE"
+        original_type_id = target.device_type_id
+        self._register_device(
+            42,
+            target.name,
+            hardware=hardware,
+        )
+        request = self._request(
+            "sync_device_type",
+            target,
+            "branches-sync-device-type-missing-user",
+        )
+
+        response = post_view(view, request, device_id=42)
+
+        self._assert_htmx_error(response, f"No matching device type for '{hardware}'")
+        assert Device.objects.get(pk=target.pk).device_type_id == original_type_id
+
+    def test_reports_when_librenms_deletes_the_device_before_post_action_revalidation(self):
+        from dcim.models import Device
+
+        view = self._make_view()
+        target = make_device(
+            "branches-post-action-missing-target",
+            librenms_cf={self.server_key: 42},
+        )
+        self._register_device(42, "branches-post-action-missing-source")
+        request = self._request(
+            "sync_name",
+            target,
+            "branches-post-action-missing-user",
+        )
+
+        # This guard checks the second LibreNMS payload, not whether the NetBox target survived.
+        # Remove the external row immediately before the second real validation, after sync_name saved.
+        response = self._post_after_validation(
+            view,
+            request,
+            42,
+            lambda: self.librenms_server.register(
+                "/api/v0/devices/42",
+                {"status": "error", "message": "Device not found"},
+                status=404,
+            ),
+            before_revalidation=True,
+        )
+
+        self._assert_htmx_error(response, "Device not found after action")
+        reloaded = Device.objects.get(pk=target.pk)
+        assert reloaded.name == "branches-post-action-missing-source"
+        assert reloaded.custom_field_data["librenms_id"] == {self.server_key: 42}
 
 
 @pytest.mark.django_db
@@ -3708,397 +4071,6 @@ class TestDeviceConflictSelectForUpdateDoesNotExist:
         assert response.status_code == 200
         assert response.headers.get("HX-Reswap") == "none"
         assert b"Device no longer exists" in response.content
-
-
-class TestDeviceConflictMoreActions:
-    """Tests for many more action paths in DeviceConflictActionView."""
-
-    @pytest.fixture(autouse=True)
-    def _no_advisory_lock(self):
-        """The serial guard's pg_advisory_xact_lock needs a real connection these mock tests don't have."""
-        with patch("netbox_librenms_plugin.views.imports.actions._acquire_serial_assignment_lock"):
-            yield
-
-    def _make_view(self):
-        from netbox_librenms_plugin.views.imports.actions import DeviceConflictActionView
-
-        view = object.__new__(DeviceConflictActionView)
-        view._librenms_api = _make_api()
-        view.request = MagicMock()
-        return view
-
-    def _base_setup(self, action, extra_post=None):
-        """Return (view, request, mock_existing, libre_device, validation)."""
-        view = self._make_view()
-        post_data = {"action": action, "existing_device_id": "1"}
-        if extra_post:
-            post_data.update(extra_post)
-        request = _make_request(post=post_data)
-        mock_existing = MagicMock()
-        mock_existing.pk = 1
-        mock_existing.name = "router01"
-        mock_existing.platform = None  # no platform → no platform/device_type manufacturer constraint
-        mock_existing.rack = None  # not rack-mounted → no device_type rack-fit constraint
-        libre_device = {"device_id": 42, "hostname": "router01", "serial": "SN001", "hardware": "Cisco", "os": "ios"}
-        validation = {
-            "existing_device": mock_existing,
-            "device_type_mismatch": False,
-        }
-        return view, request, mock_existing, libre_device, validation
-
-    def _common_patches(self, view, mock_existing, libre_device, validation):
-        """Return a context manager that patches common stuff."""
-        from contextlib import ExitStack
-
-        DoesNotExistExc = type("DoesNotExist", (Exception,), {})
-
-        stack = ExitStack()
-        stack.enter_context(patch.object(view, "require_all_permissions", return_value=None))
-
-        MockDevice = MagicMock()
-        # restrict() hands back the same manager, so the locked re-read reached through it
-        # resolves to the stubs below.
-        MockDevice.objects.restrict.return_value = MockDevice.objects
-        MockDevice.objects.get.return_value = mock_existing
-        MockDevice.objects.select_for_update.return_value.get.return_value = mock_existing
-        MockDevice.objects.filter.return_value.exclude.return_value.first.return_value = None
-        MockDevice.DoesNotExist = DoesNotExistExc
-
-        stack.enter_context(patch("dcim.models.Device", MockDevice))
-        stack.enter_context(patch.object(view, "require_object_permissions", return_value=None))
-        stack.enter_context(
-            patch.object(view, "get_validated_device_with_selections", return_value=(libre_device, validation, {}))
-        )
-        stack.enter_context(patch("netbox_librenms_plugin.utils.find_by_librenms_id", return_value=None))
-        stack.enter_context(patch("netbox_librenms_plugin.views.imports.actions.set_librenms_device_id"))
-        stack.enter_context(patch("netbox_librenms_plugin.views.imports.actions.cache"))
-        stack.enter_context(
-            patch("netbox_librenms_plugin.views.imports.actions.get_import_device_cache_key", return_value="key")
-        )
-
-        mock_tx = MagicMock()
-        mock_tx.atomic.return_value.__enter__ = MagicMock(return_value=None)
-        mock_tx.atomic.return_value.__exit__ = MagicMock(return_value=False)
-        stack.enter_context(patch("netbox_librenms_plugin.views.imports.actions.transaction", mock_tx))
-        stack.enter_context(
-            patch("netbox_librenms_plugin.views.imports.actions._get_hostname_for_action", return_value="router01")
-        )
-        stack.enter_context(
-            patch(
-                "netbox_librenms_plugin.views.imports.actions.fetch_device_with_cache", return_value={"device_id": 42}
-            )
-        )
-
-        return stack, MockDevice
-
-    def test_link_save_error_returns_error(self):
-        """Line 1090: link action → _save_device returns error."""
-        view, request, mock_existing, libre_device, validation = self._base_setup("link")
-        from django.http import HttpResponse
-
-        error_response = HttpResponse("Save failed", status=400)
-
-        with self._common_patches(view, mock_existing, libre_device, validation)[0]:
-            with patch("netbox_librenms_plugin.views.imports.actions._save_device", return_value=error_response):
-                response = view.post(request, device_id=42)
-
-        assert response.status_code == 400
-
-    def test_update_serial_conflict_renders_htmx_error_toast(self):
-        """Line 1139: update_serial with serial conflict → htmx error toast (200)."""
-        view, request, mock_existing, libre_device, validation = self._base_setup("update_serial")
-        conflict_device = MagicMock()
-        conflict_device.name = "router99"
-        conflict_device.pk = 99
-
-        stack, MockDevice = self._common_patches(view, mock_existing, libre_device, validation)
-        with stack:
-            MockDevice.objects.filter.return_value.exclude.return_value.first.return_value = conflict_device
-            with patch("netbox_librenms_plugin.views.imports.actions._save_device", return_value=None):
-                response = view.post(request, device_id=42)
-
-        assert response.status_code == 200
-        assert response.headers.get("HX-Reswap") == "none"
-        assert b"Serial conflict" in response.content
-
-    def test_update_serial_save_success_renders_row(self):
-        """Lines 1146-1149: update_serial with no conflict → save + render."""
-        view, request, mock_existing, libre_device, validation = self._base_setup("update_serial")
-
-        with self._common_patches(view, mock_existing, libre_device, validation)[0]:
-            with patch("netbox_librenms_plugin.views.imports.actions._save_device", return_value=None):
-                with patch.object(view, "render_device_row", return_value=MagicMock()) as mock_render:
-                    view.post(request, device_id=42)
-
-        mock_render.assert_called_once()
-
-    def test_sync_name_renders_row(self):
-        """Lines 1155-1161: sync_name action → save + render."""
-        view, request, mock_existing, libre_device, validation = self._base_setup("sync_name")
-
-        with self._common_patches(view, mock_existing, libre_device, validation)[0]:
-            with patch("netbox_librenms_plugin.views.imports.actions._save_device", return_value=None):
-                with patch.object(view, "render_device_row", return_value=MagicMock()) as mock_render:
-                    view.post(request, device_id=42)
-
-        mock_render.assert_called_once()
-
-    def test_sync_name_save_error(self):
-        """Line 1160: sync_name → _save_device returns error."""
-        view, request, mock_existing, libre_device, validation = self._base_setup("sync_name")
-        from django.http import HttpResponse
-
-        error_resp = HttpResponse("error", status=400)
-
-        with self._common_patches(view, mock_existing, libre_device, validation)[0]:
-            with patch("netbox_librenms_plugin.views.imports.actions._save_device", return_value=error_resp):
-                response = view.post(request, device_id=42)
-
-        assert response.status_code == 400
-
-    def test_update_type_no_device_type_renders_htmx_error_toast(self):
-        """Line 1171: update_type with no librenms_device_type → htmx error toast (200)."""
-        view, request, mock_existing, libre_device, validation = self._base_setup("update_type")
-        # No device_type_mismatch + no force → librenms_device_type = None
-
-        with self._common_patches(view, mock_existing, libre_device, validation)[0]:
-            with patch("netbox_librenms_plugin.views.imports.actions._save_device", return_value=None):
-                response = view.post(request, device_id=42)
-
-        assert response.status_code == 200
-        assert response.headers.get("HX-Reswap") == "none"
-        assert b"No LibreNMS device type available to update" in response.content
-
-    def test_sync_platform_success_renders_row(self):
-        """Line 1222: sync_platform with found platform → save + render."""
-        view, request, mock_existing, libre_device, validation = self._base_setup("sync_platform")
-        mock_platform = MagicMock()
-        mock_platform.name = "IOS"
-
-        with self._common_patches(view, mock_existing, libre_device, validation)[0]:
-            with patch(
-                "netbox_librenms_plugin.utils.find_matching_platform",
-                return_value={"found": True, "platform": mock_platform},
-            ):
-                with patch("netbox_librenms_plugin.views.imports.actions._save_device", return_value=None):
-                    with patch.object(view, "render_device_row", return_value=MagicMock()) as mock_render:
-                        view.post(request, device_id=42)
-
-        mock_render.assert_called_once()
-
-    def test_sync_device_type_success_renders_row(self):
-        """Line 1238: sync_device_type with match → save + render."""
-        view, request, mock_existing, libre_device, validation = self._base_setup("sync_device_type")
-        mock_dt = MagicMock()
-        mock_dt.display = "Cisco Router"
-
-        with self._common_patches(view, mock_existing, libre_device, validation)[0]:
-            with patch(
-                "netbox_librenms_plugin.utils.match_librenms_hardware_to_device_type",
-                return_value={"matched": True, "device_type": mock_dt},
-            ):
-                with patch("netbox_librenms_plugin.views.imports.actions._save_device", return_value=None):
-                    with patch.object(view, "render_device_row", return_value=MagicMock()) as mock_render:
-                        view.post(request, device_id=42)
-
-        mock_render.assert_called_once()
-
-    def test_device_not_found_after_action_renders_htmx_error_toast(self):
-        """Line 1338: get_validated_device_with_selections returns None after action."""
-        view, request, mock_existing, libre_device, validation = self._base_setup("sync_name")
-
-        # First call returns (libre_device, validation, {}) for permission check
-        # After action, re-validate returns (None, None, {})
-        call_count = [0]
-
-        def side_effect(*args, **kwargs):
-            call_count[0] += 1
-            if call_count[0] == 1:
-                return (libre_device, validation, {})
-            return (None, None, {})
-
-        with self._common_patches(view, mock_existing, libre_device, validation)[0]:
-            with patch.object(view, "get_validated_device_with_selections", side_effect=side_effect):
-                with patch("netbox_librenms_plugin.views.imports.actions._save_device", return_value=None):
-                    response = view.post(request, device_id=42)
-
-        assert response.status_code == 200
-        assert response.headers.get("HX-Reswap") == "none"
-        assert b"Device not found after action" in response.content
-
-
-class TestMoreSaveErrorPaths:
-    """Tests for save error paths in actions (lines 1108, 1116, 1119, 1146, 1149, 1168, 1182-1183, 1196-1210, 1222, 1238)."""
-
-    @pytest.fixture(autouse=True)
-    def _no_advisory_lock(self):
-        """The serial guard's pg_advisory_xact_lock needs a real connection these mock tests don't have."""
-        with patch("netbox_librenms_plugin.views.imports.actions._acquire_serial_assignment_lock"):
-            yield
-
-    def _make_view(self):
-        from netbox_librenms_plugin.views.imports.actions import DeviceConflictActionView
-
-        view = object.__new__(DeviceConflictActionView)
-        view._librenms_api = _make_api()
-        view.request = MagicMock()
-        return view
-
-    def _base_setup(self, action, extra_post=None):
-        view = self._make_view()
-        post_data = {"action": action, "existing_device_id": "1"}
-        if extra_post:
-            post_data.update(extra_post)
-        request = _make_request(post=post_data)
-        mock_existing = MagicMock()
-        mock_existing.pk = 1
-        mock_existing.name = "router01"
-        mock_existing.platform = None  # no platform → no platform/device_type manufacturer constraint
-        mock_existing.rack = None  # not rack-mounted → no device_type rack-fit constraint
-        libre_device = {"device_id": 42, "hostname": "router01", "serial": "SN001", "hardware": "Cisco", "os": "ios"}
-        validation = {
-            "existing_device": mock_existing,
-            "device_type_mismatch": False,
-        }
-        return view, request, mock_existing, libre_device, validation
-
-    def _setup_common(self, view, mock_existing, libre_device, validation, save_return=None):
-        from contextlib import ExitStack
-
-        DoesNotExistExc = type("DoesNotExist", (Exception,), {})
-        MockDevice = MagicMock()
-        # restrict() hands back the same manager, so the locked re-read reached through it
-        # resolves to the stubs below.
-        MockDevice.objects.restrict.return_value = MockDevice.objects
-        MockDevice.objects.get.return_value = mock_existing
-        MockDevice.objects.select_for_update.return_value.get.return_value = mock_existing
-        MockDevice.objects.filter.return_value.exclude.return_value.first.return_value = None
-        MockDevice.DoesNotExist = DoesNotExistExc
-
-        mock_tx = MagicMock()
-        mock_tx.atomic.return_value.__enter__ = MagicMock(return_value=None)
-        mock_tx.atomic.return_value.__exit__ = MagicMock(return_value=False)
-
-        stack = ExitStack()
-        stack.enter_context(patch.object(view, "require_all_permissions", return_value=None))
-        stack.enter_context(patch("dcim.models.Device", MockDevice))
-        stack.enter_context(patch.object(view, "require_object_permissions", return_value=None))
-        stack.enter_context(
-            patch.object(view, "get_validated_device_with_selections", return_value=(libre_device, validation, {}))
-        )
-        stack.enter_context(patch("netbox_librenms_plugin.utils.find_by_librenms_id", return_value=None))
-        stack.enter_context(patch("netbox_librenms_plugin.views.imports.actions.set_librenms_device_id"))
-        stack.enter_context(patch("netbox_librenms_plugin.views.imports.actions.cache"))
-        stack.enter_context(
-            patch("netbox_librenms_plugin.views.imports.actions.get_import_device_cache_key", return_value="key")
-        )
-        stack.enter_context(patch("netbox_librenms_plugin.views.imports.actions.transaction", mock_tx))
-        stack.enter_context(
-            patch("netbox_librenms_plugin.views.imports.actions._get_hostname_for_action", return_value="router01")
-        )
-        stack.enter_context(
-            patch(
-                "netbox_librenms_plugin.views.imports.actions.fetch_device_with_cache", return_value={"device_id": 42}
-            )
-        )
-        if save_return is not None:
-            stack.enter_context(
-                patch("netbox_librenms_plugin.views.imports.actions._save_device", return_value=save_return)
-            )
-        return stack, MockDevice
-
-    def test_update_serial_conflict_in_update(self):
-        """Line 1108: update action with serial conflict → htmx error toast (200)."""
-        view, request, mock_existing, libre_device, validation = self._base_setup("update")
-        conflict = MagicMock()
-        conflict.name = "other"
-        conflict.pk = 99
-
-        stack, MockDevice = self._setup_common(view, mock_existing, libre_device, validation, save_return=None)
-        with stack:
-            MockDevice.objects.filter.return_value.exclude.return_value.first.return_value = conflict
-            response = view.post(request, device_id=42)
-
-        assert response.status_code == 200
-        assert response.headers.get("HX-Reswap") == "none"
-        assert b"Serial conflict" in response.content
-
-    def test_update_with_device_type_mismatch_forced(self):
-        """Lines 1116, 1119: update with force + device_type_mismatch → device_type applied."""
-        view, request, mock_existing, libre_device, validation = self._base_setup("update", {"force": "on"})
-        validation["device_type_mismatch"] = True
-        validation["device_type"] = {"device_type": MagicMock()}
-
-        stack, MockDevice = self._setup_common(view, mock_existing, libre_device, validation, save_return=None)
-        with stack:
-            with patch.object(view, "render_device_row", return_value=MagicMock()) as mock_render:
-                view.post(request, device_id=42)
-
-        mock_render.assert_called_once()
-
-    def test_update_serial_with_device_type(self):
-        """Lines 1146, 1149: update_serial with force device_type → render."""
-        view, request, mock_existing, libre_device, validation = self._base_setup("update_serial", {"force": "on"})
-        validation["device_type_mismatch"] = True
-        validation["device_type"] = {"device_type": MagicMock()}
-
-        stack, MockDevice = self._setup_common(view, mock_existing, libre_device, validation, save_return=None)
-        with stack:
-            with patch.object(view, "render_device_row", return_value=MagicMock()) as mock_render:
-                view.post(request, device_id=42)
-
-        mock_render.assert_called_once()
-
-    def test_update_type_with_device_type_save_error(self):
-        """Line 1168: update_type with save error → return error."""
-        view, request, mock_existing, libre_device, validation = self._base_setup("update_type", {"force": "on"})
-        validation["device_type_mismatch"] = True
-        validation["device_type"] = {"device_type": MagicMock()}
-
-        from django.http import HttpResponse
-
-        error_resp = HttpResponse("save error", status=400)
-        stack, _ = self._setup_common(view, mock_existing, libre_device, validation, save_return=error_resp)
-        with stack:
-            response = view.post(request, device_id=42)
-
-        assert response.status_code == 400
-
-    def test_sync_platform_save_error(self):
-        """Line 1222: sync_platform → _save_device returns error."""
-        view, request, mock_existing, libre_device, validation = self._base_setup("sync_platform")
-        mock_platform = MagicMock()
-
-        from django.http import HttpResponse
-
-        error_resp = HttpResponse("save error", status=400)
-        stack, _ = self._setup_common(view, mock_existing, libre_device, validation, save_return=error_resp)
-        with stack:
-            with patch(
-                "netbox_librenms_plugin.utils.find_matching_platform",
-                return_value={"found": True, "platform": mock_platform},
-            ):
-                response = view.post(request, device_id=42)
-
-        assert response.status_code == 400
-
-    def test_sync_device_type_save_error(self):
-        """Line 1238: sync_device_type → _save_device returns error."""
-        view, request, mock_existing, libre_device, validation = self._base_setup("sync_device_type")
-        mock_dt = MagicMock()
-
-        from django.http import HttpResponse
-
-        error_resp = HttpResponse("save error", status=400)
-        stack, _ = self._setup_common(view, mock_existing, libre_device, validation, save_return=error_resp)
-        with stack:
-            with patch(
-                "netbox_librenms_plugin.utils.match_librenms_hardware_to_device_type",
-                return_value={"matched": True, "device_type": mock_dt},
-            ):
-                response = view.post(request, device_id=42)
-
-        assert response.status_code == 400
 
 
 @pytest.mark.django_db
