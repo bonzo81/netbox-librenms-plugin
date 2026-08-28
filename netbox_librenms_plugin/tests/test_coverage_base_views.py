@@ -1238,6 +1238,9 @@ class TestBaseCableTableViewPost:
         with (
             patch.object(view, "get_object", return_value=obj),
             patch.object(view, "_prepare_context", return_value=fake_context),
+            # _prepare_context is stubbed, so nothing reaches the cache; report the snapshot as
+            # present, which is the success case this test is about.
+            patch("netbox_librenms_plugin.views.base.cables_view.cache.has_key", return_value=True),
             patch("netbox_librenms_plugin.views.base.cables_view.messages") as mock_messages,
             patch("netbox_librenms_plugin.views.mixins.render") as mock_render,
         ):
@@ -1245,6 +1248,7 @@ class TestBaseCableTableViewPost:
             view.post(request, pk=1)
 
         mock_messages.success.assert_called_once()
+        mock_messages.error.assert_not_called()
         mock_render.assert_called_once()
 
     def test_get_ports_data_uses_cache_when_available(self):
