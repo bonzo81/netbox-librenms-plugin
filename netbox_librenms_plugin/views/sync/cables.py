@@ -1,3 +1,4 @@
+import copy
 import functools
 import hashlib
 import json
@@ -196,7 +197,9 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libre
         from netbox_librenms_plugin.views.object_sync.devices import DeviceCableTableView
 
         view = DeviceCableTableView()
-        view.request = request
+        # Give the child its own request, like every other object_sync table-view delegation, so it
+        # cannot mutate the GET/POST state this handler still reads.
+        view.request = copy.copy(request)
         return view.enrich_links_data(
             links,
             obj,

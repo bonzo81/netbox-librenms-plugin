@@ -835,6 +835,42 @@ class TestSyncCablesViewHelpers:
         assert result[0]["cable_status"] == "Cable Found"
         assert result[0]["cable_url"].endswith(f"/{cable.pk}/")
 
+    def test_cached_links_delegation_cannot_mutate_the_caller_request(self):
+        """The delegated table view gets its own request, so its edits stay out of this handler's."""
+        from django.core.cache import cache
+
+        from netbox_librenms_plugin.views.object_sync.devices import DeviceCableTableView
+        from netbox_librenms_plugin.views.sync.cables import SyncCablesView
+
+        device = _cov_device()
+        local_interface = make_interface(device, "Gi0/9")
+        request = _make_request()
+        view = SyncCablesView()
+        view.setup(request, pk=device.pk)
+        view._post_server_key = "default"
+        cache_key = view.get_cache_key(device, "links", "default")
+        _seeded_cache_keys.add(cache_key)
+        cache.set(
+            cache_key,
+            {"links": [{"local_port_id": "p", "local_port": local_interface.name}]},
+            timeout=300,
+        )
+
+        seen = {}
+        real_enrich = DeviceCableTableView.enrich_links_data
+
+        def enrich_and_scribble(self, *args, **kwargs):
+            seen["child_request"] = self.request
+            # A child that writes on its request must not reach the caller's copy.
+            self.request.cable_delegation_marker = "child"
+            return real_enrich(self, *args, **kwargs)
+
+        with patch.object(DeviceCableTableView, "enrich_links_data", enrich_and_scribble):
+            view.get_cached_links_data(request, device)
+
+        assert seen["child_request"] is not request
+        assert not hasattr(request, "cable_delegation_marker")
+
     def test_duplicate_cached_row_identities_report_the_real_cause(self):
         """Duplicate row identities must not be reported as an expired cache."""
         from django.core.cache import cache
