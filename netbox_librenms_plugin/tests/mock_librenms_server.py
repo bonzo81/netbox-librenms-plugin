@@ -443,7 +443,10 @@ class LibreNMSStubServer(MockLibreNMSServer):
         device_body = self._find_response(recording, f"/api/v0/devices/{device_id}")
         raw_devices = device_body.get("devices") if isinstance(device_body, dict) else None
         if not isinstance(raw_devices, list) or not raw_devices or not isinstance(raw_devices[0], dict):
-            return
+            # Returning here would start a stub whose device, ports, inventory and OOB routes are
+            # all silently missing, and the failure would surface much later as a puzzling 404.
+            name = (recording.get("meta") or {}).get("name") or recording.get("name") or "<unnamed>"
+            raise ValueError(f"stub recording {name!r} has no usable /api/v0/devices/{device_id} response")
 
         device = self._normalise_device(raw_devices[0], device_id)
         self.devices[device_id] = device
@@ -578,11 +581,14 @@ class LibreNMSStubServer(MockLibreNMSServer):
             )
         self._aliases_by_device[device_id] = alias_keys
 
-        self.register(
-            f"/api/v0/devices/{device_id}",
-            self._update_device_handler(device_id),
-            method="PATCH",
-        )
+        # The plugin patches by whatever identifier it holds, so PATCH must answer on the same
+        # aliases the device GET route does, not the numeric id alone.
+        for patch_key in (str(device_id), *alias_keys):
+            self.register(
+                f"/api/v0/devices/{patch_key}",
+                self._update_device_handler(device_id),
+                method="PATCH",
+            )
         self.register(
             f"/api/v0/devices/{device_id}/links",
             self._device_links_handler(device_id),
@@ -697,6 +703,10 @@ class LibreNMSStubServer(MockLibreNMSServer):
         def _handler(method, path, query, headers, body):
             fields = body.get("field") if isinstance(body, dict) else None
             values = body.get("data") if isinstance(body, dict) else None
+            # LibreNMS documents both a scalar pair and equal-length lists; normalise the scalar
+            # form so the stub accepts what the real API accepts.
+            if isinstance(fields, str) and not isinstance(values, (list, dict)):
+                fields, values = [fields], [values]
             if not isinstance(fields, list) or not isinstance(values, list) or len(fields) != len(values):
                 return 422, {"status": "error", "message": "field and data must be equal-length lists"}
             if any(not isinstance(field, str) or not field for field in fields):
