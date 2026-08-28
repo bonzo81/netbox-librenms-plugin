@@ -2091,6 +2091,7 @@ class TestProdShapeWS4908Matching:
         )
 
 
+@pytest.mark.django_db
 class TestPositionalMatchScaffoldingChain:
     """Verify positional fallback stops at model-less module scaffolding before chassis bays."""
 
@@ -2198,65 +2199,20 @@ class TestPositionalMatchScaffoldingChain:
             },
         ]
 
-    def _device_bays(self):
-        bays = {}
-        for n in range(0, 4):
-            b = MagicMock()
-            b.name = f"Slot {n}"
-            b.installed_module = None
-            b.get_absolute_url.return_value = f"/bay/slot-{n}"
-            bays[f"Slot {n}"] = b
-        return bays
-
-    def _module_types(self):
-        mt = MagicMock()
-        mt.pk = 50
-        mt.model = "SFP-10G-SR"
-        mt.get_absolute_url.return_value = "/mt/sfp"
-        return {"SFP-10G-SR": mt}
-
     def _build_rows(self, device_serial="DEVICE_SERIAL"):
+        from netbox_librenms_plugin.tests.conftest import make_device_with_module_bays, make_module_type
+
         view = _make_view()
-        # Need a transparent rule that fires on serial_matches_device, like prod
-        from netbox_librenms_plugin.tests.test_modules_view import _make_view as _mv  # noqa: F401
+        # Need the seeded transparent rule to fire on serial_matches_device, like prod.
+        # Device-serial matches the linecard's serial, so the linecard becomes transparent.
+        device = make_device_with_module_bays(
+            "positional-scaffolding",
+            [f"Slot {n}" for n in range(0, 4)],
+            serial=device_serial,
+        )
+        make_module_type("SFP-10G-SR", manufacturer=device.device_type.manufacturer)
 
-        rows_store = _captured_table_view(view)
-        view._get_module_bays = MagicMock(return_value=(self._device_bays(), {}))
-        view._get_module_types = MagicMock(return_value=self._module_types())
-        view._get_generic_module_types = MagicMock(return_value={})
-        view._get_module_type_ambiguities = MagicMock(return_value={})
-        view._get_carrier_install_rules = MagicMock(return_value=[])
-
-        # Device-serial matches the linecard's serial → linecard becomes transparent
-        device = MagicMock()
-        device.serial = device_serial
-        device.virtual_chassis = None
-        device.id = 1
-        device_type = MagicMock()
-        device_type.manufacturer = None
-        device.device_type = device_type
-
-        # Build a fake "transparent" ignore rule matching serial_matches_device
-        transparent_rule = MagicMock()
-        transparent_rule.match_type = "serial_matches_device"
-        transparent_rule.action = "transparent"
-        transparent_rule.require_serial_match_parent = False
-
-        with (
-            patch("netbox_librenms_plugin.views.base.modules_view.cache") as mock_cache,
-            patch("netbox_librenms_plugin.utils.load_bay_mappings", return_value=([], [])),
-            patch("netbox_librenms_plugin.utils.get_enabled_ignore_rules", return_value=[transparent_rule]),
-            patch("netbox_librenms_plugin.utils.apply_normalization_rules", side_effect=lambda v, *a, **kw: v),
-            patch(
-                "netbox_librenms_plugin.utils.preload_normalization_rules",
-                side_effect=lambda scope, manufacturer=None: {(scope, None): []},
-            ),
-            patch("netbox_librenms_plugin.utils.has_nested_name_conflict", return_value=False),
-            patch.object(view.__class__, "_detect_serial_conflicts", return_value=None),
-        ):
-            mock_cache.ttl = MagicMock(return_value=None)
-            view._build_context(MagicMock(), device, self._scaffolding_inventory())
-        return rows_store.get("rows", [])
+        return _run_build_context_real(view, self._scaffolding_inventory(), device)
 
     def _row(self, rows, name):
         for r in rows:
@@ -2719,6 +2675,7 @@ class TestBuildRowSerialMismatch:
         assert not row.get("can_update_serial")
 
 
+@pytest.mark.django_db
 class TestDetectSerialConflicts:
     """Tests for BaseModuleTableView._detect_serial_conflicts()."""
 
@@ -2727,53 +2684,48 @@ class TestDetectSerialConflicts:
 
         return object.__new__(BaseModuleTableView)
 
-    def test_no_can_replace_or_install_rows_does_nothing(self):
+    def _make_module(self, tag, serial):
+        from netbox_librenms_plugin.tests.conftest import install_module, make_device_with_module_bays
+
+        device = make_device_with_module_bays(f"serial-conflict-{tag}", ["Slot 1"])
+        return install_module(device, "Slot 1", f"SERIAL-CONFLICT-{tag}", serial=serial)
+
+    def test_no_can_replace_or_install_rows_does_nothing(self, django_assert_num_queries):
         """When no rows have can_replace or can_install, the method returns without DB query."""
         view = self._view()
         table_data = [{"serial": "S1", "status": "Installed"}]
-        with patch("dcim.models.Module") as mock_module_cls:
+        with django_assert_num_queries(0):
             view._detect_serial_conflicts(table_data)
-            mock_module_cls.objects.filter.assert_not_called()
         assert "serial_conflict_module" not in table_data[0]
 
     def test_conflict_detected_for_can_replace_row(self):
         """When a conflicting module exists, serial_conflict_module is set on the row."""
         view = self._view()
-        conflict = MagicMock()
-        conflict.serial = "CONFLICT_SERIAL"
-        conflict.pk = 999
-        conflict.module_bay = MagicMock()
-        conflict.device = MagicMock()
+        conflict = self._make_module("replace", "CONFLICT_SERIAL")
 
         row = {
             "can_replace": True,
             "serial": "CONFLICT_SERIAL",
-            "installed_module_id": 42,  # different from conflict.pk
+            "installed_module_id": conflict.pk + 1,  # different from conflict.pk
         }
 
-        with patch("dcim.models.Module") as mock_module_cls:
-            mock_module_cls.objects.filter.return_value.select_related.return_value = [conflict]
-            view._detect_serial_conflicts([row])
+        view._detect_serial_conflicts([row])
 
-        assert row.get("serial_conflict_module") is conflict
+        assert row.get("serial_conflict_module") == conflict
         assert row.get("can_move_from") is True
 
     def test_no_conflict_when_conflict_is_same_module(self):
         """When the only module with the serial IS the installed module, no conflict is set."""
         view = self._view()
-        conflict = MagicMock()
-        conflict.serial = "S1"
-        conflict.pk = 42  # Same as installed_module_id
+        conflict = self._make_module("same", "S1")
 
         row = {
             "can_replace": True,
             "serial": "S1",
-            "installed_module_id": 42,
+            "installed_module_id": conflict.pk,  # Same as the conflicting module.
         }
 
-        with patch("dcim.models.Module") as mock_module_cls:
-            mock_module_cls.objects.filter.return_value.select_related.return_value = [conflict]
-            view._detect_serial_conflicts([row])
+        view._detect_serial_conflicts([row])
 
         assert "serial_conflict_module" not in row
         assert not row.get("can_move_from")
@@ -2781,9 +2733,7 @@ class TestDetectSerialConflicts:
     def test_conflict_detected_for_can_install_row(self):
         """Serial conflicts are also detected for empty-bay (can_install) rows."""
         view = self._view()
-        conflict = MagicMock()
-        conflict.serial = "CONFLICT_SERIAL"
-        conflict.pk = 999
+        conflict = self._make_module("install", "CONFLICT_SERIAL")
 
         row = {
             "can_install": True,
@@ -2791,45 +2741,35 @@ class TestDetectSerialConflicts:
             # No installed_module_id — bay is empty
         }
 
-        with patch("dcim.models.Module") as mock_module_cls:
-            mock_module_cls.objects.filter.return_value.select_related.return_value = [conflict]
-            view._detect_serial_conflicts([row])
+        view._detect_serial_conflicts([row])
 
-        assert row.get("serial_conflict_module") is conflict
+        assert row.get("serial_conflict_module") == conflict
         assert row.get("can_move_from") is True
 
     def test_ambiguous_when_multiple_conflicts_for_same_serial(self):
         """When multiple modules share the same serial, mark the row ambiguous instead of picking one."""
         view = self._view()
-        conflict1 = MagicMock()
-        conflict1.serial = "DUP_SERIAL"
-        conflict1.pk = 100
-
-        conflict2 = MagicMock()
-        conflict2.serial = "DUP_SERIAL"
-        conflict2.pk = 200
+        conflict1 = self._make_module("ambiguous-a", "DUP_SERIAL")
+        conflict2 = self._make_module("ambiguous-b", "DUP_SERIAL")
 
         row = {
             "can_replace": True,
             "serial": "DUP_SERIAL",
-            "installed_module_id": 42,
+            "installed_module_id": max(conflict1.pk, conflict2.pk) + 1,
         }
 
-        with patch("dcim.models.Module") as mock_module_cls:
-            mock_module_cls.objects.filter.return_value.select_related.return_value = [conflict1, conflict2]
-            view._detect_serial_conflicts([row])
+        view._detect_serial_conflicts([row])
 
         assert row.get("serial_conflict_module") is None
         assert not row.get("can_move_from")
         assert row.get("serial_conflict_ambiguous") is True
 
-    def test_can_install_no_serial_not_flagged(self):
+    def test_can_install_no_serial_not_flagged(self, django_assert_num_queries):
         """A can_install row with no serial is not checked for conflicts."""
         view = self._view()
         row = {"can_install": True, "serial": "-"}
-        with patch("dcim.models.Module") as mock_module_cls:
+        with django_assert_num_queries(0):
             view._detect_serial_conflicts([row])
-            mock_module_cls.objects.filter.assert_not_called()
         assert "serial_conflict_module" not in row
 
 
@@ -4346,76 +4286,98 @@ class TestRenderStatusNoBayOnParent:
         assert "Fix Model" not in html
 
 
+@pytest.mark.django_db
 class TestMatchedInterfaceLinking:
     """Rows should expose matched NetBox interface metadata and render as links."""
 
-    def test_build_interface_indexes_ignores_duplicate_port_ids(self):
-        view = _make_view()
-        interface_a = MagicMock()
-        interface_b = MagicMock()
-        interface_c = MagicMock()
-        member = MagicMock()
-        member.interfaces.all.return_value = [interface_a, interface_b, interface_c]
+    def _view(self):
+        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+        from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
 
-        view._librenms_api.get_stored_librenms_id.side_effect = [42, 42, 43]
+        view = object.__new__(BaseModuleTableView)
+        view._device_manufacturer = None
+        view._librenms_api = object.__new__(LibreNMSAPI)
+        view._librenms_api.server_key = "test-server"
+        return view
+
+    def _make_interface(self, device, name, *, port_id=None, module=None):
+        from netbox_librenms_plugin.tests.conftest import make_interface
+        from netbox_librenms_plugin.utils import set_librenms_device_id
+
+        interface = make_interface(device, name)
+        if module is not None:
+            interface.module = module
+            interface.save(update_fields=["module"])
+        if port_id is not None:
+            set_librenms_device_id(interface, port_id, "test-server")
+            interface.save(update_fields=["custom_field_data"])
+        return interface
+
+    def test_build_interface_indexes_ignores_duplicate_port_ids(self):
+        from netbox_librenms_plugin.tests.conftest import make_device
+
+        view = self._view()
+        member = make_device("interface-index-port-id")
+        self._make_interface(member, "Te1/1/1", port_id=42)
+        self._make_interface(member, "Te1/1/2", port_id=42)
+        interface_c = self._make_interface(member, "Te1/1/3", port_id=43)
 
         interface_map, _ = view._build_interface_indexes(member)
 
         assert 42 not in interface_map
-        assert interface_map[43] is interface_c
-        view._librenms_api.get_librenms_id.assert_not_called()
+        assert interface_map[43] == interface_c
 
-    def test_build_interface_indexes_ignores_duplicate_names(self):
-        view = _make_view()
-        interface_a = MagicMock()
-        interface_a.name = "Te1/1/1"
-        interface_b = MagicMock()
-        interface_b.name = "Te1/1/1"
-        interface_c = MagicMock()
-        interface_c.name = "Te1/1/2"
-        member = MagicMock()
-        member.interfaces.all.return_value = [interface_a, interface_b, interface_c]
+    def test_netbox_forbids_two_interfaces_sharing_a_name_on_one_device(self):
+        """Pin the constraint that makes the duplicate-name dedupe in _build_interface_indexes unreachable.
 
-        _, interface_map = view._build_interface_indexes(member)
+        _build_interface_indexes only ever receives a Device, and dcim_interface_unique_device_name
+        forbids two interfaces of one device sharing a name, so its duplicate_names branch cannot
+        run. If NetBox ever drops the constraint this fails, and the branch needs real coverage.
+        """
+        from django.db import IntegrityError, transaction
 
-        assert "Te1/1/1" not in interface_map
-        assert interface_map["Te1/1/2"] is interface_c
+        from netbox_librenms_plugin.tests.conftest import make_device
+
+        member = make_device("interface-index-duplicate-name")
+        self._make_interface(member, "Te1/1/1", port_id=41)
+
+        with pytest.raises(IntegrityError), transaction.atomic():
+            self._make_interface(member, "Te1/1/1", port_id=42)
 
     def test_build_member_contexts_builds_interface_indexes_once_per_member(self):
-        view = _make_view()
-        member = MagicMock()
-        member.id = 100
-        member.interfaces.all.return_value = []
+        from netbox_librenms_plugin.tests.conftest import make_device
 
-        with patch.object(view, "_get_module_bays", return_value=({}, {})):
-            context = view._build_member_contexts(member, vc_members=[])
+        view = self._view()
+        member = make_device("interface-member-context")
+        interface = self._make_interface(member, "Te1/1/1", port_id=42)
+        context = view._build_member_contexts(member, vc_members=[])
 
-        assert context[100]["interfaces_by_port_id"] == {}
-        assert context[100]["interfaces_by_name"] == {}
-        member.interfaces.all.assert_called_once_with()
+        assert context[member.pk]["interfaces_by_port_id"] == {42: interface}
+        assert context[member.pk]["interfaces_by_name"] == {"Te1/1/1": interface}
 
     def test_attach_interface_match_sets_name_and_url(self):
         from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
+        from netbox_librenms_plugin.tests.conftest import make_device
 
         row = {"name": "Te1/1/1", "librenms_port_id": 42}
-        iface = MagicMock()
-        iface.name = "TenGigabitEthernet1/1/1"
-        iface.get_absolute_url.return_value = "/dcim/interfaces/100/"
+        device = make_device("interface-attach-port-id")
+        iface = self._make_interface(device, "TenGigabitEthernet1/1/1")
         context = {"interfaces_by_port_id": {42: iface}}
 
         BaseModuleTableView._attach_interface_match(row, context)
 
         assert row["matched_interface_name"] == "TenGigabitEthernet1/1/1"
-        assert row["matched_interface_url"] == "/dcim/interfaces/100/"
+        assert row["matched_interface_url"] == iface.get_absolute_url()
         assert row["matched_interface_source"] == "port_id"
         assert row["matched_interface_confidence"] == "high"
 
     def test_attach_interface_match_skips_oob_rows(self):
         """OOB-sourced rows must not name-match the main device's interfaces — only the main device's interfaces are indexed in the context."""
         from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
+        from netbox_librenms_plugin.tests.conftest import make_device
 
-        iface = MagicMock()
-        iface.name = "TenGigabitEthernet1/1/1"
+        device = make_device("interface-attach-oob")
+        iface = self._make_interface(device, "TenGigabitEthernet1/1/1")
         row = {"_source": "oob", "name": "TenGigabitEthernet1/1/1", "librenms_port_id": None}
         context = {"interfaces_by_port_id": {}, "interfaces_by_name": {"TenGigabitEthernet1/1/1": iface}}
 
@@ -4428,6 +4390,7 @@ class TestMatchedInterfaceLinking:
 
     def test_attach_interface_match_falls_back_to_name_lookup(self):
         from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
+        from netbox_librenms_plugin.tests.conftest import make_device
 
         row = {
             "name": "Te1/1/1",
@@ -4435,9 +4398,8 @@ class TestMatchedInterfaceLinking:
             "librenms_port_id": None,
             "librenms_ifname": "TenGigabitEthernet1/1/1",
         }
-        iface = MagicMock()
-        iface.name = "TenGigabitEthernet1/1/1"
-        iface.get_absolute_url.return_value = "/dcim/interfaces/100/"
+        device = make_device("interface-attach-name")
+        iface = self._make_interface(device, "TenGigabitEthernet1/1/1")
         context = {
             "interfaces_by_port_id": {},
             "interfaces_by_name": {"TenGigabitEthernet1/1/1": iface},
@@ -4446,29 +4408,27 @@ class TestMatchedInterfaceLinking:
         BaseModuleTableView._attach_interface_match(row, context)
 
         assert row["matched_interface_name"] == "TenGigabitEthernet1/1/1"
-        assert row["matched_interface_url"] == "/dcim/interfaces/100/"
+        assert row["matched_interface_url"] == iface.get_absolute_url()
         assert row["matched_interface_source"] == "name"
         assert row["matched_interface_confidence"] == "medium"
 
     def test_attach_interface_match_marks_installed_row_for_interface_update(self):
         from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
+        from netbox_librenms_plugin.tests.conftest import install_module, make_device_with_module_bays
 
+        device = make_device_with_module_bays("interface-attach-installed", ["Slot 1"])
+        installed = install_module(device, "Slot 1", "INTERFACE-ATTACH-INSTALLED")
         row = {
             "name": "Te1/1/1",
             "librenms_port_id": 42,
-            "installed_module_id": 555,
+            "installed_module_id": installed.pk,
         }
-        iface = MagicMock()
-        iface.pk = 100
-        iface.name = "TenGigabitEthernet1/1/1"
-        iface.module_id = None
-        iface.get_absolute_url.return_value = "/dcim/interfaces/100/"
+        iface = self._make_interface(device, "TenGigabitEthernet1/1/1")
         context = {"interfaces_by_port_id": {42: iface}, "server_key": "default"}
 
-        with patch("netbox_librenms_plugin.views.base.modules_view.get_librenms_device_id", return_value=None):
-            BaseModuleTableView._attach_interface_match(row, context)
+        BaseModuleTableView._attach_interface_match(row, context)
 
-        assert row["matched_interface_id"] == 100
+        assert row["matched_interface_id"] == iface.pk
         assert row["matched_interface_module_id"] is None
         assert row["can_update_interface_binding"] is True
 
@@ -4985,49 +4945,58 @@ class TestBuildRowIntegratedDedupe:
         assert row["status"] != "Integrated"
 
 
+@pytest.mark.django_db
 class TestScopePreservedAcrossIntegratedContainer:
     """Verify an integrated container passes its bay scope to children without marking the scope as preserved."""
 
     def test_port_under_integrated_mda_gets_scope_preserved_false(self):
         """Regression: ports under integrated MDA used to lose mapping suggestions."""
+        from netbox_librenms_plugin.models import ModuleBayMapping
+        from netbox_librenms_plugin.tests.conftest import install_module, make_device_with_module_bays
         from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
 
-        view = _make_view()
+        view = object.__new__(BaseModuleTableView)
+        view._device_manufacturer = None
         view._current_device_bays = {}
         # Exact mapping so XIOM matches its bay → parent_module_id is set →
         # MDA at depth=1 sees scope_preserved=False legitimately.
-        xiom_mapping = MagicMock(
+        selected_device = make_device_with_module_bays("integrated-container", ["2/x1"])
+        xiom_mapping = ModuleBayMapping.objects.create(
             librenms_name="XIOM 2/x1",
             librenms_class="xioModule",
             netbox_bay_name="2/x1",
             is_regex=False,
-            manufacturer_id=None,
+            manufacturer=selected_device.device_type.manufacturer,
         )
         view._exact_bay_mappings = [xiom_mapping]
         view._regex_bay_mappings = []
         view._norm_rules_bay = None
         view._norm_rules_type = None
-        view._generic_module_types = {}
-        view._module_type_ambiguities = {}
 
         # Top-level XIOM matches a device-level bay whose installed module exposes
         # port-level child bays (x1/c1...). MDA sharing XIOM's serial+model becomes
         # integrated. Port under MDA should see scope_preserved=False so its
         # _build_row call generates a mapping suggestion.
-        xiom_module = MagicMock()
-        xiom_module.pk = 999
-        matched_xiom_bay = MagicMock(name="2/x1")
-        matched_xiom_bay.installed_module = xiom_module
-
-        mda_bays = {f"x1/c{n}": MagicMock() for n in range(1, 5)}
-        device_bays = {"2/x1": matched_xiom_bay}
-        all_bays = dict(device_bays)
+        install_module(
+            selected_device,
+            "2/x1",
+            "3HE18883AARB01",
+            serial="NS241462069",
+            child_bays=[f"x1/c{n}" for n in range(1, 5)],
+        )
+        device_bays, module_scoped_bays = view._get_module_bays(selected_device)
+        view._generic_module_types = view._get_generic_module_types()
+        view._module_type_ambiguities = view._get_module_type_ambiguities()
+        view._carrier_install_rules = view._get_carrier_install_rules(selected_device.device_type.manufacturer)
 
         target_context = {
             "device_bays": device_bays,
-            "all_bays": all_bays,
-            "module_scoped_bays": {999: mda_bays},
-            "sibling_counts": {},
+            "all_bays": view._compute_all_bays(device_bays, module_scoped_bays),
+            "module_scoped_bays": module_scoped_bays,
+            "sibling_counts": {module_id: len(bays) for module_id, bays in module_scoped_bays.items()},
+            "interfaces_by_port_id": {},
+            "interfaces_by_name": {},
+            "server_key": "test-server",
         }
 
         xiom_item = {
@@ -5065,22 +5034,7 @@ class TestScopePreservedAcrossIntegratedContainer:
             scope_preserved_seen.append((item.get("entPhysicalIndex"), kw.get("scope_preserved")))
             return original_build_row(self, item, idx_map, mod_bays, mod_types, **kw)
 
-        selected_device = MagicMock(id=1, name="dev")
-        selected_device.device_type = MagicMock()
-        selected_device.device_type.manufacturer = MagicMock(id=10, name="Nokia")
-
-        with (
-            patch.object(BaseModuleTableView, "_build_row", spy_build_row),
-            patch.object(BaseModuleTableView, "_apply_carrier_install_rules", lambda *a, **kw: None),
-            patch.object(
-                BaseModuleTableView,
-                "_get_sub_components",
-                return_value=[(1, mda_item), (2, port_item)],
-            ),
-            patch("netbox_librenms_plugin.utils.has_nested_name_conflict", return_value=False),
-            patch("netbox_librenms_plugin.utils.resolve_module_type", return_value=None),
-            patch("netbox_librenms_plugin.utils.apply_normalization_rules", side_effect=lambda v, *a, **kw: v),
-        ):
+        with patch.object(BaseModuleTableView, "_build_row", spy_build_row):
             view._append_rows_for_item_context(
                 table_data=[],
                 item=xiom_item,
@@ -5089,8 +5043,8 @@ class TestScopePreservedAcrossIntegratedContainer:
                 children_by_parent={100: [mda_item], 200: [port_item]},
                 ignore_rules=[],
                 device_serial="",
-                module_types={},
-                manufacturer=None,
+                module_types=view._get_module_types(),
+                manufacturer=selected_device.device_type.manufacturer,
                 selected_device=selected_device,
                 resolution_source="direct",
             )
@@ -5161,72 +5115,92 @@ class TestModuleTypeAmbiguityWarning:
         assert cands == []
 
 
+@pytest.mark.django_db
 class TestBuildRowAmbiguityWiring:
     """_build_row populates module_type_ambiguity and suppresses module_type_create when ambiguous."""
 
+    def _view(self):
+        from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
+
+        view = object.__new__(BaseModuleTableView)
+        view._device_manufacturer = None
+        view._norm_rules_type = None
+        return view
+
     def test_no_type_with_ambiguity_carries_candidates_and_omits_create_button(self):
-        view = _make_view()
-        bay = MagicMock()
-        bay.name = "Slot 2"
-        bay.installed_module = None
-        bay.get_absolute_url.return_value = "/b"
-        view._match_module_bay = MagicMock(return_value=bay)
-        view._norm_rules_type = {}
+        from dcim.models import Manufacturer
+
+        from netbox_librenms_plugin.tests.conftest import make_device_with_module_bays, make_module_type
+
+        view = self._view()
+        device = make_device_with_module_bays("build-row-ambiguity", ["Slot 2"])
+        other_manufacturer = Manufacturer.objects.create(
+            name="Ambiguity Vendor B",
+            slug="ambiguity-vendor-b",
+        )
+        candidate_a = make_module_type(
+            "3HE18883AARB01",
+            manufacturer=device.device_type.manufacturer,
+        )
+        candidate_b = make_module_type("3HE18883AARB01", manufacturer=other_manufacturer)
+        view._generic_module_types = view._get_generic_module_types()
         # Ambiguity preloaded on the view
-        a = MagicMock()
-        a.pk = 1
-        a.model = "XIOM-x2-s36-800g-qsfpdd"
-        a.manufacturer.name = "Nokia"
-        a.get_absolute_url.return_value = "/dcim/module-types/1/"
-        b = MagicMock()
-        b.pk = 2
-        b.model = "XMA2-s"
-        b.manufacturer.name = "Nokia"
-        b.get_absolute_url.return_value = "/dcim/module-types/2/"
-        view._module_type_ambiguities = {"3HE18883AARB01": [a, b]}
+        view._module_type_ambiguities = view._get_module_type_ambiguities()
+        module_bays = {bay.name: bay for bay in device.modulebays.filter(module__isnull=True)}
         item = {
-            "entPhysicalName": "XIOM 2/x1",
+            "entPhysicalName": "Slot 2",
             "entPhysicalClass": "xioModule",
             "entPhysicalModelName": "3HE18883AARB01",
             "entPhysicalSerialNum": "S1",
             "entPhysicalContainedIn": 0,
         }
-        with (
-            patch("netbox_librenms_plugin.utils.has_nested_name_conflict", return_value=False),
-            patch("netbox_librenms_plugin.utils.resolve_module_type", return_value=None),
-        ):
-            row = view._build_row(item, {}, {}, {})
+        row = view._build_row(
+            item,
+            {},
+            module_bays,
+            view._get_module_types(),
+            manufacturer=device.device_type.manufacturer,
+        )
         assert row["status"] == "No Type"
         assert "ModuleTypes sharing" in row["model_warning"]
         assert len(row["module_type_ambiguity"]) == 2
-        assert row["module_type_ambiguity"][0]["model"] == "XIOM-x2-s36-800g-qsfpdd"
-        assert row["module_type_ambiguity"][0]["url"] == "/dcim/module-types/1/"
+        candidates_by_manufacturer = {
+            candidate["manufacturer"]: candidate for candidate in row["module_type_ambiguity"]
+        }
+        for candidate in (candidate_a, candidate_b):
+            assert candidates_by_manufacturer[candidate.manufacturer.name] == {
+                "pk": candidate.pk,
+                "model": candidate.model,
+                "manufacturer": candidate.manufacturer.name,
+                "url": candidate.get_absolute_url(),
+            }
         # When ambiguous we must NOT offer to create yet another duplicate.
         assert "module_type_create" not in row
         assert "type_suggestion" not in row
 
     def test_no_type_without_ambiguity_keeps_existing_buttons(self):
-        view = _make_view()
-        bay = MagicMock()
-        bay.name = "Slot 2"
-        bay.installed_module = None
-        bay.get_absolute_url.return_value = "/b"
-        view._match_module_bay = MagicMock(return_value=bay)
-        view._module_type_ambiguities = {}
-        manufacturer = MagicMock()
-        manufacturer.pk = 7
+        from netbox_librenms_plugin.tests.conftest import make_device_with_module_bays
+
+        view = self._view()
+        device = make_device_with_module_bays("build-row-no-ambiguity", ["Slot 2"])
+        manufacturer = device.device_type.manufacturer
+        view._generic_module_types = view._get_generic_module_types()
+        view._module_type_ambiguities = view._get_module_type_ambiguities()
+        module_bays = {bay.name: bay for bay in device.modulebays.filter(module__isnull=True)}
         item = {
-            "entPhysicalName": "X",
+            "entPhysicalName": "Slot 2",
             "entPhysicalClass": "module",
             "entPhysicalModelName": "BRAND-NEW",
             "entPhysicalSerialNum": "S1",
             "entPhysicalContainedIn": 0,
         }
-        with (
-            patch("netbox_librenms_plugin.utils.has_nested_name_conflict", return_value=False),
-            patch("netbox_librenms_plugin.utils.resolve_module_type", return_value=None),
-        ):
-            row = view._build_row(item, {}, {}, {}, manufacturer=manufacturer)
+        row = view._build_row(
+            item,
+            {},
+            module_bays,
+            view._get_module_types(),
+            manufacturer=manufacturer,
+        )
         assert row["status"] == "No Type"
         assert "module_type_ambiguity" not in row
         assert row["module_type_create"]["model"] == "BRAND-NEW"
@@ -5237,31 +5211,24 @@ class TestBuildRowAmbiguityWiring:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.django_db
 class TestGetModuleTypeAmbiguities:
     def test_collects_keys_shared_by_two_or_more_module_types(self):
+        from dcim.models import Manufacturer
+
+        from netbox_librenms_plugin.tests.conftest import make_module_type
         from netbox_librenms_plugin.utils import get_module_type_ambiguities
 
-        a = MagicMock()
-        a.model = "XIOM-x2-s36-800g-qsfpdd"
-        a.part_number = "3HE18883AA"
-        a.manufacturer.name = "Nokia"
-        b = MagicMock()
-        b.model = "XMA2-s"
-        b.part_number = "3HE18883AA"
-        b.manufacturer.name = "Nokia"
-        c = MagicMock()
-        c.model = "OTHER"
-        c.part_number = "3HE99999AA"
-        c.manufacturer.name = "Nokia"
+        manufacturer_a = Manufacturer.objects.create(name="Ambiguity Index A", slug="ambiguity-index-a")
+        manufacturer_b = Manufacturer.objects.create(name="Ambiguity Index B", slug="ambiguity-index-b")
+        a = make_module_type("SHARED-MODEL", manufacturer=manufacturer_a)
+        b = make_module_type("SHARED-MODEL", manufacturer=manufacturer_b)
+        make_module_type("OTHER", manufacturer=manufacturer_a)
 
-        qs = MagicMock()
-        qs.select_related.return_value = [a, b, c]
-        with patch("dcim.models.ModuleType.objects.all", return_value=qs):
-            amb = get_module_type_ambiguities()
+        amb = get_module_type_ambiguities()
 
-        assert "3HE18883AA" in amb
-        assert set(amb["3HE18883AA"]) == {a, b}
-        assert "3HE99999AA" not in amb
+        assert "SHARED-MODEL" in amb
+        assert set(amb["SHARED-MODEL"]) == {a, b}
         assert "OTHER" not in amb
 
 
