@@ -1633,6 +1633,62 @@ def test_partial_cable_refresh_renders_no_syncable_rows(client, settings):
 
 
 @pytest.mark.django_db
+def test_cable_refresh_without_a_cached_snapshot_reports_failure_not_success(client, settings):
+    """The toast must agree with the tab state: no snapshot means no success message."""
+    _configure_servers(settings)
+    device = make_device("cache-cable-nosnap", librenms_cf={"primary": {"id": 661}})
+    remote_device = make_device("cache-cable-nosnap-remote", librenms_cf={"primary": {"id": 662}})
+    local = make_interface(device, "Ethernet1", iface_type="1000base-t")
+    remote = make_interface(remote_device, "Ethernet2", iface_type="1000base-t")
+    set_librenms_device_id(local, 7481, "primary")
+    set_librenms_device_id(remote, 7482, "primary")
+    local.save(update_fields=["custom_field_data"])
+    remote.save(update_fields=["custom_field_data"])
+    user = make_superuser("cache-cable-nosnap-user")
+    client.force_login(user)
+
+    def librenms_response(url, **_kwargs):
+        if url.endswith("/api/v0/devices/661/links"):
+            return _json_response(
+                url,
+                {
+                    "status": "ok",
+                    "links": [
+                        {
+                            "local_port_id": 7481,
+                            "local_port": local.name,
+                            "remote_port_id": 7482,
+                            "remote_port": remote.name,
+                            "remote_hostname": remote_device.name,
+                            "remote_device_id": 662,
+                        }
+                    ],
+                },
+            )
+        if url.endswith("/api/v0/devices/661/ports"):
+            return _json_response(
+                url,
+                {"status": "ok", "ports": [{"port_id": 7481, "ifName": local.name, "ifDescr": local.name}]},
+            )
+        raise AssertionError(f"Unexpected LibreNMS request: {url}")
+
+    url = reverse("plugins:netbox_librenms_plugin:device_cable_sync", kwargs={"pk": device.pk})
+    # Inject the one condition the real flow cannot produce locally: the snapshot is gone by the
+    # time the handler checks for it (an eviction between the write and the read).
+    with (
+        patch("netbox_librenms_plugin.librenms_api.requests.get", side_effect=librenms_response),
+        patch("netbox_librenms_plugin.views.base.cables_view.cache.has_key", return_value=False),
+    ):
+        response = client.post(url, {"server_key": "primary"}, HTTP_HX_REQUEST="true")
+
+    assert response.status_code == 200
+    assert b"Cable data refreshed successfully" not in response.content
+    assert b"could not be cached" in response.content
+    state = SyncCacheConsistency(device).status("primary", actor_id=user.pk)[SyncTab.CABLES.value]
+    assert state["state"] == SyncTabState.REFRESH_FAILED.value
+
+
+@pytest.mark.django_db
 def test_partial_module_refresh_renders_no_inventory_rows(client, settings):
     """An incomplete module refresh must render the empty state instead of a degraded table."""
     _configure_servers(settings)

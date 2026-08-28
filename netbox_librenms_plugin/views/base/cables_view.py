@@ -892,7 +892,19 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObject
             )
             return self.render_sync_partial(request, obj, server_key, {"cable_sync": context})
 
-        messages.success(request, "Cable data refreshed successfully.")
+        # Decide the outcome before announcing it: the snapshot can be absent here (a rejected
+        # payload, or an eviction between the write and this read), and the tab is then marked
+        # REFRESH_FAILED below. Announcing success first would contradict the state we record.
+        coordinator = SyncCacheConsistency(obj)
+        snapshot_cached = cache.has_key(coordinator.snapshot_key(SyncTab.CABLES, server_key))
+        if snapshot_cached:
+            messages.success(request, "Cable data refreshed successfully.")
+        else:
+            messages.error(
+                request,
+                "Cable data could not be cached, so the tab has no snapshot to show. "
+                "Refresh again; see server logs for details.",
+            )
         # A host LLDP failure no longer aborts the refresh (OOB/serial rows can still surface it
         # as "successful"), so warn when the host fetch failed but we had a host id to query —
         # otherwise host-side cables are silently omitted under a success banner. Skip for an
@@ -914,8 +926,7 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObject
                 "Cables refreshed, but OOB controller links fetch failed; "
                 "showing host cables only. See server logs for details.",
             )
-        coordinator = SyncCacheConsistency(obj)
-        if cache.has_key(coordinator.snapshot_key(SyncTab.CABLES, server_key)):
+        if snapshot_cached:
             coordinator.mark_refresh_success(SyncTab.CABLES, server_key, actor_id=request_actor_id(request))
         else:
             coordinator.mark_refresh_failure(SyncTab.CABLES, server_key, actor_id=request_actor_id(request))
