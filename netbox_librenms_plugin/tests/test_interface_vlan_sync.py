@@ -7,8 +7,6 @@ Tests cover:
 - VLAN sync action
 """
 
-from unittest.mock import MagicMock, patch
-
 import pytest
 
 from netbox_librenms_plugin.tests import test_librenms_api_helpers
@@ -18,228 +16,170 @@ from netbox_librenms_plugin.tests import test_librenms_api_helpers
 mock_librenms_config = test_librenms_api_helpers.mock_librenms_config
 
 
+@pytest.mark.django_db
 class TestVlanAssignmentMixin:
     """Tests for VlanAssignmentMixin methods."""
 
-    def test_get_vlan_groups_for_device_includes_site_scoped(self, mock_librenms_config):
-        """Test that VLAN groups scoped to device's site are included."""
+    @staticmethod
+    def _mixin():
         from netbox_librenms_plugin.views.mixins import VlanAssignmentMixin
 
-        mixin = VlanAssignmentMixin()
+        return VlanAssignmentMixin()
 
-        # Create mock device with site
-        mock_device = MagicMock()
-        mock_device.site = MagicMock()
-        mock_device.site.pk = 1
-        mock_device.site.region = None
-        mock_device.site.group = None
-        mock_device.location = None
-        mock_device.rack = None
+    @staticmethod
+    def _group(name, scope=None):
+        """Create a VLAN group scoped to one object, or a global group when scope is None."""
+        from django.contrib.contenttypes.models import ContentType
+        from ipam.models import VLANGroup
 
-        # Mock the VLAN group query
-        mock_site_group = MagicMock()
-        mock_site_group.name = "Site VLANs"
-        mock_site_group.pk = 10
+        slug = name.lower().replace(" ", "-")
+        if scope is None:
+            return VLANGroup.objects.create(name=name, slug=slug)
+        return VLANGroup.objects.create(
+            name=name,
+            slug=slug,
+            scope_type=ContentType.objects.get_for_model(type(scope)),
+            scope_id=scope.pk,
+        )
 
-        with patch.object(mixin, "_get_vlan_groups_for_scope") as mock_get_scope:
-            mock_get_scope.return_value = [mock_site_group]
-            with patch("ipam.models.VLANGroup") as mock_vlan_group_class:
-                mock_vlan_group_class.objects.filter.return_value = []
+    def test_get_vlan_groups_for_device_includes_site_scoped(self):
+        """A group scoped to the device's site is returned; another site's group is not."""
+        from dcim.models import Site
 
-                mixin.get_vlan_groups_for_device(mock_device)
+        from netbox_librenms_plugin.tests.conftest import make_device
 
-                # Verify site scope was queried
-                assert mock_get_scope.called
+        device = make_device("ivs-site-scoped")
+        other_site = Site.objects.create(name="IVS other site", slug="ivs-other-site")
+        site_group = self._group("IVS site group", device.site)
+        other_group = self._group("IVS other site group", other_site)
 
-    def test_get_vlan_groups_for_device_includes_global(self, mock_librenms_config):
-        """Test that global VLAN groups (no scope) are included."""
-        from netbox_librenms_plugin.views.mixins import VlanAssignmentMixin
+        groups = self._mixin().get_vlan_groups_for_device(device)
 
-        mixin = VlanAssignmentMixin()
+        assert site_group in groups
+        assert other_group not in groups
 
-        # Create mock device with no location context
-        mock_device = MagicMock()
-        mock_device.site = None
-        mock_device.location = None
-        mock_device.rack = None
+    def test_get_vlan_groups_for_device_includes_global(self):
+        """A device with no location context still receives the global groups."""
+        from netbox_librenms_plugin.tests.conftest import make_device
 
-        with patch.object(mixin, "_get_vlan_groups_for_scope") as mock_get_scope:
-            mock_get_scope.return_value = []
-            with patch("ipam.models.VLANGroup") as mock_vlan_group_class:
-                mock_global_group = MagicMock()
-                mock_global_group.name = "Global VLANs"
-                mock_global_group.pk = 20
-                mock_vlan_group_class.objects.filter.return_value = [mock_global_group]
+        device = make_device("ivs-global")
+        global_group = self._group("IVS global group")
 
-                mixin.get_vlan_groups_for_device(mock_device)
+        groups = self._mixin().get_vlan_groups_for_device(device)
 
-                # Verify global scope was queried
-                mock_vlan_group_class.objects.filter.assert_called_with(scope_type__isnull=True)
+        assert global_group in groups
 
-    def test_select_most_specific_group_prefers_rack(self, mock_librenms_config):
-        """Test that rack-scoped groups are preferred over site-scoped."""
-        from netbox_librenms_plugin.views.mixins import VlanAssignmentMixin
+    def test_select_most_specific_group_prefers_rack(self):
+        """A rack-scoped group outranks a site-scoped one for a racked device."""
+        from dcim.models import Rack
 
-        mixin = VlanAssignmentMixin()
+        from netbox_librenms_plugin.tests.conftest import make_device
 
-        # Create mock device with rack
-        mock_device = MagicMock()
-        mock_device.rack = MagicMock()
-        mock_device.rack.pk = 1
-        mock_device.site = MagicMock()
-        mock_device.site.pk = 2
-        mock_device.site.region = None
-        mock_device.site.group = None
-        mock_device.location = None
+        device = make_device("ivs-rack-priority")
+        rack = Rack.objects.create(name="IVS priority rack", site=device.site, status="active")
+        device.rack = rack
+        device.save(update_fields=["rack"])
+        rack_group = self._group("IVS rack group", rack)
+        site_group = self._group("IVS site competitor", device.site)
 
-        # Create mock groups with different scopes
-        mock_rack_group = MagicMock()
-        mock_rack_group.scope_type = MagicMock()
-        mock_rack_group.scope_type.pk = 100  # Rack content type
-        mock_rack_group.scope_id = 1
+        result = self._mixin()._select_most_specific_group([rack_group, site_group], device)
 
-        mock_site_group = MagicMock()
-        mock_site_group.scope_type = MagicMock()
-        mock_site_group.scope_type.pk = 101  # Site content type
-        mock_site_group.scope_id = 2
+        assert result == rack_group
 
-        with patch("django.contrib.contenttypes.models.ContentType") as mock_ct:
-            # Mock ContentType lookups
-            mock_ct.objects.get_for_model.side_effect = lambda model: MagicMock(pk=100 if "Rack" in str(model) else 101)
+    def test_select_most_specific_group_returns_none_for_ambiguous(self):
+        """Two groups scoped to the same site tie, so no group wins."""
+        from netbox_librenms_plugin.tests.conftest import make_device
 
-            result = mixin._select_most_specific_group([mock_rack_group, mock_site_group], mock_device)
+        device = make_device("ivs-ambiguous")
+        first = self._group("IVS ambiguous a", device.site)
+        second = self._group("IVS ambiguous b", device.site)
 
-            # Rack-scoped should be preferred
-            assert result == mock_rack_group
-
-    def test_select_most_specific_group_returns_none_for_ambiguous(self, mock_librenms_config):
-        """Test that None is returned when multiple groups have same priority."""
-        from netbox_librenms_plugin.views.mixins import VlanAssignmentMixin
-
-        mixin = VlanAssignmentMixin()
-
-        # Create mock device
-        mock_device = MagicMock()
-        mock_device.site = MagicMock()
-        mock_device.site.pk = 1
-        mock_device.site.region = None
-        mock_device.site.group = None
-        mock_device.rack = None
-        mock_device.location = None
-
-        # Create two groups with same scope (both site-scoped to same site)
-        mock_group1 = MagicMock()
-        mock_group1.scope_type = MagicMock()
-        mock_group1.scope_type.pk = 101
-        mock_group1.scope_id = 1
-
-        mock_group2 = MagicMock()
-        mock_group2.scope_type = MagicMock()
-        mock_group2.scope_type.pk = 101
-        mock_group2.scope_id = 1
-
-        with patch("django.contrib.contenttypes.models.ContentType") as mock_ct:
-            mock_ct.objects.get_for_model.return_value = MagicMock(pk=101)
-
-            result = mixin._select_most_specific_group([mock_group1, mock_group2], mock_device)
-
-            # Ambiguous - should return None
-            assert result is None
-
-    def test_get_ancestors_returns_hierarchy(self, mock_librenms_config):
-        """Test that _get_ancestors returns full parent chain."""
-        from netbox_librenms_plugin.views.mixins import VlanAssignmentMixin
-
-        mixin = VlanAssignmentMixin()
-
-        # Create mock location hierarchy
-        mock_grandparent = MagicMock()
-        mock_grandparent.parent = None
-
-        mock_parent = MagicMock()
-        mock_parent.parent = mock_grandparent
-
-        mock_location = MagicMock()
-        mock_location.parent = mock_parent
-
-        ancestors = mixin._get_ancestors(mock_location)
-
-        assert len(ancestors) == 3
-        assert ancestors[0] == mock_location
-        assert ancestors[1] == mock_parent
-        assert ancestors[2] == mock_grandparent
-
-    def test_find_vlan_in_group_prefers_specified_group(self, mock_librenms_config):
-        """Test that _find_vlan_in_group prefers the specified group."""
-        from netbox_librenms_plugin.views.mixins import VlanAssignmentMixin
-
-        mixin = VlanAssignmentMixin()
-
-        mock_vlan_in_group = MagicMock()
-        mock_vlan_global = MagicMock()
-
-        lookup_maps = {
-            "vid_group_to_vlan": {
-                (100, 5): mock_vlan_in_group,
-                (100, None): mock_vlan_global,
-            },
-            "vid_to_vlans": {
-                100: [mock_vlan_in_group, mock_vlan_global],
-            },
-        }
-
-        result = mixin._find_vlan_in_group(100, 5, lookup_maps)
-
-        assert result == mock_vlan_in_group
-
-    def test_find_vlan_in_group_falls_back_to_global(self, mock_librenms_config):
-        """Test that _find_vlan_in_group falls back to global VLAN."""
-        from netbox_librenms_plugin.views.mixins import VlanAssignmentMixin
-
-        mixin = VlanAssignmentMixin()
-
-        mock_vlan_global = MagicMock()
-
-        lookup_maps = {
-            "vid_group_to_vlan": {
-                (100, None): mock_vlan_global,
-            },
-            "vid_to_vlans": {
-                100: [mock_vlan_global],
-            },
-        }
-
-        # Request group 5 which doesn't have VLAN 100
-        result = mixin._find_vlan_in_group(100, 5, lookup_maps)
-
-        assert result == mock_vlan_global
-
-    def test_find_vlan_in_group_returns_none_if_not_found(self, mock_librenms_config):
-        """Test that _find_vlan_in_group returns None if VLAN not found."""
-        from netbox_librenms_plugin.views.mixins import VlanAssignmentMixin
-
-        mixin = VlanAssignmentMixin()
-
-        lookup_maps = {
-            "vid_group_to_vlan": {},
-            "vid_to_vlans": {},
-        }
-
-        result = mixin._find_vlan_in_group(999, None, lookup_maps)
+        result = self._mixin()._select_most_specific_group([first, second], device)
 
         assert result is None
 
+    def test_get_ancestors_returns_hierarchy(self):
+        """_get_ancestors walks a real location chain from the object up to the root."""
+        from dcim.models import Location
 
+        from netbox_librenms_plugin.tests.conftest import make_device
+
+        device = make_device("ivs-ancestors")
+        grandparent = Location.objects.create(
+            name="IVS grandparent", slug="ivs-grandparent", site=device.site, status="active"
+        )
+        parent = Location.objects.create(
+            name="IVS parent", slug="ivs-parent", site=device.site, status="active", parent=grandparent
+        )
+        child = Location.objects.create(
+            name="IVS child", slug="ivs-child", site=device.site, status="active", parent=parent
+        )
+
+        ancestors = self._mixin()._get_ancestors(child)
+
+        assert ancestors == [child, parent, grandparent]
+
+    def test_find_vlan_in_group_prefers_specified_group(self):
+        """The requested group's VLAN wins over the global VLAN carrying the same VID."""
+        from ipam.models import VLAN
+
+        group = self._group("IVS find group")
+        in_group = VLAN.objects.create(vid=100, name="IVS-100-GROUP", group=group)
+        global_vlan = VLAN.objects.create(vid=100, name="IVS-100-GLOBAL")
+
+        result = self._mixin()._find_vlan_in_group(100, group.pk, {**self._maps([in_group, global_vlan])})
+
+        assert result == in_group
+        assert result != global_vlan
+
+    def test_find_vlan_in_group_falls_back_to_global(self):
+        """A group holding no such VID falls back to the global VLAN."""
+        from ipam.models import VLAN
+
+        empty_group = self._group("IVS empty group")
+        global_vlan = VLAN.objects.create(vid=100, name="IVS-100-ONLY-GLOBAL")
+
+        result = self._mixin()._find_vlan_in_group(100, empty_group.pk, self._maps([global_vlan]))
+
+        assert result == global_vlan
+
+    def test_find_vlan_in_group_returns_none_if_not_found(self):
+        """A VID absent from NetBox resolves to nothing."""
+        result = self._mixin()._find_vlan_in_group(999, None, self._maps([]))
+
+        assert result is None
+
+    @staticmethod
+    def _maps(vlans):
+        """Build the real lookup maps the production indexer produces for *vlans*."""
+        from netbox_librenms_plugin.views.mixins import VlanAssignmentMixin
+
+        return VlanAssignmentMixin._index_vlans(vlans)
+
+
+@pytest.mark.django_db
 class TestPortVlanEnrichment:
     """Tests for port VLAN data enrichment."""
 
-    @patch("requests.get")
-    def test_parse_port_vlan_data_access_port(self, mock_get, mock_librenms_config):
-        """Test parsing access port VLAN data."""
+    @staticmethod
+    def _api(settings):
+        """Return a real client bound to a configured server; parse_port_vlan_data sends no request."""
+        from copy import deepcopy
+
         from netbox_librenms_plugin.librenms_api import LibreNMSAPI
 
-        api = LibreNMSAPI(server_key="default")
+        plugin_config = deepcopy(settings.PLUGINS_CONFIG)
+        plugin_settings = plugin_config["netbox_librenms_plugin"]
+        plugin_settings["servers"] = {
+            "default": {"librenms_url": "http://default.librenms.test", "api_token": "token-default"}
+        }
+        plugin_settings.pop("librenms_url", None)
+        plugin_settings.pop("api_token", None)
+        settings.PLUGINS_CONFIG = plugin_config
+        return LibreNMSAPI(server_key="default")
 
+    def test_parse_port_vlan_data_access_port(self, settings):
+        """An untagged-only port parses as access mode."""
         port_data = {
             "port_id": 1234,
             "ifName": "Gi1/0/1",
@@ -248,7 +188,7 @@ class TestPortVlanEnrichment:
             "ifTrunk": None,
         }
 
-        result = api.parse_port_vlan_data(port_data, "ifName")
+        result = self._api(settings).parse_port_vlan_data(port_data, "ifName")
 
         assert result["port_id"] == 1234
         assert result["interface_name"] == "Gi1/0/1"
@@ -256,13 +196,8 @@ class TestPortVlanEnrichment:
         assert result["untagged_vlan"] == 100
         assert result["tagged_vlans"] == []
 
-    @patch("requests.get")
-    def test_parse_port_vlan_data_trunk_port(self, mock_get, mock_librenms_config):
-        """Test parsing trunk port VLAN data."""
-        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
-
-        api = LibreNMSAPI(server_key="default")
-
+    def test_parse_port_vlan_data_trunk_port(self, settings):
+        """A trunk port keeps its untagged VID and lists the tagged ones."""
         port_data = {
             "port_id": 5678,
             "ifName": "Te1/1/1",
@@ -276,7 +211,7 @@ class TestPortVlanEnrichment:
             ],
         }
 
-        result = api.parse_port_vlan_data(port_data, "ifName")
+        result = self._api(settings).parse_port_vlan_data(port_data, "ifName")
 
         assert result["port_id"] == 5678
         assert result["interface_name"] == "Te1/1/1"
@@ -284,13 +219,8 @@ class TestPortVlanEnrichment:
         assert result["untagged_vlan"] == 90
         assert sorted(result["tagged_vlans"]) == [50, 60]
 
-    @patch("requests.get")
-    def test_parse_port_vlan_data_uses_interface_name_field(self, mock_get, mock_librenms_config):
-        """Test that parse_port_vlan_data respects interface_name_field parameter."""
-        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
-
-        api = LibreNMSAPI(server_key="default")
-
+    def test_parse_port_vlan_data_uses_interface_name_field(self, settings):
+        """The caller's field choice decides which LibreNMS name reaches the row."""
         port_data = {
             "port_id": 1234,
             "ifName": "Gi1/0/1",
@@ -299,40 +229,37 @@ class TestPortVlanEnrichment:
             "ifTrunk": None,
         }
 
-        result = api.parse_port_vlan_data(port_data, "ifDescr")
+        result = self._api(settings).parse_port_vlan_data(port_data, "ifDescr")
 
         assert result["interface_name"] == "GigabitEthernet1/0/1"
 
 
+@pytest.mark.django_db
 class TestInterfaceVlanSync:
     """Tests for interface VLAN sync action."""
 
-    def test_update_interface_vlan_assignment_access_mode(self, mock_librenms_config):
-        """Test that access mode is set correctly for untagged-only ports."""
+    @staticmethod
+    def _fixture(tag, vlans=(), *, group=None):
+        """Return a mixin, a real interface and the lookup maps the production indexer builds."""
+        from ipam.models import VLAN
+
+        from netbox_librenms_plugin.tests.conftest import make_device, make_interface
         from netbox_librenms_plugin.views.mixins import VlanAssignmentMixin
 
         mixin = VlanAssignmentMixin()
+        interface = make_interface(make_device(f"ivs-sync-{tag}"), "eth0")
+        created = [VLAN.objects.create(vid=vid, name=name, group=group) for vid, name in vlans]
+        return mixin, interface, VlanAssignmentMixin._index_vlans(created), created
 
-        mock_interface = MagicMock()
-        mock_interface.tagged_vlans = MagicMock()
+    def test_update_interface_vlan_assignment_access_mode(self):
+        """An untagged-only port lands in access mode with that VLAN attached."""
+        mixin, interface, maps, (vlan,) = self._fixture("access", [(100, "IVS-SYNC-100")])
 
-        mock_vlan = MagicMock()
-        mock_vlan.vid = 100
+        mixin._update_interface_vlan_assignment(interface, {"untagged_vlan": 100, "tagged_vlans": []}, None, maps)
 
-        lookup_maps = {
-            "vid_group_to_vlan": {(100, None): mock_vlan},
-            "vid_to_vlans": {100: [mock_vlan]},
-        }
-
-        vlan_data = {
-            "untagged_vlan": 100,
-            "tagged_vlans": [],
-        }
-
-        mixin._update_interface_vlan_assignment(mock_interface, vlan_data, None, lookup_maps)
-
-        assert mock_interface.mode == "access"
-        assert mock_interface.untagged_vlan == mock_vlan
+        interface.refresh_from_db()
+        assert interface.mode == "access"
+        assert interface.untagged_vlan == vlan
 
     @pytest.mark.django_db
     def test_update_interface_vlan_assignment_access_mode_clears_tagged_vlans(self):
@@ -370,106 +297,48 @@ class TestInterfaceVlanSync:
         assert list(interface.tagged_vlans.all()) == []
         assert result["changed"] is True
 
-    def test_update_interface_vlan_assignment_tagged_mode(self, mock_librenms_config):
-        """Test that tagged mode is set for trunk ports."""
-        from netbox_librenms_plugin.views.mixins import VlanAssignmentMixin
+    def test_update_interface_vlan_assignment_tagged_mode(self):
+        """A trunk port lands in tagged mode with both tagged VLANs attached."""
+        mixin, interface, maps, (v100, v200, v300) = self._fixture(
+            "tagged", [(100, "IVS-SYNC-T100"), (200, "IVS-SYNC-T200"), (300, "IVS-SYNC-T300")]
+        )
 
-        mixin = VlanAssignmentMixin()
+        mixin._update_interface_vlan_assignment(
+            interface, {"untagged_vlan": 100, "tagged_vlans": [200, 300]}, None, maps
+        )
 
-        mock_interface = MagicMock()
-        mock_interface.tagged_vlans = MagicMock()
+        interface.refresh_from_db()
+        assert interface.mode == "tagged"
+        assert interface.untagged_vlan == v100
+        assert set(interface.tagged_vlans.all()) == {v200, v300}
 
-        mock_vlan_100 = MagicMock()
-        mock_vlan_100.vid = 100
-        mock_vlan_200 = MagicMock()
-        mock_vlan_200.vid = 200
-        mock_vlan_300 = MagicMock()
-        mock_vlan_300.vid = 300
+    def test_update_interface_vlan_assignment_missing_vlans(self):
+        """VIDs absent from NetBox are reported and nothing is attached."""
+        mixin, interface, maps, _ = self._fixture("missing")
 
-        lookup_maps = {
-            "vid_group_to_vlan": {
-                (100, None): mock_vlan_100,
-                (200, None): mock_vlan_200,
-                (300, None): mock_vlan_300,
-            },
-            "vid_to_vlans": {
-                100: [mock_vlan_100],
-                200: [mock_vlan_200],
-                300: [mock_vlan_300],
-            },
-        }
+        result = mixin._update_interface_vlan_assignment(
+            interface, {"untagged_vlan": 100, "tagged_vlans": [200, 300]}, None, maps
+        )
 
-        vlan_data = {
-            "untagged_vlan": 100,
-            "tagged_vlans": [200, 300],
-        }
-
-        mixin._update_interface_vlan_assignment(mock_interface, vlan_data, None, lookup_maps)
-
-        assert mock_interface.mode == "tagged"
-        assert mock_interface.untagged_vlan == mock_vlan_100
-        mock_interface.tagged_vlans.set.assert_called_once_with([mock_vlan_200, mock_vlan_300])
-
-    def test_update_interface_vlan_assignment_missing_vlans(self, mock_librenms_config):
-        """Test that missing VLANs are tracked in result."""
-        from netbox_librenms_plugin.views.mixins import VlanAssignmentMixin
-
-        mixin = VlanAssignmentMixin()
-
-        mock_interface = MagicMock()
-        mock_interface.tagged_vlans = MagicMock()
-
-        # Empty lookup maps - no VLANs exist in NetBox
-        lookup_maps = {
-            "vid_group_to_vlan": {},
-            "vid_to_vlans": {},
-        }
-
-        vlan_data = {
-            "untagged_vlan": 100,
-            "tagged_vlans": [200, 300],
-        }
-
-        result = mixin._update_interface_vlan_assignment(mock_interface, vlan_data, None, lookup_maps)
-
+        interface.refresh_from_db()
         assert result["missing_vlans"] == [100, 200, 300]
-        assert mock_interface.untagged_vlan is None
-        mock_interface.tagged_vlans.set.assert_not_called()
+        assert interface.untagged_vlan is None
+        assert list(interface.tagged_vlans.all()) == []
 
-    def test_update_interface_vlan_assignment_respects_group_selection(self, mock_librenms_config):
-        """Test that VLAN group selection is respected."""
-        from netbox_librenms_plugin.views.mixins import VlanAssignmentMixin
+    def test_update_interface_vlan_assignment_respects_group_selection(self):
+        """With the same VID in a group and globally, the requested group decides the winner."""
+        from ipam.models import VLAN, VLANGroup
 
-        mixin = VlanAssignmentMixin()
+        group = VLANGroup.objects.create(name="IVS sync group", slug="ivs-sync-group")
+        mixin, interface, _maps, (in_group,) = self._fixture("group-select", [(100, "IVS-SYNC-G100")], group=group)
+        global_vlan = VLAN.objects.create(vid=100, name="IVS-SYNC-GLOBAL100")
+        maps = mixin._index_vlans([in_group, global_vlan])
 
-        mock_interface = MagicMock()
-        mock_interface.tagged_vlans = MagicMock()
+        mixin._update_interface_vlan_assignment(interface, {"untagged_vlan": 100, "tagged_vlans": []}, group.pk, maps)
 
-        mock_vlan_group1 = MagicMock()
-        mock_vlan_group1.vid = 100
-        mock_vlan_global = MagicMock()
-        mock_vlan_global.vid = 100
-
-        lookup_maps = {
-            "vid_group_to_vlan": {
-                (100, 5): mock_vlan_group1,
-                (100, None): mock_vlan_global,
-            },
-            "vid_to_vlans": {
-                100: [mock_vlan_group1, mock_vlan_global],
-            },
-        }
-
-        vlan_data = {
-            "untagged_vlan": 100,
-            "tagged_vlans": [],
-        }
-
-        # Request VLAN from group 5
-        mixin._update_interface_vlan_assignment(mock_interface, vlan_data, 5, lookup_maps)
-
-        # Should use group-specific VLAN
-        assert mock_interface.untagged_vlan == mock_vlan_group1
+        interface.refresh_from_db()
+        assert interface.untagged_vlan == in_group
+        assert interface.untagged_vlan != global_vlan
 
 
 class TestInterfaceCssClassGroupMatching:
