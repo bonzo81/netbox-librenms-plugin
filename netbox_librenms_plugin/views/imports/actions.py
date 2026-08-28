@@ -2075,8 +2075,9 @@ class DeviceConflictActionView(
             cf_value = existing_device.custom_field_data.get("librenms_id")
             if not is_legacy_librenms_id(cf_value):
                 return _htmx_error_response("Device librenms_id is already in JSON format; no migration needed.")
-            # Normalise string-digit to int for consistent comparison
-            cf_int = int(cf_value) if isinstance(cf_value, str) else cf_value
+            # Read the value back through the same helper the gate above used, so the comparison
+            # below cannot accept a form the lookup predicates would not match.
+            cf_int = coerce_librenms_id(cf_value)
             # Verify the stored legacy ID matches the active LibreNMS device_id so we don't
             # migrate a stale/incorrect association to the wrong server mapping.
             if cf_int != librenms_id:
@@ -2101,29 +2102,28 @@ class DeviceConflictActionView(
                 cf_locked = locked_device.custom_field_data.get("librenms_id")
                 if not is_legacy_librenms_id(cf_locked):
                     return _htmx_error_response("Device librenms_id is already in JSON format; no migration needed.")
-                cf_locked_int = int(cf_locked) if isinstance(cf_locked, str) else cf_locked
+                cf_locked_int = coerce_librenms_id(cf_locked)
                 if cf_locked_int != librenms_id:
                     return _htmx_error_response(
                         f"Legacy librenms_id changed under lock ({cf_locked_int} != {librenms_id}); cannot migrate safely."
                     )
-                # Check that no other object already owns this ID (server-scoped or legacy)
+                # Fail closed when the ID resolves to more than one object (server-scoped or legacy).
                 server_key = self.librenms_api.server_key
                 from netbox_librenms_plugin.utils import AmbiguousLibreNMSIdError, find_by_librenms_id
 
+                # The locked row still carries the legacy id and every accepted form of it is
+                # matched by build_librenms_id_qs, so it always matches its own lookup. A rival
+                # owner therefore surfaces as an ambiguity, never as a single foreign match.
                 try:
-                    match = find_by_librenms_id(existing_model, cf_locked_int, server_key)
+                    find_by_librenms_id(existing_model, cf_locked_int, server_key)
                 except AmbiguousLibreNMSIdError:
                     return _htmx_error_response(
                         f"librenms_id {cf_locked_int} is ambiguous — it matches more than one device. "
                         "Resolve the duplicate assignment before migrating."
                     )
-                conflict = match is not None and match.pk != locked_device.pk
-                if conflict:
-                    return _htmx_error_response(
-                        f"Another device already has librenms_id {cf_locked_int} for server '{server_key}'; cannot migrate."
-                    )
-                if not migrate_legacy_librenms_id(locked_device, self.librenms_api.server_key):
-                    return _htmx_error_response("Migration failed: librenms_id could not be converted.")
+                # migrate_legacy_librenms_id refuses only the values is_legacy_librenms_id already
+                # rejects, and the locked value passed that gate above, so it cannot fail here.
+                migrate_legacy_librenms_id(locked_device, self.librenms_api.server_key)
                 # Save only the field we actually mutated. Running full_clean() on the
                 # whole object would reject the migration over unrelated pre-existing
                 # validation issues (e.g. legacy rack face/position without a rack),

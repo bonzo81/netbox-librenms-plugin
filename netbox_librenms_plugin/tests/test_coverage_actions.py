@@ -2484,75 +2484,372 @@ class TestDeviceVCDetailsViewAdditional:
 
 @pytest.mark.django_db
 class TestDeviceConflictActionMigrateLibreNMSId:
-    """DeviceConflictActionView migrate_librenms_id action against a real VirtualMachine."""
+    """DeviceConflictActionView migrate_librenms_id action through real integration seams."""
+
+    @pytest.fixture(autouse=True)
+    def _configure_librenms_server(self, request, settings, monkeypatch):
+        monkeypatch.setenv("NO_PROXY", "127.0.0.1,localhost")
+        monkeypatch.setenv("no_proxy", "127.0.0.1,localhost")
+        self.server_key = f"migrate-{request.node.name}".replace("_", "-").replace("[", "-").replace("]", "")
+        with run_librenms_server() as server:
+            configure_test_servers(
+                settings,
+                {
+                    self.server_key: {
+                        "librenms_url": server.url,
+                        "api_token": "test-token",
+                        "verify_ssl": False,
+                    }
+                },
+            )
+            self.librenms_server = server
+            yield
 
     def _make_view(self):
+        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
         from netbox_librenms_plugin.views.imports.actions import DeviceConflictActionView
 
-        view = object.__new__(DeviceConflictActionView)
-        view._librenms_api = _make_api()
-        view.request = MagicMock()
-        view.require_write_permission = MagicMock(return_value=None)
-        view.require_object_permissions = MagicMock(return_value=None)
+        view = DeviceConflictActionView()
+        view._librenms_api = LibreNMSAPI(server_key=self.server_key)
         return view
 
-    def test_migrate_librenms_id_for_vm_persists_dict_format(self):
-        """The VM's legacy bare-int librenms_id is converted to {server_key: id} and saved."""
-        from django.http import HttpResponse
+    def _register_device(self, device_id, hostname, *, serial=""):
+        self.librenms_server.device_info_response(
+            device_id=device_id,
+            hostname=hostname,
+            hardware="Test chassis",
+            os="ios",
+            serial=serial,
+            ip="",
+        )
+        self.librenms_server.vc_inventory_callable(device_id, [], {})
+
+    @staticmethod
+    def _post_after_validation(view, request, device_id, mutation):
+        """Run a real validation, then inject one deterministic concurrent database write."""
+        validate = view.get_validated_device_with_selections
+
+        def validate_then_mutate(*args, **kwargs):
+            result = validate(*args, **kwargs)
+            mutation()
+            return result
+
+        with patch.object(view, "get_validated_device_with_selections", side_effect=validate_then_mutate):
+            return post_view(view, request, device_id=device_id)
+
+    def test_rejects_a_mapping_that_is_already_json(self):
+        """Reject a mapping that already uses the multi-server dictionary format."""
+        from dcim.models import Device
+
+        view = self._make_view()
+        device = make_device(
+            "migrate-json-device",
+            serial="MIGRATE-SERIAL",
+            librenms_cf={self.server_key: 42},
+        )
+        self._register_device(42, "migrate-json-device", serial="MIGRATE-SERIAL")
+        request = make_view_request(
+            "post",
+            {
+                "server_key": self.server_key,
+                "action": "migrate_librenms_id",
+                "existing_device_id": str(device.pk),
+            },
+            user=make_view_user("migrate-json-device-user", [("change", Device)]),
+            HTTP_HX_REQUEST="true",
+        )
+
+        response = post_view(view, request, device_id=42)
+
+        assert response.status_code == 200
+        assert response.headers.get("HX-Reswap") == "none"
+        assert b"already in JSON format" in response.content
+        assert Device.objects.get(pk=device.pk).custom_field_data["librenms_id"] == {self.server_key: 42}
+
+    def test_rejects_a_legacy_id_that_is_not_the_active_device_id(self):
+        """Reject a signed legacy ID that differs from the active LibreNMS device ID."""
+        from dcim.models import Device
+
+        view = self._make_view()
+        device = make_device(
+            "migrate-hostname-device",
+            serial="MIGRATE-SERIAL",
+            librenms_cf="+99",
+        )
+        self._register_device(42, "migrate-hostname-device", serial="MIGRATE-SERIAL")
+        request = make_view_request(
+            "post",
+            {
+                "server_key": self.server_key,
+                "action": "migrate_librenms_id",
+                "existing_device_id": str(device.pk),
+            },
+            user=make_view_user("migrate-hostname-device-user", [("change", Device)]),
+            HTTP_HX_REQUEST="true",
+        )
+
+        response = post_view(view, request, device_id=42)
+
+        assert response.status_code == 200
+        assert response.headers.get("HX-Reswap") == "none"
+        assert b"does not match the active device ID" in response.content
+        assert b"already in JSON format" not in response.content
+        assert Device.objects.get(pk=device.pk).custom_field_data["librenms_id"] == "+99"
+
+    def test_rejects_a_vm_migration_without_force_because_no_vm_confirms_a_serial(self):
+        """VMs need force: only Device ID matches set serial_confirmed (import_utils/device_operations.py:802)."""
         from virtualization.models import VirtualMachine
 
         view = self._make_view()
-        vm = make_vm("vm01-migrate")
-        vm.custom_field_data["librenms_id"] = 42  # legacy bare int, matches active device_id
+        vm = make_vm("migrate-force-vm")
+        vm.custom_field_data["librenms_id"] = 42
         vm.save()
-        request = _make_request(
-            post={
+        self.librenms_server.device_info_response(
+            device_id=42,
+            hostname="migrate-force-vm",
+            hardware="Test VM",
+            os="linux",
+            serial="",
+            ip="",
+        )
+        self.librenms_server.vc_inventory_callable(42, [], {})
+        request = make_view_request(
+            "post",
+            {
+                "server_key": self.server_key,
                 "action": "migrate_librenms_id",
                 "existing_device_id": str(vm.pk),
                 "existing_device_type": "virtualmachine",
-            }
+                "cluster_42": str(vm.cluster_id),
+            },
+            user=make_view_user("migrate-force-vm-user", [("change", VirtualMachine)]),
+            HTTP_HX_REQUEST="true",
         )
-        validation = {"existing_device": vm, "device_type_mismatch": False, "serial_confirmed": True}
-        view.get_validated_device_with_selections = MagicMock(return_value=({"device_id": 42}, validation, {}))
-        view.render_device_row = MagicMock(return_value=HttpResponse("row"))
 
-        response = view.post(request, device_id=42)
-
-        assert response["HX-Trigger"] == "closeModal"
-        # The real migrate_legacy_librenms_id + save converted the bare int under lock.
-        assert VirtualMachine.objects.get(pk=vm.pk).custom_field_data["librenms_id"] == {"default": 42}
-
-    def test_migrate_classifies_signed_numeric_string_via_shared_helper(self):
-        """A signed numeric string is classified by is_legacy_librenms_id (int-parse), not the old isdigit inline.
-
-        "+99".isdigit() is False, so the old hand-inlined predicate treated it as "already JSON" and
-        bailed early; is_legacy_librenms_id parses it with int() (and accepts a positive value), so the
-        gate now agrees with the link/OOB-attach paths and set_librenms_device_id's own skip rule — the
-        value reaches the real ID-match check (where 99 fails as a genuine mismatch against the active
-        id 42, not a phantom "already migrated"). Pins the two gates to the shared classifier so they
-        can't drift.
-        """
-        view = self._make_view()
-        vm = make_vm("vm01-migrate-signed")
-        vm.custom_field_data["librenms_id"] = "+99"  # positive, int-parseable but not isdigit()
-        vm.save()
-        request = _make_request(
-            post={
-                "action": "migrate_librenms_id",
-                "existing_device_id": str(vm.pk),
-                "existing_device_type": "virtualmachine",
-            }
-        )
-        validation = {"existing_device": vm, "device_type_mismatch": False, "serial_confirmed": True}
-        view.get_validated_device_with_selections = MagicMock(return_value=({"device_id": 42}, validation, {}))
-
-        response = view.post(request, device_id=42)
+        response = post_view(view, request, device_id=42)
 
         assert response.status_code == 200
-        # Reached the ID-match check (helper classified it legacy) instead of the old
-        # "already in JSON format" early-return (which the isdigit inline would have hit).
-        assert b"does not match the active device ID" in response.content
-        assert b"already in JSON format" not in response.content
+        assert response.headers.get("HX-Reswap") == "none"
+        assert b"Serial number not confirmed" in response.content
+        assert VirtualMachine.objects.get(pk=vm.pk).custom_field_data["librenms_id"] == 42
+
+    def test_migrates_a_device_and_persists_the_dict_format(self):
+        """Migrate a confirmed Device mapping and render the updated import row."""
+        from dcim.models import Device
+
+        view = self._make_view()
+        device = make_device("migrate-success-device", serial="MIGRATE-SERIAL", librenms_cf=42)
+        self._register_device(42, "migrate-success-device", serial="MIGRATE-SERIAL")
+        request = make_view_request(
+            "post",
+            {
+                "server_key": self.server_key,
+                "action": "migrate_librenms_id",
+                "existing_device_id": str(device.pk),
+            },
+            user=make_view_user("migrate-success-device-user", [("change", Device)]),
+            HTTP_HX_REQUEST="true",
+        )
+
+        response = post_view(view, request, device_id=42)
+
+        assert response.status_code == 200
+        assert response["HX-Trigger"] == "closeModal"
+        assert response.content.strip()
+        assert Device.objects.get(pk=device.pk).custom_field_data["librenms_id"] == {self.server_key: 42}
+
+    def test_migrates_a_vm_when_force_is_supplied(self):
+        """Migrate a VM mapping when the request explicitly supplies force."""
+        from virtualization.models import VirtualMachine
+
+        view = self._make_view()
+        vm = make_vm("migrate-forced-vm")
+        vm.custom_field_data["librenms_id"] = 42
+        vm.save()
+        self.librenms_server.device_info_response(
+            device_id=42,
+            hostname="migrate-forced-vm",
+            hardware="Test VM",
+            os="linux",
+            serial="",
+            ip="",
+        )
+        self.librenms_server.vc_inventory_callable(42, [], {})
+        request = make_view_request(
+            "post",
+            {
+                "server_key": self.server_key,
+                "action": "migrate_librenms_id",
+                "existing_device_id": str(vm.pk),
+                "existing_device_type": "virtualmachine",
+                "cluster_42": str(vm.cluster_id),
+                "force": "on",
+            },
+            user=make_view_user("migrate-forced-vm-user", [("change", VirtualMachine)]),
+            HTTP_HX_REQUEST="true",
+        )
+
+        response = post_view(view, request, device_id=42)
+
+        assert response.status_code == 200
+        assert response["HX-Trigger"] == "closeModal"
+        assert VirtualMachine.objects.get(pk=vm.pk).custom_field_data["librenms_id"] == {self.server_key: 42}
+
+    def test_fails_closed_when_the_row_is_deleted_between_validation_and_the_lock(self):
+        """Fail closed when the validated Device is deleted before the locked re-read."""
+        from dcim.models import Device
+
+        view = self._make_view()
+        device = make_device("migrate-deleted-device", serial="MIGRATE-SERIAL", librenms_cf=42)
+        device_pk = device.pk
+        self._register_device(42, "migrate-deleted-device", serial="MIGRATE-SERIAL")
+        request = make_view_request(
+            "post",
+            {
+                "server_key": self.server_key,
+                "action": "migrate_librenms_id",
+                "existing_device_id": str(device_pk),
+            },
+            user=make_view_user("migrate-deleted-device-user", [("change", Device)]),
+            HTTP_HX_REQUEST="true",
+        )
+
+        response = self._post_after_validation(
+            view,
+            request,
+            42,
+            lambda: Device.objects.filter(pk=device_pk).delete(),
+        )
+
+        assert response.status_code == 200
+        assert response.headers.get("HX-Reswap") == "none"
+        assert b"no longer exists" in response.content
+        assert not Device.objects.filter(pk=device_pk).exists()
+
+    def test_fails_closed_when_another_request_migrates_first(self):
+        """Preserve a concurrent dictionary migration found by the locked re-read."""
+        from dcim.models import Device
+
+        view = self._make_view()
+        device = make_device("migrate-concurrent-json-device", serial="MIGRATE-SERIAL", librenms_cf=42)
+        self._register_device(42, "migrate-concurrent-json-device", serial="MIGRATE-SERIAL")
+        request = make_view_request(
+            "post",
+            {
+                "server_key": self.server_key,
+                "action": "migrate_librenms_id",
+                "existing_device_id": str(device.pk),
+            },
+            user=make_view_user("migrate-concurrent-json-device-user", [("change", Device)]),
+            HTTP_HX_REQUEST="true",
+        )
+
+        response = self._post_after_validation(
+            view,
+            request,
+            42,
+            lambda: Device.objects.filter(pk=device.pk).update(
+                custom_field_data={"librenms_id": {self.server_key: 42}}
+            ),
+        )
+
+        assert response.status_code == 200
+        assert response.headers.get("HX-Reswap") == "none"
+        assert b"already in JSON format" in response.content
+        assert Device.objects.get(pk=device.pk).custom_field_data["librenms_id"] == {self.server_key: 42}
+
+    def test_fails_closed_when_the_legacy_id_changes_under_the_lock(self):
+        """Preserve a concurrent legacy ID change found by the locked re-read."""
+        from dcim.models import Device
+
+        view = self._make_view()
+        device = make_device("migrate-changed-id-device", serial="MIGRATE-SERIAL", librenms_cf=42)
+        self._register_device(42, "migrate-changed-id-device", serial="MIGRATE-SERIAL")
+        request = make_view_request(
+            "post",
+            {
+                "server_key": self.server_key,
+                "action": "migrate_librenms_id",
+                "existing_device_id": str(device.pk),
+            },
+            user=make_view_user("migrate-changed-id-device-user", [("change", Device)]),
+            HTTP_HX_REQUEST="true",
+        )
+
+        response = self._post_after_validation(
+            view,
+            request,
+            42,
+            lambda: Device.objects.filter(pk=device.pk).update(custom_field_data={"librenms_id": 99}),
+        )
+
+        assert response.status_code == 200
+        assert response.headers.get("HX-Reswap") == "none"
+        assert b"changed under lock" in response.content
+        assert Device.objects.get(pk=device.pk).custom_field_data["librenms_id"] == 99
+
+    def test_fails_closed_when_a_rival_claims_the_id_under_the_lock(self):
+        """Preserve both mappings when a concurrent rival makes the ID ambiguous."""
+        from dcim.models import Device
+
+        view = self._make_view()
+        device = make_device("migrate-ambiguity-target", serial="MIGRATE-SERIAL", librenms_cf=42)
+        rival = make_device(
+            "migrate-ambiguity-rival",
+            serial="RIVAL-SERIAL",
+            librenms_cf={self.server_key: 99},
+        )
+        self._register_device(42, "migrate-ambiguity-target", serial="MIGRATE-SERIAL")
+        request = make_view_request(
+            "post",
+            {
+                "server_key": self.server_key,
+                "action": "migrate_librenms_id",
+                "existing_device_id": str(device.pk),
+            },
+            user=make_view_user("migrate-ambiguity-target-user", [("change", Device)]),
+            HTTP_HX_REQUEST="true",
+        )
+
+        response = self._post_after_validation(
+            view,
+            request,
+            42,
+            lambda: Device.objects.filter(pk=rival.pk).update(custom_field_data={"librenms_id": {self.server_key: 42}}),
+        )
+
+        assert response.status_code == 200
+        assert response.headers.get("HX-Reswap") == "none"
+        assert b"ambiguous" in response.content
+        assert Device.objects.get(pk=device.pk).custom_field_data["librenms_id"] == 42
+        assert Device.objects.get(pk=rival.pk).custom_field_data["librenms_id"] == {self.server_key: 42}
+
+    def test_fails_closed_when_the_save_raises_integrity_error(self):
+        """Keep the legacy mapping when the real model save method raises IntegrityError."""
+        from dcim.models import Device
+        from django.db import IntegrityError
+
+        view = self._make_view()
+        device = make_device("migrate-integrity-device", serial="MIGRATE-SERIAL", librenms_cf=42)
+        self._register_device(42, "migrate-integrity-device", serial="MIGRATE-SERIAL")
+        request = make_view_request(
+            "post",
+            {
+                "server_key": self.server_key,
+                "action": "migrate_librenms_id",
+                "existing_device_id": str(device.pk),
+            },
+            user=make_view_user("migrate-integrity-device-user", [("change", Device)]),
+            HTTP_HX_REQUEST="true",
+        )
+
+        with patch.object(Device, "save", side_effect=IntegrityError("dup")):
+            response = post_view(view, request, device_id=42)
+
+        assert response.status_code == 200
+        assert response.headers.get("HX-Reswap") == "none"
+        assert b"Unable to migrate the LibreNMS mapping" in response.content
+        assert Device.objects.get(pk=device.pk).custom_field_data["librenms_id"] == 42
 
 
 class TestDeviceConflictActionMissingExisting:
@@ -3413,138 +3710,6 @@ class TestDeviceConflictSelectForUpdateDoesNotExist:
         assert b"Device no longer exists" in response.content
 
 
-class TestMigrateLibreNMSIdMorePaths:
-    """More tests for migrate_librenms_id action (lines 1277-1323)."""
-
-    def _make_view(self):
-        from netbox_librenms_plugin.views.imports.actions import DeviceConflictActionView
-
-        view = object.__new__(DeviceConflictActionView)
-        view._librenms_api = _make_api()
-        view.request = MagicMock()
-        return view
-
-    def _make_base_request(self):
-        return _make_request(
-            post={
-                "action": "migrate_librenms_id",
-                "existing_device_id": "1",
-            }
-        )
-
-    def _make_base_context(self, mock_existing):
-        return (
-            {"device_id": 42, "hostname": "r01"},
-            {
-                "existing_device": mock_existing,
-                "device_type_mismatch": False,
-                "librenms_id_needs_migration": True,
-                "serial_confirmed": True,  # Default: serial confirmed
-            },
-            {},
-        )
-
-    def test_serial_not_confirmed_no_force_renders_htmx_error_toast(self):
-        """Line 1277-1280: serial not confirmed, no force → htmx error toast (200)."""
-        view = self._make_view()
-        request = self._make_base_request()
-
-        mock_existing = MagicMock()
-        mock_existing.pk = 1
-        mock_existing.custom_field_data = {"librenms_id": 42}  # int = needs migration, matches device_id
-
-        libre_device, validation, selections = self._make_base_context(mock_existing)
-        validation["serial_confirmed"] = False  # Not confirmed
-        # force is not set (not "on")
-
-        with patch.object(view, "require_all_permissions", return_value=None):
-            with patch("dcim.models.Device") as MockDevice:
-                MockDevice.objects.restrict.return_value.get.return_value = mock_existing
-                MockDevice.DoesNotExist = Exception
-                with patch.object(view, "require_object_permissions", return_value=None):
-                    with patch.object(
-                        view,
-                        "get_validated_device_with_selections",
-                        return_value=(libre_device, validation, selections),
-                    ):
-                        response = view.post(request, device_id=42)
-
-        assert response.status_code == 200
-        assert response.headers.get("HX-Reswap") == "none"
-        assert b"Serial number not confirmed" in response.content
-
-    def test_migration_succeeds_and_renders_row(self):
-        """Lines 1282-1323: successful migration renders row."""
-        view = self._make_view()
-        request = self._make_base_request()
-
-        mock_existing = MagicMock()
-        mock_existing.pk = 1
-        mock_existing.custom_field_data = {"librenms_id": 42}
-        mock_existing.name = "router01"
-
-        libre_device = {"device_id": 42, "hostname": "router01"}
-        validation = {
-            "existing_device": mock_existing,
-            "device_type_mismatch": False,
-            "librenms_id_needs_migration": True,
-            "serial_confirmed": True,
-        }
-
-        DoesNotExistExc = type("DoesNotExist", (Exception,), {})
-        locked_device = MagicMock()
-        locked_device.pk = 1
-        locked_device.custom_field_data = {"librenms_id": 42}  # Still int
-        locked_device.name = "router01"
-
-        with patch.object(view, "require_all_permissions", return_value=None):
-            with patch("dcim.models.Device") as MockDevice:
-                MockDevice.objects.restrict.return_value.get.return_value = mock_existing
-                MockDevice.DoesNotExist = DoesNotExistExc
-                with patch.object(view, "require_object_permissions", return_value=None):
-                    with patch.object(
-                        view, "get_validated_device_with_selections", return_value=(libre_device, validation, {})
-                    ):
-                        with patch("netbox_librenms_plugin.views.imports.actions.transaction") as mock_tx:
-                            mock_tx.atomic.return_value.__enter__ = MagicMock(return_value=None)
-                            mock_tx.atomic.return_value.__exit__ = MagicMock(return_value=False)
-                            with patch("dcim.models.Device") as MockDevice2:
-                                # This inner patch shadows the outer one for the in-function
-                                # `from dcim.models import Device`, so it must serve BOTH the
-                                # pre-lock existing_device lookup and the locked re-read. Both go
-                                # through restrict(user, action), so it returns the same manager.
-                                MockDevice2.objects.restrict.return_value = MockDevice2.objects
-                                MockDevice2.objects.get.return_value = mock_existing
-                                MockDevice2.objects.select_for_update.return_value.get.return_value = locked_device
-                                MockDevice2.DoesNotExist = DoesNotExistExc
-                                with patch("netbox_librenms_plugin.utils.find_by_librenms_id", return_value=None):
-                                    with patch(
-                                        "netbox_librenms_plugin.utils.migrate_legacy_librenms_id", return_value=True
-                                    ) as mock_migrate:
-                                        with patch(
-                                            "netbox_librenms_plugin.views.imports.actions._save_device",
-                                            return_value=None,
-                                        ):
-                                            with patch("netbox_librenms_plugin.views.imports.actions.cache"):
-                                                with patch(
-                                                    "netbox_librenms_plugin.views.imports.actions.get_import_device_cache_key",
-                                                    return_value="key",
-                                                ):
-                                                    with patch(
-                                                        "netbox_librenms_plugin.views.imports.actions.fetch_device_with_cache",
-                                                        return_value={"device_id": 42},
-                                                    ):
-                                                        with patch.object(
-                                                            view, "render_device_row", return_value=MagicMock()
-                                                        ) as mock_render:
-                                                            view.post(request, device_id=42)
-        # The migration path ran to completion and rendered the updated row
-        # (no blanket try/except masking a broken migrate/render path).
-        assert mock_render.called
-        # The conversion operates on the LOCKED instance, not the stale pre-lock one.
-        assert mock_migrate.call_args.args[0] is locked_device
-
-
 class TestDeviceConflictMoreActions:
     """Tests for many more action paths in DeviceConflictActionView."""
 
@@ -4289,201 +4454,6 @@ class TestSyncSerialConflictGuard:
         # The pre-check must not have been broken by the lock: the conflicting row still owns the serial.
         conflict.refresh_from_db()
         assert conflict.serial == "SN-LOCK-CONF"
-
-
-class TestMigrateLibreNMSIdTransactionPaths:
-    """Tests for migrate_librenms_id inside transaction (lines 1282-1323)."""
-
-    def _make_view(self):
-        from netbox_librenms_plugin.views.imports.actions import DeviceConflictActionView
-
-        view = object.__new__(DeviceConflictActionView)
-        view._librenms_api = _make_api()
-        view.request = MagicMock()
-        return view
-
-    def _make_valid_migrate_context(self, view, extra_mock=None):
-        """Common setup for valid migrate_librenms_id (serial_confirmed=True)."""
-        request = _make_request(post={"action": "migrate_librenms_id", "existing_device_id": "1"})
-        mock_existing = MagicMock()
-        mock_existing.pk = 1
-        mock_existing.custom_field_data = {"librenms_id": 42}
-        mock_existing.name = "router01"
-
-        libre_device = {"device_id": 42, "hostname": "router01"}
-        validation = {
-            "existing_device": mock_existing,
-            "device_type_mismatch": False,
-            "librenms_id_needs_migration": True,
-            "serial_confirmed": True,
-        }
-
-        DoesNotExistExc = type("DoesNotExist", (Exception,), {})
-        locked_device = MagicMock()
-        locked_device.pk = 1
-        locked_device.custom_field_data = {"librenms_id": 42}
-        locked_device.name = "router01"
-
-        MockDevice = MagicMock()
-        # The view reaches the manager through restrict(user, action) for both the primary read
-        # and the locked re-read, so restrict() hands back the same manager: the stubs below then
-        # describe both chains, and a test can still override either one.
-        MockDevice.objects.restrict.return_value = MockDevice.objects
-        MockDevice.objects.get.return_value = mock_existing
-        MockDevice.objects.select_for_update.return_value.get.return_value = locked_device
-        MockDevice.DoesNotExist = DoesNotExistExc
-
-        mock_tx = MagicMock()
-        mock_tx.atomic.return_value.__enter__ = MagicMock(return_value=None)
-        mock_tx.atomic.return_value.__exit__ = MagicMock(return_value=False)
-
-        return request, mock_existing, libre_device, validation, locked_device, MockDevice, DoesNotExistExc, mock_tx
-
-    def test_migrate_device_deleted_under_lock(self):
-        """Lines 1285-1289: DoesNotExist during select_for_update → htmx error toast (200)."""
-        view = self._make_view()
-        req, mock_ex, libre, val, locked, MockDevice, DNE, mock_tx = self._make_valid_migrate_context(view)
-        MockDevice.objects.select_for_update.return_value.get.side_effect = DNE("gone")
-
-        with patch.object(view, "require_all_permissions", return_value=None):
-            with patch("dcim.models.Device", MockDevice):
-                with patch.object(view, "require_object_permissions", return_value=None):
-                    with patch.object(view, "get_validated_device_with_selections", return_value=(libre, val, {})):
-                        with patch("netbox_librenms_plugin.views.imports.actions.transaction", mock_tx):
-                            response = view.post(req, device_id=42)
-
-        assert response.status_code == 200
-        assert response.headers.get("HX-Reswap") == "none"
-        assert b"Object no longer exists" in response.content
-
-    def test_migrate_already_migrated_under_lock(self):
-        """Lines 1292-1298: cf_locked already dict under lock → htmx error toast (200)."""
-        view = self._make_view()
-        req, mock_ex, libre, val, locked, MockDevice, DNE, mock_tx = self._make_valid_migrate_context(view)
-        locked.custom_field_data = {"librenms_id": {"default": 42}}  # Already migrated under lock
-
-        with patch.object(view, "require_all_permissions", return_value=None):
-            with patch("dcim.models.Device", MockDevice):
-                with patch.object(view, "require_object_permissions", return_value=None):
-                    with patch.object(view, "get_validated_device_with_selections", return_value=(libre, val, {})):
-                        with patch("netbox_librenms_plugin.views.imports.actions.transaction", mock_tx):
-                            response = view.post(req, device_id=42)
-
-        assert response.status_code == 200
-        assert response.headers.get("HX-Reswap") == "none"
-        assert b"already in JSON format" in response.content
-
-    def test_migrate_id_changed_under_lock(self):
-        """Lines 1300-1303: cf_locked_int != librenms_id under lock → htmx error toast (200)."""
-        view = self._make_view()
-        req, mock_ex, libre, val, locked, MockDevice, DNE, mock_tx = self._make_valid_migrate_context(view)
-        locked.custom_field_data = {"librenms_id": 99}  # Different ID under lock
-
-        with patch.object(view, "require_all_permissions", return_value=None):
-            with patch("dcim.models.Device", MockDevice):
-                with patch.object(view, "require_object_permissions", return_value=None):
-                    with patch.object(view, "get_validated_device_with_selections", return_value=(libre, val, {})):
-                        with patch("netbox_librenms_plugin.views.imports.actions.transaction", mock_tx):
-                            response = view.post(req, device_id=42)
-
-        assert response.status_code == 200
-        assert response.headers.get("HX-Reswap") == "none"
-        assert b"changed under lock" in response.content
-
-    def test_migrate_id_conflict_with_other_device(self):
-        """Lines 1309-1315: another device already has this ID → htmx error toast (200)."""
-        view = self._make_view()
-        req, mock_ex, libre, val, locked, MockDevice, DNE, mock_tx = self._make_valid_migrate_context(view)
-        conflict_dev = MagicMock()
-        conflict_dev.pk = 99  # Different pk → conflict
-
-        with patch.object(view, "require_all_permissions", return_value=None):
-            with patch("dcim.models.Device", MockDevice):
-                with patch.object(view, "require_object_permissions", return_value=None):
-                    with patch.object(view, "get_validated_device_with_selections", return_value=(libre, val, {})):
-                        with patch("netbox_librenms_plugin.views.imports.actions.transaction", mock_tx):
-                            with patch("netbox_librenms_plugin.utils.find_by_librenms_id", return_value=conflict_dev):
-                                response = view.post(req, device_id=42)
-
-        assert response.status_code == 200
-        assert response.headers.get("HX-Reswap") == "none"
-        assert b"Another device already has librenms_id" in response.content
-
-    def test_migrate_migration_fails(self):
-        """Lines 1316-1320: migrate_legacy_librenms_id returns False → htmx error toast (200)."""
-        view = self._make_view()
-        req, mock_ex, libre, val, locked, MockDevice, DNE, mock_tx = self._make_valid_migrate_context(view)
-
-        with patch.object(view, "require_all_permissions", return_value=None):
-            with patch("dcim.models.Device", MockDevice):
-                with patch.object(view, "require_object_permissions", return_value=None):
-                    with patch.object(view, "get_validated_device_with_selections", return_value=(libre, val, {})):
-                        with patch("netbox_librenms_plugin.views.imports.actions.transaction", mock_tx):
-                            with patch("netbox_librenms_plugin.utils.find_by_librenms_id", return_value=None):
-                                with patch(
-                                    "netbox_librenms_plugin.utils.migrate_legacy_librenms_id", return_value=False
-                                ):
-                                    response = view.post(req, device_id=42)
-
-        assert response.status_code == 200
-        assert response.headers.get("HX-Reswap") == "none"
-        assert b"Migration failed" in response.content
-
-    def test_migrate_save_error(self):
-        """Migrate path saves only librenms_id field; IntegrityError on save → htmx toast."""
-        view = self._make_view()
-        req, mock_ex, libre, val, locked, MockDevice, DNE, mock_tx = self._make_valid_migrate_context(view)
-        from django.db import IntegrityError
-
-        locked.save.side_effect = IntegrityError("dup")
-
-        with patch.object(view, "require_all_permissions", return_value=None):
-            with patch("dcim.models.Device", MockDevice):
-                with patch.object(view, "require_object_permissions", return_value=None):
-                    with patch.object(view, "get_validated_device_with_selections", return_value=(libre, val, {})):
-                        with patch("netbox_librenms_plugin.views.imports.actions.transaction", mock_tx):
-                            with patch("netbox_librenms_plugin.utils.find_by_librenms_id", return_value=None):
-                                with patch(
-                                    "netbox_librenms_plugin.utils.migrate_legacy_librenms_id", return_value=True
-                                ):
-                                    response = view.post(req, device_id=42)
-
-        assert response.status_code == 200
-        assert response.headers.get("HX-Reswap") == "none"
-        assert b"Unable to migrate the LibreNMS mapping" in response.content
-
-    def test_migrate_success_renders_row(self):
-        """Lines 1323+: successful migration renders row."""
-        view = self._make_view()
-        req, mock_ex, libre, val, locked, MockDevice, DNE, mock_tx = self._make_valid_migrate_context(view)
-
-        with patch.object(view, "require_all_permissions", return_value=None):
-            with patch("dcim.models.Device", MockDevice):
-                with patch.object(view, "require_object_permissions", return_value=None):
-                    with patch.object(view, "get_validated_device_with_selections", return_value=(libre, val, {})):
-                        with patch("netbox_librenms_plugin.views.imports.actions.transaction", mock_tx):
-                            with patch("netbox_librenms_plugin.utils.find_by_librenms_id", return_value=None):
-                                with patch(
-                                    "netbox_librenms_plugin.utils.migrate_legacy_librenms_id", return_value=True
-                                ):
-                                    with patch(
-                                        "netbox_librenms_plugin.views.imports.actions._save_device", return_value=None
-                                    ):
-                                        with patch("netbox_librenms_plugin.views.imports.actions.cache"):
-                                            with patch(
-                                                "netbox_librenms_plugin.views.imports.actions.get_import_device_cache_key",
-                                                return_value="key",
-                                            ):
-                                                with patch(
-                                                    "netbox_librenms_plugin.views.imports.actions.fetch_device_with_cache",
-                                                    return_value={"device_id": 42},
-                                                ):
-                                                    with patch.object(
-                                                        view, "render_device_row", return_value=MagicMock()
-                                                    ) as mock_render:
-                                                        view.post(req, device_id=42)
-
-        mock_render.assert_called_once()
 
 
 class TestBulkImportConfirmPartialExpiry:
