@@ -418,6 +418,10 @@ class CableSyncSettingsForm(NetBoxModelForm):
         # row matching the new name would rename an unrelated global tag when the old one is gone.
         locked_tags = list(Tag.objects.select_for_update().filter(name__in={old_tag_name, new_tag_name}))
         tag = next((candidate for candidate in locked_tags if candidate.name == old_tag_name), None)
+        if tag is None and any(candidate.name == new_tag_name for candidate in locked_tags):
+            # The old provenance tag is gone and an unrelated tag took the target name after
+            # clean_cable_sync_tag ran, so the settings must not adopt it.
+            raise forms.ValidationError({"cable_sync_tag": "A different tag already uses this name."})
         if tag is not None:
             update_fields = []
             if tag.name != new_tag_name:

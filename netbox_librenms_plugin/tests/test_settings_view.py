@@ -177,6 +177,44 @@ class TestCableSyncSettingsTab:
         assert (target.name, target.color) == target_state
         assert Tag.objects.count() == 1
 
+    def test_a_tag_that_claims_the_name_after_clean_is_not_adopted(self):
+        """clean() runs before save() re-locks, so save() must re-check the collision itself."""
+        from django import forms as django_forms
+        from extras.models import Tag
+
+        from netbox_librenms_plugin.forms import CableSyncSettingsForm
+
+        settings, _ = LibreNMSSettings.objects.get_or_create()
+        settings.cable_sync_tag = "old-provenance"
+        settings.save(update_fields=["cable_sync_tag"])
+        Tag.objects.create(name="old-provenance", slug="old-provenance", color="00aa00")
+
+        form = CableSyncSettingsForm(
+            data={
+                "cable_sync_tag": "renamed-provenance",
+                "cable_sync_tag_color": "ff5722",
+                "cable_sync_description": "Managed cable",
+            },
+            instance=settings,
+            user=make_superuser("settings-toctou-user"),
+        )
+        # clean_cable_sync_tag sees no clash: the old tag is the only row holding either name.
+        assert form.is_valid(), form.errors
+
+        # The window the finding names: between clean() and save() the old provenance tag is
+        # deleted and an unrelated tag takes the target name.
+        Tag.objects.filter(name="old-provenance").delete()
+        intruder = Tag.objects.create(name="renamed-provenance", slug="renamed-provenance", color="0000ff")
+
+        with pytest.raises(django_forms.ValidationError) as excinfo:
+            form.save()
+
+        assert "A different tag already uses this name." in str(excinfo.value)
+        settings.refresh_from_db()
+        intruder.refresh_from_db()
+        assert settings.cable_sync_tag == "old-provenance"
+        assert (intruder.name, intruder.color) == ("renamed-provenance", "0000ff")
+
     def test_blank_tag_name_is_rejected_and_nothing_persists(self, client):
         """A blank provenance tag would slugify to '' and break the ownership get_or_create — the form must reject it (whitespace-only strips to '' → required-field error) and the stored settings must keep their previous value."""
         client.force_login(make_superuser())

@@ -1599,6 +1599,29 @@ class TestDeviceCableTableView:
         assert {member.pk for member in table._vc_members} == {first_member.pk, second_member.pk}
         assert first_member.virtual_chassis_id == virtual_chassis.pk
 
+    @pytest.mark.django_db
+    def test_get_table_drops_a_vc_member_outside_the_view_grant(self):
+        """An unconstrained grant leaves every member viewable, so only a constrained one proves the filter."""
+        from dcim.models import Device
+
+        from netbox_librenms_plugin.tests.conftest import make_virtual_chassis_members
+        from netbox_librenms_plugin.tests.view_test_helpers import make_request, make_user_with_perms
+        from netbox_librenms_plugin.views.object_sync.devices import DeviceCableTableView
+
+        _vc, (first_member, hidden_member) = make_virtual_chassis_members("cable-vc-scoped")
+        user = make_user_with_perms(
+            "cable-vc-scoped-user",
+            [("view", Device)],
+            constraints={"pk": first_member.pk},
+        )
+        view = DeviceCableTableView()
+        view.setup(make_request("get", user=user))
+
+        table = view.get_table([], first_member)
+
+        assert {member.pk for member in table._vc_members} == {first_member.pk}
+        assert hidden_member.virtual_chassis_id == first_member.virtual_chassis_id
+
 
 class TestDeviceModuleTableView:
     """Tests for DeviceModuleTableView."""
