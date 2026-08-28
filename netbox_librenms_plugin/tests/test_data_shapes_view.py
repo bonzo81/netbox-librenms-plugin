@@ -2,6 +2,8 @@
 
 from unittest.mock import patch
 
+from netbox_librenms_plugin.librenms_api import get_plugin_config as _real_get_plugin_config
+
 import pytest
 from django.contrib.auth import get_user_model
 from django.test import RequestFactory
@@ -67,7 +69,11 @@ def _run_capture(view, server, device, *, query="?server_key=test"):
         "test": {"librenms_url": server.url, "api_token": "test-token", "cache_timeout": 0, "verify_ssl": False}
     }
     with patch("netbox_librenms_plugin.librenms_api.get_plugin_config") as mock_cfg:
-        mock_cfg.side_effect = lambda _plugin, key: servers_config if key == "servers" else None
+        # Patch ONLY the "servers" lookup and accept a defaulted 3-arg call, so a path that reads
+        # another setting (cache_timeout, verify_ssl) sees the real value instead of None.
+        mock_cfg.side_effect = lambda plugin, key, *args, **kwargs: (
+            servers_config if key == "servers" else _real_get_plugin_config(plugin, key, *args, **kwargs)
+        )
         return view.get(_superuser_request(query), device_id=device.pk)
 
 
@@ -329,7 +335,11 @@ def test_capture_view_denies_device_outside_users_object_scope(recording_server)
         "test": {"librenms_url": server.url, "api_token": "test-token", "cache_timeout": 0, "verify_ssl": False}
     }
     with patch("netbox_librenms_plugin.librenms_api.get_plugin_config") as mock_cfg:
-        mock_cfg.side_effect = lambda _plugin, key: servers_config if key == "servers" else None
+        # Patch ONLY the "servers" lookup and accept a defaulted 3-arg call, so a path that reads
+        # another setting (cache_timeout, verify_ssl) sees the real value instead of None.
+        mock_cfg.side_effect = lambda plugin, key, *args, **kwargs: (
+            servers_config if key == "servers" else _real_get_plugin_config(plugin, key, *args, **kwargs)
+        )
         # Out-of-scope id must 404 (fail-closed), never render the device's captured shape.
         with pytest.raises(Http404):
             view.get(request, device_id=target.pk)
