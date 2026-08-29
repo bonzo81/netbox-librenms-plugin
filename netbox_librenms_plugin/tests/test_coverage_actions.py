@@ -4,7 +4,6 @@ from unittest.mock import MagicMock, patch
 from types import SimpleNamespace as Namespace
 
 import pytest
-from django.contrib.auth.models import AnonymousUser
 from django.test import RequestFactory
 from django.urls import reverse as url_for
 
@@ -668,6 +667,456 @@ class TestBulkImportConfirmView:
         assert b'name="enable_vc_detection" value="true"' in response.content
         assert response.context["vc_detection_enabled"] is True
         assert response.context["devices"][0]["validation"]["_vc_detection_enabled"] is True
+
+
+@pytest.mark.django_db
+class TestBulkImportConfirmViewIntegration:
+    """BulkImportConfirmView.post integration paths for selections and collision checks."""
+
+    @pytest.fixture(autouse=True)
+    def _clear_django_cache(self):
+        # fetch_device_with_cache reads/writes the real Django cache; isolate tests so a
+        # device cached by one doesn't satisfy another's lookup.
+        from django.core.cache import cache
+
+        cache.clear()
+        yield
+        cache.clear()
+
+    @staticmethod
+    def _make_view(settings, server, server_key):
+        from netbox_librenms_plugin.views.imports.actions import BulkImportConfirmView
+
+        configure_test_servers(
+            settings,
+            {
+                server_key: {
+                    "librenms_url": server.url,
+                    "api_token": "test-token",
+                    "verify_ssl": False,
+                }
+            },
+        )
+        return BulkImportConfirmView()
+
+    @staticmethod
+    def _post_capturing_context(view, request):
+        from django.test.signals import template_rendered
+
+        rendered_contexts = []
+
+        def capture_context(**kwargs):
+            if kwargs["template"].name.endswith("bulk_import_confirm.html"):
+                rendered_contexts.append(kwargs["context"])
+
+        template_rendered.connect(capture_context)
+        try:
+            response = post_view(view, request)
+        finally:
+            template_rendered.disconnect(capture_context)
+
+        assert len(rendered_contexts) == 1
+        return response, rendered_contexts[0]
+
+    @pytest.fixture
+    def librenms_server(self, monkeypatch):
+        monkeypatch.setenv("NO_PROXY", "127.0.0.1,localhost")
+        monkeypatch.setenv("no_proxy", "127.0.0.1,localhost")
+        with run_librenms_server() as server:
+            yield server
+
+    def test_duplicate_device_id_renders_one_device(self, settings, librenms_server):
+        """A repeated LibreNMS ID produces one confirmation row and one selected device."""
+        server_key = "confirm-integration-duplicate"
+        librenms_server.device_info_response(
+            device_id=11,
+            hostname="confirm-integration-duplicate-router",
+            hardware="Test duplicate hardware",
+            os="test-duplicate-os",
+            serial="CONFIRM-INTEGRATION-DUPLICATE-SERIAL",
+            ip="198.18.0.11",
+        )
+        librenms_server.vc_inventory_callable(11, [], {})
+        view = self._make_view(settings, librenms_server, server_key)
+        user = make_view_user("confirm-integration-duplicate-user", [])
+        request = make_view_request(
+            "post",
+            {
+                "server_key": server_key,
+                "select": ["11", "11"],
+                "use_sysname": "true",
+                "strip_domain": "false",
+            },
+            user=user,
+            HTTP_HX_REQUEST="true",
+        )
+
+        response, context = self._post_capturing_context(view, request)
+
+        assert response.status_code == 200
+        assert context["selected_count"] == 1
+        assert context["device_count"] == 1
+        assert response.content.count(b'<div class="border rounded-3 p-2 mb-2">') == 1
+        assert response.content.count(b'name="select" value="11"') == 1
+        assert b"Import 1 device" in response.content
+        assert b"Import 2 devices" not in response.content
+        assert view_message_texts(request, "error") == []
+
+    def test_unknown_device_renders_only_all_expired_alert(self, settings, librenms_server):
+        """One unknown LibreNMS ID renders the all-expired alert instead of another empty-result alert."""
+        server_key = "confirm-integration-all-expired"
+        view = self._make_view(settings, librenms_server, server_key)
+        user = make_view_user("confirm-integration-all-expired-user", [])
+        request = make_view_request(
+            "post",
+            {
+                "server_key": server_key,
+                "select": ["999"],
+                "use_sysname": "true",
+                "strip_domain": "false",
+            },
+            user=user,
+            HTTP_HX_REQUEST="true",
+        )
+
+        response = post_view(view, request)
+
+        assert response.status_code == 200
+        assert b"<strong>Filter results have expired.</strong>" in response.content
+        assert b"<strong>Some device data has expired.</strong>" not in response.content
+        assert b"No valid devices selected." not in response.content
+        assert view_message_texts(request, "error") == []
+
+    def test_stack_members_use_resolved_device_name(self, settings, librenms_server):
+        """Stack member suggestions use the resolved master name in the rendered confirmation row."""
+        from django.apps import apps
+
+        server_key = "confirm-integration-stack-names"
+        settings_model = apps.get_model("netbox_librenms_plugin", "LibreNMSSettings")
+        settings_row, _ = settings_model.objects.get_or_create(pk=1)
+        settings_row.vc_member_name_pattern = "-M{position}"
+        settings_row.save(update_fields=["vc_member_name_pattern"])
+        librenms_server.device_info_response(
+            device_id=21,
+            hostname="confirm-integration-stack.example.test",
+            hardware="Test stack hardware",
+            os="test-stack-os",
+            serial="CONFIRM-INTEGRATION-STACK-SERIAL-1",
+            ip="198.18.0.21",
+        )
+        librenms_server.vc_inventory_callable(
+            21,
+            [{"entPhysicalClass": "stack", "entPhysicalIndex": 2100}],
+            {
+                2100: [
+                    {
+                        "entPhysicalClass": "chassis",
+                        "entPhysicalIndex": 2101,
+                        "entPhysicalParentRelPos": 1,
+                        "entPhysicalSerialNum": "CONFIRM-INTEGRATION-STACK-SERIAL-1",
+                        "entPhysicalModelName": "Test stack chassis",
+                        "entPhysicalName": "Stack member 1",
+                        "entPhysicalDescr": "Test stack member 1",
+                    },
+                    {
+                        "entPhysicalClass": "chassis",
+                        "entPhysicalIndex": 2102,
+                        "entPhysicalParentRelPos": 2,
+                        "entPhysicalSerialNum": "CONFIRM-INTEGRATION-STACK-SERIAL-2",
+                        "entPhysicalModelName": "Test stack chassis",
+                        "entPhysicalName": "Stack member 2",
+                        "entPhysicalDescr": "Test stack member 2",
+                    },
+                ]
+            },
+        )
+        view = self._make_view(settings, librenms_server, server_key)
+        user = make_view_user("confirm-integration-stack-names-user", [])
+        request = make_view_request(
+            "post",
+            {
+                "server_key": server_key,
+                "select": ["21"],
+                "use_sysname": "true",
+                "strip_domain": "true",
+            },
+            user=user,
+            HTTP_HX_REQUEST="true",
+        )
+
+        response = post_view(view, request)
+
+        assert response.status_code == 200
+        assert b"confirm-integration-stack-M1" in response.content
+        assert b"confirm-integration-stack-M2" in response.content
+        assert b"confirm-integration-stack.example.test-M1" not in response.content
+        assert view_message_texts(request, "error") == []
+
+    def test_stack_members_use_device_id_fallback_for_empty_resolved_name(self, settings, librenms_server):
+        """Stack member suggestions use the device ID fallback when domain stripping empties the resolved name."""
+        from django.apps import apps
+
+        server_key = "confirm-integration-stack-fallback"
+        settings_model = apps.get_model("netbox_librenms_plugin", "LibreNMSSettings")
+        settings_row, _ = settings_model.objects.get_or_create(pk=1)
+        settings_row.vc_member_name_pattern = "-F{position}"
+        settings_row.save(update_fields=["vc_member_name_pattern"])
+        librenms_server.device_info_response(
+            device_id=71,
+            hostname=".confirm-integration-stack-fallback.example.test",
+            hardware="Test fallback stack hardware",
+            os="test-fallback-stack-os",
+            serial="CONFIRM-INTEGRATION-STACK-FALLBACK-SERIAL-1",
+            ip="198.18.0.71",
+        )
+        librenms_server.vc_inventory_callable(
+            71,
+            [{"entPhysicalClass": "stack", "entPhysicalIndex": 7100}],
+            {
+                7100: [
+                    {
+                        "entPhysicalClass": "chassis",
+                        "entPhysicalIndex": 7101,
+                        "entPhysicalParentRelPos": 1,
+                        "entPhysicalSerialNum": "CONFIRM-INTEGRATION-STACK-FALLBACK-SERIAL-1",
+                        "entPhysicalModelName": "Test fallback stack chassis",
+                        "entPhysicalName": "Fallback stack member 1",
+                        "entPhysicalDescr": "Test fallback stack member 1",
+                    },
+                    {
+                        "entPhysicalClass": "chassis",
+                        "entPhysicalIndex": 7102,
+                        "entPhysicalParentRelPos": 2,
+                        "entPhysicalSerialNum": "CONFIRM-INTEGRATION-STACK-FALLBACK-SERIAL-2",
+                        "entPhysicalModelName": "Test fallback stack chassis",
+                        "entPhysicalName": "Fallback stack member 2",
+                        "entPhysicalDescr": "Test fallback stack member 2",
+                    },
+                ]
+            },
+        )
+        view = self._make_view(settings, librenms_server, server_key)
+        user = make_view_user("confirm-integration-stack-fallback-user", [])
+        request = make_view_request(
+            "post",
+            {
+                "server_key": server_key,
+                "select": ["71"],
+                "use_sysname": "true",
+                "strip_domain": "true",
+            },
+            user=user,
+            HTTP_HX_REQUEST="true",
+        )
+
+        response = post_view(view, request)
+
+        assert response.status_code == 200
+        assert b"device-71-F1" in response.content
+        assert b"device-71-F2" in response.content
+        assert view_message_texts(request, "error") == []
+
+    def test_vm_row_shows_selected_cluster_and_role(self, settings, librenms_server):
+        """A VM confirmation row shows its selected cluster and role in their own fields."""
+        from dcim.models import DeviceRole
+
+        cluster_issue = "Cluster must be manually selected before importing as VM"
+        server_key = "confirm-integration-vm-selections"
+        role = DeviceRole.objects.create(
+            name="Confirm Integration VM Selected Role",
+            slug="confirm-integration-vm-selected-role",
+            color="336699",
+        )
+        cluster = make_cluster("Confirm Integration VM Selected Cluster")
+        librenms_server.device_info_response(
+            device_id=31,
+            hostname="confirm-integration-vm",
+            hardware="Test VM hardware",
+            os="test-vm-os",
+            serial="CONFIRM-INTEGRATION-VM-SERIAL",
+            ip="198.18.0.31",
+        )
+        view = self._make_view(settings, librenms_server, server_key)
+        user = make_view_user("confirm-integration-vm-selections-user", [])
+        request = make_view_request(
+            "post",
+            {
+                "server_key": server_key,
+                "select": ["31"],
+                "cluster_31": str(cluster.pk),
+                "role_31": str(role.pk),
+                "use_sysname": "true",
+                "strip_domain": "false",
+            },
+            user=user,
+            HTTP_HX_REQUEST="true",
+        )
+
+        response, context = self._post_capturing_context(view, request)
+        validation = context["devices"][0]["validation"]
+
+        assert response.status_code == 200
+        assert validation["cluster"]["cluster"] == cluster
+        assert validation["cluster"]["found"] is True
+        assert validation["device_role"]["role"] == role
+        assert validation["device_role"]["found"] is True
+        assert cluster_issue not in validation["issues"]
+        assert cluster_issue.encode() not in response.content
+        assert b"Virtual Machine" in response.content
+        assert b"Confirm Integration VM Selected Role" in response.content
+        assert b"<strong>Cluster:</strong> Confirm Integration VM Selected Cluster" in response.content
+        assert b"<strong>Rack:</strong>" not in response.content
+        assert f'name="cluster_31" value="{cluster.pk}"'.encode() in response.content
+        assert f'name="role_31" value="{role.pk}"'.encode() in response.content
+        assert view_message_texts(request, "error") == []
+
+    def test_device_row_shows_selected_role_and_rack(self, settings, librenms_server):
+        """A device confirmation row shows its selected role and rack in their own fields."""
+        from dcim.models import DeviceRole, Rack
+
+        role_issue = "Device role must be manually selected before import"
+        server_key = "confirm-integration-device-selections"
+        site_source = make_device("confirm-integration-device-site-source")
+        role = DeviceRole.objects.create(
+            name="Confirm Integration Device Selected Role",
+            slug="confirm-integration-device-selected-role",
+            color="663399",
+        )
+        rack = Rack.objects.create(
+            name="Confirm Integration Device Selected Rack",
+            site=site_source.site,
+            status="active",
+        )
+        librenms_server.device_info_response(
+            device_id=41,
+            hostname="confirm-integration-device",
+            hardware="Test device hardware",
+            os="test-device-os",
+            serial="CONFIRM-INTEGRATION-DEVICE-SERIAL",
+            ip="198.18.0.41",
+            location=site_source.site.name,
+        )
+        librenms_server.vc_inventory_callable(41, [], {})
+        view = self._make_view(settings, librenms_server, server_key)
+        user = make_view_user("confirm-integration-device-selections-user", [])
+        request = make_view_request(
+            "post",
+            {
+                "server_key": server_key,
+                "select": ["41"],
+                "role_41": str(role.pk),
+                "rack_41": str(rack.pk),
+                "use_sysname": "true",
+                "strip_domain": "false",
+            },
+            user=user,
+            HTTP_HX_REQUEST="true",
+        )
+
+        response, context = self._post_capturing_context(view, request)
+        validation = context["devices"][0]["validation"]
+
+        assert response.status_code == 200
+        assert validation["device_role"]["role"] == role
+        assert validation["device_role"]["found"] is True
+        assert validation["rack"]["rack"] == rack
+        assert validation["rack"]["found"] is True
+        assert role_issue not in validation["issues"]
+        assert role_issue.encode() not in response.content
+        assert b"Virtual Machine" not in response.content
+        assert b"Confirm Integration Device Selected Role" in response.content
+        assert b"<strong>Rack:</strong>" in response.content
+        assert b"Confirm Integration Device Selected Rack" in response.content
+        assert b"<strong>Cluster:</strong>" not in response.content
+        assert f'name="role_41" value="{role.pk}"'.encode() in response.content
+        assert f'name="rack_41" value="{rack.pk}"'.encode() in response.content
+        assert view_message_texts(request, "error") == []
+
+    def test_partial_expiry_renders_survivor_and_warning(self, settings, librenms_server):
+        """A valid row survives confirmation when another selected LibreNMS row has expired."""
+        server_key = "confirm-integration-partial-expiry"
+        librenms_server.device_info_response(
+            device_id=51,
+            hostname="confirm-integration-partial-survivor",
+            hardware="Test partial expiry hardware",
+            os="test-partial-expiry-os",
+            serial="CONFIRM-INTEGRATION-PARTIAL-SERIAL",
+            ip="198.18.0.51",
+        )
+        librenms_server.vc_inventory_callable(51, [], {})
+        view = self._make_view(settings, librenms_server, server_key)
+        user = make_view_user("confirm-integration-partial-expiry-user", [])
+        request = make_view_request(
+            "post",
+            {
+                "server_key": server_key,
+                "select": ["51", "52"],
+                "use_sysname": "true",
+                "strip_domain": "false",
+            },
+            user=user,
+            HTTP_HX_REQUEST="true",
+        )
+
+        response = post_view(view, request)
+
+        assert response.status_code == 200
+        assert b"Confirm Import" in response.content
+        assert b"confirm-integration-partial-survivor" in response.content
+        assert b"1 of 2 selected devices had expired cache data" in response.content
+        assert response.content.count(b'<div class="border rounded-3 p-2 mb-2">') == 1
+        assert b'name="select" value="51"' in response.content
+        assert b'name="select" value="52"' not in response.content
+        assert b"Import 1 device" in response.content
+        assert view_message_texts(request, "error") == []
+
+    def test_distinct_existing_devices_render_confirmation(self, settings, librenms_server):
+        """Two LibreNMS rows targeting distinct NetBox devices pass the bulk collision gate."""
+        server_key = "confirm-integration-distinct-targets"
+        first_device = make_device("confirm-integration-distinct-target-a")
+        second_device = make_device("confirm-integration-distinct-target-b")
+        librenms_server.device_info_response(
+            device_id=61,
+            hostname=first_device.name,
+            hardware="Test distinct target hardware A",
+            os="test-distinct-target-os-a",
+            serial="",
+            ip="198.18.0.61",
+        )
+        librenms_server.vc_inventory_callable(61, [], {})
+        librenms_server.device_info_response(
+            device_id=62,
+            hostname=second_device.name,
+            hardware="Test distinct target hardware B",
+            os="test-distinct-target-os-b",
+            serial="",
+            ip="198.18.0.62",
+        )
+        librenms_server.vc_inventory_callable(62, [], {})
+        view = self._make_view(settings, librenms_server, server_key)
+        user = make_view_user("confirm-integration-distinct-targets-user", [])
+        request = make_view_request(
+            "post",
+            {
+                "server_key": server_key,
+                "select": ["61", "62"],
+                "use_sysname": "true",
+                "strip_domain": "false",
+            },
+            user=user,
+            HTTP_HX_REQUEST="true",
+        )
+
+        response = post_view(view, request)
+
+        assert response.status_code == 200
+        assert b"Confirm Import" in response.content
+        assert first_device.name.encode() in response.content
+        assert second_device.name.encode() in response.content
+        assert b"Bulk import blocked" not in response.content
+        assert response.content.count(b'<div class="border rounded-3 p-2 mb-2">') == 2
+        assert b"Import 2 devices" in response.content
+        assert view_message_texts(request, "error") == []
 
 
 @pytest.mark.django_db
@@ -2308,141 +2757,6 @@ class TestApplyUserSelectionsToValidation:
         mock_apply_rack.assert_called_once_with(validation, mock_rack)
 
 
-class TestBulkImportConfirmViewPost:
-    """Tests for BulkImportConfirmView.post() (lines 306-450)."""
-
-    def _make_view(self):
-        from netbox_librenms_plugin.views.imports.actions import BulkImportConfirmView
-
-        view = object.__new__(BulkImportConfirmView)
-        view._librenms_api = _make_api()
-        return view
-
-    def test_no_devices_selected_renders_alert(self):
-        """Empty device_ids returns the alert as HTMX modal content (200, not 400, so htmx swaps it into #htmx-modal-content)."""
-        view = self._make_view()
-        request = _make_request(post={})
-        request.POST.getlist = MagicMock(return_value=[])
-
-        with patch.object(view, "require_write_permission", return_value=None):
-            response = view.post(request)
-
-        assert response.status_code == 200
-        assert b"Select at least one device" in response.content
-
-    def test_duplicate_device_id_is_skipped(self):
-        """Line 334: duplicate device_id is skipped."""
-        view = self._make_view()
-        request = _make_request(post={"select": ["1", "1"]})  # Duplicate
-        request.POST.getlist = MagicMock(return_value=["1", "1"])
-        request.GET = MagicMock(return_value={})
-        request.GET.get = MagicMock(return_value=None)
-
-        libre_device = {"device_id": 1, "hostname": "router01"}
-        validation = {
-            "status": "importable",
-            "can_import": True,
-            "resolved_name": "router01",
-            "virtual_chassis": {},
-        }
-
-        with patch.object(view, "require_write_permission", return_value=None):
-            with patch(
-                "netbox_librenms_plugin.views.imports.actions.fetch_device_with_cache", return_value=libre_device
-            ):
-                with patch(
-                    "netbox_librenms_plugin.views.imports.actions.extract_device_selections",
-                    return_value={"cluster_id": None, "role_id": None, "rack_id": None},
-                ):
-                    with patch(
-                        "netbox_librenms_plugin.views.imports.actions.validate_device_for_import",
-                        return_value=validation,
-                    ):
-                        with patch(
-                            "netbox_librenms_plugin.views.imports.actions.resolve_naming_preferences",
-                            return_value=(True, False),
-                        ):
-                            with patch(
-                                "netbox_librenms_plugin.views.imports.actions.render",
-                                return_value=MagicMock(status_code=200),
-                            ):
-                                response = view.post(request)
-
-        # Should have processed only once (duplicate skipped)
-        assert response is not None
-
-    def test_device_not_in_cache_adds_error(self):
-        """Lines 341-346: device not in cache → error appended."""
-        view = self._make_view()
-        request = _make_request(post={"select": "999"})
-        request.POST.getlist = MagicMock(return_value=["999"])
-        request.GET = MagicMock()
-        request.GET.get = MagicMock(return_value=None)
-
-        with patch.object(view, "require_write_permission", return_value=None):
-            with patch(
-                "netbox_librenms_plugin.views.imports.actions.fetch_device_with_cache", return_value=None
-            ):  # Not in cache
-                with patch(
-                    "netbox_librenms_plugin.views.imports.actions.resolve_naming_preferences",
-                    return_value=(True, False),
-                ):
-                    with patch(
-                        "netbox_librenms_plugin.views.imports.actions.render", return_value=MagicMock(status_code=200)
-                    ) as mock_render:
-                        view.post(request)
-
-        # Render should be called with errors
-        call_args = mock_render.call_args
-        if call_args:
-            context = call_args[0][2] if len(call_args[0]) > 2 else call_args[1].get("context", {})
-            if isinstance(context, dict):
-                assert len(context.get("errors", [])) > 0 or context.get("cache_expired_count", 0) > 0
-
-    def test_vc_stack_updates_suggested_names(self):
-        """Line 371: VC stack device calls update_vc_member_suggested_names."""
-        view = self._make_view()
-        request = _make_request(post={"select": "1"})
-        request.POST.getlist = MagicMock(return_value=["1"])
-        request.GET = MagicMock()
-        request.GET.get = MagicMock(return_value="true")
-
-        libre_device = {"device_id": 1, "hostname": "sw01"}
-        validation = {
-            "status": "importable",
-            "resolved_name": "sw01",
-            "virtual_chassis": {"is_stack": True, "members": []},
-        }
-
-        with patch.object(view, "require_write_permission", return_value=None):
-            with patch(
-                "netbox_librenms_plugin.views.imports.actions.fetch_device_with_cache", return_value=libre_device
-            ):
-                with patch(
-                    "netbox_librenms_plugin.views.imports.actions.extract_device_selections",
-                    return_value={"cluster_id": None, "role_id": None, "rack_id": None},
-                ):
-                    with patch(
-                        "netbox_librenms_plugin.views.imports.actions.validate_device_for_import",
-                        return_value=validation,
-                    ):
-                        with patch(
-                            "netbox_librenms_plugin.views.imports.actions.resolve_naming_preferences",
-                            return_value=(True, False),
-                        ):
-                            with patch(
-                                "netbox_librenms_plugin.views.imports.actions.update_vc_member_suggested_names",
-                                return_value={"is_stack": True},
-                            ) as mock_vc:
-                                with patch(
-                                    "netbox_librenms_plugin.views.imports.actions.render",
-                                    return_value=MagicMock(status_code=200),
-                                ):
-                                    view.post(request)
-
-        mock_vc.assert_called_once()
-
-
 class TestDeviceVCDetailsViewAdditional:
     """Tests for DeviceVCDetailsView.get() (line 334 in vc details)."""
 
@@ -3855,134 +4169,6 @@ class TestDeviceConflictLinkIdConflict:
         assert b"LibreNMS ID conflict" in response.content
 
 
-class TestBulkImportConfirmViewVMRole:
-    """Tests for BulkImportConfirmView VM role/rack apply paths (lines 383-393)."""
-
-    def _make_view(self):
-        from netbox_librenms_plugin.views.imports.actions import BulkImportConfirmView
-
-        view = object.__new__(BulkImportConfirmView)
-        view._librenms_api = _make_api()
-        return view
-
-    def test_vm_with_cluster_and_role_applies_both(self):
-        """Lines 383-387: VM with cluster + role applies both."""
-        view = self._make_view()
-        request = _make_request(post={"select": "1"})
-        request.POST.getlist = MagicMock(return_value=["1"])
-        request.GET = MagicMock()
-        request.GET.get = MagicMock(return_value=None)
-
-        libre_device = {"device_id": 1, "hostname": "vm01"}
-        validation = {
-            "status": "importable",
-            "resolved_name": "vm01",
-            "virtual_chassis": {},
-            # The view recomputes is_vm from this flag; without it the cluster branch
-            # (apply_cluster_to_validation) is skipped.
-            "import_as_vm": True,
-        }
-        mock_cluster = MagicMock()
-        mock_role = MagicMock()
-
-        with patch.object(view, "require_write_permission", return_value=None):
-            with patch(
-                "netbox_librenms_plugin.views.imports.actions.fetch_device_with_cache", return_value=libre_device
-            ):
-                with patch(
-                    "netbox_librenms_plugin.views.imports.actions.extract_device_selections",
-                    return_value={"cluster_id": "1", "role_id": "2", "rack_id": None},
-                ):
-                    with patch(
-                        "netbox_librenms_plugin.views.imports.actions.validate_device_for_import",
-                        return_value=validation,
-                    ):
-                        with patch(
-                            "netbox_librenms_plugin.views.imports.actions.resolve_naming_preferences",
-                            return_value=(True, False),
-                        ):
-                            with patch(
-                                "netbox_librenms_plugin.views.imports.actions.fetch_model_by_id",
-                                # Issue #112: key the stub by the submitted id (cluster_id=1,
-                                # role_id=2), not call order — so a wrong-id fetch returns the
-                                # wrong mock and the swap asserts below fail.
-                                side_effect=lambda _model, id_: {"1": mock_cluster, "2": mock_role}.get(str(id_)),
-                            ):
-                                with patch(
-                                    "netbox_librenms_plugin.views.imports.actions.apply_cluster_to_validation"
-                                ) as mock_apply_c:
-                                    with patch(
-                                        "netbox_librenms_plugin.views.imports.actions.apply_role_to_validation"
-                                    ) as mock_apply_r:
-                                        with patch(
-                                            "netbox_librenms_plugin.views.imports.actions.render",
-                                            return_value=MagicMock(status_code=200),
-                                        ):
-                                            response = view.post(request)
-
-        # Both the cluster and role selections must be applied for a VM with both set,
-        # with the exact resolved objects (catches a role/cluster swap, not just "called").
-        assert mock_apply_c.call_args.args[1] is mock_cluster
-        assert mock_apply_r.call_args.args[1] is mock_role
-        assert response is not None
-
-    def test_device_with_role_and_rack_applies_both(self):
-        """Lines 390, 393: Device with role + rack applies both."""
-        view = self._make_view()
-        request = _make_request(post={"select": "1"})
-        request.POST.getlist = MagicMock(return_value=["1"])
-        request.GET = MagicMock()
-        request.GET.get = MagicMock(return_value=None)
-
-        libre_device = {"device_id": 1, "hostname": "router01"}
-        validation = {
-            "status": "importable",
-            "resolved_name": "router01",
-            "virtual_chassis": {},
-        }
-        mock_role = MagicMock()
-        mock_rack = MagicMock()
-
-        with patch.object(view, "require_write_permission", return_value=None):
-            with patch(
-                "netbox_librenms_plugin.views.imports.actions.fetch_device_with_cache", return_value=libre_device
-            ):
-                with patch(
-                    "netbox_librenms_plugin.views.imports.actions.extract_device_selections",
-                    return_value={"cluster_id": None, "role_id": "1", "rack_id": "2"},
-                ):
-                    with patch(
-                        "netbox_librenms_plugin.views.imports.actions.validate_device_for_import",
-                        return_value=validation,
-                    ):
-                        with patch(
-                            "netbox_librenms_plugin.views.imports.actions.resolve_naming_preferences",
-                            return_value=(True, False),
-                        ):
-                            with patch(
-                                "netbox_librenms_plugin.views.imports.actions.fetch_model_by_id",
-                                # Issue #112: key by submitted id (role_id=1, rack_id=2), not call order.
-                                side_effect=lambda _model, id_: {"1": mock_role, "2": mock_rack}.get(str(id_)),
-                            ):
-                                with patch(
-                                    "netbox_librenms_plugin.views.imports.actions.apply_role_to_validation"
-                                ) as mock_apply_r:
-                                    with patch(
-                                        "netbox_librenms_plugin.views.imports.actions.apply_rack_to_validation"
-                                    ) as mock_apply_rack:
-                                        with patch(
-                                            "netbox_librenms_plugin.views.imports.actions.render",
-                                            return_value=MagicMock(status_code=200),
-                                        ):
-                                            response = view.post(request)
-
-        # Both the role and rack selections must be applied for a device with both set,
-        # with the exact resolved objects in the expected positions.
-        assert mock_apply_r.call_args.args[1] is mock_role
-        assert mock_apply_rack.call_args.args[1] is mock_rack
-        assert response is not None
-
-
 class TestSaveDevicePath:
     """Test _save_device IntegrityError and ValidationError paths (line 168)."""
 
@@ -4426,75 +4612,6 @@ class TestSyncSerialConflictGuard:
         # The pre-check must not have been broken by the lock: the conflicting row still owns the serial.
         conflict.refresh_from_db()
         assert conflict.serial == "SN-LOCK-CONF"
-
-
-class TestBulkImportConfirmPartialExpiry:
-    """Test partial expiry path in BulkImportConfirmView (line 422)."""
-
-    def _make_view(self):
-        from netbox_librenms_plugin.views.imports.actions import BulkImportConfirmView
-
-        view = object.__new__(BulkImportConfirmView)
-        view._librenms_api = _make_api()
-        return view
-
-    def test_one_expired_one_valid_device_still_renders(self):
-        """One selected device is fetched, the other has expired from cache."""
-        view = self._make_view()
-        request = _make_request(post={"select": ["1", "2"]})
-        request.POST.getlist = MagicMock(return_value=["1", "2"])
-        request.GET = MagicMock()
-        request.GET.get = MagicMock(return_value=None)
-
-        call_count = [0]
-
-        def fetch_side_effect(device_id, *args, **kwargs):
-            call_count[0] += 1
-            if call_count[0] == 1:
-                return {"device_id": 1, "hostname": "router01"}  # Found
-            return None  # Not found (expired)
-
-        validation = {
-            "status": "importable",
-            "resolved_name": "router01",
-            "virtual_chassis": {},
-        }
-
-        with patch.object(view, "require_write_permission", return_value=None):
-            with patch(
-                "netbox_librenms_plugin.views.imports.actions.fetch_device_with_cache", side_effect=fetch_side_effect
-            ):
-                with patch(
-                    "netbox_librenms_plugin.views.imports.actions.extract_device_selections",
-                    return_value={"cluster_id": None, "role_id": None, "rack_id": None},
-                ):
-                    with patch(
-                        "netbox_librenms_plugin.views.imports.actions.validate_device_for_import",
-                        return_value=validation,
-                    ):
-                        with patch(
-                            "netbox_librenms_plugin.views.imports.actions.resolve_naming_preferences",
-                            return_value=(True, False),
-                        ):
-                            with patch(
-                                "netbox_librenms_plugin.views.imports.actions.render",
-                                return_value=MagicMock(status_code=200),
-                            ) as mock_render:
-                                response = view.post(request)
-
-        # The valid device (1) is rendered despite device 2 having expired; the loop
-        # fetched both ids (the expired one bumps cache_expired_count but isn't fatal).
-        assert response.status_code == 200
-        mock_render.assert_called_once()
-        # Pin the output: exactly the one surviving device renders on the confirm step, so a
-        # regression that drops the survivor (or renders a different response) is caught.
-        # (cache_expired_count is surfaced as a warning message, not a context key.)
-        template = mock_render.call_args.args[1]
-        context = mock_render.call_args.args[2]
-        assert template.endswith("bulk_import_confirm.html")
-        assert len(context["devices"]) == 1
-        assert context["device_count"] == 1
-        assert call_count[0] == 2
 
 
 @pytest.mark.django_db
@@ -5856,134 +5973,6 @@ class TestImportActionRebindGuard:
             response = view.post(request)
 
         assert response.status_code != 500
-
-
-@pytest.mark.django_db
-class TestBulkImportConfirmCollisions:
-    """Tests for Stage 3 collision-blocking behaviour."""
-
-    def _make_view(self):
-        from netbox_librenms_plugin.views.imports.actions import BulkImportConfirmView
-
-        view = object.__new__(BulkImportConfirmView)
-        view._librenms_api = _make_api()
-        return view
-
-    def _run_with_two_devices(self, validation_a, validation_b):
-        """Drive the real BulkImportConfirmView.post over two LibreNMS rows.
-
-        ``validation_a/b`` carry real NetBox Device objects so the real
-        detect_bulk_collisions + _model_name_of run; only validate_device_for_import (an
-        expensive VC-detection call covered by its own tests) is stubbed. render() is captured
-        so the chosen template can be asserted without building the full confirm-table context.
-        """
-        view = self._make_view()
-        request = _make_request(post={"select": ["1", "2"]})
-        request.POST.getlist = MagicMock(return_value=["1", "2"])
-        request.GET = MagicMock()
-        request.GET.get = MagicMock(return_value=None)
-        request.user = AnonymousUser()
-
-        libre_devices = {
-            1: {"device_id": 1, "hostname": "alpha"},
-            2: {"device_id": 2, "hostname": "beta"},
-        }
-        validations = {1: validation_a, 2: validation_b}
-
-        def fake_validate(libre_device, **_kwargs):
-            return validations[libre_device["device_id"]]
-
-        with (
-            patch.object(view, "require_write_permission", return_value=None),
-            patch(
-                "netbox_librenms_plugin.views.imports.actions.fetch_device_with_cache",
-                side_effect=lambda did, _api: libre_devices.get(did),
-            ),
-            patch(
-                "netbox_librenms_plugin.views.imports.actions.extract_device_selections",
-                return_value={"cluster_id": None, "role_id": None, "rack_id": None},
-            ),
-            patch(
-                "netbox_librenms_plugin.views.imports.actions.validate_device_for_import",
-                side_effect=fake_validate,
-            ),
-            patch(
-                "netbox_librenms_plugin.views.imports.actions.resolve_naming_preferences",
-                return_value=(True, False),
-            ),
-        ):
-            with patch("netbox_librenms_plugin.views.imports.actions.render") as mock_render:
-                mock_render.side_effect = lambda req, tpl, ctx, status=200: MagicMock(
-                    status_code=status, template_name=tpl, context=ctx
-                )
-                return view.post(request)
-
-    def test_clean_batch_renders_normal_confirm_template(self):
-        """Two rows resolving to distinct real NetBox devices fall through to the confirm template."""
-        validation_a = {
-            "status": "importable",
-            "resolved_name": "alpha",
-            "virtual_chassis": {},
-            "existing_device": make_device("nb-clean-a"),
-        }
-        validation_b = {
-            "status": "importable",
-            "resolved_name": "beta",
-            "virtual_chassis": {},
-            "existing_device": make_device("nb-clean-b"),
-        }
-        # render captured (not the heavy confirm table) — assert no collision block fired and the
-        # confirm template was chosen.
-        response = self._run_with_two_devices(validation_a, validation_b)
-        assert response is not None
-        assert "bulk_import_confirm.html" in response.template_name
-        assert response.status_code == 200
-
-    def test_collision_batch_renders_collision_template(self):
-        """A real authorized request can reach and render the collision interstitial."""
-        from dcim.models import Device
-        from django.core.cache import cache
-
-        from netbox_librenms_plugin.import_utils.cache import get_import_device_cache_key
-        from netbox_librenms_plugin.tests.view_test_helpers import make_request, make_user_with_perms, post
-        from netbox_librenms_plugin.views.imports.actions import BulkImportConfirmView
-
-        target = make_device("nb-collision-target")
-        device_ids = (97001, 97002)
-        rows = {
-            device_id: {
-                "device_id": device_id,
-                "hostname": target.name,
-                "sysName": target.name,
-                "serial": "",
-                "hardware": "Collision hardware",
-                "location": "Collision location",
-                "os": "collision-os",
-            }
-            for device_id in device_ids
-        }
-        for device_id, row in rows.items():
-            cache.set(get_import_device_cache_key(device_id, "default"), row, timeout=300)
-
-        user = make_user_with_perms("bulk-confirm-collision", [("view", Device)])
-        request = make_request(
-            data={"select": [str(device_id) for device_id in device_ids]},
-            user=user,
-            path="/device-import/bulk/confirm/",
-            HTTP_HX_REQUEST="true",
-        )
-        api = _make_api()
-        api.get_device_info.side_effect = lambda device_id, **_kwargs: (True, rows[device_id])
-        api.get_inventory_filtered.return_value = (True, [])
-        view = BulkImportConfirmView()
-        view._librenms_api = api
-
-        response = post(view, request)
-
-        html = response.content.decode()
-        assert response.status_code == 200
-        assert "Bulk import blocked: NetBox object collisions" in html
-        assert target.name in html
 
 
 @pytest.mark.django_db
