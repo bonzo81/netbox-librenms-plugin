@@ -6157,6 +6157,7 @@ def test_device_and_vm_imports_serialize_one_librenms_id_claim(settings):
     owners = list(Device.objects.filter(name="claim-race-device")) + list(
         VirtualMachine.objects.filter(name="claim-race-vm")
     )
+    assert len(claim_keys) == 2
     assert len(set(claim_keys)) == 1
     assert sorted(outcomes) == [False, True]
     assert len(owners) == 1

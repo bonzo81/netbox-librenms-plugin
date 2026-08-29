@@ -1096,6 +1096,7 @@ def test_discovered_mapping_and_vm_import_serialize_one_librenms_id_claim(settin
     mappings = [device.custom_field_data.get("librenms_id", {})]
     if vm is not None:
         mappings.append(vm.custom_field_data.get("librenms_id", {}))
+    assert len(claim_keys) == 2
     assert len(set(claim_keys)) == 1
     assert sorted(outcomes) == [False, True]
     assert sum(mapping.get(api.server_key) == librenms_id for mapping in mappings) == 1

@@ -16,13 +16,17 @@ def run_librenms_id_claim_race(*operations: Callable[[], _Result]) -> tuple[list
     claim_barrier = Barrier(len(operations))
     claim_keys = []
 
-    def wait_for_competing_claim(execute, sql, params, many, context):
-        if "pg_advisory_xact_lock" in sql:
-            claim_keys.append(params[0])
-            claim_barrier.wait(timeout=5)
-        return execute(sql, params, many, context)
-
     def run(operation):
+        claim_observed = False
+
+        def wait_for_competing_claim(execute, sql, params, many, context):
+            nonlocal claim_observed
+            if "pg_advisory_xact_lock" in sql and not claim_observed:
+                claim_observed = True
+                claim_keys.append(params[0])
+                claim_barrier.wait(timeout=5)
+            return execute(sql, params, many, context)
+
         close_old_connections()
         try:
             with connection.execute_wrapper(wait_for_competing_claim):
