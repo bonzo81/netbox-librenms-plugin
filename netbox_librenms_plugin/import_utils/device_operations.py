@@ -299,11 +299,17 @@ def _determine_device_name(
         ...                        use_sysname=True, strip_domain=True)
         'router'
     """
+    # LibreNMS sends JSON, so a name field can arrive as any type; only a str can name a device.
+    sysname = libre_device.get("sysName")
+    hostname = libre_device.get("hostname")
+    sysname = sysname if isinstance(sysname, str) else None
+    hostname = hostname if isinstance(hostname, str) else None
+
     # Determine base name based on use_sysname preference
     if use_sysname:
-        name = libre_device.get("sysName") or libre_device.get("hostname")
+        name = sysname or hostname
     else:
-        name = libre_device.get("hostname") or libre_device.get("sysName")
+        name = hostname or sysname
 
     # Strip domain if requested (but not for IP addresses)
     if strip_domain and name and "." in name:

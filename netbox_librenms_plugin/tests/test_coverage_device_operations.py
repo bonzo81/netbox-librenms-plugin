@@ -3777,3 +3777,46 @@ class TestImportNamesDeviceWhenDomainStripEmptiesTheName:
         assert result["success"] is True, result.get("error")
         created = Device.objects.get(serial="SN-DOTNAME-1")
         assert created.name == "device-8814"
+
+
+@pytest.mark.django_db
+class TestValidationNamesDeviceWhenLibreNMSSendsNonStringName:
+    """A non-string sysName or hostname must resolve to the device ID name, not crash or leak its type."""
+
+    @staticmethod
+    def _validate(libre_device):
+        from netbox_librenms_plugin.import_utils.device_operations import validate_device_for_import
+
+        return validate_device_for_import(
+            libre_device,
+            api=None,
+            use_sysname=True,
+            strip_domain=True,
+            include_vc_detection=False,
+        )
+
+    def _libre_device(self, device_id, sysname):
+        return {
+            "device_id": device_id,
+            "sysName": sysname,
+            "hostname": None,
+            "hardware": "-",
+            "serial": "-",
+            "os": "-",
+            "status": 1,
+            "location": "-",
+        }
+
+    def test_numeric_sysname_resolves_to_the_device_id_name(self):
+        from netbox_librenms_plugin.import_utils.device_operations import VALIDATION_ERROR_ISSUE_PREFIX
+
+        result = self._validate(self._libre_device(9001, 7))
+
+        assert result["resolved_name"] == "device-9001"
+        assert not [issue for issue in result["issues"] if issue.startswith(VALIDATION_ERROR_ISSUE_PREFIX)]
+
+    def test_list_sysname_does_not_reach_the_resolved_name(self):
+        result = self._validate(self._libre_device(9002, ["router01"]))
+
+        assert result["resolved_name"] == "device-9002"
+        assert isinstance(result["resolved_name"], str)
