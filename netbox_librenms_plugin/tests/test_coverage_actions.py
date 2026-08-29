@@ -76,14 +76,6 @@ def _make_request(post=None, get=None, headers=None, user_is_superuser=False):
     return req
 
 
-def _set_posted_device_ids(request, device_ids):
-    """Set selected device IDs without hiding other QueryDict values."""
-    original_getlist = request.POST.getlist
-    request.POST.getlist = MagicMock(
-        side_effect=lambda key: list(device_ids) if key == "select" else original_getlist(key)
-    )
-
-
 def test_make_request_getlist_returns_a_copy_like_querydict():
     request = _make_request(post={"device_ids": ["1", "2"]})
 
