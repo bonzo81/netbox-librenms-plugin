@@ -387,6 +387,40 @@ def _lock_mapping_in_scope(view, model, lookup, duplicate_message):
     return locked, None
 
 
+def _lock_librenms_id_assignment_target(view, target_model, target_pk, librenms_id, server_key):
+    """Lock one server/ID claim and its target, then reject ownership across Devices and VMs."""
+    from dcim.models import Device
+    from virtualization.models import VirtualMachine as NetBoxVM
+
+    from netbox_librenms_plugin.utils import AmbiguousLibreNMSIdError, find_by_librenms_id
+
+    acquire_advisory_transaction_lock(f"netbox-librenms-plugin:librenms-id:{server_key}:{librenms_id}")
+    try:
+        locked_target = (
+            view.restricted_queryset(target_model, "change").select_for_update(of=("self",)).get(pk=target_pk)
+        )
+    except target_model.DoesNotExist:
+        object_label = "VM" if target_model is NetBoxVM else "Device"
+        return None, _htmx_error_response(f"{object_label} no longer exists; it may have been deleted concurrently.")
+
+    for conflict_model in (Device, NetBoxVM):
+        try:
+            id_conflict = find_by_librenms_id(conflict_model, librenms_id, server_key)
+        except AmbiguousLibreNMSIdError:
+            return None, _htmx_error_response(
+                f"LibreNMS ID {librenms_id} is ambiguous. Resolve the duplicate assignment before changing the mapping."
+            )
+        if id_conflict is None or (type(id_conflict) is type(locked_target) and id_conflict.pk == locked_target.pk):
+            continue
+        object_label = "VM" if conflict_model is NetBoxVM else "device"
+        return None, _htmx_error_response(
+            f"LibreNMS ID conflict: ID {librenms_id} is already assigned to {object_label} "
+            f"'{id_conflict.name}' (ID: {id_conflict.pk})"
+        )
+
+    return locked_target, None
+
+
 def _oob_ip_is_reassignable(candidate, interface) -> bool:
     """
     Return whether *candidate* may be re-homed to *interface* without taking another device's IP.
@@ -2005,39 +2039,17 @@ class DeviceConflictActionView(
         # object tables. The target-row lock separately preserves concurrent changes to the
         # object receiving the mapping.
         if action in {"link", "update", "update_serial"}:
-            from netbox_librenms_plugin.utils import AmbiguousLibreNMSIdError, find_by_librenms_id
-
             with transaction.atomic():
                 server_key = self.librenms_api.server_key
-                acquire_advisory_transaction_lock(f"netbox-librenms-plugin:librenms-id:{server_key}:{librenms_id}")
-                # Lock the target row so concurrent requests preserve its other mappings.
-                try:
-                    existing_device = (
-                        self.restricted_queryset(existing_model, "change")
-                        .select_for_update(of=("self",))
-                        .get(pk=existing_device.pk)
-                    )
-                except existing_model.DoesNotExist:
-                    object_label = "VM" if existing_model is NetBoxVM else "Device"
-                    return _htmx_error_response(
-                        f"{object_label} no longer exists; it may have been deleted concurrently."
-                    )
-                for conflict_model in (Device, NetBoxVM):
-                    try:
-                        id_conflict = find_by_librenms_id(conflict_model, int(librenms_id), server_key)
-                    except AmbiguousLibreNMSIdError:
-                        return _htmx_error_response(
-                            f"LibreNMS ID {librenms_id} is ambiguous. Resolve the duplicate assignment before linking."
-                        )
-                    if id_conflict is None or (
-                        type(id_conflict) is type(existing_device) and id_conflict.pk == existing_device.pk
-                    ):
-                        continue
-                    object_label = "VM" if conflict_model is NetBoxVM else "device"
-                    return _htmx_error_response(
-                        f"LibreNMS ID conflict: ID {librenms_id} is already assigned to {object_label} "
-                        f"'{id_conflict.name}' (ID: {id_conflict.pk})"
-                    )
+                existing_device, lock_error = _lock_librenms_id_assignment_target(
+                    self,
+                    existing_model,
+                    existing_device.pk,
+                    librenms_id,
+                    server_key,
+                )
+                if lock_error is not None:
+                    return lock_error
 
                 # Reject legacy bare-int/string librenms_id: set_librenms_device_id
                 # silently skips writes for legacy formats, leaving the device partially
@@ -2233,14 +2245,16 @@ class DeviceConflictActionView(
                     "Serial number not confirmed. Check the force checkbox to migrate without serial verification."
                 )
             with transaction.atomic():
-                try:
-                    locked_device = (
-                        self.restricted_queryset(existing_model, "change")
-                        .select_for_update(of=("self",))
-                        .get(pk=existing_device.pk)
-                    )
-                except existing_model.DoesNotExist:
-                    return _htmx_error_response("Object no longer exists; it may have been deleted concurrently.")
+                server_key = self.librenms_api.server_key
+                locked_device, lock_error = _lock_librenms_id_assignment_target(
+                    self,
+                    existing_model,
+                    existing_device.pk,
+                    librenms_id,
+                    server_key,
+                )
+                if lock_error is not None:
+                    return lock_error
                 # Re-check under lock — another request may have already migrated it
                 cf_locked = locked_device.custom_field_data.get("librenms_id")
                 if not is_legacy_librenms_id(cf_locked):
@@ -2250,23 +2264,9 @@ class DeviceConflictActionView(
                     return _htmx_error_response(
                         f"Legacy librenms_id changed under lock ({cf_locked_int} != {librenms_id}); cannot migrate safely."
                     )
-                # Fail closed when the ID resolves to more than one object (server-scoped or legacy).
-                server_key = self.librenms_api.server_key
-                from netbox_librenms_plugin.utils import AmbiguousLibreNMSIdError, find_by_librenms_id
-
-                # The locked row still carries the legacy id and every accepted form of it is
-                # matched by build_librenms_id_qs, so it always matches its own lookup. A rival
-                # owner therefore surfaces as an ambiguity, never as a single foreign match.
-                try:
-                    find_by_librenms_id(existing_model, cf_locked_int, server_key)
-                except AmbiguousLibreNMSIdError:
-                    return _htmx_error_response(
-                        f"librenms_id {cf_locked_int} is ambiguous — it matches more than one device. "
-                        "Resolve the duplicate assignment before migrating."
-                    )
                 # migrate_legacy_librenms_id refuses only the values is_legacy_librenms_id already
                 # rejects, and the locked value passed that gate above, so it cannot fail here.
-                migrate_legacy_librenms_id(locked_device, self.librenms_api.server_key)
+                migrate_legacy_librenms_id(locked_device, server_key)
                 # Save only the field we actually mutated. Running full_clean() on the
                 # whole object would reject the migration over unrelated pre-existing
                 # validation issues (e.g. legacy rack face/position without a rack),
@@ -2282,10 +2282,7 @@ class DeviceConflictActionView(
                         locked_device.pk,
                     )
                     return _htmx_error_response("Unable to migrate the LibreNMS mapping. Please try again.")
-            logger.info(
-                f"Migrated legacy librenms_id on '{locked_device.name}' "
-                f"to {{{self.librenms_api.server_key!r}: {cf_locked_int}}}"
-            )
+            logger.info(f"Migrated legacy librenms_id on '{locked_device.name}' to {{{server_key!r}: {cf_locked_int}}}")
 
         else:
             return _htmx_error_response(f"Unknown action: {action}")

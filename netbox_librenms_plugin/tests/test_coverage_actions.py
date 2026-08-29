@@ -3125,6 +3125,61 @@ class TestDeviceConflictActionMigrateLibreNMSId:
         assert response["HX-Trigger"] == "closeModal"
         assert VirtualMachine.objects.get(pk=vm.pk).custom_field_data["librenms_id"] == {self.server_key: 42}
 
+    def test_vm_migration_rejects_a_device_claim_created_after_validation(self):
+        """Reject a Device claim that appears after validation and keep the VM mapping unchanged."""
+        from dcim.models import Device
+        from django.db import connection
+        from django.test.utils import CaptureQueriesContext
+        from virtualization.models import VirtualMachine
+
+        view = self._make_view()
+        device = make_device(
+            "migrate-cross-model-owner",
+            librenms_cf={self.server_key: 99},
+        )
+        vm = make_vm("migrate-cross-model-vm")
+        vm.custom_field_data["librenms_id"] = 42
+        vm.save(update_fields=["custom_field_data"])
+        self.librenms_server.device_info_response(
+            device_id=42,
+            hostname="migrate-cross-model-vm",
+            hardware="Test VM",
+            os="linux",
+            serial="",
+            ip="",
+        )
+        self.librenms_server.vc_inventory_callable(42, [], {})
+        request = make_view_request(
+            "post",
+            {
+                "server_key": self.server_key,
+                "action": "migrate_librenms_id",
+                "existing_device_id": str(vm.pk),
+                "existing_device_type": "virtualmachine",
+                "cluster_42": str(vm.cluster_id),
+                "force": "on",
+            },
+            user=make_view_user("migrate-cross-model-user", [("change", VirtualMachine)]),
+            HTTP_HX_REQUEST="true",
+        )
+
+        with CaptureQueriesContext(connection) as queries:
+            response = self._post_after_validation(
+                view,
+                request,
+                42,
+                lambda: Device.objects.filter(pk=device.pk).update(
+                    custom_field_data={"librenms_id": {self.server_key: 42}}
+                ),
+            )
+
+        assert response.status_code == 200
+        assert response.headers.get("HX-Reswap") == "none"
+        assert b"already assigned to device" in response.content
+        assert any("pg_advisory_xact_lock" in query["sql"] for query in queries.captured_queries)
+        assert VirtualMachine.objects.get(pk=vm.pk).custom_field_data["librenms_id"] == 42
+        assert Device.objects.get(pk=device.pk).custom_field_data["librenms_id"] == {self.server_key: 42}
+
     def test_fails_closed_when_the_row_is_deleted_between_validation_and_the_lock(self):
         """Fail closed when the validated Device is deleted before the locked re-read."""
         from dcim.models import Device

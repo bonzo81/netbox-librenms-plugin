@@ -288,6 +288,12 @@ class TestRemoveServerMappingViewWiring:
         request = MagicMock()
         request.POST = {"object_type": "virtualmachine", "server_key": "orphaned-server"}
 
+        # Resolve the URL before the settings patch below replaces the settings object: reverse()
+        # loads the root URLconf, which reads real settings.
+        from django.urls import reverse
+
+        expected_vm_sync_url = reverse("plugins:netbox_librenms_plugin:vm_librenms_sync", kwargs={"pk": 10})
+
         with (
             patch.object(view, "require_all_permissions", side_effect=capture_perms),
             patch.object(view, "_get_object", return_value=(mock_vm, mock_model)),
@@ -305,5 +311,6 @@ class TestRemoveServerMappingViewWiring:
         # required_object_permissions must be scoped to VirtualMachine, not Device
         assert ("change", VirtualMachine) in permissions_at_check.get("POST", [])
         mock_model.objects.restrict.assert_called_once_with(request.user, "change")
-        # Response must redirect to the VM-specific sync URL
-        mock_redirect.assert_called_with("plugins:netbox_librenms_plugin:vm_librenms_sync", pk=10)
+        # Response must redirect to the VM-specific sync URL, which the view now builds itself
+        # so it can carry the active ?tab through the redirect.
+        mock_redirect.assert_called_with(expected_vm_sync_url)

@@ -1764,6 +1764,15 @@ class TestRemoveServerMappingViewPost:
 
         return _make_view(RemoveServerMappingView, request)
 
+    @staticmethod
+    def _assert_tab_redirect(response, object_type, pk, tab="modules"):
+        """Assert that a removal outcome returns to the validated submitted sync tab."""
+        from django.urls import reverse
+
+        url_name = "vm_librenms_sync" if object_type == "vm" else "device_librenms_sync"
+        url = reverse(f"plugins:netbox_librenms_plugin:{url_name}", kwargs={"pk": pk})
+        assert response.url == f"{url}?tab={tab}"
+
     def test_invalid_object_type_returns_400(self):
         req = _make_request({"object_type": "badtype"})
 
@@ -1778,11 +1787,12 @@ class TestRemoveServerMappingViewPost:
         vm = make_vm("rm-vm-orphan")
         vm.custom_field_data["librenms_id"] = {"orphan": 5}
         vm.save()
-        req = _make_request({"object_type": "virtualmachine", "server_key": "orphan"})
+        req = _make_request({"object_type": "virtualmachine", "server_key": "orphan", "tab": "modules"})
 
         with _plugins_config(servers={}, librenms_url=""):
-            _post(self._view(req), req, pk=vm.pk)
+            response = _post(self._view(req), req, pk=vm.pk)
 
+        self._assert_tab_redirect(response, "vm", vm.pk)
         assert message_texts(req, "success")
         assert VirtualMachine.objects.get(pk=vm.pk).custom_field_data["librenms_id"] is None
 
@@ -1802,11 +1812,36 @@ class TestRemoveServerMappingViewPost:
 
     def test_no_server_key(self):
         dev = make_device("rm-nokey", librenms_cf={"orphan": 5})
-        req = _make_request({"object_type": "device", "server_key": ""})
+        req = _make_request({"object_type": "device", "server_key": "", "tab": "modules"})
 
-        _post(self._view(req), req, pk=dev.pk)
+        response = _post(self._view(req), req, pk=dev.pk)
 
+        self._assert_tab_redirect(response, "device", dev.pk)
         assert message_texts(req, "error") == ["No server_key provided."]
+
+    def test_invalid_server_key_preserves_tab(self):
+        """A rejected server key returns to the validated submitted sync tab."""
+        dev = make_device("rm-invalid-key", librenms_cf={"dc__west": 5})
+        req = _make_request({"object_type": "device", "server_key": "dc__west", "tab": "modules"})
+
+        response = _post(self._view(req), req, pk=dev.pk)
+
+        self._assert_tab_redirect(response, "device", dev.pk)
+        assert message_texts(req, "error") == ["LibreNMS server key must not contain '__'."]
+
+    def test_invalid_tab_is_not_reflected(self):
+        """An unknown submitted tab is omitted from the redirect URL."""
+        from django.urls import reverse
+
+        dev = make_device("rm-invalid-tab", librenms_cf={"orphan": 5})
+        req = _make_request({"object_type": "device", "server_key": "", "tab": "settings"})
+
+        response = _post(self._view(req), req, pk=dev.pk)
+
+        assert response.url == reverse(
+            "plugins:netbox_librenms_plugin:device_librenms_sync",
+            kwargs={"pk": dev.pk},
+        )
 
     def test_mapping_not_found_wrong_type(self):
         """cf_value is not a dict → warning."""
@@ -1820,10 +1855,11 @@ class TestRemoveServerMappingViewPost:
     def test_mapping_not_found_missing_key(self):
         """server_key not in cf_value dict → warning."""
         dev = make_device("rm-otherkey", librenms_cf={"other": 5})
-        req = _make_request({"object_type": "device", "server_key": "default"})
+        req = _make_request({"object_type": "device", "server_key": "default", "tab": "modules"})
 
-        _post(self._view(req), req, pk=dev.pk)
+        response = _post(self._view(req), req, pk=dev.pk)
 
+        self._assert_tab_redirect(response, "device", dev.pk)
         assert message_texts(req, "warning") == ["No mapping found for server 'default'."]
 
     def test_configured_servers_non_dict_treated_as_empty(self):
@@ -1844,11 +1880,12 @@ class TestRemoveServerMappingViewPost:
         from dcim.models import Device
 
         dev = make_device("rm-configured", librenms_cf={"production": 10})
-        req = _make_request({"object_type": "device", "server_key": "production"})
+        req = _make_request({"object_type": "device", "server_key": "production", "tab": "modules"})
 
         with _plugins_config(servers={"production": {}}, librenms_url=""):
-            _post(self._view(req), req, pk=dev.pk)
+            response = _post(self._view(req), req, pk=dev.pk)
 
+        self._assert_tab_redirect(response, "device", dev.pk)
         assert any("Cannot remove" in t for t in message_texts(req, "error"))
         assert Device.objects.get(pk=dev.pk).custom_field_data["librenms_id"] == {"production": 10}
 
@@ -1870,12 +1907,13 @@ class TestRemoveServerMappingViewPost:
         from dcim.models import Device
 
         dev = make_device("rm-vanishes", librenms_cf={"orphan": 5})
-        req = _make_request({"object_type": "device", "server_key": "orphan"})
+        req = _make_request({"object_type": "device", "server_key": "orphan", "tab": "modules"})
         view = self._view(req)
 
         with _plugins_config(servers={}, librenms_url=""), _deleted_before_lock(view, dev):
-            _post(view, req, pk=dev.pk)
+            response = _post(view, req, pk=dev.pk)
 
+        self._assert_tab_redirect(response, "device", dev.pk)
         assert message_texts(req, "error") == ["Device no longer exists."]
         assert not Device.objects.filter(pk=dev.pk).exists()
 
@@ -1901,7 +1939,7 @@ class TestRemoveServerMappingViewPost:
         from django.core.exceptions import ValidationError
 
         dev = make_device("rm-validationerr", librenms_cf={"orphan": 5})
-        req = _make_request({"object_type": "device", "server_key": "orphan"})
+        req = _make_request({"object_type": "device", "server_key": "orphan", "tab": "modules"})
 
         # full_clean() accepts any dict for this custom field, so the rejection has to be
         # injected; the manager, the lock and the transaction all stay real.
@@ -1909,8 +1947,9 @@ class TestRemoveServerMappingViewPost:
             _plugins_config(servers={}, librenms_url=""),
             patch.object(Device, "full_clean", side_effect=ValidationError({"custom_field_data": ["err"]})),
         ):
-            _post(self._view(req), req, pk=dev.pk)
+            response = _post(self._view(req), req, pk=dev.pk)
 
+        self._assert_tab_redirect(response, "device", dev.pk)
         assert any("Validation error removing" in t for t in message_texts(req, "error"))
         assert Device.objects.get(pk=dev.pk).custom_field_data["librenms_id"] == {"orphan": 5}
 
@@ -1920,7 +1959,7 @@ class TestRemoveServerMappingViewPost:
         from django.db import OperationalError
 
         dev = make_device("rm-unexpected", librenms_cf={"orphan": 5})
-        req = _make_request({"object_type": "device", "server_key": "orphan"})
+        req = _make_request({"object_type": "device", "server_key": "orphan", "tab": "modules"})
 
         # Injected at the persistence boundary, which is where an unexpected failure of this
         # kind actually originates; full_clean still runs for real ahead of it.
@@ -1928,8 +1967,9 @@ class TestRemoveServerMappingViewPost:
             _plugins_config(servers={}, librenms_url=""),
             patch.object(Device, "save", side_effect=OperationalError("disk full")),
         ):
-            _post(self._view(req), req, pk=dev.pk)
+            response = _post(self._view(req), req, pk=dev.pk)
 
+        self._assert_tab_redirect(response, "device", dev.pk)
         assert any("Unexpected error removing" in t for t in message_texts(req, "error"))
         assert Device.objects.get(pk=dev.pk).custom_field_data["librenms_id"] == {"orphan": 5}
 
@@ -1939,14 +1979,13 @@ class TestRemoveServerMappingViewPost:
 
         view = self._view()
         dev = make_device("rm-orphan", librenms_cf={"orphan": 5})
-        req = _make_request({"object_type": "device", "server_key": "orphan"})
+        req = _make_request({"object_type": "device", "server_key": "orphan", "tab": "modules"})
 
-        with (
-            patch("netbox_librenms_plugin.views.sync.device_fields.messages") as mock_msg,
-            patch("netbox_librenms_plugin.views.sync.device_fields.redirect"),
-        ):
-            _post(view, req, pk=dev.pk)
-        mock_msg.success.assert_called_once()
+        with _plugins_config(servers={}, librenms_url=""):
+            response = _post(view, req, pk=dev.pk)
+
+        self._assert_tab_redirect(response, "device", dev.pk)
+        assert message_texts(req, "success") == ["Removed LibreNMS mapping for server 'orphan'."]
         # Last key removed → cf librenms_id collapses to None.
         assert Device.objects.get(pk=dev.pk).custom_field_data["librenms_id"] is None
 
