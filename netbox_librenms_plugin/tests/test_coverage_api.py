@@ -194,8 +194,7 @@ class TestGetAvailableServersLegacy:
 
         result = LibreNMSAPI.get_available_servers()
 
-        assert "default" in result
-        assert "legacy.example.com" in result["default"]
+        assert result == {"default": "Default Server (https://legacy.example.com)"}
 
     def test_no_legacy_url_returns_default_label(self, settings):
         """With neither a servers mapping nor a legacy URL, only the bare default label is offered."""
