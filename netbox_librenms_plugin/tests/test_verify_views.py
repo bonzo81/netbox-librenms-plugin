@@ -1963,11 +1963,10 @@ class TestSaveVlanGroupOverridesObjectScope:
         """A real user with plugin write access AND a pk-constrained view_device grant (no superuser)."""
         from core.models import ObjectType
         from dcim.models import Device
-        from django.apps import apps
         from django.contrib.auth import get_user_model
         from users.models import ObjectPermission
 
-        LibreNMSSettings = apps.get_model("netbox_librenms_plugin", "LibreNMSSettings")
+        from netbox_librenms_plugin.models import LibreNMSSettings
 
         user = get_user_model().objects.create_user(username="scoped-writer", password="x")
 

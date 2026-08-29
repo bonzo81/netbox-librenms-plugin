@@ -346,38 +346,38 @@ class TestInterfaceCssClassGroupMatching:
 
     # -- get_untagged_vlan_css_class --
 
-    def test_untagged_vid_match_group_match_returns_green(self, mock_librenms_config):
+    def test_untagged_vid_match_group_match_returns_green(self):
         from netbox_librenms_plugin.utils import get_untagged_vlan_css_class
 
         assert get_untagged_vlan_css_class(60, 60, True, [], group_matches=True) == "text-success"
 
-    def test_untagged_vid_match_group_mismatch_returns_orange(self, mock_librenms_config):
+    def test_untagged_vid_match_group_mismatch_returns_orange(self):
         from netbox_librenms_plugin.utils import get_untagged_vlan_css_class
 
         assert get_untagged_vlan_css_class(60, 60, True, [], group_matches=False) == "text-warning"
 
-    def test_untagged_vid_differs_group_irrelevant(self, mock_librenms_config):
+    def test_untagged_vid_differs_group_irrelevant(self):
         """Different VIDs -> text-warning regardless of group_matches."""
         from netbox_librenms_plugin.utils import get_untagged_vlan_css_class
 
         assert get_untagged_vlan_css_class(60, 100, True, [], group_matches=True) == "text-warning"
 
-    def test_untagged_not_in_netbox_ignores_group(self, mock_librenms_config):
+    def test_untagged_not_in_netbox_ignores_group(self):
         from netbox_librenms_plugin.utils import get_untagged_vlan_css_class
 
         assert get_untagged_vlan_css_class(60, 60, False, [], group_matches=True) == "text-danger"
 
-    def test_untagged_missing_vlan_ignores_group(self, mock_librenms_config):
+    def test_untagged_missing_vlan_ignores_group(self):
         from netbox_librenms_plugin.utils import get_untagged_vlan_css_class
 
         assert get_untagged_vlan_css_class(60, 60, True, [60], group_matches=True) == "text-danger"
 
-    def test_untagged_no_netbox_vlan_returns_red(self, mock_librenms_config):
+    def test_untagged_no_netbox_vlan_returns_red(self):
         from netbox_librenms_plugin.utils import get_untagged_vlan_css_class
 
         assert get_untagged_vlan_css_class(60, None, True, [], group_matches=True) == "text-danger"
 
-    def test_untagged_default_group_matches_is_true(self, mock_librenms_config):
+    def test_untagged_default_group_matches_is_true(self):
         """Without group_matches param, defaults to True (backward compat)."""
         from netbox_librenms_plugin.utils import get_untagged_vlan_css_class
 
@@ -385,32 +385,32 @@ class TestInterfaceCssClassGroupMatching:
 
     # -- get_tagged_vlan_css_class --
 
-    def test_tagged_vid_present_group_match_returns_green(self, mock_librenms_config):
+    def test_tagged_vid_present_group_match_returns_green(self):
         from netbox_librenms_plugin.utils import get_tagged_vlan_css_class
 
         assert get_tagged_vlan_css_class(60, {60, 100}, True, [], group_matches=True) == "text-success"
 
-    def test_tagged_vid_present_group_mismatch_returns_orange(self, mock_librenms_config):
+    def test_tagged_vid_present_group_mismatch_returns_orange(self):
         from netbox_librenms_plugin.utils import get_tagged_vlan_css_class
 
         assert get_tagged_vlan_css_class(60, {60, 100}, True, [], group_matches=False) == "text-warning"
 
-    def test_tagged_vid_absent_group_irrelevant(self, mock_librenms_config):
+    def test_tagged_vid_absent_group_irrelevant(self):
         from netbox_librenms_plugin.utils import get_tagged_vlan_css_class
 
         assert get_tagged_vlan_css_class(60, {100}, True, [], group_matches=True) == "text-danger"
 
-    def test_tagged_not_in_netbox_ignores_group(self, mock_librenms_config):
+    def test_tagged_not_in_netbox_ignores_group(self):
         from netbox_librenms_plugin.utils import get_tagged_vlan_css_class
 
         assert get_tagged_vlan_css_class(60, {60}, False, [], group_matches=True) == "text-danger"
 
-    def test_tagged_missing_vlan_ignores_group(self, mock_librenms_config):
+    def test_tagged_missing_vlan_ignores_group(self):
         from netbox_librenms_plugin.utils import get_tagged_vlan_css_class
 
         assert get_tagged_vlan_css_class(60, {60}, True, [60], group_matches=True) == "text-danger"
 
-    def test_tagged_default_group_matches_is_true(self, mock_librenms_config):
+    def test_tagged_default_group_matches_is_true(self):
         """Without group_matches param, defaults to True (backward compat)."""
         from netbox_librenms_plugin.utils import get_tagged_vlan_css_class
 
@@ -418,45 +418,45 @@ class TestInterfaceCssClassGroupMatching:
 
     # -- check_vlan_group_matches --
 
-    def test_check_group_matches_untagged_same_group(self, mock_librenms_config):
+    def test_check_group_matches_untagged_same_group(self):
         from netbox_librenms_plugin.utils import check_vlan_group_matches
 
         assert check_vlan_group_matches("U", 60, 5, 5, {}, 60, set()) is True
 
-    def test_check_group_matches_untagged_different_group(self, mock_librenms_config):
+    def test_check_group_matches_untagged_different_group(self):
         from netbox_librenms_plugin.utils import check_vlan_group_matches
 
         assert check_vlan_group_matches("U", 60, 10, 5, {}, 60, set()) is False
 
-    def test_check_group_matches_untagged_vid_differs(self, mock_librenms_config):
+    def test_check_group_matches_untagged_vid_differs(self):
         """When VIDs don't match, group comparison is irrelevant -> True."""
         from netbox_librenms_plugin.utils import check_vlan_group_matches
 
         assert check_vlan_group_matches("U", 60, 10, 5, {}, 100, set()) is True
 
-    def test_check_group_matches_tagged_same_group(self, mock_librenms_config):
+    def test_check_group_matches_tagged_same_group(self):
         from netbox_librenms_plugin.utils import check_vlan_group_matches
 
         assert check_vlan_group_matches("T", 60, 5, None, {60: 5}, None, {60}) is True
 
-    def test_check_group_matches_tagged_different_group(self, mock_librenms_config):
+    def test_check_group_matches_tagged_different_group(self):
         from netbox_librenms_plugin.utils import check_vlan_group_matches
 
         assert check_vlan_group_matches("T", 60, 10, None, {60: 5}, None, {60}) is False
 
-    def test_check_group_matches_tagged_vid_absent(self, mock_librenms_config):
+    def test_check_group_matches_tagged_vid_absent(self):
         """When VID is not tagged in NetBox, group comparison irrelevant -> True."""
         from netbox_librenms_plugin.utils import check_vlan_group_matches
 
         assert check_vlan_group_matches("T", 60, 10, None, {}, None, set()) is True
 
-    def test_check_group_matches_global_to_global(self, mock_librenms_config):
+    def test_check_group_matches_global_to_global(self):
         """Both NetBox VLAN and selected have no group (global) -> match."""
         from netbox_librenms_plugin.utils import check_vlan_group_matches
 
         assert check_vlan_group_matches("U", 60, None, None, {}, 60, set()) is True
 
-    def test_check_group_matches_global_vs_group(self, mock_librenms_config):
+    def test_check_group_matches_global_vs_group(self):
         """NetBox VLAN is global, selected is a specific group -> mismatch."""
         from netbox_librenms_plugin.utils import check_vlan_group_matches
 
