@@ -96,8 +96,8 @@ def test_a_resolved_action_server_key_is_never_blank(settings):
     _configure_default_server(settings)
     view = DeviceInterfaceTableView()
 
-    assert view.resolve_posted_server_key_or_none({"server_key": ""})
-    assert view.resolve_posted_server_key_or_none({"server_key": "forged"})
+    assert view.resolve_posted_server_key_or_none({"server_key": ""}) == "default"
+    assert view.resolve_posted_server_key_or_none({"server_key": "forged"}) == "default"
 
     configure_no_librenms_servers(settings)
     assert DeviceInterfaceTableView().resolve_posted_server_key_or_none({"server_key": ""}) is None

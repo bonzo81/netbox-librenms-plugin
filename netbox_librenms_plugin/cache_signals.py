@@ -87,7 +87,13 @@ class _Batch:
         for reference in self.assignment_claims:
             content_type = content_types.get(reference.content_type_id)
             model = content_type.model_class() if content_type is not None else None
-            if model is None or model._meta.label_lower not in OWNER_COLUMNS:
+            if model is None:
+                continue
+            label = model._meta.label_lower
+            if label in ASSIGNED_OBJECT_LABELS:
+                logger.warning("Ignored unsupported assigned-object model %s after a NetBox change", label)
+                continue
+            if label not in OWNER_COLUMNS:
                 continue
             references_by_model.setdefault(model, []).append(reference)
 

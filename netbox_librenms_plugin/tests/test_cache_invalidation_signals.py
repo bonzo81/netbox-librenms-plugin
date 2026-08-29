@@ -446,6 +446,34 @@ class TestOneFlushPerObject:
         assert not any(remaining.values()), f"the failed assignment lookup left stale snapshots: {remaining}"
         assert "Could not resolve assigned-object owners after a NetBox change" in caplog.text
 
+    def test_invalid_generic_assignment_does_not_abort_later_assignment_cleanup(
+        self, caplog, django_capture_on_commit_callbacks
+    ):
+        """A malformed generic assignment must not hide a later valid assignment owner."""
+        from django.db import transaction
+        from ipam.models import IPAddress
+
+        from netbox_librenms_plugin.tests.conftest import make_device, make_interface
+
+        invalid_device = make_device("signal-invalid-assignment-source", librenms_cf={SERVER_KEY: 7})
+        invalid_interface = make_interface(invalid_device, "Ethernet1")
+        invalid_target = IPAddress.objects.create(address="198.18.33.1/24", assigned_object=invalid_interface)
+        valid_device = make_device("signal-valid-assignment-owner", librenms_cf={SERVER_KEY: 8})
+        valid_interface = make_interface(valid_device, "Ethernet1")
+        keys = _seed_every_tab(valid_device)
+
+        try:
+            with django_capture_on_commit_callbacks(execute=True):
+                with transaction.atomic():
+                    IPAddress.objects.create(address="198.18.33.2/24", assigned_object=invalid_target)
+                    IPAddress.objects.create(address="198.18.33.3/24", assigned_object=valid_interface)
+            remaining = _snapshot_state(valid_device)
+        finally:
+            _clear(keys)
+
+        assert not any(remaining.values()), f"the invalid assignment left stale snapshots: {remaining}"
+        assert "Ignored unsupported assigned-object model ipam.ipaddress after a NetBox change" in caplog.text
+
 
 @pytest.mark.django_db
 def test_loading_deferred_rows_does_not_fetch_owner_columns():
