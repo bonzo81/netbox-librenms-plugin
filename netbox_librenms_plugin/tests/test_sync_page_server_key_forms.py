@@ -297,13 +297,18 @@ def test_stale_installation_server_does_not_select_its_cached_locations(settings
 
     stale_choices = [("", "All Locations"), ("stale", "Removed server location")]
     default_choices = [("", "All Locations"), ("current", "Default server location")]
-    cache.set(get_location_choices_cache_key("removed-server"), stale_choices)
-    cache.set(get_location_choices_cache_key("default"), default_choices)
+    stale_key = get_location_choices_cache_key("removed-server")
+    default_key = get_location_choices_cache_key("default")
+    cache.set(stale_key, stale_choices)
+    cache.set(default_key, default_choices)
 
-    with patch.object(LibreNMSAPI, "get_locations", side_effect=AssertionError("cache lookup should resolve")):
-        form = LibreNMSImportFilterForm()
+    try:
+        with patch.object(LibreNMSAPI, "get_locations", side_effect=AssertionError("cache lookup should resolve")):
+            form = LibreNMSImportFilterForm()
 
-    assert list(form.fields["librenms_location"].choices) == default_choices
+        assert list(form.fields["librenms_location"].choices) == default_choices
+    finally:
+        cache.delete_many([stale_key, default_key])
 
 
 class TestSyncPageMisconfiguredDefaultDegrades:

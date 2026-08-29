@@ -1049,72 +1049,47 @@ class TestStorelibrenmsId:
 @pytest.mark.django_db(transaction=True)
 def test_discovered_mapping_and_vm_import_serialize_one_librenms_id_claim(settings, librenms_server):
     """Concurrent API discovery and VM import must leave one owner for an ID."""
-    from concurrent.futures import ThreadPoolExecutor
-    from threading import Barrier
-
-    from django.db import close_old_connections, connection
     from virtualization.models import VirtualMachine
 
     from netbox_librenms_plugin.import_utils.vm_operations import create_vm_from_librenms
+    from netbox_librenms_plugin.tests.claim_race_helpers import run_librenms_id_claim_race
     from netbox_librenms_plugin.tests.conftest import make_cluster, make_device
 
     api = api_for(settings, librenms_server.url)
     device = make_device("discovered-claim-race-device", librenms_cf={api.server_key: None})
     cluster = make_cluster("discovered-claim-race-cluster")
-    claim_barrier = Barrier(2)
-    claim_keys = []
     librenms_id = 61003
 
-    def wait_for_competing_claim(execute, sql, params, many, context):
-        if "pg_advisory_xact_lock" in sql:
-            claim_keys.append(params[0])
-            claim_barrier.wait(timeout=5)
-        return execute(sql, params, many, context)
-
     def store_discovered_mapping():
-        close_old_connections()
         try:
-            with connection.execute_wrapper(wait_for_competing_claim):
-                try:
-                    api._store_librenms_id(device, librenms_id)
-                except ValueError as exc:
-                    assert "already assigned" in str(exc)
-                    return False
-            return True
-        finally:
-            connection.close()
+            api._store_librenms_id(device, librenms_id)
+        except ValueError as exc:
+            assert "already assigned" in str(exc)
+            return False
+        return True
 
     def import_vm():
-        close_old_connections()
+        validation = {
+            "can_import": True,
+            "cluster": {"cluster": cluster},
+            "platform": {"platform": None},
+        }
         try:
-            validation = {
-                "can_import": True,
-                "cluster": {"cluster": cluster},
-                "platform": {"platform": None},
-            }
-            with connection.execute_wrapper(wait_for_competing_claim):
-                try:
-                    create_vm_from_librenms(
-                        {
-                            "device_id": librenms_id,
-                            "hostname": "discovered-claim-race-vm",
-                            "_computed_name": "discovered-claim-race-vm",
-                        },
-                        validation,
-                        server_key=api.server_key,
-                    )
-                except ValueError as exc:
-                    assert "already assigned" in str(exc)
-                    return False
-            return True
-        finally:
-            connection.close()
+            create_vm_from_librenms(
+                {
+                    "device_id": librenms_id,
+                    "hostname": "discovered-claim-race-vm",
+                    "_computed_name": "discovered-claim-race-vm",
+                },
+                validation,
+                server_key=api.server_key,
+            )
+        except ValueError as exc:
+            assert "already assigned" in str(exc)
+            return False
+        return True
 
-    with ThreadPoolExecutor(max_workers=2) as executor:
-        outcomes = [
-            future.result(timeout=30)
-            for future in (executor.submit(store_discovered_mapping), executor.submit(import_vm))
-        ]
+    outcomes, claim_keys = run_librenms_id_claim_race(store_discovered_mapping, import_vm)
 
     device.refresh_from_db()
     vm = VirtualMachine.objects.filter(name="discovered-claim-race-vm").first()

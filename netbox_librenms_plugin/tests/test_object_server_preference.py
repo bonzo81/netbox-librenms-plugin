@@ -74,6 +74,28 @@ def test_preference_post_changes_only_preference_and_keeps_transient_server(clie
 
 
 @pytest.mark.django_db
+def test_preference_post_ignores_unrelated_legacy_validation_errors(client, settings):
+    """A preference change validates only the custom field that it writes."""
+    configure_servers(settings)
+    owner = make_device(
+        "preference-with-legacy-rack-fields",
+        librenms_cf={"primary": 13532, "secondary": 13533},
+    )
+    type(owner).objects.filter(pk=owner.pk).update(face="front", status="obsolete")
+    client.force_login(make_superuser("legacy-validation-preference-writer"))
+
+    response = client.post(
+        reverse("plugins:netbox_librenms_plugin:set_preferred_server", args=[owner.pk]),
+        {"object_type": "device", "server_key": "secondary"},
+    )
+
+    assert response.status_code == 302
+    assert _message_texts(response) == ["Preferred LibreNMS server changed to 'secondary'."]
+    owner.refresh_from_db()
+    assert owner.custom_field_data["librenms_id"]["_preferred_server"] == "secondary"
+
+
+@pytest.mark.django_db
 def test_preference_post_supports_virtual_machines(client, settings):
     """A VM owns and stores its preferred server in the same mapping field."""
     configure_servers(settings)

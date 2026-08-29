@@ -984,7 +984,9 @@ class SetPreferredServerView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixi
 
             owner.custom_field_data["librenms_id"] = with_preferred_server(raw_mapping, requested_key)
             try:
-                owner.full_clean()
+                owner.clean_fields(
+                    exclude={field.name for field in owner._meta.fields if field.name != "custom_field_data"}
+                )
                 owner.save(update_fields=["custom_field_data"])
             except ValidationError as exc:
                 transaction.set_rollback(True)

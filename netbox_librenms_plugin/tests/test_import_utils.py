@@ -6088,95 +6088,71 @@ class TestDeviceValidationDetailsTemplate:
 @pytest.mark.django_db(transaction=True)
 def test_device_and_vm_imports_serialize_one_librenms_id_claim(settings):
     """Concurrent Device and VM imports must leave one owner for a server-scoped ID."""
-    from concurrent.futures import ThreadPoolExecutor
-    from threading import Barrier
-
     from dcim.models import Device
-    from django.db import close_old_connections, connection
     from virtualization.models import VirtualMachine
 
     from netbox_librenms_plugin.import_utils.device_operations import import_single_device
     from netbox_librenms_plugin.import_utils.vm_operations import create_vm_from_librenms
+    from netbox_librenms_plugin.tests.claim_race_helpers import run_librenms_id_claim_race
     from netbox_librenms_plugin.tests.conftest import _shared_infra, make_cluster
     from netbox_librenms_plugin.tests.import_server_helpers import configure_servers
 
     configure_servers(settings)
     site, _manufacturer, device_type, role = _shared_infra()
     cluster = make_cluster("claim-race-cluster")
-    claim_barrier = Barrier(2)
-    claim_keys = []
     librenms_id = 61002
 
-    def wait_for_competing_claim(execute, sql, params, many, context):
-        if "pg_advisory_xact_lock" in sql:
-            claim_keys.append(params[0])
-            claim_barrier.wait(timeout=5)
-        return execute(sql, params, many, context)
-
     def import_device():
-        close_old_connections()
-        try:
-            validation = {
-                "existing_device": None,
-                "resolved_name": "claim-race-device",
-                "site": {"found": True, "site": site},
-                "device_type": {"matched": True, "device_type": device_type},
-                "device_role": {"found": True, "role": role},
-                "platform": {"found": False, "platform": None},
-                "rack": {"rack": None},
-            }
-            libre_device = {
-                "device_id": librenms_id,
-                "hostname": "claim-race-device",
-                "sysName": "claim-race-device",
-                "hardware": "TestDT",
-                "serial": "-",
-                "os": "-",
-                "status": 1,
-                "location": "",
-            }
-            with connection.execute_wrapper(wait_for_competing_claim):
-                result = import_single_device(
-                    librenms_id,
-                    server_key="primary",
-                    validation=validation,
-                    libre_device=libre_device,
-                    sync_options={"sync_interfaces": False, "sync_cables": False},
-                )
-            return result["success"]
-        finally:
-            connection.close()
+        validation = {
+            "existing_device": None,
+            "resolved_name": "claim-race-device",
+            "site": {"found": True, "site": site},
+            "device_type": {"matched": True, "device_type": device_type},
+            "device_role": {"found": True, "role": role},
+            "platform": {"found": False, "platform": None},
+            "rack": {"rack": None},
+        }
+        libre_device = {
+            "device_id": librenms_id,
+            "hostname": "claim-race-device",
+            "sysName": "claim-race-device",
+            "hardware": "TestDT",
+            "serial": "-",
+            "os": "-",
+            "status": 1,
+            "location": "",
+        }
+        result = import_single_device(
+            librenms_id,
+            server_key="primary",
+            validation=validation,
+            libre_device=libre_device,
+            sync_options={"sync_interfaces": False, "sync_cables": False},
+        )
+        return result["success"]
 
     def import_vm():
-        close_old_connections()
+        validation = {
+            "can_import": True,
+            "cluster": {"cluster": cluster},
+            "platform": {"platform": None},
+        }
         try:
-            validation = {
-                "can_import": True,
-                "cluster": {"cluster": cluster},
-                "platform": {"platform": None},
-            }
-            with connection.execute_wrapper(wait_for_competing_claim):
-                try:
-                    create_vm_from_librenms(
-                        {
-                            "device_id": librenms_id,
-                            "hostname": "claim-race-vm",
-                            "_computed_name": "claim-race-vm",
-                        },
-                        validation,
-                        server_key="primary",
-                    )
-                except ValueError as exc:
-                    assert "already assigned" in str(exc)
-                    return False
-            return True
-        finally:
-            connection.close()
+            create_vm_from_librenms(
+                {
+                    "device_id": librenms_id,
+                    "hostname": "claim-race-vm",
+                    "_computed_name": "claim-race-vm",
+                },
+                validation,
+                server_key="primary",
+            )
+        except ValueError as exc:
+            assert "already assigned" in str(exc)
+            return False
+        return True
 
-    with ThreadPoolExecutor(max_workers=2) as executor:
-        outcomes = [
-            future.result(timeout=30) for future in (executor.submit(import_device), executor.submit(import_vm))
-        ]
+    outcomes, claim_keys = run_librenms_id_claim_race(import_device, import_vm)
 
     owners = list(Device.objects.filter(name="claim-race-device")) + list(
         VirtualMachine.objects.filter(name="claim-race-vm")
