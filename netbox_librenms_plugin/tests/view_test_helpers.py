@@ -144,9 +144,10 @@ def trusted_module_inventory_payload(device, inventory, *, server_key="default",
 
     if not isinstance(device.custom_field_data, dict):
         device.custom_field_data = {}
-        device.cf = device.custom_field_data
     set_librenms_device_id(device, librenms_id, server_key)
     device.save(update_fields=["custom_field_data"])
+    # obj.cf is a @cached_property, so refresh it from the write before verifying it below.
+    device.cf = device.custom_field_data
     # set_librenms_device_id() only logs and returns when it refuses a write (legacy bare
     # integer, non-positive id), which would leave the payload claiming a mapping the device
     # does not have; every caller would then fail on the production staleness guard instead.

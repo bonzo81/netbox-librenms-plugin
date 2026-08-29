@@ -212,3 +212,16 @@ class TestTrustedPayloadMatchesTheDeviceMapping:
         payload = trusted_module_inventory_payload(device, [{"index": 1}], librenms_id=9)
 
         assert payload == {"inventory": [{"index": 1}], "librenms_id": 9, "oob_librenms_id": None}
+
+    def test_a_written_mapping_refreshes_the_cached_custom_field_value(self):
+        """The helper must verify a write against current custom field data."""
+        from netbox_librenms_plugin.tests.conftest import make_device
+        from netbox_librenms_plugin.tests.view_test_helpers import trusted_module_inventory_payload
+        from netbox_librenms_plugin.utils import get_librenms_device_id
+
+        device = make_device("trusted-payload-cached")
+        assert get_librenms_device_id(device, auto_save=False) is None
+
+        payload = trusted_module_inventory_payload(device, [{"index": 1}], librenms_id=9)
+
+        assert payload == {"inventory": [{"index": 1}], "librenms_id": 9, "oob_librenms_id": None}

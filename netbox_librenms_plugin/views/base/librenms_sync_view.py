@@ -145,7 +145,8 @@ class BaseLibreNMSSyncView(
         """Get the context data for the LibreNMS sync view."""
         # Get context from parent classes (including LibreNMSAPIMixin)
         context = super().get_context_data()
-        applicable_tabs = SyncCacheConsistency(obj).applicable_tabs()
+        coordinator = SyncCacheConsistency(obj)
+        applicable_tabs = coordinator.applicable_tabs()
         applicable_tab_names = {tab.value for tab in applicable_tabs}
         requested_sync_tab = request.GET.get("tab") or SyncTab.INTERFACES.value
         active_sync_tab = requested_sync_tab if requested_sync_tab in applicable_tab_names else SyncTab.INTERFACES.value
@@ -201,10 +202,8 @@ class BaseLibreNMSSyncView(
             )
 
         render_server_key = self._scoped_render_server_key or self.active_server_key
-        coordinator = None
         sync_cache_status = None
         if render_server_key and render_server_key in mapped_server_keys(obj, render_server_key):
-            coordinator = SyncCacheConsistency(obj)
             sync_cache_status = coordinator.status_for_request(
                 request,
                 render_server_key,
@@ -314,9 +313,9 @@ class BaseLibreNMSSyncView(
             }
         )
 
-        if coordinator is not None and sync_cache_status is not None:
+        if sync_cache_status is not None:
             object_type = obj._meta.model_name
-            for sync_tab in coordinator.applicable_tabs():
+            for sync_tab in applicable_tabs:
                 if sync_cache_status[sync_tab.value]["snapshot_available"]:
                     continue
                 spec = TAB_SPECS[sync_tab]
@@ -330,7 +329,7 @@ class BaseLibreNMSSyncView(
             context.update(
                 {
                     "sync_cache_status": sync_cache_status,
-                    "sync_cache_contract": sync_cache_browser_contract(coordinator.applicable_tabs()),
+                    "sync_cache_contract": sync_cache_browser_contract(applicable_tabs),
                     "sync_cache_status_url": reverse(
                         "plugins:netbox_librenms_plugin:sync_cache_status",
                         kwargs={"object_type": object_type, "pk": obj.pk},
@@ -340,7 +339,7 @@ class BaseLibreNMSSyncView(
                             "plugins:netbox_librenms_plugin:sync_cache_fragment",
                             kwargs={"object_type": object_type, "pk": obj.pk, "tab": tab.value},
                         )
-                        for tab in coordinator.applicable_tabs()
+                        for tab in applicable_tabs
                     },
                 }
             )

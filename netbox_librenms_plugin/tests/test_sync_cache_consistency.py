@@ -388,6 +388,55 @@ def test_cold_sync_page_load_fetches_librenms_status(client, settings):
 
 
 @pytest.mark.django_db
+class TestSyncPageRenderCoordinator:
+    """A page render must reuse its cache consistency inputs."""
+
+    def test_sync_page_render_reuses_one_cache_consistency_coordinator(self, client, settings, monkeypatch):
+        """One page render must reuse its cache coordinator and applicable-tabs tuple."""
+        from netbox_librenms_plugin.tests.mock_librenms_server import librenms_mock_server
+        from netbox_librenms_plugin.views.base import librenms_sync_view as sync_view_module
+
+        _configure_servers(settings)
+        device = make_device("cache-single-render-coordinator", librenms_cf={"primary": {"id": 7408}})
+        client.force_login(make_superuser("cache-single-render-coordinator-user"))
+        constructed_subjects = []
+        direct_applicable_tabs_subjects = []
+        original_consistency = sync_view_module.SyncCacheConsistency
+
+        class TrackingSyncCacheConsistency(original_consistency):
+            def __init__(self, subject):
+                constructed_subjects.append(subject.pk)
+                self._status_in_progress = False
+                super().__init__(subject)
+
+            def applicable_tabs(self):
+                if not self._status_in_progress:
+                    direct_applicable_tabs_subjects.append(self.subject.pk)
+                return super().applicable_tabs()
+
+            def status_for_request(self, *args, **kwargs):
+                self._status_in_progress = True
+                try:
+                    return super().status_for_request(*args, **kwargs)
+                finally:
+                    self._status_in_progress = False
+
+        monkeypatch.setattr(sync_view_module, "SyncCacheConsistency", TrackingSyncCacheConsistency)
+        monkeypatch.setenv("NO_PROXY", "127.0.0.1,localhost")
+        monkeypatch.setenv("no_proxy", "127.0.0.1,localhost")
+        url = reverse("plugins:netbox_librenms_plugin:device_librenms_sync", args=[device.pk])
+
+        with librenms_mock_server() as server:
+            settings.PLUGINS_CONFIG["netbox_librenms_plugin"]["servers"]["primary"]["librenms_url"] = server.url
+            server.device_info_response(device_id=7408, hostname=device.name, hardware="Render Hardware")
+            response = client.get(url, {"server_key": "primary", "tab": SyncTab.INTERFACES.value})
+
+        assert response.status_code == 200
+        assert constructed_subjects == [device.pk]
+        assert direct_applicable_tabs_subjects == [device.pk]
+
+
+@pytest.mark.django_db
 def test_mapped_device_missing_from_librenms_renders_danger_status(client, settings):
     """A stale stored LibreNMS ID must not make a failed lookup look successful."""
     _configure_servers(settings)
