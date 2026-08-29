@@ -147,6 +147,9 @@ pytest netbox_librenms_plugin/tests/ -v -x
 
 # Re-run only failed tests from last run
 pytest netbox_librenms_plugin/tests/ -v --lf
+
+# Re-run only failed browser tests from last run
+pytest -c netbox_librenms_plugin/tests/browser/pytest.ini netbox_librenms_plugin/tests/browser --lf
 ```
 
 ## Testing Philosophy
@@ -302,9 +305,9 @@ passes whenever the call is made, including when the call did the wrong thing.
 
 ## CI/CD Compatibility
 
-The tests run in any environment without external dependencies:
+The tests do not use production services:
 
-- No database connection required
+- Database-backed tests require a test database connection. Other tests do not require one.
 - No external network access needed (integration tests use local loopback only)
 - Fast execution suitable for pre-commit hooks
 - Clear failure messages for debugging

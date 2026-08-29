@@ -136,13 +136,30 @@ def _restore_librenms_custom_field():
 
 def _seeds_are_intact():
     """Return whether every declared seed row and the plugin's custom field are present."""
+    from dcim.models import Device, Interface
+    from django.contrib.contenttypes.models import ContentType
     from extras.models import CustomField
+    from virtualization.models import VirtualMachine, VMInterface
 
     for model, lookup_field, value_field, rows in _seeded_model_rows():
         stored = set(model.objects.values_list(lookup_field, value_field))
         if not stored.issuperset(rows):
             return False
-    return CustomField.objects.filter(name="librenms_id").exists()
+
+    custom_field = CustomField.objects.filter(name="librenms_id", type="json").first()
+    if custom_field is None:
+        return False
+    required_type_ids = {
+        content_type.pk
+        for content_type in ContentType.objects.get_for_models(
+            Device,
+            VirtualMachine,
+            Interface,
+            VMInterface,
+        ).values()
+    }
+    configured_type_ids = set(custom_field.object_types.values_list("pk", flat=True))
+    return configured_type_ids.issuperset(required_type_ids)
 
 
 def restore_seeded_state(*, force):

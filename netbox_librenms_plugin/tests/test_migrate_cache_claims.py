@@ -5,11 +5,11 @@ from copy import deepcopy
 import pytest
 from dcim.models import Device, Interface
 from django.apps import apps as django_apps
-from django.core.cache import cache
 from django.urls import reverse
 from ipam.models import IPAddress
 
-from netbox_librenms_plugin.sync_cache import TAB_SPECS, SyncTab, sync_snapshot_key
+from netbox_librenms_plugin.sync_cache import SyncTab
+from netbox_librenms_plugin.tests.cache_test_helpers import seed_every_tab, snapshot_state
 from netbox_librenms_plugin.tests.conftest import ip_on, make_device, make_interface
 from netbox_librenms_plugin.tests.view_test_helpers import make_user_with_perms
 from netbox_librenms_plugin.utils import mark_librenms_migrated
@@ -35,33 +35,18 @@ def _mark_migrated(donor, winner):
     donor.save(update_fields=["custom_field_data"])
 
 
-def _snapshot_key(device, tab):
-    """Return one device snapshot key through the shared key builder."""
-    return sync_snapshot_key(device, TAB_SPECS[tab].data_type, SERVER_KEY)
-
-
-def _seed_every_tab(device):
-    """Seed distinct snapshots for every tab owned by one device."""
-    snapshots = {}
-    for tab in SyncTab:
-        payload = {"device": device.name, "tab": tab.value}
-        cache.set(_snapshot_key(device, tab), payload, timeout=300)
-        snapshots[tab] = payload
-    return snapshots
-
-
-def _assert_source_survives_and_other_tabs_are_cleared(device, snapshots, source_tab):
+def _assert_source_survives_and_other_tabs_are_cleared(device, source_tab):
     """Assert the cache transition preserves only the active source snapshot."""
-    assert cache.get(_snapshot_key(device, source_tab)) == snapshots[source_tab]
-    for tab in SyncTab:
-        if tab != source_tab:
-            assert cache.get(_snapshot_key(device, tab)) is None
+    state = snapshot_state(device, SERVER_KEY)
+    assert state[source_tab] is True
+    assert not [tab for tab, present in state.items() if tab != source_tab and present]
 
 
-def _assert_every_tab_survives(device, snapshots):
+def _assert_every_tab_survives(device):
     """Assert an unrelated device retains every seeded snapshot."""
-    for tab in SyncTab:
-        assert cache.get(_snapshot_key(device, tab)) == snapshots[tab]
+    state = snapshot_state(device, SERVER_KEY)
+    assert state
+    assert all(state.values())
 
 
 @pytest.mark.django_db(
@@ -82,9 +67,10 @@ def test_interface_move_preserves_source_snapshots_for_donor_and_winner(
 
     interface = make_interface(donor, "Ethernet1", iface_type="1000base-t")
 
-    snapshots = {device.pk: _seed_every_tab(device) for device in (donor, winner, unrelated)}
-    assert cache.get(_snapshot_key(donor, SyncTab.INTERFACES)) == snapshots[donor.pk][SyncTab.INTERFACES]
-    assert cache.get(_snapshot_key(winner, SyncTab.INTERFACES)) == snapshots[winner.pk][SyncTab.INTERFACES]
+    for device in (donor, winner, unrelated):
+        seed_every_tab(device, SERVER_KEY)
+    assert snapshot_state(donor, SERVER_KEY)[SyncTab.INTERFACES] is True
+    assert snapshot_state(winner, SERVER_KEY)[SyncTab.INTERFACES] is True
 
     user = make_user_with_perms(
         "claim-interface-user",
@@ -102,15 +88,13 @@ def test_interface_move_preserves_source_snapshots_for_donor_and_winner(
     assert interface.device_id == winner.pk
     _assert_source_survives_and_other_tabs_are_cleared(
         donor,
-        snapshots[donor.pk],
         SyncTab.INTERFACES,
     )
     _assert_source_survives_and_other_tabs_are_cleared(
         winner,
-        snapshots[winner.pk],
         SyncTab.INTERFACES,
     )
-    _assert_every_tab_survives(unrelated, snapshots[unrelated.pk])
+    _assert_every_tab_survives(unrelated)
 
 
 @pytest.mark.django_db(
@@ -132,9 +116,10 @@ def test_ip_address_move_preserves_source_snapshots_for_donor_and_winner(
     address = ip_on(donor, "198.18.0.10/24", "Ethernet10")
     make_interface(winner, address.assigned_object.name, iface_type="1000base-t")
 
-    snapshots = {device.pk: _seed_every_tab(device) for device in (donor, winner, unrelated)}
-    assert cache.get(_snapshot_key(donor, SyncTab.IP_ADDRESSES)) == snapshots[donor.pk][SyncTab.IP_ADDRESSES]
-    assert cache.get(_snapshot_key(winner, SyncTab.IP_ADDRESSES)) == snapshots[winner.pk][SyncTab.IP_ADDRESSES]
+    for device in (donor, winner, unrelated):
+        seed_every_tab(device, SERVER_KEY)
+    assert snapshot_state(donor, SERVER_KEY)[SyncTab.IP_ADDRESSES] is True
+    assert snapshot_state(winner, SERVER_KEY)[SyncTab.IP_ADDRESSES] is True
 
     user = make_user_with_perms(
         "claim-ip-user",
@@ -152,12 +137,10 @@ def test_ip_address_move_preserves_source_snapshots_for_donor_and_winner(
     assert address.assigned_object.device_id == winner.pk
     _assert_source_survives_and_other_tabs_are_cleared(
         donor,
-        snapshots[donor.pk],
         SyncTab.IP_ADDRESSES,
     )
     _assert_source_survives_and_other_tabs_are_cleared(
         winner,
-        snapshots[winner.pk],
         SyncTab.IP_ADDRESSES,
     )
-    _assert_every_tab_survives(unrelated, snapshots[unrelated.pk])
+    _assert_every_tab_survives(unrelated)

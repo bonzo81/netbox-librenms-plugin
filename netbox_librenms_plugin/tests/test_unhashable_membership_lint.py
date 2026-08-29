@@ -274,7 +274,8 @@ def test_a_self_importing_module_still_reaches_a_fixed_point(tmp_path):
     target = tmp_path / "sample.py"
     target.write_text('import sample\n\nNAMES = frozenset({"a"})\n')
 
-    names = collect_container_names((target,))[target]
+    with _settles_within(10):
+        names = collect_container_names((target,))[target]
 
     assert "NAMES" in names
     assert "sample.NAMES" in names

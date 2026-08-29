@@ -434,6 +434,37 @@ def test_a_missing_custom_field_restores_even_though_the_seeded_rows_are_intact(
     assert CustomField.objects.filter(name="librenms_id").exists()
 
 
+@pytest.mark.parametrize("damage", ["legacy-type", "missing-object-type"])
+@pytest.mark.django_db
+def test_an_invalid_custom_field_schema_is_restored(damage):
+    """The seed probe must reject a field that cannot store every supported object mapping."""
+    from dcim.models import Device, Interface
+    from django.contrib.contenttypes.models import ContentType
+    from extras.models import CustomField
+    from virtualization.models import VirtualMachine, VMInterface
+
+    custom_field = CustomField.objects.get(name="librenms_id")
+    required_types = set(
+        ContentType.objects.get_for_models(
+            Device,
+            VirtualMachine,
+            Interface,
+            VMInterface,
+        ).values()
+    )
+
+    if damage == "legacy-type":
+        CustomField.objects.filter(pk=custom_field.pk).update(type="integer")
+    else:
+        custom_field.object_types.remove(ContentType.objects.get_for_model(VMInterface))
+
+    assert restore_seeded_state(force=False) is True
+
+    custom_field.refresh_from_db()
+    assert custom_field.type == "json"
+    assert set(custom_field.object_types.all()) >= required_types
+
+
 def _run_netbox_test_alias(worker_value=None, *, db_name="test_alias_contract", redis_host="redis-alias-contract"):
     """Run the local test alias with pytest and the venv activation stubbed out."""
     script = "\n".join(
@@ -600,6 +631,18 @@ def test_playwright_state_machine_has_a_required_separate_ci_job():
     assert "python -m playwright install --with-deps chromium" in setup
     # A developer outside the devcontainer and CI installs the browser from the guide.
     assert "python -m playwright install chromium" in testing_guide
+    assert (
+        "pytest -c netbox_librenms_plugin/tests/browser/pytest.ini "
+        "netbox_librenms_plugin/tests/browser --lf" in testing_guide
+    )
+
+
+def test_testing_guide_requires_a_test_database_only_for_database_backed_tests():
+    """Describe the test database without claiming that the full suite has no database dependency."""
+    testing_guide = (REPOSITORY_ROOT / "docs/development/testing.md").read_text()
+
+    assert "The database-backed suite needs a test database" in testing_guide
+    assert "No database connection required" not in testing_guide
 
 
 def test_test_alias_preserves_the_calling_shell(tmp_path):
