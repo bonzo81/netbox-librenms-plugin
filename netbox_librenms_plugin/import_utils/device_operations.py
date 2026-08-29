@@ -283,7 +283,7 @@ def _determine_device_name(
     Centralized logic for building device names with consistent handling of:
     - sysName vs hostname preference
     - Domain stripping (avoiding IP addresses)
-    - Fallback to device_id when name is missing
+    - Fallback to device_id when no name remains, including after stripping
 
     Args:
         libre_device: Device data from LibreNMS
@@ -305,14 +305,6 @@ def _determine_device_name(
     else:
         name = libre_device.get("hostname") or libre_device.get("sysName")
 
-    # Fallback to device_id if no name found
-    if not name:
-        if device_id is not None:
-            name = f"device-{device_id}"
-        else:
-            name = libre_device.get("device_id", "unknown")
-            name = f"device-{name}"
-
     # Strip domain if requested (but not for IP addresses)
     if strip_domain and name and "." in name:
         try:
@@ -321,6 +313,16 @@ def _determine_device_name(
         except ValueError:
             # Not an IP, safe to strip domain
             name = name.split(".")[0]
+
+    # Fallback to device_id if no name found. This runs AFTER stripping because a sysName whose
+    # first label is empty (".example.com") strips to "", which would otherwise reach NetBox as a
+    # blank device name.
+    if not name:
+        if device_id is not None:
+            name = f"device-{device_id}"
+        else:
+            name = libre_device.get("device_id", "unknown")
+            name = f"device-{name}"
 
     return name
 

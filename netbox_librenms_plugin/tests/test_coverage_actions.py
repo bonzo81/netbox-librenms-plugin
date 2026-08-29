@@ -852,8 +852,8 @@ class TestBulkImportConfirmViewIntegration:
         assert b"confirm-integration-stack.example.test-M1" not in response.content
         assert view_message_texts(request, "error") == []
 
-    def test_stack_members_use_device_id_fallback_for_empty_resolved_name(self, settings, librenms_server):
-        """Stack member suggestions use the device ID fallback when domain stripping empties the resolved name."""
+    def test_stack_members_use_the_device_id_name_when_stripping_empties_the_hostname(self, settings, librenms_server):
+        """Stack member suggestions use the device ID name when domain stripping empties the LibreNMS hostname."""
         from django.apps import apps
 
         server_key = "confirm-integration-stack-fallback"

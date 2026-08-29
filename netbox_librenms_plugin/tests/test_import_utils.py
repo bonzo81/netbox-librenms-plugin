@@ -185,6 +185,16 @@ class TestDeviceNameDetermination:
         name = _determine_device_name(device_data, device_id=999)
         assert name == "device-999"
 
+    @pytest.mark.parametrize("empty_first_label", [".example.com", ".", "..", ".corp.local"])
+    def test_determine_device_name_falls_back_when_stripping_empties_the_name(self, empty_first_label):
+        """A name whose first label is empty falls back to the device_id name instead of returning ''."""
+        from netbox_librenms_plugin.import_utils import _determine_device_name
+
+        device_data = {"sysName": empty_first_label, "hostname": ""}
+
+        name = _determine_device_name(device_data, use_sysname=True, strip_domain=True, device_id=42)
+        assert name == "device-42"
+
 
 # =============================================================================
 # TestDeviceRetrieval - 10 tests

@@ -3720,3 +3720,60 @@ class TestValidateDedupsSerialDuplicateQuery:
         # A TRIM-wrapped comparison would not match the exact-serial filter above, so check
         # every captured query rather than only the already-filtered exact-match subset.
         assert all("trim(" not in query["sql"].lower() for query in ctx.captured_queries)
+
+
+@pytest.mark.django_db
+class TestImportNamesDeviceWhenDomainStripEmptiesTheName:
+    """A LibreNMS name whose first label is empty must not reach NetBox as a blank device name."""
+
+    def test_leading_dot_sysname_falls_back_to_the_device_id_name(self):
+        from unittest.mock import patch
+
+        from dcim.models import Device, DeviceRole, DeviceType, Manufacturer, Site
+
+        from netbox_librenms_plugin.import_utils.device_operations import import_single_device
+
+        mfr, _ = Manufacturer.objects.get_or_create(name="ACME-dotname", slug="acme-dotname")
+        dt, _ = DeviceType.objects.get_or_create(manufacturer=mfr, model="DT-dotname", slug="dt-dotname")
+        role, _ = DeviceRole.objects.get_or_create(name="Role-dotname", slug="role-dotname")
+        site, _ = Site.objects.get_or_create(name="Site-dotname", slug="site-dotname")
+
+        libre_device = {
+            "device_id": 8814,
+            # SNMP sysName with an empty first label: "".join splits to "" under strip_domain.
+            "sysName": ".dotname.example.test",
+            "hostname": ".dotname.example.test",
+            "hardware": "-",
+            "serial": "SN-DOTNAME-1",
+            "os": "-",
+            "status": 1,
+            "location": "-",
+        }
+        validation = {
+            "existing_device": None,
+            # What validate_device_for_import stores for this input today.
+            "resolved_name": "",
+            "site": {"found": True, "site": site},
+            "device_type": {"matched": True, "device_type": dt},
+            "device_role": {"found": True, "role": role},
+            "platform": {"found": False, "platform": None},
+            "rack": {"rack": None},
+        }
+
+        # Same orthogonal patch as TestImportPersistsTrimmedSerial: set_librenms_device_id writes a
+        # custom field the isolated test DB does not register. The real Device is created and cleaned.
+        with (
+            patch("netbox_librenms_plugin.import_utils.device_operations.LibreNMSAPI"),
+            patch("netbox_librenms_plugin.import_utils.device_operations.set_librenms_device_id"),
+        ):
+            result = import_single_device(
+                8814,
+                server_key="default",
+                validation=validation,
+                libre_device=libre_device,
+                sync_options={"sync_interfaces": False, "use_sysname": True, "strip_domain": True},
+            )
+
+        assert result["success"] is True, result.get("error")
+        created = Device.objects.get(serial="SN-DOTNAME-1")
+        assert created.name == "device-8814"
