@@ -1,30 +1,31 @@
 """Tests for netbox_librenms_plugin.import_utils.vm_operations module.
 
 Covers create_vm_from_librenms and bulk_import_vms.
-All DB interactions are mocked — no @pytest.mark.django_db used.
 """
 
 import pytest
 from unittest.mock import MagicMock, patch
 
 
+@pytest.mark.django_db
 class TestCreateVmFromLibrenms:
     """Tests for create_vm_from_librenms function."""
 
-    @pytest.fixture(autouse=True)
-    def _patch_atomic(self):
-        """transaction.atomic() is a no-op; tests mock all DB interactions."""
-        from contextlib import contextmanager
+    @staticmethod
+    def _validation(tag, *, platform=None, role=None):
+        from netbox_librenms_plugin.tests.conftest import make_cluster
 
-        @contextmanager
-        def noop_atomic(*args, **kwargs):
-            yield
-
-        with patch("netbox_librenms_plugin.import_utils.vm_operations.transaction.atomic", noop_atomic):
-            yield
+        return {
+            "can_import": True,
+            "cluster": {"cluster": make_cluster(f"{tag}-cluster")},
+            "platform": {"platform": platform},
+            "device_role": {"role": role},
+        }
 
     def test_success_with_computed_name(self):
         """VM is created using pre-computed _computed_name when present."""
+        from dcim.models import Platform
+
         from netbox_librenms_plugin.import_utils.vm_operations import create_vm_from_librenms
 
         libre_device = {
@@ -32,55 +33,27 @@ class TestCreateVmFromLibrenms:
             "hostname": "vm01.example.com",
             "_computed_name": "vm01-computed",
         }
-        mock_cluster = MagicMock()
-        mock_platform = MagicMock()
-        validation = {
-            "can_import": True,
-            "cluster": {"cluster": mock_cluster},
-            "platform": {"platform": mock_platform},
-        }
-        mock_vm = MagicMock()
-        mock_vm.name = "vm01-computed"
-        mock_vm.pk = 10
+        platform = Platform.objects.create(name="VM computed platform", slug="vm-computed-platform")
+        validation = self._validation("vm-computed", platform=platform)
 
-        with patch("virtualization.models.VirtualMachine") as mock_vm_class:
-            mock_vm_class.objects.create.return_value = mock_vm
-            result = create_vm_from_librenms(libre_device, validation)
+        result = create_vm_from_librenms(libre_device, validation)
 
-        assert result == mock_vm
-        call_kwargs = mock_vm_class.objects.create.call_args[1]
-        assert call_kwargs["name"] == "vm01-computed"
-        assert call_kwargs["cluster"] == mock_cluster
-        assert call_kwargs["platform"] == mock_platform
+        result.refresh_from_db()
+        assert result.name == "vm01-computed"
+        assert result.cluster == validation["cluster"]["cluster"]
+        assert result.platform == platform
 
     def test_fallback_to_determine_device_name_when_no_computed_name(self):
         """Falls back to _determine_device_name when _computed_name is absent."""
         from netbox_librenms_plugin.import_utils.vm_operations import create_vm_from_librenms
 
         libre_device = {"device_id": 2, "hostname": "vm02.example.com"}
-        validation = {
-            "can_import": True,
-            "cluster": {"cluster": MagicMock()},
-            "platform": {"platform": None},
-        }
-        mock_vm = MagicMock()
-        mock_vm.name = "vm02-determined"
-        mock_vm.pk = 11
+        validation = self._validation("vm-fallback")
 
-        with (
-            patch(
-                "netbox_librenms_plugin.import_utils.vm_operations._determine_device_name",
-                return_value="vm02-determined",
-            ) as mock_det,
-            patch("virtualization.models.VirtualMachine") as mock_vm_class,
-        ):
-            mock_vm_class.objects.create.return_value = mock_vm
-            result = create_vm_from_librenms(libre_device, validation)
+        result = create_vm_from_librenms(libre_device, validation)
 
-        mock_det.assert_called_once()
-        call_kwargs = mock_vm_class.objects.create.call_args[1]
-        assert call_kwargs["name"] == "vm02-determined"
-        assert result == mock_vm
+        result.refresh_from_db()
+        assert result.name == "vm02.example.com"
 
     def test_can_import_false_raises_value_error(self):
         """Raises ValueError immediately when validation['can_import'] is False."""
@@ -99,124 +72,107 @@ class TestCreateVmFromLibrenms:
         """A numeric-like device_id (1.9 / Decimal('1.9') / '1.9' / True) must be rejected — int() would truncate a float to a valid-looking but WRONG pk, creating a VM with a garbage librenms_id mapping. The guard runs before any VM is created."""
         from decimal import Decimal
 
+        from virtualization.models import VirtualMachine
+
         from netbox_librenms_plugin.import_utils.vm_operations import create_vm_from_librenms
 
-        validation = {"can_import": True, "cluster": {"cluster": MagicMock()}, "platform": {"platform": None}}
+        validation = {"can_import": True, "cluster": {"cluster": None}, "platform": {"platform": None}}
+        before = VirtualMachine.objects.count()
         for bad in (1.9, Decimal("1.9"), "1.9", True):
             libre_device = {"device_id": bad, "hostname": "vm-bad", "_computed_name": "vm-bad"}
-            with patch("virtualization.models.VirtualMachine") as mock_vm_class:
-                with pytest.raises(ValueError):
-                    create_vm_from_librenms(libre_device, validation)
-                mock_vm_class.objects.create.assert_not_called()  # no VM created on an invalid id
+            with pytest.raises(ValueError):
+                create_vm_from_librenms(libre_device, validation)
+        assert VirtualMachine.objects.count() == before
 
     def test_digit_string_device_id_accepted(self):
         """A plain digit string ('42') is still accepted and coerced to int (so a JSON-string id from LibreNMS keeps working)."""
         from netbox_librenms_plugin.import_utils.vm_operations import create_vm_from_librenms
 
         libre_device = {"device_id": "42", "hostname": "vm42", "_computed_name": "vm42"}
-        validation = {"can_import": True, "cluster": {"cluster": MagicMock()}, "platform": {"platform": None}}
-        mock_vm = MagicMock()
+        validation = self._validation("vm-digit-id")
 
-        with (
-            patch("virtualization.models.VirtualMachine") as mock_vm_class,
-            patch("netbox_librenms_plugin.utils.set_librenms_device_id") as mock_setter,
-        ):
-            mock_vm_class.objects.create.return_value = mock_vm
-            create_vm_from_librenms(libre_device, validation)
+        vm = create_vm_from_librenms(libre_device, validation)
 
-        assert mock_setter.call_args[0][1] == 42  # coerced to int, not left as "42"
+        vm.refresh_from_db()
+        assert vm.custom_field_data["librenms_id"]["default"] == 42
 
     def test_server_key_stored_in_custom_field(self):
         """librenms_id custom field uses the provided server_key via set_librenms_device_id."""
-        from unittest.mock import patch
-
         from netbox_librenms_plugin.import_utils.vm_operations import create_vm_from_librenms
 
         libre_device = {"device_id": 5, "hostname": "vm05", "_computed_name": "vm05"}
-        validation = {
-            "can_import": True,
-            "cluster": {"cluster": MagicMock()},
-            "platform": {"platform": None},
-        }
-        mock_vm = MagicMock()
-        mock_vm.name = "vm05"
-        mock_vm.pk = 50
-        mock_vm.custom_field_data = {}
+        validation = self._validation("vm-server-key")
 
-        with patch("virtualization.models.VirtualMachine") as mock_vm_class:
-            with patch("netbox_librenms_plugin.utils.set_librenms_device_id") as mock_setter:
-                mock_vm_class.objects.create.return_value = mock_vm
-                create_vm_from_librenms(libre_device, validation, server_key="secondary")
+        vm = create_vm_from_librenms(libre_device, validation, server_key="secondary")
 
-        mock_setter.assert_called_once_with(mock_vm, 5, "secondary")
-        mock_vm.save.assert_called_once()
+        vm.refresh_from_db()
+        assert vm.custom_field_data["librenms_id"] == {"secondary": 5}
 
     def test_role_is_read_from_validation(self):
         """Role is read from validation[device_role] and forwarded to VirtualMachine.objects.create."""
         from netbox_librenms_plugin.import_utils.vm_operations import create_vm_from_librenms
+        from netbox_librenms_plugin.tests.conftest import _shared_infra
 
         libre_device = {"device_id": 6, "hostname": "vm06", "_computed_name": "vm06"}
-        mock_role = MagicMock()
-        validation = {
-            "can_import": True,
-            "cluster": {"cluster": MagicMock()},
-            "platform": {"platform": None},
-            "device_role": {"role": mock_role},
-        }
-        mock_vm = MagicMock()
-        mock_vm.name = "vm06"
-        mock_vm.pk = 60
+        _site, _manufacturer, _device_type, role = _shared_infra()
+        validation = self._validation("vm-role", role=role)
 
-        with patch("virtualization.models.VirtualMachine") as mock_vm_class:
-            mock_vm_class.objects.create.return_value = mock_vm
-            create_vm_from_librenms(libre_device, validation)
+        vm = create_vm_from_librenms(libre_device, validation)
 
-        call_kwargs = mock_vm_class.objects.create.call_args[1]
-        assert call_kwargs["role"] == mock_role
+        vm.refresh_from_db()
+        assert vm.role == role
 
     def test_platform_none_when_not_in_validation(self):
         """Platform is None when validation['platform'] has no 'platform' key."""
         from netbox_librenms_plugin.import_utils.vm_operations import create_vm_from_librenms
 
         libre_device = {"device_id": 7, "hostname": "vm07", "_computed_name": "vm07"}
-        validation = {
-            "can_import": True,
-            "cluster": {"cluster": MagicMock()},
-            "platform": {},  # no 'platform' key — .get() returns None
-        }
-        mock_vm = MagicMock()
-        mock_vm.name = "vm07"
-        mock_vm.pk = 70
+        validation = self._validation("vm-no-platform")
+        validation["platform"] = {}
 
-        with patch("virtualization.models.VirtualMachine") as mock_vm_class:
-            mock_vm_class.objects.create.return_value = mock_vm
-            create_vm_from_librenms(libre_device, validation)
+        vm = create_vm_from_librenms(libre_device, validation)
 
-        call_kwargs = mock_vm_class.objects.create.call_args[1]
-        assert call_kwargs["platform"] is None
+        vm.refresh_from_db()
+        assert vm.platform is None
 
     def test_import_comment_contains_device_id(self):
         """The comments field contains a reference to LibreNMS."""
         from netbox_librenms_plugin.import_utils.vm_operations import create_vm_from_librenms
 
         libre_device = {"device_id": 8, "hostname": "vm08", "_computed_name": "vm08"}
-        validation = {
-            "can_import": True,
-            "cluster": {"cluster": MagicMock()},
-            "platform": {"platform": None},
-        }
-        mock_vm = MagicMock()
-        mock_vm.name = "vm08"
-        mock_vm.pk = 80
+        validation = self._validation("vm-comment")
 
-        with patch("virtualization.models.VirtualMachine") as mock_vm_class:
-            mock_vm_class.objects.create.return_value = mock_vm
-            create_vm_from_librenms(libre_device, validation)
+        vm = create_vm_from_librenms(libre_device, validation)
 
-        call_kwargs = mock_vm_class.objects.create.call_args[1]
-        assert "LibreNMS" in call_kwargs["comments"]
-        assert "netbox-librenms-plugin" in call_kwargs["comments"]
-        assert str(libre_device["device_id"]) in call_kwargs["comments"]
+        vm.refresh_from_db()
+        assert "LibreNMS" in vm.comments
+        assert "netbox-librenms-plugin" in vm.comments
+        assert str(libre_device["device_id"]) in vm.comments
+
+
+@pytest.mark.django_db
+def test_create_vm_rejects_a_device_owned_librenms_id():
+    """VM creation must not claim an ID that already belongs to a Device."""
+    from virtualization.models import VirtualMachine
+
+    from netbox_librenms_plugin.import_utils.vm_operations import create_vm_from_librenms
+    from netbox_librenms_plugin.tests.conftest import make_cluster, make_device
+
+    make_device("vm-import-id-owner", librenms_cf={"default": 61001})
+    cluster = make_cluster("vm-import-conflict-cluster")
+    validation = {
+        "can_import": True,
+        "cluster": {"cluster": cluster},
+        "platform": {"platform": None},
+    }
+
+    with pytest.raises(ValueError, match="already assigned to device"):
+        create_vm_from_librenms(
+            {"device_id": 61001, "hostname": "conflicting-vm", "_computed_name": "conflicting-vm"},
+            validation,
+        )
+
+    assert not VirtualMachine.objects.filter(name="conflicting-vm").exists()
 
 
 class TestBulkImportVms:

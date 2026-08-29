@@ -2683,6 +2683,54 @@ def find_by_librenms_id(model, librenms_id, server_key: str = "default", *, sele
     return host_match or oob_match
 
 
+def lock_librenms_id_assignment(librenms_id, server_key: str, *, owner_queryset=None, owner_pk=None):
+    """
+    Serialize a Device or VM LibreNMS ID claim and return any existing owner.
+
+    The caller must hold an open transaction. This function takes the server-scoped advisory
+    lock before the optional target row lock. Every claim writer must use this order so two
+    transactions cannot both observe an unclaimed ID or deadlock while changing existing owners.
+
+    Args:
+        librenms_id: Positive LibreNMS device ID.
+        server_key: Configured LibreNMS server key.
+        owner_queryset: Optional queryset that applies the caller's permission scope.
+        owner_pk: Primary key of the existing owner to lock.
+
+    Returns:
+        A pair containing the locked owner, when supplied, and a conflicting Device or VM.
+
+    Raises:
+        ValueError: If the ID, server key, or owner arguments are invalid.
+        AmbiguousLibreNMSIdError: If more than one existing object owns the ID.
+    """
+    from virtualization.models import VirtualMachine
+
+    if (owner_queryset is None) != (owner_pk is None):
+        raise ValueError("owner_queryset and owner_pk must be provided together")
+
+    normalized_id = coerce_librenms_id(librenms_id)
+    if normalized_id is None:
+        raise ValueError(f"librenms_id {librenms_id!r} is not a positive integer")
+    normalized_server_key = require_server_key(server_key)
+
+    acquire_advisory_transaction_lock(f"netbox-librenms-plugin:librenms-id:{normalized_server_key}:{normalized_id}")
+    locked_owner = None
+    owner_model = None
+    if owner_queryset is not None:
+        owner_model = owner_queryset.model
+        locked_owner = owner_queryset.select_for_update(of=("self",)).get(pk=owner_pk)
+
+    for model in (Device, VirtualMachine):
+        conflict = find_by_librenms_id(model, normalized_id, normalized_server_key)
+        if conflict is None:
+            continue
+        if model is owner_model and conflict.pk == owner_pk:
+            continue
+        return locked_owner, conflict
+    return locked_owner, None
+
+
 def get_librenms_oob(obj, server_key: str = "default") -> dict | None:
     """
     Return the OOB sub-object from the ``librenms_id`` JSON custom field, or ``None``.

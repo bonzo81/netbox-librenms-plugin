@@ -2388,6 +2388,33 @@ class TestValidateForcesDeviceModeRealDB:
         assert result["existing_device"].pk == device.pk
         assert result["import_as_vm"] is False
 
+    def test_primary_ip_device_match_forces_device_mode(self):
+        """A primary-IP Device match must override a user-selected VM mode."""
+        from netbox_librenms_plugin.import_utils.device_operations import validate_device_for_import
+        from netbox_librenms_plugin.tests.conftest import ip_on
+
+        device = self._make_device("force-dev-primary-ip")
+        ip_on(device, "198.18.0.91/32", "management")
+        libre_device = {
+            "device_id": 778,
+            "hostname": "different-hostname",
+            "sysName": "different-hostname",
+            "serial": "-",
+            "hardware": "-",
+            "os": "-",
+            "location": "-",
+            "ip": "198.18.0.91",
+        }
+
+        result = validate_device_for_import(
+            libre_device, import_as_vm=True, api=self._api(), include_vc_detection=False
+        )
+
+        assert result["existing_match_type"] == "primary_ip"
+        assert result["existing_device"].pk == device.pk
+        assert result["import_as_vm"] is False
+        assert result["site"]["found"] is False
+
 
 @pytest.mark.django_db
 class TestValidateSerialMatchStripsWhitespace:
@@ -2639,9 +2666,10 @@ class TestImportPersistsTrimmedSerial:
         # registered in the isolated test DB and would fail Device.full_clean() — orthogonal to the
         # serial persistence under test. The real Device is created, full_clean'd, and saved.
         with (
-            patch("netbox_librenms_plugin.import_utils.device_operations.LibreNMSAPI"),
+            patch("netbox_librenms_plugin.import_utils.device_operations.LibreNMSAPI") as MockAPI,
             patch("netbox_librenms_plugin.import_utils.device_operations.set_librenms_device_id"),
         ):
+            MockAPI.return_value.server_key = "default"
             result = import_single_device(
                 8813,
                 server_key="default",
@@ -3839,9 +3867,10 @@ class TestImportNamesDeviceWhenDomainStripEmptiesTheName:
         # Same orthogonal patch as TestImportPersistsTrimmedSerial: set_librenms_device_id writes a
         # custom field the isolated test DB does not register. The real Device is created and cleaned.
         with (
-            patch("netbox_librenms_plugin.import_utils.device_operations.LibreNMSAPI"),
+            patch("netbox_librenms_plugin.import_utils.device_operations.LibreNMSAPI") as MockAPI,
             patch("netbox_librenms_plugin.import_utils.device_operations.set_librenms_device_id"),
         ):
+            MockAPI.return_value.server_key = "default"
             result = import_single_device(
                 8814,
                 server_key="default",

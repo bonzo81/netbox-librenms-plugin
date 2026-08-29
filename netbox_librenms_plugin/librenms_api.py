@@ -5,6 +5,7 @@ from dataclasses import dataclass
 
 import requests
 from django.core.cache import cache
+from django.db import transaction
 from netbox.plugins import get_plugin_config
 
 # HTTP request timeout constants (in seconds)
@@ -455,10 +456,23 @@ class LibreNMSAPI:
             None
         """
         if "librenms_id" in obj.cf:
-            from netbox_librenms_plugin.utils import set_librenms_device_id
+            from netbox_librenms_plugin.utils import lock_librenms_id_assignment, set_librenms_device_id
 
-            set_librenms_device_id(obj, librenms_id, self.server_key)
-            obj.save(update_fields=["custom_field_data"])
+            with transaction.atomic():
+                locked_obj, conflict = lock_librenms_id_assignment(
+                    librenms_id,
+                    self.server_key,
+                    owner_queryset=type(obj).objects.all(),
+                    owner_pk=obj.pk,
+                )
+                if conflict is not None:
+                    object_label = "VM" if conflict._meta.model_name == "virtualmachine" else "device"
+                    raise ValueError(
+                        f"LibreNMS ID {librenms_id} is already assigned to {object_label} '{conflict.name}'"
+                    )
+                set_librenms_device_id(locked_obj, librenms_id, self.server_key)
+                locked_obj.save(update_fields=["custom_field_data"])
+            obj.custom_field_data = locked_obj.custom_field_data
         else:
             # Use cache as fallback
             cache_key = self._get_cache_key(obj)

@@ -991,6 +991,11 @@ class SetPreferredServerView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixi
                 error = exc.message_dict if hasattr(exc, "message_dict") else str(exc)
                 messages.error(request, f"Validation error changing preferred server: {error}")
                 return self._redirect(object_type, pk, active_server_key, active_sync_tab)
+            except Exception:
+                transaction.set_rollback(True)
+                logger.exception("Could not save the preferred LibreNMS server %r", requested_key)
+                messages.error(request, "Could not change the preferred LibreNMS server. Try again.")
+                return self._redirect(object_type, pk, active_server_key, active_sync_tab)
 
         messages.success(request, f"Preferred LibreNMS server changed to '{requested_key}'.")
         return self._redirect(object_type, pk, active_server_key, active_sync_tab)

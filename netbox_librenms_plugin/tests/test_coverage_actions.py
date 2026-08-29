@@ -4284,6 +4284,7 @@ class TestDeviceConflictActionBoolAndInvalidId:
         assert b"Invalid or missing LibreNMS device_id in payload" in response.content
 
 
+@pytest.mark.django_db
 class TestDeviceConflictLinkIdConflict:
     """Test DeviceConflictActionView 'link' when ID is already used (line 1069-1070)."""
 
@@ -4336,10 +4337,7 @@ class TestDeviceConflictLinkIdConflict:
                         with patch(
                             "netbox_librenms_plugin.utils.find_by_librenms_id", return_value=conflicting_device
                         ):  # ID conflict!
-                            with patch("netbox_librenms_plugin.views.imports.actions.transaction") as mock_tx:
-                                mock_tx.atomic.return_value.__enter__ = MagicMock(return_value=None)
-                                mock_tx.atomic.return_value.__exit__ = MagicMock(return_value=False)
-                                response = view.post(request, device_id=42)
+                            response = view.post(request, device_id=42)
 
         assert response.status_code == 200
         assert response.headers.get("HX-Reswap") == "none"
@@ -4380,6 +4378,7 @@ class TestSaveDevicePath:
         assert raw_error.encode().lower() not in result.content.lower()
 
 
+@pytest.mark.django_db
 class TestDeviceConflictSelectForUpdateDoesNotExist:
     """Tests for select_for_update DoesNotExist (lines 1069-1070)."""
 
@@ -4416,7 +4415,9 @@ class TestDeviceConflictSelectForUpdateDoesNotExist:
             "device_type_mismatch": False,
         }
 
-        DoesNotExistExc = type("DoesNotExist", (Exception,), {})
+        from django.core.exceptions import ObjectDoesNotExist
+
+        DoesNotExistExc = type("DoesNotExist", (ObjectDoesNotExist,), {})
 
         with patch.object(view, "require_all_permissions", return_value=None):
             with patch("dcim.models.Device") as MockDevice:
@@ -4432,10 +4433,7 @@ class TestDeviceConflictSelectForUpdateDoesNotExist:
                         view, "get_validated_device_with_selections", return_value=(libre_device, validation, {})
                     ):
                         with patch("netbox_librenms_plugin.utils.find_by_librenms_id", return_value=None):
-                            with patch("netbox_librenms_plugin.views.imports.actions.transaction") as mock_tx:
-                                mock_tx.atomic.return_value.__enter__ = MagicMock(return_value=None)
-                                mock_tx.atomic.return_value.__exit__ = MagicMock(return_value=False)
-                                response = view.post(request, device_id=42)
+                            response = view.post(request, device_id=42)
 
         assert response.status_code == 200
         assert response.headers.get("HX-Reswap") == "none"
@@ -4509,6 +4507,7 @@ class TestSyncSerialAction:
         assert Device.objects.get(pk=dev.pk).serial == "SN-OLD"
 
 
+@pytest.mark.django_db
 class TestUpdateAndSerialSaveErrors:
     """Tests for update/update_serial _save_device error paths (lines 1119, 1149)."""
 
@@ -4552,9 +4551,6 @@ class TestUpdateAndSerialSaveErrors:
         MockDevice.objects.select_for_update.return_value.get.return_value = mock_existing
         MockDevice.objects.filter.return_value.exclude.return_value.first.return_value = None
         MockDevice.DoesNotExist = DoesNotExistExc
-        mock_tx = MagicMock()
-        mock_tx.atomic.return_value.__enter__ = MagicMock(return_value=None)
-        mock_tx.atomic.return_value.__exit__ = MagicMock(return_value=False)
         stack = ExitStack()
         stack.enter_context(patch.object(view, "require_all_permissions", return_value=None))
         stack.enter_context(patch("dcim.models.Device", MockDevice))
@@ -4568,7 +4564,6 @@ class TestUpdateAndSerialSaveErrors:
         stack.enter_context(
             patch("netbox_librenms_plugin.views.imports.actions.get_import_device_cache_key", return_value="key")
         )
-        stack.enter_context(patch("netbox_librenms_plugin.views.imports.actions.transaction", mock_tx))
         stack.enter_context(
             patch("netbox_librenms_plugin.views.imports.actions._get_hostname_for_action", return_value="r01")
         )
@@ -7093,13 +7088,45 @@ class TestAddAsOOBViewPost:
         # HTMX error toast (200 + HX-Reswap:none) naming the conflicting device.
         assert response.status_code == 200
         assert response["HX-Reswap"] == "none"
-        assert b"already linked to &#x27;&lt;script&gt;the-idrac&lt;/script&gt;&#x27;" in response.content
+        assert b"already assigned to device &#x27;&lt;script&gt;the-idrac&lt;/script&gt;&#x27;" in response.content
         assert b"&amp;lt;script&amp;gt;" not in response.content
         # Nothing attached: the host device's entry gained no oob sub-block.
         entry = Device.objects.get(pk=existing_device.pk).custom_field_data["librenms_id"][self.server_key]
         assert entry == {"id": 10}
         conflict_entry = Device.objects.get(pk=conflicting_device.pk).custom_field_data["librenms_id"][self.server_key]
         assert conflict_entry == {"id": 17}
+
+    def test_aborts_when_librenms_id_is_owned_by_a_vm(self):
+        """An incoming OOB ID owned by a VM must not be attached to a Device."""
+        from dcim.models import Device
+
+        view = self._make_view()
+        existing_device = make_device(
+            "oob-vm-owner-target",
+            serial="OOB-VM-OWNER-SERIAL",
+            librenms_cf={self.server_key: {"id": 10}},
+        )
+        conflicting_vm = make_vm("oob-vm-owner")
+        self._register_oob_device(17, "controller-node", serial=existing_device.serial, generic=True)
+        request = make_view_request(
+            "post",
+            {"server_key": self.server_key, "existing_device_id": str(existing_device.pk)},
+            user=self._device_writer("oob-vm-owner-user"),
+            HTTP_HX_REQUEST="true",
+        )
+
+        def claim_incoming_id():
+            type(conflicting_vm).objects.filter(pk=conflicting_vm.pk).update(
+                custom_field_data={"librenms_id": {self.server_key: {"id": 17}}}
+            )
+
+        response = self._post_after_validation(view, request, 17, claim_incoming_id)
+
+        assert response.status_code == 200
+        assert response["HX-Reswap"] == "none"
+        assert b"already assigned to VM" in response.content
+        entry = Device.objects.get(pk=existing_device.pk).custom_field_data["librenms_id"][self.server_key]
+        assert entry == {"id": 10}
 
     def test_aborts_when_incoming_id_is_own_host_id(self):
         """A concurrent re-link could make this device's host id equal the incoming OOB id; attaching it as OOB would store the same id in both slots (self host/OOB conflict)."""
@@ -7477,7 +7504,7 @@ class TestPromoteToHostViewPost:
         response = self._post_after_validation(view, request, 17, claim_incoming_id)
 
         assert response.status_code == 200
-        assert b"already linked to" in response.content
+        assert b"already assigned to device" in response.content
         assert b"&lt;script&gt;promote-conflict&lt;/script&gt;" in response.content
         assert b"&amp;lt;script&amp;gt;" not in response.content
         # The source device must be left unchanged (still host id 10, no OOB).
@@ -7485,6 +7512,36 @@ class TestPromoteToHostViewPost:
         assert existing_device.custom_field_data["librenms_id"][self.server_key] == {"id": 10}
         conflicting_device.refresh_from_db()
         assert conflicting_device.custom_field_data["librenms_id"][self.server_key] == {"id": 17}
+
+    def test_promote_rejected_when_a_vm_claimed_the_host_id_after_validation(self):
+        """A VM claim created after validation must block the Device promotion."""
+        view = self._make_view()
+        existing_device = make_device(
+            "promote-vm-conflict-controller",
+            serial="PROMOTE-VM-CONFLICT-SERIAL",
+            librenms_cf={self.server_key: {"id": 10}},
+        )
+        conflicting_vm = make_vm("promote-vm-conflict-owner")
+        self._register_host_device(17, "promote-vm-conflict-host", serial=existing_device.serial)
+        request = make_view_request(
+            "post",
+            {"server_key": self.server_key, "existing_device_id": str(existing_device.pk)},
+            user=self._device_writer("promote-vm-conflict-user"),
+            HTTP_HX_REQUEST="true",
+        )
+
+        def claim_incoming_id():
+            type(conflicting_vm).objects.filter(pk=conflicting_vm.pk).update(
+                custom_field_data={"librenms_id": {self.server_key: {"id": 17}}}
+            )
+
+        response = self._post_after_validation(view, request, 17, claim_incoming_id)
+
+        assert response.status_code == 200
+        assert response["HX-Reswap"] == "none"
+        assert b"already assigned to VM" in response.content
+        existing_device.refresh_from_db()
+        assert existing_device.custom_field_data["librenms_id"][self.server_key] == {"id": 10}
 
     def test_failed_oob_attach_after_host_swap_leaves_db_untouched(self):
         """An invalid OOB type after the in-memory host swap leaves the database unchanged."""
@@ -7645,7 +7702,7 @@ class TestPromoteToHostViewPost:
 
         assert response.status_code == 200
         assert response["HX-Reswap"] == "none"
-        assert b"already linked to &#x27;promote-thief&#x27;" in response.content
+        assert b"already assigned to device &#x27;promote-thief&#x27;" in response.content
         # Nothing committed: the host slot is unchanged and no OOB slot was written.
         entry = Device.objects.get(pk=existing_device.pk).custom_field_data["librenms_id"][self.server_key]
         assert entry == {"id": 10}
@@ -9902,24 +9959,23 @@ class TestPromoteAndMergeObjectScope:
     def test_promote_rechecks_legacy_mapping_after_lock(self):
         """A concurrent legacy write between validation and row lock must fail closed without partially promoting."""
         from dcim.models import Device
+        from django.db import connection
 
         target = make_device("promote-legacy-race", librenms_cf={"default": {"id": 10}})
         user = _scoped_device_writer(target, "scoped-promote-legacy-race")
-        calls = 0
+        concurrent_write_applied = False
 
-        def concurrent_legacy_write(*args, **kwargs):
-            nonlocal calls
-            calls += 1
-            if calls == 1:
+        def concurrent_legacy_write(execute, sql, params, many, context):
+            nonlocal concurrent_write_applied
+            if not concurrent_write_applied and "FOR UPDATE" in sql and 'FROM "dcim_device"' in sql:
+                concurrent_write_applied = True
                 Device.objects.filter(pk=target.pk).update(custom_field_data={"librenms_id": 10})
-            return None
+            return execute(sql, params, many, context)
 
-        with patch(
-            "netbox_librenms_plugin.utils.find_by_librenms_id",
-            side_effect=concurrent_legacy_write,
-        ):
+        with connection.execute_wrapper(concurrent_legacy_write):
             response = self._post_promote(user, target)
 
+        assert concurrent_write_applied
         assert b"Convert mapping" in response.content
         assert Device.objects.get(pk=target.pk).custom_field_data["librenms_id"] == 10
 

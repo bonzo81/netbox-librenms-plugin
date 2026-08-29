@@ -1368,7 +1368,13 @@ class LibreNMSImportFilterForm(forms.Form):
                     from netbox_librenms_plugin.models import LibreNMSSettings
 
                     _settings = LibreNMSSettings.objects.first()
-                    _server_key = (_settings.selected_server if _settings else None) or "default"
+                    selected_server = (_settings.selected_server if _settings else None) or "default"
+                    available_servers = LibreNMSAPI.get_available_servers()
+                    _server_key = (
+                        selected_server
+                        if selected_server in available_servers
+                        else next(iter(available_servers), "default")
+                    )
                 except Exception:
                     _server_key = "default"
 

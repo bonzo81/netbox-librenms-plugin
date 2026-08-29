@@ -30,6 +30,7 @@ from ..utils import (
     get_librenms_device_id,
     get_librenms_oob,
     is_legacy_librenms_id,
+    lock_librenms_id_assignment,
     match_librenms_hardware_to_device_type,
     normalize_serial,
     parse_location_for_import,
@@ -1298,6 +1299,7 @@ def validate_device_for_import(
                         result["can_import"] = False
                     elif matched_object:
                         device = matched_object
+                        result["import_as_vm"] = False
                         # Surface any existing host/OOB linkage so the import UI renders the
                         # correct row state (the librenms_id / serial branches do the same;
                         # without this an already-linked device shows as "not linked" here).
@@ -1820,6 +1822,19 @@ def import_single_device(
 
         # Create device in NetBox
         with transaction.atomic():
+            _locked_owner, conflict = lock_librenms_id_assignment(device_id, api.server_key)
+            if conflict is not None:
+                from virtualization.models import VirtualMachine
+
+                object_label = "VM" if isinstance(conflict, VirtualMachine) else "device"
+                return {
+                    "success": False,
+                    "device": None,
+                    "message": "",
+                    "error": (f"LibreNMS ID {device_id} is already assigned to {object_label} '{conflict.name}'"),
+                    "synced": {},
+                }
+
             # Use pre-computed resolved_name from validation when available so the
             # created device name matches exactly what was displayed in the import UI.
             # Only fall back to recomputing from sync_options when no validation exists.

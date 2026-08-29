@@ -8,6 +8,7 @@ from django.utils import timezone
 from virtualization.models import Cluster
 
 from ..librenms_api import LibreNMSAPI
+from ..utils import lock_librenms_id_assignment
 from .bulk_import import _is_job_cancelled
 from .device_operations import _determine_device_name, fetch_device_with_cache, validate_device_for_import
 from .permissions import require_permissions
@@ -81,6 +82,13 @@ def create_vm_from_librenms(
     # Create the VM and assign its LibreNMS ID atomically so a failure in
     # set_librenms_device_id never leaves a VM without a mapping.
     with transaction.atomic():
+        _locked_owner, conflict = lock_librenms_id_assignment(librenms_device_id, server_key)
+        if conflict is not None:
+            object_label = "VM" if isinstance(conflict, VirtualMachine) else "device"
+            raise ValueError(
+                f"VM cannot be imported: LibreNMS ID {librenms_device_id} is already assigned to "
+                f"{object_label} '{conflict.name}'"
+            )
         vm = VirtualMachine.objects.create(
             name=vm_name,
             cluster=cluster,

@@ -11,6 +11,7 @@ assert each form contains the hidden ``server_key`` input scoped to the tab.
 """
 
 import os
+from copy import deepcopy
 from unittest.mock import patch
 
 import pytest
@@ -194,14 +195,15 @@ class TestSyncPageFormsCarryServerKey:
     """Rendered with ?server_key=secondary, every POST form must scope to it."""
 
     def _device(self):
-        # Legacy bare-int librenms_id → resolvable on any server + Convert-ID form renders.
+        # The installation default differs from the query-selected server. An explicit secondary
+        # mapping makes every ordinary action prove that the query key wins.
         # Serial/type/platform differ from LibreNMS values → the sync forms render.
         from dcim.models import DeviceType, Manufacturer, Platform
 
         from netbox_librenms_plugin.models import LibreNMSSettings
 
-        device = make_device("sync-page-forms", serial="NB-SER-1", librenms_cf=42)
-        LibreNMSSettings.objects.update_or_create(pk=1, defaults={"selected_server": "secondary"})
+        device = make_device("sync-page-forms", serial="NB-SER-1", librenms_cf={"secondary": {"id": 42}})
+        LibreNMSSettings.objects.update_or_create(pk=1, defaults={"selected_server": "default"})
         # A DeviceType matching the LibreNMS hardware string (≠ the device's own type)
         # → the Device Type sync form renders.
         mfr = Manufacturer.objects.get(slug="test-mfr")
@@ -222,7 +224,6 @@ class TestSyncPageFormsCarryServerKey:
             "update_device_serial",
             "update_device_platform",
             "update_device_location",
-            "convert_legacy_librenms_id",
         ],
     )
     def test_device_info_form_posts_server_key(self, html, action_name):
@@ -231,6 +232,26 @@ class TestSyncPageFormsCarryServerKey:
         assert 'name="server_key"' in form and 'value="secondary"' in form, (
             f"{action_name} form must post server_key=secondary; got: {form[:400]}"
         )
+
+    def test_legacy_conversion_form_posts_the_query_selected_server_key(self):
+        """The legacy-only action keeps its active server key in the submitted form."""
+        from django.urls import reverse
+
+        from netbox_librenms_plugin.models import LibreNMSSettings
+
+        device = make_device("sync-page-legacy-form", serial="NB-SER-2", librenms_cf=42)
+        LibreNMSSettings.objects.update_or_create(pk=1, defaults={"selected_server": "secondary"})
+
+        html = _render_sync_page(device, "?server_key=secondary")
+        form = _enclosing_form(
+            html,
+            reverse(
+                "plugins:netbox_librenms_plugin:convert_legacy_librenms_id",
+                kwargs={"pk": device.pk},
+            ),
+        )
+
+        assert 'name="server_key"' in form and 'value="secondary"' in form
 
     @pytest.mark.parametrize(
         "refresh_url_name",
@@ -258,6 +279,31 @@ def reverse_fragment(url_name):
 
     pk = Device.objects.get(name="sync-page-forms").pk
     return reverse(f"plugins:netbox_librenms_plugin:{url_name}", kwargs={"pk": pk})
+
+
+def test_stale_installation_server_does_not_select_its_cached_locations(settings):
+    """A removed selected server must not win the first location-cache lookup."""
+    from django.core.cache import cache
+
+    from netbox_librenms_plugin.forms import LibreNMSImportFilterForm
+    from netbox_librenms_plugin.import_utils.cache import get_location_choices_cache_key
+    from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+    from netbox_librenms_plugin.models import LibreNMSSettings
+
+    plugin_config = deepcopy(settings.PLUGINS_CONFIG)
+    plugin_config["netbox_librenms_plugin"]["servers"] = deepcopy(TWO_SERVERS)
+    settings.PLUGINS_CONFIG = plugin_config
+    LibreNMSSettings.objects.update_or_create(pk=1, defaults={"selected_server": "removed-server"})
+
+    stale_choices = [("", "All Locations"), ("stale", "Removed server location")]
+    default_choices = [("", "All Locations"), ("current", "Default server location")]
+    cache.set(get_location_choices_cache_key("removed-server"), stale_choices)
+    cache.set(get_location_choices_cache_key("default"), default_choices)
+
+    with patch.object(LibreNMSAPI, "get_locations", side_effect=AssertionError("cache lookup should resolve")):
+        form = LibreNMSImportFilterForm()
+
+    assert list(form.fields["librenms_location"].choices) == default_choices
 
 
 class TestSyncPageMisconfiguredDefaultDegrades:

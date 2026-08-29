@@ -7,7 +7,7 @@ from urllib.parse import parse_qs, urlencode, urlparse
 
 from django.contrib import messages
 from django.core.cache import cache
-from django.core.exceptions import PermissionDenied, ValidationError
+from django.core.exceptions import ObjectDoesNotExist, PermissionDenied, ValidationError
 from django.db import DatabaseError, DataError, IntegrityError, transaction
 
 from django.http import HttpResponse, JsonResponse
@@ -66,6 +66,7 @@ from netbox_librenms_plugin.utils import (
     coerce_model_pk,
     get_librenms_sync_device,
     is_legacy_librenms_id,
+    lock_librenms_id_assignment,
     normalize_serial,
     resolve_naming_preferences,
     resolve_server_mapping_display_id,
@@ -389,30 +390,26 @@ def _lock_mapping_in_scope(view, model, lookup, duplicate_message):
 
 def _lock_librenms_id_assignment_target(view, target_model, target_pk, librenms_id, server_key):
     """Lock one server/ID claim and its target, then reject ownership across Devices and VMs."""
-    from dcim.models import Device
     from virtualization.models import VirtualMachine as NetBoxVM
 
-    from netbox_librenms_plugin.utils import AmbiguousLibreNMSIdError, find_by_librenms_id
+    from netbox_librenms_plugin.utils import AmbiguousLibreNMSIdError
 
-    acquire_advisory_transaction_lock(f"netbox-librenms-plugin:librenms-id:{server_key}:{librenms_id}")
     try:
-        locked_target = (
-            view.restricted_queryset(target_model, "change").select_for_update(of=("self",)).get(pk=target_pk)
+        locked_target, id_conflict = lock_librenms_id_assignment(
+            librenms_id,
+            server_key,
+            owner_queryset=view.restricted_queryset(target_model, "change"),
+            owner_pk=target_pk,
         )
-    except target_model.DoesNotExist:
+    except ObjectDoesNotExist:
         object_label = "VM" if target_model is NetBoxVM else "Device"
         return None, _htmx_error_response(f"{object_label} no longer exists; it may have been deleted concurrently.")
-
-    for conflict_model in (Device, NetBoxVM):
-        try:
-            id_conflict = find_by_librenms_id(conflict_model, librenms_id, server_key)
-        except AmbiguousLibreNMSIdError:
-            return None, _htmx_error_response(
-                f"LibreNMS ID {librenms_id} is ambiguous. Resolve the duplicate assignment before changing the mapping."
-            )
-        if id_conflict is None or (type(id_conflict) is type(locked_target) and id_conflict.pk == locked_target.pk):
-            continue
-        object_label = "VM" if conflict_model is NetBoxVM else "device"
+    except AmbiguousLibreNMSIdError:
+        return None, _htmx_error_response(
+            f"LibreNMS ID {librenms_id} is ambiguous. Resolve the duplicate assignment before changing the mapping."
+        )
+    if id_conflict is not None:
+        object_label = "VM" if isinstance(id_conflict, NetBoxVM) else "device"
         return None, _htmx_error_response(
             f"LibreNMS ID conflict: ID {librenms_id} is already assigned to {object_label} "
             f"'{id_conflict.name}' (ID: {id_conflict.pk})"
@@ -2926,18 +2923,37 @@ class AddAsOOBView(
                 "Device has a legacy bare-integer librenms_id; use 'Convert mapping' to migrate first."
             )
 
-        from netbox_librenms_plugin.utils import set_librenms_oob
+        from netbox_librenms_plugin.utils import (
+            AmbiguousLibreNMSIdError,
+            get_librenms_device_id,
+            get_librenms_oob,
+            set_librenms_oob,
+        )
 
         oob_type = oob_candidate.get("type") or ""
         oob_ip_str = oob_candidate.get("ip") or None
 
         with transaction.atomic():
             try:
-                sync_device = (
-                    self.restricted_queryset(Device, "change").select_for_update(of=("self",)).get(pk=sync_device.pk)
+                sync_device, id_conflict = lock_librenms_id_assignment(
+                    librenms_id,
+                    server_key,
+                    owner_queryset=self.restricted_queryset(Device, "change"),
+                    owner_pk=sync_device.pk,
                 )
-            except Device.DoesNotExist:
+            except ObjectDoesNotExist:
                 return _htmx_error_response("Device no longer exists; it may have been deleted concurrently.")
+            except AmbiguousLibreNMSIdError:
+                return _htmx_error_response(
+                    f"LibreNMS device #{librenms_id} is ambiguous. Resolve the duplicate assignment before "
+                    "attaching as OOB."
+                )
+            if id_conflict is not None:
+                object_label = "VM" if id_conflict._meta.model_name == "virtualmachine" else "device"
+                return _htmx_error_response(
+                    f"LibreNMS device #{librenms_id} is already assigned to {object_label} "
+                    f"'{id_conflict.name}'; refresh and retry."
+                )
 
             # Re-verify the legacy gate on the LOCKED row (mirrors DeviceConflictActionView's
             # post-lock gate): a legacy bare-int written between the unlocked check above and
@@ -2949,13 +2965,6 @@ class AddAsOOBView(
                 return _htmx_error_response(
                     "Device has a legacy bare-integer librenms_id; use 'Convert mapping' to migrate first."
                 )
-
-            from netbox_librenms_plugin.utils import (
-                AmbiguousLibreNMSIdError,
-                find_by_librenms_id,
-                get_librenms_device_id,
-                get_librenms_oob,
-            )
 
             # Reject if the locked OOB link differs from what this (possibly stale) modal
             # is about to write — by id OR by type. oob_type is already a canonical OOB_TYPES
@@ -2978,24 +2987,6 @@ class AddAsOOBView(
                 return _htmx_error_response(
                     f"LibreNMS device #{librenms_id} is this device's host link; it can't also be its "
                     "OOB controller. Refresh and retry."
-                )
-
-            # Another device may already own this LibreNMS id (as its host id or OOB id)
-            # since validation ran. Re-check inside the transaction and abort on a non-self
-            # conflict so we don't point one LibreNMS device at two NetBox devices. Mirrors
-            # PromoteToHostView's host_conflict guard. select_for_update locks the competing
-            # owner row so a concurrent attach of the same id serializes against it; best-effort
-            # like the serial guard (no unique constraint on the JSON cf to fully close it).
-            try:
-                oob_conflict = find_by_librenms_id(Device, librenms_id, server_key, select_for_update=True)
-            except AmbiguousLibreNMSIdError:
-                return _htmx_error_response(
-                    f"LibreNMS device #{librenms_id} is ambiguous — it matches more than one NetBox "
-                    "device. Resolve the duplicate assignment before attaching as OOB."
-                )
-            if oob_conflict is not None and oob_conflict.pk != sync_device.pk:
-                return _htmx_error_response(
-                    f"LibreNMS device #{librenms_id} is already linked to '{oob_conflict.name}'; refresh and retry."
                 )
 
             try:
@@ -3570,34 +3561,18 @@ class PromoteToHostView(
                 "Device has a legacy bare-integer librenms_id; use 'Convert mapping' to migrate first."
             )
 
-        from netbox_librenms_plugin.utils import (
-            AmbiguousLibreNMSIdError,
-            find_by_librenms_id,
-            get_librenms_device_id,
-            get_librenms_oob,
-        )
-
-        # Pre-resolve any device already linked to new_host_id WITHOUT locking, so the
-        # transaction can lock every row it touches in one deterministic pk order (mirrors the
-        # merge flow). Locking existing_device first and the conflict second would let two
-        # concurrent opposite-direction promotions each hold one row and block on the other
-        # (lock-order deadlock).
-        try:
-            pre_conflict = find_by_librenms_id(Device, new_host_id, server_key)
-        except AmbiguousLibreNMSIdError:
-            return _htmx_error_response(
-                f"LibreNMS device #{new_host_id} is ambiguous — it matches more than one NetBox "
-                "device. Resolve the duplicate assignment before promoting."
-            )
-        lock_pks = {existing_device.pk}
-        if pre_conflict is not None:
-            lock_pks.add(pre_conflict.pk)
+        from netbox_librenms_plugin.utils import get_librenms_device_id, get_librenms_oob
 
         with transaction.atomic():
-            locked = {d.pk: d for d in Device.objects.select_for_update().filter(pk__in=lock_pks).order_by("pk")}
-            existing_device = locked.get(existing_device.pk)
-            if existing_device is None:
-                return _htmx_error_response("Device no longer exists; it may have been deleted concurrently.")
+            existing_device, lock_error = _lock_librenms_id_assignment_target(
+                self,
+                Device,
+                existing_device.pk,
+                new_host_id,
+                server_key,
+            )
+            if lock_error is not None:
+                return lock_error
             if is_legacy_librenms_id(existing_device.custom_field_data.get("librenms_id")):
                 return _htmx_error_response(
                     "Device has a legacy bare-integer librenms_id; use 'Convert mapping' to migrate first."
@@ -3611,21 +3586,6 @@ class PromoteToHostView(
                 return _htmx_error_response(
                     "OOB link already set; this device may have been promoted by a concurrent request."
                 )
-            # Re-verify the conflict under lock (TOCTOU): a device could have gained or lost
-            # new_host_id between the unlocked pre-lookup and acquiring the row locks. The rows
-            # in lock_pks are already locked in pk order, so this re-check doesn't reorder locks.
-            try:
-                host_conflict = find_by_librenms_id(Device, new_host_id, server_key, select_for_update=True)
-            except AmbiguousLibreNMSIdError:
-                return _htmx_error_response(
-                    f"LibreNMS device #{new_host_id} is ambiguous — it matches more than one NetBox "
-                    "device. Resolve the duplicate assignment before promoting."
-                )
-            if host_conflict is not None and host_conflict.pk != existing_device.pk:
-                return _htmx_error_response(
-                    f"LibreNMS device #{new_host_id} is already linked to '{host_conflict.name}'; refresh and retry."
-                )
-
             try:
                 # First, swap the host id to the incoming LibreNMS device id.
                 # set_librenms_device_id preserves any existing OOB sub-object.
