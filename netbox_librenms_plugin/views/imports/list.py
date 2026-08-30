@@ -299,7 +299,6 @@ class LibreNMSImportView(LibreNMSGenericPermissionMixin, LibreNMSAPIMixin, gener
 
             if form_valid:
                 self._filter_form_data = filter_form.cleaned_data
-                self._vc_detection_enabled = self._filter_form_data.get("enable_vc_detection")
                 self._cache_cleared = self._filter_form_data.get("clear_cache")
             elif filters_submitted:
                 non_field_errors = filter_form.non_field_errors()
