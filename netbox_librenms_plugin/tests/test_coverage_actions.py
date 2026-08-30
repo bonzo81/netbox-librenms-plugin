@@ -4619,14 +4619,14 @@ class TestBulkImportDevicesViewBasicPaths:
     """Tests for BulkImportDevicesView early paths (lines 498-763)."""
 
     @staticmethod
-    def _make_view(settings, server_key):
+    def _make_view(settings, server_key, server_url="https://librenms.example.test"):
         from netbox_librenms_plugin.views.imports.actions import BulkImportDevicesView
 
         configure_test_servers(
             settings,
             {
                 server_key: {
-                    "librenms_url": "https://librenms.example.test",
+                    "librenms_url": server_url,
                     "api_token": "test-token",
                     "verify_ssl": False,
                 }
@@ -4708,27 +4708,41 @@ class TestBulkImportDevicesViewBasicPaths:
         assert response.content == b"Invalid device identifier"
         assert view_message_texts(request, "error") == []
 
-    def test_sync_mode_import_runs(self, settings):
-        """Lines 498-763: synchronous import path runs without crashing."""
+    def test_sync_mode_import_runs(self, settings, monkeypatch):
+        """The synchronous path fetches LibreNMS data and persists the imported device."""
+        from dcim.models import Device
+
+        monkeypatch.setenv("NO_PROXY", "127.0.0.1,localhost")
+        monkeypatch.setenv("no_proxy", "127.0.0.1,localhost")
         server_key = "bulk-basic-sync"
-        view = self._make_view(settings, server_key)
+        mapping_source = make_device("bulk-basic-sync-mapping-source")
         user = self._device_import_user("bulk-basic-sync-user")
-        request = make_view_request(
-            "post",
-            {"server_key": server_key, "select": ["1"]},
-            user=user,  # A non-superuser forces sync mode.
-        )
-
-        import_result = {"success": [], "failed": [], "skipped": [], "virtual_chassis_created": 0}
-
-        with patch(
-            "netbox_librenms_plugin.views.imports.actions.bulk_import_devices",
-            return_value=import_result,
-        ) as mock_import:
+        with run_librenms_server() as server:
+            server.device_info_response(
+                device_id=1,
+                hostname="bulk-basic-sync-imported",
+                hardware=mapping_source.device_type.model,
+                serial="",
+                ip="198.18.0.1",
+                location=mapping_source.site.name,
+            )
+            server.vc_inventory_callable(1, [], {})
+            view = self._make_view(settings, server_key, server.url)
+            request = make_view_request(
+                "post",
+                {
+                    "server_key": server_key,
+                    "select": ["1"],
+                    "role_1": str(mapping_source.role_id),
+                },
+                user=user,  # A non-superuser forces sync mode.
+            )
             response = post_view(view, request)
 
-        # Non-HTMX request redirects
-        mock_import.assert_called_once()
+        imported = Device.objects.get(name="bulk-basic-sync-imported")
+        assert imported.site_id == mapping_source.site_id
+        assert imported.device_type_id == mapping_source.device_type_id
+        assert imported.role_id == mapping_source.role_id
         assert response.status_code == 302
         assert response["Location"] == url_for("plugins:netbox_librenms_plugin:librenms_import")
 
@@ -4889,59 +4903,70 @@ class TestBulkImportDevicesMorePaths:
         assert response.content == b"Invalid cluster or role selection"
         assert set(VirtualMachine.objects.values_list("pk", flat=True)) == before
 
-    def test_invalid_role_on_a_valid_cluster_still_imports_the_vm(self, settings, caplog):
+    def test_invalid_role_on_a_valid_cluster_still_imports_the_vm(self, settings, caplog, monkeypatch):
         """A bad role id next to a valid cluster keeps the VM import and drops only the role."""
+        from virtualization.models import VirtualMachine
+
+        monkeypatch.setenv("NO_PROXY", "127.0.0.1,localhost")
+        monkeypatch.setenv("no_proxy", "127.0.0.1,localhost")
         user = self._vm_import_user("bulk-more-invalid-role-user")
         cluster = make_cluster("bulk-more-invalid-role-cluster")
-        view, request = self._make_base_request(
-            settings,
-            ["1"],
-            user,
-            {"cluster_1": str(cluster.pk), "role_1": "not-int"},
-            server_key="bulk-more-invalid-role",
-        )
-        with (
-            patch("netbox_librenms_plugin.views.imports.actions.bulk_import_devices") as mock_device_import,
-            patch(
-                "netbox_librenms_plugin.views.imports.actions.bulk_import_vms",
-                return_value={"success": [], "failed": [], "skipped": []},
-            ) as mock_vm_import,
-        ):
+        with run_librenms_server() as server:
+            server.device_info_response(
+                device_id=1,
+                hostname="bulk-more-invalid-role-imported",
+                serial="",
+                ip="198.18.0.2",
+            )
+            view, request = self._make_base_request(
+                settings,
+                ["1"],
+                user,
+                {"cluster_1": str(cluster.pk), "role_1": "not-int"},
+                server_key="bulk-more-invalid-role",
+                server_url=server.url,
+            )
             response = post_view(view, request)
 
         assert "Ignoring invalid role id 'not-int' for VM import of device 1" in caplog.text
-        # bulk_import_vms takes vm_imports positionally; the role was dropped, the cluster kept.
-        assert mock_vm_import.call_args.args[0] == {1: {"cluster_id": cluster.pk}}
-        mock_device_import.assert_not_called()
+        imported = VirtualMachine.objects.get(name="bulk-more-invalid-role-imported")
+        assert imported.cluster_id == cluster.pk
+        assert imported.role_id is None
         assert response.status_code == 302
 
-    def test_valid_role_and_rack_values_applied(self, settings):
-        """Lines 531-552: valid role_id and rack_id → parsed into mappings."""
-        from dcim.models import Rack
+    def test_valid_role_and_rack_values_applied(self, settings, monkeypatch):
+        """The importer persists the selected role and rack on the new device."""
+        from dcim.models import Device, Rack
 
+        monkeypatch.setenv("NO_PROXY", "127.0.0.1,localhost")
+        monkeypatch.setenv("no_proxy", "127.0.0.1,localhost")
         mapped_device = make_device("bulk-more-mapping-source")
         rack = Rack.objects.create(name="Bulk More Rack", site=mapped_device.site, status="active")
         user = self._device_import_user("bulk-more-valid-mapping-user")
 
-        # Submit real role and rack primary keys.
-        view, request = self._make_base_request(
-            settings,
-            ["1"],
-            user,
-            {"role_1": str(mapped_device.role_id), "rack_1": str(rack.pk)},
-            server_key="bulk-more-valid-mapping",
-        )
-
-        with patch(
-            "netbox_librenms_plugin.views.imports.actions.bulk_import_devices",
-            return_value={"success": [], "failed": [], "skipped": [], "virtual_chassis_created": 0},
-        ) as mock_import:
+        with run_librenms_server() as server:
+            server.device_info_response(
+                device_id=1,
+                hostname="bulk-more-valid-mapping-imported",
+                hardware=mapped_device.device_type.model,
+                serial="",
+                ip="198.18.0.3",
+                location=mapped_device.site.name,
+            )
+            server.vc_inventory_callable(1, [], {})
+            view, request = self._make_base_request(
+                settings,
+                ["1"],
+                user,
+                {"role_1": str(mapped_device.role_id), "rack_1": str(rack.pk)},
+                server_key="bulk-more-valid-mapping",
+                server_url=server.url,
+            )
             response = post_view(view, request)
 
-        mock_import.assert_called_once()
-        assert mock_import.call_args.kwargs["manual_mappings_per_device"] == {
-            1: {"device_role_id": mapped_device.role_id, "rack_id": rack.pk}
-        }
+        imported = Device.objects.get(name="bulk-more-valid-mapping-imported")
+        assert imported.role_id == mapped_device.role_id
+        assert imported.rack_id == rack.pk
         assert response.status_code == 302
         assert response["Location"] == url_for("plugins:netbox_librenms_plugin:librenms_import")
 
@@ -5168,14 +5193,14 @@ class TestBulkImportEdgePaths:
     """Tests for remaining BulkImportDevicesView edge paths."""
 
     @staticmethod
-    def _make_view(settings, server_key):
+    def _make_view(settings, server_key, server_url="https://librenms.example.test"):
         from netbox_librenms_plugin.views.imports.actions import BulkImportDevicesView
 
         configure_test_servers(
             settings,
             {
                 server_key: {
-                    "librenms_url": "https://librenms.example.test",
+                    "librenms_url": server_url,
                     "api_token": "test-token",
                     "verify_ssl": False,
                 }
@@ -5195,38 +5220,39 @@ class TestBulkImportEdgePaths:
 
         return make_view_user(username, [("add", VirtualMachine)])
 
-    def test_cluster_with_role_applies_role_to_vm(self, settings):
-        """Line 521: cluster + role for VM import."""
+    def test_cluster_with_role_applies_role_to_vm(self, settings, monkeypatch):
+        """The VM importer persists both selected mappings."""
+        from virtualization.models import VirtualMachine
+
+        monkeypatch.setenv("NO_PROXY", "127.0.0.1,localhost")
+        monkeypatch.setenv("no_proxy", "127.0.0.1,localhost")
         server_key = "bulk-edge-vm-role"
-        view = self._make_view(settings, server_key)
         existing_vm = make_vm("bulk-edge-vm-seed")
         role_source = make_device("bulk-edge-role-source")
         user = self._vm_import_user("bulk-edge-vm-role-user")
-        request = make_view_request(
-            "post",
-            {
-                "server_key": server_key,
-                "select": ["1"],
-                "cluster_1": str(existing_vm.cluster_id),
-                "role_1": str(role_source.role_id),
-            },
-            user=user,
-        )
-
-        with patch(
-            "netbox_librenms_plugin.views.imports.actions.bulk_import_vms",
-            return_value={"success": [], "failed": [], "skipped": []},
-        ) as mock_vm:
+        with run_librenms_server() as server:
+            server.device_info_response(
+                device_id=1,
+                hostname="bulk-edge-vm-role-imported",
+                serial="",
+                ip="198.18.0.4",
+            )
+            view = self._make_view(settings, server_key, server.url)
+            request = make_view_request(
+                "post",
+                {
+                    "server_key": server_key,
+                    "select": ["1"],
+                    "cluster_1": str(existing_vm.cluster_id),
+                    "role_1": str(role_source.role_id),
+                },
+                user=user,
+            )
             response = post_view(view, request)
 
-        # VM import should have been called with role
-        mock_vm.assert_called_once()
-        assert mock_vm.call_args.args[0] == {
-            1: {
-                "cluster_id": existing_vm.cluster_id,
-                "device_role_id": role_source.role_id,
-            }
-        }
+        imported = VirtualMachine.objects.get(name="bulk-edge-vm-role-imported")
+        assert imported.cluster_id == existing_vm.cluster_id
+        assert imported.role_id == role_source.role_id
         assert response.status_code == 302
         assert response["Location"] == url_for("plugins:netbox_librenms_plugin:librenms_import")
 
