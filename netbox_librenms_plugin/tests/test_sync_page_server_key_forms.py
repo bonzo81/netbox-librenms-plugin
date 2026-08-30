@@ -5,34 +5,25 @@ conversion) and every tab refresh form rebinds server-side from the POSTed
 ``server_key``. A form that omits it silently falls back to the GLOBAL selected
 server — a wrong-server write when the user is acting on a ``?server_key`` tab.
 
-These tests render the REAL page through the real view (real device, real URL
-routing, real template) with only the LibreNMS HTTP boundary patched, then
-assert each form contains the hidden ``server_key`` input scoped to the tab.
+These tests render the real page through the real view, template, database,
+cache, and loopback LibreNMS HTTP boundary. Each form must contain the hidden
+``server_key`` input scoped to the tab.
 """
 
-import os
+from contextlib import ExitStack
 from copy import deepcopy
-from unittest.mock import patch
+from types import SimpleNamespace
 
 import pytest
 from django.contrib.sessions.middleware import SessionMiddleware
+from django.core.cache import cache
 from django.test import RequestFactory
 
-from netbox_librenms_plugin.tests.conftest import make_device
-from netbox_librenms_plugin.tests.mock_librenms_server import librenms_mock_server as run_librenms_server
+from netbox_librenms_plugin.models import LibreNMSSettings
+from netbox_librenms_plugin.tests.conftest import make_device, make_superuser
+from netbox_librenms_plugin.tests.mock_librenms_server import librenms_mock_server
 
 pytestmark = pytest.mark.django_db
-
-TWO_SERVERS = {
-    "default": {
-        "librenms_url": "https://librenms-default.example.com",
-        "api_token": "default-token-12345",
-    },
-    "secondary": {
-        "librenms_url": "https://librenms-secondary.example.com",
-        "api_token": "secondary-token-67890",
-    },
-}
 
 DEVICE_INFO = {
     "device_id": 42,
@@ -48,7 +39,50 @@ DEVICE_INFO = {
 }
 
 
-def _render_sync_page(device, query=""):
+def _configure_servers(settings, servers):
+    plugin_config = deepcopy(settings.PLUGINS_CONFIG)
+    plugin_config["netbox_librenms_plugin"]["servers"] = {
+        key: {
+            "display_name": f"{key.title()} LibreNMS",
+            "librenms_url": server.url,
+            "api_token": f"{key}-test-token",
+            "verify_ssl": False,
+        }
+        for key, server in vars(servers).items()
+    }
+    plugin_config["netbox_librenms_plugin"].pop("librenms_url", None)
+    settings.PLUGINS_CONFIG = plugin_config
+
+
+@pytest.fixture
+def servers(settings, monkeypatch):
+    monkeypatch.setenv("NO_PROXY", "127.0.0.1,localhost")
+    monkeypatch.setenv("no_proxy", "127.0.0.1,localhost")
+    with ExitStack() as stack:
+        running = SimpleNamespace(
+            default=stack.enter_context(librenms_mock_server()),
+            secondary=stack.enter_context(librenms_mock_server()),
+        )
+        _configure_servers(settings, running)
+        LibreNMSSettings.objects.update_or_create(pk=1, defaults={"selected_server": "default"})
+        cache.delete_many(
+            [
+                "librenms_device_info_default_42",
+                "librenms_device_info_secondary_42",
+                "librenms_poller_group_choices_default",
+                "librenms_poller_group_choices_secondary",
+            ]
+        )
+        yield running
+
+
+def _register_device_info(server, *, found=True):
+    status = 200 if found else 404
+    payload = {"status": "ok", "devices": [dict(DEVICE_INFO)]} if found else {"status": "error"}
+    server.register("/api/v0/devices/42", payload, status=status)
+
+
+def _render_sync_page(device, servers, query=""):
     """GET the LibreNMS sync page through the real view; return decoded HTML."""
     from django.contrib.auth import get_user_model
 
@@ -66,17 +100,9 @@ def _render_sync_page(device, query=""):
     view = DeviceLibreNMSSyncView()
     view.setup(request, pk=device.pk)
 
-    with (
-        patch(
-            "netbox_librenms_plugin.librenms_api.get_plugin_config",
-            side_effect=lambda _plugin, key, default=None: TWO_SERVERS if key == "servers" else default,
-        ),
-        patch(
-            "netbox_librenms_plugin.librenms_api.LibreNMSAPI.get_device_info",
-            return_value=(True, dict(DEVICE_INFO)),
-        ),
-    ):
-        response = view.get(request, pk=device.pk)
+    _register_device_info(servers.default)
+    _register_device_info(servers.secondary)
+    response = view.get(request, pk=device.pk)
     return response.content.decode()
 
 
@@ -93,14 +119,8 @@ def _enclosing_form(html, marker):
 class TestAddDeviceFormsScopeToTheActiveServer:
     """The Add-device forms build their choices from the server the page is scoped to."""
 
-    def _render_unknown_device(self, device, query):
-        """Render the page for a device LibreNMS does not know, so the Add-device forms appear.
-
-        Both servers are real loopback LibreNMS instances, so the request path, headers and
-        response parsing are exercised rather than stubbed. Returns ``(response, requested)``,
-        where *requested* holds one ``(server_key, path)`` pair per request that actually
-        reached either server.
-        """
+    def _render_unknown_device(self, device, servers, query, requested_servers):
+        """Render the page for a device LibreNMS does not know, so the Add-device forms appear."""
         from django.contrib.auth import get_user_model
 
         from netbox_librenms_plugin.views.object_sync.devices import DeviceLibreNMSSyncView
@@ -116,79 +136,41 @@ class TestAddDeviceFormsScopeToTheActiveServer:
 
         view = DeviceLibreNMSSyncView()
         view.setup(request, pk=device.pk)
+        cache.delete("librenms_device_info_secondary_42")
+        for key, server in vars(servers).items():
+            _register_device_info(server, found=False)
 
-        requested = []
+            def record_poller_request(*, _key=key, **_request):
+                requested_servers.append(_key)
+                return 200, {"status": "ok", "get_poller_group": []}
 
-        def _route(server_key, status, body):
-            """Register-able route that records which server was asked for which path."""
+            server.register("/api/v0/poller_group", record_poller_request)
+        return view.get(request, pk=device.pk)
 
-            def route(*, path, **_kwargs):
-                requested.append((server_key, path))
-                return status, body
-
-            return route
-
-        with run_librenms_server() as default_server, run_librenms_server() as secondary_server:
-            live = {"default": default_server, "secondary": secondary_server}
-            for server_key, server in live.items():
-                # Absent from LibreNMS (a real 404), so the page offers the Add-device forms.
-                server.register(
-                    f"/api/v0/devices/{DEVICE_INFO['device_id']}",
-                    _route(server_key, 404, {"status": "error", "message": "device not found"}),
-                )
-                # Registered on BOTH servers so a request to the wrong one is recorded rather
-                # than lost in the handler's catch-all 404.
-                server.register(
-                    "/api/v0/poller_group",
-                    _route(server_key, 200, {"status": "ok", "get_poller_group": []}),
-                )
-            servers = {key: {**TWO_SERVERS[key], "librenms_url": live[key].url} for key in TWO_SERVERS}
-            with (
-                patch.dict(
-                    os.environ,
-                    {"NO_PROXY": "127.0.0.1,localhost", "no_proxy": "127.0.0.1,localhost"},
-                ),
-                patch(
-                    "netbox_librenms_plugin.librenms_api.get_plugin_config",
-                    side_effect=lambda _plugin, key, default=None: servers if key == "servers" else default,
-                ),
-            ):
-                response = view.get(request, pk=device.pk)
-        return response, requested
-
-    def test_poller_group_choices_come_from_the_active_server(self):
+    def test_poller_group_choices_come_from_the_active_server(self, servers):
         """A secondary-server page must not offer the default server's poller groups."""
-        from django.core.cache import cache
-
         # The choices are cached per server key; clear so this render does the lookup.
         cache.delete("librenms_poller_group_choices_secondary")
         cache.delete("librenms_poller_group_choices_default")
 
         device = make_device("poller-scope", librenms_cf={"secondary": 42})
-        _response, requested = self._render_unknown_device(device, "?server_key=secondary")
+        requested_servers = []
+        self._render_unknown_device(device, servers, "?server_key=secondary", requested_servers)
 
-        poller_requests = [(key, path) for key, path in requested if "poller_group" in path]
-        assert poller_requests, "the page never asked for poller groups, so the check below is vacuous"
-        assert not [key for key, _path in poller_requests if key == "default"], (
-            f"the secondary-server page asked the DEFAULT server for poller groups: {poller_requests}"
-        )
+        assert requested_servers == ["secondary"]
 
-    def test_a_stale_server_key_asks_no_server_for_poller_groups(self):
+    def test_a_stale_server_key_asks_no_server_for_poller_groups(self, servers):
         """The fail-closed page must not fall back to the installation default for its choices."""
-        from django.core.cache import cache
-
         cache.delete("librenms_poller_group_choices_default")
         cache.delete("librenms_poller_group_choices_secondary")
         cache.delete("librenms_poller_group_choices_ghost")
         device = make_device("poller-stale", librenms_cf={"secondary": 42})
-        response, requested = self._render_unknown_device(device, "?server_key=ghost")
+        requested_servers = []
+        response = self._render_unknown_device(device, servers, "?server_key=ghost", requested_servers)
 
-        # The page must still render: a 500 would otherwise satisfy every negative below.
+        # The page must still render: a 500 would otherwise satisfy the negative below on its own.
         assert response.status_code == 200
-        # Measured: a stale key contacts NO server at all, so assert that directly rather than
-        # only the poller-group subset. The sibling test above is the positive control that this
-        # helper does record requests when the key resolves.
-        assert requested == [], f"a stale server selection contacted a LibreNMS server: {requested}"
+        assert requested_servers == []
 
 
 class TestSyncPageFormsCarryServerKey:
@@ -199,8 +181,6 @@ class TestSyncPageFormsCarryServerKey:
         # mapping makes every ordinary action prove that the query key wins.
         # Serial/type/platform differ from LibreNMS values → the sync forms render.
         from dcim.models import DeviceType, Manufacturer, Platform
-
-        from netbox_librenms_plugin.models import LibreNMSSettings
 
         device = make_device("sync-page-forms", serial="NB-SER-1", librenms_cf={"secondary": {"id": 42}})
         LibreNMSSettings.objects.update_or_create(pk=1, defaults={"selected_server": "default"})
@@ -213,8 +193,8 @@ class TestSyncPageFormsCarryServerKey:
         return device
 
     @pytest.fixture
-    def html(self):
-        return _render_sync_page(self._device(), "?server_key=secondary")
+    def html(self, servers):
+        return _render_sync_page(self._device(), servers, "?server_key=secondary")
 
     @pytest.mark.parametrize(
         "action_name",
@@ -233,16 +213,14 @@ class TestSyncPageFormsCarryServerKey:
             f"{action_name} form must post server_key=secondary; got: {form[:400]}"
         )
 
-    def test_legacy_conversion_form_posts_the_query_selected_server_key(self):
+    def test_legacy_conversion_form_posts_the_query_selected_server_key(self, servers):
         """The legacy-only action keeps its active server key in the submitted form."""
         from django.urls import reverse
-
-        from netbox_librenms_plugin.models import LibreNMSSettings
 
         device = make_device("sync-page-legacy-form", serial="NB-SER-2", librenms_cf=42)
         LibreNMSSettings.objects.update_or_create(pk=1, defaults={"selected_server": "secondary"})
 
-        html = _render_sync_page(device, "?server_key=secondary")
+        html = _render_sync_page(device, servers, "?server_key=secondary")
         form = _enclosing_form(
             html,
             reverse(
@@ -281,18 +259,11 @@ def reverse_fragment(url_name):
     return reverse(f"plugins:netbox_librenms_plugin:{url_name}", kwargs={"pk": pk})
 
 
-def test_stale_installation_server_does_not_select_its_cached_locations(settings):
+def test_stale_installation_server_does_not_select_its_cached_locations(servers):
     """A removed selected server must not win the first location-cache lookup."""
-    from django.core.cache import cache
-
     from netbox_librenms_plugin.forms import LibreNMSImportFilterForm
     from netbox_librenms_plugin.import_utils.cache import get_location_choices_cache_key
-    from netbox_librenms_plugin.librenms_api import LibreNMSAPI
-    from netbox_librenms_plugin.models import LibreNMSSettings
 
-    plugin_config = deepcopy(settings.PLUGINS_CONFIG)
-    plugin_config["netbox_librenms_plugin"]["servers"] = deepcopy(TWO_SERVERS)
-    settings.PLUGINS_CONFIG = plugin_config
     LibreNMSSettings.objects.update_or_create(pk=1, defaults={"selected_server": "removed-server"})
 
     stale_choices = [("", "All Locations"), ("stale", "Removed server location")]
@@ -301,12 +272,20 @@ def test_stale_installation_server_does_not_select_its_cached_locations(settings
     default_key = get_location_choices_cache_key("default")
     cache.set(stale_key, stale_choices)
     cache.set(default_key, default_choices)
+    location_requests = []
+
+    def record_location_request(**request):
+        location_requests.append(request)
+        return 200, {"status": "ok", "locations": [{"id": 1, "location": "Unexpected live location"}]}
+
+    servers.default.register("/api/v0/resources/locations", record_location_request)
+    servers.secondary.register("/api/v0/resources/locations", record_location_request)
 
     try:
-        with patch.object(LibreNMSAPI, "get_locations", side_effect=AssertionError("cache lookup should resolve")):
-            form = LibreNMSImportFilterForm()
+        form = LibreNMSImportFilterForm()
 
         assert list(form.fields["librenms_location"].choices) == default_choices
+        assert location_requests == []
     finally:
         cache.delete_many([stale_key, default_key])
 
@@ -314,17 +293,39 @@ def test_stale_installation_server_does_not_select_its_cached_locations(settings
 class TestSyncPageMisconfiguredDefaultDegrades:
     """Verify that a broken default degrades the sync page without lazy API client reconstruction or a 500."""
 
-    def test_get_with_broken_default_renders_degraded_page(self):
-        from django.contrib.auth import get_user_model
+    @staticmethod
+    def _configure_broken_default(settings, *, include_secondary=False):
+        plugin_config = deepcopy(settings.PLUGINS_CONFIG)
+        servers = {
+            "default": {
+                "display_name": "Broken default",
+                "librenms_url": "",
+                "api_token": "",
+            }
+        }
+        if include_secondary:
+            servers["secondary"] = {
+                "display_name": "Secondary LibreNMS",
+                "librenms_url": "http://127.0.0.1:9",
+                "api_token": "misconfiguration-test-token",
+                "verify_ssl": False,
+            }
+        plugin_config["netbox_librenms_plugin"]["servers"] = servers
+        plugin_config["netbox_librenms_plugin"].pop("librenms_url", None)
+        plugin_config["netbox_librenms_plugin"].pop("api_token", None)
+        settings.PLUGINS_CONFIG = plugin_config
+        LibreNMSSettings.objects.update_or_create(pk=1, defaults={"selected_server": "default"})
+
+    def test_get_with_broken_default_renders_degraded_page(self, settings):
         from django.contrib.messages.storage.fallback import FallbackStorage
 
         from netbox_librenms_plugin.views.object_sync.devices import DeviceLibreNMSSyncView
 
+        self._configure_broken_default(settings)
         device = make_device("sync-page-degraded")
-        user = get_user_model().objects.create_superuser(username="sync-degraded-su")
 
         request = RequestFactory().get("/x/")  # plain GET, no ?server_key
-        request.user = user
+        request.user = make_superuser("sync-degraded-su")
         request.htmx = False
         request.session = {}
         request._messages = FallbackStorage(request)
@@ -332,35 +333,22 @@ class TestSyncPageMisconfiguredDefaultDegrades:
         view = DeviceLibreNMSSyncView()
         view.setup(request, pk=device.pk)
 
-        with (
-            # The default server can't build a client (config typo / rotated secret)...
-            patch("netbox_librenms_plugin.librenms_api.build_librenms_api", return_value=None),
-            # ...so any lazy LibreNMSAPI() reconstruction would raise — exactly what a
-            # misconfigured default does in production.
-            patch(
-                "netbox_librenms_plugin.views.mixins.LibreNMSAPI",
-                side_effect=ValueError("LibreNMS URL or API token is not configured"),
-            ),
-        ):
-            response = view.get(request, pk=device.pk)
+        response = view.get(request, pk=device.pk)
 
         assert response.status_code == 200
         assert "not configured correctly" in response.content.decode()
 
-    def test_get_with_stale_server_key_and_broken_default_renders_degraded_page(self):
+    def test_get_with_stale_server_key_and_broken_default_renders_degraded_page(self, settings):
         """A stale server key must fail closed before API client construction."""
-        from django.contrib.auth import get_user_model
         from django.contrib.messages.storage.fallback import FallbackStorage
 
         from netbox_librenms_plugin.views.object_sync.devices import DeviceLibreNMSSyncView
 
+        self._configure_broken_default(settings, include_secondary=True)
         device = make_device("sync-page-degraded-stale")
-        user = get_user_model().objects.create_superuser(username="sync-degraded-stale-su")
-
-        assert "gone-server" not in TWO_SERVERS  # the key really is stale under the pinned config
 
         request = RequestFactory().get("/x/", {"server_key": "gone-server"})
-        request.user = user
+        request.user = make_superuser("sync-degraded-stale-su")
         request.htmx = False
         request.session = {}
         request._messages = FallbackStorage(request)
@@ -368,27 +356,8 @@ class TestSyncPageMisconfiguredDefaultDegrades:
         view = DeviceLibreNMSSyncView()
         view.setup(request, pk=device.pk)
 
-        with (
-            # Pin the configured servers (as _render_sync_page does) so "gone-server" is stale
-            # against a real two-server config rather than an unconfigured plugin.
-            patch(
-                "netbox_librenms_plugin.librenms_api.get_plugin_config",
-                side_effect=lambda _plugin, key, default=None: TWO_SERVERS if key == "servers" else default,
-            ),
-            # Neither the requested key nor the default can build a client.
-            patch("netbox_librenms_plugin.librenms_api.build_librenms_api", return_value=None) as mock_build,
-            # Any lazy LibreNMSAPI() reconstruction would raise, as in production.
-            patch(
-                "netbox_librenms_plugin.views.mixins.LibreNMSAPI",
-                side_effect=ValueError("LibreNMS URL or API token is not configured"),
-            ),
-        ):
-            response = view.get(request, pk=device.pk)
+        response = view.get(request, pk=device.pk)
 
-        # Selection reads the installation default once, then rejects the stale requested key
-        # without trying to construct a client for it.
-        build_keys = [c.args[0] for c in mock_build.call_args_list]
-        assert build_keys == [None]
         assert response.status_code == 200
         assert "is not an available mapping for this object" in response.content.decode()
         assert view._server_key_unresolved is True
@@ -399,32 +368,7 @@ class TestSyncPageMisconfiguredDefaultDegrades:
 class TestUpdateDeviceLocationRebindsServer:
     """UpdateDeviceLocationView must write to the POSTed server, not the global default."""
 
-    @pytest.fixture
-    def librenms_servers(self, monkeypatch):
-        from netbox_librenms_plugin.tests.mock_librenms_server import librenms_mock_server
-
-        monkeypatch.setenv("NO_PROXY", "127.0.0.1,localhost")
-        monkeypatch.setenv("no_proxy", "127.0.0.1,localhost")
-        with librenms_mock_server() as default, librenms_mock_server() as secondary:
-            yield {"default": default, "secondary": secondary}
-
-    @staticmethod
-    def _configure_servers(settings, librenms_servers):
-        from netbox_librenms_plugin.models import LibreNMSSettings
-
-        config = deepcopy(settings.PLUGINS_CONFIG)
-        config["netbox_librenms_plugin"]["servers"] = {
-            key: {
-                "librenms_url": server.url,
-                "api_token": f"{key}-token",
-                "verify_ssl": False,
-            }
-            for key, server in librenms_servers.items()
-        }
-        settings.PLUGINS_CONFIG = config
-        LibreNMSSettings.objects.update_or_create(pk=1, defaults={"selected_server": "default"})
-
-    def test_location_write_goes_to_posted_server(self, client, settings, librenms_servers):
+    def test_location_write_goes_to_posted_server(self, client, servers):
         """The real action writes only to the server selected by the POST."""
         from dcim.models import Device
         from django.contrib.messages import get_messages
@@ -432,7 +376,6 @@ class TestUpdateDeviceLocationRebindsServer:
 
         from netbox_librenms_plugin.tests.view_test_helpers import make_user_with_perms
 
-        self._configure_servers(settings, librenms_servers)
         device = make_device("loc-rebind", librenms_cf={"default": 41, "secondary": 42})
         writes = []
 
@@ -440,8 +383,8 @@ class TestUpdateDeviceLocationRebindsServer:
             writes.append(request)
             return 200, {"status": "ok"}
 
-        librenms_servers["default"].register("/api/v0/devices/41", record_write, method="PATCH")
-        librenms_servers["secondary"].register("/api/v0/devices/42", record_write, method="PATCH")
+        servers.default.register("/api/v0/devices/41", record_write, method="PATCH")
+        servers.secondary.register("/api/v0/devices/42", record_write, method="PATCH")
         client.force_login(make_user_with_perms("loc-rebind-writer", [("view", Device)]))
 
         response = client.post(
@@ -459,7 +402,7 @@ class TestUpdateDeviceLocationRebindsServer:
         ]
         assert any(message.level_tag == "success" for message in get_messages(response.wsgi_request))
 
-    def test_stale_server_key_fails_closed(self, client, settings, librenms_servers):
+    def test_stale_server_key_fails_closed(self, client, servers):
         """A stale POSTed key reports an error without writing to another server."""
         from dcim.models import Device
         from django.contrib.messages import get_messages
@@ -467,7 +410,6 @@ class TestUpdateDeviceLocationRebindsServer:
 
         from netbox_librenms_plugin.tests.view_test_helpers import make_user_with_perms
 
-        self._configure_servers(settings, librenms_servers)
         device = make_device("loc-rebind-stale", librenms_cf={"default": 41})
         writes = []
 
@@ -475,7 +417,7 @@ class TestUpdateDeviceLocationRebindsServer:
             writes.append(request)
             return 200, {"status": "ok"}
 
-        librenms_servers["default"].register("/api/v0/devices/41", record_write, method="PATCH")
+        servers.default.register("/api/v0/devices/41", record_write, method="PATCH")
         client.force_login(make_user_with_perms("loc-rebind-stale-writer", [("view", Device)]))
 
         response = client.post(
@@ -496,14 +438,12 @@ class TestInterfaceSyncRefreshButtonDeduped:
     """Verify that one Refresh Interfaces button uses the object-specific URL and shared pagination and server values."""
 
     def _render(self, obj):
-        from unittest.mock import MagicMock
-
         from django.template.loader import render_to_string
 
         # A real request (with a user) so {% csrf_token %} and the context processors the
         # template relies on resolve instead of rendering empty with a warning.
         request = RequestFactory().get("/")
-        request.user = MagicMock(is_authenticated=True)
+        request.user = make_superuser("interface-refresh-renderer")
         return render_to_string(
             "netbox_librenms_plugin/_interface_sync.html",
             {
