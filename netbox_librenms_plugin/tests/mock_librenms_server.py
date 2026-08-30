@@ -869,7 +869,6 @@ class LibreNMSStubServer(MockLibreNMSServer):
                     except (TypeError, ValueError):
                         continue
                     vlans[(device_id, vlan_number)] = {
-                        "vlan_id": len(vlans) + 1,
                         "device_id": device_id,
                         "vlan_vlan": vlan_number,
                         "vlan_domain": 1,
@@ -877,7 +876,7 @@ class LibreNMSStubServer(MockLibreNMSServer):
                         "vlan_type": "ethernet",
                         "vlan_state": 1,
                     }
-        self.vlans = list(vlans.values())
+        self.vlans = [{"vlan_id": index, **vlan} for index, vlan in enumerate(vlans.values(), start=1)]
 
     def _get_vlans(self, method, path, query, headers, body):
         return 200, {"status": "ok", "vlans": copy.deepcopy(self.vlans)}
