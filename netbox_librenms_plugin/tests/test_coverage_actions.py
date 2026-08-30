@@ -4851,51 +4851,43 @@ class TestBulkImportDevicesMorePaths:
         assert response["Location"] == url_for("plugins:netbox_librenms_plugin:librenms_import")
         assert "Invalid cluster or role selection supplied" in view_message_texts(request, "error")
 
-    def test_invalid_cluster_value_fails_closed_on_the_htmx_path(self, settings):
-        """The HTMX path gets a bare 400, matching the other invalid-input responses in this view."""
-        user = self._device_import_user("bulk-more-invalid-cluster-htmx-user")
-        view, request = self._make_base_request(
-            settings,
-            ["1"],
-            user,
-            {"cluster_1": "not-int"},
-            server_key="bulk-more-invalid-cluster-htmx",
-            htmx=True,
-        )
-        with (
-            patch("netbox_librenms_plugin.views.imports.actions.bulk_import_devices") as mock_device_import,
-            patch("netbox_librenms_plugin.views.imports.actions.bulk_import_vms") as mock_vm_import,
-        ):
-            response = post_view(view, request)
-
-        mock_device_import.assert_not_called()
-        mock_vm_import.assert_not_called()
-        assert response.status_code == 400
-
     @pytest.mark.parametrize(
         ("cluster_value", "case"),
-        [("0", "zero"), ("-1", "negative"), (str(2**63), "overflow")],
+        [("not-int", "text"), ("0", "zero"), ("-1", "negative"), (None, "overflow")],
     )
-    def test_out_of_range_cluster_value_fails_closed(self, settings, cluster_value, case):
-        """A cluster id outside PostgreSQL's primary-key range must abort the VM import."""
-        user = self._vm_import_user(f"bulk-more-cluster-{case}-user")
-        view, request = self._make_base_request(
-            settings,
-            ["1"],
-            user,
-            {"cluster_1": cluster_value},
-            server_key=f"bulk-more-cluster-{case}",
-            htmx=True,
-        )
-        with (
-            patch("netbox_librenms_plugin.views.imports.actions.bulk_import_devices") as mock_device_import,
-            patch("netbox_librenms_plugin.views.imports.actions.bulk_import_vms") as mock_vm_import,
-        ):
+    def test_invalid_cluster_value_fails_closed_on_the_htmx_path(self, settings, monkeypatch, cluster_value, case):
+        """The HTMX path rejects malformed and out-of-range cluster ids without creating a VM."""
+        from virtualization.models import VirtualMachine
+
+        from netbox_librenms_plugin.utils import _POSTGRES_BIGINT_MAX
+
+        if case == "overflow":
+            cluster_value = str(_POSTGRES_BIGINT_MAX + 1)
+        monkeypatch.setenv("NO_PROXY", "127.0.0.1,localhost")
+        monkeypatch.setenv("no_proxy", "127.0.0.1,localhost")
+        user = self._vm_import_user(f"bulk-more-invalid-cluster-{case}-user")
+        before = set(VirtualMachine.objects.values_list("pk", flat=True))
+        with run_librenms_server() as server:
+            server.device_info_response(
+                device_id=1,
+                hostname=f"bulk-more-invalid-cluster-{case}",
+                serial="",
+                ip="198.18.0.1",
+            )
+            view, request = self._make_base_request(
+                settings,
+                ["1"],
+                user,
+                {"cluster_1": cluster_value},
+                server_key=f"bulk-more-invalid-cluster-{case}",
+                server_url=server.url,
+                htmx=True,
+            )
             response = post_view(view, request)
 
-        mock_device_import.assert_not_called()
-        mock_vm_import.assert_not_called()
         assert response.status_code == 400
+        assert response.content == b"Invalid cluster or role selection"
+        assert set(VirtualMachine.objects.values_list("pk", flat=True)) == before
 
     def test_invalid_role_on_a_valid_cluster_still_imports_the_vm(self, settings, caplog):
         """A bad role id next to a valid cluster keeps the VM import and drops only the role."""
