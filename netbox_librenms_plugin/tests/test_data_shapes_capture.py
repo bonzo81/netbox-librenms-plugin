@@ -386,8 +386,8 @@ def test_capture_raises_when_filtered_inventory_request_has_transport_error():
         capture_device_recording(api, 1000)
 
 
-def test_capture_fails_when_transceiver_request_has_transport_error():
-    """A failed transceiver fetch must not become a successful no-optics capture."""
+def test_capture_omits_transceivers_when_optional_request_has_transport_error():
+    """A failed optional transceiver fetch must not abort an otherwise complete capture."""
     routes = {
         "devices/1000": {"status": "ok", "devices": [{"device_id": 1000, "os": "ios"}]},
         "inventory/1000": {"status": "ok", "inventory": []},
@@ -397,6 +397,16 @@ def test_capture_fails_when_transceiver_request_has_transport_error():
     }
     api = _StubApi({k: (200, v) for k, v in routes.items()})
     api.routes["devices/1000/transceivers"] = (0, None)  # transport error on this route
+
+    captured = capture_device_recording(api, 1000)
+
+    assert "GET /api/v0/devices/1000/transceivers" not in captured["responses"]
+
+
+def test_capture_rejects_transceiver_server_error():
+    """An optional transceiver route's HTTP failure must not look like a successful no-optics capture."""
+    api = _StubApi({k: (200, v) for k, v in _all_ok_routes().items()})
+    api.routes["devices/1000/transceivers"] = (503, {"status": "error", "message": "unavailable"})
 
     with pytest.raises(RuntimeError, match="transceivers"):
         capture_device_recording(api, 1000)

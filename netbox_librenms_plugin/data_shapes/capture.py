@@ -103,6 +103,7 @@ def capture_device_recording(api, device_id, *, name=None, description="", meta=
         key_params="__same__",
         required=False,
         allow_not_found=False,
+        allow_transport_failure=False,
         row_field=None,
         allow_empty=True,
     ):
@@ -117,9 +118,9 @@ def capture_device_recording(api, device_id, *, name=None, description="", meta=
         if not (100 <= status < 600):
             # A required structural route that never answered means the capture is incomplete:
             # persisting it would ship a partial fixture (missing device/ports/port_stack) as if
-            # capture succeeded. Fail loudly instead. (Optional routes like transceivers may be
-            # legitimately absent/timed out, so they are not required.)
-            if required:
+            # capture succeeded. Fail loudly instead. A caller can explicitly omit an optional
+            # route that did not answer while still rejecting real HTTP and payload failures.
+            if required and not allow_transport_failure:
                 raise RuntimeError(f"Capture failed for {path!r}: no HTTP response (status {status})")
             return status, body
         if 200 <= status < 300 and body is None:
@@ -219,6 +220,7 @@ def capture_device_recording(api, device_id, *, name=None, description="", meta=
         f"devices/{device_id}/transceivers",
         required=True,
         allow_not_found=True,
+        allow_transport_failure=True,
         row_field="transceivers",
     )
 
