@@ -2087,14 +2087,17 @@ class TestBaseInterfaceTableViewPost:
         # filter being that there *was* an OOB LAG row to exclude).
         assert any(request_url.endswith("/api/v0/devices/99/ports") for request_url in requested_urls)
         cache_key = DeviceInterfaceTableView().get_cache_key(device, "ports", "default")
-        cached_snapshot = real_cache.get(cache_key)
-        assert cached_snapshot is not None
-        assert any(p.get("_source") == "oob" for p in cached_snapshot["ports"]), (
-            "OOB row was never merged into the snapshot — the test would pass vacuously"
-        )
+        try:
+            cached_snapshot = real_cache.get(cache_key)
+            assert cached_snapshot is not None
+            assert any(p.get("_source") == "oob" for p in cached_snapshot["ports"]), (
+                "OOB row was never merged into the snapshot — the test would pass vacuously"
+            )
 
-        # The OOB LAG row does not trigger the main-device port_stack fetch.
-        assert not any(request_url.endswith("/port_stack") for request_url in requested_urls)
+            # The OOB LAG row does not trigger the main-device port_stack fetch.
+            assert not any(request_url.endswith("/port_stack") for request_url in requested_urls)
+        finally:
+            real_cache.delete(cache_key)
 
 
 @pytest.mark.django_db
