@@ -351,14 +351,17 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
         Return the LibreNMS management/polling IP for *obj*, or None.
 
         Used to decide which synced IP (if any) should become the object's
-        Primary IP. Best-effort: any lookup failure yields None so the sync
-        itself is never blocked.
+        Primary IP. Transport and response failures yield None. An assignment
+        conflict stops the sync so the caller can report its conflicting owner.
 
         Args:
             obj (Device | VirtualMachine): The object whose management IP to read.
 
         Returns:
             str | None: The management/polling IP, or None if the lookup fails or has no result.
+
+        Raises:
+            LibreNMSIDConflictError: If discovery finds an ID owned by another object.
         """
         try:
             librenms_id, lookup_error = self.resolve_librenms_id(obj)

@@ -437,7 +437,7 @@ class LibreNMSAPI:
         Generate a unique cache key for an object.
 
         Args:
-            obj: NetBox device or VM object
+            obj: NetBox object with model metadata and an optional primary key
             server_key: LibreNMS server key to scope the key to; defaults to this
                 client's bound ``server_key``. Pass an explicit key when reading on
                 behalf of a different (scoped) server than the client is bound to.
@@ -457,10 +457,10 @@ class LibreNMSAPI:
 
     def _store_librenms_id(self, obj, librenms_id):
         """
-        Store in custom field if available
+        Persist a saved device/VM mapping, or cache the ID for another object.
 
         Args:
-            obj: NetBox device or VM object
+            obj: NetBox object associated with the LibreNMS ID
             librenms_id: LibreNMS device ID
 
         Returns:
