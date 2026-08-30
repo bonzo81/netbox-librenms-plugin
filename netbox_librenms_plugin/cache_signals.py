@@ -15,7 +15,7 @@ is the safe direction to fail.
 import logging
 from typing import NamedTuple
 
-from django.db import DatabaseError, transaction
+from django.db import transaction
 from django.db.models.signals import m2m_changed, post_delete, post_init, post_save, pre_delete, pre_save
 
 from netbox_librenms_plugin.sync_cache import (
@@ -118,7 +118,7 @@ class _Batch:
 
         try:
             self._resolve_assignments()
-        except DatabaseError:
+        except Exception:
             logger.exception("Could not resolve assigned-object owners after a NetBox change")
         for label, pk in self.owner_keys:
             try:

@@ -413,32 +413,28 @@ class TestOneFlushPerObject:
         assert not any(remaining.values()), f"batched IP writes left stale snapshots: {remaining}"
 
     def test_assignment_resolution_failure_does_not_abort_direct_owner_cleanup(
-        self, caplog, django_capture_on_commit_callbacks
+        self, caplog, django_capture_on_commit_callbacks, monkeypatch
     ):
-        """A failed generic-assignment lookup must not stop known-owner invalidation."""
+        """A non-database assignment-resolution error must not stop known-owner invalidation."""
         from django.contrib.contenttypes.models import ContentType
-        from django.db import DatabaseError, connection, transaction
+        from django.db import transaction
         from ipam.models import IPAddress
 
+        from netbox_librenms_plugin import cache_signals
         from netbox_librenms_plugin.tests.conftest import make_device, make_interface
 
         device = make_device("signal-assignment-resolution-failure", librenms_cf={SERVER_KEY: 7})
         interface = make_interface(device, "Ethernet1")
         ContentType.objects.get_for_model(interface)
         keys = _seed_every_tab(device)
-
-        def fail_content_type_lookup(execute, sql, params, many, context):
-            if 'FROM "django_content_type"' in sql:
-                raise DatabaseError("simulated content-type lookup failure")
-            return execute(sql, params, many, context)
+        monkeypatch.setitem(cache_signals.OWNER_COLUMNS, "dcim.interface", ("missing_owner_id",))
 
         try:
-            with connection.execute_wrapper(fail_content_type_lookup):
-                with django_capture_on_commit_callbacks(execute=True):
-                    with transaction.atomic():
-                        interface.description = "Changed in the same transaction"
-                        interface.save(update_fields=["description"])
-                        IPAddress.objects.create(address="198.18.32.1/24", assigned_object=interface)
+            with django_capture_on_commit_callbacks(execute=True):
+                with transaction.atomic():
+                    interface.description = "Changed in the same transaction"
+                    interface.save(update_fields=["description"])
+                    IPAddress.objects.create(address="198.18.32.1/24", assigned_object=interface)
             remaining = _snapshot_state(device)
         finally:
             _clear(keys)
