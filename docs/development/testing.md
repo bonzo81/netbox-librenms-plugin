@@ -187,13 +187,6 @@ New tests should follow this structure:
 ```python
 import pytest
 
-from netbox_librenms_plugin.tests.conftest import make_device
-from netbox_librenms_plugin.tests.view_test_helpers import (
-    make_request as make_view_request,
-    make_user_with_perms as make_view_user,
-    message_texts as view_message_texts,
-    post as post_view,
-)
 
 @pytest.mark.django_db
 class TestFeatureName:
@@ -203,6 +196,13 @@ class TestFeatureName:
         """Describe what this test verifies."""
         from dcim.models import Device
 
+        from netbox_librenms_plugin.tests.conftest import make_device
+        from netbox_librenms_plugin.tests.view_test_helpers import (
+            make_request as make_view_request,
+            make_user_with_perms as make_view_user,
+            message_texts as view_message_texts,
+            post as post_view,
+        )
         from netbox_librenms_plugin.views.imports.actions import SomeActionView
 
         # Arrange - real rows, a real user, real grants

@@ -1,5 +1,6 @@
 """Tests for isolated parallel test workers."""
 
+import ast
 import os
 import re
 import subprocess
@@ -712,6 +713,22 @@ def test_reused_database_restores_inventory_and_serial_seed_rules():
     seed_migration_rows()
     assert InventoryIgnoreRule.objects.filter(**inventory).exists()
     assert NormalizationRule.objects.filter(**serial).exists()
+
+
+def test_testing_guide_template_keeps_project_imports_inside_the_test_method():
+    """The starter template must not import Django-dependent project modules during collection."""
+    testing_guide = (REPOSITORY_ROOT / "docs/development/testing.md").read_text()
+    template_section = testing_guide.split("### Basic Test Template", maxsplit=1)[1]
+    template = template_section.split("```python", maxsplit=1)[1].split("```", maxsplit=1)[0]
+    module = ast.parse(template)
+
+    project_imports = [
+        node
+        for node in module.body
+        if isinstance(node, ast.ImportFrom) and node.module.startswith("netbox_librenms_plugin")
+    ]
+
+    assert not project_imports, "move project imports inside the template test method"
 
 
 def test_browser_tests_take_their_page_from_the_shared_fixture():
