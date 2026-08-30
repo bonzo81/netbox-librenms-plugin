@@ -259,59 +259,63 @@ class TestBulkImportVms:
         assert result["skipped"][0]["device_id"] == 10
         assert "existing-vm" in result["skipped"][0]["reason"]
 
-    def test_success_path_vm_created(self):
-        """Happy path: VM is created and appended to success list."""
+    @pytest.mark.django_db
+    def test_success_path_vm_created(self, monkeypatch, settings):
+        """A permitted bulk import persists a VM with its selected cluster and server mapping."""
+        from copy import deepcopy
+
+        from django.core.cache import cache
+        from virtualization.models import VirtualMachine
+
+        from netbox_librenms_plugin.import_utils.cache import get_import_device_cache_key
         from netbox_librenms_plugin.import_utils.vm_operations import bulk_import_vms
+        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+        from netbox_librenms_plugin.tests.conftest import make_cluster
+        from netbox_librenms_plugin.tests.mock_librenms_server import librenms_mock_server
+        from netbox_librenms_plugin.tests.view_test_helpers import make_user_with_perms
 
-        mock_api = MagicMock()
-        mock_api.server_key = "default"
+        monkeypatch.setenv("NO_PROXY", "127.0.0.1,localhost")
+        monkeypatch.setenv("no_proxy", "127.0.0.1,localhost")
+        device_id = 62020
+        with librenms_mock_server() as server:
+            server.device_info_response(device_id=device_id, hostname="bulk-imported-vm", ip="198.18.0.20")
+            config = deepcopy(settings.PLUGINS_CONFIG)
+            config["netbox_librenms_plugin"]["servers"] = {
+                "default": {
+                    "librenms_url": server.url,
+                    "api_token": "default-token",
+                    "verify_ssl": False,
+                }
+            }
+            settings.PLUGINS_CONFIG = config
+            cache.delete_many(
+                [
+                    get_import_device_cache_key(device_id, "default"),
+                    f"librenms_device_info_default_{device_id}",
+                ]
+            )
+            cluster = make_cluster("bulk-import-success-cluster")
+            user = make_user_with_perms(
+                "bulk-import-vm-writer",
+                [("add", VirtualMachine)],
+                plugin_write=False,
+            )
 
-        libre_device = {"device_id": 20, "hostname": "new-vm"}
-        mock_validation = {
-            "existing_device": None,
-            "can_import": True,
-            "cluster": {"cluster": MagicMock()},
-            "platform": {"platform": None},
-            "issues": [],
-        }
-        mock_vm = MagicMock()
-        mock_vm.name = "new-vm"
+            result = bulk_import_vms(
+                {device_id: {"cluster_id": cluster.pk}},
+                LibreNMSAPI("default"),
+                user=user,
+            )
 
-        mock_create_vm = MagicMock(return_value=mock_vm)
-
-        with (
-            patch("netbox_librenms_plugin.import_utils.vm_operations.require_permissions"),
-            patch(
-                "netbox_librenms_plugin.import_utils.vm_operations.fetch_device_with_cache",
-                return_value=libre_device,
-            ),
-            patch(
-                "netbox_librenms_plugin.import_utils.vm_operations.validate_device_for_import",
-                return_value=mock_validation,
-            ),
-            patch(
-                "netbox_librenms_plugin.import_utils.vm_operations._determine_device_name",
-                return_value="new-vm",
-            ),
-            patch(
-                "netbox_librenms_plugin.import_utils.vm_operations.create_vm_from_librenms",
-                mock_create_vm,
-            ),
-            patch("netbox_librenms_plugin.import_utils.vm_operations.Cluster"),
-            patch("netbox_librenms_plugin.import_utils.vm_operations.DeviceRole"),
-            patch("netbox_librenms_plugin.import_validation_helpers.apply_cluster_to_validation"),
-            patch("netbox_librenms_plugin.import_validation_helpers.apply_role_to_validation"),
-        ):
-            result = bulk_import_vms({20: {}}, mock_api, user=MagicMock())
-
+        assert result["failed"] == []
+        assert result["skipped"] == []
         assert len(result["success"]) == 1
-        assert result["success"][0]["device_id"] == 20
-        assert result["success"][0]["device"] == mock_vm
-        assert len(result["failed"]) == 0
-        assert len(result["skipped"]) == 0
-        # Verify api.server_key is forwarded to create_vm_from_librenms
-        call_kwargs = mock_create_vm.call_args[1]
-        assert call_kwargs.get("server_key") == mock_api.server_key
+        vm = result["success"][0]["device"]
+        vm.refresh_from_db()
+        assert result["success"][0]["device_id"] == device_id
+        assert vm.name == "bulk-imported-vm"
+        assert vm.cluster == cluster
+        assert vm.custom_field_data["librenms_id"] == {"default": device_id}
 
     def test_cluster_assignment_applied(self):
         """apply_cluster_to_validation is called when cluster_id is provided and found."""
