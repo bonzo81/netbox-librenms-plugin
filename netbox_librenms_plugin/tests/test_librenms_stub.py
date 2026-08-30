@@ -175,6 +175,28 @@ def test_stub_serves_recordings_and_derived_instance_endpoints_over_real_http():
         server.stop()
 
 
+def test_stub_updates_location_whose_name_contains_slash():
+    """Keep a slash inside the encoded location path segment used by the real client."""
+    server = _start_stub()
+    try:
+        api = make_recording_api(server.url, server_key="stub", token=TOKEN)
+        name = "Building A/Floor 2"
+
+        ok, message = api.add_location({"location": name, "lat": None, "lng": None})
+        assert ok is True, message
+
+        ok, message = api.update_location(name, {"lat": 0, "lng": 0})
+        assert ok is True, message
+
+        ok, locations = api.get_locations()
+        assert ok is True
+        location = next(item for item in locations if item["location"] == name)
+        assert location["lat"] == 0
+        assert location["lng"] == 0
+    finally:
+        server.stop()
+
+
 def test_stub_supports_librenms_device_filters_and_lookup_aliases():
     server = _start_stub()
     try:

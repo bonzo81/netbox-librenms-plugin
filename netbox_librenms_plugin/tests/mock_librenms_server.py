@@ -832,7 +832,7 @@ class LibreNMSStubServer(MockLibreNMSServer):
 
     def _register_location_patch(self, location_name):
         self.register(
-            f"/api/v0/locations/{quote(location_name)}",
+            f"/api/v0/locations/{quote(location_name, safe='')}",
             self._update_location_handler(location_name),
             method="PATCH",
         )
