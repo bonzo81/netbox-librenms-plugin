@@ -1452,6 +1452,25 @@ class TestUpdateLocationErrors:
         assert result == (True, "Location updated")
         assert received == [("PATCH", "/api/v0/locations/Test%20Site", self.LOCATION_DATA)]
 
+    def test_success_encodes_slash_as_part_of_the_location_segment(self, settings, librenms_server):
+        """A slash in a location name must not become another route segment."""
+        encoded_path = "/api/v0/locations/Building%20A%2FFloor%202"
+        received = []
+
+        def update_location(method, path, query, headers, body):
+            received.append((method, path, body))
+            return 200, {"status": "ok", "message": "Location updated"}
+
+        librenms_server.register(encoded_path, update_location, method="PATCH")
+
+        result = api_for(settings, librenms_server.url).update_location(
+            "Building A/Floor 2",
+            self.LOCATION_DATA,
+        )
+
+        assert result == (True, "Location updated")
+        assert received == [("PATCH", encoded_path, self.LOCATION_DATA)]
+
     def test_request_exception_returns_false(self, settings, librenms_server):
         """A refused connection returns a failed result."""
         api = api_for(settings, librenms_server.url)

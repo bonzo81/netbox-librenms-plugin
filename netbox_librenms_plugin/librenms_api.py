@@ -1142,7 +1142,7 @@ class LibreNMSAPI:
             tuple: (success: bool, message: str)
         """
         try:
-            encoded_location_name = urllib.parse.quote(location_name)
+            encoded_location_name = urllib.parse.quote(location_name, safe="")
             response = requests.patch(
                 f"{self.librenms_url}/api/v0/locations/{encoded_location_name}",
                 headers=self.headers,
