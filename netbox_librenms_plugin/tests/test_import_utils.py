@@ -2166,13 +2166,13 @@ class TestResolveNamingPreferencesKeys:
     def test_real_user_preferences_are_used_without_toggles(self, django_user_model):
         from django.test import RequestFactory
 
-        from netbox_librenms_plugin.utils import resolve_naming_preferences
+        from netbox_librenms_plugin.utils import resolve_naming_preferences, save_user_pref
 
         user = django_user_model.objects.create_user(username="naming-preferences")
-        user.config.set("plugins.netbox_librenms_plugin.use_sysname", False, commit=True)
-        user.config.set("plugins.netbox_librenms_plugin.strip_domain", True, commit=True)
         request = RequestFactory().get("/device-import/")
         request.user = user
+        save_user_pref(request, "plugins.netbox_librenms_plugin.use_sysname", False)
+        save_user_pref(request, "plugins.netbox_librenms_plugin.strip_domain", True)
 
         assert resolve_naming_preferences(request) == (False, True)
 
@@ -2241,12 +2241,12 @@ class TestResolveSetPrimaryIp:
     def test_real_user_preference_is_used_without_toggle(self, django_user_model):
         from django.test import RequestFactory
 
-        from netbox_librenms_plugin.utils import resolve_set_primary_ip
+        from netbox_librenms_plugin.utils import resolve_set_primary_ip, save_user_pref
 
         user = django_user_model.objects.create_user(username="primary-ip-preference")
-        user.config.set("plugins.netbox_librenms_plugin.set_primary_ip", True, commit=True)
         request = RequestFactory().get("/sync/")
         request.user = user
+        save_user_pref(request, "plugins.netbox_librenms_plugin.set_primary_ip", True)
 
         assert resolve_set_primary_ip(request) is True
 
