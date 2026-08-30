@@ -1,9 +1,34 @@
 """Tests for device sync views: AddDeviceToLibreNMSView and field update views."""
 
+from copy import deepcopy
 from unittest.mock import MagicMock, patch
 
+import pytest
+from django.contrib.messages import get_messages
+from django.urls import reverse
 
-from netbox_librenms_plugin.tests.view_test_helpers import post as _post
+from netbox_librenms_plugin.tests.conftest import make_device, make_vm, make_superuser
+from netbox_librenms_plugin.tests.mock_librenms_server import librenms_mock_server
+from netbox_librenms_plugin.tests.view_test_helpers import make_user_with_perms
+
+
+@pytest.fixture
+def librenms_server(monkeypatch):
+    """Run the real HTTP boundary against a controlled loopback LibreNMS server."""
+    monkeypatch.setenv("NO_PROXY", "127.0.0.1,localhost")
+    monkeypatch.setenv("no_proxy", "127.0.0.1,localhost")
+    with librenms_mock_server() as server:
+        yield server
+
+
+def _point_plugin_at(settings, url):
+    """Configure the loopback server without changing unrelated plugin settings."""
+    plugin_config = deepcopy(settings.PLUGINS_CONFIG)
+    plugin_config["netbox_librenms_plugin"]["servers"] = {
+        "default": {"librenms_url": url, "api_token": "test-token", "verify_ssl": False}
+    }
+    settings.PLUGINS_CONFIG = plugin_config
+    return "default"
 
 
 def _make_view(cls_name, module_path="netbox_librenms_plugin.views.sync.devices"):
@@ -121,66 +146,47 @@ class TestAddDeviceToLibreNMSViewFormValid:
 
 
 class TestUpdateDeviceLocationView:
-    """UpdateDeviceLocationView.post calls update_device_field with site name."""
+    """A location update crosses the real request, permission, ORM, and HTTP boundaries."""
 
-    def test_calls_update_device_field_with_site(self):
-        """post() resolves the NetBox site name and passes the exact API payload
-        expected by LibreNMS's PATCH /api/v0/devices/{id}/field endpoint:
-        ``{"field": ["location", "override_sysLocation"], "data": [name, "1"]}``.
-        """
-        from netbox_librenms_plugin.views.sync.devices import UpdateDeviceLocationView
+    @pytest.mark.django_db
+    def test_a_location_update_sends_the_netbox_site_to_the_active_server(
+        self,
+        client,
+        librenms_server,
+        settings,
+    ):
+        server_key = _point_plugin_at(settings, librenms_server.url)
+        device_id = 42
+        device = make_device("location-update-target", librenms_cf={server_key: device_id})
+        received_requests = []
 
-        view = object.__new__(UpdateDeviceLocationView)
-        view._librenms_api = MagicMock()
-        view._librenms_api.server_key = "default"  # blank-POST rebind reuses the cached client
-        view._librenms_api.get_librenms_id.return_value = 42
-        view._librenms_api.update_device_field.return_value = (True, "ok")
-        view.request = MagicMock()
-        view.request.POST.get.return_value = None  # no posted server_key -> session/default
+        def record_update(**request):
+            received_requests.append(request)
+            return 200, {"status": "ok"}
 
-        device = MagicMock()
-        device.site = MagicMock()
-        device.site.name = "London"
-        device.get_absolute_url.return_value = "/dcim/devices/1/"
+        librenms_server.register(f"/api/v0/devices/{device_id}", record_update, method="PATCH")
+        client.force_login(make_superuser("location-update-writer"))
 
-        with patch(
-            "netbox_librenms_plugin.views.mixins.NetBoxObjectPermissionMixin.restrict_object_or_404",
-            return_value=device,
-        ):
-            with patch("netbox_librenms_plugin.views.sync.devices._device_sync_redirect"):
-                with patch("netbox_librenms_plugin.views.sync.devices.messages") as mock_msg:
-                    _post(view, view.request, pk=1)
-
-        view._librenms_api.update_device_field.assert_called_once_with(
-            42,
-            {"field": ["location", "override_sysLocation"], "data": ["London", "1"]},
+        response = client.post(
+            reverse("plugins:netbox_librenms_plugin:update_device_location", args=[device.pk]),
+            {"server_key": server_key},
         )
-        mock_msg.success.assert_called_once()
 
-    def test_warning_when_no_site(self):
-        from netbox_librenms_plugin.views.sync.devices import UpdateDeviceLocationView
-
-        view = object.__new__(UpdateDeviceLocationView)
-        view._librenms_api = MagicMock()
-        view._librenms_api.server_key = "default"  # blank-POST rebind reuses the cached client
-        view._librenms_api.get_librenms_id.return_value = 42
-        view.request = MagicMock()
-        view.request.POST.get.return_value = None  # no posted server_key -> session/default
-
-        device = MagicMock()
-        device.site = None
-        device.pk = 1
-
-        with patch(
-            "netbox_librenms_plugin.views.mixins.NetBoxObjectPermissionMixin.restrict_object_or_404",
-            return_value=device,
-        ):
-            with patch("netbox_librenms_plugin.views.sync.devices._device_sync_redirect"):
-                with patch("netbox_librenms_plugin.views.sync.devices.messages") as mock_msg:
-                    _post(view, view.request, pk=1)
-
-        view._librenms_api.update_device_field.assert_not_called()
-        mock_msg.warning.assert_called_once()
+        assert response.status_code == 302
+        assert response.url == (
+            f"{reverse('plugins:netbox_librenms_plugin:device_librenms_sync', args=[device.pk])}"
+            f"?server_key={server_key}"
+        )
+        assert [(request["method"], request["path"], request["body"]) for request in received_requests] == [
+            (
+                "PATCH",
+                f"/api/v0/devices/{device_id}",
+                {"field": ["location", "override_sysLocation"], "data": ["TestSite", "1"]},
+            )
+        ]
+        assert "Device location updated in LibreNMS to TestSite" in [
+            str(message) for message in get_messages(response.wsgi_request)
+        ]
 
 
 class TestAddDeviceObjectResolution:
@@ -248,69 +254,26 @@ class TestUpdateDeviceSerialViewWiring:
         assert any(action == "change" and model == Device for action, model in perms["POST"])
 
 
-class TestRemoveServerMappingViewWiring:
-    def test_does_not_have_librenms_api_mixin(self):
-        """RemoveServerMappingView does not call LibreNMS API — it only modifies NetBox."""
-        from netbox_librenms_plugin.views.sync.device_fields import RemoveServerMappingView
-        from netbox_librenms_plugin.views.mixins import LibreNMSAPIMixin
-
-        assert LibreNMSAPIMixin not in RemoveServerMappingView.__mro__
-
-    def test_has_permission_mixin(self):
-        from netbox_librenms_plugin.views.sync.device_fields import RemoveServerMappingView
-        from netbox_librenms_plugin.views.mixins import LibreNMSPermissionMixin, NetBoxObjectPermissionMixin
-
-        assert LibreNMSPermissionMixin in RemoveServerMappingView.__mro__
-        assert NetBoxObjectPermissionMixin in RemoveServerMappingView.__mro__
-
-    def test_post_with_virtualmachine_sets_vm_permissions_and_redirects(self):
-        """post() with object_type='virtualmachine' sets VirtualMachine permissions and redirects to VM URL."""
-        from netbox_librenms_plugin.views.sync.device_fields import RemoveServerMappingView
+class TestRemoveServerMappingView:
+    @pytest.mark.django_db
+    def test_a_vm_writer_can_remove_an_orphaned_mapping_and_returns_to_the_vm_sync_page(self, client):
         from virtualization.models import VirtualMachine
 
-        view = object.__new__(RemoveServerMappingView)
+        vm = make_vm("remove-orphaned-vm-mapping")
+        vm.custom_field_data["librenms_id"] = {"orphaned-server": 42}
+        vm.save(update_fields=["custom_field_data"])
+        user = make_user_with_perms("remove-orphaned-vm-writer", [("change", VirtualMachine)])
+        client.force_login(user)
 
-        permissions_at_check = {}
+        response = client.post(
+            reverse("plugins:netbox_librenms_plugin:remove_server_mapping", args=[vm.pk]),
+            {"object_type": "virtualmachine", "server_key": "orphaned-server"},
+        )
 
-        def capture_perms(method):
-            permissions_at_check[method] = list(view.required_object_permissions.get(method, []))
-            return None  # permission passes
-
-        mock_vm = MagicMock()
-        mock_vm.pk = 10
-        mock_vm.custom_field_data = {"librenms_id": {"orphaned-server": 42}}
-
-        # Use a mock model class so the select_for_update().get() call doesn't hit the DB
-        mock_model = MagicMock()
-        mock_model.objects.restrict.return_value = mock_model.objects
-        mock_model.objects.select_for_update.return_value.get.return_value = mock_vm
-
-        request = MagicMock()
-        request.POST = {"object_type": "virtualmachine", "server_key": "orphaned-server"}
-
-        # Resolve the URL before the settings patch below replaces the settings object: reverse()
-        # loads the root URLconf, which reads real settings.
-        from django.urls import reverse
-
-        expected_vm_sync_url = reverse("plugins:netbox_librenms_plugin:vm_librenms_sync", kwargs={"pk": 10})
-
-        with (
-            patch.object(view, "require_all_permissions", side_effect=capture_perms),
-            patch.object(view, "_get_object", return_value=(mock_vm, mock_model)),
-            patch("netbox_librenms_plugin.views.sync.device_fields.messages"),
-            patch("netbox_librenms_plugin.views.sync.device_fields.redirect") as mock_redirect,
-            patch("netbox_librenms_plugin.views.sync.device_fields.transaction"),
-            patch(
-                "django.conf.settings",
-                PLUGINS_CONFIG={"netbox_librenms_plugin": {}},
-            ),
-        ):
-            view.request = request
-            view.post(request, pk=10)
-
-        # required_object_permissions must be scoped to VirtualMachine, not Device
-        assert ("change", VirtualMachine) in permissions_at_check.get("POST", [])
-        mock_model.objects.restrict.assert_called_once_with(request.user, "change")
-        # Response must redirect to the VM-specific sync URL, which the view now builds itself
-        # so it can carry the active ?tab through the redirect.
-        mock_redirect.assert_called_with(expected_vm_sync_url)
+        assert response.status_code == 302
+        assert response.url == reverse("plugins:netbox_librenms_plugin:vm_librenms_sync", args=[vm.pk])
+        assert "Removed LibreNMS mapping for server 'orphaned-server'." in [
+            str(message) for message in get_messages(response.wsgi_request)
+        ]
+        vm.refresh_from_db()
+        assert vm.custom_field_data["librenms_id"] is None

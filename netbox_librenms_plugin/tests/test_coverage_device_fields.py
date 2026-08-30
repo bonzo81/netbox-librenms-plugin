@@ -2666,82 +2666,104 @@ class TestSyncRedirectServerKeyValidation:
 
 @pytest.mark.django_db
 class TestUpdateDeviceFieldsServerRebind:
-    """Each Update* field view must rebind the API client to the POSTed server_key."""
+    """Each device-field action must use the server selected by its real POST."""
 
-    # "staging" first so the global/default fallback (LibreNMSSettings absent) resolves THERE,
-    # not "production" — a missing rebind then looks up the per-server id under the wrong server.
-    SERVERS = {
-        "staging": {"librenms_url": "https://stg.example.com", "api_token": "t", "verify_ssl": False},
-        "production": {"librenms_url": "https://prod.example.com", "api_token": "t", "verify_ssl": False},
-    }
+    @pytest.fixture
+    def librenms_servers(self, monkeypatch):
+        from netbox_librenms_plugin.tests.mock_librenms_server import librenms_mock_server
 
-    def _view(self, ViewClass):
-        view = object.__new__(ViewClass)
-        view.kwargs = {}
-        view._librenms_api = None  # force a real build via rebind / the lazy property
-        view.require_all_permissions = MagicMock(return_value=None)
-        return view
-
-    def _post(self, view, pk, device_info):
-        from django.test import RequestFactory, override_settings
-
-        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
-
-        request = RequestFactory().post(f"/sync/{pk}/", {"server_key": "production"})
-        # RequestFactory skips AuthenticationMiddleware; the object-scoped device lookup reads
-        # request.user, and dispatch() is what binds the request in production.
-        from netbox_librenms_plugin.tests.conftest import make_superuser
-
-        request.user = make_superuser("devfield-rebind-su")
-        view.setup(request)
-        global_settings = MagicMock()
-        global_settings.first.return_value = None  # no selected server -> default -> first config key
-        with (
-            override_settings(PLUGINS_CONFIG={"netbox_librenms_plugin": {"servers": self.SERVERS}}),
-            patch("netbox_librenms_plugin.models.LibreNMSSettings.objects", global_settings),
-            patch.object(LibreNMSAPI, "get_device_info", return_value=(True, device_info)),
-            patch("netbox_librenms_plugin.views.sync.device_fields.messages"),
-            patch("netbox_librenms_plugin.views.sync.device_fields.redirect"),
-        ):
-            view.post(request, pk=pk)
-
-    def test_update_name_rebinds_and_renames_from_posted_server(self):
-        """The id lives only under 'production'; the rename only resolves if the view rebinds to the POSTed key."""
-        from netbox_librenms_plugin.views.sync.device_fields import UpdateDeviceNameView
-
-        device = make_device("rebind-name", librenms_cf={"production": 5})
-        view = self._view(UpdateDeviceNameView)
-
-        self._post(view, device.pk, {"sysName": "renamed-from-prod"})
-
-        # Rebound to the POSTed server…
-        assert view._librenms_api.server_key == "production"
-        # …and the per-server id (5) resolved, so the device actually renamed.
-        device.refresh_from_db()
-        assert device.name == "renamed-from-prod"
+        monkeypatch.setenv("NO_PROXY", "127.0.0.1,localhost")
+        monkeypatch.setenv("no_proxy", "127.0.0.1,localhost")
+        with librenms_mock_server() as staging, librenms_mock_server() as production:
+            staging.device_info_response(
+                device_id=4,
+                hostname="name-from-staging",
+                hardware="Hardware From Staging",
+                os="os-from-staging",
+                serial="SERIAL-STAGING",
+            )
+            production.device_info_response(
+                device_id=5,
+                hostname="name-from-production",
+                hardware="Hardware From Production",
+                os="os-from-production",
+                serial="SERIAL-PRODUCTION",
+            )
+            yield {"staging": staging, "production": production}
 
     @pytest.mark.parametrize(
-        "view_path",
+        ("action_name", "field_name"),
         [
-            "UpdateDeviceNameView",
-            "UpdateDeviceSerialView",
-            "UpdateDeviceTypeView",
-            "UpdateDevicePlatformView",
+            ("update_device_name", "name"),
+            ("update_device_serial", "serial"),
+            ("update_device_type", "device_type_id"),
+            ("update_device_platform", "platform_id"),
         ],
     )
-    def test_update_views_rebind_to_posted_server(self, view_path):
-        """Every Update* view rebinds self.librenms_api to the POSTed server_key before lookup."""
-        import netbox_librenms_plugin.views.sync.device_fields as df
+    def test_update_view_uses_posted_server(
+        self,
+        action_name,
+        field_name,
+        client,
+        settings,
+        librenms_servers,
+    ):
+        """The POSTed server controls the real API read and persisted device field."""
+        from copy import deepcopy
 
-        ViewClass = getattr(df, view_path)
-        device = make_device(f"rebind-{view_path.lower()}", librenms_cf={"production": 5})
-        view = self._view(ViewClass)
+        from dcim.models import Device, DeviceType, Platform
+        from django.contrib.messages import get_messages
+        from django.urls import reverse
 
-        self._post(view, device.pk, {"sysName": "h", "serial": "", "hardware": "", "os": ""})
+        from netbox_librenms_plugin.models import LibreNMSSettings
 
-        # The fix: the client is rebound to 'production' (not left on the global 'staging').
-        assert view._librenms_api is not None
-        assert view._librenms_api.server_key == "production"
+        config = deepcopy(settings.PLUGINS_CONFIG)
+        config["netbox_librenms_plugin"]["servers"] = {
+            key: {
+                "librenms_url": server.url,
+                "api_token": f"{key}-token",
+                "verify_ssl": False,
+            }
+            for key, server in librenms_servers.items()
+        }
+        settings.PLUGINS_CONFIG = config
+        LibreNMSSettings.objects.update_or_create(pk=1, defaults={"selected_server": "staging"})
+
+        device = make_device(
+            f"rebind-{action_name}",
+            serial="SERIAL-NETBOX",
+            librenms_cf={"staging": 4, "production": 5},
+        )
+        target_device_type = DeviceType.objects.create(
+            manufacturer=device.device_type.manufacturer,
+            model="Hardware From Production",
+            slug=f"hardware-from-production-{action_name}",
+        )
+        target_platform = Platform.objects.create(
+            name="os-from-production",
+            slug=f"os-from-production-{action_name}",
+        )
+        expected = {
+            "name": "name-from-production",
+            "serial": "SERIAL-PRODUCTION",
+            "device_type_id": target_device_type.pk,
+            "platform_id": target_platform.pk,
+        }[field_name]
+
+        user = make_user_with_perms(f"rebind-{action_name}", [("change", Device)])
+        client.force_login(user)
+        response = client.post(
+            reverse(f"plugins:netbox_librenms_plugin:{action_name}", args=[device.pk]),
+            {"server_key": "production"},
+        )
+
+        device.refresh_from_db()
+        assert response.status_code == 302
+        assert response.url == (
+            reverse("plugins:netbox_librenms_plugin:device_librenms_sync", args=[device.pk]) + "?server_key=production"
+        )
+        assert getattr(device, field_name) == expected
+        assert any(message.level_tag == "success" for message in get_messages(response.wsgi_request))
 
 
 # ---------------------------------------------------------------------------
