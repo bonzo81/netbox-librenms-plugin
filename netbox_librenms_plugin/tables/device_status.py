@@ -5,7 +5,7 @@ import django_tables2 as tables
 from dcim.models import Device
 from dcim.tables import DeviceTable
 from django.urls import reverse
-from django.utils.html import escape
+from django.utils.html import escape, format_html
 from django.utils.safestring import mark_safe
 from django_tables2 import Column
 from virtualization.models import VirtualMachine
@@ -239,10 +239,14 @@ class DeviceImportTable(tables.Table):
         sysname = record.get("sysName", "")
 
         if can_import:
-            return mark_safe(
-                f'<input type="checkbox" name="select" value="{device_id}" '
-                f'class="form-check-input device-select" data-device-id="{device_id}" '
-                f'data-hostname="{hostname}" data-sysname="{sysname}">'
+            return format_html(
+                '<input type="checkbox" name="select" value="{}" '
+                'class="form-check-input device-select" data-device-id="{}" '
+                'data-hostname="{}" data-sysname="{}">',
+                device_id,
+                device_id,
+                hostname,
+                sysname,
             )
         else:
             return mark_safe(
@@ -251,7 +255,7 @@ class DeviceImportTable(tables.Table):
 
     def render_hostname(self, value, record):
         """Render hostname with link to LibreNMS if available."""
-        return mark_safe(f"<strong>{value}</strong>")
+        return format_html("<strong>{}</strong>", value)
 
     def render_netbox_cluster(self, value, record):
         """
