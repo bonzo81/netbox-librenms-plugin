@@ -100,15 +100,27 @@ class _Batch:
         for model, references in references_by_model.items():
             label = model._meta.label_lower
             object_ids = {reference.object_id for reference in references}
-            rows = {
-                row[0]: row[1:]
-                for row in model.objects.using(self.using)
-                .filter(pk__in=object_ids)
-                .values_list("pk", *OWNER_COLUMNS[label])
-            }
+            try:
+                rows = {
+                    row[0]: row[1:]
+                    for row in model.objects.using(self.using)
+                    .filter(pk__in=object_ids)
+                    .values_list("pk", *OWNER_COLUMNS[label])
+                }
+            except Exception:
+                logger.exception("Could not resolve assigned-object owners after a NetBox change for %s", label)
+                continue
             for reference in references:
-                values = rows.get(reference.object_id)
-                key = _owner_key_from_columns(label, values) if values is not None else None
+                try:
+                    values = rows.get(reference.object_id)
+                    key = _owner_key_from_columns(label, values) if values is not None else None
+                except Exception:
+                    logger.exception(
+                        "Could not resolve assigned-object owner after a NetBox change for %s %s",
+                        label,
+                        reference.object_id,
+                    )
+                    continue
                 if key is not None and key not in self.assignment_claims[reference]:
                     self.add(key)
 

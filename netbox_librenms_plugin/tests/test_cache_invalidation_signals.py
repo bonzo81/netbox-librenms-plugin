@@ -442,6 +442,38 @@ class TestOneFlushPerObject:
         assert not any(remaining.values()), f"the failed assignment lookup left stale snapshots: {remaining}"
         assert "Could not resolve assigned-object owners after a NetBox change" in caplog.text
 
+    def test_assignment_resolution_failure_does_not_abort_later_model_cleanup(
+        self, caplog, django_capture_on_commit_callbacks, monkeypatch
+    ):
+        """One model's failed lookup must not hide a later assigned object's owner."""
+        from django.db import transaction
+        from ipam.models import IPAddress
+        from virtualization.models import VMInterface
+
+        from netbox_librenms_plugin import cache_signals
+        from netbox_librenms_plugin.tests.conftest import make_device, make_interface, make_vm
+
+        device = make_device("signal-failing-assignment-model", librenms_cf={SERVER_KEY: 7})
+        interface = make_interface(device, "Ethernet1")
+        virtual_machine = make_vm("signal-valid-assignment-model")
+        virtual_machine.custom_field_data["librenms_id"] = {SERVER_KEY: 8}
+        virtual_machine.save(update_fields=["custom_field_data"])
+        vm_interface = VMInterface.objects.create(virtual_machine=virtual_machine, name="Ethernet1")
+        keys = _seed_every_tab(virtual_machine)
+        monkeypatch.setitem(cache_signals.OWNER_COLUMNS, "dcim.interface", ("missing_owner_id",))
+
+        try:
+            with django_capture_on_commit_callbacks(execute=True):
+                with transaction.atomic():
+                    IPAddress.objects.create(address="198.18.34.1/24", assigned_object=interface)
+                    IPAddress.objects.create(address="198.18.34.2/24", assigned_object=vm_interface)
+            remaining = _snapshot_state(virtual_machine)
+        finally:
+            _clear(keys)
+
+        assert not any(remaining.values()), f"the earlier failed model left stale VM snapshots: {remaining}"
+        assert "Could not resolve assigned-object owners after a NetBox change" in caplog.text
+
     def test_invalid_generic_assignment_does_not_abort_later_assignment_cleanup(
         self, caplog, django_capture_on_commit_callbacks
     ):
