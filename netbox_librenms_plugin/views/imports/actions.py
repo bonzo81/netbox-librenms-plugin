@@ -1088,9 +1088,8 @@ class BulkImportDevicesView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
 
             # If cluster is selected, this is a VM import
             if cluster_value:
-                try:
-                    cluster_id = int(cluster_value)
-                except (TypeError, ValueError):
+                cluster_id = coerce_model_pk(cluster_value)
+                if cluster_id is None:
                     # Fail closed. Falling through would leave the row out of vm_imports and
                     # import it as a plain Device with the requested cluster discarded, and it
                     # would swap the required permission from add_virtualmachine to add_device.

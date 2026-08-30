@@ -4872,6 +4872,31 @@ class TestBulkImportDevicesMorePaths:
         mock_vm_import.assert_not_called()
         assert response.status_code == 400
 
+    @pytest.mark.parametrize(
+        ("cluster_value", "case"),
+        [("0", "zero"), ("-1", "negative"), (str(2**63), "overflow")],
+    )
+    def test_out_of_range_cluster_value_fails_closed(self, settings, cluster_value, case):
+        """A cluster id outside PostgreSQL's primary-key range must abort the VM import."""
+        user = self._vm_import_user(f"bulk-more-cluster-{case}-user")
+        view, request = self._make_base_request(
+            settings,
+            ["1"],
+            user,
+            {"cluster_1": cluster_value},
+            server_key=f"bulk-more-cluster-{case}",
+            htmx=True,
+        )
+        with (
+            patch("netbox_librenms_plugin.views.imports.actions.bulk_import_devices") as mock_device_import,
+            patch("netbox_librenms_plugin.views.imports.actions.bulk_import_vms") as mock_vm_import,
+        ):
+            response = post_view(view, request)
+
+        mock_device_import.assert_not_called()
+        mock_vm_import.assert_not_called()
+        assert response.status_code == 400
+
     def test_invalid_role_on_a_valid_cluster_still_imports_the_vm(self, settings, caplog):
         """A bad role id next to a valid cluster keeps the VM import and drops only the role."""
         user = self._vm_import_user("bulk-more-invalid-role-user")
