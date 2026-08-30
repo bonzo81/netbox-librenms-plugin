@@ -12,7 +12,7 @@ from django.utils.http import url_has_allowed_host_and_scheme
 from utilities.permissions import get_permission_for_model
 
 from netbox_librenms_plugin.constants import PERM_CHANGE_PLUGIN, PERM_VIEW_PLUGIN
-from netbox_librenms_plugin.librenms_api import LibreNMSAPI, LibreNMSLookupError
+from netbox_librenms_plugin.librenms_api import LibreNMSAPI, LibreNMSIDConflictError, LibreNMSLookupError
 from netbox_librenms_plugin.utils import coerce_librenms_id, coerce_model_pk, is_list_of_dicts
 
 logger = logging.getLogger(__name__)
@@ -520,7 +520,7 @@ class LibreNMSAPIMixin:
         """Return a normalized LibreNMS ID or a user-facing assignment error."""
         try:
             return coerce_librenms_id(self.librenms_api.get_librenms_id(obj)), None
-        except ValueError as exc:
+        except LibreNMSIDConflictError as exc:
             return None, LibreNMSLookupError(str(exc))
 
     def _render_server_key(self):

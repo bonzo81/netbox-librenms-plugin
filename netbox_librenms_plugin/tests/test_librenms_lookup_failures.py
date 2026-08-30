@@ -169,3 +169,26 @@ def test_location_update_reports_a_discovered_id_conflict(client, librenms_serve
 
     assert response.status_code == 302
     assert f"LibreNMS ID {CONFLICTING_DEVICE_ID} is already assigned to device '{owner.name}'" in rendered_messages
+
+
+@pytest.mark.django_db
+def test_device_status_reports_a_discovered_id_conflict(client, librenms_server, settings):
+    """A status lookup must identify the conflicting owner instead of only showing unlinked."""
+    server_key = _point_plugin_at(settings, librenms_server.url)
+    owner = make_device("librenms-status-conflict-owner", librenms_cf={server_key: CONFLICTING_DEVICE_ID})
+    target = make_device("librenms-status-conflict-target.example.com", librenms_cf={server_key: None})
+    librenms_server.register(
+        f"/api/v0/devices/{target.name}",
+        {"status": "ok", "devices": [{"device_id": CONFLICTING_DEVICE_ID}]},
+        method="GET",
+    )
+    client.force_login(make_superuser("librenms-conflict-status-user"))
+
+    response = client.get(
+        reverse("plugins:netbox_librenms_plugin:device_status_list"),
+        {"device": target.pk},
+    )
+    rendered_messages = [str(message) for message in get_messages(response.wsgi_request)]
+
+    assert response.status_code == 200
+    assert f"LibreNMS ID {CONFLICTING_DEVICE_ID} is already assigned to device '{owner.name}'" in rendered_messages

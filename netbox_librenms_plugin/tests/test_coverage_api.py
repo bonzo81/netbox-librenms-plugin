@@ -1076,6 +1076,8 @@ class TestStorelibrenmsId:
 
         api._store_librenms_id(device, 43)
 
+        assert f"unsaved-{id(device)}" not in cache_key
+        assert api._get_cache_key(device) == cache_key
         assert cache.get(cache_key) == 43
 
 

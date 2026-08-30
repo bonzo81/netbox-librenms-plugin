@@ -2,6 +2,7 @@ import logging
 import math
 import urllib.parse
 from dataclasses import dataclass
+from uuid import uuid4
 
 import requests
 from django.core.cache import cache
@@ -23,6 +24,10 @@ DEVICE_INFO_CACHE_TIMEOUT = 60
 HTTP_NOT_FOUND = 404
 
 logger = logging.getLogger(__name__)
+
+
+class LibreNMSIDConflictError(ValueError):
+    """A LibreNMS device ID is already assigned to another NetBox object."""
 
 
 @dataclass(frozen=True)
@@ -441,7 +446,12 @@ class LibreNMSAPI:
             str: Cache key
         """
         object_type = obj._meta.model_name
-        object_id = obj.pk if obj.pk is not None else f"unsaved-{id(obj)}"
+        object_id = obj.pk
+        if object_id is None:
+            object_id = getattr(obj, "_librenms_cache_identity", None)
+            if object_id is None:
+                object_id = f"unsaved-{uuid4().hex}"
+                obj._librenms_cache_identity = object_id
         resolved_key = server_key if server_key is not None else getattr(self, "server_key", "default")
         return f"librenms_device_id_{object_type}_{object_id}_{resolved_key}"
 
@@ -477,7 +487,7 @@ class LibreNMSAPI:
                 )
                 if conflict is not None:
                     object_label = "VM" if conflict._meta.model_name == "virtualmachine" else "device"
-                    raise ValueError(
+                    raise LibreNMSIDConflictError(
                         f"LibreNMS ID {librenms_id} is already assigned to {object_label} '{conflict.name}'"
                     )
                 set_librenms_device_id(locked_obj, librenms_id, self.server_key)

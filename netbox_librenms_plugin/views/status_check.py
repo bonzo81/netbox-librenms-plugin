@@ -1,6 +1,7 @@
 import logging
 
 from dcim.models import Device
+from django.contrib import messages
 from django.db.models import BooleanField, Case, Value, When
 from netbox.views import generic
 from virtualization.models import VirtualMachine
@@ -62,7 +63,9 @@ class DeviceStatusListView(LibreNMSGenericPermissionMixin, LibreNMSAPIMixin, gen
             # Check LibreNMS status for each device
             for device in queryset:
                 try:
-                    librenms_id, _lookup_error = self.resolve_librenms_id(device)
+                    librenms_id, lookup_error = self.resolve_librenms_id(device)
+                    if lookup_error is not None:
+                        messages.error(self.request, lookup_error.message)
                     device_status_map[device.pk] = bool(librenms_id)
                 except Exception:
                     device_status_map[device.pk] = False
@@ -114,7 +117,9 @@ class VMStatusListView(LibreNMSGenericPermissionMixin, LibreNMSAPIMixin, generic
             # Check LibreNMS status for each VM
             for vm in queryset:
                 try:
-                    librenms_id, _lookup_error = self.resolve_librenms_id(vm)
+                    librenms_id, lookup_error = self.resolve_librenms_id(vm)
+                    if lookup_error is not None:
+                        messages.error(self.request, lookup_error.message)
                     vm_status_map[vm.pk] = bool(librenms_id)
                 except Exception:
                     vm_status_map[vm.pk] = False
