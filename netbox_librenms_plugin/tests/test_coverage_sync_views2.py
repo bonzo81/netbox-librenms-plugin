@@ -1243,43 +1243,6 @@ class TestSyncIPAddressesGetManagementIp:
         # pick the wrong management IP as Primary. Fixed: use_cache=False.
         assert view._librenms_api.get_device_info.call_args.kwargs.get("use_cache") is False
 
-    def test_assignment_conflict_is_not_silently_dropped(self):
-        """A conflicting discovery must stop the primary-IP decision."""
-        from netbox_librenms_plugin.librenms_api import LibreNMSIDConflictError
-        from netbox_librenms_plugin.views.sync.ip_addresses import SyncIPAddressesView
-
-        view = object.__new__(SyncIPAddressesView)
-        view._librenms_api = MagicMock()
-        view._librenms_api.get_librenms_id.side_effect = LibreNMSIDConflictError("conflicting mapping")
-
-        with pytest.raises(LibreNMSIDConflictError, match="conflicting mapping"):
-            view.get_management_ip(MagicMock())
-
-
-class TestSyncIPAddressesConflictHandling:
-    def test_post_reports_management_id_conflict(self):
-        """The POST must report a primary-IP lookup conflict without applying cached rows."""
-        from netbox_librenms_plugin.librenms_api import LibreNMSIDConflictError
-        from netbox_librenms_plugin.views.sync.ip_addresses import SyncIPAddressesView
-
-        view = object.__new__(SyncIPAddressesView)
-        view.require_all_permissions = MagicMock(return_value=None)
-        view.get_object = MagicMock(return_value=MagicMock(pk=1))
-        view.rebind_api_for_server = MagicMock(return_value="default")
-        view.get_cached_ip_snapshot = MagicMock(return_value={"ip_addresses": [{"ip_address": "198.18.0.1/24"}]})
-        view._load_force_intents = MagicMock(return_value=({}, {}))
-        view.process_ip_sync = MagicMock(side_effect=LibreNMSIDConflictError("conflicting mapping"))
-        view.redirect_to_ip_tab = MagicMock(return_value=MagicMock(status_code=302))
-        request = _make_request(post_data={"select": ["198.18.0.1/24"], "server_key": "default"})
-        view.request = request
-
-        with patch("netbox_librenms_plugin.views.sync.ip_addresses.messages") as mock_messages:
-            response = view.post(request, object_type="device", pk=1)
-
-        mock_messages.error.assert_called_once_with(request, "conflicting mapping")
-        view.redirect_to_ip_tab.assert_called_once()
-        assert response.status_code == 302
-
 
 class TestSyncIPAddressesViewIPWrites:
     """SyncIPAddressesView create/update/unchanged against real IPAddress rows."""

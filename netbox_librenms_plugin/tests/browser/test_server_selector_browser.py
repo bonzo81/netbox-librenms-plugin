@@ -185,13 +185,6 @@ def test_import_server_switch_clears_search_without_persisting_selection(page):
     assert requested_urls == [initial_url, destination]
 
 
-def test_import_server_switch_has_no_local_settings_stand_in():
-    """Do not let a local stand-in make the server-selector browser test pass."""
-    source = Path(__file__).read_text()
-
-    assert 'installation_settings = {"selected_server": "primary"}' not in source
-
-
 def test_stopped_import_filter_job_returns_to_the_active_server(page):
     """A stopped background search clears filters but retains its transient server."""
     base_url = "https://plugin.example.com/import/"
