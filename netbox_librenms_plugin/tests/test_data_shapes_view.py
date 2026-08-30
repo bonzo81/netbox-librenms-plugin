@@ -252,6 +252,30 @@ def test_capture_view_errors_when_device_not_linked(recording_server):
 
 
 @pytest.mark.django_db
+def test_capture_view_reports_a_discovered_id_conflict(recording_server):
+    """A conflicting discovery renders its owner instead of raising from the HTMX request."""
+    from html import unescape
+
+    recording = load_recording("cisco-stackwise-3member")
+    server, api = recording_server(recording)
+    owner = make_device("capture-conflict-owner", librenms_cf={"test": {"id": 1000}})
+    target = make_device("capture-conflict-target.example.com", librenms_cf={"test": None})
+    server.register(
+        f"/api/v0/devices/{target.name}",
+        {"status": "ok", "devices": [{"device_id": 1000}]},
+        method="GET",
+    )
+    view = _view_with_api(api)
+
+    response = _run_capture(view, server, target)
+    html = unescape(response.content.decode())
+
+    assert response.status_code == 200
+    assert f"LibreNMS ID 1000 is already assigned to device '{owner.name}'" in html
+    assert "Anonymized recording" not in html
+
+
+@pytest.mark.django_db
 def test_capture_view_errors_on_stale_server_key(recording_server):
     """A stale/unconfigured server key shows an error panel."""
     server, api = recording_server(load_recording("cisco-stackwise-3member"))
