@@ -4,8 +4,8 @@ Tests for background job implementation.
 Tests the FilterDevicesJob, ImportDevicesJob, should_use_background_job logic,
 job result loading, and graceful fallback behavior.
 
-Refactored to use pure pytest without Django database dependencies.
-All tests use mocking and direct attribute manipulation instead of HTTP requests.
+Most job-runner tests isolate RQ and LibreNMS boundaries. The background-mode
+decision tests use real Django requests, forms, and persisted users.
 """
 
 from unittest.mock import MagicMock, patch
@@ -30,63 +30,70 @@ def _configured_job_server_keys():
         yield
 
 
+@pytest.mark.django_db
 class TestShouldUseBackgroundJob:
     """Test background job decision logic."""
 
-    def test_checkbox_checked_returns_true(self):
-        """When use_background_job form field is True, return True for superusers."""
+    @staticmethod
+    def _view(user, data=None, *, cleaned_data=None):
+        from django.test import RequestFactory
+
+        from netbox_librenms_plugin.forms import LibreNMSImportFilterForm
         from netbox_librenms_plugin.views.imports.list import LibreNMSImportView
 
+        request = RequestFactory().get("/", data or {})
+        request.user = user
         view = LibreNMSImportView()
-        view._filter_form_data = {"use_background_job": True}
-        view.request = MagicMock()
-        view.request.user.is_superuser = True
+        view.setup(request)
+        if cleaned_data is None:
+            form = LibreNMSImportFilterForm(request.GET, librenms_api=None)
+            assert form.is_valid(), form.errors
+            cleaned_data = form.cleaned_data
+        view._filter_form_data = cleaned_data
+        return view
+
+    def test_checkbox_checked_returns_true(self):
+        """A checked real form enables background jobs for a superuser."""
+        from netbox_librenms_plugin.tests.conftest import make_superuser
+
+        view = self._view(make_superuser("background-checked"), {"use_background_job": "on"})
 
         assert view.should_use_background_job() is True
 
     def test_checkbox_unchecked_returns_false(self):
-        """When use_background_job form field is False, return False."""
-        from netbox_librenms_plugin.views.imports.list import LibreNMSImportView
+        """An explicitly unchecked real form disables background jobs."""
+        from netbox_librenms_plugin.tests.conftest import make_superuser
 
-        view = LibreNMSImportView()
-        view._filter_form_data = {"use_background_job": False}
-        view.request = MagicMock()
-        view.request.user.is_superuser = True
+        view = self._view(make_superuser("background-unchecked"), {"use_background_job": ""})
 
         assert view.should_use_background_job() is False
 
     def test_default_when_field_missing(self):
-        """When field is missing, default to True for superusers."""
-        from netbox_librenms_plugin.views.imports.list import LibreNMSImportView
+        """The decision method defaults a missing cleaned field to true for superusers."""
+        from netbox_librenms_plugin.tests.conftest import make_superuser
 
-        view = LibreNMSImportView()
-        view._filter_form_data = {"some_other_field": "value"}
-        view.request = MagicMock()
-        view.request.user.is_superuser = True
+        view = self._view(
+            make_superuser("background-missing"),
+            cleaned_data={"some_other_field": "value"},
+        )
 
         assert view.should_use_background_job() is True
 
     def test_empty_form_data_returns_default(self):
-        """Empty form data returns default True for superusers."""
-        from netbox_librenms_plugin.views.imports.list import LibreNMSImportView
+        """An empty initial form applies the real checked-by-default behavior."""
+        from netbox_librenms_plugin.tests.conftest import make_superuser
 
-        view = LibreNMSImportView()
-        view._filter_form_data = {}
-        view.request = MagicMock()
-        view.request.user.is_superuser = True
+        view = self._view(make_superuser("background-default"))
 
         assert view.should_use_background_job() is True
 
     def test_non_superuser_always_returns_false(self):
-        """Non-superuser users always get synchronous mode."""
-        from netbox_librenms_plugin.views.imports.list import LibreNMSImportView
+        """A checked form still uses synchronous mode for a real non-superuser."""
+        from django.contrib.auth import get_user_model
 
-        view = LibreNMSImportView()
-        view._filter_form_data = {"use_background_job": True}
-        view.request = MagicMock()
-        view.request.user.is_superuser = False
+        user = get_user_model().objects.create_user(username="background-non-superuser")
+        view = self._view(user, {"use_background_job": "on"})
 
-        # Even when checkbox is True, non-superusers get False
         assert view.should_use_background_job() is False
 
 
@@ -1110,8 +1117,8 @@ class TestLoadJobResults:
 
     @patch("netbox_librenms_plugin.views.imports.list.cache")
     @patch("netbox_librenms_plugin.import_utils.get_validated_device_cache_key")
-    @patch("core.models.Job")
-    def test_load_success_uses_correct_cache_keys(self, mock_job_class, mock_get_key, mock_cache):
+    @patch("core.models.Job.objects.get")
+    def test_load_success_uses_correct_cache_keys(self, mock_job_get, mock_get_key, mock_cache):
         """Load uses get_validated_device_cache_key with job data."""
         from netbox_librenms_plugin.views.imports.list import LibreNMSImportView
 
@@ -1128,7 +1135,7 @@ class TestLoadJobResults:
             "use_sysname": True,
             "strip_domain": False,
         }
-        mock_job_class.objects.get.return_value = mock_job
+        mock_job_get.return_value = mock_job
 
         # Mock cache key generation
         mock_get_key.side_effect = lambda **kw: f"key_{kw['device_id']}"
@@ -1167,8 +1174,8 @@ class TestLoadJobResults:
 
     @patch("netbox_librenms_plugin.views.imports.list.cache")
     @patch("netbox_librenms_plugin.import_utils.get_validated_device_cache_key")
-    @patch("core.models.Job")
-    def test_load_extracts_filters_from_job_data(self, mock_job_class, mock_get_key, mock_cache):
+    @patch("core.models.Job.objects.get")
+    def test_load_extracts_filters_from_job_data(self, mock_job_get, mock_get_key, mock_cache):
         """Filters, server_key, vc_enabled extracted from job data."""
         from netbox_librenms_plugin.views.imports.list import LibreNMSImportView
 
@@ -1184,7 +1191,7 @@ class TestLoadJobResults:
             "use_sysname": True,
             "strip_domain": False,
         }
-        mock_job_class.objects.get.return_value = mock_job
+        mock_job_get.return_value = mock_job
         mock_get_key.return_value = "test_key"
         mock_cache.get.return_value = {"device_id": 1}
 
@@ -1205,8 +1212,8 @@ class TestLoadJobResults:
 
     @patch("netbox_librenms_plugin.views.imports.list.cache")
     @patch("netbox_librenms_plugin.import_utils.get_validated_device_cache_key")
-    @patch("core.models.Job")
-    def test_load_returns_cached_devices(self, mock_job_class, mock_get_key, mock_cache):
+    @patch("core.models.Job.objects.get")
+    def test_load_returns_cached_devices(self, mock_job_get, mock_get_key, mock_cache):
         """Devices retrieved from cache."""
         from netbox_librenms_plugin.views.imports.list import LibreNMSImportView
 
@@ -1220,7 +1227,7 @@ class TestLoadJobResults:
             "cached_at": "2026-01-20T10:00:00Z",
             "cache_timeout": 300,
         }
-        mock_job_class.objects.get.return_value = mock_job
+        mock_job_get.return_value = mock_job
         mock_get_key.side_effect = lambda **kw: f"key_{kw['device_id']}"
         mock_cache.get.side_effect = [
             {"device_id": 1, "hostname": "device1"},
@@ -1236,8 +1243,8 @@ class TestLoadJobResults:
 
     @patch("netbox_librenms_plugin.views.imports.list.cache")
     @patch("netbox_librenms_plugin.import_utils.get_validated_device_cache_key")
-    @patch("core.models.Job")
-    def test_load_sets_cache_metadata(self, mock_job_class, mock_get_key, mock_cache):
+    @patch("core.models.Job.objects.get")
+    def test_load_sets_cache_metadata(self, mock_job_get, mock_get_key, mock_cache):
         """Load sets _cache_timestamp and _cache_timeout on view."""
         from netbox_librenms_plugin.views.imports.list import LibreNMSImportView
 
@@ -1251,7 +1258,7 @@ class TestLoadJobResults:
             "cached_at": "2026-01-20T12:00:00Z",
             "cache_timeout": 900,
         }
-        mock_job_class.objects.get.return_value = mock_job
+        mock_job_get.return_value = mock_job
         mock_get_key.return_value = "test_key"
         mock_cache.get.return_value = {"device_id": 1}
 
@@ -1261,28 +1268,28 @@ class TestLoadJobResults:
         assert view._cache_timestamp == "2026-01-20T12:00:00Z"
         assert view._cache_timeout == 900
 
-    @patch("core.models.Job")
-    def test_load_job_not_found_returns_empty(self, mock_job_class):
+    @patch("core.models.Job.objects.get")
+    def test_load_job_not_found_returns_empty(self, mock_job_get):
         """Non-existent job returns empty list."""
+        from core.models import Job
+
         from netbox_librenms_plugin.views.imports.list import LibreNMSImportView
 
-        # Create a mock DoesNotExist exception
-        mock_job_class.DoesNotExist = Exception
-        mock_job_class.objects.get.side_effect = mock_job_class.DoesNotExist
+        mock_job_get.side_effect = Job.DoesNotExist
 
         view = LibreNMSImportView()
         results = view._load_job_results(999, MagicMock())
 
         assert results == []
 
-    @patch("core.models.Job")
-    def test_load_job_not_completed_returns_empty(self, mock_job_class):
+    @patch("core.models.Job.objects.get")
+    def test_load_job_not_completed_returns_empty(self, mock_job_get):
         """Running job returns empty list."""
         from netbox_librenms_plugin.views.imports.list import LibreNMSImportView
 
         mock_job = MagicMock()
         mock_job.status = "running"
-        mock_job_class.objects.get.return_value = mock_job
+        mock_job_get.return_value = mock_job
 
         view = LibreNMSImportView()
         results = view._load_job_results(123, MagicMock())
@@ -1291,8 +1298,8 @@ class TestLoadJobResults:
 
     @patch("netbox_librenms_plugin.views.imports.list.cache")
     @patch("netbox_librenms_plugin.import_utils.get_validated_device_cache_key")
-    @patch("core.models.Job")
-    def test_load_expired_cache_returns_empty(self, mock_job_class, mock_get_key, mock_cache):
+    @patch("core.models.Job.objects.get")
+    def test_load_expired_cache_returns_empty(self, mock_job_get, mock_get_key, mock_cache):
         """All cache misses returns empty list."""
         from netbox_librenms_plugin.views.imports.list import LibreNMSImportView
 
@@ -1306,7 +1313,7 @@ class TestLoadJobResults:
             "cached_at": "2026-01-20T10:00:00Z",
             "cache_timeout": 300,
         }
-        mock_job_class.objects.get.return_value = mock_job
+        mock_job_get.return_value = mock_job
         mock_get_key.side_effect = lambda **kw: f"key_{kw['device_id']}"
 
         # Simulate expired cache (returns None)
@@ -1319,8 +1326,8 @@ class TestLoadJobResults:
 
     @patch("netbox_librenms_plugin.views.imports.list.cache")
     @patch("netbox_librenms_plugin.import_utils.get_validated_device_cache_key")
-    @patch("core.models.Job")
-    def test_load_partial_cache_returns_available(self, mock_job_class, mock_get_key, mock_cache):
+    @patch("core.models.Job.objects.get")
+    def test_load_partial_cache_returns_available(self, mock_job_get, mock_get_key, mock_cache):
         """Some expired, returns available devices."""
         from netbox_librenms_plugin.views.imports.list import LibreNMSImportView
 
@@ -1334,7 +1341,7 @@ class TestLoadJobResults:
             "cached_at": "2026-01-20T10:00:00Z",
             "cache_timeout": 300,
         }
-        mock_job_class.objects.get.return_value = mock_job
+        mock_job_get.return_value = mock_job
         mock_get_key.side_effect = lambda **kw: f"key_{kw['device_id']}"
 
         # First device in cache, second expired, third in cache
