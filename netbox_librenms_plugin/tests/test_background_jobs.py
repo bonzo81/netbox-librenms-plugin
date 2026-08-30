@@ -1,43 +1,88 @@
-"""
-Tests for background job implementation.
+"""Integration coverage for import decisions and NetBox background jobs."""
 
-Tests the FilterDevicesJob, ImportDevicesJob, should_use_background_job logic,
-job result loading, and graceful fallback behavior.
-
-Most job-runner tests isolate RQ and LibreNMS boundaries. The background-mode
-decision tests use real Django requests, forms, and persisted users.
-"""
-
-from unittest.mock import MagicMock, patch
+from copy import deepcopy
+from uuid import uuid4
 
 import pytest
 from django.http import QueryDict
 
+from netbox_librenms_plugin.tests.conftest import make_cluster, make_device, make_superuser
+from netbox_librenms_plugin.tests.mock_librenms_server import librenms_mock_server
+from netbox_librenms_plugin.tests.view_test_helpers import make_user_with_perms
 
-@pytest.fixture(autouse=True)
-def _configured_job_server_keys():
-    """Give job tests explicit usable server keys."""
-    with patch(
-        "netbox_librenms_plugin.server_selection.LibreNMSAPI.get_available_servers",
-        return_value={
-            "default": "Default",
-            "primary": "Primary",
-            "secondary": "Secondary",
-            "non-default": "Non-default",
-            "resolved-default": "Resolved default",
-        },
-    ):
-        yield
+
+SERVER_KEY = "default"
+
+
+def _configure_server(settings, server):
+    plugin_config = deepcopy(settings.PLUGINS_CONFIG)
+    plugin_config["netbox_librenms_plugin"]["servers"] = {
+        SERVER_KEY: {
+            "display_name": "Background job test server",
+            "librenms_url": server.url,
+            "api_token": "test-token",
+            "cache_timeout": 300,
+            "verify_ssl": False,
+        }
+    }
+    settings.PLUGINS_CONFIG = plugin_config
+
+
+@pytest.fixture
+def librenms_server(settings):
+    with librenms_mock_server() as server:
+        _configure_server(settings, server)
+        yield server
+
+
+def _device_payload(device_id, hostname=None, **overrides):
+    name = hostname or f"background-{device_id}.example.test"
+    payload = {
+        "device_id": device_id,
+        "hostname": name,
+        "sysName": name,
+        "hardware": "TestDT",
+        "serial": "-",
+        "os": "linux",
+        "ip": f"198.18.40.{device_id % 250 + 1}",
+        "version": "1.0",
+        "location": "TestSite",
+        "type": "network",
+        "status": 1,
+        "disabled": 0,
+    }
+    payload.update(overrides)
+    return payload
+
+
+def _job(user, tag):
+    from core.models import Job
+
+    return Job.objects.create(
+        name=f"Background integration {tag}",
+        user=user,
+        job_id=uuid4(),
+        data={},
+    )
+
+
+def _import_user(tag, *, devices=True, vms=True):
+    from dcim.models import Device
+    from virtualization.models import VirtualMachine
+
+    permissions = []
+    if devices:
+        permissions.extend([("add", Device), ("change", Device)])
+    if vms:
+        permissions.append(("add", VirtualMachine))
+    return make_user_with_perms(f"background-import-{tag}", permissions)
 
 
 @pytest.mark.django_db
 class TestShouldUseBackgroundJob:
-    """Test background job decision logic."""
-
     @staticmethod
     def _view(user, data=None, *, cleaned_data=None):
         from django.test import RequestFactory
-
         from netbox_librenms_plugin.forms import LibreNMSImportFilterForm
         from netbox_librenms_plugin.views.imports.list import LibreNMSImportView
 
@@ -52,1475 +97,348 @@ class TestShouldUseBackgroundJob:
         view._filter_form_data = cleaned_data
         return view
 
-    def test_checkbox_checked_returns_true(self):
-        """A checked real form enables background jobs for a superuser."""
-        from netbox_librenms_plugin.tests.conftest import make_superuser
+    @pytest.mark.parametrize(
+        ("data", "expected"),
+        [
+            ({"use_background_job": "on"}, True),
+            ({"use_background_job": ""}, False),
+            ({}, True),
+        ],
+    )
+    def test_superuser_decision_comes_from_the_real_bound_form(self, data, expected):
+        view = self._view(make_superuser(f"background-choice-{expected}-{len(data)}"), data)
 
-        view = self._view(make_superuser("background-checked"), {"use_background_job": "on"})
+        assert view.should_use_background_job() is expected
 
-        assert view.should_use_background_job() is True
-
-    def test_checkbox_unchecked_returns_false(self):
-        """An explicitly unchecked real form disables background jobs."""
-        from netbox_librenms_plugin.tests.conftest import make_superuser
-
-        view = self._view(make_superuser("background-unchecked"), {"use_background_job": ""})
-
-        assert view.should_use_background_job() is False
-
-    def test_default_when_field_missing(self):
-        """The decision method defaults a missing cleaned field to true for superusers."""
-        from netbox_librenms_plugin.tests.conftest import make_superuser
-
+    def test_missing_cleaned_field_uses_the_superuser_default(self):
         view = self._view(
-            make_superuser("background-missing"),
+            make_superuser("background-missing-cleaned-field"),
             cleaned_data={"some_other_field": "value"},
         )
 
         assert view.should_use_background_job() is True
 
-    def test_empty_form_data_returns_default(self):
-        """An empty initial form applies the real checked-by-default behavior."""
-        from netbox_librenms_plugin.tests.conftest import make_superuser
-
-        view = self._view(make_superuser("background-default"))
-
-        assert view.should_use_background_job() is True
-
-    def test_non_superuser_always_returns_false(self):
-        """A checked form still uses synchronous mode for a real non-superuser."""
-        from django.contrib.auth import get_user_model
-
-        user = get_user_model().objects.create_user(username="background-non-superuser")
+    def test_non_superuser_cannot_select_background_mode(self, django_user_model):
+        user = django_user_model.objects.create_user(username="background-non-superuser")
         view = self._view(user, {"use_background_job": "on"})
 
         assert view.should_use_background_job() is False
 
+    def test_querydict_unchecked_checkbox_remains_false(self):
+        data = QueryDict("use_background_job=")
+        view = self._view(make_superuser("background-querydict-unchecked"), data)
 
-def create_mock_job_runner(job_class, job_pk=123):
-    """Create a mock job runner instance without invoking real __init__."""
-    # Create instance without calling __init__
-    job = object.__new__(job_class)
-    # Set up required attributes
-    job.job = MagicMock()
-    job.job.pk = job_pk
-    job.job.data = {}
-    job.logger = MagicMock()
-    return job
+        assert view.should_use_background_job() is False
 
 
+@pytest.mark.django_db
 class TestFilterDevicesJob:
-    """Test FilterDevicesJob background job."""
-
-    @patch("netbox_librenms_plugin.librenms_api.LibreNMSAPI")
-    @patch("netbox_librenms_plugin.import_utils.process_device_filters")
-    def test_run_processes_filters_successfully(self, mock_process, mock_api_class):
-        """Job runs and processes filters correctly."""
+    def test_real_filter_run_persists_only_enabled_unlinked_rows_and_options(self, librenms_server):
         from netbox_librenms_plugin.jobs import FilterDevicesJob
 
-        # Setup mocks
-        mock_api = MagicMock()
-        mock_api.cache_timeout = 300
-        mock_api.server_key = "default"
-        mock_api_class.return_value = mock_api
-
-        validated_devices = [
-            {"device_id": 1, "hostname": "test1", "_validation": {}},
-            {"device_id": 2, "hostname": "test2", "_validation": {}},
-        ]
-        mock_process.return_value = validated_devices
-
-        # Create job instance without calling real __init__
-        job = create_mock_job_runner(FilterDevicesJob)
-
-        # Run job
-        filters = {"location": "site1"}
-        job.run(
-            filters=filters,
-            vc_detection_enabled=True,
-            clear_cache=False,
-            show_disabled=False,
-            server_key="default",
+        existing = make_device("background-existing", librenms_cf={SERVER_KEY: 6301})
+        visible = _device_payload(
+            6303,
+            hostname="visible-host.example.test",
+            sysName="visible-system.example.test",
+            hardware=existing.device_type.model,
+            location=existing.site.name,
         )
-
-        # Verify process_device_filters was called with correct args
-        mock_process.assert_called_once()
-        call_kwargs = mock_process.call_args.kwargs
-        assert call_kwargs["filters"] == filters
-        assert call_kwargs["vc_detection_enabled"] is True
-        assert call_kwargs["clear_cache"] is False
-        assert call_kwargs["job"] == job
-
-    @patch("netbox_librenms_plugin.librenms_api.LibreNMSAPI")
-    @patch("netbox_librenms_plugin.import_utils.process_device_filters")
-    def test_run_with_vc_detection_enabled(self, mock_process, mock_api_class):
-        """vc_detection_enabled=True passed to processor."""
-        from netbox_librenms_plugin.jobs import FilterDevicesJob
-
-        mock_api = MagicMock()
-        mock_api.cache_timeout = 300
-        mock_api.server_key = "secondary"
-        mock_api_class.return_value = mock_api
-        mock_process.return_value = []
-
-        job = create_mock_job_runner(FilterDevicesJob)
-
-        job.run(
-            filters={},
-            vc_detection_enabled=True,
-            clear_cache=False,
-            show_disabled=False,
-            server_key="default",
+        librenms_server.register(
+            "/api/v0/devices",
+            {
+                "status": "ok",
+                "devices": [
+                    _device_payload(
+                        6301,
+                        hostname=existing.name,
+                        hardware=existing.device_type.model,
+                        location=existing.site.name,
+                    ),
+                    _device_payload(
+                        6302,
+                        hostname="background-disabled",
+                        disabled=1,
+                        hardware=existing.device_type.model,
+                        location=existing.site.name,
+                    ),
+                    visible,
+                ],
+            },
         )
+        job = _job(make_superuser("background-filter-owner"), "filter-options")
 
-        call_kwargs = mock_process.call_args.kwargs
-        assert call_kwargs["vc_detection_enabled"] is True
-
-    @patch("netbox_librenms_plugin.librenms_api.LibreNMSAPI")
-    @patch("netbox_librenms_plugin.import_utils.process_device_filters")
-    def test_run_with_clear_cache(self, mock_process, mock_api_class):
-        """clear_cache=True triggers cache refresh."""
-        from netbox_librenms_plugin.jobs import FilterDevicesJob
-
-        mock_api = MagicMock()
-        mock_api.cache_timeout = 300
-        mock_api.server_key = "secondary"
-        mock_api_class.return_value = mock_api
-        mock_process.return_value = []
-
-        job = create_mock_job_runner(FilterDevicesJob)
-
-        job.run(
-            filters={},
+        FilterDevicesJob(job).run(
+            filters={"hostname": ""},
             vc_detection_enabled=False,
             clear_cache=True,
             show_disabled=False,
-            server_key="default",
+            exclude_existing=True,
+            server_key=SERVER_KEY,
+            use_sysname=False,
+            strip_domain=True,
         )
 
-        call_kwargs = mock_process.call_args.kwargs
-        assert call_kwargs["clear_cache"] is True
+        job.refresh_from_db()
+        assert job.data["device_ids"] == [6303]
+        assert job.data["total_processed"] == 1
+        assert job.data["filters"] == {"hostname": ""}
+        assert job.data["server_key"] == SERVER_KEY
+        assert job.data["vc_detection_enabled"] is False
+        assert job.data["use_sysname"] is False
+        assert job.data["strip_domain"] is True
+        assert job.data["cache_timeout"] == 300
+        assert job.data["cached_at"].endswith("+00:00")
+        assert job.data["completed"] is True
 
-    @patch("netbox_librenms_plugin.librenms_api.LibreNMSAPI")
-    @patch("netbox_librenms_plugin.import_utils.process_device_filters")
-    def test_run_with_show_disabled(self, mock_process, mock_api_class):
-        """show_disabled=True includes disabled devices."""
+    def test_empty_live_result_persists_a_completed_empty_job(self, librenms_server):
         from netbox_librenms_plugin.jobs import FilterDevicesJob
 
-        mock_api = MagicMock()
-        mock_api.cache_timeout = 300
-        mock_api.server_key = "secondary"
-        mock_api_class.return_value = mock_api
-        mock_process.return_value = []
+        librenms_server.register("/api/v0/devices", {"status": "ok", "devices": []})
+        job = _job(make_superuser("background-empty-filter-owner"), "empty-filter")
 
-        job = create_mock_job_runner(FilterDevicesJob)
-
-        job.run(
+        FilterDevicesJob(job).run(
             filters={},
             vc_detection_enabled=False,
             clear_cache=False,
             show_disabled=True,
-            server_key="default",
+            server_key=SERVER_KEY,
         )
 
-        call_kwargs = mock_process.call_args.kwargs
-        assert call_kwargs["show_disabled"] is True
+        job.refresh_from_db()
+        assert job.data["device_ids"] == []
+        assert job.data["total_processed"] == 0
+        assert job.data["completed"] is True
 
-    @patch("netbox_librenms_plugin.librenms_api.LibreNMSAPI")
-    @patch("netbox_librenms_plugin.import_utils.process_device_filters")
-    def test_run_with_exclude_existing(self, mock_process, mock_api_class):
-        """exclude_existing=True filters out NetBox devices."""
+    def test_job_rejects_a_server_key_removed_after_enqueue(self, settings, librenms_server):
         from netbox_librenms_plugin.jobs import FilterDevicesJob
 
-        mock_api = MagicMock()
-        mock_api.cache_timeout = 300
-        mock_api.server_key = "secondary"
-        mock_api_class.return_value = mock_api
-        mock_process.return_value = []
+        plugin_config = deepcopy(settings.PLUGINS_CONFIG)
+        plugin_config["netbox_librenms_plugin"]["servers"] = {}
+        settings.PLUGINS_CONFIG = plugin_config
+        job = _job(make_superuser("background-stale-filter-owner"), "stale-filter")
 
-        job = create_mock_job_runner(FilterDevicesJob)
+        with pytest.raises(ValueError, match="configured LibreNMS server"):
+            FilterDevicesJob(job).run(
+                filters={},
+                vc_detection_enabled=False,
+                clear_cache=True,
+                show_disabled=False,
+                server_key=SERVER_KEY,
+            )
 
-        job.run(
-            filters={},
-            vc_detection_enabled=False,
-            clear_cache=False,
-            show_disabled=False,
-            exclude_existing=True,
-            server_key="default",
-        )
-
-        call_kwargs = mock_process.call_args.kwargs
-        assert call_kwargs["exclude_existing"] is True
-
-    @patch("netbox_librenms_plugin.librenms_api.LibreNMSAPI")
-    @patch("netbox_librenms_plugin.import_utils.process_device_filters")
-    def test_run_with_custom_server_key(self, mock_process, mock_api_class):
-        """Non-default server_key used for API."""
-        from netbox_librenms_plugin.jobs import FilterDevicesJob
-
-        mock_api = MagicMock()
-        mock_api.cache_timeout = 300
-        mock_api.server_key = "secondary"
-        mock_api_class.return_value = mock_api
-        mock_process.return_value = [{"device_id": 1, "hostname": "test1"}]
-
-        job = create_mock_job_runner(FilterDevicesJob)
-
-        job.run(
-            filters={},
-            vc_detection_enabled=False,
-            clear_cache=False,
-            show_disabled=False,
-            server_key="secondary",
-        )
-
-        # Verify API was initialized with correct server_key
-        mock_api_class.assert_called_once_with(server_key="secondary")
-        # Verify server_key stored in job data
-        assert job.job.data["server_key"] == "secondary"
-
-    @patch("netbox_librenms_plugin.librenms_api.LibreNMSAPI")
-    @patch("netbox_librenms_plugin.import_utils.process_device_filters")
-    def test_filter_job_stores_server_key(self, mock_process, mock_api_class):
-        """Job stores resolved api.server_key, not raw input parameter."""
-        from netbox_librenms_plugin.jobs import FilterDevicesJob
-
-        mock_api = MagicMock()
-        mock_api.cache_timeout = 300
-        mock_api.server_key = "resolved-default"
-        mock_api_class.return_value = mock_api
-        mock_process.return_value = [{"device_id": 1, "hostname": "test1"}]
-
-        job = create_mock_job_runner(FilterDevicesJob)
-        job.run(
-            filters={},
-            vc_detection_enabled=False,
-            clear_cache=False,
-            show_disabled=False,
-            server_key="default",
-        )
-
-        assert job.job.data["server_key"] == "resolved-default"
-
-    @patch("netbox_librenms_plugin.librenms_api.LibreNMSAPI")
-    @patch("netbox_librenms_plugin.import_utils.process_device_filters")
-    def test_run_stores_job_data_correctly(self, mock_process, mock_api_class):
-        """Job stores expected data structure."""
-        from netbox_librenms_plugin.jobs import FilterDevicesJob
-
-        mock_api = MagicMock()
-        mock_api.cache_timeout = 300
-        mock_api.server_key = "secondary"
-        mock_api_class.return_value = mock_api
-
-        mock_process.return_value = [
-            {"device_id": 1, "hostname": "test1"},
-            {"device_id": 2, "hostname": "test2"},
-        ]
-
-        job = create_mock_job_runner(FilterDevicesJob, job_pk=456)
-
-        job.run(
-            filters={"location": "dc1"},
-            vc_detection_enabled=True,
-            clear_cache=False,
-            show_disabled=False,
-            server_key="secondary",
-        )
-
-        # Verify job.data structure
-        assert job.job.data["device_ids"] == [1, 2]
-        assert job.job.data["total_processed"] == 2
-        assert job.job.data["filters"] == {"location": "dc1"}
-        assert job.job.data["server_key"] == "secondary"
-        assert job.job.data["vc_detection_enabled"] is True
-        assert job.job.data["cache_timeout"] == 300
-        assert "cached_at" in job.job.data
-        assert job.job.data["completed"] is True
-        job.job.save.assert_called()
-
-    @patch("netbox_librenms_plugin.librenms_api.LibreNMSAPI")
-    @patch("netbox_librenms_plugin.import_utils.process_device_filters")
-    def test_run_handles_empty_results(self, mock_process, mock_api_class):
-        """Empty filter results handled gracefully."""
-        from netbox_librenms_plugin.jobs import FilterDevicesJob
-
-        mock_api = MagicMock()
-        mock_api.cache_timeout = 300
-        mock_api_class.return_value = mock_api
-
-        mock_process.return_value = []
-
-        job = create_mock_job_runner(FilterDevicesJob, job_pk=789)
-
-        job.run(
-            filters={"location": "nonexistent"},
-            vc_detection_enabled=False,
-            clear_cache=False,
-            show_disabled=False,
-            server_key="default",
-        )
-
-        # Verify job data shows zero devices
-        assert job.job.data["device_ids"] == []
-        assert job.job.data["total_processed"] == 0
-        assert job.job.data["completed"] is True
-
-    @patch("netbox_librenms_plugin.librenms_api.LibreNMSAPI")
-    @patch("netbox_librenms_plugin.import_utils.process_device_filters")
-    def test_run_logs_progress(self, mock_process, mock_api_class):
-        """Logger called with expected messages."""
-        from netbox_librenms_plugin.jobs import FilterDevicesJob
-
-        mock_api = MagicMock()
-        mock_api.cache_timeout = 300
-        mock_api_class.return_value = mock_api
-        mock_process.return_value = [{"device_id": 1, "hostname": "test1"}]
-
-        job = create_mock_job_runner(FilterDevicesJob)
-
-        job.run(
-            filters={"location": "site1"},
-            vc_detection_enabled=True,
-            clear_cache=False,
-            show_disabled=False,
-            server_key="default",
-        )
-
-        # Verify logger was called with expected messages
-        assert job.logger.info.call_count >= 3
-        info_calls = [call[0][0] for call in job.logger.info.call_args_list]
-        assert any("Starting" in msg for msg in info_calls)
-        assert any("completed" in msg.lower() for msg in info_calls)
-
-    def test_job_meta_name(self):
-        """Job has correct Meta.name."""
+    def test_meta_name_is_stable(self):
         from netbox_librenms_plugin.jobs import FilterDevicesJob
 
         assert FilterDevicesJob.Meta.name == "LibreNMS Device Filter"
 
 
+@pytest.mark.django_db
 class TestImportDevicesJob:
-    """Test ImportDevicesJob background job."""
-
-    # Two LibreNMS ids (>=2) trigger the job's collision pre-check, which runs the real
-    # validate_device_for_import against the DB (as the production rqworker does). The
-    # fabricated hostnames match no existing NetBox object, so the batch resolves cleanly.
-    @pytest.mark.django_db
-    @patch("netbox_librenms_plugin.import_utils.bulk_import_vms")
-    @patch("netbox_librenms_plugin.import_utils.bulk_import_devices_shared")
-    @patch("netbox_librenms_plugin.librenms_api.LibreNMSAPI")
-    def test_run_device_only_import(self, mock_api_class, mock_bulk_devices, mock_bulk_vms):
-        """Import devices without VMs."""
+    def test_mixed_device_and_vm_batch_imports_real_objects_and_persists_ids(self, librenms_server):
+        from dcim.models import Device
+        from virtualization.models import VirtualMachine
         from netbox_librenms_plugin.jobs import ImportDevicesJob
 
-        # Pin server_key to a real string: the collision pre-check uses api.server_key as a
-        # cache/Q discriminator, so a bare MagicMock() would let server-scoped logic pass on a
-        # non-string sentinel and miss the multi-server regression this path protects.
-        mock_api_class.return_value = MagicMock(server_key="default")
-        # The collision pre-check fetches each device; return distinct devices so the batch
-        # resolves cleanly with no collision (collision/unresolved handling has its own tests).
-        # A "not found" here would now fail the batch closed (unresolved id), not skip silently.
-        mock_api_class.return_value.get_device_info.side_effect = lambda did, **_kwargs: (
-            True,
-            {"device_id": did, "hostname": f"job-import-dev-{did}", "sysName": f"job-import-dev-{did}"},
-        )
-
-        # Mock successful device imports
-        mock_device_1 = MagicMock()
-        mock_device_1.pk = 100
-        mock_device_2 = MagicMock()
-        mock_device_2.pk = 101
-
-        mock_bulk_devices.return_value = {
-            "success": [
-                {"device": mock_device_1, "device_id": 1},
-                {"device": mock_device_2, "device_id": 2},
-            ],
-            "failed": [],
-            "skipped": [],
-            "virtual_chassis_created": 0,
+        infrastructure = make_device("background-import-infrastructure")
+        cluster = make_cluster("background-import-cluster")
+        user = _import_user("mixed")
+        job = _job(user, "mixed-import")
+        rows = {
+            6401: _device_payload(
+                6401,
+                hostname="background-imported-device",
+                hardware=infrastructure.device_type.model,
+                location=infrastructure.site.name,
+            ),
+            6402: _device_payload(6402, hostname="background-imported-vm"),
         }
 
-        job = create_mock_job_runner(ImportDevicesJob, job_pk=789)
+        ImportDevicesJob(job).run(
+            device_ids=[6401],
+            vm_imports={6402: {"cluster_id": cluster.pk}},
+            server_key=SERVER_KEY,
+            sync_options={"sync_interfaces": False, "sync_cables": False},
+            manual_mappings_per_device={
+                6401: {
+                    "site_id": infrastructure.site_id,
+                    "device_type_id": infrastructure.device_type_id,
+                    "device_role_id": infrastructure.role_id,
+                }
+            },
+            libre_devices_cache=rows,
+        )
 
-        job.run(
-            device_ids=[1, 2],
+        job.refresh_from_db()
+        imported_device = Device.objects.get(name="background-imported-device")
+        imported_vm = VirtualMachine.objects.get(name="background-imported-vm")
+        assert job.data["imported_device_pks"] == [imported_device.pk]
+        assert job.data["imported_vm_pks"] == [imported_vm.pk]
+        assert job.data["imported_libre_device_ids"] == [6401]
+        assert job.data["imported_libre_vm_ids"] == [6402]
+        assert job.data["server_key"] == SERVER_KEY
+        assert job.data["total"] == 2
+        assert job.data["success_count"] == 2
+        assert job.data["failed_count"] == 0
+        assert job.data["skipped_count"] == 0
+        assert job.data["errors"] == []
+        assert job.data["completed"] is True
+
+    def test_unresolved_row_is_skipped_while_a_checked_row_imports(self, librenms_server):
+        from dcim.models import Device
+        from netbox_librenms_plugin.jobs import ImportDevicesJob
+
+        infrastructure = make_device("background-unresolved-infrastructure")
+        user = _import_user("unresolved", vms=False)
+        job = _job(user, "unresolved-import")
+        librenms_server.register("/api/v0/devices/6403", {"status": "error"}, status=404)
+        rows = {
+            6404: _device_payload(
+                6404,
+                hostname="background-checked-device",
+                hardware=infrastructure.device_type.model,
+                location=infrastructure.site.name,
+            )
+        }
+        mappings = {
+            device_id: {
+                "site_id": infrastructure.site_id,
+                "device_type_id": infrastructure.device_type_id,
+                "device_role_id": infrastructure.role_id,
+            }
+            for device_id in (6403, 6404)
+        }
+
+        ImportDevicesJob(job).run(
+            device_ids=[6403, 6404],
             vm_imports={},
-            server_key="default",
-            sync_options={"sync_interfaces": True},
+            server_key=SERVER_KEY,
+            manual_mappings_per_device=mappings,
+            libre_devices_cache=rows,
         )
 
-        # Verify device import was called
-        mock_bulk_devices.assert_called_once()
-        # VM import should not be called with empty dict
-        mock_bulk_vms.assert_not_called()
+        job.refresh_from_db()
+        assert Device.objects.filter(name="background-checked-device").exists()
+        assert job.data["success_count"] == 1
+        assert job.data["failed_count"] == 1
+        assert job.data["errors"][0]["device_id"] == 6403
+        assert "couldn't be fetched to verify collisions" in job.data["errors"][0]["error"]
 
-        # Verify job.data
-        assert job.job.data["imported_device_pks"] == [100, 101]
-        assert job.job.data["imported_vm_pks"] == []
-        assert job.job.data["success_count"] == 2
-        assert job.job.data["failed_count"] == 0
-
-    # Two VM ids (>=2) now trigger the job's collision pre-check too — it runs over the WHOLE
-    # batch (devices + VMs), so configure the api the same way the device-batch tests do.
-    @pytest.mark.django_db
-    @patch("netbox_librenms_plugin.import_utils.bulk_import_vms")
-    @patch("netbox_librenms_plugin.import_utils.bulk_import_devices_shared")
-    @patch("netbox_librenms_plugin.librenms_api.LibreNMSAPI")
-    def test_run_vm_only_import(self, mock_api_class, mock_bulk_devices, mock_bulk_vms):
-        """Import VMs without devices."""
+    def test_cross_mode_collision_blocks_the_whole_batch(self, librenms_server):
+        from dcim.models import Device
+        from virtualization.models import VirtualMachine
         from netbox_librenms_plugin.jobs import ImportDevicesJob
 
-        mock_api_class.return_value = MagicMock(server_key="default")
-        # The batch-wide collision pre-check now fetches each VM id; return distinct devices so the
-        # VM-only batch resolves cleanly (no collision) and the VM import still proceeds.
-        mock_api_class.return_value.get_device_info.side_effect = lambda did, **_kwargs: (
-            True,
-            {"device_id": did, "hostname": f"job-vm-{did}", "sysName": f"job-vm-{did}"},
-        )
-
-        # Mock successful VM imports
-        mock_vm_1 = MagicMock()
-        mock_vm_1.pk = 200
-        mock_vm_2 = MagicMock()
-        mock_vm_2.pk = 201
-
-        mock_bulk_vms.return_value = {
-            "success": [
-                {"device": mock_vm_1, "device_id": 10},
-                {"device": mock_vm_2, "device_id": 11},
-            ],
-            "failed": [],
-            "skipped": [],
+        target = make_device("background-collision-target")
+        cluster = make_cluster("background-collision-cluster")
+        job = _job(make_superuser("background-collision-owner"), "collision-import")
+        rows = {
+            6405: _device_payload(6405, hostname=target.name, sysName=target.name),
+            6406: _device_payload(6406, hostname=target.name, sysName=target.name),
         }
+        device_count = Device.objects.count()
+        vm_count = VirtualMachine.objects.count()
 
-        job = create_mock_job_runner(ImportDevicesJob, job_pk=790)
-
-        job.run(
-            device_ids=[],
-            vm_imports={10: {"cluster_id": 1}, 11: {"cluster_id": 1}},
-            server_key="default",
+        ImportDevicesJob(job).run(
+            device_ids=[6405],
+            vm_imports={6406: {"cluster_id": cluster.pk}},
+            server_key=SERVER_KEY,
+            libre_devices_cache=rows,
         )
 
-        # Verify device import was not called with empty list
-        mock_bulk_devices.assert_not_called()
-        # VM import should be called
-        mock_bulk_vms.assert_called_once()
+        job.refresh_from_db()
+        assert Device.objects.count() == device_count
+        assert VirtualMachine.objects.count() == vm_count
+        assert job.data["success_count"] == 0
+        assert job.data["failed_count"] == 2
+        assert {error["device_id"] for error in job.data["errors"]} == {6405, 6406}
+        assert all("Bulk import blocked" in error["error"] for error in job.data["errors"])
 
-        # Verify job.data
-        assert job.job.data["imported_device_pks"] == []
-        assert job.job.data["imported_vm_pks"] == [200, 201]
-        assert job.job.data["success_count"] == 2
-
-    @patch("netbox_librenms_plugin.import_utils.bulk_import_vms")
-    @patch("netbox_librenms_plugin.import_utils.bulk_import_devices_shared")
-    @patch("netbox_librenms_plugin.librenms_api.LibreNMSAPI")
-    def test_run_vm_only_batch_is_collision_gated(self, mock_api_class, mock_bulk_devices, mock_bulk_vms):
-        """A VM-only batch skips unverifiable rows through the shared collision pre-check."""
-        from netbox_librenms_plugin.jobs import ImportDevicesJob
-
-        mock_api_class.return_value = MagicMock(server_key="default")
-        # get_device_info fails for the VM ids → they can't be collision-checked → the batch-wide
-        # pre-check must skip those rows and the VM import (before the fix it only saw device_ids,
-        # so a VM-only batch bypassed it entirely and bulk_import_vms ran unchecked).
-        mock_api_class.return_value.get_device_info.side_effect = lambda did, **_kwargs: (False, None)
-
-        job = create_mock_job_runner(ImportDevicesJob, job_pk=801)
-
-        job.run(
-            device_ids=[],
-            vm_imports={10: {"cluster_id": 1}, 11: {"cluster_id": 1}},
-            server_key="default",
-        )
-
-        # The VM import must NOT run because every submitted row was skipped.
-        mock_bulk_vms.assert_not_called()
-        mock_bulk_devices.assert_not_called()
-        errors = job.job.data["errors"]
-        assert {error["device_id"] for error in errors} == {10, 11}
-        assert all("Skipped" in error["error"] and "verify collisions" in error["error"] for error in errors)
-        assert job.job.data["failed_count"] == 2
-        assert job.job.data["success_count"] == 0
-
-    @patch("netbox_librenms_plugin.import_utils.bulk_import_vms")
-    @patch("netbox_librenms_plugin.import_utils.bulk_import_devices_shared")
-    @patch("netbox_librenms_plugin.librenms_api.LibreNMSAPI")
-    def test_run_cancelled_during_precheck_blocks_batch_with_cancel_message(
-        self, mock_api_class, mock_bulk_devices, mock_bulk_vms
+    def test_revoked_permissions_block_before_librenms_or_job_data_changes(
+        self,
+        librenms_server,
+        django_user_model,
     ):
-        """A job cancelled during the collision pre-check stops scanning immediately, imports nothing, and reports the block as a cancellation — not as the fetch-failure message the genuine unresolved path uses."""
-        from netbox_librenms_plugin.import_utils import bulk_import as bulk_import_module
+        from django.core.exceptions import PermissionDenied
         from netbox_librenms_plugin.jobs import ImportDevicesJob
 
-        mock_api_class.return_value = MagicMock(server_key="default")
-        job = create_mock_job_runner(ImportDevicesJob, job_pk=802)
-
-        # _is_job_cancelled reads RQ/Redis job state — patch that one external boundary; the
-        # pre-check loop and the jobs.py message branch both read it through this module attr.
-        with patch.object(bulk_import_module, "_is_job_cancelled", return_value=True):
-            job.run(device_ids=[1, 2], vm_imports={10: {"cluster_id": 1}}, server_key="default")
-
-        mock_bulk_devices.assert_not_called()
-        mock_bulk_vms.assert_not_called()
-        # Cancelled at the first poll → the scan issued ZERO LibreNMS calls.
-        mock_api_class.return_value.get_device_info.assert_not_called()
-        errors = job.job.data["errors"]
-        assert errors, "blocked rows must surface as errors"
-        assert all("cancelled during the collision pre-check" in e["error"] for e in errors)
-        assert job.job.data["failed_count"] == 3  # 2 device rows + 1 VM row fail closed
-        assert job.job.data["success_count"] == 0
-
-    # device + VM = 2 ids → the batch-wide collision pre-check runs over both; configure the api.
-    @pytest.mark.django_db
-    @patch("netbox_librenms_plugin.import_utils.bulk_import_vms")
-    @patch("netbox_librenms_plugin.import_utils.bulk_import_devices_shared")
-    @patch("netbox_librenms_plugin.librenms_api.LibreNMSAPI")
-    def test_run_mixed_device_and_vm_import(self, mock_api_class, mock_bulk_devices, mock_bulk_vms):
-        """Import both devices and VMs."""
-        from netbox_librenms_plugin.jobs import ImportDevicesJob
-
-        mock_api = MagicMock()
-        mock_api.server_key = "non-default"
-        # Distinct devices so the mixed batch resolves cleanly and both imports proceed.
-        mock_api.get_device_info.side_effect = lambda did, **_kwargs: (
-            True,
-            {"device_id": did, "hostname": f"job-mix-{did}", "sysName": f"job-mix-{did}"},
-        )
-        mock_api_class.return_value = mock_api
-
-        # Mock device imports
-        mock_device = MagicMock()
-        mock_device.pk = 100
-
-        mock_bulk_devices.return_value = {
-            "success": [{"device": mock_device, "device_id": 1}],
-            "failed": [],
-            "skipped": [],
-            "virtual_chassis_created": 0,
-            "cancelled": False,
-        }
-
-        # Mock VM imports
-        mock_vm = MagicMock()
-        mock_vm.pk = 200
-
-        mock_bulk_vms.return_value = {
-            "success": [{"device": mock_vm, "device_id": 10}],
-            "failed": [],
-            "skipped": [],
-        }
-
-        job = create_mock_job_runner(ImportDevicesJob, job_pk=791)
-
-        job.run(
-            device_ids=[1],
-            vm_imports={10: {"cluster_id": 1}},
-            server_key="non-default",
-        )
-
-        # Both should be called
-        mock_bulk_devices.assert_called_once()
-        mock_bulk_vms.assert_called_once()
-
-        # Verify server_key (via api.server_key) is forwarded to bulk_import_devices_shared
-        bulk_devices_kwargs = mock_bulk_devices.call_args[1]
-        assert bulk_devices_kwargs.get("server_key") == "non-default"
-
-        # Verify bulk_import_vms received the api with the correct server_key
-        bulk_vms_positional = mock_bulk_vms.call_args[0]
-        assert bulk_vms_positional[1].server_key == "non-default"
-
-        # Verify combined results
-        assert job.job.data["imported_device_pks"] == [100]
-        assert job.job.data["imported_vm_pks"] == [200]
-        assert job.job.data["success_count"] == 2
-        assert job.job.data["total"] == 2
-
-    @patch("netbox_librenms_plugin.import_utils.bulk_import_vms")
-    @patch("netbox_librenms_plugin.import_utils.bulk_import_devices_shared")
-    @patch("netbox_librenms_plugin.librenms_api.LibreNMSAPI")
-    def test_run_with_sync_options(self, mock_api_class, mock_bulk_devices, mock_bulk_vms):
-        """Sync options passed to bulk import."""
-        from netbox_librenms_plugin.jobs import ImportDevicesJob
-
-        mock_api_class.return_value = MagicMock()
-
-        mock_bulk_devices.return_value = {
-            "success": [],
-            "failed": [],
-            "skipped": [],
-            "virtual_chassis_created": 0,
-        }
-
-        job = create_mock_job_runner(ImportDevicesJob, job_pk=792)
-
-        sync_options = {
-            "sync_interfaces": True,
-            "sync_cables": False,
-            "use_sysname": True,
-            "strip_domain": True,
-        }
-
-        job.run(
-            device_ids=[1],
-            vm_imports={},
-            server_key="default",
-            sync_options=sync_options,
-        )
-
-        # Verify sync_options passed to bulk_import_devices_shared
-        call_kwargs = mock_bulk_devices.call_args.kwargs
-        assert call_kwargs["sync_options"] == sync_options
-
-    # >=2 ids → the collision pre-check runs real validation against the DB (see note above).
-    @pytest.mark.django_db
-    @patch("netbox_librenms_plugin.import_utils.bulk_import_vms")
-    @patch("netbox_librenms_plugin.import_utils.bulk_import_devices_shared")
-    @patch("netbox_librenms_plugin.librenms_api.LibreNMSAPI")
-    def test_run_with_manual_mappings(self, mock_api_class, mock_bulk_devices, mock_bulk_vms):
-        """Manual mappings passed correctly."""
-        from netbox_librenms_plugin.jobs import ImportDevicesJob
-
-        # Pin server_key to a real string so the collision pre-check's server-scoped cache/Q
-        # logic runs on a real discriminator, not a MagicMock sentinel.
-        mock_api_class.return_value = MagicMock(server_key="default")
-        # Collision pre-check fetches each device; return distinct devices so the batch resolves
-        # cleanly (a "not found" would now fail the batch closed as an unresolved id).
-        mock_api_class.return_value.get_device_info.side_effect = lambda did, **_kwargs: (
-            True,
-            {"device_id": did, "hostname": f"job-mm-dev-{did}", "sysName": f"job-mm-dev-{did}"},
-        )
-
-        mock_bulk_devices.return_value = {
-            "success": [],
-            "failed": [],
-            "skipped": [],
-            "virtual_chassis_created": 0,
-        }
-
-        job = create_mock_job_runner(ImportDevicesJob, job_pk=793)
-
-        manual_mappings = {
-            1: {"site_id": 10, "device_role_id": 5},
-            2: {"site_id": 11, "device_role_id": 6},
-        }
-
-        job.run(
-            device_ids=[1, 2],
-            vm_imports={},
-            manual_mappings_per_device=manual_mappings,
-            server_key="default",
-        )
-
-        # Verify manual_mappings passed to bulk_import_devices_shared
-        call_kwargs = mock_bulk_devices.call_args.kwargs
-        assert call_kwargs["manual_mappings_per_device"] == manual_mappings
-
-    @patch("netbox_librenms_plugin.import_utils.bulk_import_vms")
-    @patch("netbox_librenms_plugin.import_utils.bulk_import_devices_shared")
-    @patch("netbox_librenms_plugin.librenms_api.LibreNMSAPI")
-    def test_run_stores_imported_pks(self, mock_api_class, mock_bulk_devices, mock_bulk_vms):
-        """Imported device/VM PKs stored in job.data."""
-        from netbox_librenms_plugin.jobs import ImportDevicesJob
-
-        mock_api_class.return_value = MagicMock()
-
-        mock_device = MagicMock()
-        mock_device.pk = 100
-
-        mock_bulk_devices.return_value = {
-            "success": [{"device": mock_device, "device_id": 1}],
-            "failed": [],
-            "skipped": [],
-            "virtual_chassis_created": 0,
-        }
-
-        job = create_mock_job_runner(ImportDevicesJob, job_pk=794)
-
-        job.run(device_ids=[1], vm_imports={}, server_key="default")
-
-        assert 100 in job.job.data["imported_device_pks"]
-
-    @patch("netbox_librenms_plugin.import_utils.bulk_import_vms")
-    @patch("netbox_librenms_plugin.import_utils.bulk_import_devices_shared")
-    @patch("netbox_librenms_plugin.librenms_api.LibreNMSAPI")
-    def test_run_stores_libre_device_ids(self, mock_api_class, mock_bulk_devices, mock_bulk_vms):
-        """LibreNMS device IDs stored for re-render."""
-        from netbox_librenms_plugin.jobs import ImportDevicesJob
-
-        mock_api_class.return_value = MagicMock()
-
-        mock_device = MagicMock()
-        mock_device.pk = 100
-
-        mock_bulk_devices.return_value = {
-            "success": [{"device": mock_device, "device_id": 42}],
-            "failed": [],
-            "skipped": [],
-            "virtual_chassis_created": 0,
-        }
-
-        job = create_mock_job_runner(ImportDevicesJob, job_pk=795)
-
-        job.run(device_ids=[42], vm_imports={}, server_key="default")
-
-        assert 42 in job.job.data["imported_libre_device_ids"]
-
-    # device + VM = 2 ids → the batch-wide collision pre-check runs over both; configure the api so
-    # the batch resolves cleanly and the mocked device/VM error payloads are actually exercised.
-    @pytest.mark.django_db
-    @patch("netbox_librenms_plugin.import_utils.bulk_import_vms")
-    @patch("netbox_librenms_plugin.import_utils.bulk_import_devices_shared")
-    @patch("netbox_librenms_plugin.librenms_api.LibreNMSAPI")
-    def test_run_aggregates_errors(self, mock_api_class, mock_bulk_devices, mock_bulk_vms):
-        """Device and VM errors are combined in job.data."""
-        from netbox_librenms_plugin.jobs import ImportDevicesJob
-
-        mock_api_class.return_value = MagicMock(server_key="default")
-        mock_api_class.return_value.get_device_info.side_effect = lambda did, **_kwargs: (
-            True,
-            {"device_id": did, "hostname": f"job-agg-{did}", "sysName": f"job-agg-{did}"},
-        )
-
-        # Mock mixed results
-        mock_bulk_devices.return_value = {
-            "success": [],
-            "failed": [{"device_id": 1, "error": "Device type not found"}],
-            "skipped": [],
-            "virtual_chassis_created": 0,
-        }
-        mock_bulk_vms.return_value = {
-            "success": [],
-            "failed": [{"device_id": 10, "error": "Cluster not specified"}],
-            "skipped": [],
-        }
-
-        job = create_mock_job_runner(ImportDevicesJob, job_pk=999)
-
-        job.run(
-            device_ids=[1],
-            vm_imports={10: {"cluster": None}},
-            server_key="default",
-        )
-
-        # Verify errors aggregated
-        assert len(job.job.data["errors"]) == 2
-        assert job.job.data["failed_count"] == 2
-        assert job.job.data["success_count"] == 0
-
-    @pytest.mark.django_db
-    @patch("netbox_librenms_plugin.import_utils.bulk_import_vms")
-    @patch("netbox_librenms_plugin.import_utils.bulk_import_devices_shared")
-    @patch("netbox_librenms_plugin.librenms_api.LibreNMSAPI")
-    def test_run_handles_all_failures(self, mock_api_class, mock_bulk_devices, mock_bulk_vms):
-        """All imports fail gracefully."""
-        from netbox_librenms_plugin.jobs import ImportDevicesJob
-
-        # Pin server_key to a real string so the collision pre-check runs server-scoped cache/Q
-        # logic on a real discriminator rather than a MagicMock sentinel.
-        mock_api_class.return_value = MagicMock(server_key="default")
-        # Collision pre-check fetches each device; return distinct devices so the batch resolves
-        # cleanly (no collision/unresolved) and the import actually reaches
-        # bulk_import_devices_shared. A "not found" here would fail the batch closed in the
-        # unresolved branch, so the mocked all-failure payload below would never be exercised.
-        mock_api_class.return_value.get_device_info.side_effect = lambda did, **_kwargs: (
-            True,
-            {"device_id": did, "hostname": f"job-fail-dev-{did}", "sysName": f"job-fail-dev-{did}"},
-        )
-
-        mock_bulk_devices.return_value = {
-            "success": [],
-            "failed": [
-                {"device_id": 1, "error": "Error 1"},
-                {"device_id": 2, "error": "Error 2"},
-            ],
-            "skipped": [],
-            "virtual_chassis_created": 0,
-        }
-
-        job = create_mock_job_runner(ImportDevicesJob, job_pk=800)
-
-        job.run(device_ids=[1, 2], vm_imports={}, server_key="default")
-
-        # The import path is actually exercised, and the bulk-import failures (not an
-        # unresolved/collision block message) are the stored errors.
-        mock_bulk_devices.assert_called_once()
-        assert job.job.data["errors"] == [
-            {"device_id": 1, "error": "Error 1"},
-            {"device_id": 2, "error": "Error 2"},
-        ]
-        assert job.job.data["success_count"] == 0
-        assert job.job.data["failed_count"] == 2
-        assert job.job.data["completed"] is True
-        job.job.save.assert_called()
-
-    @pytest.mark.django_db
-    @patch("netbox_librenms_plugin.import_utils.bulk_import_vms")
-    @patch("netbox_librenms_plugin.import_utils.bulk_import_devices_shared")
-    @patch("netbox_librenms_plugin.librenms_api.LibreNMSAPI")
-    def test_unresolved_row_is_skipped_not_batch_blocked(self, mock_api_class, mock_bulk_devices, mock_bulk_vms):
-        """An unresolved id is SKIPPED (not imported) while the rest of the batch — devices AND VMs — imports. A transient fetch miss on one row must not drop the whole submission (the old whole-batch block)."""
-        from netbox_librenms_plugin.jobs import ImportDevicesJob
-
-        mock_api = MagicMock()
-        mock_api.server_key = "default"
-
-        # Real collision gate against the DB: ids 1 and 10 resolve + validate cleanly (match no
-        # existing NetBox device); id 2 is a get_device_info miss → unresolved → skipped, not a block.
-        def _get_device_info(did, **_kwargs):
-            if did == 2:
-                return (False, None)
-            return (True, {"device_id": did, "hostname": f"job-skip-dev-{did}", "sysName": f"job-skip-dev-{did}"})
-
-        mock_api.get_device_info.side_effect = _get_device_info
-        mock_api_class.return_value = mock_api
-        mock_bulk_devices.return_value = {"success": [], "failed": [], "skipped": [], "virtual_chassis_created": 0}
-        mock_bulk_vms.return_value = {"success": [], "failed": [], "skipped": []}
-
-        job = create_mock_job_runner(ImportDevicesJob, job_pk=810)
-        job.run(device_ids=[1, 2], vm_imports={10: {"cluster_id": 1}}, server_key="default")
-
-        # The fetchable rows import; only the unresolved id 2 is dropped. The importer is called
-        # with just the importable device id, and the VM section still runs.
-        mock_bulk_devices.assert_called_once()
-        assert mock_bulk_devices.call_args.kwargs["device_ids"] == [1]
-        mock_bulk_vms.assert_called_once()
-        assert mock_bulk_vms.call_args.args[0] == {10: {"cluster_id": 1}}
-
-        errors = job.job.data["errors"]
-        # Only the unresolved row is reported (as a skip) — not the whole batch.
-        assert {e["device_id"] for e in errors} == {2}
-        assert all("Skipped" in e["error"] and "verify collisions" in e["error"] for e in errors)
-        # Object-neutral wording: "row(s)", never "device(s)".
-        assert all("device(s)" not in e["error"] for e in errors)
-        assert any("row(s)" in e["error"] for e in errors)
-        assert job.job.data["failed_count"] == 1
-        assert job.job.data["success_count"] == 0
-        assert job.job.data["completed"] is True
-
-    @pytest.mark.django_db
-    @patch("netbox_librenms_plugin.import_utils.bulk_import_vms")
-    @patch("netbox_librenms_plugin.import_utils.bulk_import_devices_shared")
-    @patch("netbox_librenms_plugin.librenms_api.LibreNMSAPI")
-    def test_vm_row_is_collision_checked_in_vm_mode_not_device_mode(
-        self, mock_api_class, mock_bulk_devices, mock_bulk_vms
-    ):
-        """End-to-end through the job's REAL collision gate: a VM row whose serial happens to equal an existing Device's serial must not be Device-serial-matched onto it — that would fabricate a collision with the device row legitimately targeting that Device and block a valid batch that the real VM import (which skips serial matching) would import fine."""
-        from netbox_librenms_plugin.jobs import ImportDevicesJob
-        from netbox_librenms_plugin.tests.conftest import make_device
-
-        make_device("job-phantom-host", serial="ZZSER-JOB-PHANTOM")
-
-        mock_api = MagicMock()
-        mock_api.server_key = "default"
-
-        def _get_device_info(did, **_kwargs):
-            if did == 1:  # device import row → hostname-matches the existing device (fine alone)
-                return (
-                    True,
-                    {"device_id": 1, "hostname": "job-phantom-host", "sysName": "job-phantom-host", "serial": ""},
-                )
-            # VM import row → hostname matches nothing; serial equals the Device's.
-            return (
-                True,
-                {
-                    "device_id": did,
-                    "hostname": "job-vm-unique",
-                    "sysName": "job-vm-unique",
-                    "serial": "ZZSER-JOB-PHANTOM",
-                },
+        user = django_user_model.objects.create_user(username="background-revoked-user")
+        job = _job(user, "revoked-import")
+
+        with pytest.raises(PermissionDenied, match="dcim.add_device"):
+            ImportDevicesJob(job).run(
+                device_ids=[6407],
+                vm_imports={},
+                server_key=SERVER_KEY,
+                libre_devices_cache={6407: _device_payload(6407)},
             )
 
-        mock_api.get_device_info.side_effect = _get_device_info
-        mock_api_class.return_value = mock_api
-        mock_bulk_devices.return_value = {"success": [], "failed": [], "skipped": [], "virtual_chassis_created": 0}
-        mock_bulk_vms.return_value = {"success": [], "failed": [], "skipped": []}
+        job.refresh_from_db()
+        assert job.data == {}
 
-        job = create_mock_job_runner(ImportDevicesJob, job_pk=811)
-        job.run(device_ids=[1], vm_imports={10: {"cluster_id": 1}}, server_key="default")
+    def test_vm_only_permission_is_sufficient_for_a_vm_only_batch(self, librenms_server):
+        from virtualization.models import VirtualMachine
+        from netbox_librenms_plugin.jobs import ImportDevicesJob
 
-        # No fabricated collision → the clean batch imports BOTH halves.
-        mock_bulk_devices.assert_called_once()
-        mock_bulk_vms.assert_called_once()
-        assert job.job.data["errors"] == []
-        assert job.job.data["failed_count"] == 0
+        cluster = make_cluster("background-vm-only-cluster")
+        user = _import_user("vm-only", devices=False)
+        job = _job(user, "vm-only-import")
 
-    def test_job_meta_name(self):
-        """Job has correct Meta.name."""
+        ImportDevicesJob(job).run(
+            device_ids=[],
+            vm_imports={6408: {"cluster_id": cluster.pk}},
+            server_key=SERVER_KEY,
+            libre_devices_cache={6408: _device_payload(6408, hostname="background-vm-only")},
+        )
+
+        job.refresh_from_db()
+        vm = VirtualMachine.objects.get(name="background-vm-only")
+        assert job.data["imported_vm_pks"] == [vm.pk]
+        assert job.data["success_count"] == 1
+
+    def test_empty_batch_still_records_a_completed_result(self, librenms_server):
+        from netbox_librenms_plugin.jobs import ImportDevicesJob
+
+        job = _job(make_superuser("background-empty-import-owner"), "empty-import")
+
+        ImportDevicesJob(job).run(
+            device_ids=[],
+            vm_imports={},
+            server_key=SERVER_KEY,
+        )
+
+        job.refresh_from_db()
+        assert job.data == {
+            "imported_device_pks": [],
+            "imported_vm_pks": [],
+            "imported_libre_device_ids": [],
+            "imported_libre_vm_ids": [],
+            "server_key": SERVER_KEY,
+            "total": 0,
+            "success_count": 0,
+            "failed_count": 0,
+            "skipped_count": 0,
+            "virtual_chassis_created": 0,
+            "errors": [],
+            "completed": True,
+        }
+
+    def test_job_rejects_a_server_key_removed_after_enqueue(self, settings, librenms_server):
+        from netbox_librenms_plugin.jobs import ImportDevicesJob
+
+        plugin_config = deepcopy(settings.PLUGINS_CONFIG)
+        plugin_config["netbox_librenms_plugin"]["servers"] = {}
+        settings.PLUGINS_CONFIG = plugin_config
+        job = _job(make_superuser("background-stale-import-owner"), "stale-import")
+
+        with pytest.raises(ValueError, match="configured LibreNMS server"):
+            ImportDevicesJob(job).run(
+                device_ids=[],
+                vm_imports={},
+                server_key=SERVER_KEY,
+            )
+
+    def test_meta_name_is_stable(self):
         from netbox_librenms_plugin.jobs import ImportDevicesJob
 
         assert ImportDevicesJob.Meta.name == "LibreNMS Device Import"
-
-    @patch("netbox_librenms_plugin.import_utils.bulk_import_vms")
-    @patch("netbox_librenms_plugin.import_utils.bulk_import_devices_shared")
-    @patch("netbox_librenms_plugin.librenms_api.LibreNMSAPI")
-    def test_import_job_stores_server_key(self, mock_api_class, mock_bulk_devices, mock_bulk_vms):
-        """Import job stores resolved api.server_key in job metadata and forwards it to bulk_import_devices_shared."""
-        from netbox_librenms_plugin.jobs import ImportDevicesJob
-
-        mock_api = MagicMock()
-        mock_api.server_key = "resolved-default"
-        mock_api_class.return_value = mock_api
-        mock_bulk_devices.return_value = {
-            "success": [],
-            "failed": [],
-            "skipped": [],
-            "virtual_chassis_created": 0,
-        }
-        mock_bulk_vms.return_value = {"success": [], "failed": [], "skipped": []}
-
-        job = create_mock_job_runner(ImportDevicesJob)
-        job.run(device_ids=[1], vm_imports={}, server_key="default")
-
-        assert job.job.data["server_key"] == "resolved-default"
-        mock_bulk_devices.assert_called_once()
-        call_kwargs = mock_bulk_devices.call_args[1]
-        assert call_kwargs.get("server_key") == "resolved-default"
-
-    @staticmethod
-    def _real_user(username, *vm_or_device_perms):
-        """Create a real NetBox user with ObjectPermission rows for ObjectPermissionBackend enforcement."""
-        from core.models import ObjectType
-        from django.contrib.auth import get_user_model
-        from users.models import ObjectPermission
-
-        user = get_user_model().objects.create_user(username=username)
-        for app_label, model, action in vm_or_device_perms:
-            perm = ObjectPermission.objects.create(name=f"{username}-{app_label}.{action}_{model}", actions=[action])
-            perm.object_types.add(ObjectType.objects.get_by_natural_key(app_label, model))
-            perm.users.add(user)
-        # Refetch: the permission backend caches per instance on first has_perm call.
-        return get_user_model().objects.get(pk=user.pk)
-
-    @pytest.mark.django_db
-    @patch("netbox_librenms_plugin.import_utils.bulk_import_vms")
-    @patch("netbox_librenms_plugin.import_utils.bulk_import_devices_shared")
-    @patch("netbox_librenms_plugin.librenms_api.LibreNMSAPI")
-    def test_run_unauthorized_user_is_blocked_before_any_librenms_call(
-        self, mock_api_class, mock_bulk_devices, mock_bulk_vms
-    ):
-        """A submitter without import permissions is rejected BEFORE the collision pre-check — no API client, no LibreNMS queries, no collision details computed (the per-path checks inside the import helpers only run after the scan)."""
-        from django.core.exceptions import PermissionDenied
-
-        from netbox_librenms_plugin.jobs import ImportDevicesJob
-
-        # Even if the gate were bypassed, keep the pre-check viable so the failure mode
-        # on unfixed code is "scan ran + import mocks reached", not an unpacking error.
-        mock_api_class.return_value = MagicMock(server_key="default")
-        mock_api_class.return_value.get_device_info.side_effect = lambda did, **_kwargs: (
-            True,
-            {"device_id": did, "hostname": f"authgate-{did}", "sysName": f"authgate-{did}"},
-        )
-
-        job = create_mock_job_runner(ImportDevicesJob, job_pk=803)
-        job.job.user = self._real_user("import-noperms")
-
-        with pytest.raises(PermissionDenied):
-            job.run(device_ids=[1, 2], vm_imports={}, server_key="default")
-
-        mock_api_class.assert_not_called()
-        mock_api_class.return_value.get_device_info.assert_not_called()
-        mock_bulk_devices.assert_not_called()
-        mock_bulk_vms.assert_not_called()
-
-    @pytest.mark.django_db
-    @patch("netbox_librenms_plugin.import_utils.bulk_import_vms")
-    @patch("netbox_librenms_plugin.import_utils.bulk_import_devices_shared")
-    @patch("netbox_librenms_plugin.librenms_api.LibreNMSAPI")
-    def test_run_device_batch_rejected_with_only_the_vm_permission(
-        self, mock_api_class, mock_bulk_devices, mock_bulk_vms
-    ):
-        """A device batch needs add/change Device permissions; the VM permission alone must not open the pre-check."""
-        from django.core.exceptions import PermissionDenied
-
-        from netbox_librenms_plugin.jobs import ImportDevicesJob
-
-        mock_api_class.return_value = MagicMock(server_key="default")
-
-        job = create_mock_job_runner(ImportDevicesJob, job_pk=804)
-        job.job.user = self._real_user("import-vm-perm-only", ("virtualization", "virtualmachine", "add"))
-
-        with pytest.raises(PermissionDenied):
-            job.run(device_ids=[1, 2], vm_imports={}, server_key="default")
-
-        mock_api_class.assert_not_called()
-        mock_bulk_devices.assert_not_called()
-
-    @pytest.mark.django_db
-    @patch("netbox_librenms_plugin.import_utils.bulk_import_vms")
-    @patch("netbox_librenms_plugin.import_utils.bulk_import_devices_shared")
-    @patch("netbox_librenms_plugin.librenms_api.LibreNMSAPI")
-    def test_run_device_batch_passes_without_vm_permission(self, mock_api_class, mock_bulk_devices, mock_bulk_vms):
-        """A device-only batch reaches the importer with add/change Device permissions."""
-        from netbox_librenms_plugin.jobs import ImportDevicesJob
-
-        mock_api_class.return_value = MagicMock(server_key="default")
-        mock_bulk_devices.return_value = {
-            "success": [],
-            "failed": [],
-            "skipped": [],
-            "virtual_chassis_created": 0,
-        }
-
-        job = create_mock_job_runner(ImportDevicesJob, job_pk=806)
-        job.job.user = self._real_user(
-            "import-device-without-vm",
-            ("dcim", "device", "add"),
-            ("dcim", "device", "change"),
-        )
-
-        job.run(device_ids=[1], vm_imports={}, server_key="default")
-
-        mock_api_class.assert_called_once()
-        mock_bulk_devices.assert_called_once()
-        mock_bulk_vms.assert_not_called()
-
-    @pytest.mark.django_db
-    @patch("netbox_librenms_plugin.import_utils.bulk_import_vms")
-    @patch("netbox_librenms_plugin.import_utils.bulk_import_devices_shared")
-    @patch("netbox_librenms_plugin.librenms_api.LibreNMSAPI")
-    def test_run_vm_only_batch_passes_with_only_the_vm_permission(
-        self, mock_api_class, mock_bulk_devices, mock_bulk_vms
-    ):
-        """The gate scopes to the batch: a VM-only submission requires only virtualization.add_virtualmachine, so that single grant reaches the pre-check and the VM import."""
-        from netbox_librenms_plugin.jobs import ImportDevicesJob
-
-        mock_api_class.return_value = MagicMock(server_key="default")
-        mock_api_class.return_value.get_device_info.side_effect = lambda did, **_kwargs: (
-            True,
-            {"device_id": did, "hostname": f"vmgate-{did}", "sysName": f"vmgate-{did}"},
-        )
-        mock_bulk_vms.return_value = {"success": [], "failed": [], "skipped": []}
-
-        job = create_mock_job_runner(ImportDevicesJob, job_pk=805)
-        job.job.user = self._real_user("import-vm-only", ("virtualization", "virtualmachine", "add"))
-
-        job.run(device_ids=[], vm_imports={10: {"cluster_id": 1}, 11: {"cluster_id": 1}}, server_key="default")
-
-        # The gate let the batch through: the pre-check scanned it and the VM import ran.
-        mock_bulk_vms.assert_called_once()
-        mock_bulk_devices.assert_not_called()
-
-
-class TestLoadJobResults:
-    """Test loading results from completed background jobs."""
-
-    @pytest.fixture(autouse=True)
-    def _configured_job_servers(self):
-        """Give persisted-job tests explicit usable server keys."""
-        with patch(
-            "netbox_librenms_plugin.server_selection.LibreNMSAPI.get_available_servers",
-            return_value={"default": "Default", "primary": "Primary", "secondary": "Secondary"},
-        ):
-            yield
-
-    @patch("netbox_librenms_plugin.views.imports.list.cache")
-    @patch("netbox_librenms_plugin.import_utils.get_validated_device_cache_key")
-    @patch("core.models.Job.objects.get")
-    def test_load_success_uses_correct_cache_keys(self, mock_job_get, mock_get_key, mock_cache):
-        """Load uses get_validated_device_cache_key with job data."""
-        from netbox_librenms_plugin.views.imports.list import LibreNMSImportView
-
-        # Setup mock job
-        mock_job = MagicMock()
-        mock_job.status = "completed"
-        mock_job.data = {
-            "device_ids": [1, 2],
-            "filters": {"location": "dc1"},
-            "server_key": "primary",
-            "vc_detection_enabled": True,
-            "cached_at": "2026-01-20T10:00:00Z",
-            "cache_timeout": 600,
-            "use_sysname": True,
-            "strip_domain": False,
-        }
-        mock_job_get.return_value = mock_job
-
-        # Mock cache key generation
-        mock_get_key.side_effect = lambda **kw: f"key_{kw['device_id']}"
-
-        # Mock cache returns
-        mock_cache.get.side_effect = [
-            {"device_id": 1, "hostname": "test1"},
-            {"device_id": 2, "hostname": "test2"},
-        ]
-
-        view = LibreNMSImportView()
-        view.rebind_api_for_server = MagicMock(return_value="primary")
-        results = view._load_job_results(123, MagicMock())
-
-        # Verify cache key function called with correct params
-        assert mock_get_key.call_count == 2
-        mock_get_key.assert_any_call(
-            server_key="primary",
-            filters={"location": "dc1"},
-            device_id=1,
-            vc_enabled=True,
-            use_sysname=True,
-            strip_domain=False,
-        )
-        mock_get_key.assert_any_call(
-            server_key="primary",
-            filters={"location": "dc1"},
-            device_id=2,
-            vc_enabled=True,
-            use_sysname=True,
-            strip_domain=False,
-        )
-
-        assert len(results) == 2
-        view.rebind_api_for_server.assert_called_once_with("primary")
-
-    @patch("netbox_librenms_plugin.views.imports.list.cache")
-    @patch("netbox_librenms_plugin.import_utils.get_validated_device_cache_key")
-    @patch("core.models.Job.objects.get")
-    def test_load_extracts_filters_from_job_data(self, mock_job_get, mock_get_key, mock_cache):
-        """Filters, server_key, vc_enabled extracted from job data."""
-        from netbox_librenms_plugin.views.imports.list import LibreNMSImportView
-
-        mock_job = MagicMock()
-        mock_job.status = "completed"
-        mock_job.data = {
-            "device_ids": [1],
-            "filters": {"location": "dc2", "type": "router"},
-            "server_key": "secondary",
-            "vc_detection_enabled": False,
-            "cached_at": "2026-01-20T10:00:00Z",
-            "cache_timeout": 300,
-            "use_sysname": True,
-            "strip_domain": False,
-        }
-        mock_job_get.return_value = mock_job
-        mock_get_key.return_value = "test_key"
-        mock_cache.get.return_value = {"device_id": 1}
-
-        view = LibreNMSImportView()
-        view.rebind_api_for_server = MagicMock(return_value="secondary")
-        view._load_job_results(456, MagicMock())
-
-        # Verify get_validated_device_cache_key called with extracted values
-        mock_get_key.assert_called_once_with(
-            server_key="secondary",
-            filters={"location": "dc2", "type": "router"},
-            device_id=1,
-            vc_enabled=False,
-            use_sysname=True,
-            strip_domain=False,
-        )
-        view.rebind_api_for_server.assert_called_once_with("secondary")
-
-    @patch("netbox_librenms_plugin.views.imports.list.cache")
-    @patch("netbox_librenms_plugin.import_utils.get_validated_device_cache_key")
-    @patch("core.models.Job.objects.get")
-    def test_load_returns_cached_devices(self, mock_job_get, mock_get_key, mock_cache):
-        """Devices retrieved from cache."""
-        from netbox_librenms_plugin.views.imports.list import LibreNMSImportView
-
-        mock_job = MagicMock()
-        mock_job.status = "completed"
-        mock_job.data = {
-            "device_ids": [1, 2],
-            "filters": {},
-            "server_key": "default",
-            "vc_detection_enabled": False,
-            "cached_at": "2026-01-20T10:00:00Z",
-            "cache_timeout": 300,
-        }
-        mock_job_get.return_value = mock_job
-        mock_get_key.side_effect = lambda **kw: f"key_{kw['device_id']}"
-        mock_cache.get.side_effect = [
-            {"device_id": 1, "hostname": "device1"},
-            {"device_id": 2, "hostname": "device2"},
-        ]
-
-        view = LibreNMSImportView()
-        results = view._load_job_results(789, MagicMock())
-
-        assert len(results) == 2
-        assert results[0]["hostname"] == "device1"
-        assert results[1]["hostname"] == "device2"
-
-    @patch("netbox_librenms_plugin.views.imports.list.cache")
-    @patch("netbox_librenms_plugin.import_utils.get_validated_device_cache_key")
-    @patch("core.models.Job.objects.get")
-    def test_load_sets_cache_metadata(self, mock_job_get, mock_get_key, mock_cache):
-        """Load sets _cache_timestamp and _cache_timeout on view."""
-        from netbox_librenms_plugin.views.imports.list import LibreNMSImportView
-
-        mock_job = MagicMock()
-        mock_job.status = "completed"
-        mock_job.data = {
-            "device_ids": [1],
-            "filters": {},
-            "server_key": "default",
-            "vc_detection_enabled": False,
-            "cached_at": "2026-01-20T12:00:00Z",
-            "cache_timeout": 900,
-        }
-        mock_job_get.return_value = mock_job
-        mock_get_key.return_value = "test_key"
-        mock_cache.get.return_value = {"device_id": 1}
-
-        view = LibreNMSImportView()
-        view._load_job_results(456, MagicMock())
-
-        assert view._cache_timestamp == "2026-01-20T12:00:00Z"
-        assert view._cache_timeout == 900
-
-    @patch("core.models.Job.objects.get")
-    def test_load_job_not_found_returns_empty(self, mock_job_get):
-        """Non-existent job returns empty list."""
-        from core.models import Job
-
-        from netbox_librenms_plugin.views.imports.list import LibreNMSImportView
-
-        mock_job_get.side_effect = Job.DoesNotExist
-
-        view = LibreNMSImportView()
-        results = view._load_job_results(999, MagicMock())
-
-        assert results == []
-
-    @patch("core.models.Job.objects.get")
-    def test_load_job_not_completed_returns_empty(self, mock_job_get):
-        """Running job returns empty list."""
-        from netbox_librenms_plugin.views.imports.list import LibreNMSImportView
-
-        mock_job = MagicMock()
-        mock_job.status = "running"
-        mock_job_get.return_value = mock_job
-
-        view = LibreNMSImportView()
-        results = view._load_job_results(123, MagicMock())
-
-        assert results == []
-
-    @patch("netbox_librenms_plugin.views.imports.list.cache")
-    @patch("netbox_librenms_plugin.import_utils.get_validated_device_cache_key")
-    @patch("core.models.Job.objects.get")
-    def test_load_expired_cache_returns_empty(self, mock_job_get, mock_get_key, mock_cache):
-        """All cache misses returns empty list."""
-        from netbox_librenms_plugin.views.imports.list import LibreNMSImportView
-
-        mock_job = MagicMock()
-        mock_job.status = "completed"
-        mock_job.data = {
-            "device_ids": [1, 2],
-            "filters": {},
-            "server_key": "default",
-            "vc_detection_enabled": False,
-            "cached_at": "2026-01-20T10:00:00Z",
-            "cache_timeout": 300,
-        }
-        mock_job_get.return_value = mock_job
-        mock_get_key.side_effect = lambda **kw: f"key_{kw['device_id']}"
-
-        # Simulate expired cache (returns None)
-        mock_cache.get.return_value = None
-
-        view = LibreNMSImportView()
-        results = view._load_job_results(123, MagicMock())
-
-        assert results == []
-
-    @patch("netbox_librenms_plugin.views.imports.list.cache")
-    @patch("netbox_librenms_plugin.import_utils.get_validated_device_cache_key")
-    @patch("core.models.Job.objects.get")
-    def test_load_partial_cache_returns_available(self, mock_job_get, mock_get_key, mock_cache):
-        """Some expired, returns available devices."""
-        from netbox_librenms_plugin.views.imports.list import LibreNMSImportView
-
-        mock_job = MagicMock()
-        mock_job.status = "completed"
-        mock_job.data = {
-            "device_ids": [1, 2, 3],
-            "filters": {},
-            "server_key": "default",
-            "vc_detection_enabled": False,
-            "cached_at": "2026-01-20T10:00:00Z",
-            "cache_timeout": 300,
-        }
-        mock_job_get.return_value = mock_job
-        mock_get_key.side_effect = lambda **kw: f"key_{kw['device_id']}"
-
-        # First device in cache, second expired, third in cache
-        mock_cache.get.side_effect = [
-            {"device_id": 1, "hostname": "device1"},
-            None,  # Expired
-            {"device_id": 3, "hostname": "device3"},
-        ]
-
-        view = LibreNMSImportView()
-        results = view._load_job_results(123, MagicMock())
-
-        # Should return available devices only
-        assert len(results) == 2
-        assert results[0]["device_id"] == 1
-        assert results[1]["device_id"] == 3
-
-
-class TestGracefulFallback:
-    """Test graceful fallback when RQ workers unavailable."""
-
-    def _make_view_with_request(self, superuser=True, query_params=None):
-        """Helper to set up a LibreNMSImportView with a mock request."""
-        from netbox_librenms_plugin.views.imports.list import LibreNMSImportView
-
-        view = object.__new__(LibreNMSImportView)
-        request = MagicMock()
-        request.user.is_superuser = superuser
-        request.user.username = "testuser"
-        request.GET = QueryDict("", mutable=True)
-        request.GET.update(query_params or {})
-        view.request = request
-        return view, request
-
-    @patch("netbox_librenms_plugin.views.imports.list.get_workers_for_queue")
-    def test_no_workers_triggers_synchronous_processing(self, mock_get_workers):
-        """No RQ workers: view falls back to synchronous processing, FilterDevicesJob.enqueue not called."""
-        from netbox_librenms_plugin.views.imports.list import LibreNMSImportView
-
-        mock_get_workers.return_value = 0
-
-        view, request = self._make_view_with_request(
-            superuser=True,
-            query_params={"apply_filters": "1", "librenms_location": "DC1"},
-        )
-        mock_api = MagicMock()
-        mock_api.server_key = "default"
-
-        with (
-            patch.object(LibreNMSImportView, "librenms_api", new_callable=lambda: property(lambda self: mock_api)),
-            patch("netbox_librenms_plugin.views.imports.list.LibreNMSSettings") as mock_settings,
-            patch("netbox_librenms_plugin.views.imports.list.get_user_pref", return_value=None),
-            patch("netbox_librenms_plugin.views.imports.list.cache") as mock_cache,
-            patch("netbox_librenms_plugin.import_utils.get_cache_metadata_key", return_value="meta_key"),
-            patch("netbox_librenms_plugin.import_utils.get_device_count_for_filters", return_value=5),
-            patch("netbox_librenms_plugin.views.imports.list.render") as mock_render,
-            patch("netbox_librenms_plugin.views.imports.list.DeviceImportTable"),
-            patch(
-                "netbox_librenms_plugin.views.imports.list.get_active_cached_searches_for_servers",
-                return_value=[],
-            ),
-            patch("netbox_librenms_plugin.jobs.FilterDevicesJob") as mock_job_cls,
-            patch("netbox_librenms_plugin.views.imports.list.messages"),
-            patch("netbox_librenms_plugin.views.imports.list.process_device_filters") as mock_pdf,
-        ):
-            mock_settings.objects.first.return_value = None
-            mock_settings.objects.get_or_create.return_value = (None, False)
-            mock_cache.get.return_value = None
-            mock_render.return_value = MagicMock()
-
-            mock_form_cls = MagicMock()
-            mock_form = MagicMock()
-            mock_form.is_valid.return_value = True
-            mock_form.cleaned_data = {"enable_vc_detection": False, "clear_cache": False, "use_background_job": True}
-            mock_form_cls.return_value = mock_form
-            view.filterset_form = mock_form_cls
-            mock_pdf.return_value = ([], False)
-
-            with patch.object(view, "get_server_info", return_value={}):
-                view.get(request)
-
-        # Workers == 0 means synchronous fallback — enqueue must not be called
-        mock_job_cls.enqueue.assert_not_called()
-        mock_render.assert_called_once()
-        mock_pdf.assert_called_once()
-
-    @patch("netbox_librenms_plugin.views.imports.list.get_workers_for_queue")
-    def test_workers_available_allows_background_job(self, mock_get_workers):
-        """Available workers: view enqueues FilterDevicesJob and returns JSON response."""
-        from django.http import JsonResponse
-
-        from netbox_librenms_plugin.views.imports.list import LibreNMSImportView
-
-        mock_get_workers.return_value = 2
-
-        view, request = self._make_view_with_request(
-            superuser=True,
-            query_params={"apply_filters": "1", "librenms_location": "DC1"},
-        )
-        mock_api = MagicMock()
-        mock_api.server_key = "server-2"
-
-        with (
-            patch.object(LibreNMSImportView, "librenms_api", new_callable=lambda: property(lambda self: mock_api)),
-            patch("netbox_librenms_plugin.views.imports.list.LibreNMSSettings") as mock_settings,
-            patch("netbox_librenms_plugin.views.imports.list.get_user_pref", return_value=None),
-            patch("netbox_librenms_plugin.views.imports.list.cache") as mock_cache,
-            patch("netbox_librenms_plugin.import_utils.get_cache_metadata_key", return_value="meta_key"),
-            patch("netbox_librenms_plugin.import_utils.get_device_count_for_filters", return_value=10),
-            patch("netbox_librenms_plugin.jobs.FilterDevicesJob") as mock_job_cls,
-        ):
-            mock_settings.objects.first.return_value = None
-            mock_cache.get.return_value = None
-            mock_job = MagicMock()
-            mock_job.pk = 99
-            mock_job.job_id = "uuid-99"
-            mock_job_cls.enqueue.return_value = mock_job
-
-            mock_form_cls = MagicMock()
-            mock_form = MagicMock()
-            mock_form.is_valid.return_value = True
-            mock_form.cleaned_data = {"enable_vc_detection": False, "clear_cache": False, "use_background_job": True}
-            mock_form_cls.return_value = mock_form
-            view.filterset_form = mock_form_cls
-
-            result = view.get(request)
-
-        # Workers > 0 means background job should have been enqueued
-        mock_job_cls.enqueue.assert_called_once()
-        # Verify the non-default server_key was forwarded to the background job
-        assert mock_job_cls.enqueue.call_args.kwargs["server_key"] == "server-2"
-        assert isinstance(result, JsonResponse)
-
-    @patch("netbox_librenms_plugin.views.imports.list.get_workers_for_queue")
-    @patch("netbox_librenms_plugin.views.imports.list.messages")
-    def test_fallback_logs_warning(self, mock_messages, mock_get_workers):
-        """No workers: view logs a warning message when falling back to synchronous mode."""
-        from netbox_librenms_plugin.views.imports.list import LibreNMSImportView
-
-        mock_get_workers.return_value = 0
-
-        view, request = self._make_view_with_request(
-            superuser=True,
-            query_params={"apply_filters": "1", "librenms_location": "DC1"},
-        )
-        mock_api = MagicMock()
-        mock_api.server_key = "default"
-        # Answer the way LibreNMS does: a search that matches nothing is 200 and an empty list.
-        mock_api.list_devices.return_value = (True, [])
-
-        with (
-            patch.object(LibreNMSImportView, "librenms_api", new_callable=lambda: property(lambda self: mock_api)),
-            patch("netbox_librenms_plugin.views.imports.list.LibreNMSSettings") as mock_settings,
-            patch("netbox_librenms_plugin.views.imports.list.get_user_pref", return_value=None),
-            patch("netbox_librenms_plugin.views.imports.list.cache") as mock_cache,
-            patch("netbox_librenms_plugin.import_utils.get_cache_metadata_key", return_value="meta_key"),
-            patch("netbox_librenms_plugin.import_utils.get_device_count_for_filters", return_value=3),
-            patch("netbox_librenms_plugin.views.imports.list.render") as mock_render,
-            patch("netbox_librenms_plugin.views.imports.list.DeviceImportTable"),
-            patch(
-                "netbox_librenms_plugin.views.imports.list.get_active_cached_searches_for_servers",
-                return_value=[],
-            ),
-            patch("netbox_librenms_plugin.jobs.FilterDevicesJob"),
-        ):
-            mock_settings.objects.first.return_value = None
-            mock_settings.objects.get_or_create.return_value = (None, False)
-            mock_cache.get.return_value = None
-            mock_render.return_value = MagicMock()
-
-            mock_form_cls = MagicMock()
-            mock_form = MagicMock()
-            mock_form.is_valid.return_value = True
-            mock_form.cleaned_data = {"enable_vc_detection": False, "clear_cache": False, "use_background_job": True}
-            mock_form_cls.return_value = mock_form
-            view.filterset_form = mock_form_cls
-
-            with patch.object(view, "get_server_info", return_value={}):
-                view.get(request)
-
-        # A warning should be emitted when falling back to sync due to no workers
-        mock_messages.warning.assert_called_once()
