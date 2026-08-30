@@ -144,12 +144,12 @@ def test_server_switch_keeps_the_tab_and_marks_the_destination_active(page):
     assert page.locator('[aria-current="true"]').inner_text() == "Primary LibreNMS"
 
 
-def test_import_server_switch_clears_search_and_keeps_the_installation_default(page):
-    """An import selector click keeps only the new transient server in the destination URL."""
+def test_import_server_switch_clears_search_without_persisting_selection(page):
+    """An import selector click only requests the current and transient destination URLs."""
     base_url = "https://plugin.example.com/import/"
     initial_url = f"{base_url}?server_key=primary&apply_filters=1&librenms_hostname=old-search&job_id=42"
     destination = f"{base_url}?server_key=secondary"
-    installation_settings = {"selected_server": "primary"}
+    requested_urls = []
     initial_html = f"""
         {_render_server_selector("primary")}
         <form><input name="librenms_hostname" value="old-search"></form>
@@ -162,6 +162,7 @@ def test_import_server_switch_clears_search_and_keeps_the_installation_default(p
     """
 
     def handle_route(route):
+        requested_urls.append(route.request.url)
         if route.request.url == initial_url:
             route.fulfill(body=initial_html, content_type="text/html")
             return
@@ -181,7 +182,14 @@ def test_import_server_switch_clears_search_and_keeps_the_installation_default(p
     assert page.locator('[name="librenms_hostname"]').input_value() == ""
     assert page.locator("#search-results").inner_text() == ""
     assert page.locator("#librenms-server-selector").get_attribute("data-active-server-key") == "secondary"
-    assert installation_settings["selected_server"] == "primary"
+    assert requested_urls == [initial_url, destination]
+
+
+def test_import_server_switch_has_no_local_settings_stand_in():
+    """Do not let a local stand-in make the server-selector browser test pass."""
+    source = Path(__file__).read_text()
+
+    assert 'installation_settings = {"selected_server": "primary"}' not in source
 
 
 def test_stopped_import_filter_job_returns_to_the_active_server(page):
