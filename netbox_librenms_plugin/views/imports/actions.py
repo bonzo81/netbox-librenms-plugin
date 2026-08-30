@@ -1107,9 +1107,10 @@ class BulkImportDevicesView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
                 # created under the cluster the user picked, so the object type does not change.
                 role_value = request.POST.get(f"role_{device_id}")
                 if role_value:
-                    try:
-                        vm_imports[device_id]["device_role_id"] = int(role_value)
-                    except (TypeError, ValueError):
+                    role_id = coerce_model_pk(role_value)
+                    if role_id is not None:
+                        vm_imports[device_id]["device_role_id"] = role_id
+                    else:
                         logger.warning(
                             "Ignoring invalid role id '%s' for VM import of device %s",
                             role_value,

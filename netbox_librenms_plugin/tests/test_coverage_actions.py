@@ -4903,18 +4903,28 @@ class TestBulkImportDevicesMorePaths:
         assert response.content == b"Invalid cluster or role selection"
         assert set(VirtualMachine.objects.values_list("pk", flat=True)) == before
 
-    def test_invalid_role_on_a_valid_cluster_still_imports_the_vm(self, settings, caplog, monkeypatch):
+    @pytest.mark.parametrize(
+        ("role_value", "case"),
+        [("not-int", "text"), ("0", "zero"), ("-1", "negative"), (None, "overflow")],
+    )
+    def test_invalid_role_on_a_valid_cluster_still_imports_the_vm(
+        self, settings, caplog, monkeypatch, role_value, case
+    ):
         """A bad role id next to a valid cluster keeps the VM import and drops only the role."""
         from virtualization.models import VirtualMachine
 
+        from netbox_librenms_plugin.utils import _POSTGRES_BIGINT_MAX
+
+        if case == "overflow":
+            role_value = str(_POSTGRES_BIGINT_MAX + 1)
         monkeypatch.setenv("NO_PROXY", "127.0.0.1,localhost")
         monkeypatch.setenv("no_proxy", "127.0.0.1,localhost")
-        user = self._vm_import_user("bulk-more-invalid-role-user")
-        cluster = make_cluster("bulk-more-invalid-role-cluster")
+        user = self._vm_import_user(f"bulk-more-invalid-role-{case}-user")
+        cluster = make_cluster(f"bulk-more-invalid-role-{case}-cluster")
         with run_librenms_server() as server:
             server.device_info_response(
                 device_id=1,
-                hostname="bulk-more-invalid-role-imported",
+                hostname=f"bulk-more-invalid-role-{case}-imported",
                 serial="",
                 ip="198.18.0.2",
             )
@@ -4922,14 +4932,14 @@ class TestBulkImportDevicesMorePaths:
                 settings,
                 ["1"],
                 user,
-                {"cluster_1": str(cluster.pk), "role_1": "not-int"},
-                server_key="bulk-more-invalid-role",
+                {"cluster_1": str(cluster.pk), "role_1": role_value},
+                server_key=f"bulk-more-invalid-role-{case}",
                 server_url=server.url,
             )
             response = post_view(view, request)
 
-        assert "Ignoring invalid role id 'not-int' for VM import of device 1" in caplog.text
-        imported = VirtualMachine.objects.get(name="bulk-more-invalid-role-imported")
+        assert f"Ignoring invalid role id '{role_value}' for VM import of device 1" in caplog.text
+        imported = VirtualMachine.objects.get(name=f"bulk-more-invalid-role-{case}-imported")
         assert imported.cluster_id == cluster.pk
         assert imported.role_id is None
         assert response.status_code == 302
