@@ -285,10 +285,7 @@ class TestInterfaceVlanSync:
             interface,
             {"untagged_vlan": 100, "tagged_vlans": []},
             None,
-            {
-                "vid_group_to_vlan": {(100, None): untagged_vlan},
-                "vid_to_vlans": {100: [untagged_vlan]},
-            },
+            VlanAssignmentMixin._index_vlans([untagged_vlan, stale_tagged_vlan]),
         )
 
         interface.refresh_from_db()
