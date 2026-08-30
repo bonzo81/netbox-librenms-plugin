@@ -19,6 +19,21 @@ def _matchable_filter_result():
     return result
 
 
+class RecordedLibreNMSAPI:
+    """Provide the LibreNMS device-list boundary and record each request."""
+
+    def __init__(self, devices, *, success=True, server_key="default"):
+        self.devices = devices
+        self.success = success
+        self.server_key = server_key
+        self.cache_timeout = 300
+        self.list_device_filters = []
+
+    def list_devices(self, filters=None):
+        self.list_device_filters.append(filters)
+        return self.success, self.devices
+
+
 # =============================================================================
 # TestCacheKeyGeneration - 4 tests
 # =============================================================================
@@ -209,97 +224,90 @@ class TestDeviceNameDetermination:
 class TestDeviceRetrieval:
     """Test device retrieval and filtering functions."""
 
-    @patch("netbox_librenms_plugin.import_utils.filters.cache")
-    @patch("netbox_librenms_plugin.import_utils.filters.LibreNMSAPI")
-    def test_get_librenms_devices_for_import_success(self, mock_api_class, mock_cache):
+    @pytest.fixture(autouse=True)
+    def clear_import_cache(self):
+        """Keep each test isolated while exercising Django's real cache backend."""
+        from django.core.cache import cache
+
+        cache.clear()
+        yield
+        cache.clear()
+
+    def test_get_librenms_devices_for_import_success(self):
         """Retrieve devices from LibreNMS API."""
-        mock_cache.get.return_value = None  # Cache miss
-        mock_api = MagicMock()
-        mock_api.list_devices.return_value = (
-            True,
+        api = RecordedLibreNMSAPI(
             [
                 {"device_id": 1, "hostname": "switch-01"},
                 {"device_id": 2, "hostname": "switch-02"},
-            ],
+            ]
         )
-        mock_api.cache_timeout = 300
 
         from netbox_librenms_plugin.import_utils import get_librenms_devices_for_import
 
-        devices = get_librenms_devices_for_import(api=mock_api, filters={})
+        devices = get_librenms_devices_for_import(api=api, filters={})
 
         assert len(devices) == 2
         assert devices[0]["hostname"] == "switch-01"
+        assert api.list_device_filters == [None]
 
-    @patch("netbox_librenms_plugin.import_utils.filters.cache")
-    def test_get_librenms_devices_for_import_uses_cache(self, mock_cache):
+    def test_get_librenms_devices_for_import_uses_cache(self):
         """Cached results returned on repeat call."""
-        cached_devices = [
-            {"device_id": 1, "hostname": "cached-device"},
-        ]
-        mock_cache.get.return_value = cached_devices
-
-        mock_api = MagicMock()
+        api = RecordedLibreNMSAPI([{"device_id": 1, "hostname": "cached-device"}])
 
         from netbox_librenms_plugin.import_utils import get_librenms_devices_for_import
 
-        devices = get_librenms_devices_for_import(api=mock_api, filters={})
+        first_devices = get_librenms_devices_for_import(api=api, filters={})
+        api.devices = [{"device_id": 2, "hostname": "uncached-device"}]
+        cached_devices = get_librenms_devices_for_import(api=api, filters={})
 
-        assert len(devices) == 1
-        assert devices[0]["hostname"] == "cached-device"
-        mock_api.list_devices.assert_not_called()
+        assert first_devices == [{"device_id": 1, "hostname": "cached-device"}]
+        assert cached_devices == first_devices
+        assert api.list_device_filters == [None]
 
-    @patch("netbox_librenms_plugin.import_utils.filters.cache")
-    def test_get_librenms_devices_for_import_cache_miss(self, mock_cache):
+    def test_get_librenms_devices_for_import_cache_miss(self):
         """API called when cache empty."""
-        mock_cache.get.return_value = None
-        mock_api = MagicMock()
-        mock_api.list_devices.return_value = (
-            True,
-            [
-                {"device_id": 3, "hostname": "fresh-device"},
-            ],
-        )
-        mock_api.cache_timeout = 300
+        api = RecordedLibreNMSAPI([{"device_id": 3, "hostname": "fresh-device"}])
 
         from netbox_librenms_plugin.import_utils import get_librenms_devices_for_import
 
-        devices = get_librenms_devices_for_import(api=mock_api, filters={}, force_refresh=True)
+        devices = get_librenms_devices_for_import(api=api, filters={}, force_refresh=True)
 
-        mock_api.list_devices.assert_called_once()
-        assert len(devices) == 1
+        assert devices == [{"device_id": 3, "hostname": "fresh-device"}]
+        assert api.list_device_filters == [None]
 
-    @patch("netbox_librenms_plugin.import_utils.filters.cache")
-    def test_get_device_count_for_filters_success(self, mock_cache):
+    def test_get_device_count_for_filters_success(self):
         """Returns correct count from API."""
-        mock_cache.get.return_value = [
-            {"device_id": 1, "hostname": "switch-01", "status": 1},
-            {"device_id": 2, "hostname": "switch-02", "status": 1},
-            {"device_id": 3, "hostname": "switch-03", "status": 0},
-        ]
-        mock_api = MagicMock()
+        api = RecordedLibreNMSAPI(
+            [
+                {"device_id": 1, "hostname": "switch-01", "status": 1},
+                {"device_id": 2, "hostname": "switch-02", "status": 1},
+                {"device_id": 3, "hostname": "switch-03", "status": 0},
+            ]
+        )
 
         from netbox_librenms_plugin.import_utils import get_device_count_for_filters
 
-        count = get_device_count_for_filters(api=mock_api, filters={})
+        count = get_device_count_for_filters(api=api, filters={})
 
         assert count == 3
+        assert api.list_device_filters == [None]
 
-    @patch("netbox_librenms_plugin.import_utils.filters.cache")
-    def test_get_device_count_excludes_disabled(self, mock_cache):
+    def test_get_device_count_excludes_disabled(self):
         """Count respects show_disabled filter parameter: disabled==1 devices excluded."""
-        mock_cache.get.return_value = [
-            {"device_id": 1, "hostname": "switch-01", "disabled": 0, "status": 1},
-            {"device_id": 2, "hostname": "switch-02", "disabled": 0, "status": 0},
-            {"device_id": 3, "hostname": "switch-03", "disabled": 1, "status": 1},  # disabled in LibreNMS
-        ]
-        mock_api = MagicMock()
+        api = RecordedLibreNMSAPI(
+            [
+                {"device_id": 1, "hostname": "switch-01", "disabled": 0, "status": 1},
+                {"device_id": 2, "hostname": "switch-02", "disabled": 0, "status": 0},
+                {"device_id": 3, "hostname": "switch-03", "disabled": 1, "status": 1},
+            ]
+        )
 
         from netbox_librenms_plugin.import_utils import get_device_count_for_filters
 
-        count = get_device_count_for_filters(api=mock_api, filters={}, show_disabled=False)
+        count = get_device_count_for_filters(api=api, filters={}, show_disabled=False)
 
         assert count == 2
+        assert api.list_device_filters == [None]
 
     def test_get_import_device_cache_key_default_server(self):
         """Generate cache key with explicit default server key."""
@@ -339,8 +347,7 @@ class TestDeviceRetrieval:
         assert data["members"] == []
         assert data["detection_error"] is None
 
-    @patch("netbox_librenms_plugin.import_utils.virtual_chassis.cache")
-    def test_get_virtual_chassis_data_returns_empty_without_api(self, mock_cache):
+    def test_get_virtual_chassis_data_returns_empty_without_api(self):
         """Get VC data returns empty structure without API."""
         from netbox_librenms_plugin.import_utils import get_virtual_chassis_data
 
