@@ -6,16 +6,14 @@ and migrate_legacy_librenms_id.
 These run against real NetBox Device rows (``@pytest.mark.django_db``): the
 helpers read/write the real ``librenms_id`` JSON custom field via ``device.cf`` /
 ``device.custom_field_data``, and ``find_by_librenms_id`` issues real ORM queries
-against the JSON field. A MagicMock object would let ``.cf`` (a computed property
+against the JSON field. A dynamically fabricated object would let ``.cf`` (a computed property
 distinct from ``custom_field_data``) or the JSON-path query silently diverge from
 production; real rows + DB reloads catch that. The few genuinely query-free guards
-(rejecting a float/dict before touching the ORM) keep a mock model so the
-"no DB hit on bad input" contract stays assertable.
+(rejecting a float/dict before touching the ORM) use a model whose manager access
+raises, so the "no DB hit on bad input" contract stays assertable.
 """
 
-from types import SimpleNamespace
 import itertools
-from unittest.mock import MagicMock
 
 import pytest
 
@@ -23,6 +21,12 @@ from netbox_librenms_plugin.tests.conftest import make_device
 
 _UNSET = object()
 _counter = itertools.count(1)
+
+
+class _QueryForbiddenModel:
+    @property
+    def objects(self):
+        raise AssertionError("invalid IDs must be rejected before ORM manager access")
 
 
 def _dev(librenms_value=_UNSET, *, name=None):
@@ -298,17 +302,13 @@ class TestFindByLibreNMSId:
         """A positive float bypasses the int-only coerce contract → reject before the ORM."""
         from netbox_librenms_plugin.utils import find_by_librenms_id
 
-        mock_model = MagicMock()
-        assert find_by_librenms_id(mock_model, 42.0, "default") is None
-        mock_model.objects.filter.assert_not_called()
+        assert find_by_librenms_id(_QueryForbiddenModel(), 42.0, "default") is None
 
     def test_non_scalar_input_rejected_without_querying(self):
         """Arbitrary non-int/str objects (e.g. a dict) must fail closed before the lookup."""
         from netbox_librenms_plugin.utils import find_by_librenms_id
 
-        mock_model = MagicMock()
-        assert find_by_librenms_id(mock_model, {"id": 42}, "default") is None
-        mock_model.objects.filter.assert_not_called()
+        assert find_by_librenms_id(_QueryForbiddenModel(), {"id": 42}, "default") is None
 
 
 @pytest.mark.django_db
@@ -626,20 +626,21 @@ class TestLibreNMSIdAcceptedFormsContract:
         assert is_legacy_librenms_id(stored) is reader_resolves
 
 
+@pytest.mark.django_db
 class TestMigrateLegacyRejectsNonPositive:
     """migrate_legacy_librenms_id must never canonicalise a non-positive id into the JSON form."""
 
     def test_zero_is_not_migrated(self):
         from netbox_librenms_plugin.utils import migrate_legacy_librenms_id
 
-        obj = SimpleNamespace(custom_field_data={"librenms_id": 0})
+        obj = _dev(0)
         assert migrate_legacy_librenms_id(obj, "default") is False
         assert obj.custom_field_data["librenms_id"] == 0  # left untouched, not {"default": 0}
 
     def test_negative_is_not_migrated(self):
         from netbox_librenms_plugin.utils import migrate_legacy_librenms_id
 
-        obj = SimpleNamespace(custom_field_data={"librenms_id": "-5"})
+        obj = _dev("-5")
         assert migrate_legacy_librenms_id(obj, "default") is False
         assert obj.custom_field_data["librenms_id"] == "-5"
 
@@ -861,14 +862,12 @@ class TestOOBHelpers:
         }
 
 
+@pytest.mark.django_db
 class TestMergeLibreNMSLinks:
     """Tests for merge_librenms_links() — winner-wins conflict policy."""
 
     def _make_dev(self, name, librenms_id_dict):
-        d = MagicMock()
-        d.name = name
-        d.custom_field_data = {"librenms_id": librenms_id_dict} if librenms_id_dict is not None else {}
-        return d
+        return _dev(librenms_id_dict, name=f"{name}-{next(_counter)}")
 
     def test_winner_inherits_id_when_winner_has_no_id(self):
         from netbox_librenms_plugin.utils import merge_librenms_links
@@ -1141,8 +1140,7 @@ class TestMergeLibreNMSLinks:
 
         from netbox_librenms_plugin.utils import merge_librenms_links
 
-        winner = MagicMock()
-        winner.custom_field_data = {"librenms_id": 42}
+        winner = self._make_dev("legacy-winner", 42)
         donor = self._make_dev("idrac-x", {"default": {"id": 99}})
         with pytest.raises(ValueError):
             merge_librenms_links(winner, donor, "default")
@@ -1252,14 +1250,14 @@ class TestMergeLibreNMSLinks:
                 merge_librenms_links(winner, donor, "default")
 
 
+@pytest.mark.django_db
 class TestMarkLibreNMSMigrated:
     """Tests for mark_librenms_migrated()."""
 
     def test_clears_id_and_oob_and_writes_marker(self):
         from netbox_librenms_plugin.utils import mark_librenms_migrated
 
-        donor = MagicMock()
-        donor.custom_field_data = {"librenms_id": {"default": {"id": 99, "oob": {"id": 11, "type": "drac"}}}}
+        donor = _dev({"default": {"id": 99, "oob": {"id": 11, "type": "drac"}}})
         mark_librenms_migrated(donor, winner_pk=42, server_key="default", at="2025-01-01T00:00:00Z")
 
         entry = donor.custom_field_data["librenms_id"]["default"]
@@ -1274,8 +1272,7 @@ class TestMarkLibreNMSMigrated:
     def test_default_timestamp_is_iso_z(self):
         from netbox_librenms_plugin.utils import mark_librenms_migrated
 
-        donor = MagicMock()
-        donor.custom_field_data = {"librenms_id": {"default": {"id": 99}}}
+        donor = _dev({"default": {"id": 99}})
         mark_librenms_migrated(donor, winner_pk=42, server_key="default")
 
         ts = donor.custom_field_data["librenms_id"]["default"]["_migrated_to"]["at"]
@@ -1291,8 +1288,7 @@ class TestMarkLibreNMSMigrated:
         from netbox_librenms_plugin.utils import mark_librenms_migrated
 
         for bad in (True, 0, -1):
-            donor = MagicMock()
-            donor.custom_field_data = {"librenms_id": {"default": {"id": 99}}}
+            donor = _dev({"default": {"id": 99}})
             with pytest.raises(ValueError):
                 mark_librenms_migrated(donor, winner_pk=bad, server_key="default")
 
@@ -1307,9 +1303,7 @@ class TestMarkLibreNMSMigrated:
         from netbox_librenms_plugin.utils import mark_librenms_migrated
 
         for legacy in (42, "42", True, [1, 2]):
-            donor = MagicMock()
-            donor.name = "legacy-donor"
-            donor.custom_field_data = {"librenms_id": legacy}
+            donor = _dev(legacy)
             with pytest.raises(ValueError):
                 mark_librenms_migrated(donor, winner_pk=99, server_key="default")
             # Untouched: no marker stamped, original value preserved for the caller to migrate.
@@ -1328,9 +1322,7 @@ class TestMarkLibreNMSMigrated:
         from netbox_librenms_plugin.utils import mark_librenms_migrated
 
         for corrupt in (True, ["bad"], 3.5, "notanid"):
-            donor = MagicMock()
-            donor.name = "corrupt-entry-donor"
-            donor.custom_field_data = {"librenms_id": {"default": corrupt}}
+            donor = _dev({"default": corrupt})
             with pytest.raises(ValueError):
                 mark_librenms_migrated(donor, winner_pk=99, server_key="default")
             # The raise happens before any mutation: no marker stamped, entry untouched.
@@ -1341,16 +1333,12 @@ class TestMarkLibreNMSMigrated:
         from netbox_librenms_plugin.utils import mark_librenms_migrated
 
         # Blank string → no recoverable link → collapses to {} and stamps the marker (no raise).
-        donor = MagicMock()
-        donor.name = "blank-entry-donor"
-        donor.custom_field_data = {"librenms_id": {"default": ""}}
+        donor = _dev({"default": ""})
         mark_librenms_migrated(donor, winner_pk=99, server_key="default", at="2025-01-01T00:00:00Z")
         assert donor.custom_field_data["librenms_id"]["default"]["_migrated_to"]["device_id"] == 99
 
         # Numeric string → a real id → also valid, marker stamped, id cleared.
-        donor2 = MagicMock()
-        donor2.name = "numstr-entry-donor"
-        donor2.custom_field_data = {"librenms_id": {"default": "77"}}
+        donor2 = _dev({"default": "77"})
         mark_librenms_migrated(donor2, winner_pk=99, server_key="default", at="2025-01-01T00:00:00Z")
         entry = donor2.custom_field_data["librenms_id"]["default"]
         assert "id" not in entry
@@ -1363,9 +1351,7 @@ class TestMarkLibreNMSMigrated:
         from netbox_librenms_plugin.utils import mark_librenms_migrated
 
         for corrupt_oob in ("garbage", ["bad"], 7, {"id": "abc"}):
-            donor = MagicMock()
-            donor.name = "corrupt-oob-donor"
-            donor.custom_field_data = {"librenms_id": {"default": {"oob": corrupt_oob}}}
+            donor = _dev({"default": {"oob": corrupt_oob}})
             with pytest.raises(ValueError):
                 mark_librenms_migrated(donor, winner_pk=99, server_key="default")
             # The raise happens before any mutation: no marker stamped, oob preserved to migrate first.
@@ -1376,9 +1362,7 @@ class TestMarkLibreNMSMigrated:
         from netbox_librenms_plugin.utils import mark_librenms_migrated
 
         for ok_oob in ({"id": 55}, {"id": "55"}, {"id": ""}, {}):
-            donor = MagicMock()
-            donor.name = "ok-oob-donor"
-            donor.custom_field_data = {"librenms_id": {"default": {"oob": ok_oob}}}
+            donor = _dev({"default": {"oob": ok_oob}})
             mark_librenms_migrated(donor, winner_pk=99, server_key="default", at="2025-01-01T00:00:00Z")
             entry = donor.custom_field_data["librenms_id"]["default"]
             assert "oob" not in entry
@@ -1396,9 +1380,7 @@ class TestMarkLibreNMSMigrated:
         from netbox_librenms_plugin.utils import mark_librenms_migrated
 
         for corrupt_id in ("abc", 0, True):
-            donor = MagicMock()
-            donor.name = "corrupt-host-id-donor"
-            donor.custom_field_data = {"librenms_id": {"default": {"id": corrupt_id}}}
+            donor = _dev({"default": {"id": corrupt_id}})
             with pytest.raises(ValueError):
                 mark_librenms_migrated(donor, winner_pk=99, server_key="default")
             # The raise happens before any mutation: no marker stamped, id preserved to migrate first.
@@ -1409,9 +1391,7 @@ class TestMarkLibreNMSMigrated:
         from netbox_librenms_plugin.utils import mark_librenms_migrated
 
         for ok_id in ({"id": 55}, {"id": "55"}, {"id": ""}, {"id": None}, {}):
-            donor = MagicMock()
-            donor.name = "ok-host-id-donor"
-            donor.custom_field_data = {"librenms_id": {"default": dict(ok_id)}}
+            donor = _dev({"default": dict(ok_id)})
             mark_librenms_migrated(donor, winner_pk=99, server_key="default", at="2025-01-01T00:00:00Z")
             entry = donor.custom_field_data["librenms_id"]["default"]
             assert "id" not in entry
