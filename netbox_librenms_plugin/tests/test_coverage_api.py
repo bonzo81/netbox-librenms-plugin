@@ -1045,6 +1045,39 @@ class TestStorelibrenmsId:
         assert cache.get(cache_key) == 42
         assert api.server_key in cache_key
 
+    def test_interface_id_is_cached_without_claiming_a_device_mapping(self, settings, librenms_server):
+        """An interface port ID must not conflict with the same numeric device ID."""
+        from django.core.cache import cache
+
+        from netbox_librenms_plugin.tests.conftest import make_device, make_interface
+
+        device = make_device("store-interface-owner", librenms_cf={"default": 42})
+        interface = make_interface(device, "Ethernet1")
+        api = api_for(settings, librenms_server.url)
+        cache_key = api._get_cache_key(interface)
+
+        api._store_librenms_id(interface, 42)
+
+        interface.refresh_from_db()
+        assert interface.custom_field_data.get("librenms_id") in (None, {})
+        assert cache.get(cache_key) == 42
+
+    def test_unsaved_device_id_is_cached_without_row_locking(self, settings, librenms_server):
+        """An unsaved object has no row that the assignment path can lock."""
+        from django.core.cache import cache
+
+        from netbox_librenms_plugin.tests.conftest import make_device
+
+        device = make_device("store-unsaved-device", librenms_cf={"default": None})
+        device.pk = None
+        device._state.adding = True
+        api = api_for(settings, librenms_server.url)
+        cache_key = api._get_cache_key(device)
+
+        api._store_librenms_id(device, 43)
+
+        assert cache.get(cache_key) == 43
+
 
 @pytest.mark.django_db(transaction=True)
 def test_discovered_mapping_and_vm_import_serialize_one_librenms_id_claim(settings, librenms_server):

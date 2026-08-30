@@ -441,8 +441,9 @@ class LibreNMSAPI:
             str: Cache key
         """
         object_type = obj._meta.model_name
+        object_id = obj.pk if obj.pk is not None else f"unsaved-{id(obj)}"
         resolved_key = server_key if server_key is not None else getattr(self, "server_key", "default")
-        return f"librenms_device_id_{object_type}_{obj.pk}_{resolved_key}"
+        return f"librenms_device_id_{object_type}_{object_id}_{resolved_key}"
 
     def _store_librenms_id(self, obj, librenms_id):
         """
@@ -455,7 +456,16 @@ class LibreNMSAPI:
         Returns:
             None
         """
-        if "librenms_id" in obj.cf:
+        from dcim.models import Device
+        from virtualization.models import VirtualMachine
+
+        can_persist_mapping = (
+            isinstance(obj, (Device, VirtualMachine))
+            and obj.pk is not None
+            and not obj._state.adding
+            and "librenms_id" in obj.cf
+        )
+        if can_persist_mapping:
             from netbox_librenms_plugin.utils import lock_librenms_id_assignment, set_librenms_device_id
 
             with transaction.atomic():
