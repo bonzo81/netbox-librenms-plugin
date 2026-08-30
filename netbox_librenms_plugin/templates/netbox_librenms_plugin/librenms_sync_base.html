@@ -740,7 +740,7 @@
         {% endif %}
     </div>
     {% endif %}
-{% elif librenms_device_id or migrated_to_marker %}
+{% elif librenms_device_id or migrated_to_marker or librenms_lookup_error %}
 {% comment %}
 A migrated donor has its active librenms_id cleared (so it is never found_in_librenms), but the
 banner above directs the user to the per-row "Move to winner" actions that live in these tabs.
@@ -757,12 +757,19 @@ that may well be correct.
     <div>
         <strong>LibreNMS lookup failed:</strong>
         {{ librenms_lookup_error.message }}
+        {% if librenms_device_id %}
         Whether LibreNMS has the device with <code>librenms_id</code> <code>{{ librenms_device_id }}</code> is unknown.
         <hr class="my-2">
         <span class="text-muted">
             Leave the custom field as it is and retry once LibreNMS answers again. If this
             continues, check the LibreNMS server and its logs for that device.
         </span>
+        {% else %}
+        <hr class="my-2">
+        <span class="text-muted">
+            The discovered mapping was not stored. Resolve the reported conflict, then retry.
+        </span>
+        {% endif %}
     </div>
 </div>
 {% endif %}

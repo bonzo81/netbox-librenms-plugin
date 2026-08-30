@@ -12,8 +12,8 @@ from django.utils.http import url_has_allowed_host_and_scheme
 from utilities.permissions import get_permission_for_model
 
 from netbox_librenms_plugin.constants import PERM_CHANGE_PLUGIN, PERM_VIEW_PLUGIN
-from netbox_librenms_plugin.librenms_api import LibreNMSAPI
-from netbox_librenms_plugin.utils import coerce_model_pk, is_list_of_dicts
+from netbox_librenms_plugin.librenms_api import LibreNMSAPI, LibreNMSLookupError
+from netbox_librenms_plugin.utils import coerce_librenms_id, coerce_model_pk, is_list_of_dicts
 
 logger = logging.getLogger(__name__)
 
@@ -515,6 +515,13 @@ class LibreNMSAPIMixin:
             # The LibreNMSAPI will automatically use the selected server
             self._librenms_api = LibreNMSAPI()
         return self._librenms_api
+
+    def resolve_librenms_id(self, obj):
+        """Return a normalized LibreNMS ID or a user-facing assignment error."""
+        try:
+            return coerce_librenms_id(self.librenms_api.get_librenms_id(obj)), None
+        except ValueError as exc:
+            return None, LibreNMSLookupError(str(exc))
 
     def _render_server_key(self):
         """

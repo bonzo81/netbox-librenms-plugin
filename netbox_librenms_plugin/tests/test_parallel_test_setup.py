@@ -212,6 +212,23 @@ def test_local_and_ci_commands_request_isolated_workers():
     assert "pytest -n auto --maxschedchunk=1" in workflow
 
 
+def test_views_resolve_librenms_ids_through_the_shared_boundary():
+    """Keep assignment conflicts inside the view-layer error boundary."""
+    direct_callers = []
+    views_root = REPOSITORY_ROOT / "netbox_librenms_plugin" / "views"
+    for module in views_root.rglob("*.py"):
+        if module.name == "mixins.py":
+            continue
+        tree = ast.parse(module.read_text())
+        if any(
+            isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "get_librenms_id"
+            for node in ast.walk(tree)
+        ):
+            direct_callers.append(str(module.relative_to(REPOSITORY_ROOT)))
+
+    assert not direct_callers, f"views bypass the shared LibreNMS ID boundary: {direct_callers}"
+
+
 def test_lint_workflow_python_meets_the_project_minimum():
     """Run the lint workflow on a Python version supported by the project."""
     pyproject = tomllib.loads((REPOSITORY_ROOT / "pyproject.toml").read_text())

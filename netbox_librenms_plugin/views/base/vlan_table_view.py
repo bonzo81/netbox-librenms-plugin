@@ -8,7 +8,6 @@ from netbox_librenms_plugin.tables.vlans import LibreNMSVLANTable
 from netbox_librenms_plugin.sync_cache import SyncCacheConsistency, SyncTab, request_actor_id
 from netbox_librenms_plugin.utils import (
     cache_remaining_ttl,
-    coerce_librenms_id,
     is_list_of_dicts,
 )
 from netbox_librenms_plugin.views.mixins import (
@@ -75,7 +74,7 @@ class BaseVLANTableView(
         # poisoned cached value (bool/zero/negative/garbage) — the device-id cache path of
         # get_librenms_id returns its value verbatim, so a stray True would otherwise int() to 1
         # and fetch a stranger's VLANs. Mirrors the cables/interfaces/IP views in this PR.
-        self.librenms_id = coerce_librenms_id(self.librenms_api.get_librenms_id(obj))
+        self.librenms_id, lookup_error = self.resolve_librenms_id(obj)
 
         if self.librenms_id is None:
             # Drop any prior snapshot for this server: a failed refresh on a previously-synced
@@ -88,12 +87,13 @@ class BaseVLANTableView(
                 server_key,
                 actor_id=request_actor_id(request),
             )
-            messages.error(request, "Device not found in LibreNMS.")
+            error_message = lookup_error.message if lookup_error else "Device not found in LibreNMS."
+            messages.error(request, error_message)
             return self.render_sync_partial(
                 request,
                 obj,
                 server_key,
-                {"vlan_sync": self._get_error_context(obj, "Device not found in LibreNMS", server_key=server_key)},
+                {"vlan_sync": self._get_error_context(obj, error_message, server_key=server_key)},
             )
 
         # Fetch VLAN data from LibreNMS

@@ -356,7 +356,7 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
             str | None: The management/polling IP, or None if the lookup fails or has no result.
         """
         try:
-            librenms_id = self.librenms_api.get_librenms_id(obj)
+            librenms_id, _lookup_error = self.resolve_librenms_id(obj)
             if not librenms_id:
                 return None
             # get_live_device_info reads live (uncached): this feeds the Primary-IP write decision,

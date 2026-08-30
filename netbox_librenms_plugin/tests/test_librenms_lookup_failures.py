@@ -5,13 +5,17 @@ reached are three different problems with three different fixes. Reporting all o
 "device not found" sends the user to remove a custom field that is correct.
 """
 
+from html import unescape
+
 import pytest
+from django.contrib.messages import get_messages
 from django.urls import reverse
 
 from netbox_librenms_plugin.tests.conftest import configure_librenms_servers, make_device, make_superuser
 
 ABSENT_DEVICE_ID = 4041
 ERRORING_DEVICE_ID = 1255
+CONFLICTING_DEVICE_ID = 1266
 
 
 def _point_plugin_at(settings, url):
@@ -122,3 +126,46 @@ def test_the_sync_page_still_reports_a_genuinely_missing_device(client, librenms
     assert response.status_code == 200
     assert "Device not found" in body
     assert "Remove the custom field value" in body
+
+
+@pytest.mark.django_db
+def test_the_sync_page_reports_a_discovered_id_conflict(client, librenms_server, settings):
+    """A discovery conflict must render its owner instead of raising a server error."""
+    server_key = _point_plugin_at(settings, librenms_server.url)
+    owner = make_device("librenms-conflict-owner", librenms_cf={server_key: CONFLICTING_DEVICE_ID})
+    target = make_device("librenms-conflict-target.example.com", librenms_cf={server_key: None})
+    librenms_server.register(
+        f"/api/v0/devices/{target.name}",
+        {"status": "ok", "devices": [{"device_id": CONFLICTING_DEVICE_ID}]},
+        method="GET",
+    )
+    client.force_login(make_superuser("librenms-conflict-page-user"))
+
+    response = client.get(reverse("plugins:netbox_librenms_plugin:device_librenms_sync", args=[target.pk]))
+    body = unescape(response.content.decode())
+
+    assert response.status_code == 200
+    assert f"LibreNMS ID {CONFLICTING_DEVICE_ID} is already assigned to device '{owner.name}'" in body
+
+
+@pytest.mark.django_db
+def test_location_update_reports_a_discovered_id_conflict(client, librenms_server, settings):
+    """A POST action must redirect with the discovery conflict and make no LibreNMS write."""
+    server_key = _point_plugin_at(settings, librenms_server.url)
+    owner = make_device("librenms-action-conflict-owner", librenms_cf={server_key: CONFLICTING_DEVICE_ID})
+    target = make_device("librenms-action-conflict-target.example.com", librenms_cf={server_key: None})
+    librenms_server.register(
+        f"/api/v0/devices/{target.name}",
+        {"status": "ok", "devices": [{"device_id": CONFLICTING_DEVICE_ID}]},
+        method="GET",
+    )
+    client.force_login(make_superuser("librenms-conflict-action-user"))
+
+    response = client.post(
+        reverse("plugins:netbox_librenms_plugin:update_device_location", args=[target.pk]),
+        {"server_key": server_key},
+    )
+    rendered_messages = [str(message) for message in get_messages(response.wsgi_request)]
+
+    assert response.status_code == 302
+    assert f"LibreNMS ID {CONFLICTING_DEVICE_ID} is already assigned to device '{owner.name}'" in rendered_messages

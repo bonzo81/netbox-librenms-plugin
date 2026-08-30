@@ -438,7 +438,9 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObject
         # and discovery paths), so a falsy non-None id resolves to None here instead of being
         # passed to get_device_links()/get_ports() as device id 1 (int(True)) — fetching a
         # stranger's links. Mirrors the GET/interfaces-POST contract.
-        self.librenms_id = coerce_librenms_id(self.librenms_api.get_librenms_id(lookup_device))
+        self.librenms_id, lookup_error = self.resolve_librenms_id(lookup_device)
+        if lookup_error is not None:
+            self._links_fetch_error = lookup_error.message
         if self.librenms_id is None:
             # OOB-only / unmapped device: skip the host LLDP call. get_device_links(None) would
             # GET /devices/None/links and always 404 for no benefit. Synthesize the same not-ok
@@ -458,7 +460,7 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObject
         if not lldp_ok:
             # Capture the real fetch failure so that when there's ultimately nothing to show,
             # post() can surface the actual LibreNMS error instead of a generic "No links found".
-            self._links_fetch_error = self._classify_links_fetch_error(success, data)
+            self._links_fetch_error = self._links_fetch_error or self._classify_links_fetch_error(success, data)
 
         interface_name_field = get_interface_name_field(getattr(self, "request", None), obj)
         # The alternate LibreNMS name field: when the user displays ifName, a NetBox
@@ -505,7 +507,7 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObject
         # that as a successful empty refresh would overwrite the cache with [] and drop the
         # very rows we couldn't re-fetch. So fall back to None (failure) in that case.
         host_mapping_absent_but_oob_scoped = (
-            self.librenms_id is None and oob_linked and not self._oob_links_fetch_failed
+            self.librenms_id is None and lookup_error is None and oob_linked and not self._oob_links_fetch_failed
         )
         if not links_data and self._links_fetch_error and not host_mapping_absent_but_oob_scoped:
             return None

@@ -398,7 +398,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         # coerce_librenms_id fails closed on a poisoned cached value (bool/zero/negative/garbage):
         # get_librenms_id's device-id cache path returns its value verbatim, so a stray True would
         # otherwise int() to 1 and fetch a stranger's inventory. Mirrors the cables/IP views.
-        self.librenms_id = coerce_librenms_id(self.librenms_api.get_librenms_id(sync_device))
+        self.librenms_id, lookup_error = self.resolve_librenms_id(sync_device)
         if self.librenms_id is None:
             cache.delete(self.get_cache_key(sync_device, "inventory", server_key=server_key))
             SyncCacheConsistency(obj).mark_refresh_failure(
@@ -406,7 +406,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
                 server_key,
                 actor_id=request_actor_id(request),
             )
-            messages.error(request, "Device not found in LibreNMS.")
+            messages.error(request, lookup_error.message if lookup_error else "Device not found in LibreNMS.")
             return self.render_sync_partial(
                 request,
                 obj,
@@ -646,7 +646,9 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
                 self.librenms_api.get_stored_librenms_id(sync_device, server_key=scoped_server)
             )
         else:
-            current_librenms_id = coerce_librenms_id(self.librenms_api.get_librenms_id(sync_device))
+            current_librenms_id, lookup_error = self.resolve_librenms_id(sync_device)
+            if lookup_error is not None:
+                messages.error(request, lookup_error.message)
         if current_librenms_id is None or cached_payload.get("librenms_id") != current_librenms_id:
             cache.delete(cache_key)
             return {"table": None, "object": obj, "cache_expiry": None, "server_key": scoped_server}

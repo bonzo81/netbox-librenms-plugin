@@ -24,7 +24,6 @@ from netbox_librenms_plugin.sync_cache import (
     sync_cache_browser_contract,
 )
 from netbox_librenms_plugin.utils import (
-    coerce_librenms_id,
     find_matching_platform,
     get_interface_name_field,
     get_librenms_device_id,
@@ -176,7 +175,7 @@ class BaseLibreNMSSyncView(
             # Get librenms_id using the determined lookup device. Normalise to a positive int
             # or None at the source so every downstream `is not None` check (has_librenms_id,
             # get_device_info, etc.) can rely on the invariant without re-validating.
-            self.librenms_id = coerce_librenms_id(self.librenms_api.get_librenms_id(librenms_lookup_device))
+            self.librenms_id, self._librenms_id_lookup_error = self.resolve_librenms_id(librenms_lookup_device)
 
         context = self.get_context_data(request, obj)
 
@@ -513,7 +512,7 @@ class BaseLibreNMSSyncView(
         found_in_librenms = False
         mismatched_device = False
         device_info_unavailable = False
-        lookup_error = None
+        lookup_error = getattr(self, "_librenms_id_lookup_error", None)
         librenms_device_details = {
             "librenms_device_url": None,
             "librenms_device_hardware": "-",
@@ -664,6 +663,9 @@ class BaseLibreNMSSyncView(
                     mismatched_device = True
 
                 librenms_device_details["netbox_dns_name"] = netbox_dns_name or "-"
+
+        if lookup_error is not None:
+            device_info_unavailable = True
 
         return {
             "found_in_librenms": found_in_librenms,

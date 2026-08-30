@@ -146,7 +146,11 @@ class UpdateDeviceNameView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin,
                 if sync_device:
                     librenms_lookup_device = sync_device
 
-        self.librenms_id = self.librenms_api.get_librenms_id(librenms_lookup_device)
+        self.librenms_id, lookup_error = self.resolve_librenms_id(librenms_lookup_device)
+
+        if lookup_error is not None:
+            messages.error(request, lookup_error.message)
+            return _device_sync_redirect(request, pk, server_key)
 
         if not self.librenms_id:
             messages.error(request, "Device not found in LibreNMS")
@@ -230,7 +234,11 @@ class UpdateDeviceSerialView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixi
             messages.error(request, "Selected LibreNMS server is no longer configured.")
             return _device_sync_redirect(request, pk, server_key)
 
-        self.librenms_id = self.librenms_api.get_librenms_id(device)
+        self.librenms_id, lookup_error = self.resolve_librenms_id(device)
+
+        if lookup_error is not None:
+            messages.error(request, lookup_error.message)
+            return _device_sync_redirect(request, pk, server_key)
 
         if not self.librenms_id:
             messages.error(request, "Device not found in LibreNMS")
@@ -294,7 +302,11 @@ class UpdateDeviceTypeView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin,
             messages.error(request, "Selected LibreNMS server is no longer configured.")
             return _device_sync_redirect(request, pk, server_key)
 
-        self.librenms_id = self.librenms_api.get_librenms_id(device)
+        self.librenms_id, lookup_error = self.resolve_librenms_id(device)
+
+        if lookup_error is not None:
+            messages.error(request, lookup_error.message)
+            return _device_sync_redirect(request, pk, server_key)
 
         if not self.librenms_id:
             messages.error(request, "Device not found in LibreNMS")
@@ -372,7 +384,11 @@ class UpdateDevicePlatformView(LibreNMSPermissionMixin, NetBoxObjectPermissionMi
             messages.error(request, "Selected LibreNMS server is no longer configured.")
             return _device_sync_redirect(request, pk, server_key)
 
-        self.librenms_id = self.librenms_api.get_librenms_id(device)
+        self.librenms_id, lookup_error = self.resolve_librenms_id(device)
+
+        if lookup_error is not None:
+            messages.error(request, lookup_error.message)
+            return _device_sync_redirect(request, pk, server_key)
 
         if not self.librenms_id:
             messages.error(request, "Device not found in LibreNMS")

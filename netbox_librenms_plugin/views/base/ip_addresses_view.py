@@ -56,9 +56,9 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxOb
         # Coerce before the HTTP call: a poisoned cached id (e.g. True or a
         # non-numeric string) must fail closed here rather than reach the
         # LibreNMS device-ip endpoint, where it would build a malformed URL.
-        self.librenms_id = coerce_librenms_id(self.librenms_api.get_librenms_id(obj))
+        self.librenms_id, lookup_error = self.resolve_librenms_id(obj)
         if self.librenms_id is None:
-            return False, "Device not found in LibreNMS"
+            return False, lookup_error.message if lookup_error else "Device not found in LibreNMS"
         return self.librenms_api.get_device_ips(self.librenms_id)
 
     def enrich_ip_data(self, ip_data, obj, interface_name_field, mgmt_ip="", server_key=None, port_data_cache=None):

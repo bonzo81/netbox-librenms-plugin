@@ -163,7 +163,10 @@ class UpdateDeviceLocationView(LibreNMSPermissionMixin, NetBoxObjectPermissionMi
             messages.error(request, "Selected LibreNMS server is no longer configured.")
             return _device_sync_redirect(request, pk, server_key)
 
-        self.librenms_id = self.librenms_api.get_librenms_id(device)
+        self.librenms_id, lookup_error = self.resolve_librenms_id(device)
+        if lookup_error is not None:
+            messages.error(request, lookup_error.message)
+            return _device_sync_redirect(request, pk, server_key)
 
         if device.site:
             librenms_api = self.librenms_api

@@ -249,10 +249,10 @@ class BaseInterfaceTableView(
         # is already invalidated, so the missing-id path can't leave stale interface data behind.
         # coerce_librenms_id fails closed on a bool/zero/negative/garbage custom-field value (a
         # stored ``True`` would otherwise become id ``1`` and fetch a stranger's ports).
-        self.librenms_id = coerce_librenms_id(self.librenms_api.get_librenms_id(lookup_device))
+        self.librenms_id, lookup_error = self.resolve_librenms_id(lookup_device)
 
         if self.librenms_id is None:
-            messages.error(request, "Device not found in LibreNMS.")
+            messages.error(request, lookup_error.message if lookup_error else "Device not found in LibreNMS.")
             return self._failure_redirect(request, obj, _server_key)
 
         success, librenms_data = self.librenms_api.get_ports(self.librenms_id)
