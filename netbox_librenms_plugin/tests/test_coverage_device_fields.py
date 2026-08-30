@@ -1941,11 +1941,11 @@ class TestRemoveServerMappingViewPost:
         dev = make_device("rm-validationerr", librenms_cf={"orphan": 5})
         req = _make_request({"object_type": "device", "server_key": "orphan", "tab": "modules"})
 
-        # full_clean() accepts any dict for this custom field, so the rejection has to be
-        # injected; the manager, the lock and the transaction all stay real.
+        # The custom field accepts any JSON object, so inject a rejection at its validation
+        # boundary. The manager, lock, transaction, and persistence rollback stay real.
         with (
             _plugins_config(servers={}, librenms_url=""),
-            patch.object(Device, "full_clean", side_effect=ValidationError({"custom_field_data": ["err"]})),
+            patch.object(Device, "clean_fields", side_effect=ValidationError({"custom_field_data": ["err"]})),
         ):
             response = _post(self._view(req), req, pk=dev.pk)
 

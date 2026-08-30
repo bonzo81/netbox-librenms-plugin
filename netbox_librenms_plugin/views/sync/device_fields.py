@@ -931,8 +931,10 @@ class RemoveServerMappingView(LibreNMSPermissionMixin, NetBoxObjectPermissionMix
                     cf.pop(PREFERRED_SERVER_FIELD, None)
                 obj_locked.custom_field_data["librenms_id"] = cf if any(iter_server_mapping_entries(cf)) else None
                 try:
-                    obj_locked.full_clean()
-                    obj_locked.save()
+                    obj_locked.clean_fields(
+                        exclude={field.name for field in obj_locked._meta.fields if field.name != "custom_field_data"}
+                    )
+                    obj_locked.save(update_fields=["custom_field_data"])
                 except ValidationError as exc:
                     transaction.set_rollback(True)
                     error_msg = exc.message_dict if hasattr(exc, "message_dict") else str(exc)

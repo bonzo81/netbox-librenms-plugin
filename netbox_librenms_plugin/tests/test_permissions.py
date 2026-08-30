@@ -1124,7 +1124,7 @@ class TestObjectTypeValidation:
 
 @pytest.mark.django_db
 class TestRemoveServerMappingViewErrorHandling:
-    """Test RemoveServerMappingView handles full_clean/save failures gracefully."""
+    """Test RemoveServerMappingView handles validation and save failures gracefully."""
 
     def _make_view(self, server_key, post_extra=None):
         """Return a (view, request) pair with permissions satisfied."""
@@ -1141,7 +1141,7 @@ class TestRemoveServerMappingViewErrorHandling:
         return override_settings(PLUGINS_CONFIG={"netbox_librenms_plugin": {"servers": servers}})
 
     def test_validation_error_returns_error_message(self):
-        """ValidationError from full_clean leads to error message, not 500."""
+        """A custom-field validation error leads to an error message, not a 500 response."""
         from dcim.models import Device
         from django.core.exceptions import ValidationError
 
@@ -1151,11 +1151,11 @@ class TestRemoveServerMappingViewErrorHandling:
         dev = make_device("perm-rm-validation", librenms_cf={"orphan-server": 99})
         view, request = self._make_view("orphan-server")
 
-        # The custom field accepts any dict, so the rejection has to be injected; the manager,
-        # the lock and the transaction all stay real.
+        # The custom field accepts any JSON object, so inject a rejection at its validation
+        # boundary. The manager, lock, transaction, and persistence rollback stay real.
         with (
             self._plugins_config({}),  # orphan-server NOT configured
-            patch.object(Device, "full_clean", side_effect=ValidationError("CF validation failed")),
+            patch.object(Device, "clean_fields", side_effect=ValidationError("CF validation failed")),
         ):
             _post(view, request, pk=dev.pk)
 

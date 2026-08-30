@@ -277,3 +277,25 @@ class TestRemoveServerMappingView:
         ]
         vm.refresh_from_db()
         assert vm.custom_field_data["librenms_id"] is None
+
+    @pytest.mark.django_db
+    def test_mapping_removal_ignores_unrelated_legacy_device_validation_errors(self, client):
+        from dcim.models import Device
+
+        device = make_device("remove-orphaned-device-mapping", librenms_cf={"orphaned-server": 42})
+        Device.objects.filter(pk=device.pk).update(face="front")
+        user = make_user_with_perms("remove-orphaned-device-writer", [("change", Device)])
+        client.force_login(user)
+
+        response = client.post(
+            reverse("plugins:netbox_librenms_plugin:remove_server_mapping", args=[device.pk]),
+            {"object_type": "device", "server_key": "orphaned-server"},
+        )
+
+        assert response.status_code == 302
+        assert "Removed LibreNMS mapping for server 'orphaned-server'." in [
+            str(message) for message in get_messages(response.wsgi_request)
+        ]
+        device.refresh_from_db()
+        assert device.custom_field_data["librenms_id"] is None
+        assert device.face == "front"
