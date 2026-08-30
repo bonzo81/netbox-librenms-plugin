@@ -1,6 +1,8 @@
-"""Request-level tests for selecting a mapped server on object sync pages."""
+"""Request-level coverage for object-scoped LibreNMS server selection."""
 
-from unittest.mock import patch
+from contextlib import ExitStack
+from copy import deepcopy
+from types import SimpleNamespace
 
 import pytest
 from django.core.cache import cache
@@ -14,141 +16,154 @@ from netbox_librenms_plugin.tests.conftest import (
     make_virtual_chassis_members,
     make_vm,
 )
-from netbox_librenms_plugin.tests.import_server_helpers import (
-    configure_servers,
-    device_info_response,
-    json_response,
-    selector_html,
-)
+from netbox_librenms_plugin.tests.import_server_helpers import selector_html
+from netbox_librenms_plugin.tests.mock_librenms_server import librenms_mock_server
+
+
+def _server_config(server, display_name):
+    return {
+        "display_name": display_name,
+        "librenms_url": server.url,
+        "api_token": "object-server-test-token",
+        "cache_timeout": 300,
+        "verify_ssl": False,
+    }
+
+
+def _configure_servers(settings, **servers):
+    plugin_config = deepcopy(settings.PLUGINS_CONFIG)
+    plugin_config["netbox_librenms_plugin"]["servers"] = {
+        key: _server_config(server, display_name) for key, (server, display_name) in servers.items()
+    }
+    plugin_config["netbox_librenms_plugin"].pop("librenms_url", None)
+    settings.PLUGINS_CONFIG = plugin_config
+
+
+@pytest.fixture
+def servers(settings, monkeypatch):
+    """Provide two configured LibreNMS servers over real loopback HTTP."""
+    monkeypatch.setenv("NO_PROXY", "127.0.0.1,localhost")
+    monkeypatch.setenv("no_proxy", "127.0.0.1,localhost")
+    with ExitStack() as stack:
+        primary = stack.enter_context(librenms_mock_server())
+        secondary = stack.enter_context(librenms_mock_server())
+        _configure_servers(
+            settings,
+            primary=(primary, "Primary LibreNMS"),
+            secondary=(secondary, "Secondary LibreNMS"),
+        )
+        yield SimpleNamespace(primary=primary, secondary=secondary)
+
+
+def _register_device(server, device_id, name, observed=None, *, status=200, payload=None):
+    """Register one device lookup and optionally record the real request."""
+    if payload is None:
+        payload = {
+            "status": "ok",
+            "devices": [
+                {
+                    "device_id": device_id,
+                    "sysName": name,
+                    "hostname": name,
+                    "hardware": "Test appliance",
+                }
+            ],
+        }
+
+    def response(**request):
+        if observed is not None:
+            observed.append(request)
+        return status, payload
+
+    server.register(f"/api/v0/devices/{device_id}", response)
+
+
+def _sync_url(obj):
+    name = "vm_librenms_sync" if obj._meta.model_name == "virtualmachine" else "device_librenms_sync"
+    return reverse(f"plugins:netbox_librenms_plugin:{name}", args=[obj.pk])
 
 
 @pytest.mark.django_db
-def test_device_with_one_non_default_mapping_redirects_and_queries_that_server(client, settings):
-    """A sole mapped server becomes active before the first LibreNMS query."""
-    configure_servers(settings)
-    device = make_device("one-mapped-server", librenms_cf={"secondary": {"id": 13401}})
-    client.force_login(make_superuser("object-server-device-user"))
-    url = reverse("plugins:netbox_librenms_plugin:device_librenms_sync", args=[device.pk])
+@pytest.mark.parametrize("object_kind", ["device", "virtualmachine"])
+def test_single_non_default_mapping_redirects_before_query_and_then_uses_that_server(
+    client,
+    servers,
+    object_kind,
+):
+    obj = make_device("one-mapped-server", librenms_cf={"secondary": {"id": 13401}})
+    if object_kind == "virtualmachine":
+        obj = make_vm("one-mapped-vm")
+        obj.custom_field_data["librenms_id"] = {"secondary": {"id": 13402}}
+        obj.save(update_fields=["custom_field_data"])
+    device_id = 13401 if object_kind == "device" else 13402
+    observed = []
+    _register_device(servers.secondary, device_id, obj.name, observed)
+    client.force_login(make_superuser(f"single-mapping-{object_kind}-user"))
+    url = _sync_url(obj)
 
-    with patch("netbox_librenms_plugin.librenms_api.requests.get") as requests_get:
-        redirect_response = client.get(url)
+    redirect_response = client.get(url)
 
-    requests_get.assert_not_called()
+    assert observed == []
     assert redirect_response.status_code == 302
     assert redirect_response.url == f"{url}?server_key=secondary"
 
-    requested_urls = []
-
-    def librenms_response(request_url, **_kwargs):
-        requested_urls.append(request_url)
-        if request_url == "https://secondary.example.com/api/v0/devices/13401":
-            return device_info_response(request_url, 13401, device.name)
-        raise AssertionError(f"Unexpected LibreNMS request: {request_url}")
-
-    with patch("netbox_librenms_plugin.librenms_api.requests.get", side_effect=librenms_response):
-        response = client.get(redirect_response.url)
+    response = client.get(redirect_response.url)
 
     assert response.status_code == 200
-    assert requested_urls == ["https://secondary.example.com/api/v0/devices/13401"]
+    assert [(request["method"], request["path"]) for request in observed] == [("GET", f"/api/v0/devices/{device_id}")]
     assert b"Secondary LibreNMS" in response.content
 
 
 @pytest.mark.django_db
-def test_vm_with_one_non_default_mapping_redirects_and_queries_that_server(client, settings):
-    """VM sync pages use the same object mapping selection as device pages."""
-    configure_servers(settings)
-    vm = make_vm("one-mapped-vm")
-    vm.custom_field_data["librenms_id"] = {"secondary": {"id": 13402}}
-    vm.save(update_fields=["custom_field_data"])
-    client.force_login(make_superuser("object-server-vm-user"))
-    url = reverse("plugins:netbox_librenms_plugin:vm_librenms_sync", args=[vm.pk])
-
-    with patch("netbox_librenms_plugin.librenms_api.requests.get") as requests_get:
-        redirect_response = client.get(url)
-
-    requests_get.assert_not_called()
-    assert redirect_response.status_code == 302
-    assert redirect_response.url == f"{url}?server_key=secondary"
-
-    requested_urls = []
-
-    def librenms_response(request_url, **_kwargs):
-        requested_urls.append(request_url)
-        if request_url == "https://secondary.example.com/api/v0/devices/13402":
-            return device_info_response(request_url, 13402, vm.name)
-        raise AssertionError(f"Unexpected LibreNMS request: {request_url}")
-
-    with patch("netbox_librenms_plugin.librenms_api.requests.get", side_effect=librenms_response):
-        response = client.get(redirect_response.url)
-
-    assert response.status_code == 200
-    assert requested_urls == ["https://secondary.example.com/api/v0/devices/13402"]
-
-
-@pytest.mark.django_db
-def test_virtual_chassis_member_uses_the_mapping_owners_server(client, settings):
-    """A VC member resolves the server and ID from the member that owns the mapping."""
-    configure_servers(settings)
+def test_virtual_chassis_member_uses_the_mapping_owners_server(client, servers):
     _virtual_chassis, (mapping_owner, viewed_member) = make_virtual_chassis_members("object-server", count=2)
     mapping_owner.custom_field_data["librenms_id"] = {"secondary": {"id": 13403}}
     mapping_owner.save(update_fields=["custom_field_data"])
+    observed = []
+    _register_device(servers.secondary, 13403, viewed_member.name, observed)
+
+    def inventory(**request):
+        observed.append(request)
+        return 200, {"status": "ok", "inventory": []}
+
+    servers.secondary.register("/api/v0/inventory/13403/all", inventory)
     client.force_login(make_superuser("object-server-vc-user"))
-    url = reverse("plugins:netbox_librenms_plugin:device_librenms_sync", args=[viewed_member.pk])
+    url = _sync_url(viewed_member)
 
-    with patch("netbox_librenms_plugin.librenms_api.requests.get") as requests_get:
-        redirect_response = client.get(url)
+    redirect_response = client.get(url)
 
-    requests_get.assert_not_called()
-    assert redirect_response.status_code == 302
+    assert observed == []
     assert redirect_response.url == f"{url}?server_key=secondary"
 
-    requested_urls = []
-
-    def librenms_response(request_url, **_kwargs):
-        requested_urls.append(request_url)
-        if request_url == "https://secondary.example.com/api/v0/devices/13403":
-            return device_info_response(request_url, 13403, viewed_member.name)
-        if request_url == "https://secondary.example.com/api/v0/inventory/13403/all":
-            return json_response(request_url, {"status": "ok", "inventory": []})
-        raise AssertionError(f"Unexpected LibreNMS request: {request_url}")
-
-    with patch("netbox_librenms_plugin.librenms_api.requests.get", side_effect=librenms_response):
-        response = client.get(redirect_response.url)
+    response = client.get(redirect_response.url)
 
     assert response.status_code == 200
-    assert requested_urls == [
-        "https://secondary.example.com/api/v0/devices/13403",
-        "https://secondary.example.com/api/v0/inventory/13403/all",
+    assert [request["path"] for request in observed] == [
+        "/api/v0/devices/13403",
+        "/api/v0/inventory/13403/all",
     ]
     assert b"ID 13403" in response.content
 
 
 @pytest.mark.django_db
-def test_explicit_mapping_is_active_and_server_switch_keeps_only_the_tab(client, settings):
-    """The selector and page controls carry the explicit mapped server."""
-    configure_servers(settings)
+def test_explicit_mapping_is_active_and_server_switch_keeps_only_the_tab(client, servers):
     device = make_device(
         "explicit-mapped-server",
         librenms_cf={"primary": {"id": 13404}, "secondary": {"id": 13405}},
     )
+    _register_device(servers.secondary, 13405, device.name)
     client.force_login(make_superuser("object-server-explicit-user"))
-    url = reverse("plugins:netbox_librenms_plugin:device_librenms_sync", args=[device.pk])
+    url = _sync_url(device)
 
-    def librenms_response(request_url, **_kwargs):
-        if request_url == "https://secondary.example.com/api/v0/devices/13405":
-            return device_info_response(request_url, 13405, device.name)
-        raise AssertionError(f"Unexpected LibreNMS request: {request_url}")
-
-    with patch("netbox_librenms_plugin.librenms_api.requests.get", side_effect=librenms_response):
-        response = client.get(
-            url,
-            {
-                "tab": "ipaddresses",
-                "server_key": "secondary",
-                "interfaces_page": "3",
-                "interface_name_field": "ifAlias",
-            },
-        )
+    response = client.get(
+        url,
+        {
+            "tab": "ipaddresses",
+            "server_key": "secondary",
+            "interfaces_page": "3",
+            "interface_name_field": "ifAlias",
+        },
+    )
 
     assert response.status_code == 200
     html = response.content.decode()
@@ -161,20 +176,15 @@ def test_explicit_mapping_is_active_and_server_switch_keeps_only_the_tab(client,
 
 
 @pytest.mark.django_db
-def test_configured_but_unmapped_server_fails_closed_without_discovery(client, settings):
-    """A configured server cannot query or create identity without an object mapping."""
-    configure_servers(settings)
+def test_configured_but_unmapped_server_fails_closed_without_discovery(client, servers):
     device = make_device("configured-unmapped-server", librenms_cf={"secondary": {"id": 13406}})
+    observed = []
+    _register_device(servers.primary, 13406, device.name, observed)
     client.force_login(make_superuser("object-server-unmapped-user"))
-    url = reverse("plugins:netbox_librenms_plugin:device_librenms_sync", args=[device.pk])
 
-    with patch(
-        "netbox_librenms_plugin.librenms_api.requests.get",
-        side_effect=AssertionError("The configured but unmapped server contacted LibreNMS"),
-    ) as requests_get:
-        response = client.get(url, {"server_key": "primary", "tab": "interfaces"})
+    response = client.get(_sync_url(device), {"server_key": "primary", "tab": "interfaces"})
 
-    requests_get.assert_not_called()
+    assert observed == []
     assert response.status_code == 200
     assert b"is not an available mapping for this object" in response.content
     assert b'id="add-device-modal"' not in response.content
@@ -184,19 +194,23 @@ def test_configured_but_unmapped_server_fails_closed_without_discovery(client, s
 
 @pytest.mark.django_db
 @pytest.mark.parametrize("stored_key", ["contains", "dc__west"])
-def test_a_malformed_stored_server_key_does_not_break_the_page(client, settings, stored_key):
-    """Hand-edited custom-field data must not take down server discovery."""
-    configure_servers(settings)
+def test_malformed_stored_server_key_does_not_break_the_page(client, servers, stored_key):
     device = make_device(
         f"malformed-stored-{stored_key}",
-        librenms_cf={stored_key: {"_migrated_to": {"device_id": 4242, "server_key": stored_key}}, "secondary": 13409},
+        librenms_cf={
+            stored_key: {"_migrated_to": {"device_id": 4242, "server_key": stored_key}},
+            "secondary": 13409,
+        },
+    )
+    _register_device(
+        servers.secondary,
+        13409,
+        device.name,
+        payload={"status": "ok", "devices": []},
     )
     client.force_login(make_superuser(f"object-server-stored-{stored_key}-user"))
-    url = reverse("plugins:netbox_librenms_plugin:device_librenms_sync", args=[device.pk])
 
-    with patch("netbox_librenms_plugin.librenms_api.requests.get") as requests_get:
-        requests_get.return_value = json_response(url, {"devices": []})
-        response = client.get(url, {"server_key": "secondary"})
+    response = client.get(_sync_url(device), {"server_key": "secondary"})
 
     assert response.status_code == 200
     html = response.content.decode()
@@ -206,20 +220,15 @@ def test_a_malformed_stored_server_key_does_not_break_the_page(client, settings,
 
 @pytest.mark.django_db
 @pytest.mark.parametrize("requested_key", ["contains", "dc__west", "_preferred_server"])
-def test_a_malformed_requested_server_key_renders_the_blocked_page(client, settings, requested_key):
-    """A rejected ?server_key must not reach the marker reader, which raises on it."""
-    configure_servers(settings)
+def test_malformed_requested_server_key_renders_the_blocked_page(client, servers, requested_key):
     device = make_device("malformed-server-key", librenms_cf={"secondary": {"id": 13408}})
-    client.force_login(make_superuser("object-server-malformed-user"))
-    url = reverse("plugins:netbox_librenms_plugin:device_librenms_sync", args=[device.pk])
+    observed = []
+    _register_device(servers.secondary, 13408, device.name, observed)
+    client.force_login(make_superuser(f"object-server-malformed-{requested_key}-user"))
 
-    with patch(
-        "netbox_librenms_plugin.librenms_api.requests.get",
-        side_effect=AssertionError("A rejected server key contacted LibreNMS"),
-    ) as requests_get:
-        response = client.get(url, {"server_key": requested_key})
+    response = client.get(_sync_url(device), {"server_key": requested_key})
 
-    requests_get.assert_not_called()
+    assert observed == []
     assert response.status_code == 200
     assert b"is not an available mapping for this object" in response.content
 
@@ -227,14 +236,16 @@ def test_a_malformed_requested_server_key_renders_the_blocked_page(client, setti
 @pytest.mark.django_db
 @pytest.mark.parametrize("requested_key", ["contains", "dc__west", "_preferred_server"])
 @pytest.mark.parametrize(
-    "url_name,tab_argument",
+    ("url_name", "tab_argument"),
     [("sync_cache_status", []), ("sync_cache_fragment", ["interfaces"])],
 )
-def test_the_cache_only_endpoints_reject_a_malformed_server_key(
-    client, settings, requested_key, url_name, tab_argument
+def test_cache_only_endpoints_reject_malformed_server_keys(
+    client,
+    servers,
+    requested_key,
+    url_name,
+    tab_argument,
 ):
-    """The mapped-server gate reads a raw query value, so a rejected key must not reach the validator."""
-    configure_servers(settings)
     label = f"{url_name}-{requested_key}"
     device = make_device(f"malformed-cache-{label}", librenms_cf={"secondary": {"id": 13410}})
     client.force_login(make_superuser(f"object-server-cache-{label}-user"))
@@ -246,20 +257,12 @@ def test_the_cache_only_endpoints_reject_a_malformed_server_key(
 
 
 @pytest.mark.django_db
-def test_unconfigured_mapping_is_removable_but_not_selectable(client, settings):
-    """A stale mapping remains visible for cleanup and cannot become an API target."""
-    configure_servers(settings)
+def test_unconfigured_mapping_is_removable_but_not_selectable(client, servers):
     device = make_device("stale-server-mapping", librenms_cf={"retired": {"id": 13407}})
     client.force_login(make_superuser("object-server-stale-user"))
-    url = reverse("plugins:netbox_librenms_plugin:device_librenms_sync", args=[device.pk])
 
-    with patch(
-        "netbox_librenms_plugin.librenms_api.requests.get",
-        side_effect=AssertionError("The unconfigured server contacted LibreNMS"),
-    ) as requests_get:
-        response = client.get(url, {"server_key": "retired"})
+    response = client.get(_sync_url(device), {"server_key": "retired"})
 
-    requests_get.assert_not_called()
     assert response.status_code == 200
     html = response.content.decode()
     assert "LibreNMS server &#x27;retired&#x27; is not an available mapping" in html
@@ -271,69 +274,55 @@ def test_unconfigured_mapping_is_removable_but_not_selectable(client, settings):
 
 
 @pytest.mark.django_db
-def test_multiple_non_default_mappings_require_selection_without_querying(client, settings):
-    """Ambiguous mappings do not silently fall back to an unmapped installation default."""
-    configure_servers(settings)
-    settings.PLUGINS_CONFIG["netbox_librenms_plugin"]["servers"]["tertiary"] = {
-        "display_name": "Tertiary LibreNMS",
-        "librenms_url": "https://tertiary.example.com",
-        "api_token": "test-token",
-    }
-    device = make_device(
-        "ambiguous-server-mappings",
-        librenms_cf={"secondary": {"id": 13408}, "tertiary": {"id": 13409}},
-    )
-    client.force_login(make_superuser("object-server-ambiguous-user"))
-    url = reverse("plugins:netbox_librenms_plugin:device_librenms_sync", args=[device.pk])
+def test_multiple_non_default_mappings_require_selection_without_querying(client, settings, servers):
+    with librenms_mock_server() as tertiary:
+        _configure_servers(
+            settings,
+            primary=(servers.primary, "Primary LibreNMS"),
+            secondary=(servers.secondary, "Secondary LibreNMS"),
+            tertiary=(tertiary, "Tertiary LibreNMS"),
+        )
+        device = make_device(
+            "ambiguous-server-mappings",
+            librenms_cf={"secondary": {"id": 13408}, "tertiary": {"id": 13409}},
+        )
+        observed = []
+        _register_device(servers.secondary, 13408, device.name, observed)
+        _register_device(tertiary, 13409, device.name, observed)
+        client.force_login(make_superuser("object-server-ambiguous-user"))
+        url = _sync_url(device)
 
-    with patch(
-        "netbox_librenms_plugin.librenms_api.requests.get",
-        side_effect=AssertionError("An ambiguous server selection contacted LibreNMS"),
-    ) as requests_get:
         response = client.get(url, {"tab": "modules"})
 
-    requests_get.assert_not_called()
+    assert observed == []
     assert response.status_code == 200
-    html = response.content.decode()
     assert b"Select a LibreNMS server to continue" in response.content
-    selector = selector_html(html)
+    selector = selector_html(response.content.decode())
     assert f'href="{url}?tab=modules&amp;server_key=secondary"' in selector
     assert f'href="{url}?tab=modules&amp;server_key=tertiary"' in selector
 
 
 @pytest.mark.django_db
-def test_mapped_installation_default_wins_when_several_mappings_exist(client, settings):
-    """A mapped installation default resolves ambiguity without adding a URL key."""
-    configure_servers(settings)
+def test_mapped_installation_default_wins_when_several_mappings_exist(client, servers):
     LibreNMSSettings.objects.update_or_create(pk=1, defaults={"selected_server": "primary"})
     device = make_device(
         "mapped-installation-default",
         librenms_cf={"primary": {"id": 13410}, "secondary": {"id": 13411}},
     )
+    observed = []
+    _register_device(servers.primary, 13410, device.name, observed)
     client.force_login(make_superuser("object-server-default-user"))
-    url = reverse("plugins:netbox_librenms_plugin:device_librenms_sync", args=[device.pk])
 
-    requested_urls = []
-
-    def librenms_response(request_url, **_kwargs):
-        requested_urls.append(request_url)
-        if request_url == "https://primary.example.com/api/v0/devices/13410":
-            return device_info_response(request_url, 13410, device.name)
-        raise AssertionError(f"Unexpected LibreNMS request: {request_url}")
-
-    with patch("netbox_librenms_plugin.librenms_api.requests.get", side_effect=librenms_response):
-        response = client.get(url)
+    response = client.get(_sync_url(device))
 
     assert response.status_code == 200
     assert response.request["QUERY_STRING"] == ""
-    assert requested_urls == ["https://primary.example.com/api/v0/devices/13410"]
+    assert [request["path"] for request in observed] == ["/api/v0/devices/13410"]
     assert 'data-active-server-key="primary"' in response.content.decode()
 
 
 @pytest.mark.django_db
-def test_valid_object_preference_beats_default_and_is_not_rendered_as_mapping(client, settings):
-    """Read-only preference metadata selects its mapping and stays out of mapping rows."""
-    configure_servers(settings)
+def test_valid_object_preference_beats_default_and_is_not_a_mapping_row(client, servers):
     LibreNMSSettings.objects.update_or_create(pk=1, defaults={"selected_server": "primary"})
     device = make_device(
         "preferred-object-server",
@@ -343,25 +332,20 @@ def test_valid_object_preference_beats_default_and_is_not_rendered_as_mapping(cl
             "_preferred_server": "secondary",
         },
     )
+    observed = []
+    _register_device(servers.secondary, 13413, device.name, observed)
     client.force_login(make_superuser("object-server-preference-user"))
-    url = reverse("plugins:netbox_librenms_plugin:device_librenms_sync", args=[device.pk])
+    url = _sync_url(device)
 
-    with patch("netbox_librenms_plugin.librenms_api.requests.get") as requests_get:
-        redirect_response = client.get(url, {"tab": "cables"})
+    redirect_response = client.get(url, {"tab": "cables"})
 
-    requests_get.assert_not_called()
-    assert redirect_response.status_code == 302
+    assert observed == []
     assert redirect_response.url == f"{url}?tab=cables&server_key=secondary"
 
-    def librenms_response(request_url, **_kwargs):
-        if request_url == "https://secondary.example.com/api/v0/devices/13413":
-            return device_info_response(request_url, 13413, device.name)
-        raise AssertionError(f"Unexpected LibreNMS request: {request_url}")
-
-    with patch("netbox_librenms_plugin.librenms_api.requests.get", side_effect=librenms_response):
-        response = client.get(redirect_response.url)
+    response = client.get(redirect_response.url)
 
     assert response.status_code == 200
+    assert [request["path"] for request in observed] == ["/api/v0/devices/13413"]
     html = response.content.decode()
     assert 'data-active-server-key="secondary"' in html
     assert "_preferred_server" not in html
@@ -370,68 +354,52 @@ def test_valid_object_preference_beats_default_and_is_not_rendered_as_mapping(cl
 
 
 @pytest.mark.django_db
-def test_legacy_integer_mapping_keeps_the_installation_default_workflow(client, settings):
-    """Legacy object identity remains scoped to the installation default server."""
-    configure_servers(settings)
+def test_legacy_integer_mapping_keeps_the_installation_default(client, servers):
     LibreNMSSettings.objects.update_or_create(pk=1, defaults={"selected_server": "primary"})
     device = make_device("legacy-object-server", librenms_cf=13414)
+    observed = []
+    _register_device(servers.primary, 13414, device.name, observed)
     client.force_login(make_superuser("object-server-legacy-user"))
-    url = reverse("plugins:netbox_librenms_plugin:device_librenms_sync", args=[device.pk])
 
-    requested_urls = []
-
-    def librenms_response(request_url, **_kwargs):
-        requested_urls.append(request_url)
-        if request_url == "https://primary.example.com/api/v0/devices/13414":
-            return device_info_response(request_url, 13414, device.name)
-        raise AssertionError(f"Unexpected LibreNMS request: {request_url}")
-
-    with patch("netbox_librenms_plugin.librenms_api.requests.get", side_effect=librenms_response):
-        response = client.get(url)
+    response = client.get(_sync_url(device))
 
     assert response.status_code == 200
     assert response.request["QUERY_STRING"] == ""
-    assert requested_urls == ["https://primary.example.com/api/v0/devices/13414"]
+    assert [request["path"] for request in observed] == ["/api/v0/devices/13414"]
     assert b"Active LibreNMS Server" in response.content
 
 
 @pytest.mark.django_db
-def test_unavailable_explicit_server_stays_active_without_fallback(client, settings):
-    """A live lookup failure never changes the selected object mapping."""
-    configure_servers(settings)
+def test_unavailable_explicit_server_stays_active_without_fallback(client, servers):
     device = make_device(
         "unavailable-object-server",
         librenms_cf={"primary": {"id": 13415}, "secondary": {"id": 13416}},
     )
+    observed = []
+    primary_requests = []
+    _register_device(servers.primary, 13415, device.name, primary_requests)
+    _register_device(
+        servers.secondary,
+        13416,
+        device.name,
+        observed,
+        status=503,
+        payload={"status": "error", "message": "Service unavailable"},
+    )
     client.force_login(make_superuser("object-server-unavailable-user"))
-    url = reverse("plugins:netbox_librenms_plugin:device_librenms_sync", args=[device.pk])
-    requested_urls = []
 
-    def librenms_response(request_url, **_kwargs):
-        requested_urls.append(request_url)
-        if request_url == "https://secondary.example.com/api/v0/devices/13416":
-            return json_response(
-                request_url,
-                {"status": "error", "message": "Service unavailable"},
-                status=503,
-            )
-        raise AssertionError(f"Unexpected LibreNMS request: {request_url}")
-
-    with patch("netbox_librenms_plugin.librenms_api.requests.get", side_effect=librenms_response):
-        response = client.get(url, {"server_key": "secondary"})
+    response = client.get(_sync_url(device), {"server_key": "secondary"})
 
     assert response.status_code == 200
-    assert requested_urls == ["https://secondary.example.com/api/v0/devices/13416"]
+    assert [request["path"] for request in observed] == ["/api/v0/devices/13416"]
+    assert primary_requests == []
     html = response.content.decode()
     assert 'data-active-server-key="secondary"' in html
-    assert "https://primary.example.com/api/" not in html
     assert b"Details unavailable" in response.content
 
 
 @pytest.mark.django_db
-def test_interface_paginator_keeps_the_active_server(client, settings):
-    """Following a table page link stays in the active server namespace."""
-    configure_servers(settings)
+def test_interface_paginator_keeps_the_active_server(client, servers):
     device = make_device("server-scoped-paginator", librenms_cf={"secondary": {"id": 13417}})
     ports = [
         {
@@ -448,51 +416,38 @@ def test_interface_paginator_keeps_the_active_server(client, settings):
         for number in range(1, 56)
     ]
     cache.set(sync_snapshot_key(device, "ports", "secondary"), {"ports": ports}, timeout=300)
+    _register_device(servers.secondary, 13417, device.name)
     client.force_login(make_superuser("object-server-paginator-user"))
-    url = reverse("plugins:netbox_librenms_plugin:device_librenms_sync", args=[device.pk])
 
-    def librenms_response(request_url, **_kwargs):
-        if request_url == "https://secondary.example.com/api/v0/devices/13417":
-            return device_info_response(request_url, 13417, device.name)
-        raise AssertionError(f"Unexpected LibreNMS request: {request_url}")
-
-    with patch("netbox_librenms_plugin.librenms_api.requests.get", side_effect=librenms_response):
-        response = client.get(
-            url,
-            {"server_key": "secondary", "tab": "interfaces", "interfaces_per_page": "25"},
-        )
+    response = client.get(
+        _sync_url(device),
+        {"server_key": "secondary", "tab": "interfaces", "interfaces_per_page": "25"},
+    )
 
     assert response.status_code == 200
     html = response.content.decode()
     assert "interfaces_page=2" in html
     paginator_start = html.index('aria-label="Page selection"')
     paginator_end = html.index("</nav>", paginator_start)
-    paginator = html[paginator_start:paginator_end]
-    assert "server_key=secondary" in paginator
+    assert "server_key=secondary" in html[paginator_start:paginator_end]
 
 
 @pytest.mark.django_db
-def test_add_device_forms_carry_the_installation_default_server(client, settings):
-    """Adding an unmapped object cannot drift from the server used for discovery."""
-    configure_servers(settings)
+def test_add_device_forms_carry_the_installation_default_server(client, servers):
     LibreNMSSettings.objects.update_or_create(pk=1, defaults={"selected_server": "primary"})
     device = make_device("add-on-active-server")
+    servers.primary.register(
+        f"/api/v0/devices/{device.name}",
+        {"status": "error", "message": "Device not found"},
+        status=404,
+    )
+    servers.primary.register(
+        "/api/v0/poller_group",
+        {"status": "ok", "get_poller_group": []},
+    )
     client.force_login(make_superuser("object-server-add-user"))
-    url = reverse("plugins:netbox_librenms_plugin:device_librenms_sync", args=[device.pk])
 
-    def librenms_response(request_url, **_kwargs):
-        if request_url == f"https://primary.example.com/api/v0/devices/{device.name}":
-            return json_response(
-                request_url,
-                {"status": "error", "message": "Device not found"},
-                status=404,
-            )
-        if request_url == "https://primary.example.com/api/v0/poller_group":
-            return json_response(request_url, {"status": "ok", "get_poller_group": []})
-        raise AssertionError(f"Unexpected LibreNMS request: {request_url}")
-
-    with patch("netbox_librenms_plugin.librenms_api.requests.get", side_effect=librenms_response):
-        response = client.get(url)
+    response = client.get(_sync_url(device))
 
     assert response.status_code == 200
     html = response.content.decode()
@@ -503,22 +458,19 @@ def test_add_device_forms_carry_the_installation_default_server(client, settings
 
 
 @pytest.mark.django_db
-def test_fallback_mapping_rows_render_the_active_server_the_same_way(settings):
-    """Both producers of all_server_mappings feed one template, so their rows carry one shape."""
+def test_fallback_mapping_rows_render_the_active_server_the_same_way(settings, servers):
     from django.template.loader import render_to_string
 
     from netbox_librenms_plugin.views.base.librenms_sync_view import BaseLibreNMSSyncView
 
-    configure_servers(settings)
     device = make_device("fallback-selector-device", librenms_cf={"primary": 51001, "secondary": 51002})
 
     rows = BaseLibreNMSSyncView._build_all_server_mappings(device, "primary")
-
-    assert rows, "no mapping row was built, so the render below would assert nothing"
     markup = render_to_string(
         "netbox_librenms_plugin/inc/_server_selector.html",
         {"all_server_mappings": rows, "server_key": "primary"},
     )
 
+    assert rows
     assert "dropdown-item active" in markup
     assert "dropdown-item disabled" not in markup
