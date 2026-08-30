@@ -24,7 +24,12 @@ from ..utils import (
     preload_normalization_rules,
     row_identity_matches,
 )
-from .cache import get_cache_metadata_key, get_import_device_cache_key, get_validated_device_cache_key
+from .cache import (
+    get_cache_index_key,
+    get_cache_metadata_key,
+    get_import_device_cache_key,
+    get_validated_device_cache_key,
+)
 from .collisions import detect_bulk_collisions, scope_bulk_collisions
 from .device_operations import (
     VALIDATION_ERROR_ISSUE_PREFIX,
@@ -1315,7 +1320,7 @@ def process_device_filters(
         use_sysname=use_sysname,
         strip_domain=strip_domain,
     )
-    cache_index_key = f"librenms_cache_index_{api.server_key}"
+    cache_index_key = get_cache_index_key(api.server_key)
     if clear_cache:
         cache.delete(cache_metadata_key)
         cache_index = cache.get(cache_index_key, [])

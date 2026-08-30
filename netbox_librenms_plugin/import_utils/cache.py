@@ -34,6 +34,11 @@ def get_location_choices_cache_key(server_key: str) -> str:
     return f"librenms_locations_choices:{server_key}"
 
 
+def get_cache_index_key(server_key: str) -> str:
+    """Return the cached-search index key for a LibreNMS server."""
+    return f"librenms_cache_index_{server_key}"
+
+
 def get_cache_metadata_key(
     server_key: str, filters: dict, vc_enabled: bool, use_sysname: bool = True, strip_domain: bool = False
 ) -> str:
@@ -96,7 +101,7 @@ def get_active_cached_searches(server_key: str) -> list[dict]:
     """
     from datetime import datetime, timezone
 
-    cache_index_key = f"librenms_cache_index_{server_key}"
+    cache_index_key = get_cache_index_key(server_key)
     cache_index = cache.get(cache_index_key, [])
 
     active_searches = []

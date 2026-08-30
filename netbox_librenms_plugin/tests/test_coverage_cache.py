@@ -304,3 +304,10 @@ class TestGetCacheMetadataKeyDeterminism:
         key1 = get_cache_metadata_key("production", {"location": "NYC"}, False)
         key2 = get_cache_metadata_key("staging", {"location": "NYC"}, False)
         assert key1 != key2
+
+
+def test_cache_index_key_scopes_entries_to_the_server():
+    """Keep each server's cached-search index in its own cache entry."""
+    from netbox_librenms_plugin.import_utils.cache import get_cache_index_key
+
+    assert get_cache_index_key("primary") == "librenms_cache_index_primary"
