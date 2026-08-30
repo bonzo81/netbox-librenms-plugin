@@ -211,7 +211,7 @@ class TestFeatureName:
         request = make_view_request("post", {"action": "sync_name"}, user=user)
 
         # Act - drive the real view with the request bound as dispatch() binds it
-        response = post_view(SomeActionView(), request, device_id=42)
+        response = post_view(SomeActionView(), request, device_id=device.pk)
 
         # Assert - on the response and on the persisted state
         assert response.status_code == 200

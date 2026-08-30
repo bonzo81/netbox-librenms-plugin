@@ -731,6 +731,15 @@ def test_testing_guide_template_keeps_project_imports_inside_the_test_method():
     assert not project_imports, "move project imports inside the template test method"
 
 
+def test_testing_guide_template_targets_the_arranged_device():
+    """The request and persisted-state assertion must refer to the same example row."""
+    testing_guide = (REPOSITORY_ROOT / "docs/development/testing.md").read_text()
+    template_section = testing_guide.split("### Basic Test Template", maxsplit=1)[1]
+    template = template_section.split("```python", maxsplit=1)[1].split("```", maxsplit=1)[0]
+
+    assert "post_view(SomeActionView(), request, device_id=device.pk)" in template
+
+
 def test_browser_tests_take_their_page_from_the_shared_fixture():
     """A hand-rolled launch skips the teardown that closes the browser after a failing test."""
     browser_directory = REPOSITORY_ROOT / "netbox_librenms_plugin/tests/browser"
