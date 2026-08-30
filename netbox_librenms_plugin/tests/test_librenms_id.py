@@ -202,6 +202,19 @@ class TestFindByLibreNMSId:
             assert Device.objects.filter(hq).first() is None
             assert Device.objects.filter(oq).first() is None
 
+    def test_build_librenms_id_qs_fails_closed_on_invalid_server_key(self):
+        """A malformed server key must not raise or resolve corrupt custom-field data."""
+        from dcim.models import Device
+
+        from netbox_librenms_plugin.utils import build_librenms_id_qs
+
+        corrupt = _dev({"invalid__server": 42})
+        host_q, oob_q = build_librenms_id_qs("invalid__server", 42)
+
+        assert Device.objects.filter(host_q).first() is None
+        assert Device.objects.filter(oob_q).first() is None
+        corrupt.delete()
+
     def test_returns_matching_object(self):
         from dcim.models import Device
 

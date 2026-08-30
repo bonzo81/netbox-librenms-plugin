@@ -2497,9 +2497,10 @@ def build_librenms_id_qs(server_key, value):
     and the OOB sub-key (``{server_key: {"oob": {"id": 42}}}``), across the value's int and string
     representations (so ``"042"`` / ``" 42 "`` match JSON ``42``).
 
-    Fails closed on an invalid *value* (bool / None / zero / negative / non-numeric string): it
-    returns match-nothing predicates rather than building a lookup that could hit a corrupt legacy
-    row. Callers may still pre-validate for their own control flow, but no longer have to for safety.
+    Fails closed on an invalid server key or value (bool / None / zero / negative / non-numeric
+    string): it returns match-nothing predicates rather than building a lookup that could hit a
+    corrupt legacy row. Callers may still pre-validate for their own control flow, but no longer
+    have to for safety.
 
     Args:
         server_key (str): The LibreNMS server key whose JSON sub-key is matched.
@@ -2510,10 +2511,11 @@ def build_librenms_id_qs(server_key, value):
             bare) and the OOB-controller predicate (``__oob__id``), kept separate so callers can
             fail closed on a host-vs-OOB cross-row collision.
     """
-    if not isinstance(server_key, str) or not server_key.strip():
+    try:
+        server_key = require_server_key(server_key)
+    except ValueError:
         match_none = Q(pk__in=[])
         return match_none, match_none
-    server_key = require_server_key(server_key)
     # Fail closed centrally so every caller is safe: a value that isn't a valid librenms_id
     # (bool / None / zero / negative / non-numeric string like "abc") must never build a predicate
     # that could match a corrupt legacy row (e.g. ``custom_field_data__librenms_id="abc"``). Callers
