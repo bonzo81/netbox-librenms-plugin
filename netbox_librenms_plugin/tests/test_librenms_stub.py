@@ -158,6 +158,7 @@ def test_stub_serves_recordings_and_derived_instance_endpoints_over_real_http():
         assert ok is True
         assert {vlan["vlan_vlan"] for vlan in vlans} == {100, 200}
         assert all(vlan["device_id"] == 1 for vlan in vlans)
+        assert len({vlan["vlan_id"] for vlan in vlans}) == len(vlans)
 
         ok, links = api.get_device_links(1)
         assert ok is True
