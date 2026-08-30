@@ -629,6 +629,15 @@ def recording_server(monkeypatch):
         server = MockLibreNMSServer().start()
         started.append(server)
         server.load_recording(recording)
+        # A recording omits the instance-wide sensors route when the target device has no serial
+        # sensors. Successful capture tests still need a definitive empty response from the source
+        # server; an unregistered route is a 404 fetch failure, not proof that the device has none.
+        if "GET /api/v0/resources/sensors" not in server.routes:
+            server.register(
+                "/api/v0/resources/sensors",
+                {"status": "ok", "sensors": []},
+                method="GET",
+            )
         return server, make_recording_api(server.url, server_key=server_key)
 
     yield _load

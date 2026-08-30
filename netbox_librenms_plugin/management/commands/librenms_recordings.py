@@ -75,7 +75,11 @@ class Command(BaseCommand):
         # load_bundled_recordings(): the recordings are dev/test fixtures NOT packaged in the wheel,
         # so in a wheel install build_manifest(load_bundled_recordings()) would be empty and classify
         # every submission as novel. This mirrors the runtime capture view's novelty contract.
-        verdict = classify_novelty(signature, recordings_store.load_manifest())
+        try:
+            manifest = recordings_store.load_manifest()
+        except RuntimeError as exc:
+            raise CommandError(str(exc)) from exc
+        verdict = classify_novelty(signature, manifest)
         self.stdout.write(self.style.SUCCESS(f"OK: '{recording['name']}' is schema-valid and PII-clean."))
         self.stdout.write(f"Novelty: {verdict['verdict']} ({verdict['why']}).")
 
@@ -94,8 +98,7 @@ class Command(BaseCommand):
             )
         manifest = build_manifest(recordings)
         # Write atomically (tmp + replace): a direct write_text truncates the shipped manifest
-        # first, so a crash mid-write would leave load_manifest() returning [] — making the
-        # command and the capture modal classify every recording as "new" until a rebuild.
+        # first, so a crash mid-write would make novelty classification unavailable until a rebuild.
         tmp_path = recordings_store.MANIFEST_PATH.with_name(recordings_store.MANIFEST_PATH.name + ".tmp")
         tmp_path.write_text(json.dumps(manifest, indent=2) + "\n")
         tmp_path.replace(recordings_store.MANIFEST_PATH)

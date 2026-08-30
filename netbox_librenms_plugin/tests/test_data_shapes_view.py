@@ -147,6 +147,8 @@ def test_capture_view_compresses_redundant_ports(recording_server):
         "meta": {"os": "iosxr"},
         "responses": {
             "GET /api/v0/devices/1000": {"status": "ok", "devices": [{"device_id": 1000, "os": "iosxr"}]},
+            "GET /api/v0/inventory/1000?entPhysicalContainedIn=0": {"status": "ok", "inventory": []},
+            "GET /api/v0/inventory/1000/all": {"status": "ok", "inventory": []},
             "GET /api/v0/devices/1000/ports": {"status": "ok", "ports": ports},
             "GET /api/v0/devices/1000/port_stack": {
                 "status": "ok",
@@ -301,6 +303,26 @@ def test_capture_view_errors_on_mid_capture_transport_failure(recording_server):
     assert "Capture failed" in html
     assert "no HTTP response" in html
     assert "Anonymized recording" not in html
+
+
+@pytest.mark.django_db
+def test_capture_view_reports_an_unavailable_novelty_manifest(recording_server):
+    """A broken packaged manifest must render an error instead of a false novelty verdict."""
+    server, api = recording_server(load_recording("cisco-stackwise-3member"))
+    device = make_device("cap-dev-manifest", librenms_cf={"test": {"id": 1000}})
+    view = _view_with_api(api)
+
+    with patch(
+        "netbox_librenms_plugin.views.data_shapes.recordings_store.load_manifest",
+        side_effect=RuntimeError("Data-shape manifest is unavailable."),
+    ):
+        response = _run_capture(view, server, device)
+
+    assert response.status_code == 200
+    html = response.content.decode()
+    assert "Capture failed" in html
+    assert "manifest is unavailable" in html
+    assert "Likely already covered" not in html
 
 
 @pytest.mark.django_db

@@ -230,10 +230,8 @@ def compute_shape_signature(recording):
 
 def _structural_axes(signature):
     """Reduce a signature to the OS-independent shape axes used for novelty matching."""
-    # A partially malformed manifest entry can carry an explicit null (or non-dict) section —
-    # dict.get(key, {}) returns the stored None when the key is present, so `.get()` below would
-    # blow up. classify_novelty() feeds load_manifest() straight into here in the capture flow,
-    # so fall back to {} per-section to degrade gracefully instead of breaking the modal.
+    # classify_novelty() is also a public helper for caller-supplied manifests. Keep it robust even
+    # though load_manifest() rejects malformed entries at the generated-artifact boundary.
     vc = signature.get("virtual_chassis")
     if not isinstance(vc, dict):
         vc = {}
@@ -266,6 +264,60 @@ def _structural_axes(signature):
         signature.get("serial", False),
         signature.get("oob", False),
     )
+
+
+def signature_schema_errors(signature):
+    """Return schema errors for one generated novelty signature."""
+    if not isinstance(signature, dict):
+        return ["signature must be a JSON object"]
+
+    errors = []
+    os_name = signature.get("os")
+    if "os" not in signature or (os_name is not None and not isinstance(os_name, str)):
+        errors.append("os must be a string or null")
+
+    vc = signature.get("virtual_chassis")
+    if not isinstance(vc, dict):
+        errors.append("virtual_chassis must be an object")
+    else:
+        if not isinstance(vc.get("present"), bool):
+            errors.append("virtual_chassis.present must be a boolean")
+        root_class = vc.get("root_class")
+        if root_class is not None and not isinstance(root_class, str):
+            errors.append("virtual_chassis.root_class must be a string or null")
+        member_count = vc.get("member_count")
+        if not isinstance(member_count, int) or isinstance(member_count, bool) or member_count < 0:
+            errors.append("virtual_chassis.member_count must be a non-negative integer")
+        position_base = vc.get("position_base")
+        if position_base is not None and (not isinstance(position_base, int) or isinstance(position_base, bool)):
+            errors.append("virtual_chassis.position_base must be an integer or null")
+
+    lag = signature.get("lag")
+    if not isinstance(lag, dict):
+        errors.append("lag must be an object")
+    else:
+        if not isinstance(lag.get("present"), bool):
+            errors.append("lag.present must be a boolean")
+        if not isinstance(lag.get("ieee8023ad"), bool):
+            errors.append("lag.ieee8023ad must be a boolean")
+        name_prefix = lag.get("name_prefix")
+        if name_prefix is not None and not isinstance(name_prefix, str):
+            errors.append("lag.name_prefix must be a string or null")
+
+    sub_interfaces = signature.get("sub_interfaces")
+    if not isinstance(sub_interfaces, dict):
+        errors.append("sub_interfaces must be an object")
+    else:
+        if not isinstance(sub_interfaces.get("present"), bool):
+            errors.append("sub_interfaces.present must be a boolean")
+        styles = sub_interfaces.get("styles")
+        if not isinstance(styles, list) or any(not isinstance(style, str) for style in styles):
+            errors.append("sub_interfaces.styles must be a list of strings")
+
+    for name in ("port_stack", "vlans", "transceivers", "serial", "oob"):
+        if not isinstance(signature.get(name), bool):
+            errors.append(f"{name} must be a boolean")
+    return errors
 
 
 def build_manifest(recordings):

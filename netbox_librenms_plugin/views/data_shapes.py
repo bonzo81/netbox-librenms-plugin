@@ -88,7 +88,11 @@ class CaptureDataShapeView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin,
         # hostname is recoverable by hashing candidates from a dictionary.
         anonymized = anonymize_recording(recording, salt=secrets.token_hex(16))
         signature = compute_shape_signature(anonymized)
-        novelty = classify_novelty(signature, recordings_store.load_manifest())
+        try:
+            manifest = recordings_store.load_manifest()
+        except RuntimeError as exc:
+            return self._error(request, device, f"Capture failed: {exc}")
+        novelty = classify_novelty(signature, manifest)
         residual_pii = find_pii(anonymized)
         recording_json = json.dumps(anonymized, indent=2)
 

@@ -28,76 +28,90 @@ class _StubApi:
         return self.routes.get(path, (200, {"status": "ok"}))
 
 
+def _with_empty_inventory_source(recording):
+    """Add definitive empty inventory responses to a capture source recording."""
+    device_id = recording["device_id"]
+    responses = recording["responses"]
+    responses[f"GET /api/v0/inventory/{device_id}?entPhysicalContainedIn=0"] = {
+        "status": "ok",
+        "inventory": [],
+    }
+    responses[f"GET /api/v0/inventory/{device_id}/all"] = {"status": "ok", "inventory": []}
+    return recording
+
+
 def _transceiver_serial_seed():
     """Build a seed with per-device transceivers and instance-wide target, unrelated, and non-serial sensors."""
-    return {
-        "schema_version": 1,
-        "name": "transceiver-serial-seed",
-        "device_id": 2000,
-        "meta": {"os": "sros"},
-        "responses": {
-            "GET /api/v0/devices/2000": {
-                "status": "ok",
-                "devices": [{"device_id": 2000, "os": "sros", "hostname": "acs01.example.net"}],
+    return _with_empty_inventory_source(
+        {
+            "schema_version": 1,
+            "name": "transceiver-serial-seed",
+            "device_id": 2000,
+            "meta": {"os": "sros"},
+            "responses": {
+                "GET /api/v0/devices/2000": {
+                    "status": "ok",
+                    "devices": [{"device_id": 2000, "os": "sros", "hostname": "acs01.example.net"}],
+                },
+                # Required structural routes: capture fails loudly on an error status for these
+                # (a stale librenms_id answers 404 everywhere), so the seed must serve them.
+                "GET /api/v0/devices/2000/ports": {"status": "ok", "ports": []},
+                "GET /api/v0/devices/2000/port_stack": {"status": "ok", "mappings": []},
+                "GET /api/v0/devices/2000/transceivers": {
+                    "status": "ok",
+                    "transceivers": [
+                        {
+                            "port_id": 519,
+                            "entity_physical_index": 1610899520,
+                            "type": "CFP2/QSFP28",
+                            "model": "3HE10550AARA01",
+                            "serial": "X42AU0D",
+                            "channels": 4,
+                            "connector": "LC",
+                            "wavelength": 1301,
+                        }
+                    ],
+                },
+                "GET /api/v0/resources/sensors": {
+                    "status": "ok",
+                    "sensors": [
+                        {
+                            "sensor_id": 1,
+                            "device_id": 2000,
+                            "sensor_type": "acsSerialPortTable",
+                            "sensor_index": "acsSerialPortTableStatus.7",
+                            "sensor_descr": "ttyS7 Status",
+                            "sensor_class": "state",
+                        },
+                        {
+                            "sensor_id": 2,
+                            "device_id": 2000,
+                            "sensor_type": "acsSerialPortTable",
+                            "sensor_index": "acsSerialPortTableStatus.8",
+                            "sensor_descr": "PROD-LAB03A-RA1 Status",
+                            "sensor_class": "state",
+                        },
+                        {
+                            "sensor_id": 99,
+                            "device_id": 3000,
+                            "sensor_type": "acsSerialPortTable",
+                            "sensor_index": "acsSerialPortTableStatus.1",
+                            "sensor_descr": "OTHER-DEVICE Status",
+                            "sensor_class": "state",
+                        },
+                        {
+                            "sensor_id": 50,
+                            "device_id": 2000,
+                            "sensor_type": "temperature",
+                            "sensor_index": "tempSensor.1",
+                            "sensor_descr": "CPU temperature",
+                            "sensor_class": "temperature",
+                        },
+                    ],
+                },
             },
-            # Required structural routes: capture fails loudly on an error status for these
-            # (a stale librenms_id answers 404 everywhere), so the seed must serve them.
-            "GET /api/v0/devices/2000/ports": {"status": "ok", "ports": []},
-            "GET /api/v0/devices/2000/port_stack": {"status": "ok", "mappings": []},
-            "GET /api/v0/devices/2000/transceivers": {
-                "status": "ok",
-                "transceivers": [
-                    {
-                        "port_id": 519,
-                        "entity_physical_index": 1610899520,
-                        "type": "CFP2/QSFP28",
-                        "model": "3HE10550AARA01",
-                        "serial": "X42AU0D",
-                        "channels": 4,
-                        "connector": "LC",
-                        "wavelength": 1301,
-                    }
-                ],
-            },
-            "GET /api/v0/resources/sensors": {
-                "status": "ok",
-                "sensors": [
-                    {
-                        "sensor_id": 1,
-                        "device_id": 2000,
-                        "sensor_type": "acsSerialPortTable",
-                        "sensor_index": "acsSerialPortTableStatus.7",
-                        "sensor_descr": "ttyS7 Status",
-                        "sensor_class": "state",
-                    },
-                    {
-                        "sensor_id": 2,
-                        "device_id": 2000,
-                        "sensor_type": "acsSerialPortTable",
-                        "sensor_index": "acsSerialPortTableStatus.8",
-                        "sensor_descr": "PROD-LAB03A-RA1 Status",
-                        "sensor_class": "state",
-                    },
-                    {
-                        "sensor_id": 99,
-                        "device_id": 3000,
-                        "sensor_type": "acsSerialPortTable",
-                        "sensor_index": "acsSerialPortTableStatus.1",
-                        "sensor_descr": "OTHER-DEVICE Status",
-                        "sensor_class": "state",
-                    },
-                    {
-                        "sensor_id": 50,
-                        "device_id": 2000,
-                        "sensor_type": "temperature",
-                        "sensor_index": "tempSensor.1",
-                        "sensor_descr": "CPU temperature",
-                        "sensor_class": "temperature",
-                    },
-                ],
-            },
-        },
-    }
+        }
+    )
 
 
 def test_capture_records_verbatim_transceiver_body(recording_server):
@@ -277,7 +291,7 @@ def test_capture_roundtrip_preserves_vc_outcome(recording_server):
 
 def test_capture_roundtrip_preserves_port_relationships(recording_server):
     """Capturing a device with LAG + sub-interface rows preserves ports/port_stack on replay."""
-    seed = load_recording("cisco-lag-and-subinterface")
+    seed = _with_empty_inventory_source(load_recording("cisco-lag-and-subinterface"))
     _server, api = recording_server(seed)
 
     captured = capture_device_recording(api, seed["device_id"], name="captured-lag")
@@ -296,7 +310,7 @@ def test_capture_roundtrip_preserves_port_relationships(recording_server):
 
 def test_capture_records_verbatim_port_body(recording_server):
     """The captured ports body matches the source server's ports payload byte-for-byte."""
-    seed = load_recording("cisco-lag-and-subinterface")
+    seed = _with_empty_inventory_source(load_recording("cisco-lag-and-subinterface"))
     _server, api = recording_server(seed)
 
     captured = capture_device_recording(api, 1002)
@@ -354,29 +368,26 @@ def test_capture_mirrors_inventory_all_fallback_when_server_ignores_filters(reco
     assert sig["virtual_chassis"]["member_count"] == 2
 
 
-def test_capture_synthesizes_filtered_inventory_route_after_transport_failure():
-    """A filtered inventory query that fails at transport but whose /all fallback filters to [] must still record the filtered route, or replay 404s on a structural route."""
+def test_capture_raises_when_filtered_inventory_request_has_transport_error():
+    """A filtered inventory transport failure must not fall back to /all as if the request returned an empty list."""
     routes = {
         "devices/1000": (200, {"status": "ok", "devices": [{"device_id": 1000, "os": "ios"}]}),
-        # The filtered inventory query fails at the transport layer → record() skips storing it.
+        # Production returns this failure immediately. It does not consult /all.
         "inventory/1000": (0, None),
-        # /all answers, but client-side filtering yields [] (no containedIn=0 entities).
+        # A successful /all response must not hide the failed filtered request.
         "inventory/1000/all": (200, {"status": "ok", "inventory": []}),
         "devices/1000/ports": (200, {"status": "ok", "ports": []}),
         "devices/1000/port_stack": (200, {"status": "ok", "mappings": []}),
+        "devices/1000/transceivers": (200, {"status": "ok", "transceivers": []}),
     }
     api = _StubApi(routes)
 
-    captured = capture_device_recording(api, 1000)
-
-    # The structural route is still present (synthesized empty), not missing — so replay won't 404.
-    key = "GET /api/v0/inventory/1000?entPhysicalContainedIn=0"
-    assert key in captured["responses"]
-    assert captured["responses"][key] == {"status": "ok", "inventory": []}
+    with pytest.raises(RuntimeError, match="inventory/1000"):
+        capture_device_recording(api, 1000)
 
 
-def test_capture_skips_route_with_transport_error_status():
-    """A route that fails at the transport layer (status 0) must not be baked into the recording (it would replay as an invalid send_response(0))."""
+def test_capture_fails_when_transceiver_request_has_transport_error():
+    """A failed transceiver fetch must not become a successful no-optics capture."""
     routes = {
         "devices/1000": {"status": "ok", "devices": [{"device_id": 1000, "os": "ios"}]},
         "inventory/1000": {"status": "ok", "inventory": []},
@@ -387,11 +398,8 @@ def test_capture_skips_route_with_transport_error_status():
     api = _StubApi({k: (200, v) for k, v in routes.items()})
     api.routes["devices/1000/transceivers"] = (0, None)  # transport error on this route
 
-    captured = capture_device_recording(api, 1000)
-
-    assert "GET /api/v0/devices/1000/transceivers" not in captured["responses"]
-    # Other routes are still recorded — only the un-replayable status-0 route is skipped.
-    assert "GET /api/v0/devices/1000/ports" in captured["responses"]
+    with pytest.raises(RuntimeError, match="transceivers"):
+        capture_device_recording(api, 1000)
 
 
 def test_capture_skips_oob_ports_when_oob_id_equals_host():
@@ -467,15 +475,40 @@ def test_capture_raises_when_inventory_all_fallback_errors_5xx():
         capture_device_recording(api, 1000)
 
 
-def test_capture_treats_inventory_all_404_as_no_inventory_not_failure():
-    """A 404 (or 2xx-empty) on /all is a definitive "no inventory" for a plain device — it must NOT raise."""
+@pytest.mark.parametrize(
+    ("status", "body"),
+    [
+        (200, None),
+        (401, {"status": "error", "message": "unauthorized"}),
+        (429, {"status": "error", "message": "rate limited"}),
+    ],
+)
+def test_capture_raises_when_inventory_all_fallback_has_no_definitive_answer(status, body):
+    """A malformed or refused fallback must not synthesize a plain-device inventory."""
+    api = _StubApi({k: (200, v) for k, v in _all_ok_routes().items()})
+    api.routes["inventory/1000/all"] = (status, body)
+
+    with pytest.raises(RuntimeError, match="inventory/1000/all"):
+        capture_device_recording(api, 1000)
+
+
+def test_capture_raises_when_inventory_all_fallback_returns_404():
+    """A missing /all endpoint must remain a failed production fallback."""
     api = _StubApi({k: (200, v) for k, v in _all_ok_routes().items()})
     api.routes["inventory/1000/all"] = (404, {"status": "error", "message": "not found"})
 
-    captured = capture_device_recording(api, 1000)  # must not raise
+    with pytest.raises(RuntimeError, match="inventory/1000/all"):
+        capture_device_recording(api, 1000)
 
-    key = "GET /api/v0/inventory/1000?entPhysicalContainedIn=0"
-    assert captured["responses"][key]["inventory"] == []
+
+def test_capture_replays_successful_empty_inventory_fallback(recording_server):
+    """A successful empty /all fallback must remain successful on replay."""
+    api = _StubApi({k: (200, v) for k, v in _all_ok_routes().items()})
+
+    captured = capture_device_recording(api, 1000)
+    _server, replay_api = recording_server(captured)
+
+    assert replay_api.get_inventory_filtered(1000, ent_physical_contained_in=0) == (True, [])
 
 
 def test_capture_omits_serial_type_patterns_when_device_has_no_serial_sensors():
@@ -492,17 +525,78 @@ def test_capture_omits_serial_type_patterns_when_device_has_no_serial_sensors():
     assert "serial_type_patterns" not in captured
 
 
-def test_capture_does_not_mark_oob_when_controller_ports_fail():
-    """record() skips an un-replayable controller-ports route (transport error); the recording must NOT then be marked OOB with no controller ports behind it."""
+def test_capture_fails_when_configured_oob_controller_ports_fail():
+    """A failed configured OOB fetch must not become a successful non-OOB capture."""
     api = _StubApi({k: (200, v) for k, v in _all_ok_routes().items()})
     api.routes["devices/2000/ports"] = (0, None)  # OOB controller ports fail at the transport layer
 
-    captured = capture_device_recording(api, 1000, oob_id=2000)
+    with pytest.raises(RuntimeError, match="devices/2000/ports"):
+        capture_device_recording(api, 1000, oob_id=2000)
 
-    # The un-replayable controller route was skipped, so the recording isn't marked OOB.
-    assert "GET /api/v0/devices/2000/ports" not in captured["responses"]
-    assert "oob_id" not in captured["meta"]
-    assert compute_shape_signature(captured)["oob"] is False
+
+def test_capture_fails_when_serial_sensor_fetch_fails():
+    """A failed sensor fetch must not become a successful no-serial capture."""
+
+    class SerialFailureApi(_StubApi):
+        def get_serial_port_sensors(self, device_id):
+            return False, "HTTP 503"
+
+    api = SerialFailureApi({k: (200, v) for k, v in _all_ok_routes().items()})
+
+    with pytest.raises(RuntimeError, match="serial-port sensors"):
+        capture_device_recording(api, 1000)
+
+
+def test_capture_fails_when_successful_route_has_no_json_body():
+    """A 2xx HTML response must not be recorded as an absent structural payload."""
+    api = _StubApi({k: (200, v) for k, v in _all_ok_routes().items()})
+    api.routes["devices/1000/ports"] = (200, None)
+
+    with pytest.raises(RuntimeError, match="devices/1000/ports"):
+        capture_device_recording(api, 1000)
+
+
+@pytest.mark.parametrize(
+    ("path", "payload", "oob_id"),
+    [
+        ("devices/1000", {"status": "error", "devices": []}, None),
+        ("devices/1000", {"status": "ok", "devices": [None]}, None),
+        ("inventory/1000", {"status": "ok", "inventory": [None]}, None),
+        ("inventory/1000/all", {"status": "ok", "inventory": [None]}, None),
+        ("devices/1000/ports", {"status": "ok", "ports": [None]}, None),
+        ("devices/1000/port_stack", {"status": "error", "mappings": []}, None),
+        ("devices/1000/transceivers", {"status": "ok", "transceivers": [None]}, None),
+        ("devices/2000/ports", {"status": "error", "ports": []}, 2000),
+    ],
+)
+def test_capture_rejects_malformed_success_envelopes(path, payload, oob_id):
+    """A valid JSON error or malformed row list must not become absent topology."""
+    api = _StubApi({k: (200, v) for k, v in _all_ok_routes().items()})
+    api.routes[path] = (200, payload)
+
+    with pytest.raises(RuntimeError, match=path):
+        capture_device_recording(api, 1000, oob_id=oob_id)
+
+
+@pytest.mark.parametrize("payload", [{"mappings": []}, {"status": "OK", "mappings": []}])
+def test_capture_accepts_port_stack_success_envelopes(payload):
+    """Capture must accept every success envelope that production port-stack replay accepts."""
+    api = _StubApi({k: (200, v) for k, v in _all_ok_routes().items()})
+    api.routes["devices/1000/port_stack"] = (200, payload)
+
+    captured = capture_device_recording(api, 1000)
+
+    assert captured["responses"]["GET /api/v0/devices/1000/port_stack"] == payload
+
+
+@pytest.mark.parametrize("mapping", [{}, {"high_port_id": 1}, {"low_port_id": 2}])
+def test_capture_rejects_incomplete_port_stack_mappings(mapping):
+    """Capture must reject a port-stack row that production replay cannot consume."""
+    api = _StubApi({k: (200, v) for k, v in _all_ok_routes().items()})
+    api.routes["devices/1000/port_stack"] = (200, {"status": "ok", "mappings": [mapping]})
+
+    with pytest.raises(RuntimeError, match="port_stack"):
+        capture_device_recording(api, 1000)
 
 
 def test_capture_required_route_http_error_raises():
@@ -518,8 +612,11 @@ def test_capture_string_oob_id_equal_to_host_is_rejected():
     api = _StubApi(
         {
             "devices/123": (200, {"status": "ok", "devices": [{"device_id": 123, "os": "ios"}]}),
+            "inventory/123": (200, {"status": "ok", "inventory": []}),
+            "inventory/123/all": (200, {"status": "ok", "inventory": []}),
             "devices/123/ports": (200, {"status": "ok", "ports": []}),
             "devices/123/port_stack": (200, {"status": "ok", "mappings": []}),
+            "devices/123/transceivers": (200, {"status": "ok", "transceivers": []}),
         }
     )
 
@@ -539,8 +636,11 @@ def test_capture_snapshots_os_scoped_lag_patterns():
     api = _StubApi(
         {
             "devices/77": (200, {"status": "ok", "devices": [{"device_id": 77, "os": "captest-os"}]}),
+            "inventory/77": (200, {"status": "ok", "inventory": []}),
+            "inventory/77/all": (200, {"status": "ok", "inventory": []}),
             "devices/77/ports": (200, {"status": "ok", "ports": []}),
             "devices/77/port_stack": (200, {"status": "ok", "mappings": []}),
+            "devices/77/transceivers": (200, {"status": "ok", "transceivers": []}),
         }
     )
 
@@ -560,8 +660,11 @@ def test_capture_blank_os_embeds_no_lag_patterns(blank_os):
     api = _StubApi(
         {
             "devices/78": (200, {"status": "ok", "devices": [{"device_id": 78, "os": blank_os}]}),
+            "inventory/78": (200, {"status": "ok", "inventory": []}),
+            "inventory/78/all": (200, {"status": "ok", "inventory": []}),
             "devices/78/ports": (200, {"status": "ok", "ports": []}),
             "devices/78/port_stack": (200, {"status": "ok", "mappings": []}),
+            "devices/78/transceivers": (200, {"status": "ok", "transceivers": []}),
         }
     )
 
@@ -579,8 +682,11 @@ def test_capture_no_os_at_all_keeps_legacy_unscoped_lag_patterns():
     api = _StubApi(
         {
             "devices/79": (200, {"status": "ok", "devices": [{"device_id": 79}]}),
+            "inventory/79": (200, {"status": "ok", "inventory": []}),
+            "inventory/79/all": (200, {"status": "ok", "inventory": []}),
             "devices/79/ports": (200, {"status": "ok", "ports": []}),
             "devices/79/port_stack": (200, {"status": "ok", "mappings": []}),
+            "devices/79/transceivers": (200, {"status": "ok", "transceivers": []}),
         }
     )
 

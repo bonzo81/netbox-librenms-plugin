@@ -8,8 +8,8 @@ reads it for the novelty verdict). The recordings live INSIDE the package
 the wheel (see ``[tool.setuptools.package-data]``); the full recording fixtures are dev/test-time
 only, so ``iter_recording_paths()`` is empty in a wheel install. The runtime capture view needs
 only the manifest; ``--rebuild-manifest`` therefore runs from a source checkout (and refuses to
-overwrite the manifest when no recordings are present). Reading the manifest is best-effort: a
-missing manifest yields an empty list so the novelty check degrades to "new" rather than erroring.
+overwrite the manifest when no recordings are present). Manifest failures stop novelty
+classification because an empty fallback would label every otherwise-covered shape as new.
 """
 
 import json
@@ -58,16 +58,25 @@ load_bundled_recordings = iter_recordings
 
 
 def load_manifest():
-    """Load the novelty manifest, or [] when it has not been generated/shipped."""
-    if not MANIFEST_PATH.exists():
-        return []
+    """Load the novelty manifest, or raise when the generated artifact is unavailable."""
     try:
         manifest = json.loads(MANIFEST_PATH.read_text())
-    except (OSError, ValueError):
-        # read_text() can raise OSError (permission/IO), not just a JSON ValueError. The
-        # contract here is best-effort: return [] rather than break every caller.
-        return []
-    return manifest if isinstance(manifest, list) else []
+    except OSError as exc:
+        raise RuntimeError(f"Could not read data-shape manifest {MANIFEST_PATH.name!r}.") from exc
+    except ValueError as exc:
+        raise RuntimeError(f"Data-shape manifest {MANIFEST_PATH.name!r} is not valid JSON.") from exc
+    if not isinstance(manifest, list):
+        raise RuntimeError(f"Data-shape manifest {MANIFEST_PATH.name!r} must contain a JSON list.")
+    from netbox_librenms_plugin.data_shapes.signature import signature_schema_errors
+
+    for index, entry in enumerate(manifest):
+        if not isinstance(entry, dict):
+            raise RuntimeError(f"Data-shape manifest {MANIFEST_PATH.name!r} entry {index} must be an object.")
+        if not isinstance(entry.get("name"), str) or not entry["name"]:
+            raise RuntimeError(f"Data-shape manifest {MANIFEST_PATH.name!r} entry {index} must have a non-empty name.")
+        if errors := signature_schema_errors(entry.get("signature")):
+            raise RuntimeError(f"Data-shape manifest {MANIFEST_PATH.name!r} entry {index} is invalid: {errors[0]}.")
+    return manifest
 
 
 def recording_schema_errors(recording):

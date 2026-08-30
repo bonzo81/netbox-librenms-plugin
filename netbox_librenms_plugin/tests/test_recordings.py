@@ -279,15 +279,48 @@ def test_manifest_is_in_sync_with_bundled_recordings():
     assert recordings_store.load_manifest() == expected, "run: manage.py librenms_recordings --rebuild-manifest"
 
 
-def test_load_manifest_returns_empty_on_unreadable_file(tmp_path):
-    """load_manifest() is best-effort: an OSError from read_text must return [], not break callers."""
+def test_load_manifest_fails_when_file_is_unreadable(tmp_path):
+    """An unreadable manifest must not make every captured shape look new."""
     from netbox_librenms_plugin.data_shapes import recordings_store
 
     manifest_path = tmp_path / "manifest.json"
     manifest_path.mkdir()
 
     with patch.object(recordings_store, "MANIFEST_PATH", manifest_path):
-        assert recordings_store.load_manifest() == []
+        with pytest.raises(RuntimeError, match="manifest"):
+            recordings_store.load_manifest()
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        "not-json",
+        "{}",
+        "null",
+        '["old-format"]',
+        '[{"name":"x","signature":null}]',
+        '[{"name":"x","signature":{"virtual_chassis":null}}]',
+    ],
+)
+def test_load_manifest_fails_when_content_is_invalid(tmp_path, content):
+    """A corrupt or wrong-type manifest must not become an empty coverage set."""
+    from netbox_librenms_plugin.data_shapes import recordings_store
+
+    manifest_path = tmp_path / "manifest.json"
+    manifest_path.write_text(content)
+
+    with patch.object(recordings_store, "MANIFEST_PATH", manifest_path):
+        with pytest.raises(RuntimeError, match="manifest"):
+            recordings_store.load_manifest()
+
+
+def test_load_manifest_fails_when_file_is_missing(tmp_path):
+    """A missing packaged manifest must surface the packaging error."""
+    from netbox_librenms_plugin.data_shapes import recordings_store
+
+    with patch.object(recordings_store, "MANIFEST_PATH", tmp_path / "missing.json"):
+        with pytest.raises(RuntimeError, match="manifest"):
+            recordings_store.load_manifest()
 
 
 @pytest.mark.parametrize("recording", _RECORDINGS, ids=_ids)

@@ -70,7 +70,42 @@ def capture_device_recording(api, device_id, *, name=None, description="", meta=
             key += "?" + "&".join(f"{k}={v}" for k, v in key_params.items())
         return key
 
-    def record(path, request_params=None, *, key_params="__same__", required=False):
+    def require_row_list(path, body, field, *, allow_empty=True):
+        """Return a validated LibreNMS success-envelope list, or fail the capture."""
+        if not isinstance(body, dict) or body.get("status") != "ok":
+            raise RuntimeError(f"Capture failed for {path!r}: response was not a success object")
+        rows = body.get(field)
+        if not isinstance(rows, list) or any(not isinstance(row, dict) for row in rows):
+            raise RuntimeError(f"Capture failed for {path!r}: response did not contain a valid {field} list")
+        if not allow_empty and not rows:
+            raise RuntimeError(f"Capture failed for {path!r}: response contained no {field}")
+        return rows
+
+    def require_port_stack(path, body):
+        """Return mappings that the production port-stack reader accepts."""
+        if not isinstance(body, dict):
+            raise RuntimeError(f"Capture failed for {path!r}: response was not an object")
+        status = body.get("status")
+        if status is not None and (not isinstance(status, str) or status.lower() != "ok"):
+            raise RuntimeError(f"Capture failed for {path!r}: response was not a success object")
+        mappings = body.get("mappings")
+        if not isinstance(mappings, list) or any(
+            not isinstance(mapping, dict) or "high_port_id" not in mapping or "low_port_id" not in mapping
+            for mapping in mappings
+        ):
+            raise RuntimeError(f"Capture failed for {path!r}: response did not contain valid mappings")
+        return mappings
+
+    def record(
+        path,
+        request_params=None,
+        *,
+        key_params="__same__",
+        required=False,
+        allow_not_found=False,
+        row_field=None,
+        allow_empty=True,
+    ):
         """Issue one raw GET and store it under its route key (key_params=None → path-only)."""
         status, body = api._raw_get(path, request_params)
         if key_params == "__same__":
@@ -87,12 +122,16 @@ def capture_device_recording(api, device_id, *, name=None, description="", meta=
             if required:
                 raise RuntimeError(f"Capture failed for {path!r}: no HTTP response (status {status})")
             return status, body
+        if 200 <= status < 300 and body is None:
+            raise RuntimeError(f"Capture failed for {path!r}: HTTP {status} did not contain JSON")
         # A real error status on a REQUIRED structural route is just as fatal: a stale
         # librenms_id pointing at a device deleted from LibreNMS answers 404 on every route,
         # and recording those [404, error-body] pairs would present a junk recording (all-false
         # signature, "likely a new shape") as a successful capture inviting submission.
-        if required and not (200 <= status < 300):
+        if required and not (200 <= status < 300) and not (allow_not_found and status == 404):
             raise RuntimeError(f"Capture failed for {path!r}: HTTP {status} (is the LibreNMS device id stale?)")
+        if 200 <= status < 300 and row_field is not None:
+            require_row_list(path, body, row_field, allow_empty=allow_empty)
         responses[_route_key(path, key_params)] = body if 200 <= status < 300 else [status, body]
         return status, body
 
@@ -118,52 +157,28 @@ def capture_device_recording(api, device_id, *, name=None, description="", meta=
             list[dict]: Inventory entries from the filtered request or the client-side fallback.
 
         Raises:
-            RuntimeError: The fallback inventory request receives no HTTP response or a 5xx response.
+            RuntimeError: The filtered or fallback request has no definitive valid response.
         """
-        filtered_status, body = record(f"inventory/{device_id}", query_params)
-        # record() skips storing the route on a transport failure (status outside 100–599), so track
-        # whether the filtered key was actually persisted. If it was NOT, we must synthesize it below
-        # even when the client-side filter yields [], otherwise replay 404s on this structural route.
-        filtered_route_recorded = 100 <= filtered_status < 600
-        items = body.get("inventory") if isinstance(body, dict) else None
+        _, body = record(f"inventory/{device_id}", query_params, required=True, row_field="inventory")
+        items = body["inventory"]
         if items:
             return items
         if not _all_inventory:
-            all_status, all_body = api._raw_get(f"inventory/{device_id}/all")
-            # This /all fetch bypasses record(), so a TRANSPORT failure (no HTTP response, status 0)
-            # would silently degrade to an empty inventory and still ship a "successful" capture —
-            # recording a VC device with the wrong topology/signature. Once the filtered query came
-            # back empty, /all is the only inventory source, so a no-response failure is fatal here,
-            # mirroring record(required=True).
-            if not (100 <= all_status < 600):
-                raise RuntimeError(
-                    f"Capture failed for inventory/{device_id}/all: no HTTP response (status {all_status})"
-                )
-            # A 5xx on that sole remaining source is a FAILED fetch, not an answer — production's
-            # get_device_inventory treats it as a failure, so recording an empty inventory here would
-            # ship a VC device as a plain one. Fail loudly, like record(required=True) on a non-2xx.
-            # (A 404 / 2xx-empty IS a definitive "no inventory" for a plain device and stays [] below.)
-            if 500 <= all_status < 600:
-                raise RuntimeError(
-                    f"Capture failed for inventory/{device_id}/all: HTTP {all_status} (inventory source errored)"
-                )
-            all_items = all_body.get("inventory") if isinstance(all_body, dict) else None
-            _all_inventory.append(all_items if isinstance(all_items, list) else [])
+            _, all_body = record(f"inventory/{device_id}/all", required=True, row_field="inventory")
+            _all_inventory.append(all_body["inventory"])
         filtered = [i for i in _all_inventory[0] if isinstance(i, dict)]
         if ent_class is not None:
             filtered = [i for i in filtered if i.get("entPhysicalClass") == ent_class]
         if contained_in is not None:
             filtered = [i for i in filtered if str(i.get("entPhysicalContainedIn")) == str(contained_in)]
-        if filtered or not filtered_route_recorded:
-            # Overwrite the (empty or never-stored) filtered response with the client-filtered
-            # entities so the recording looks as if captured from a filter-honoring server (faithful
-            # signature + replay), and so the structural route always exists for replay even when the
-            # /all fallback filters down to [].
+        if filtered:
+            # Overwrite the empty filtered response with the client-filtered entities so the
+            # recording looks as if captured from a filter-honoring server.
             responses[_route_key(f"inventory/{device_id}", query_params)] = {"status": "ok", "inventory": filtered}
         return filtered
 
     # 1. Device info (also the source of the os metadata).
-    _, dev_body = record(f"devices/{device_id}", required=True)
+    _, dev_body = record(f"devices/{device_id}", required=True, row_field="devices", allow_empty=False)
     device_os = None
     if isinstance(dev_body, dict):
         devices = dev_body.get("devices")
@@ -185,13 +200,27 @@ def capture_device_recording(api, device_id, *, name=None, description="", meta=
     # 3. Ports (request VLAN data so the body matches what get_ports reads) and 4. port_stack
     #    (LAG / sub-interface relationships). Both are keyed path-only — there's a single variant
     #    per path, so the loader serves it for any query the production readers send.
-    record(f"devices/{device_id}/ports", {"columns": _PORTS_COLUMNS, "with": "vlans"}, key_params=None, required=True)
-    record(f"devices/{device_id}/port_stack", required=True)
+    record(
+        f"devices/{device_id}/ports",
+        {"columns": _PORTS_COLUMNS, "with": "vlans"},
+        key_params=None,
+        required=True,
+        row_field="ports",
+    )
+    _, port_stack_body = record(f"devices/{device_id}/port_stack", required=True)
+    require_port_stack(f"devices/{device_id}/port_stack", port_stack_body)
 
     # 5. Transceivers (optics shape). Per-device route — safe to record verbatim; anonymization
     #    pseudonymizes the transceiver serial and preserves the optics shape plus the `model` SKU
     #    (the module-matching key for ModuleType resolution).
-    record(f"devices/{device_id}/transceivers")
+    # A 404 is a definitive answer from a LibreNMS version without this endpoint. Transport errors,
+    # server errors, and non-JSON success bodies are not evidence that the device has no optics.
+    record(
+        f"devices/{device_id}/transceivers",
+        required=True,
+        allow_not_found=True,
+        row_field="transceivers",
+    )
 
     # 6. Serial-port sensors (Avocent console servers). The underlying LibreNMS route,
     #    /api/v0/resources/sensors, is INSTANCE-WIDE — it returns every sensor on every device, so
@@ -205,6 +234,8 @@ def capture_device_recording(api, device_id, *, name=None, description="", meta=
         # No cache to bypass: get_serial_port_sensors fetches the instance-wide table on every
         # call, so a capture always records the CURRENT LibreNMS shape.
         ss_ok, device_serial_sensors = api.get_serial_port_sensors(device_id)
+        if not ss_ok:
+            raise RuntimeError(f"Capture failed for serial-port sensors: {device_serial_sensors}")
         if ss_ok and device_serial_sensors:
             responses["GET /api/v0/resources/sensors"] = {"status": "ok", "sensors": device_serial_sensors}
             serial_sensors_present = True
@@ -227,11 +258,14 @@ def capture_device_recording(api, device_id, *, name=None, description="", meta=
 
     oob_id = coerce_librenms_id(oob_id)
     if oob_id is not None and oob_id != coerce_librenms_id(device_id):
-        oob_status, _ = record(f"devices/{oob_id}/ports", {"columns": _PORTS_COLUMNS, "with": "vlans"}, key_params=None)
-        # Only mark the recording OOB once the controller ports were actually captured: record()
-        # silently skips a route that produced no HTTP response (transport failure), so stamping
-        # oob_id unconditionally would label the recording OOB with no controller ports behind it —
-        # and signature reads meta["oob_id"] as the authoritative OOB signal.
+        oob_status, _ = record(
+            f"devices/{oob_id}/ports",
+            {"columns": _PORTS_COLUMNS, "with": "vlans"},
+            key_params=None,
+            required=True,
+            row_field="ports",
+        )
+        # Mark the recording OOB only after the configured controller ports were captured.
         if 200 <= oob_status < 300:
             meta_out["oob_id"] = oob_id
 

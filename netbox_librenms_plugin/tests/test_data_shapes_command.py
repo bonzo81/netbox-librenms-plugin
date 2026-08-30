@@ -117,7 +117,7 @@ def test_rebuild_manifest_writes_signatures(tmp_path, monkeypatch):
 
 
 def test_rebuild_manifest_writes_atomically(tmp_path, monkeypatch):
-    """The manifest is written via a temp file + atomic replace, so a crash mid-write can never leave load_manifest() reading a truncated/empty manifest (every recording would then classify as 'new')."""
+    """Write the manifest atomically so a crash cannot leave novelty classification unavailable."""
     from pathlib import Path
 
     rec_dir = tmp_path / "recordings"
