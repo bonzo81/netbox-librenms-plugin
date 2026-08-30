@@ -42,10 +42,7 @@ SUPPRESSION = "unhashable-ok:"
 
 def _fingerprint(node):
     """Return a comparable form of an expression, so two spellings of one value match."""
-    try:
-        return ast.dump(node, annotate_fields=False)
-    except Exception:  # pragma: no cover - ast.dump does not raise for parsed trees
-        return None
+    return ast.dump(node, annotate_fields=False)
 
 
 def _is_hashable_container_literal(node):
