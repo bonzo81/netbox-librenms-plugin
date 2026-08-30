@@ -399,67 +399,96 @@ class TestSyncPageMisconfiguredDefaultDegrades:
 class TestUpdateDeviceLocationRebindsServer:
     """UpdateDeviceLocationView must write to the POSTed server, not the global default."""
 
-    def test_location_write_goes_to_posted_server(self):
-        """POSTing server_key=secondary rebinds the client before update_device_field."""
-        from unittest.mock import MagicMock
+    @pytest.fixture
+    def librenms_servers(self, monkeypatch):
+        from netbox_librenms_plugin.tests.mock_librenms_server import librenms_mock_server
 
-        from netbox_librenms_plugin.views.sync.devices import UpdateDeviceLocationView
+        monkeypatch.setenv("NO_PROXY", "127.0.0.1,localhost")
+        monkeypatch.setenv("no_proxy", "127.0.0.1,localhost")
+        with librenms_mock_server() as default, librenms_mock_server() as secondary:
+            yield {"default": default, "secondary": secondary}
 
-        device = make_device("loc-rebind", librenms_cf=42)
-        request = RequestFactory().post("/x/", {"server_key": "secondary"})
-        request.user = MagicMock(is_superuser=True)
-        request.user.has_perm.return_value = True
-        request._messages = MagicMock()
+    @staticmethod
+    def _configure_servers(settings, librenms_servers):
+        from netbox_librenms_plugin.models import LibreNMSSettings
 
-        view = UpdateDeviceLocationView()
-        view.setup(request, pk=device.pk)
+        config = deepcopy(settings.PLUGINS_CONFIG)
+        config["netbox_librenms_plugin"]["servers"] = {
+            key: {
+                "librenms_url": server.url,
+                "api_token": f"{key}-token",
+                "verify_ssl": False,
+            }
+            for key, server in librenms_servers.items()
+        }
+        settings.PLUGINS_CONFIG = config
+        LibreNMSSettings.objects.update_or_create(pk=1, defaults={"selected_server": "default"})
 
-        secondary_api = MagicMock()
-        secondary_api.server_key = "secondary"
-        secondary_api.get_librenms_id.return_value = 42
-        secondary_api.update_device_field.return_value = (True, "ok")
+    def test_location_write_goes_to_posted_server(self, client, settings, librenms_servers):
+        """The real action writes only to the server selected by the POST."""
+        from dcim.models import Device
+        from django.contrib.messages import get_messages
+        from django.urls import reverse
 
-        def _build(key):
-            assert key == "secondary", f"expected rebind to 'secondary', got {key!r}"
-            return secondary_api
+        from netbox_librenms_plugin.tests.view_test_helpers import make_user_with_perms
 
-        with patch(
-            "netbox_librenms_plugin.librenms_api.build_librenms_api",
-            side_effect=_build,
-        ) as mock_build:
-            response = view.post(request, pk=device.pk)
+        self._configure_servers(settings, librenms_servers)
+        device = make_device("loc-rebind", librenms_cf={"default": 41, "secondary": 42})
+        writes = []
 
-        # The write ran on the secondary-bound client, never on a lazily-built default.
-        mock_build.assert_called_once_with("secondary")
-        secondary_api.update_device_field.assert_called_once()
-        # Redirect preserves the acting server's tab.
-        assert response.status_code == 302
-        assert "server_key=secondary" in response["Location"]
+        def record_write(**request):
+            writes.append(request)
+            return 200, {"status": "ok"}
 
-    def test_stale_server_key_fails_closed(self):
-        """A POSTed key that no longer resolves errors out without any LibreNMS write."""
-        from unittest.mock import MagicMock
+        librenms_servers["default"].register("/api/v0/devices/41", record_write, method="PATCH")
+        librenms_servers["secondary"].register("/api/v0/devices/42", record_write, method="PATCH")
+        client.force_login(make_user_with_perms("loc-rebind-writer", [("view", Device)]))
 
-        from netbox_librenms_plugin.views.sync.devices import UpdateDeviceLocationView
-
-        device = make_device("loc-rebind-stale", librenms_cf=42)
-        request = RequestFactory().post("/x/", {"server_key": "ghost"})
-        request.user = MagicMock(is_superuser=True)
-        request.user.has_perm.return_value = True
-        request._messages = MagicMock()
-
-        view = UpdateDeviceLocationView()
-        view.setup(request, pk=device.pk)
-
-        with patch(
-            "netbox_librenms_plugin.librenms_api.build_librenms_api",
-            return_value=None,
-        ):
-            response = view.post(request, pk=device.pk)
+        response = client.post(
+            reverse("plugins:netbox_librenms_plugin:update_device_location", args=[device.pk]),
+            {"server_key": "secondary"},
+        )
 
         assert response.status_code == 302
-        # No client was ever bound — nothing could have been written.
-        assert getattr(view, "_librenms_api", None) is None
+        assert response.url.endswith("?server_key=secondary")
+        assert [(write["path"], write["body"]) for write in writes] == [
+            (
+                "/api/v0/devices/42",
+                {"field": ["location", "override_sysLocation"], "data": [device.site.name, "1"]},
+            )
+        ]
+        assert any(message.level_tag == "success" for message in get_messages(response.wsgi_request))
+
+    def test_stale_server_key_fails_closed(self, client, settings, librenms_servers):
+        """A stale POSTed key reports an error without writing to another server."""
+        from dcim.models import Device
+        from django.contrib.messages import get_messages
+        from django.urls import reverse
+
+        from netbox_librenms_plugin.tests.view_test_helpers import make_user_with_perms
+
+        self._configure_servers(settings, librenms_servers)
+        device = make_device("loc-rebind-stale", librenms_cf={"default": 41})
+        writes = []
+
+        def record_write(**request):
+            writes.append(request)
+            return 200, {"status": "ok"}
+
+        librenms_servers["default"].register("/api/v0/devices/41", record_write, method="PATCH")
+        client.force_login(make_user_with_perms("loc-rebind-stale-writer", [("view", Device)]))
+
+        response = client.post(
+            reverse("plugins:netbox_librenms_plugin:update_device_location", args=[device.pk]),
+            {"server_key": "ghost"},
+        )
+
+        assert response.status_code == 302
+        assert "server_key=" not in response.url
+        assert writes == []
+        assert [str(message) for message in get_messages(response.wsgi_request)] == [
+            "Selected LibreNMS server is no longer configured."
+        ]
 
 
 @pytest.mark.django_db
