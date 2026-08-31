@@ -153,13 +153,20 @@ class TestDeviceImportTable:
 
         assert [row["device_id"] for row in table.data] == [2, 1]
 
+    def test_selection_uses_the_netbox_toggle_column(self):
+        from netbox.tables.columns import ToggleColumn
+
+        table = self._table([_import_record(can_import=True)])
+
+        assert isinstance(table.columns["selection"].column, ToggleColumn)
+
     def test_selection_and_hostname_escape_librenms_values(self):
         record = _import_record(5, can_import=True)
         record["hostname"] = '"><script>alert(1)</script>'
         record["sysName"] = '" onfocus="alert(2)'
-        table = self._table()
+        table = self._table([record])
 
-        selection = str(table.render_selection(None, record))
+        selection = str(table.rows[0].get_cell("selection"))
         hostname = str(table.render_hostname(record["hostname"], record))
 
         assert "<script>" not in selection
@@ -169,7 +176,9 @@ class TestDeviceImportTable:
         assert "&lt;script&gt;" in hostname
 
     def test_disabled_selection_has_no_submitted_value(self):
-        html = str(self._table().render_selection(None, _import_record(can_import=False)))
+        table = self._table([_import_record(can_import=False)])
+
+        html = str(table.rows[0].get_cell("selection"))
 
         assert "disabled" in html
         assert 'name="select"' not in html

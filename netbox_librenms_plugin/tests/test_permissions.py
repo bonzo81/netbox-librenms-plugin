@@ -60,8 +60,10 @@ def _permission_view(*, user=None, requirements=None, request_method="post", req
 
 
 @pytest.fixture
-def librenms_server(settings):
+def librenms_server(settings, monkeypatch):
     """Configure a real LibreNMS client against the local HTTP boundary."""
+    monkeypatch.setenv("NO_PROXY", "127.0.0.1,localhost")
+    monkeypatch.setenv("no_proxy", "127.0.0.1,localhost")
     with librenms_mock_server() as server:
         plugin_config = deepcopy(settings.PLUGINS_CONFIG)
         plugin_config["netbox_librenms_plugin"]["servers"] = {
@@ -411,6 +413,20 @@ class TestNetBoxObjectPermissionMixin:
 
 
 class TestBulkImportPermissions:
+    def test_loopback_server_bypasses_environment_proxy(self, librenms_server):
+        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+
+        device = {"device_id": 7099, "hostname": "proxy-bypass.example.test"}
+        librenms_server.register(
+            "/api/v0/devices/7099",
+            {"status": "ok", "devices": [device]},
+        )
+
+        success, result = LibreNMSAPI(SERVER_KEY).get_device_info(7099, use_cache=False)
+
+        assert success is True
+        assert result == device
+
     def test_device_import_requires_add_and_change_but_not_virtual_chassis(self, librenms_server):
         from dcim.models import Device
 

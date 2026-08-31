@@ -8,6 +8,7 @@ from django.urls import reverse
 from django.utils.html import escape, format_html
 from django.utils.safestring import mark_safe
 from django_tables2 import Column
+from netbox.tables.columns import ToggleColumn
 from virtualization.models import VirtualMachine
 
 from netbox_librenms_plugin.utils import coerce_librenms_id, get_librenms_sync_device
@@ -165,12 +166,33 @@ class DeviceImportTable(tables.Table):
             if isinstance(self.data, list):
                 self.data.sort(key=sort_key, reverse=reverse)
 
-    # Selection checkbox
-    selection = Column(
+    selection = ToggleColumn(
         verbose_name="",
-        empty_values=(),
+        default="",
+        visible=True,
         orderable=False,
         accessor="device_id",
+        attrs={
+            "th": {"class": "w-1", "aria-label": "Select all"},
+            "td": {"class": "w-1"},
+            "input": {
+                "name": lambda record: "select" if record.get("_validation", {}).get("can_import", False) else None,
+                "class": lambda record: (
+                    "form-check-input device-select"
+                    if record.get("_validation", {}).get("can_import", False)
+                    else "form-check-input"
+                ),
+                "disabled": lambda record: (
+                    None if record.get("_validation", {}).get("can_import", False) else "disabled"
+                ),
+                "title": lambda record: (
+                    None if record.get("_validation", {}).get("can_import", False) else "Cannot import this device"
+                ),
+                "data-device-id": lambda record: record.get("device_id"),
+                "data-hostname": lambda record: record.get("hostname", ""),
+                "data-sysname": lambda record: record.get("sysName", ""),
+            },
+        },
     )
 
     # LibreNMS device fields
@@ -218,40 +240,6 @@ class DeviceImportTable(tables.Table):
         orderable=False,
         accessor="device_id",
     )
-
-    def render_selection(self, value, record):
-        """
-        Render selection checkbox.
-
-        Disabled if device can't be imported.
-
-        Args:
-            value (object): The column value.
-            record (dict): The LibreNMS device and its validation state.
-
-        Returns:
-            SafeString: The rendered selection checkbox HTML.
-        """
-        validation = record.get("_validation", {})
-        can_import = validation.get("can_import", False)
-        device_id = record.get("device_id")
-        hostname = record.get("hostname", "")
-        sysname = record.get("sysName", "")
-
-        if can_import:
-            return format_html(
-                '<input type="checkbox" name="select" value="{}" '
-                'class="form-check-input device-select" data-device-id="{}" '
-                'data-hostname="{}" data-sysname="{}">',
-                device_id,
-                device_id,
-                hostname,
-                sysname,
-            )
-        else:
-            return mark_safe(
-                '<input type="checkbox" disabled class="form-check-input" title="Cannot import this device">'
-            )
 
     def render_hostname(self, value, record):
         """Render hostname with link to LibreNMS if available."""
